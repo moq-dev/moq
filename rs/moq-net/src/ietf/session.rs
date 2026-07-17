@@ -47,7 +47,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
-				let (tasks, task_set) = TaskSet::new();
+				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version, tasks);
 
 				let dispatch_session = adapter.clone();
@@ -65,7 +65,6 @@ pub fn start<S: web_transport_trait::Session>(
 					version
 				)));
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
-				let mut task_run = std::pin::pin!(task_set.run());
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let stream = match version {
 						Version::Draft16 => {
@@ -97,7 +96,7 @@ pub fn start<S: web_transport_trait::Session>(
 					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					if waiter.poll_future(task_run.as_mut()).is_ready() {
+					if task_set.poll(waiter).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
@@ -121,7 +120,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				let control = Control::new(None, client);
 				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
-				let (tasks, task_set) = TaskSet::new();
+				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version, tasks);
 
 				let sub_ns_session = session.clone();
@@ -150,7 +149,6 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
 				let mut goaway = std::pin::pin!(err_only(goaway));
 				let mut setup = std::pin::pin!(setup);
-				let mut task_run = std::pin::pin!(task_set.run());
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let stream = Stream::open(&sub_ns_session, version).await?;
 					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
@@ -176,7 +174,7 @@ pub fn start<S: web_transport_trait::Session>(
 					if waiter.poll_future(setup.as_mut()).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
-					if waiter.poll_future(task_run.as_mut()).is_ready() {
+					if task_set.poll(waiter).is_ready() {
 						return Poll::Ready(Ok(()));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {

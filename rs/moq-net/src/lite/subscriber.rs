@@ -114,7 +114,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
 	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
 	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Result<(), Error> {
+	pub async fn run(self, connecting: Option<ConnectingProducer>, mut tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
 		// The watchdog halves (announce/bandwidth/datagrams) only end the session on
@@ -123,7 +123,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut uni = std::pin::pin!(self.run_uni());
 		let mut bandwidth = std::pin::pin!(err_only(bw.run_recv_bandwidth()));
 		let mut datagrams = std::pin::pin!(err_only(dg.run_datagrams()));
-		let mut tasks = std::pin::pin!(tasks.run());
 		kio::wait(|waiter| {
 			if let Poll::Ready(err) = waiter.poll_future(announce.as_mut()) {
 				return Poll::Ready(Err(err));
@@ -137,7 +136,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
 				return Poll::Ready(Err(err));
 			}
-			if waiter.poll_future(tasks.as_mut()).is_ready() {
+			if tasks.poll(waiter).is_ready() {
 				return Poll::Ready(Ok(()));
 			}
 			Poll::Pending
@@ -939,8 +938,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Sub::None => std::future::pending().await,
 					}
 				});
-				let mut broadcast_closed = std::pin::pin!(self.broadcast.closed());
-
 				// Biased: demand first, then completions, then closures, then the timer.
 				kio::wait(|waiter| {
 					// (1) Track demand: a fetch, a subscription change, or full idle. Polled
@@ -981,7 +978,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					}
 
 					// (4) The whole broadcast went away on the publisher side.
-					if let Poll::Ready(err) = waiter.poll_future(broadcast_closed.as_mut()) {
+					if let Poll::Ready(err) = self.broadcast.poll_closed(waiter) {
 						return Poll::Ready(Event::BroadcastClosed(err));
 					}
 

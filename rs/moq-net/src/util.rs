@@ -144,7 +144,9 @@ impl TaskSet {
 	}
 
 	/// Drive submitted children until every submission handle is dropped and all
-	/// active children finish.
+	/// active children finish. The async form of [`Self::poll`], for callers with
+	/// nothing else to poll.
+	#[cfg(test)]
 	pub async fn run(mut self) {
 		kio::wait(|waiter| self.poll(waiter)).await
 	}

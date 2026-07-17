@@ -887,8 +887,13 @@ enum Recv {
 /// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
 /// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
-async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| {
+fn poll_recv_next(
+	track: &mut track::Subscriber,
+	datagrams: bool,
+	emit_boundary: bool,
+	waiter: &kio::Waiter,
+) -> Poll<Result<Recv, Error>> {
+	{
 		let mut groups_finished = false;
 		match track.poll_next_group(waiter) {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
@@ -914,8 +919,13 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 			return Poll::Ready(Ok(Recv::Finished));
 		}
 		Poll::Pending
-	})
-	.await
+	}
+}
+
+/// The async form of [`poll_recv_next`], for callers with nothing else to poll.
+#[cfg(test)]
+async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| poll_recv_next(track, datagrams, emit_boundary, waiter)).await
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
@@ -979,11 +989,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 		loop {
 			let event = {
-				// One cursor drives the whole subscription: poll the cap-aware next group and,
-				// when enabled, the next best-effort datagram. Groups are polled first so a
-				// datagram burst can't starve them; datagrams flow whenever no group is ready
-				// (including while groups are paused above the cap).
-				let mut recv = std::pin::pin!(recv_next(&mut track, datagrams, emit_range && !end_sent));
+				let emit_boundary = emit_range && !end_sent;
 				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
 				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
 				// read primitives (see Reader::decode_maybe doc).
@@ -993,7 +999,11 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
 
-					if let Poll::Ready(res) = waiter.poll_future(recv.as_mut()) {
+					// One cursor drives the whole subscription: poll the cap-aware next group and,
+					// when enabled, the next best-effort datagram. Groups are polled first so a
+					// datagram burst can't starve them; datagrams flow whenever no group is ready
+					// (including while groups are paused above the cap).
+					if let Poll::Ready(res) = poll_recv_next(&mut track, datagrams, emit_boundary, waiter) {
 						return Poll::Ready(Event::Recv(res));
 					}
 					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
@@ -1177,7 +1187,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			priority,
 			&self.track_priority,
 			&mut self.track_priority_seen,
-			group.next_frame(),
+			|waiter| group.poll_next_frame(waiter),
 		)
 		.await
 	}
@@ -1194,19 +1204,19 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			priority,
 			&self.track_priority,
 			&mut self.track_priority_seen,
-			frame.read_chunk(),
+			|waiter| frame.poll_read_chunk(waiter),
 		)
 		.await
 	}
 
-	/// Drive `work` to completion while applying queue and SUBSCRIBE_UPDATE priority
+	/// Poll `work` to completion while applying queue and SUBSCRIBE_UPDATE priority
 	/// changes to the stream. Errors with [`Error::Cancel`] if the peer closes first.
 	async fn serve_step<T>(
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		track_priority: &kio::Consumer<u8>,
 		track_priority_seen: &mut u8,
-		work: impl Future<Output = Result<T, Error>>,
+		mut work: impl FnMut(&kio::Waiter) -> Poll<Result<T, Error>>,
 	) -> Result<T, Error> {
 		enum Event<T> {
 			Closed,
@@ -1215,7 +1225,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			TrackPriority(u8),
 		}
 
-		let mut work = std::pin::pin!(work);
 		loop {
 			let event = {
 				let mut closed = std::pin::pin!(stream.closed());
@@ -1224,7 +1233,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return Poll::Ready(Event::Closed);
 					}
-					if let Poll::Ready(res) = waiter.poll_future(work.as_mut()) {
+					if let Poll::Ready(res) = work(waiter) {
 						return Poll::Ready(Event::Work(res));
 					}
 					if let Poll::Ready(new_pri) = priority.poll_next(waiter) {
