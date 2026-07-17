@@ -410,8 +410,13 @@ fn pace(anchor: Instant, base: moq_net::Timestamp, ts: moq_net::Timestamp, now: 
 	let send_at = match ts.checked_sub(base) {
 		Ok(offset) => anchor + Duration::from(offset),
 		// A reordered B-frame can carry a PTS before the anchor: pace it at that earlier
-		// instant instead of collapsing it onto the anchor.
-		Err(_) => anchor.checked_sub(Duration::from(base - ts)).unwrap_or(anchor),
+		// instant instead of collapsing it onto the anchor. `ts.checked_sub(base)` failed,
+		// so `base >= ts` (same scale); fall back to the anchor if it can't be expressed.
+		Err(_) => base
+			.checked_sub(ts)
+			.ok()
+			.and_then(|behind| anchor.checked_sub(Duration::from(behind)))
+			.unwrap_or(anchor),
 	};
 	if send_at > now {
 		// Media outran wall-clock: re-anchor so this newest frame is the live edge.

@@ -1164,7 +1164,7 @@ impl<E: CatalogExt> AacStream<E> {
 					let advance = Timestamp::from_scale(index * 1024, header.sample_rate as u64)?;
 					// `base` is a 90 kHz PTS; rescale the sample-rate advance to match
 					// before adding (the scale-aware Timestamp rejects mixed scales).
-					Some(base + advance.convert(base.scale())?)
+					Some(base.checked_add(advance.convert(base.scale())?)?)
 				}
 				other => other,
 			};
@@ -1266,7 +1266,7 @@ impl<E: CatalogExt> OpusStream<E> {
 					let advance = Timestamp::from_scale(elapsed, 48_000)?;
 					// `base` is a 90 kHz PTS; rescale the sample advance to match before
 					// adding (the scale-aware Timestamp rejects mixed scales).
-					Some(base + advance.convert(base.scale())?)
+					Some(base.checked_add(advance.convert(base.scale())?)?)
 				}
 				other => other,
 			};
@@ -1445,7 +1445,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 				// before adding (the scale-aware Timestamp rejects mixed scales).
 				Some(pts) => {
 					let advance = Timestamp::from_scale(header.samples, header.sample_rate as u64)?;
-					Some(pts + advance.convert(pts.scale())?)
+					Some(pts.checked_add(advance.convert(pts.scale())?)?)
 				}
 				None => None,
 			};

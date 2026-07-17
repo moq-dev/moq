@@ -89,7 +89,7 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 ## Invariants and footguns
 
 - **No cascading abort**: Broadcast/Track/Group/Frame closes stay independent so handles can be shared. Closing or aborting one layer must not tear down its parent or siblings.
-- **`moq_net::Timestamp` scales**: the inherent `max`/`checked_add`/`checked_sub` panic or error on mismatched scales (`Ord::cmp` is safe), and `ZERO` is second-scale. Don't seed a `.max()` accumulator with `ZERO`; use an `Option` instead. A panic in a spawned task can hang a `finished().await` forever, so this once cost a 60-minute CI hang.
+- **`moq_net::Timestamp` scales**: it's an instant, not a scalar, so it has no `+`/`-` operators. `checked_add`/`checked_sub` require matching scales and return `Err` (never panic) otherwise; `.convert()` to align scales first. `Ord::cmp` is scale-aware and safe, but `Eq`/`Hash` are structural (`from_secs(1) != from_millis(1000)`). `ZERO` is second-scale, so don't seed a `.max()` accumulator with it (a finer-scale value loses the tie-break); use an `Option` instead.
 
 ## Rust conventions
 
