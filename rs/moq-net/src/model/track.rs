@@ -1851,6 +1851,7 @@ impl Subscriber {
 		self.control().subscription()
 	}
 
+	/// Replace this subscriber's delivery preferences.
 	///
 	/// The latency budget is clamped to the track's cache, like the initial subscribe.
 	/// Returns [`Error::Closed`] if the track already ended; the update is

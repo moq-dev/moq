@@ -3,7 +3,7 @@
 //! Encoding is strictly on demand: the track and catalog entry are advertised
 //! immediately, but the camera stays closed (LED off, no CPU) until a subscriber
 //! appears. When the last viewer leaves, the camera is released again. This
-//! mirrors `moq-boy`, which pauses its emulator on `TrackProducer::used()` /
+//! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
 use std::time::Instant;
