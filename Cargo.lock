@@ -4024,7 +4024,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.31"
+version = "0.2.32"
 dependencies = [
  "bytes",
  "hang",
@@ -4287,7 +4287,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4365,7 +4365,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.35"
+version = "0.5.36"
 dependencies = [
  "anyhow",
  "clap",
@@ -5868,9 +5868,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90e77a69a65d8d401fa8d3f008afdac42eaa1c71923bace0b6d99c27f03eadc1"
+checksum = "1a824572a7e027bd1d78ddd0df76447a810b881868dfee2cabdfe0e6301e24e5"
 dependencies = [
  "bytes",
  "futures",
@@ -8711,9 +8711,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quinn"
-version = "0.11.10"
+version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e156adf0f66b54479dda9a41c227e786676253e0bef0fe48acf7bab0315fb9"
+checksum = "87a8e4c1283dd02f898390b9a570b738af05317ebfc482db30caa98f754fd47e"
 dependencies = [
  "bytes",
  "futures",
@@ -8731,9 +8731,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-trait"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9959d7a7db997953305c49e0db5087fb495614a186d1cdfa98c40f9a194dbe5d"
+checksum = "6394e09415ddc1e7c88d605443a3d2f333bf278f74c17020a2b6c44e97507883"
 dependencies = [
  "bytes",
 ]

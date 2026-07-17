@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.32](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.31...moq-ffi-v0.2.32) - 2026-07-17
+
+### Fixed
+
+- *(moq-ffi)* reject unsupported audio codecs ([#2331](https://github.com/moq-dev/moq/pull/2331))
+
 ## [0.2.31](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.30...moq-ffi-v0.2.31) - 2026-07-16
 
 ### Other
