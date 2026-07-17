@@ -49,7 +49,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), moq_native::moq_net::Role::Subscriber);
+		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -326,7 +326,7 @@ async fn iroh_connect() {
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
-		assert_eq!(request.role(), moq_native::moq_net::Role::Subscriber);
+		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;

@@ -1,9 +1,9 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream},
-	ietf, lite, setup,
+	ietf, lite, setup, stats,
 };
 
 /// A MoQ server session builder.
@@ -11,7 +11,7 @@ use crate::{
 pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	stats: StatsHandle,
+	stats: stats::Handle,
 	versions: Versions,
 }
 
@@ -48,10 +48,10 @@ impl Server {
 		self.with_subscriber(subscribe)
 	}
 
-	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
+	/// Attach a tier-scoped [`stats::Handle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
-	/// Pass [`StatsHandle::default`] (a no-op handle) to opt out.
-	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
+	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
 		self.stats = stats;
 		self
 	}
@@ -88,10 +88,10 @@ impl Server {
 	/// it's `None` on versions with no in-band request path (e.g. lite 01-04).
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
 		// Regimes without a path to read defer to `ok()` without surfacing one, and
-		// carry no role hint (`Both`), so authorization is unchanged for them.
+		// carry no role hint, so authorization is unchanged for them.
 		let deferred = |handshake| Request {
 			path: None,
-			role: Role::Both,
+			role: None,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				handshake,
@@ -223,7 +223,7 @@ impl Server {
 
 		Ok(Request {
 			path,
-			role: Role::Both,
+			role: None,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				handshake: Handshake::Legacy {
@@ -246,7 +246,7 @@ impl Server {
 		let (peer_setup, path) = ietf::accept_setup(&session, version).await?;
 		Ok(Request {
 			path,
-			role: Role::Both,
+			role: None,
 			inner: Some(RequestInner {
 				server: self.clone(),
 				handshake: Handshake::IetfModern {
@@ -268,7 +268,7 @@ impl Server {
 /// moq-native.
 pub struct Request<S: web_transport_trait::Session> {
 	path: Option<String>,
-	role: Role,
+	role: Option<Role>,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S>>,
 }
@@ -319,11 +319,15 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self.path.as_deref()
 	}
 
-	/// The [`Role`] the client advertised in its SETUP.
+	/// The single [`Role`] the client advertised in its SETUP, or `None` for a
+	/// bidirectional session.
 	///
-	/// Populated for moq-lite-05; [`Role::Both`] on versions without an in-band role
-	/// (and for clients that omit it). See the note on [`Server::accept_request`].
-	pub fn role(&self) -> Role {
+	/// Only moq-lite-05 carries a role, so `None` covers three cases that the wire
+	/// doesn't distinguish: an older version, a client that omitted the parameter, and a
+	/// client that explicitly advertised both directions. All three mean the same thing
+	/// (the client may publish and subscribe), so authorize on what the token grants.
+	/// See the note on [`Server::accept_request`].
+	pub fn role(&self) -> Option<Role> {
 		self.role
 	}
 
@@ -341,7 +345,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 	}
 
 	/// Set the tier-scoped stats handle. Overrides any value from the [`Server`] builder.
-	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
 		self.inner_mut().server.stats = stats;
 		self
 	}
@@ -405,7 +409,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let our_setup = lite::Setup {
 					probe: lite::ProbeLevel::Report,
 					path: None,
-					role: lite::Role::Both,
+					role: None,
 				};
 				let start = lite::start(
 					session.clone(),
@@ -638,7 +642,7 @@ mod tests {
 	}
 
 	/// Encode a lite-05 Setup Stream: the `DataType::Setup` tag then the SETUP message.
-	fn lite05_setup(path: Option<&str>, role: Role) -> Vec<u8> {
+	fn lite05_setup(path: Option<&str>, role: Option<Role>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
 		lite::DataType::Setup.encode(&mut buf, v).unwrap();
@@ -661,34 +665,31 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_path() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), Role::Both)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
-		assert_eq!(request.role(), Role::Both);
+		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_lite05_without_path_is_none() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, Role::Both)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), None);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_role() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), Role::Publisher)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), Some(Role::Publisher))]);
 		let request = Server::new().accept_request(session).await.unwrap();
-		assert_eq!(request.role(), Role::Publisher);
+		assert_eq!(request.role(), Some(Role::Publisher));
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_skips_uni_stream_before_setup() {
 		// A GROUP racing ahead of the SETUP is STOP_SENDING-ed and skipped; the gate
 		// keeps reading until it finds the SETUP.
-		let session = FakeSession::new(
-			ALPN_LITE_05,
-			[lite05_group(), lite05_setup(Some("/team/room"), Role::Both)],
-		);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_group(), lite05_setup(Some("/team/room"), None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
 	}

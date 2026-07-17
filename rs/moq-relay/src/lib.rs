@@ -27,11 +27,11 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// is configured, shared by the `--cluster-tier` / `--auth-mtls-tier` defaults.
 const DEFAULT_TRUSTED_TIER: &str = "internal";
 
-/// Resolve a configured tier label to a [`moq_net::Tier`], defaulting to
+/// Resolve a configured tier label to a [`moq_net::stats::Tier`], defaulting to
 /// [`DEFAULT_TRUSTED_TIER`] when unset. An empty label selects the default
 /// (unprefixed) tier.
-fn trusted_tier(label: Option<String>) -> moq_net::Tier {
-	moq_net::Tier::new(label.unwrap_or_else(|| DEFAULT_TRUSTED_TIER.to_string()))
+fn trusted_tier(label: Option<String>) -> moq_net::stats::Tier {
+	moq_net::stats::Tier::new(label.unwrap_or_else(|| DEFAULT_TRUSTED_TIER.to_string()))
 }
 
 pub use auth::*;

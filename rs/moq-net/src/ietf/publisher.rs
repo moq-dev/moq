@@ -1,4 +1,4 @@
-use crate::{group, origin, track};
+use crate::{group, origin, stats, track};
 use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -6,7 +6,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, StatsHandle,
+	AsPath, Error,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
@@ -20,16 +20,16 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: origin::Consumer,
 	control: Control,
-	stats: StatsHandle,
+	stats: stats::Handle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
 	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: crate::SessionBroadcasts,
+	broadcasts: stats::SessionBroadcasts,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: origin::Consumer, control: Control, stats: StatsHandle, version: Version) -> Self {
+	pub fn new(session: S, origin: origin::Consumer, control: Control, stats: stats::Handle, version: Version) -> Self {
 		let broadcasts = stats.publisher_broadcasts();
 		Self {
 			session,
@@ -265,7 +265,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		&self,
 		mut track: track::Subscriber,
 		request_id: RequestId,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		track_stats: std::sync::Arc<stats::PublisherTrack>,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
@@ -316,7 +316,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: group::Consumer,
-		track_stats: std::sync::Arc<crate::PublisherTrack>,
+		track_stats: std::sync::Arc<stats::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -514,7 +514,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Each accepted namespace holds a `publisher()` announce guard (bumps
 		// `announced` / `announced_closed`) alongside its stream, so dropping the
 		// tuple on unannounce or cleanup records the close.
-		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)> =
+		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, stats::Publisher)> =
 			HashMap::new();
 		let mut announced = self.origin.announced();
 
@@ -554,7 +554,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn announce_namespace(
 		&self,
 		suffix: crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)>,
+		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, stats::Publisher)>,
 	) -> Result<(), Error> {
 		let absolute = self.origin.absolute(&suffix).to_owned();
 		tracing::debug!(broadcast = %absolute, "announce");
@@ -612,7 +612,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn unannounce_namespace(
 		&self,
 		suffix: &crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, crate::PublisherStats)>,
+		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>, stats::Publisher)>,
 	) {
 		tracing::debug!(broadcast = %self.origin.absolute(suffix), "unannounce");
 		// Dropping `_stats` on removal records the announce close.

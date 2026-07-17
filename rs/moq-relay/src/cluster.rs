@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Context;
 use moq_net::origin;
-use moq_net::{Origin, Path, Stats, Tier};
+use moq_net::{Origin, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
@@ -330,8 +330,9 @@ pub struct ClusterConfig {
 /// hop list carried on each broadcast (see [`moq_net::broadcast::Info::hops`]).
 ///
 /// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
-/// a [`Stats`] aggregator with the `with_*` builder methods. A cluster without
-/// a client can serve local sessions but cannot dial remote peers.
+/// a [`stats::Producer`](moq_net::stats::Producer) aggregator with the `with_*`
+/// builder methods. A cluster without a client can serve local sessions but cannot
+/// dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
@@ -347,11 +348,11 @@ pub struct Cluster {
 	pub origin: origin::Producer,
 
 	/// Stats aggregator. One instance per relay; sessions pick a billing tier via
-	/// [`Stats::tier`] at acceptance time (default tier for JWT/public, `internal`
-	/// for mTLS / cluster peers, or any label the auth API returns) so traffic
-	/// classes land in separate counter sets. Defaults to a no-op aggregator
-	/// ([`Stats::default`]) until [`with_stats`](Self::with_stats) is called.
-	pub stats: Stats,
+	/// [`stats::Producer::tier`](moq_net::stats::Producer::tier) at acceptance time
+	/// (default tier for JWT/public, `internal` for mTLS / cluster peers, or any label
+	/// the auth API returns) so traffic classes land in separate counter sets. Defaults
+	/// to a no-op aggregator until [`with_stats`](Self::with_stats) is called.
+	pub stats: moq_net::stats::Producer,
 }
 
 impl Cluster {
@@ -379,7 +380,7 @@ impl Cluster {
 			client: None,
 			client_tls: None,
 			origin,
-			stats: Stats::default(),
+			stats: moq_net::stats::Producer::default(),
 		})
 	}
 
@@ -414,12 +415,12 @@ impl Cluster {
 		self
 	}
 
-	/// Attach a [`Stats`] aggregator. Replaces the default no-op aggregator.
+	/// Attach a stats aggregator. Replaces the default no-op aggregator.
 	///
 	/// Build the value with [`StatsConfig::build`](crate::StatsConfig::build),
 	/// passing [`Self::origin`] so the aggregator publishes through the same
 	/// origin cluster peers read from.
-	pub fn with_stats(mut self, stats: Stats) -> Self {
+	pub fn with_stats(mut self, stats: moq_net::stats::Producer) -> Self {
 		self.stats = stats;
 		self
 	}

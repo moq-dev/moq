@@ -3,7 +3,7 @@ use axum::http;
 use moq_native::Transport;
 #[cfg(test)]
 use moq_net::AsPath;
-use moq_net::{Path, PathOwned, PathPrefixes, Tier};
+use moq_net::{Path, PathOwned, PathPrefixes, stats::Tier};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};

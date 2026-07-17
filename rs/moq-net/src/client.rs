@@ -1,9 +1,9 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Session, StatsHandle, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
-	ietf, lite, setup,
+	ietf, lite, setup, stats,
 };
 
 /// A MoQ client session builder.
@@ -11,7 +11,7 @@ use crate::{
 pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	stats: StatsHandle,
+	stats: stats::Handle,
 	versions: Versions,
 	setup_path: Option<String>,
 }
@@ -48,10 +48,10 @@ impl Client {
 		self.with_subscriber(subscribe)
 	}
 
-	/// Attach a tier-scoped [`StatsHandle`]. Per-broadcast and per-subscription
+	/// Attach a tier-scoped [`stats::Handle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
-	/// Pass [`StatsHandle::default`] (a no-op handle) to opt out.
-	pub fn with_stats(mut self, stats: StatsHandle) -> Self {
+	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
+	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
 		self.stats = stats;
 		self
 	}
