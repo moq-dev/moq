@@ -28,7 +28,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "description": "0164001fffe100196764001fac2484014016ec0440000003004000000c23c60c9201000568ee32c8b0",
         "codedWidth": 1280,
         "codedHeight": 720,
-        "container": "legacy"
+        "container": { "kind": "legacy" }
       }
     }
   },
@@ -39,7 +39,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "sampleRate": 44100,
         "numberOfChannels": 2,
         "bitrate": 283637,
-        "container": "legacy"
+        "container": { "kind": "legacy" }
       }
     }
   }
@@ -100,7 +100,7 @@ The catalog is a JSON document published through the merge-patch snapshot helper
   In Rust, either flatten the catalog into your own struct with `#[serde(flatten)]` for typed access, or read sections untyped from an `Extra` catalog, which keeps unknown keys as raw JSON (`catalog.section("scte35")`). The `()` default drops sections it doesn't model.
   The FFI bindings always use the untyped form, one JSON string per section keyed by name (`catalog.sections["scte35"]` in Python, `moq_catalog_get_section()` / `moq_catalog_section_at()` in C).
 - **Writing**: the catalog producer holds one shared document.
-  Each owner edits only its own keys and publishes: `producer.mutate(c => { c.scte35 = ... })` in TypeScript; the `Deref`/`DerefMut` lock guard from `producer.lock()` for a typed Rust extension, or `producer.set_section("scte35", value)` for an untyped one; `broadcast.set_catalog_section("scte35", json)` in Python; `moq_publish_catalog_section()` in C.
+  Each owner edits only its own keys and publishes: `producer.mutate(c => { c.scte35 = ... })` in TypeScript; the `Deref`/`DerefMut` lock guard from `producer.lock()` for a typed Rust extension, or `producer.set_section("scte35", value)` for an untyped one; `broadcast.set_catalog_section("scte35", value)` in Python; `moq_publish_catalog_section()` in C.
   Every edit starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.
   Removing a key publishes a deletion (`producer.remove_section(...)`, `broadcast.remove_catalog_section(...)` in Python, `moq_remove_catalog_section()` in C), which a consumer reads as the section being removed.
 

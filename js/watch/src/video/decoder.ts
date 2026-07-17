@@ -5,7 +5,7 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import type { BufferedRanges } from "../buffered";
+
 import type { Sync } from "../sync";
 import type { Source } from "./source";
 
@@ -13,7 +13,7 @@ import type { Source } from "./source";
 const BUFFERING = Time.Milli(500);
 const SWITCH = Time.Milli(100);
 
-type DecoderInput = {
+export type DecoderInput = {
 	// Whether to download the video track. Wired from the renderer's output by the parent.
 	enabled: Getter<boolean>;
 };
@@ -41,7 +41,7 @@ type DecoderOutput = {
 	stats: Signal<Stats | undefined>;
 
 	// Combined buffered ranges (network jitter + decode buffer)
-	buffered: Signal<BufferedRanges>;
+	buffered: Signal<Container.BufferedRanges>;
 };
 
 // The types in VideoDecoderConfig that cause a hard reload.
@@ -52,8 +52,8 @@ type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeig
 /** Downloads video from a track and decodes it into {@link VideoFrame}s with WebCodecs. */
 export class Decoder {
 	readonly in: Readonlys<DecoderInput>;
-	source: Source;
-	sync: Sync;
+	readonly source: Source;
+	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
@@ -61,7 +61,7 @@ export class Decoder {
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
 		stats: new Signal<Stats | undefined>(undefined),
-		buffered: new Signal<BufferedRanges>([]),
+		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -244,16 +244,16 @@ class DecoderTrack {
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
 	// Network jitter + decode buffer.
-	buffered = new Signal<BufferedRanges>([]);
+	buffered = new Signal<Container.BufferedRanges>([]);
 
 	// Decoded frames waiting to be rendered.
-	#buffered = new Signal<BufferedRanges>([]);
+	#buffered = new Signal<Container.BufferedRanges>([]);
 
 	// The last discontinuity count seen from the container consumer; doubles as a generation
 	// so in-flight decodes from before a rewind can be dropped on output.
 	#discontinuity = 0;
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
 		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
@@ -265,7 +265,7 @@ class DecoderTrack {
 		this.config = requiredConfig;
 		this.stats = props.stats;
 
-		this.signals.run(this.#run.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {
@@ -383,14 +383,14 @@ class DecoderTrack {
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
-					data: frame.data,
+					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
 
 				// Track both frame count and bytes received for stats in the UI
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Track decode buffer: frames sent to decoder but not yet rendered
@@ -467,7 +467,7 @@ class DecoderTrack {
 				// Track stats
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
 				// Track decode buffer
@@ -488,7 +488,7 @@ class DecoderTrack {
 				decoder.decode(
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
-						data: frame.data,
+						data: frame.payload,
 						timestamp: frame.timestamp,
 					}),
 				);
@@ -545,7 +545,7 @@ class DecoderTrack {
 	}
 
 	close(): void {
-		this.signals.close();
+		this.#signals.close();
 
 		this.frame.update((prev) => {
 			prev?.close();

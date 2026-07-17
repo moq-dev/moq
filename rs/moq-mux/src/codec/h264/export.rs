@@ -183,11 +183,10 @@ impl<S: Stream> Export<S> {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeMap;
 	use std::task::Poll;
 
 	use bytes::Bytes;
-	use hang::catalog::{H264, Video, VideoConfig};
+	use hang::catalog::{H264, VideoConfig};
 
 	use super::*;
 	use crate::catalog::Stream;
@@ -217,18 +216,9 @@ mod tests {
 		config.description = Some(avcc);
 		config.container = hang::catalog::Container::Legacy;
 
-		let mut renditions = BTreeMap::new();
-		renditions.insert(name.to_string(), config);
-
-		Catalog {
-			video: Video {
-				renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		}
+		let mut catalog = Catalog::default();
+		catalog.video.insert(name, config).expect("duplicate rendition");
+		catalog
 	}
 
 	/// Build a minimal avcC carrying one SPS + one PPS.
@@ -277,10 +267,7 @@ mod tests {
 		// Producer side: publish the broadcast with one length-prefixed video track.
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
-			.create_track(
-				"video.m4s",
-				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track("video.m4s", hang::container::track_info())
 			.unwrap();
 
 		// Group 0 (keyframe-starting group): one IDR frame.

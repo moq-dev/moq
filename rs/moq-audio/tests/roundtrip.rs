@@ -1,12 +1,13 @@
-//! End-to-end round-trip: configure an [`AudioProducer`], publish a few
-//! frames, subscribe via [`AudioConsumer`], assert the decoded signal
-//! is non-trivial. Covers moq-net wiring, the resampler path, and a
-//! non-default [`AudioFormat`].
+//! End-to-end round-trip: configure an [`encode::Producer`], publish a few
+//! frames, subscribe via [`decode::Consumer`], assert the decoded signal is
+//! non-trivial. Covers moq-net wiring, the resampler path, and a non-default
+//! [`Format`].
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_audio::{AudioConsumer, AudioFormat, AudioProducer, Codec, DecoderOutput, EncoderInput, EncoderOutput, Frame};
+use moq_audio::{Format, Frame, decode, encode};
+use moq_net::Timestamp;
 
 fn sine_f32_interleaved(freq: f32, sample_rate: u32, channels: u32, frames: usize) -> Vec<f32> {
 	let mut out = Vec::with_capacity(frames * channels as usize);
@@ -35,29 +36,26 @@ async fn opus_round_trip_48k_stereo() {
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
 
-	let mut producer = AudioProducer::new(
-		&mut broadcast,
-		catalog.clone(),
-		"audio",
-		EncoderInput {
-			format: AudioFormat::F32,
-			sample_rate: 48_000,
-			channels: 2,
-		},
-		EncoderOutput {
-			codec: Codec::Opus,
-			bitrate: Some(96_000),
-			..EncoderOutput::default()
-		},
-	)
-	.unwrap();
+	let input = encode::Input {
+		format: Format::F32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	// `Options` is `#[non_exhaustive]`, so build it the way external callers must:
+	// `default()` plus field assignment, never a struct literal.
+	let mut options = encode::Options::default();
+	options.track = Some("audio".to_string());
+	options.codec = encode::Codec::Opus;
+	options.bitrate = Some(96_000);
+
+	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 
 	let frames_per_chunk = 48_000 / 50; // 960 frames = 20ms @ 48k
 	for _ in 0..10 {
 		let pcm = sine_f32_interleaved(440.0, 48_000, 2, frames_per_chunk);
 		producer
 			.write(&Frame {
-				timestamp_us: 0,
+				timestamp: Timestamp::from_micros(0).unwrap(),
 				data: f32_bytes(&pcm),
 			})
 			.unwrap();
@@ -65,17 +63,11 @@ async fn opus_round_trip_48k_stereo() {
 
 	let snapshot = catalog_consumer.next().await.unwrap().expect("catalog should publish");
 	let cfg = snapshot.audio.renditions.get("audio").expect("audio rendition");
-	let mut consumer = AudioConsumer::new(
-		&broadcast_consumer,
-		cfg,
-		"audio",
-		DecoderOutput {
-			format: AudioFormat::F32,
-			..DecoderOutput::default()
-		},
-	)
-	.await
-	.unwrap();
+	let mut config = decode::Config::default();
+	config.format = Format::F32;
+	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
+		.await
+		.unwrap();
 
 	producer.finish().unwrap();
 
@@ -115,30 +107,25 @@ async fn opus_round_trip_44100_s16_resampled() {
 	let mut catalog_consumer = catalog.consume().unwrap();
 	let broadcast_consumer = broadcast.consume();
 
-	let mut producer = AudioProducer::new(
-		&mut broadcast,
-		catalog.clone(),
-		"audio",
-		EncoderInput {
-			format: AudioFormat::S16,
-			sample_rate: 44_100,
-			channels: 1,
-		},
-		EncoderOutput {
-			codec: Codec::Opus,
-			bitrate: Some(64_000),
-			..EncoderOutput::default()
-		},
-	)
-	.unwrap();
+	let input = encode::Input {
+		format: Format::S16,
+		sample_rate: 44_100,
+		channels: 1,
+	};
+	let mut options = encode::Options::default();
+	options.track = Some("audio".to_string());
+	options.codec = encode::Codec::Opus;
+	options.bitrate = Some(64_000);
+
+	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 
 	let frames_per_chunk = 44_100 / 50; // 882 = 20ms @ 44.1k
 	for _ in 0..25 {
 		let pcm = sine_f32_interleaved(440.0, 44_100, 1, frames_per_chunk);
-		let s16 = AudioFormat::S16.from_interleaved_f32(&pcm, 1).unwrap();
+		let s16 = Format::S16.from_interleaved_f32(&pcm, 1).unwrap();
 		producer
 			.write(&Frame {
-				timestamp_us: 0,
+				timestamp: Timestamp::from_micros(0).unwrap(),
 				data: Bytes::from(s16),
 			})
 			.unwrap();
@@ -150,19 +137,15 @@ async fn opus_round_trip_44100_s16_resampled() {
 	assert_eq!(cfg.sample_rate, 48_000);
 	assert_eq!(cfg.channel_count, 1);
 
-	let mut consumer = AudioConsumer::new(
-		&broadcast_consumer,
-		cfg,
-		"audio",
-		DecoderOutput {
-			format: AudioFormat::S16,
-			sample_rate: Some(44_100),
-			channels: Some(1),
-			latency_max: Some(Duration::from_millis(500)),
-		},
-	)
-	.await
-	.unwrap();
+	let mut config = decode::Config::default();
+	config.format = Format::S16;
+	config.sample_rate = Some(44_100);
+	config.channels = Some(1);
+	config.latency_max = Some(Duration::from_millis(500));
+
+	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
+		.await
+		.unwrap();
 	assert_eq!(consumer.sample_rate(), 44_100);
 	assert_eq!(consumer.channels(), 1);
 

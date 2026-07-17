@@ -26,6 +26,13 @@ export interface Established {
 	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
+	/**
+	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a
+	 * prefix. When false, {@link announced} never yields, so a consumer must subscribe blind
+	 * rather than wait for an announcement. Set via `discovery` on the connect options.
+	 */
+	readonly discovery: boolean;
+
 	/** Subscribe to broadcast announcements under an optional path prefix, returning paths relative to that prefix. */
 	announced(prefix?: Path.Valid): announce.Consumer;
 

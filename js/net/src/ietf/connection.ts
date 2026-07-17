@@ -31,6 +31,9 @@ export class Connection implements Established {
 	// The wire transport this session runs over.
 	readonly transport: Transport;
 
+	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
+	readonly discovery: boolean;
+
 	// The established WebTransport session.
 	#quic: WebTransport;
 
@@ -62,14 +65,17 @@ export class Connection implements Established {
 		control,
 		maxRequestId,
 		version,
+		discovery = true,
 	}: {
 		url: URL;
 		quic: WebTransport;
 		control: Stream;
 		maxRequestId: bigint;
 		version: IetfVersion;
+		discovery?: boolean;
 	}) {
 		this.url = url;
+		this.discovery = discovery;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;

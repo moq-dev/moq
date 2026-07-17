@@ -20,9 +20,9 @@ export const MAX_GROUP_FRAMES = 1024;
  */
 export interface Frame {
 	/** The frame payload. */
-	data: Uint8Array;
+	payload: Uint8Array;
 	/**
-	 * Presentation timestamp. Required: for data with no presentation time of its own
+	 * Presentation timestamp. Required: for a payload with no presentation time of its own
 	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
 	 */
 	timestamp: Timestamp;
@@ -49,7 +49,7 @@ export class CacheFull extends Error {
 class GroupState {
 	readonly sequence: number;
 	frames = new Signal<Frame[]>([]);
-	closed = new Once<true | Error>();
+	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Frames evicted from the front by the cache cap. A reader that had not consumed
@@ -63,16 +63,16 @@ class GroupState {
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
-	if (state.closed.peek()) throw new Error("group is closed");
+	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
-	state.cacheBytes += frame.data.byteLength;
+	state.cacheBytes += frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 
 		while (frames.length > MAX_GROUP_FRAMES || state.cacheBytes > MAX_GROUP_CACHE_BYTES) {
 			const evicted = frames.shift();
 			if (!evicted) break;
-			state.cacheBytes -= evicted.data.byteLength;
+			state.cacheBytes -= evicted.payload.byteLength;
 			state.offset++;
 		}
 	});
@@ -98,10 +98,10 @@ export class Producer {
 	}
 
 	/**
-	 * Settles once the group closes: `true` on a clean close, or the abort {@link Error}.
+	 * Settles once the group closes: `null` on a clean close, or the abort {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
-	get closed(): GetPromise<true | Error> {
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
@@ -114,7 +114,9 @@ export class Producer {
 	 * Create an independent read handle that receives every frame written here.
 	 *
 	 * Frames written so far are replayed synchronously; later writes and close are teed
-	 * in as they happen. Internal to track fan-out.
+	 * in as they happen.
+	 *
+	 * @internal Track fan-out and fetch coalescing only. Use {@link consume} instead.
 	 */
 	mirror(): Consumer {
 		const dst = new GroupState(this.sequence);
@@ -122,7 +124,7 @@ export class Producer {
 		dst.offset = this.#state.offset;
 
 		const closed = this.#state.closed.peek();
-		if (closed) {
+		if (closed !== undefined) {
 			dst.closed.set(closed);
 			return makeConsumer(dst);
 		}
@@ -138,7 +140,7 @@ export class Producer {
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek()) this.#mirrors.delete(mirror);
+				if (mirror.closed.peek() !== undefined) this.#mirrors.delete(mirror);
 				else appendFrame(mirror, frame);
 			}
 		}
@@ -146,7 +148,7 @@ export class Producer {
 
 	/** Write a string as a single UTF-8 encoded frame, stamped with {@link Timestamp.now}. */
 	writeString(str: string) {
-		this.writeFrame({ data: new TextEncoder().encode(str), timestamp: Timestamp.now() });
+		this.writeFrame({ payload: new TextEncoder().encode(str), timestamp: Timestamp.now() });
 	}
 
 	/** Write a value as a single JSON-encoded frame, stamped with {@link Timestamp.now}. */
@@ -156,7 +158,7 @@ export class Producer {
 
 	/** Write a boolean as a single one-byte frame, stamped with {@link Timestamp.now}. */
 	writeBool(bool: boolean) {
-		this.writeFrame({ data: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
+		this.writeFrame({ payload: new Uint8Array([bool ? 1 : 0]), timestamp: Timestamp.now() });
 	}
 
 	/** True once the group has been closed. */
@@ -167,11 +169,11 @@ export class Producer {
 	/** Closes the group, optionally with an error to abort readers. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
-		this.#state.closed.set(abort ?? true);
+		this.#state.closed.set(abort ?? null);
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? true);
+				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? null);
 			}
 			this.#mirrors.clear();
 		}
@@ -200,10 +202,10 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles once the group closes: `true` on a clean close, or the abort {@link Error}.
+	 * Settles once the group closes: `null` on a clean close, or the abort {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
-	get closed(): GetPromise<true | Error> {
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
@@ -216,7 +218,7 @@ export class Consumer {
 		const frame = frames.shift();
 		if (!frame) return undefined;
 
-		this.#state.cacheBytes -= frame.data.byteLength;
+		this.#state.cacheBytes -= frame.payload.byteLength;
 		return { sequence: this.#state.total.peek() - frames.length - 1, frame };
 	}
 
@@ -251,14 +253,14 @@ export class Consumer {
 	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
-		return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
+		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
 	async readable(): Promise<void> {
 		for (;;) {
 			if (this.#state.frames.peek().length > 0) return;
-			if (this.#state.closed.peek()) return;
+			if (this.#state.closed.peek() !== undefined) return;
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
 	}
@@ -276,7 +278,7 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return;
+			if (closed !== undefined) return;
 
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
@@ -291,11 +293,11 @@ export class Consumer {
 			if (this.#state.offset > 0) throw new CacheFull();
 
 			const read = this.#readBufferedFrame();
-			if (read) return { sequence: read.sequence, data: read.frame.data, timestamp: read.frame.timestamp };
+			if (read) return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return;
+			if (closed !== undefined) return;
 
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
@@ -304,7 +306,7 @@ export class Consumer {
 	/** Reads the next frame and decodes its payload as a UTF-8 string. */
 	async readString(): Promise<string | undefined> {
 		const frame = await this.readFrame();
-		return frame ? new TextDecoder().decode(frame.data) : undefined;
+		return frame ? new TextDecoder().decode(frame.payload) : undefined;
 	}
 
 	/** Reads the next frame and parses its payload as JSON. */
@@ -316,12 +318,12 @@ export class Consumer {
 	/** Reads the next frame and decodes its payload as a one-byte boolean. */
 	async readBool(): Promise<boolean | undefined> {
 		const frame = await this.readFrame();
-		return frame ? frame.data[0] === 1 : undefined;
+		return frame ? frame.payload[0] === 1 : undefined;
 	}
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return; // already closed
-		this.#state.closed.set(abort ?? true);
+		this.#state.closed.set(abort ?? null);
 	}
 }

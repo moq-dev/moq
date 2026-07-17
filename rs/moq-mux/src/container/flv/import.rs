@@ -541,10 +541,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			old.track.finish()?;
 			self.catalog.lock().video.renditions.remove(old.track.name());
 		}
-		Ok(self.broadcast.unique_track(
-			".flv-v",
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)?)
+		Ok(self.broadcast.unique_track(".flv-v", hang::container::track_info())?)
 	}
 
 	/// Drop any existing audio track `track_id` (finishing it and clearing its
@@ -554,10 +551,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			old.track.finish()?;
 			self.catalog.lock().audio.renditions.remove(old.track.name());
 		}
-		Ok(self.broadcast.unique_track(
-			".flv-a",
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)?)
+		Ok(self.broadcast.unique_track(".flv-a", hang::container::track_info())?)
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.

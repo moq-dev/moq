@@ -143,8 +143,8 @@ impl Video {
 				// The C ABI carries microseconds; the decoded frame's Timestamp is
 				// constrained to a QUIC VarInt, so the microsecond value fits a u64.
 				timestamp_us: frame.timestamp.as_micros() as u64,
-				width: frame.width,
-				height: frame.height,
+				width: frame.size.width,
+				height: frame.size.height,
 				data: frame.into_i420()?,
 			};
 			let frame_id = State::lock().video.frames.insert(frame)?;

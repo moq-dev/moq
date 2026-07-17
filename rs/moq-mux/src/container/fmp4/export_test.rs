@@ -25,10 +25,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc3"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".avc3"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
@@ -129,10 +126,7 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".aac"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".aac"), hang::container::track_info())
 		.unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
@@ -224,10 +218,7 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".vp8"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".vp8"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(VideoCodec::VP8);
 	config.coded_width = Some(320);
@@ -302,10 +293,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".vp9"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".vp9"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(VP9 {
 		profile: 0,
@@ -392,10 +380,7 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".av01"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".av01"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(AV1 {
 		profile: 0,
@@ -622,10 +607,7 @@ async fn next_fragment_reports_segment_metadata() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc3"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".avc3"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,

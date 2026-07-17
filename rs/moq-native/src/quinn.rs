@@ -1,9 +1,12 @@
+//! The quinn QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
+
 use crate::client::ClientConfig;
 use crate::quic::Resolved;
-use crate::server::{ServerConfig, ServerId};
+use crate::quic::ServerId;
+use crate::server::ServerConfig;
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::net;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -33,99 +36,131 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: Resolved) {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The UDP socket couldn't be bound, usually because the address is already in use.
 	#[error("failed to bind UDP socket")]
 	BindSocket(#[source] std::io::Error),
 
+	/// The bound socket couldn't be turned into a QUIC endpoint.
 	#[error("failed to create QUIC endpoint")]
 	CreateEndpoint(#[source] std::io::Error),
 
+	/// Quinn found no async runtime. Construct the client or server from within a tokio context.
 	#[error("no async runtime")]
 	NoRuntime,
 
+	/// The endpoint's local address couldn't be read back from the OS.
 	#[error("failed to get local address")]
 	LocalAddr(#[source] std::io::Error),
 
+	/// The server's configured bind address couldn't be resolved.
 	#[error("failed to resolve bind address")]
 	ResolveBind(#[source] std::io::Error),
 
+	/// The URL has no host to connect to.
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
+	/// Resolving the URL's host failed.
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
+	/// DNS returned no address usable from the local socket, usually an address family mismatch.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
+	/// The insecure `http://` bootstrap couldn't fetch `/certificate.sha256`.
 	#[error("failed to fetch fingerprint")]
 	FetchFingerprint(#[source] reqwest::Error),
 
+	/// The `/certificate.sha256` fetch returned a non-success status.
 	#[error("fingerprint request failed")]
 	FingerprintStatus(#[source] reqwest::Error),
 
+	/// The fingerprint response body couldn't be read.
 	#[error("failed to read fingerprint")]
 	ReadFingerprint(#[source] reqwest::Error),
 
+	/// The fetched fingerprint wasn't valid hex.
 	#[error("invalid fingerprint")]
 	InvalidFingerprint(#[from] hex::FromHexError),
 
+	/// The URL scheme isn't one this backend can dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
 
+	/// The URL scheme passed the initial check but has no session type, which means it slipped through a scheme list.
 	#[error("unsupported URL scheme: {0}")]
 	UnsupportedScheme(String),
 
+	/// The connection came up without TLS handshake data, so the negotiated ALPN can't be read.
 	#[error("missing handshake data")]
 	MissingHandshake,
 
+	/// TLS negotiated no ALPN, so there's no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
 
+	/// The negotiated ALPN wasn't valid UTF-8.
 	#[error("failed to decode ALPN")]
 	DecodeAlpn(#[from] std::string::FromUtf8Error),
 
+	/// The peer negotiated an ALPN this endpoint doesn't handle.
 	#[error("unsupported ALPN: {0}")]
 	UnsupportedAlpn(String),
 
+	/// A raw QUIC client connected without SNI, so the server can't tell which host it wanted.
 	#[error("missing server name for raw QUIC connection")]
 	MissingServerName,
 
+	/// The client's SNI hostname didn't form a valid URL.
 	#[error("failed to construct URL from server name")]
 	BuildUrl(#[source] url::ParseError),
 
+	/// The configured QUIC-LB nonce is too short to be unguessable.
 	#[error("quic_lb_nonce must be at least 4")]
 	QuicLbNonceTooSmall,
 
+	/// The QUIC-LB server ID plus nonce doesn't fit in a connection ID. Shorten one of them.
 	#[error("connection ID length ({0}) exceeds maximum of 20")]
 	QuicLbCidTooLong(usize),
 
+	/// The mTLS client verifier couldn't be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
+	/// The rustls crypto provider offers no cipher suite usable for QUIC initial packets.
 	#[error(transparent)]
 	NoInitialCipherSuite(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
 
+	/// Quinn refused to start the connection, before any packet was sent.
 	#[error(transparent)]
 	Connect(#[from] quinn::ConnectError),
 
+	/// The QUIC connection failed or was closed by the peer.
 	#[error(transparent)]
 	Connection(#[from] quinn::ConnectionError),
 
+	/// The WebTransport client handshake failed.
 	#[error(transparent)]
 	Client(#[from] web_transport_quinn::ClientError),
 
+	/// The server answered the WebTransport CONNECT with a rejection status.
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
+	/// The WebTransport server handshake failed while responding.
 	#[error(transparent)]
 	Server(#[from] web_transport_quinn::ServerError),
 
+	/// The QUIC handshake didn't complete for an incoming connection.
 	#[error("failed to establish QUIC connection")]
 	Establish(#[source] quinn::ConnectionError),
 
+	/// The client never sent a usable WebTransport CONNECT request.
 	#[error("failed to receive WebTransport request")]
 	RecvRequest(#[source] web_transport_quinn::ServerError),
 
+	/// The TLS configuration or certificates couldn't be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
 }
@@ -423,8 +458,8 @@ impl QuinnServer {
 		self.quic.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
-		self.certs.info.clone()
+	pub fn certificates(&self) -> crate::tls::Certificates {
+		crate::tls::Certificates::new(self.certs.info.clone())
 	}
 
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {

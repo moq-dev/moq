@@ -70,7 +70,7 @@ a real bundler (the examples below).
 - `paused`: Pause playback (boolean)
 - `muted`: Mute audio (boolean)
 - `volume`: Audio volume (0 to 1, default: 1)
-- `reload`: Wait for (re)announcement before subscribing (default: true). Defaults off for `mediaoverquic.com` relays until they support broadcast discovery.
+- `reload`: Wait for (re)announcement before subscribing (default: true). Ignored when the relay does not support broadcast discovery, which subscribes immediately instead of waiting forever.
 - `latency`: Latency target. `"real-time"` (default) derives it from RTT, or a number sets a fixed jitter buffer in ms. Collapses `latency-min` and `latency-max` to one value (minimize latency).
 - `latency-min`: Latency floor (the jitter/startup buffer). Same units as `latency`; leaves the ceiling untouched.
 - `latency-max`: Latency ceiling. `"real-time"` (default) minimizes latency; a number caps at that many ms. A ceiling above the floor enables [buffered playback](#buffered-playback): build up a buffer from future-dated frames instead of skipping ahead.
@@ -268,15 +268,20 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` an
 
 ```typescript
 import * as Watch from "@moq/watch";
+import { Signal } from "@moq/signals";
+
+// Inputs are read-only on the component, so keep a handle to anything you want to change later.
+const reload = new Signal(true);
 
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
     name: "alice.hang",
+    reload,
 });
 
-// Disable the announcement gate for relays without broadcast discovery.
-broadcast.reload.set(false);
+// Subscribe immediately instead of waiting for an announcement.
+reload.set(false);
 ```
 
 ## Related Packages

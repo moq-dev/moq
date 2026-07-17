@@ -34,7 +34,7 @@ test("Format decodes timestamp at default microseconds timescale", () => {
 	const [decoded] = fmt.decode(frame);
 
 	expect(decoded.timestamp).toBe(12_345 as Time.Micro);
-	expect(decoded.data).toEqual(payload);
+	expect(decoded.payload).toEqual(payload);
 	expect(decoded.keyframe).toBe(false);
 });
 
@@ -70,7 +70,7 @@ test("Format skips unknown odd-typed properties", () => {
 	const [decoded] = fmt.decode(frame);
 
 	expect(decoded.timestamp).toBe(10 as Time.Micro);
-	expect(decoded.data).toEqual(payload);
+	expect(decoded.payload).toEqual(payload);
 });
 
 test("Format throws when the timestamp property is missing", () => {

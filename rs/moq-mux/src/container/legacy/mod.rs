@@ -23,7 +23,7 @@ impl Container for Wire {
 				timestamp: frame.timestamp,
 				payload: frame.payload.clone(),
 			};
-			hang_frame.encode(group)?;
+			hang_frame.write_to(group)?;
 		}
 		Ok(())
 	}

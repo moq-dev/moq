@@ -4,7 +4,7 @@ import type { Decoder } from "./decoder";
 const MIN_GAIN = 0.001;
 const FADE_TIME = 0.2;
 
-type EmitterInput = {
+export type EmitterInput = {
 	volume: Getter<number>;
 
 	// Silences the audio and stops the download. Muted samples aren't worth the bandwidth,
@@ -22,7 +22,7 @@ type EmitterOutput = {
 
 // A helper that emits audio directly to the speakers.
 export class Emitter {
-	source: Decoder;
+	readonly source: Decoder;
 
 	readonly in: Readonlys<EmitterInput>;
 

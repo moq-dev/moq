@@ -108,10 +108,10 @@ pub struct Catalog<E: CatalogExt = ()> {
 impl<E: CatalogExt> Catalog<E> {
 	/// The base catalog carrying just the media sections, used to derive the MSF track.
 	pub(crate) fn media(&self) -> hang::Catalog {
-		hang::Catalog {
-			video: self.video.clone(),
-			audio: self.audio.clone(),
-		}
+		let mut catalog = hang::Catalog::default();
+		catalog.video = self.video.clone();
+		catalog.audio = self.audio.clone();
+		catalog
 	}
 }
 

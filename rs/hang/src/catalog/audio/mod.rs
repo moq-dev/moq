@@ -16,10 +16,16 @@ use crate::catalog::Container;
 /// Information about an audio track in the catalog.
 ///
 /// This struct contains a map of renditions (different quality/codec options)
+///
+/// Marked `#[non_exhaustive]` so additional optional fields can be added without
+/// bumping the major version. External callers start from [`Audio::default`] and
+/// fill in what they need ([`insert`](Self::insert) for renditions); struct-literal
+/// construction (with or without `..base`) is not available outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Audio {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.

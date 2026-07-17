@@ -35,11 +35,12 @@ import com.android.build.gradle.LibraryExtension
 import com.vanniktech.maven.publish.SonatypeHost
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// Plugin versions are pinned in the root build.gradle.kts (Kotlin, publish) and
+// settings.gradle.kts (Android); request them by id alone here.
 plugins {
-    kotlin("multiplatform") version "2.0.21"
-    // Version pinned in settings.gradle.kts.
+    kotlin("multiplatform")
     id("com.android.library") apply false
-    id("com.vanniktech.maven.publish") version "0.30.0"
+    id("com.vanniktech.maven.publish")
 }
 
 version = providers.gradleProperty("moqffi.version").get()

@@ -31,7 +31,7 @@ export function latencyFromBounds(min: Bound, max: Bound): Latency {
 const MIN_JITTER = Time.Milli(20);
 const FALLBACK_JITTER = Time.Milli(100);
 
-type SyncInput = {
+export type SyncInput = {
 	// Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
 	latency: Getter<Latency>;
 
@@ -92,7 +92,7 @@ export class Sync {
 	// Avoids inflating jitter due to bufferbloat.
 	#minRtt: number | undefined;
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
@@ -104,9 +104,9 @@ export class Sync {
 
 		this.#update = Promise.withResolvers();
 
-		this.signals.run(this.#runJitter.bind(this));
-		this.signals.run(this.#runBuffer.bind(this));
-		this.signals.run(this.#runRange.bind(this));
+		this.#signals.run(this.#runJitter.bind(this));
+		this.#signals.run(this.#runBuffer.bind(this));
+		this.#signals.run(this.#runRange.bind(this));
 	}
 
 	// Derive `buffered` / `maxBuffer` from the floor (`buffer`) and the ceiling (the `max` bound).
@@ -251,7 +251,7 @@ export class Sync {
 	async wait(timestamp: Time.Milli): Promise<void> {
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) {
-			throw new Error("reference not set; call update() first");
+			throw new Error("reference not set; call received() first");
 		}
 
 		for (;;) {
@@ -286,6 +286,6 @@ export class Sync {
 	}
 
 	close() {
-		this.signals.close();
+		this.#signals.close();
 	}
 }

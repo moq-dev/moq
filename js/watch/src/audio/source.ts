@@ -19,7 +19,7 @@ export type Target = {
  */
 export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
-type SourceInput = {
+export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 
 	// The desired rendition/bitrate of the audio.

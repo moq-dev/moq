@@ -1,6 +1,12 @@
+/**
+ * Feature detection for publishing: which codecs encode, whether capture works, and
+ * whether WebTransport works.
+ *
+ * @module
+ */
 import * as Util from "@moq/hang/util";
 
-export type Partial = "full" | "partial" | "none";
+export type Level = "full" | "partial" | "none";
 
 export type Codec = {
 	hardware?: boolean; // undefined when we can't detect hardware acceleration
@@ -9,7 +15,7 @@ export type Codec = {
 
 export type Audio = {
 	aac: boolean;
-	opus: Partial;
+	opus: Level;
 };
 
 export type Video = {
@@ -21,13 +27,13 @@ export type Video = {
 };
 
 export type Full = {
-	webtransport: Partial;
+	webtransport: Level;
 	audio: {
 		capture: boolean;
 		encoding: Audio;
 	};
 	video: {
-		capture: Partial;
+		capture: Level;
 		encoding: Video | undefined;
 	};
 };

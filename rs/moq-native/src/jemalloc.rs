@@ -1,3 +1,7 @@
+//! On-demand jemalloc heap profiling, for chasing leaks in a running process.
+//!
+//! Spawn [`run`] to dump a profile whenever the process gets SIGUSR1.
+
 use tikv_jemalloc_ctl::raw;
 
 pub use tikv_jemallocator;

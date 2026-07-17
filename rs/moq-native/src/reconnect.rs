@@ -341,12 +341,14 @@ async fn run_session(
 	let closed = session.closed();
 	tokio::pin!(closed);
 
-	kio::wait(|waiter| {
+	let err = kio::wait(|waiter| {
 		poll_forward(&mut send, send_bw, waiter);
 		poll_forward(&mut recv, recv_bw, waiter);
 		waiter.poll_future(closed.as_mut())
 	})
-	.await
+	.await;
+
+	Err(err)
 }
 
 /// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once

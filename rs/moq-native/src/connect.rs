@@ -2,9 +2,13 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConnectError {
+	/// The server rejected the credentials (HTTP 401). Retrying with the same
+	/// token will fail again.
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The credentials were understood but don't grant access to this path
+	/// (HTTP 403).
 	#[error("forbidden")]
 	Forbidden,
 }
@@ -18,6 +22,8 @@ impl ConnectError {
 		}
 	}
 
+	/// Whether this is an authentication failure, meaning a retry is pointless
+	/// until the credentials change.
 	pub fn is_auth(&self) -> bool {
 		matches!(self, Self::Unauthorized | Self::Forbidden)
 	}

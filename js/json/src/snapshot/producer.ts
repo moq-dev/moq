@@ -180,7 +180,7 @@ export class Producer<T> {
 			this.#encoder = new Encoder();
 			data = this.#encoder.frame(frame);
 		}
-		group.writeFrame({ data, timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: data, timestamp: Time.Timestamp.now() });
 		return data.length;
 	}
 
@@ -192,7 +192,7 @@ export class Producer<T> {
 			if (!this.#encoder) throw new Error("compressed delta requires an open group");
 			data = this.#encoder.frame(frame);
 		}
-		group.writeFrame({ data, timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: data, timestamp: Time.Timestamp.now() });
 		return data.length;
 	}
 }

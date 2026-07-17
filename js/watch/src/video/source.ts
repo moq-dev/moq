@@ -31,7 +31,7 @@ export type Target = {
 	bitrate?: number;
 };
 
-type SourceInput = {
+export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
 

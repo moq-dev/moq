@@ -1,9 +1,12 @@
+//! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
+
 use crate::client::ClientConfig;
 use crate::quic::Resolved;
-use crate::server::{ServerConfig, ServerId};
+use crate::quic::ServerId;
+use crate::server::ServerConfig;
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use std::net;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -34,99 +37,131 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: Resolved) {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The UDP socket failed to bind, usually because the address is in use.
 	#[error("failed to bind UDP socket")]
 	BindSocket(#[source] std::io::Error),
 
+	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
 	CreateEndpoint(#[source] std::io::Error),
 
+	/// No async runtime was found. Construct the client or server from within a tokio runtime.
 	#[error("no async runtime")]
 	NoRuntime,
 
+	/// The endpoint's local address could not be read from the socket.
 	#[error("failed to get local address")]
 	LocalAddr(#[source] std::io::Error),
 
+	/// The configured bind address could not be resolved.
 	#[error("failed to resolve bind address")]
 	ResolveBind(#[source] std::io::Error),
 
+	/// The URL has no host to connect to.
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
+	/// The URL host could not be resolved.
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
+	/// DNS resolved, but no address matched the local socket's family.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
+	/// The insecure `http://` fingerprint fetch failed to reach the server.
 	#[error("failed to fetch fingerprint")]
 	FetchFingerprint(#[source] reqwest::Error),
 
+	/// The server returned a non-success status for the fingerprint request.
 	#[error("fingerprint request failed")]
 	FingerprintStatus(#[source] reqwest::Error),
 
+	/// The fingerprint response body could not be read.
 	#[error("failed to read fingerprint")]
 	ReadFingerprint(#[source] reqwest::Error),
 
+	/// The fetched fingerprint was not valid hex.
 	#[error("invalid fingerprint")]
 	InvalidFingerprint(#[from] hex::FromHexError),
 
+	/// The URL scheme is not one this backend can dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
 
+	/// The URL scheme survived ALPN selection but has no session type.
 	#[error("unsupported URL scheme: {0}")]
 	UnsupportedScheme(String),
 
+	/// The connection came up without TLS handshake data, so the ALPN is unknown.
 	#[error("missing handshake data")]
 	MissingHandshake,
 
+	/// The peer negotiated no ALPN, so there's no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
 
+	/// The negotiated ALPN was not valid UTF-8.
 	#[error("failed to decode ALPN")]
 	DecodeAlpn(#[from] std::string::FromUtf8Error),
 
+	/// The peer negotiated an ALPN this endpoint doesn't serve.
 	#[error("unsupported ALPN: {0}")]
 	UnsupportedAlpn(String),
 
+	/// A raw QUIC client connected without SNI, so there's no host to build a URL from.
 	#[error("missing server name for raw QUIC connection")]
 	MissingServerName,
 
+	/// The client's SNI host could not be parsed as a URL.
 	#[error("failed to construct URL from server name")]
 	BuildUrl(#[source] url::ParseError),
 
+	/// The configured QUIC-LB nonce is too short to be unique.
 	#[error("quic_lb_nonce must be at least 4")]
 	QuicLbNonceTooSmall,
 
+	/// The server ID plus nonce don't fit in a QUIC connection ID. Shorten either.
 	#[error("connection ID length ({0}) exceeds maximum of 20")]
 	QuicLbCidTooLong(usize),
 
+	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
+	/// The TLS config lacks a cipher suite QUIC can use for initial packets.
 	#[error(transparent)]
 	NoInitialCipherSuite(#[from] noq::crypto::rustls::NoInitialCipherSuite),
 
+	/// The connection could not be started, usually a bad config or address.
 	#[error(transparent)]
 	Connect(#[from] noq::ConnectError),
 
+	/// The QUIC connection failed or was closed.
 	#[error(transparent)]
 	Connection(#[from] noq::ConnectionError),
 
+	/// The WebTransport CONNECT request failed.
 	#[error(transparent)]
 	Client(#[from] web_transport_noq::ClientError),
 
+	/// The server rejected the connection with a status we understand (auth, not found, etc).
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
+	/// The WebTransport server failed to respond to a request.
 	#[error(transparent)]
 	Server(#[from] web_transport_noq::ServerError),
 
+	/// The QUIC handshake never completed for an incoming connection.
 	#[error("failed to establish QUIC connection")]
 	Establish(#[source] noq::ConnectionError),
 
+	/// The client connected but never sent a valid WebTransport CONNECT request.
 	#[error("failed to receive WebTransport request")]
 	RecvRequest(#[source] web_transport_noq::ServerError),
 
+	/// The certificates or roots could not be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
 }
@@ -425,8 +460,8 @@ impl NoqServer {
 		self.quic.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
-		self.certs.info.clone()
+	pub fn certificates(&self) -> crate::tls::Certificates {
+		crate::tls::Certificates::new(self.certs.info.clone())
 	}
 
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {

@@ -54,13 +54,26 @@ Lifecycle and cleanup (the rules that actually bite):
 
 ## Producer / consumer and pub/sub shapes
 
-Networking objects split state from behavior: a plain `XxxState` class holds `Signal` fields, and the public `Xxx` class wraps it (see `net/src/broadcast.ts`, `track.ts`, `group.ts`). The publisher side answers `requested()` (await the next subscribed track) and writes; the consumer side `subscribe(name, priority)`s and reads. `closed` is exposed both as a `Signal` on state and as a `Promise` on the object. `@moq/json` and `@moq/hang/catalog` follow the same `Producer`/`Consumer` pair, with hang's catalog `Producer`/`Consumer` extending json's generics.
+Networking objects split state from behavior: a plain `XxxState` class holds `Signal` fields, and the public `Xxx` class wraps it (see `net/src/broadcast.ts`, `track.ts`, `group.ts`). The publisher side answers `requested()` (await the next subscribed track) and writes; the consumer side `subscribe(name, priority)`s and reads. Terminal state is a single `closed: GetPromise<Error | null>` backed by a `Once`: one handle serves the sync check, the reactive read (`effect.get` / `Signal.race`), and the `await`. Three states, so test them explicitly: `undefined` is open (the `Once` pending sentinel), `null` is a clean close, an `Error` is an abort. **`if (closed)` means "aborted", not "closed"** -- use `closed.peek() !== undefined` for "is it closed". `Once.set` throws on a second settle, so every `close()` path guards on `peek() !== undefined` and is idempotent; it's a thenable, not a `Promise`, so use `.then()` rather than `.finally()`/`.catch()`. `@moq/json` and `@moq/hang/catalog` follow the same `Producer`/`Consumer` pair, with hang's catalog `Producer`/`Consumer` extending json's generics.
+
+## Component shape: `in` / `out` / knobs
+
+Every reactive component in `watch`/`publish` follows one shape (see `publish/src/video/encoder.ts`):
+
+- `readonly in: Readonlys<XxxInput>`: the wired dependencies, built in the constructor with `getter(props?.x ?? default)`. Read-only to consumers: wire another component's `out` straight in (`capture: this.capture`), or pass a `Signal` you keep a handle to. Export the `XxxInput` map so consumers can name it.
+- `readonly out = readonlys(this.#out)`: derived state. The class writes `this.#out.x`; consumers only read. Never hand out a writable `Signal`: it lets a caller forge state behind the owner's back.
+- **Knobs** stay public writable `Signal`s outside both groups (`encoder.config`, `audio.codec`, `device.preferred`). They're live-editable settings the component doesn't derive, and typed `T | Signal<T>` in props via `Signal.from`. `XxxProps = Inputs<XxxInput> & { ...knobs }`.
+- Positional identity (a name, a kind) stays a plain constructor arg, not a signal.
+- When a *parent* legitimately produces one of a child's outputs, give the child a method that returns a dispose handle (`Device.capture(deviceId)`), rather than exposing the backing `Signal`.
+- `#signals = new Effect()` is **private**; `close()` is the only handle. The two custom elements (`MoqWatch`/`MoqPublish`) are the exception: they expose `readonly signals` as the documented place for an app to hang its own reactivity.
 
 ## Web Components UI (watch/ui, publish/ui)
 
 Plain custom elements built directly on `@moq/signals`, no framework (except moq-boy, which uses Solid). The pattern, from `watch/src/element.ts` and `watch/src/ui/element.ts`:
 
-- `class Foo extends HTMLElement` with `static observedAttributes`. Attributes are the public API; mirror each into a `Signal` in `attributeChangedCallback`.
+- `class Foo extends HTMLElement` with `static observedAttributes`. Attributes are the public API; mirror each into a `Signal` on the element's `readonly controls` bag in `attributeChangedCallback`.
+- An invalid attribute **value** warns and falls back to the default; never throw. `attributeChangedCallback` runs from the browser, so a throw surfaces as an unhandled error and leaves the element half-configured. (The `exhaustive: never` throw for an unknown attribute *name* is unreachable and stays.)
+- Boolean attributes parse through `parseBoolean(value, default)`: absent uses the default, bare presence is true, and an explicit `"false"`/`"0"` is false. Reflect them back as a bare attribute (`setAttribute("muted", "")`), never `"true"`.
 - Create the `Effect` in `connectedCallback`, call `effect.close()` in `disconnectedCallback`. A module-level `FinalizationRegistry` closes the Effect if the element is GC'd without disconnect (there is no real destructor for custom elements).
 - Build DOM with `@moq/signals/dom` (`create`, reactive helpers) and drive visibility/content from `effect.get(...)` inside `effect.run(...)`. UI components are functions `(parent: Effect, host) => HTMLElement` that register their own reactivity on `parent` (see `watch/src/ui/components/*`).
 - Styles are imported as `?inline` CSS strings into a `ShadowRoot`. The `./element` / `./ui` / `./support` subpaths are side-effectful (they call `customElements.define`); the package marks them in `sideEffects` and they are NOT re-exported from the main entry (import from the subpath). These web-component packages set `"jsr": false` because JSR forbids the `HTMLElementTagNameMap` augmentation custom elements need.

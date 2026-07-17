@@ -319,7 +319,7 @@ export class Game {
 		producer: Json.Snapshot.Producer<Record<string, unknown>>,
 		effect: Moq.Signals.Effect,
 	) {
-		if (effect.get(track.closedSignal)) return;
+		if (effect.get(track.closed) !== undefined) return;
 
 		const command = effect.get(this.#command);
 		if (!command) return;

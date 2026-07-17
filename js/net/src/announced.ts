@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Signal } from "@moq/signals";
+import { type GetPromise, Once, Signal } from "@moq/signals";
 import * as Path from "./path.js";
 
 /**
@@ -21,16 +21,15 @@ export interface Event {
 /** Reactive backing state shared by announcement producers and consumers. */
 class AnnounceState {
 	queue = new Signal<Event[]>([]);
-	closed = new Signal<boolean | Error>(false);
+	closed = new Once<Error | null>();
 }
 
-function closedPromise(state: AnnounceState): Promise<Error | undefined> {
-	return new Promise((resolve) => {
-		const dispose = state.closed.subscribe((closed) => {
-			if (!closed) return;
-			resolve(closed instanceof Error ? closed : undefined);
-			dispose();
-		});
+// Once.set throws on a second settle, and both ends of a stream can close independently.
+function closeState(state: AnnounceState, abort?: Error) {
+	if (state.closed.peek() !== undefined) return;
+	state.closed.set(abort ?? null);
+	state.queue.mutate((queue) => {
+		queue.length = 0;
 	});
 }
 
@@ -45,12 +44,16 @@ export class Producer {
 
 	#state = new AnnounceState();
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	constructor(prefix = Path.empty()) {
 		this.prefix = prefix;
-		this.closed = closedPromise(this.#state);
+	}
+
+	/**
+	 * Settles once the stream closes: `null` on a clean close, or the abort {@link Error}.
+	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
+	 */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
 	}
 
 	/** A read handle for this announcement stream. */
@@ -60,18 +63,15 @@ export class Producer {
 
 	/** Writes an announcement to the queue. */
 	append(event: Event) {
-		if (this.#state.closed.peek()) throw new Error("announcements are closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("announcements are closed");
 		this.#state.queue.mutate((queue) => {
 			queue.push(event);
 		});
 	}
 
-	/** Closes the writer. */
+	/** Closes the writer. Idempotent. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
-		this.#state.queue.mutate((queue) => {
-			queue.length = 0;
-		});
+		closeState(this.#state, abort);
 	}
 }
 
@@ -93,13 +93,14 @@ export class Consumer {
 
 	#state: AnnounceState;
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	private constructor(prefix: Path.Valid, state: AnnounceState) {
 		this.prefix = prefix;
 		this.#state = state;
-		this.closed = closedPromise(this.#state);
+	}
+
+	/** Settles once the stream closes; see {@link Producer.closed}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
 	}
 
 	static {
@@ -114,17 +115,14 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.queue, this.#state.closed);
 		}
 	}
 
-	/** Closes the reader. */
+	/** Closes the reader. Idempotent. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
-		this.#state.queue.mutate((queue) => {
-			queue.length = 0;
-		});
+		closeState(this.#state, abort);
 	}
 }

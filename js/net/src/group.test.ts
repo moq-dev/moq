@@ -14,17 +14,17 @@ test("a group caps its frame count, dropping from the front", () => {
 
 	const extra = 100;
 	for (let i = 0; i < MAX_GROUP_FRAMES + extra; i++) {
-		producer.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
+		producer.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
 
 	// Drain the buffered frames: exactly MAX_GROUP_FRAMES remain after eviction.
-	const frames: { sequence: number; data: Uint8Array }[] = [];
+	const frames: { sequence: number; payload: Uint8Array }[] = [];
 	for (let f = consumer.tryReadFrameSequence(); f; f = consumer.tryReadFrameSequence()) frames.push(f);
 	expect(frames.length).toBe(MAX_GROUP_FRAMES);
 	// Sequence numbers count every frame ever written (evicted included), so the first surviving
 	// frame is index `extra`, not 0: indices stay consistent across eviction.
 	expect(frames[0].sequence).toBe(extra);
-	expect(frames[0].data[0]).toBe(extra & 0xff);
+	expect(frames[0].payload[0]).toBe(extra & 0xff);
 });
 
 test("a group caps its byte size, dropping from the front", () => {
@@ -33,12 +33,12 @@ test("a group caps its byte size, dropping from the front", () => {
 	// 40 x 1 MiB = 40 MiB, over the 32 MiB cap.
 	const oneMiB = 1024 * 1024;
 	for (let i = 0; i < 40; i++) {
-		producer.writeFrame({ data: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
+		producer.writeFrame({ payload: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
 	}
 
 	// Drain the buffered frames and sum their bytes: the cache stayed under the byte cap.
 	const frames: Uint8Array[] = [];
-	for (let f = consumer.tryReadFrame(); f; f = consumer.tryReadFrame()) frames.push(f.data);
+	for (let f = consumer.tryReadFrame(); f; f = consumer.tryReadFrame()) frames.push(f.payload);
 	const bytes = frames.reduce((sum, f) => sum + f.byteLength, 0);
 	expect(bytes).toBeLessThanOrEqual(MAX_GROUP_CACHE_BYTES);
 	expect(frames.length).toBe(MAX_GROUP_CACHE_BYTES / oneMiB);
@@ -50,8 +50,8 @@ test("a caught-up reader does not trip the byte cache cap", async () => {
 	const oneMiB = 1024 * 1024;
 	const frames = MAX_GROUP_CACHE_BYTES / oneMiB + 8;
 	for (let i = 0; i < frames; i++) {
-		producer.writeFrame({ data: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
-		expect((await consumer.readFrame())?.data.byteLength).toBe(oneMiB);
+		producer.writeFrame({ payload: new Uint8Array(oneMiB), timestamp: Timestamp.now() });
+		expect((await consumer.readFrame())?.payload.byteLength).toBe(oneMiB);
 	}
 });
 
@@ -60,7 +60,7 @@ test("reading a group whose frames were evicted throws CacheFull", async () => {
 
 	// Overflow the frame cap without reading, so the front frames are evicted.
 	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++) {
-		producer.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
+		producer.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	}
 
 	// The reader fell behind the eviction window: it must error, not skip the gap.
@@ -69,12 +69,12 @@ test("reading a group whose frames were evicted throws CacheFull", async () => {
 
 test("a group with no eviction reads every frame without error", async () => {
 	const { producer, consumer } = pair(0);
-	producer.writeFrame({ data: new Uint8Array([1]), timestamp: Timestamp.now() });
-	producer.writeFrame({ data: new Uint8Array([2]), timestamp: Timestamp.now() });
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
 	producer.close();
 
-	expect((await consumer.readFrame())?.data[0]).toBe(1);
-	expect((await consumer.readFrame())?.data[0]).toBe(2);
+	expect((await consumer.readFrame())?.payload[0]).toBe(1);
+	expect((await consumer.readFrame())?.payload[0]).toBe(2);
 	expect(await consumer.readFrame()).toBeUndefined();
 });
 
@@ -83,8 +83,8 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("a");
-	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("b");
+	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("a");
+	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("b");
 	// Nothing buffered: undefined, and the group is not closed so this is not end-of-group.
 	expect(consumer.tryReadFrame()).toBeUndefined();
 });
@@ -94,8 +94,8 @@ test("tryReadFrameSequence reports per-frame sequence numbers", () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 0, data: new TextEncoder().encode("a") });
-	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, data: new TextEncoder().encode("b") });
+	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
+	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
 	expect(consumer.tryReadFrameSequence()).toBeUndefined();
 });
 
@@ -104,8 +104,8 @@ test("readFrameSequence reports per-frame sequence numbers", async () => {
 	producer.writeString("a");
 	producer.writeString("b");
 
-	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 0, data: new TextEncoder().encode("a") });
-	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 1, data: new TextEncoder().encode("b") });
+	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
+	expect(await consumer.readFrameSequence()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
@@ -139,7 +139,7 @@ test("readable resolves once a frame is buffered", async () => {
 	// Writing makes it resolve.
 	producer.writeString("hi");
 	await readable; // must not hang
-	expect(dec.decode(consumer.tryReadFrame()?.data)).toBe("hi");
+	expect(dec.decode(consumer.tryReadFrame()?.payload)).toBe("hi");
 });
 
 test("readable resolves once the group closes, even with nothing buffered", async () => {

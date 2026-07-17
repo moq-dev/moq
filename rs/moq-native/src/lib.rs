@@ -10,6 +10,8 @@
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
 
+#![warn(missing_docs)]
+
 pub mod bind;
 mod client;
 mod connect;
@@ -36,12 +38,14 @@ pub mod watch;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-pub use client::*;
+// Enumerated rather than globbed, so the root surface is a deliberate list and a
+// new `pub` item in these modules doesn't silently join it.
+pub use client::{Client, ClientConfig};
 pub use connect::ConnectError;
 pub use error::{Error, Result};
-pub use log::*;
-pub use reconnect::*;
-pub use server::*;
+pub use log::Log;
+pub use reconnect::{Backoff, ConnectionStatsReader, Reconnect, Status};
+pub use server::{Request, Server, ServerConfig, Transport};
 
 /// Spawn the session's protocol driver on the current tokio runtime, handing back
 /// the session it drives.

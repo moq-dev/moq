@@ -22,10 +22,16 @@ use crate::catalog::Container;
 ///
 /// This struct contains a map of renditions (different quality/codec options)
 /// and optional metadata like detection, display settings, rotation, and flip.
+///
+/// Marked `#[non_exhaustive]` so additional optional fields can be added without
+/// bumping the major version. External callers start from [`Video::default`] and
+/// fill in what they need ([`insert`](Self::insert) for renditions); struct-literal
+/// construction (with or without `..base`) is not available outside this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Video {
 	/// A map of track name to rendition configuration.
 	/// This is not an array in order for it to work with JSON Merge Patch.

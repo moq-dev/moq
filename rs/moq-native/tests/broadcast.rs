@@ -1048,7 +1048,7 @@ async fn broadcast_websocket() {
 	let mut server = server_config
 		.init()
 		.expect("failed to init server")
-		.with_websocket(Some(ws_listener));
+		.with_websocket(ws_listener);
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
@@ -1156,7 +1156,7 @@ async fn broadcast_websocket_fallback() {
 	let mut server = server_config
 		.init()
 		.expect("failed to init server")
-		.with_websocket(Some(ws_listener));
+		.with_websocket(ws_listener);
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
@@ -1269,7 +1269,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let mut server = server_config
 		.init()
 		.expect("failed to init server")
-		.with_websocket(Some(ws_listener));
+		.with_websocket(ws_listener);
 
 	let sub_origin = Origin::random().produce();
 	let mut client_config = moq_native::ClientConfig::default();
@@ -1340,7 +1340,7 @@ async fn broadcast_race_quic_wins() {
 	let mut server = server_config
 		.init()
 		.expect("failed to init server")
-		.with_websocket(Some(ws_listener));
+		.with_websocket(ws_listener);
 
 	let sub_origin = Origin::random().produce();
 	let mut client_config = moq_native::ClientConfig::default();

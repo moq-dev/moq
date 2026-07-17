@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Video};
+use crate::catalog::{Audio, PRIORITY, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -9,10 +9,16 @@ use serde::{Deserialize, Serialize};
 /// their own root sections (e.g. `scte35`) by flattening this struct into their own with
 /// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
 /// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
+///
+/// Marked `#[non_exhaustive]` so a future base section can be added without bumping the major
+/// version. External callers start from [`Catalog::default`] and fill in the sections they
+/// publish; struct-literal construction (with or without `..base`) is not available outside
+/// this crate.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Catalog {
 	/// Video track information with multiple renditions.
 	///
@@ -55,13 +61,13 @@ impl Catalog {
 		Ok(serde_json::from_reader(reader)?)
 	}
 
-	/// Serialize the catalog to a string.
-	pub fn to_string(&self) -> Result<String> {
+	/// Serialize the catalog to a JSON string.
+	pub fn to_json(&self) -> Result<String> {
 		Ok(serde_json::to_string(self)?)
 	}
 
-	/// Serialize the catalog to a pretty string.
-	pub fn to_string_pretty(&self) -> Result<String> {
+	/// Serialize the catalog to a pretty-printed JSON string.
+	pub fn to_json_pretty(&self) -> Result<String> {
 		Ok(serde_json::to_string_pretty(self)?)
 	}
 
@@ -85,7 +91,7 @@ impl Catalog {
 	/// The subscription preferences used for the catalog track (high priority so
 	/// it preempts media tracks).
 	pub fn default_subscription() -> moq_net::track::Subscription {
-		moq_net::track::Subscription::default().with_priority(100)
+		moq_net::track::Subscription::default().with_priority(PRIORITY.catalog)
 	}
 }
 
@@ -150,22 +156,14 @@ mod test {
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio".to_string(), audio_config);
 
-		let decoded = Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			audio: Audio {
-				renditions: audio_renditions,
-			},
-		};
+		let mut decoded = Catalog::default();
+		decoded.video.renditions = video_renditions;
+		decoded.audio.renditions = audio_renditions;
 
 		let output = Catalog::from_str(&encoded).expect("failed to decode");
 		assert_eq!(decoded, output, "wrong decoded output");
 
-		let output = decoded.to_string().expect("failed to encode");
+		let output = decoded.to_json().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
 	}
 
@@ -241,22 +239,14 @@ mod test {
 			},
 		);
 
-		let catalog = Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			audio: Audio {
-				renditions: audio_renditions,
-			},
-		};
+		let mut catalog = Catalog::default();
+		catalog.video.renditions = video_renditions;
+		catalog.audio.renditions = audio_renditions;
 
 		let decoded = Catalog::from_str(&encoded).expect("failed to decode");
 		assert_eq!(catalog, decoded, "decode mismatch");
 
-		let output = catalog.to_string().expect("failed to encode");
+		let output = catalog.to_json().expect("failed to encode");
 		assert_eq!(encoded, output, "encode mismatch");
 	}
 
@@ -288,7 +278,7 @@ mod test {
 
 		// Full encode -> decode -> equality, so the test catches any encoder regression
 		// (e.g. wrong key, double-emission, or `null` instead of skip).
-		let output = parsed.to_string().expect("failed to encode");
+		let output = parsed.to_json().expect("failed to encode");
 		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 	}
@@ -316,7 +306,7 @@ mod test {
 			..Default::default()
 		};
 
-		let output = catalog.to_string().expect("failed to encode");
+		let output = catalog.to_json().expect("failed to encode");
 		assert!(
 			!output.contains("broadcast"),
 			"broadcast field leaked into JSON when None: {output}"

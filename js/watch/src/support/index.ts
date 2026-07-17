@@ -1,7 +1,12 @@
+/**
+ * Feature detection for playback: which codecs decode, and whether WebTransport works.
+ *
+ * @module
+ */
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 
-export type Partial = "full" | "partial" | "none";
+export type Level = "full" | "partial" | "none";
 
 export type Codec = {
 	hardware?: boolean; // undefined when we can't detect hardware acceleration
@@ -10,7 +15,7 @@ export type Codec = {
 
 export type Audio = {
 	aac: boolean;
-	opus: Partial;
+	opus: Level;
 };
 
 export type Video = {
@@ -22,7 +27,7 @@ export type Video = {
 };
 
 export type Full = {
-	webtransport: Partial;
+	webtransport: Level;
 	audio: {
 		decoding: Audio;
 		render: boolean;

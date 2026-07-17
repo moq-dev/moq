@@ -11,7 +11,7 @@ import { Time } from "@moq/net";
 /** A decoded LOC frame: the codec bitstream plus its timing metadata. */
 export interface Frame {
 	/** The codec bitstream payload, with the LOC property block stripped. */
-	data: Uint8Array;
+	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
 	timestamp: Time.Micro;
 	/** True if this frame can be decoded without any preceding frames. */
@@ -81,7 +81,7 @@ export class Format {
 		const activeTimescale = timescale ?? DEFAULT_TIMESCALE;
 		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Time.Micro;
 
-		return [{ data: payload, timestamp: micros, keyframe: false }];
+		return [{ payload, timestamp: micros, keyframe: false }];
 	}
 }
 
@@ -118,7 +118,7 @@ export class Producer {
 		}
 
 		this.#group?.writeFrame({
-			data: this.#encode(data, timestamp),
+			payload: this.#encode(data, timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 	}

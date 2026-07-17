@@ -36,15 +36,19 @@ async with moq.Client("https://relay.example.com") as client:
 
 `Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
-A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
+A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting. `moq.is_auth(err)` catches both:
 
 ```python
 try:
     async with moq.Client("https://relay.example.com") as client:
         ...
-except (moq.Error.Unauthorized, moq.Error.Forbidden):
-    ...  # Prompt for credentials; don't reconnect.
+except moq.Error as err:
+    if moq.is_auth(err):
+        ...  # Prompt for credentials; don't reconnect.
+    raise
 ```
+
+`moq.is_shutdown(err)` is the companion: true for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
 
 ### Publishing media
 
@@ -86,14 +90,14 @@ async for announcement in client.announced("prefix/"):
 
 ### Catalog extensions
 
-Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.
+Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON-serializable object; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.
 
 ```python
 import json
 
 # Publish: attach a custom section.
 broadcast = moq.BroadcastProducer()
-broadcast.set_catalog_section("transcript", json.dumps({"track": "transcript.json"}))
+broadcast.set_catalog_section("transcript", {"track": "transcript.json"})
 client.announce("my-stream", broadcast)
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.

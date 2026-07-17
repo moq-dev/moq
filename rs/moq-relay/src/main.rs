@@ -33,9 +33,9 @@ async fn main() -> anyhow::Result<()> {
 	};
 
 	#[cfg(feature = "iroh")]
-	let (server, client) = {
-		let iroh = config.iroh.bind(&config.client.quic).await?;
-		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
+	let (server, client) = match config.iroh.bind(&config.client.quic).await? {
+		Some(iroh) => (server.with_iroh(iroh.clone()), client.with_iroh(iroh)),
+		None => (server, client),
 	};
 
 	// Reject configs where neither JWT nor mTLS can authenticate anyone.
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 	let internal = Internal::new(config.internal, cluster.stats.clone());
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-	let web = Web::new(auth.clone(), cluster.clone(), server.tls_info(), config.web);
+	let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
 
 	match addr {
 		Some(addr) => tracing::info!(%addr, "listening"),

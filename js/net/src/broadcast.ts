@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Signal } from "@moq/signals";
+import { type GetPromise, Once, Signal } from "@moq/signals";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks } from "./internal.ts";
 import * as track from "./track.ts";
@@ -11,28 +11,22 @@ import * as track from "./track.ts";
 /** Reactive backing state shared by broadcast producers and consumers. */
 class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
-	closed = new Signal<boolean | Error>(false);
+	closed = new Once<Error | null>();
 	tracks = new Map<string, track.Producer>();
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
 }
 
-function closedPromise(state: BroadcastState): Promise<Error | undefined> {
-	return new Promise((resolve) => {
-		const dispose = state.closed.subscribe((closed) => {
-			if (!closed) return;
-			resolve(closed instanceof Error ? closed : undefined);
-			dispose();
-		});
-	});
-}
-
 // Close the broadcast and reject any requests still pending in the queue, so a
 // subscriber blocked on the track's info() or group reads is unblocked rather
 // than left waiting on a producer that will never be served.
+//
+// Once.set throws on a second settle, and the producer and each consumer handle close
+// independently, so this has to be idempotent.
 function closeState(state: BroadcastState, abort?: Error) {
-	state.closed.set(abort ?? true);
+	if (state.closed.peek() !== undefined) return;
+	state.closed.set(abort ?? null);
 	state.requested.mutate((requests) => {
 		for (const request of requests) request.reject(abort);
 		requests.length = 0;
@@ -50,13 +44,13 @@ function subscribe(
 	options: track.Subscription = {},
 	register = false,
 ): track.Subscriber {
-	if (state.closed.peek()) {
+	if (state.closed.peek() !== undefined) {
 		throw new Error(`broadcast is closed: ${state.closed.peek()}`);
 	}
 
 	const existing = state.tracks.get(name);
 	if (existing) {
-		if (!existing.closedSignal.peek()) return existing.subscribe();
+		if (existing.closed.peek() === undefined) return existing.subscribe();
 		state.tracks.delete(name);
 	}
 
@@ -66,7 +60,7 @@ function subscribe(
 	if (register) {
 		state.tracks.set(name, producer);
 		// Drop the cache entry once the subscription closes, so a later subscribe re-opens it.
-		void producer.closed.finally(() => {
+		void producer.closed.then(() => {
 			if (state.tracks.get(name) === producer) state.tracks.delete(name);
 		});
 	}
@@ -81,11 +75,11 @@ function subscribe(
 
 async function resolveTrackInfo(state: BroadcastState, name: string): Promise<track.Info> {
 	const existing = state.tracks.get(name);
-	if (existing && !existing.closedSignal.peek()) {
+	if (existing && existing.closed.peek() === undefined) {
 		return existing.info();
 	}
 
-	if (state.closed.peek()) {
+	if (state.closed.peek() !== undefined) {
 		return Promise.reject(new Error(`broadcast is closed: ${state.closed.peek()}`));
 	}
 
@@ -141,11 +135,12 @@ async function fetchGroup(
 export class Producer implements track.Broadcast {
 	#state = new BroadcastState();
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
-	constructor() {
-		this.closed = closedPromise(this.#state);
+	/**
+	 * Settles once the broadcast closes: `null` on a clean close, or the abort {@link Error}.
+	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
+	 */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
 	}
 
 	/** A read handle for this broadcast. */
@@ -161,7 +156,7 @@ export class Producer implements track.Broadcast {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.requested, this.#state.closed);
 		}
@@ -169,18 +164,18 @@ export class Producer implements track.Broadcast {
 
 	/** Insert a track that is served directly, without an on-demand request round-trip. */
 	insertTrack(track: track.Producer): void {
-		if (this.#state.closed.peek()) {
+		if (this.#state.closed.peek() !== undefined) {
 			throw new Error(`broadcast is closed: ${this.#state.closed.peek()}`);
 		}
 
 		const existing = this.#state.tracks.get(track.name);
-		if (existing && !existing.closedSignal.peek()) {
+		if (existing && existing.closed.peek() === undefined) {
 			throw new Error(`duplicate track: ${track.name}`);
 		}
 
 		this.#state.tracks.set(track.name, track);
 
-		void track.closed.finally(() => {
+		void track.closed.then(() => {
 			if (this.#state.tracks.get(track.name) === track) {
 				this.#state.tracks.delete(track.name);
 			}
@@ -219,7 +214,7 @@ export class Producer implements track.Broadcast {
 		return new track.Consumer(name, this);
 	}
 
-	/** Close the broadcast, optionally with an error to abort waiters. */
+	/** Close the broadcast, optionally with an error to abort waiters. Idempotent. */
 	close(abort?: Error) {
 		closeState(this.#state, abort);
 	}
@@ -243,14 +238,10 @@ export class Consumer implements track.Broadcast {
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	protected constructor(state?: never);
 	protected constructor(state?: BroadcastState) {
 		this.#state = state ?? new BroadcastState();
 		this.#state.consumers++;
-		this.closed = closedPromise(this.#state);
 	}
 
 	static {
@@ -258,11 +249,13 @@ export class Consumer implements track.Broadcast {
 	}
 
 	/**
-	 * Reactive closed state: `false` while open, `true` or the abort `Error` once closed.
-	 * Await {@link closed} (the promise) to block on it instead. The subscribing wire layer
-	 * reads this to evict a closed entry from its per-path consume cache.
+	 * Settles once the broadcast closes: `null` on a clean close, or the abort {@link Error}.
+	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
+	 *
+	 * Shared by every {@link clone}: it settles once the last handle closes. The subscribing
+	 * wire layer peeks it to evict a closed entry from its per-path consume cache.
 	 */
-	get closedSignal(): Signal<boolean | Error> {
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
@@ -302,7 +295,7 @@ export class Consumer implements track.Broadcast {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.requested, this.#state.closed);
 		}

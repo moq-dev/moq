@@ -179,7 +179,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+		let info = hang::container::track_info();
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
@@ -194,12 +194,15 @@ mod tests {
 			let mut group = track.create_group(sequence.into()).unwrap();
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
-				for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+				for payload in encoder
+					.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+					.unwrap()
+				{
 					let frame = hang::container::Frame {
 						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 						payload,
 					};
-					frame.encode(&mut group).unwrap();
+					frame.write_to(&mut group).unwrap();
 				}
 			}
 			group.finish().unwrap();
@@ -232,7 +235,7 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.lock().video.insert("video", video).unwrap();
 
-		let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+		let info = hang::container::track_info();
 		let mut track = broadcast.create_track("video", info).unwrap();
 
 		let source = Source {
@@ -259,12 +262,15 @@ mod tests {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
 					let timestamp = (sequence * frames + index) * 33_333;
-					for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+					for payload in encoder
+						.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+						.unwrap()
+					{
 						let frame = hang::container::Frame {
 							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 							payload,
 						};
-						frame.encode(&mut group).unwrap();
+						frame.write_to(&mut group).unwrap();
 					}
 				}
 				group.finish().unwrap();

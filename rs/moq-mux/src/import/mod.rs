@@ -27,14 +27,12 @@ pub use track::*;
 
 /// Mint a fresh unique track for a legacy single-codec importer.
 ///
-/// Picks a unique name from `suffix` and sets the microsecond
-/// [`hang::container::TIMESCALE`] that the legacy importers stamp their frames
-/// with, so the relay gets timing without parsing the payload. Hand the result to
-/// the importer's `new`.
+/// Picks a unique name from `suffix` and applies [`hang::container::track_info`], so the
+/// relay gets timing without parsing the payload. Hand the result to the importer's `new`.
 pub fn unique_track(
 	broadcast: &mut moq_net::broadcast::Producer,
 	suffix: &str,
 ) -> crate::Result<moq_net::track::Producer> {
-	let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+	let info = hang::container::track_info();
 	Ok(broadcast.unique_track(suffix, info)?)
 }

@@ -117,8 +117,7 @@ impl Pad {
 				// directly and lifts it into a `Track` via `.into()`.
 				let name = broadcast.unique_name(".mp3");
 				let request = broadcast.reserve_track(name)?;
-				let producer =
-					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
+				let producer = request.accept(hang::container::track_info());
 				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into()).into()
 			}
 			"audio/mpeg" => {
@@ -149,8 +148,7 @@ impl Pad {
 				// importer directly and lifts it into a `Track` via `.into()`.
 				let name = broadcast.unique_name(".opus");
 				let request = broadcast.reserve_track(name)?;
-				let producer =
-					request.accept(moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE));
+				let producer = request.accept(hang::container::track_info());
 				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into()).into()
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),

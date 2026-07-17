@@ -57,13 +57,13 @@ test("a consumer clone shares the broadcast until every handle closes", () => {
 
 	// Closing one handle leaves the shared broadcast live for the other...
 	consumer.close();
-	expect(consumer.closedSignal.peek()).toBeFalsy();
-	expect(clone.closedSignal.peek()).toBeFalsy();
+	expect(consumer.closed.peek()).toBeUndefined();
+	expect(clone.closed.peek()).toBeUndefined();
 
 	// ...and closing the last handle closes it for both.
 	clone.close();
-	expect(consumer.closedSignal.peek()).toBeTruthy();
-	expect(clone.closedSignal.peek()).toBeTruthy();
+	expect(consumer.closed.peek()).toBeDefined();
+	expect(clone.closed.peek()).toBeDefined();
 });
 
 test("double-closing a consumer handle does not prematurely close the broadcast", () => {
@@ -73,11 +73,11 @@ test("double-closing a consumer handle does not prematurely close the broadcast"
 	// The double close must decrement the shared count only once...
 	clone.close();
 	clone.close();
-	expect(consumer.closedSignal.peek()).toBeFalsy();
+	expect(consumer.closed.peek()).toBeUndefined();
 
 	// ...so the broadcast still stays live until the other handle closes.
 	consumer.close();
-	expect(consumer.closedSignal.peek()).toBeTruthy();
+	expect(consumer.closed.peek()).toBeDefined();
 });
 
 test("consumer track subscriptions fan out and close independently", async () => {
@@ -164,12 +164,12 @@ test("a read throws CacheFull on a gap, then resyncs to the next group", async (
 	// Group 0 overflows its frame cap without being read, evicting the front: a gap.
 	const g0 = producer.appendGroup();
 	for (let i = 0; i < MAX_GROUP_FRAMES + 10; i++)
-		g0.writeFrame({ data: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
+		g0.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
 	g0.close();
 
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
-	g1.writeFrame({ data: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
+	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
 	g1.close();
 
 	// The reader hits the gap in group 0 (error, not a silent skip), then the next

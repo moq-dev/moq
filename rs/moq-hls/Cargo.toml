@@ -40,3 +40,4 @@ url = "2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }

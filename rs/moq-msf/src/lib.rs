@@ -150,7 +150,7 @@ impl Catalog {
 	}
 
 	/// Serialize the MSF catalog to a JSON string.
-	pub fn to_string(&self) -> Result<String, serde_json::Error> {
+	pub fn to_json(&self) -> Result<String, serde_json::Error> {
 		serde_json::to_string(self)
 	}
 
@@ -582,7 +582,7 @@ mod test {
 	fn serialize_video_track() {
 		let catalog = Catalog::new(vec![video_track()]);
 
-		let json = catalog.to_string().unwrap();
+		let json = catalog.to_json().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 
@@ -602,7 +602,7 @@ mod test {
 	fn serialize_audio_track() {
 		let catalog = Catalog::new(vec![audio_track()]);
 
-		let json = catalog.to_string().unwrap();
+		let json = catalog.to_json().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 
@@ -650,7 +650,7 @@ mod test {
 	#[test]
 	fn roundtrip_empty() {
 		let catalog = Catalog::new(vec![]);
-		let json = catalog.to_string().unwrap();
+		let json = catalog.to_json().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
 	}
@@ -667,7 +667,7 @@ mod test {
 
 		let catalog = Catalog::new(vec![track]);
 
-		let json = catalog.to_string().unwrap();
+		let json = catalog.to_json().unwrap();
 		assert!(json.contains("\"packaging\":\"cmaf\""));
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(catalog, parsed);
@@ -678,7 +678,7 @@ mod test {
 	fn serialize_sap_fields() {
 		let catalog = Catalog::new(vec![track_with_sap_and_jitter()]);
 
-		let json = catalog.to_string().unwrap();
+		let json = catalog.to_json().unwrap();
 
 		// Verify wire-format field names use the explicit camelCase renames and the
 		// auto-renamed jitter field.
@@ -724,7 +724,7 @@ mod test {
 	fn sap_and_jitter_roundtrip() {
 		let original = Catalog::new(vec![track_with_sap_and_jitter()]);
 
-		let json = original.to_string().unwrap();
+		let json = original.to_json().unwrap();
 		let parsed = Catalog::from_str(&json).unwrap();
 		assert_eq!(original, parsed);
 		assert_eq!(parsed.tracks[0].max_grp_sap_starting_type, Some(1));
@@ -749,14 +749,14 @@ mod test {
 		let catalog = Catalog::from_str(json).expect("fractional jitter must decode");
 		assert_eq!(catalog.tracks[0].jitter, Some(Duration::from_millis(15)));
 
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["tracks"][0]["jitter"].as_f64(), Some(15.0));
 	}
 
 	#[test]
 	fn serialize_emits_draft01_version() {
 		// Callers never set a version; we always emit the newest draft string.
-		let json = Catalog::default().to_string().unwrap();
+		let json = Catalog::default().to_json().unwrap();
 		let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
 	}
@@ -768,7 +768,7 @@ mod test {
 		let catalog = Catalog::from_str(r#"{"version":1,"tracks":[]}"#).unwrap();
 		assert!(catalog.tracks.is_empty());
 
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
 	}
 
@@ -903,7 +903,7 @@ mod test {
 		b.init_data = Some("AQID".to_string());
 
 		let catalog = Catalog::new(vec![a, b]);
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 
 		let list = value["initDataList"].as_array().expect("initDataList present");
 		assert_eq!(list.len(), 1, "identical payloads should dedup to one entry");
@@ -917,7 +917,7 @@ mod test {
 		}
 
 		// And it round-trips back to inline init_data for both tracks.
-		let parsed = Catalog::from_str(&catalog.to_string().unwrap()).unwrap();
+		let parsed = Catalog::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(parsed.tracks[0].init_data.as_deref(), Some("AQID"));
 		assert_eq!(parsed.tracks[1].init_data.as_deref(), Some("AQID"));
 	}
@@ -1018,14 +1018,14 @@ mod test {
 		assert!(catalog.is_complete);
 		assert!(catalog.tracks.is_empty());
 
-		let value: serde_json::Value = serde_json::from_str(&catalog.to_string().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["generatedAt"], serde_json::json!(1746104606044u64));
 		assert_eq!(value["isComplete"], serde_json::json!(true));
 	}
 
 	#[test]
 	fn default_catalog_omits_completion_fields() {
-		let value: serde_json::Value = serde_json::from_str(&Catalog::default().to_string().unwrap()).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&Catalog::default().to_json().unwrap()).unwrap();
 		assert!(value.get("generatedAt").is_none());
 		assert!(value.get("isComplete").is_none());
 	}

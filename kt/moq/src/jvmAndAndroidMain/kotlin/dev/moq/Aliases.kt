@@ -7,10 +7,10 @@ package dev.moq
 // are the exact same objects, so every FFI method and the extensions in
 // Flows.kt / Errors.kt apply unchanged.
 
-// Session + connection handles.
+// Session + connection handles. `Server` is not aliased: `dev.moq.Server` is the
+// listen facade (see Server.kt), which exposes the raw handle as `server`.
 typealias Client = uniffi.moq.MoqClient
 typealias Session = uniffi.moq.MoqSession
-typealias Server = uniffi.moq.MoqServer
 typealias Request = uniffi.moq.MoqRequest
 
 // Origin (broadcast discovery / announcement).

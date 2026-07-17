@@ -323,12 +323,12 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	server.publish(Path.from("test"), broadcast);
 
 	const group0 = producer.appendGroup();
-	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
-	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	group0.close();
 
 	const group1 = producer.appendGroup();
-	group1.writeFrame({ data: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
+	group1.writeFrame({ payload: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
 	group1.close();
 
 	// Fetch group 0 without holding a live subscription; the timestamps round-trip.
@@ -336,11 +336,11 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	const fetched = await remote.track("video").fetchGroup(0);
 
 	const first = await fetched.readFrame();
-	expect(dec.decode(first?.data)).toBe("alpha");
+	expect(dec.decode(first?.payload)).toBe("alpha");
 	expect(first?.timestamp.asMillis()).toBe(10);
 
 	const second = await fetched.readFrame();
-	expect(dec.decode(second?.data)).toBe("beta");
+	expect(dec.decode(second?.payload)).toBe("beta");
 	expect(second?.timestamp.asMillis()).toBe(15);
 
 	expect(await fetched.readFrame()).toBeUndefined();
@@ -363,8 +363,8 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	server.publish(Path.from("test"), broadcast);
 
 	const group0 = producer.appendGroup();
-	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
-	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	group0.close();
 
 	const remote = client.consume(Path.from("test"));
@@ -375,15 +375,15 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	const [a, b] = await Promise.all([trackConsumer.fetchGroup(0), trackConsumer.fetchGroup(0)]);
 
 	for (const fetched of [a, b]) {
-		expect(dec.decode((await fetched.readFrame())?.data)).toBe("alpha");
-		expect(dec.decode((await fetched.readFrame())?.data)).toBe("beta");
+		expect(dec.decode((await fetched.readFrame())?.payload)).toBe("alpha");
+		expect(dec.decode((await fetched.readFrame())?.payload)).toBe("beta");
 		expect(await fetched.readFrame()).toBeUndefined();
 	}
 
 	// After the coalesced fetch completes and its cache entry evicts, the same group re-fetches.
 	const again = await trackConsumer.fetchGroup(0);
-	expect(dec.decode((await again.readFrame())?.data)).toBe("alpha");
-	expect(dec.decode((await again.readFrame())?.data)).toBe("beta");
+	expect(dec.decode((await again.readFrame())?.payload)).toBe("alpha");
+	expect(dec.decode((await again.readFrame())?.payload)).toBe("beta");
 	expect(await again.readFrame()).toBeUndefined();
 
 	broadcast.close();
@@ -405,18 +405,18 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 
 	// Open the group and write one frame, but leave it open (in-progress).
 	const group0 = producer.appendGroup();
-	group0.writeFrame({ data: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
+	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 
 	const remote = client.consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(0);
 
 	const first = await fetched.readFrame();
-	expect(dec.decode(first?.data)).toBe("alpha");
+	expect(dec.decode(first?.payload)).toBe("alpha");
 
 	// Frames appended after the fetch started must still stream through, not be truncated.
-	group0.writeFrame({ data: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
+	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
 	const second = await fetched.readFrame();
-	expect(dec.decode(second?.data)).toBe("beta");
+	expect(dec.decode(second?.payload)).toBe("beta");
 	expect(second?.timestamp.asMillis()).toBe(15);
 
 	group0.close();
@@ -478,22 +478,22 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	const first = client.consume(Path.from("shared"));
 	const second = client.consume(Path.from("shared"));
 	first.close();
-	expect(first.closedSignal.peek()).toBeFalsy();
-	expect(second.closedSignal.peek()).toBeFalsy();
+	expect(first.closed.peek()).toBeUndefined();
+	expect(second.closed.peek()).toBeUndefined();
 
 	// ...and closing the last handle closes the shared broadcast (both handles observe it).
 	second.close();
-	expect(first.closedSignal.peek()).toBeTruthy();
-	expect(second.closedSignal.peek()).toBeTruthy();
+	expect(first.closed.peek()).toBeDefined();
+	expect(second.closed.peek()).toBeDefined();
 
 	// A different path is independent: a lone handle closes the broadcast immediately.
 	const other = client.consume(Path.from("other"));
 	other.close();
-	expect(other.closedSignal.peek()).toBeTruthy();
+	expect(other.closed.peek()).toBeDefined();
 
 	// Once closed, the path re-consumes fresh (a new live handle).
 	const third = client.consume(Path.from("shared"));
-	expect(third.closedSignal.peek()).toBeFalsy();
+	expect(third.closed.peek()).toBeUndefined();
 	third.close();
 
 	client.close();

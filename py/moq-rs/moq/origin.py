@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from moq_ffi import (
     MoqAnnounced,
     MoqAnnouncedBroadcast,
@@ -171,5 +173,9 @@ class OriginProducer:
         self._inner.announce(path, broadcast._inner)
 
     def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        # Deprecated alias for announce(); kept for back-compat.
+        warnings.warn(
+            "OriginProducer.publish() is deprecated; use OriginProducer.announce() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.announce(path, broadcast)

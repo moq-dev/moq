@@ -104,7 +104,7 @@ pub struct CaptureArgs {
 	#[arg(long)]
 	pub software: bool,
 
-	/// Capture a microphone, by the name `moq devices` reports. Bare
+	/// Capture a microphone, by the id `moq devices` reports. Bare
 	/// `--microphone`, or no audio source flag, opens the default input.
 	#[arg(long, num_args = 0..=1, group = "audio-source")]
 	pub microphone: Option<Option<String>>,
@@ -200,7 +200,7 @@ enum Source {
 	Capture {
 		catalog: moq_mux::catalog::Producer,
 		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
-		audio: Option<(moq_audio::capture::Config, moq_audio::EncoderOutput)>,
+		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
 	},
 }
 
@@ -340,8 +340,8 @@ impl Publish {
 					let broadcast = self.broadcast.clone();
 					async move {
 						match audio {
-							Some((config, output)) => {
-								moq_audio::capture::publish_capture(broadcast, catalog, config, "audio", output, clock)
+							Some((config, encode)) => {
+								moq_audio::encode::publish_capture(broadcast, catalog, config, encode, clock)
 									.await
 									.map_err(anyhow::Error::from)
 							}
@@ -419,11 +419,13 @@ impl CaptureArgs {
 		config
 	}
 
-	fn audio_encode(&self) -> moq_audio::EncoderOutput {
-		moq_audio::EncoderOutput {
-			bitrate: self.audio_bitrate,
-			..Default::default()
-		}
+	/// The audio counterpart to [`video_encode`](Self::video_encode). `track` is
+	/// left unset so the name derives from the codec, the way the video side
+	/// names its track; consumers find it through the catalog either way.
+	fn audio_encode(&self) -> moq_audio::encode::Options {
+		let mut options = moq_audio::encode::Options::default();
+		options.bitrate = self.audio_bitrate;
+		options
 	}
 }
 
@@ -488,10 +490,7 @@ mod tests {
 
 		// Section-framed verbatim stream (SCTE-35, stream_type 0x86).
 		let section = broadcast
-			.unique_track(
-				".scte35",
-				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.unique_track(".scte35", hang::container::track_info())
 			.unwrap();
 		let mut section_track = tscat::Track::new(SECTION_PID);
 		section_track.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
@@ -517,12 +516,7 @@ mod tests {
 
 		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
 		// an explicit PES stream_id to round-trip.
-		let pes = broadcast
-			.unique_track(
-				".data",
-				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-			)
-			.unwrap();
+		let pes = broadcast.unique_track(".data", hang::container::track_info()).unwrap();
 		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
 		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
 		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);

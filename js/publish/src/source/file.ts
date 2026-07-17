@@ -1,28 +1,49 @@
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Audio from "../audio";
 import type { StreamTrack as VideoStreamTrack } from "../video/types";
 
-export interface FileSourceConfig {
-	enabled?: boolean | Signal<boolean>;
+// Signals the file source reads.
+export type FileInput = {
+	// Whether to decode the file. When false the tracks are stopped and `out.source` clears.
+	enabled: Getter<boolean>;
+};
+
+/** Constructor options: the wired inputs plus the file to decode. */
+export interface FileProps extends Inputs<FileInput> {
+	/** Seed the file; also live-editable via `file.file` and {@link File.prompt}. */
 	file?: globalThis.File | Signal<globalThis.File | undefined>;
 }
+
+type FileOutput = {
+	// The tracks decoded from the file, empty while disabled or undecodable.
+	source: Signal<{ video?: VideoStreamTrack; audio?: Audio.Source }>;
+};
 
 // Image, video, and audio files we know how to decode (see #decode).
 const ACCEPT = "image/*,video/*,audio/*";
 
+/** Decodes a local file into looping capture tracks. */
 export class File {
-	file = new Signal<globalThis.File | undefined>(undefined);
-	signals = new Effect();
+	readonly in: Readonlys<FileInput>;
 
-	source = new Signal<{ video?: VideoStreamTrack; audio?: Audio.Source }>({});
-	enabled: Signal<boolean>;
+	/** The file to decode. Written by {@link prompt}, or set it directly. */
+	file: Signal<globalThis.File | undefined>;
 
-	constructor(config: FileSourceConfig) {
-		this.enabled = Signal.from(config.enabled ?? false);
-		this.file = Signal.from(config.file);
+	readonly #out: FileOutput = {
+		source: new Signal<{ video?: VideoStreamTrack; audio?: Audio.Source }>({}),
+	};
+	readonly out = readonlys(this.#out);
 
-		this.signals.run((effect) => {
-			const values = effect.getAll([this.file, this.enabled]);
+	#signals = new Effect();
+
+	constructor(props?: FileProps) {
+		this.in = {
+			enabled: getter(props?.enabled ?? false),
+		};
+		this.file = Signal.from(props?.file);
+
+		this.#signals.run((effect) => {
+			const values = effect.getAll([this.file, this.in.enabled]);
 			if (!values) return;
 			const [file] = values;
 
@@ -89,7 +110,7 @@ export class File {
 			throw new Error("Failed to capture video track from canvas stream");
 		}
 
-		effect.set(this.source, { video: videoTrack as VideoStreamTrack }, {});
+		effect.set(this.#out.source, { video: videoTrack as VideoStreamTrack }, {});
 	}
 
 	async #decodeMedia(file: globalThis.File, effect: Effect) {
@@ -122,7 +143,7 @@ export class File {
 			throw new Error("Failed to capture any tracks from video element");
 		}
 		effect.set(
-			this.source,
+			this.#out.source,
 			{
 				video: videoTrack as VideoStreamTrack,
 				audio: audioTrack ? { track: audioTrack as Audio.StreamTrack, kind: "auto" } : undefined,
@@ -131,7 +152,8 @@ export class File {
 		);
 	}
 
+	/** Stop decoding and release the file. */
 	close() {
-		this.signals.close();
+		this.#signals.close();
 	}
 }
