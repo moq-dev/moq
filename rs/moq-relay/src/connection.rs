@@ -127,12 +127,12 @@ impl Connection {
 		// connect time, so hold the session open no longer than the credential is
 		// valid. Without an expiry, just wait for the session to close.
 		let Some(expires) = token.expires else {
-			return Ok(session.closed().await?);
+			return Err(session.closed().await.into());
 		};
 
 		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
 		match tokio::time::timeout(remaining, session.closed()).await {
-			Ok(res) => Ok(res?),
+			Ok(err) => Err(err.into()),
 			Err(_) => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);

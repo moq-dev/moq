@@ -32,7 +32,7 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 	let cs = client.with_publisher(&origin).connect(url).await?;
 
 	// Wait until the session is closed.
-	cs.closed().await.map_err(Into::into)
+	Err(cs.closed().await.into())
 }
 
 // Produce a broadcast and publish it to the origin.

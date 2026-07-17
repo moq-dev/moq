@@ -795,13 +795,9 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	// scoped subscriber, by contrast, would stay open indefinitely.
 	match tokio::time::timeout(TIMEOUT, client().with_publisher(pub_origin.consume()).connect(url)).await {
 		Ok(Ok(session)) => {
-			let closed = tokio::time::timeout(TIMEOUT, session.closed())
+			tokio::time::timeout(TIMEOUT, session.closed())
 				.await
-				.expect("publisher session should be closed by the relay, not left open");
-			assert!(
-				closed.is_err(),
-				"relay should close a publisher whose token lacks publish scope"
-			);
+				.expect("relay should close a publisher whose token lacks publish scope, not leave it open");
 		}
 		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
 		Err(_) => panic!("publisher connect neither resolved nor was rejected within the timeout"),
@@ -880,13 +876,9 @@ async fn publish_only_public_rejects_subscriber_role() {
 	// outright, or the session the relay hands back closes shortly after.
 	match tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url)).await {
 		Ok(Ok(session)) => {
-			let closed = tokio::time::timeout(TIMEOUT, session.closed())
+			tokio::time::timeout(TIMEOUT, session.closed())
 				.await
-				.expect("subscriber session should be closed by the relay, not left open");
-			assert!(
-				closed.is_err(),
-				"relay should close a subscriber whose token lacks subscribe scope"
-			);
+				.expect("relay should close a subscriber whose token lacks subscribe scope, not leave it open");
 		}
 		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
 		Err(_) => panic!("subscriber connect neither resolved nor was rejected within the timeout"),

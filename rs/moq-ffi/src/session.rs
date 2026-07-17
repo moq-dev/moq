@@ -322,7 +322,7 @@ impl MoqSession {
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
 		self.closed
-			.run(|session| async move { session.closed().await.map_err(Into::into) })
+			.run(|session| async move { Err(session.closed().await.into()) })
 			.await
 	}
 

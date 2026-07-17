@@ -1928,12 +1928,18 @@ impl Request {
 
 	/// Serve the request with the given track, resolving every waiting subscriber.
 	///
-	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
-	/// mismatch, or the broadcast's abort error if it closed while pending.
+	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
+	/// (`None` for the defaults). If the track was already aborted, the returned
+	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
+	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		let mut info = info.into().unwrap_or_default();
 		info.broadcast = self.broadcast.clone();
-		self.state.write().ok().unwrap().info = Some(info);
+		// A closed state means the track was aborted under us. Mirror `reject` and
+		// tolerate it: the Producer we hand back simply can't write.
+		if let Ok(mut state) = self.state.write() {
+			state.info = Some(info);
+		}
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,

@@ -106,10 +106,9 @@ impl Session {
 		self.shared.close(err.to_code(), err.to_string().as_ref());
 	}
 
-	/// Block until the transport session is closed.
-	pub async fn closed(&self) -> Result<(), Error> {
-		let err = self.shared.inner.closed().await;
-		Err(Error::Transport(err))
+	/// Block until the transport session is closed, returning the reason.
+	pub async fn closed(&self) -> Error {
+		Error::Transport(self.shared.inner.closed().await)
 	}
 }
 

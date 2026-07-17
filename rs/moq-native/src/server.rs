@@ -643,8 +643,7 @@ impl Server {
 /// Complete one accepted [`Request`] and wait for the session to close.
 async fn serve_session(request: Request) -> crate::Result<()> {
 	let session = request.ok().await?;
-	session.closed().await?;
-	Ok(())
+	Err(session.closed().await.into())
 }
 
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.
