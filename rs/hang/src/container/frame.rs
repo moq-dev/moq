@@ -53,8 +53,8 @@ impl Frame {
 	/// different source scale (e.g. nanoseconds from MKV) can decode without knowing
 	/// the producer's internal scale. Inverse of [`Self::decode`].
 	pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), Error> {
-		buf.put(self.header()?);
-		buf.put(self.payload.clone());
+		self.encode_header(buf)?;
+		buf.put_slice(&self.payload);
 		Ok(())
 	}
 
@@ -77,7 +77,10 @@ impl Frame {
 	/// the moq-net frame timestamp so moq-lite-05 and later can delta-encode it on the wire
 	/// independently of the container-level prefix.
 	pub fn write_to(&self, group: &mut moq_net::group::Producer) -> Result<(), Error> {
-		let header = self.header()?;
+		let mut header = BytesMut::new();
+		self.encode_header(&mut header)?;
+		let header = header.freeze();
+
 		let size = (header.len() + self.payload.len()) as u64;
 
 		// `create_frame` converts the timestamp into the track's timescale; older drafts
@@ -94,15 +97,13 @@ impl Frame {
 		Ok(())
 	}
 
-	/// The VarInt timestamp prefix, normalized to [`TIMESCALE`].
-	fn header(&self) -> Result<Bytes, Error> {
+	/// Write the VarInt timestamp prefix, normalized to [`TIMESCALE`].
+	fn encode_header(&self, buf: &mut impl BufMut) -> Result<(), Error> {
 		let timestamp = self.timestamp.convert(TIMESCALE)?;
 		let value = VarInt::try_from(timestamp.value()).map_err(moq_net::Error::from)?;
+		value.encode_quic(buf).map_err(moq_net::Error::from)?;
 
-		let mut header = BytesMut::new();
-		value.encode_quic(&mut header).map_err(moq_net::Error::from)?;
-
-		Ok(header.freeze())
+		Ok(())
 	}
 }
 
