@@ -13,8 +13,12 @@
 //! name address distinct resources.
 //!
 //! Every request is served. To gate access, wrap [`Server::router`] in your own
-//! [`axum`] middleware: the broadcast path is the first segment of the request
-//! URI, and rejecting there keeps the origin untouched.
+//! [`axum`] middleware. It runs before routing, so a rejected request never reaches
+//! the origin, but it also sees the raw request URI rather than the path parameters
+//! axum decodes for the handlers. The broadcast is the first segment, still
+//! percent-encoded: `/li%76e/master.m3u8` serves the broadcast `live`. Decode a
+//! segment before matching it against a policy, or a name can be encoded past the
+//! check.
 //!
 //! ```no_run
 //! use axum::http::StatusCode;
@@ -179,6 +183,9 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(allowed.status(), StatusCode::NOT_FOUND);
+		// Pin the 404 to our handler: an unmatched route would also 404, but without
+		// the no-store that not_found() sets, so a broken URI can't fake this pass.
+		assert_eq!(allowed.headers()[header::CACHE_CONTROL], "no-store");
 	}
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
