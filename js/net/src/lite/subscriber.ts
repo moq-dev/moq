@@ -542,13 +542,14 @@ export class Subscriber {
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
-			// demand, not by the stream ending. `unused` is a one-shot watched across frames (so it
-			// isn't re-subscribed per frame); the check is level-triggered, so a coalesced fetch that
-			// arrives before we cancel re-arms it and resumes on the same stream.
+			// demand, not by the stream ending. `closed` and `unused` are watched across frames as
+			// stable promises (not re-subscribed to the signals each frame); the unused check is
+			// level-triggered, so a coalesced fetch that arrives before we cancel re-arms and resumes.
 			const idle = Symbol("idle");
+			const closed = Promise.resolve<Error | null>(group.closed);
 			let unused = group.unused().then(() => idle);
 			for (;;) {
-				const done = await Promise.race([stream.reader.done(), group.closed, unused]);
+				const done = await Promise.race([stream.reader.done(), closed, unused]);
 				if (done === idle) {
 					if (!group.isClosed && group.used.peek()) {
 						unused = group.unused().then(() => idle);

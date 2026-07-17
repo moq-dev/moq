@@ -6,6 +6,7 @@ import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
+import type { Producer as TrackProducer } from "./track.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -548,6 +549,50 @@ test("integration: ietf subscriber teardown on last unsubscribe", async () => {
 	await runSubscriberTeardown(Ietf.ALPN.DRAFT_17);
 });
 
+// Draft-14 sends an explicit Unsubscribe after the demand loop breaks; exercise that path too.
+// Uses a dynamic serve (draft-14 doesn't complete SUBSCRIBE_OK for a statically inserted track).
+test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async () => {
+	const pair = createMockTransportPair("");
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { version: Ietf.Version.DRAFT_14 }),
+	]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+
+	// Serve dynamically, keeping the served producer so we can watch its demand.
+	let served: TrackProducer | undefined;
+	const serving = (async () => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			served = req.accept();
+			served.writeString("hello");
+		}
+	})();
+
+	// Draft-14 only completes SUBSCRIBE_OK once the session is warmed by an announce round-trip.
+	const announced = client.announced();
+	await announced.next();
+
+	const remote = client.consume(Path.from("test"));
+	const sub = remote.track("video").subscribe();
+	expect(await sub.readString()).toBe("hello");
+	await waitUntil(() => served?.used.peek() === true);
+
+	// Closing the subscriber sends Unsubscribe and tears the subscription down, so demand drops.
+	sub.close();
+	await waitUntil(() => served?.used.peek() === false);
+
+	broadcast.close();
+	await serving;
+	announced.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
 // A fetched group can stay open indefinitely (a catalog track, a JSON stream), so abandoning the
 // fetch must cancel the FETCH stream rather than wait for a stream end that never comes.
 test("integration: lite fetch teardown when the reader abandons an open group", async () => {
@@ -573,6 +618,138 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	await waitUntil(() => !group.used.peek());
 
 	group.close();
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+// Older drafts have no TRACK stream or SUBSCRIBE_UPDATE, so the demand loop must still tear the
+// subscription down through the plain stream-close path.
+test("integration: lite draft-01 subscriber teardown on last unsubscribe", async () => {
+	await runSubscriberTeardown("", Lite.Version.DRAFT_01);
+});
+
+// Two subscribers to one track dedupe onto a single wire subscription: closing one keeps it alive
+// for the other, and only the last close tears it down.
+test("integration: lite fan-out keeps the upstream until the last subscriber leaves", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+	video.writeString("hello");
+
+	const remote = client.consume(Path.from("test"));
+	const a = remote.track("video").subscribe();
+	const b = remote.track("video").subscribe();
+	expect(await a.readString()).toBe("hello");
+	expect(await b.readString()).toBe("hello");
+	await waitUntil(() => video.used.peek());
+
+	// Closing one leaves the shared upstream serving the other.
+	a.close();
+	video.writeString("more");
+	expect(await b.readString()).toBe("more");
+	expect(video.used.peek()).toBe(true);
+
+	// The last close tears it down.
+	b.close();
+	await waitUntil(() => !video.used.peek());
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+// Repeated subscribe/unsubscribe cycles must each tear down and re-open cleanly (the 40-toggle
+// scenario in the issue), never wedging the shared cache or leaking a subscription.
+test("integration: lite re-subscribe re-opens the upstream after each teardown", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+
+	const remote = client.consume(Path.from("test"));
+
+	for (let i = 0; i < 8; i++) {
+		video.writeString(`hello-${i}`);
+		const sub = remote.track("video").subscribe();
+		expect(await sub.readString()).toBe(`hello-${i}`);
+		await waitUntil(() => video.used.peek());
+
+		sub.close();
+		await waitUntil(() => !video.used.peek());
+	}
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+// Coalesced fetches of one open group share a single FETCH stream: closing one keeps it flowing
+// for the other, and only the last abandon cancels it.
+test("integration: lite coalesced fetch stays until every reader abandons the open group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+	const group = video.appendGroup(); // open
+	group.writeString("hello");
+
+	const remote = client.consume(Path.from("test"));
+	const f1 = await remote.track("video").fetchGroup(group.sequence);
+	const f2 = await remote.track("video").fetchGroup(group.sequence);
+	expect(await f1.readString()).toBe("hello");
+	expect(await f2.readString()).toBe("hello");
+	await waitUntil(() => group.used.peek());
+
+	// Closing one coalesced reader keeps the shared FETCH flowing for the other.
+	f1.close();
+	group.writeString("more");
+	expect(await f2.readString()).toBe("more");
+	expect(group.used.peek()).toBe(true);
+
+	// The last abandon cancels the FETCH.
+	f2.close();
+	await waitUntil(() => !group.used.peek());
+
+	group.close();
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+// A finite group must still deliver every frame and end cleanly (the demand watch must not disturb
+// normal completion), exercising the per-frame loop many times.
+test("integration: lite fetch delivers every frame of a finite multi-frame group", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const video = broadcast.createTrack("video");
+	const group = video.appendGroup();
+	const count = 50;
+	for (let i = 0; i < count; i++) group.writeString(`f${i}`);
+	group.close(); // finite
+
+	const remote = client.consume(Path.from("test"));
+	const fetched = await remote.track("video").fetchGroup(group.sequence);
+	for (let i = 0; i < count; i++) {
+		expect(await fetched.readString()).toBe(`f${i}`);
+	}
+	// Every frame read, then a clean end.
+	expect(await fetched.readString()).toBeUndefined();
+
 	broadcast.close();
 	remote.close();
 	client.close();

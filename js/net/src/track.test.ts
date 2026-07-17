@@ -27,6 +27,48 @@ test("used reflects subscriber demand and unused resolves when the last one leav
 	expect(producer.used.peek()).toBe(false);
 });
 
+test("a producer never self-closes on zero demand: a publisher keeps serving new subscribers", async () => {
+	const producer = new TrackProducer("video");
+
+	// Demand comes and goes...
+	const a = producer.subscribe();
+	a.close();
+	await producer.unused();
+
+	// ...but the producer stays open (only the wire acts on `unused`, not the producer itself),
+	// so a publisher writing to a track nobody is watching is unaffected.
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// A later subscriber still works and replays the cache.
+	producer.writeString("still here");
+	const b = producer.subscribe();
+	expect(await b.readString()).toBe("still here");
+	expect(producer.used.peek()).toBe(true);
+});
+
+test("unused() resolves immediately when there was never any demand", async () => {
+	const producer = new TrackProducer("video");
+	// No subscriber was ever attached; unused() must not hang.
+	await producer.unused();
+	expect(producer.used.peek()).toBe(false);
+});
+
+test("used stays true across churn while at least one subscriber remains", async () => {
+	const producer = new TrackProducer("video");
+
+	const a = producer.subscribe();
+	// Rapidly add and drop extra subscribers; `a` keeps demand asserted throughout.
+	for (let i = 0; i < 20; i++) {
+		const t = producer.subscribe();
+		t.close();
+		expect(producer.used.peek()).toBe(true);
+	}
+
+	a.close();
+	await producer.unused();
+	expect(producer.used.peek()).toBe(false);
+});
+
 test("appendDatagram shares the group sequence counter", () => {
 	const producer = new TrackProducer("test");
 	const ts = Timestamp.fromMillis(10);
