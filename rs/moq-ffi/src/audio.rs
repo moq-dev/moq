@@ -227,12 +227,25 @@ impl MoqAudioConsumer {
 	}
 }
 
+fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
+	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
+	if !matches!(&codec, hang::catalog::AudioCodec::Opus) {
+		return Err(MoqError::Unsupported);
+	}
+
+	let mut config = hang::catalog::AudioConfig::new(codec, catalog_audio.sample_rate, catalog_audio.channel_count);
+	config.bitrate = catalog_audio.bitrate;
+	config.description = catalog_audio.description.map(Into::into);
+	config.container = catalog_audio.container.into();
+	Ok(config)
+}
+
 #[uniffi::export]
 impl MoqBroadcastConsumer {
-	/// Subscribe to an audio track. `catalog_audio_config` comes from
+	/// Subscribe to an audio track. `catalog_audio` comes from
 	/// the catalog (see
 	/// [`MoqCatalogConsumer::next`](crate::consumer::MoqCatalogConsumer::next));
-	/// the codec is inferred from it.
+	/// the codec is inferred from it. Only Opus is currently supported.
 	pub fn subscribe_audio(
 		&self,
 		name: String,
@@ -241,14 +254,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
-		let mut cfg = hang::catalog::AudioConfig::new(
-			hang::catalog::AudioCodec::Opus,
-			catalog_audio.sample_rate,
-			catalog_audio.channel_count,
-		);
-		cfg.bitrate = catalog_audio.bitrate;
-		cfg.description = catalog_audio.description.map(Into::into);
-		cfg.container = catalog_audio.container.into();
+		let cfg = audio_config(catalog_audio)?;
 
 		let consumer = moq_audio::AudioConsumer::new(
 			self.inner(),
@@ -265,5 +271,40 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),
 		}))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::media::{Container, MoqAudio};
+
+	fn catalog_audio(codec: &str) -> MoqAudio {
+		MoqAudio {
+			codec: codec.to_string(),
+			description: None,
+			sample_rate: 48_000,
+			channel_count: 2,
+			bitrate: None,
+			container: Container::Legacy,
+		}
+	}
+
+	#[test]
+	fn audio_config_accepts_opus() {
+		let config = audio_config(catalog_audio("opus")).unwrap();
+		assert!(matches!(config.codec, hang::catalog::AudioCodec::Opus));
+	}
+
+	#[test]
+	fn audio_config_rejects_non_opus_codec() {
+		let error = audio_config(catalog_audio("mp4a.40.2")).unwrap_err();
+		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	#[test]
+	fn audio_config_rejects_unknown_codec() {
+		let error = audio_config(catalog_audio("unknown")).unwrap_err();
+		assert!(matches!(error, MoqError::Unsupported));
 	}
 }

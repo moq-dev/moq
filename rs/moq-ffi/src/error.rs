@@ -64,6 +64,10 @@ pub enum MoqError {
 	#[error("forbidden")]
 	Forbidden,
 
+	/// The requested operation is not supported.
+	#[error("unsupported")]
+	Unsupported,
+
 	#[error("log: {0}")]
 	Log(String),
 }

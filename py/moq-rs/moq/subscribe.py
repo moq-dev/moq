@@ -252,8 +252,9 @@ class BroadcastConsumer:
 
         ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
-        ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
-        control how aggressively stalled groups get skipped — that's
+        ``catalog.audio[name]``). Only Opus tracks are currently supported.
+        Use ``output.latency_max_ms`` to
+        control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)
         """
