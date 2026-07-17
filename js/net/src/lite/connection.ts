@@ -1,4 +1,4 @@
-import { Signal } from "@moq/signals";
+import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
@@ -14,7 +14,7 @@ import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
-import { ProbeLevel, Setup } from "./setup.ts";
+import { ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -70,6 +70,23 @@ export class Connection implements Established {
 	// encoding depends on a negotiated capability (e.g. PROBE) wait on this. undefined
 	// until the peer's SETUP arrives; stays undefined forever on older drafts.
 	#peerSetup = new Signal<Setup | undefined>(undefined);
+
+	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
+	// direction without handing out the whole SETUP (whose probe level gates our own streams).
+	#peerRole = new Signal<Role | undefined>(undefined);
+
+	/**
+	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
+	 * peer's authorization grants the direction it intends to use.
+	 *
+	 * `undefined` until the peer's SETUP arrives, and forever on pre-lite-05 versions, which
+	 * carry no in-band role. A peer that omits the parameter, or sends a value we don't
+	 * recognize, reports {@link Role.Both}. Only a client sends a role, so this stays
+	 * `undefined` on a connection we opened.
+	 */
+	get peerRole(): Getter<Role | undefined> {
+		return this.#peerRole;
+	}
 
 	/**
 	 * Creates a new Connection instance.
@@ -192,11 +209,13 @@ export class Connection implements Established {
 	// The browser uses WebTransport, which carries the request URI, so we advertise no
 	// path and leave routing to the URL. We advertise probe = Report (we measure and
 	// report bitrate over the PROBE stream, but don't actively pad the connection).
+	// Role stays Both: publish/consume are called after this point, so there is nothing
+	// to narrow yet.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic);
 		try {
 			await writer.u53(DataType.Setup);
-			await new Setup(ProbeLevel.Report).encode(writer, this.#version);
+			await new Setup({ probe: ProbeLevel.Report }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -273,6 +292,7 @@ export class Connection implements Established {
 			// streams (e.g. PROBE) can react, then drain to the FIN.
 			const setup = await Setup.decode(stream, this.#version);
 			this.#peerSetup.set(setup);
+			this.#peerRole.set(setup.role);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
