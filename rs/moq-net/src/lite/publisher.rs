@@ -525,7 +525,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		broadcast: kio::Pending<origin::Requesting>,
+		broadcast: kio::Awaitable<origin::Requesting>,
 		priority: PriorityQueue,
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
@@ -656,7 +656,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch(
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
-		broadcast: kio::Pending<origin::Requesting>,
+		broadcast: kio::Awaitable<origin::Requesting>,
 		track_stats: crate::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {

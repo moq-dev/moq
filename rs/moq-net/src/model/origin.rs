@@ -1249,7 +1249,7 @@ impl Drop for Request {
 
 /// The pollable result of [`Consumer::request_broadcast`].
 ///
-/// Awaited via the [`kio::Pending`] wrapper; resolves to the [`broadcast::Consumer`]
+/// Awaited via the [`kio::Awaitable`] wrapper; resolves to the [`broadcast::Consumer`]
 /// immediately when the broadcast was already announced, or once an [`Dynamic`]
 /// handler serves the request. Resolves to an error if the request is rejected or every
 /// handler drops before serving it.
@@ -1305,7 +1305,7 @@ impl Requesting {
 	}
 }
 
-impl kio::Future for Requesting {
+impl kio::Pollable for Requesting {
 	type Output = Result<broadcast::Consumer, Error>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1504,7 +1504,7 @@ impl Consumer {
 
 	/// Get a broadcast by path, falling back to a dynamic request when it is not announced.
 	///
-	/// Returns a [`kio::Pending`] future (resolved synchronously for an announced broadcast,
+	/// Returns a [`kio::Awaitable`] future (resolved synchronously for an announced broadcast,
 	/// otherwise once a handler serves it), mirroring [`track::Consumer::fetch_group`](track::Consumer::fetch_group).
 	/// The lookup order is: an already-announced broadcast resolves
 	/// immediately; otherwise, if an [`Dynamic`] handler is live (see
@@ -1520,12 +1520,12 @@ impl Consumer {
 	/// dynamic handler exists. A request that is registered while a handler is live but then loses
 	/// every handler before being served also resolves to [`Error::Unroutable`]. Unlike an announced
 	/// broadcast, a dynamically served one is never visible to [`Self::announced`].
-	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
+	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Awaitable<Requesting> {
 		let path = path.as_path();
 
 		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
 		if let Some(broadcast) = self.get_broadcast(&path) {
-			return kio::Pending::new(Requesting::ready(broadcast));
+			return kio::Awaitable::new(Requesting::ready(broadcast));
 		}
 
 		// Key requests by absolute path so a scoped/rooted consumer and the handler
@@ -1538,7 +1538,7 @@ impl Consumer {
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
 		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			return kio::Pending::new(Requesting::ready(weak.consume()));
+			return kio::Awaitable::new(Requesting::ready(weak.consume()));
 		}
 
 		// Coalesce onto a pending request for the same path; otherwise register a new
@@ -1549,12 +1549,12 @@ impl Consumer {
 			let producer = kio::Producer::<PendingBroadcast>::default();
 			let consumer = producer.consume();
 			if state.requests.insert(absolute, producer).is_err() {
-				return kio::Pending::new(Requesting::failed(Error::Unroutable));
+				return kio::Awaitable::new(Requesting::failed(Error::Unroutable));
 			}
 			consumer
 		};
 
-		kio::Pending::new(Requesting::pending(consumer))
+		kio::Awaitable::new(Requesting::pending(consumer))
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.

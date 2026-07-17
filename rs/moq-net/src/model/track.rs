@@ -858,23 +858,22 @@ impl Producer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
@@ -1263,23 +1262,22 @@ impl Demand {
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
@@ -1304,17 +1302,17 @@ impl Consumer {
 
 	/// Open a live subscription.
 	///
-	/// Registers the subscription on the track and returns a [`kio::Pending`] that resolves to the
+	/// Registers the subscription on the track and returns a [`kio::Awaitable`] that resolves to the
 	/// [`Subscriber`] once the track info is available, or the track's abort error (or
 	/// [`Error::Dropped`]) if it is already closed.
-	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
+	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Awaitable<Subscribing> {
 		let subscription = kio::Producer::new(subscription.into().unwrap_or_default());
 
 		// Register the subscription if the track is live. If it is already closed, the returned
 		// future resolves to the abort error via `Subscribing::poll_ok`.
 		register_subscription(self.state.read(), &subscription);
 
-		kio::Pending::new(Subscribing {
+		kio::Awaitable::new(Subscribing {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			subscription,
@@ -1330,7 +1328,7 @@ impl Consumer {
 
 	/// Fetching a single past group, without holding a live subscription.
 	///
-	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
+	/// Returns a [`kio::Awaitable`] that resolves to the [`group::Consumer`]:
 	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
@@ -1339,7 +1337,7 @@ impl Consumer {
 	/// (past the final sequence, or no [`Dynamic`] on the track), or the track's abort error
 	/// if it's already closed. Concurrent fetches for the same sequence coalesce onto one
 	/// handler request.
-	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
+	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Awaitable<Fetching> {
 		let options = options.into().unwrap_or_default();
 		let mut result = None;
 
@@ -1374,7 +1372,7 @@ impl Consumer {
 			}
 		}
 
-		kio::Pending::new(Fetching {
+		kio::Awaitable::new(Fetching {
 			state: self.state.clone(),
 			fetch,
 			sequence,
@@ -1382,15 +1380,15 @@ impl Consumer {
 		})
 	}
 
-	pub fn info(&self) -> kio::Pending<Querying> {
-		kio::Pending::new(Querying {
+	pub fn info(&self) -> kio::Awaitable<Querying> {
+		kio::Awaitable::new(Querying {
 			state: self.state.clone(),
 		})
 	}
 }
 
 /// The pollable state of a [`Consumer::subscribe`]; awaited via the
-/// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+/// [`kio::Awaitable`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct Subscribing {
 	name: Arc<str>,
 	state: kio::Consumer<TrackState>,
@@ -1427,7 +1425,7 @@ impl Subscribing {
 	}
 }
 
-impl kio::Future for Subscribing {
+impl kio::Pollable for Subscribing {
 	type Output = Result<Subscriber>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1436,7 +1434,7 @@ impl kio::Future for Subscribing {
 }
 
 /// The pollable state of a [`Consumer::info`]; awaited via the
-/// [`kio::Pending`] wrapper.
+/// [`kio::Awaitable`] wrapper.
 pub struct Querying {
 	state: kio::Consumer<TrackState>,
 }
@@ -1450,7 +1448,7 @@ impl Querying {
 	}
 }
 
-impl kio::Future for Querying {
+impl kio::Pollable for Querying {
 	type Output = Result<Info>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1540,7 +1538,7 @@ impl Drop for GroupRequest {
 
 /// The pollable state of a [`Consumer::fetch_group`].
 ///
-/// Awaited via the [`kio::Pending`] wrapper; resolves to the
+/// Awaited via the [`kio::Awaitable`] wrapper; resolves to the
 /// [`group::Consumer`] once the group lands in the track's cache (already present,
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
 pub struct Fetching {
@@ -1551,7 +1549,7 @@ pub struct Fetching {
 	result: Option<kio::Consumer<FetchOutcome>>,
 }
 
-impl kio::Future for Fetching {
+impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -3170,10 +3168,10 @@ mod test {
 
 		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `Fetching` (a `kio::Future`).
+		// wrapper to the inner `Fetching` (a `kio::Pollable`).
 		assert!(consumer.get_group(5).is_none());
 		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3272,7 +3270,7 @@ mod test {
 		// carrying the higher of the two priorities.
 		let first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
 		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*first, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3321,7 +3319,7 @@ mod test {
 
 		// The rejected attempt is gone: a retry starts a fresh one.
 		let retry = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*retry, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
 			.requested_group()
 			.now_or_never()
@@ -3338,7 +3336,7 @@ mod test {
 
 		// Queued but never popped: the last handler leaving fails it fast.
 		let pending = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
@@ -3608,7 +3606,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(3, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

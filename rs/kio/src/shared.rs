@@ -78,6 +78,18 @@ impl<T> Shared<T> {
 		}
 	}
 
+	/// Wait until the read-only predicate holds, then acquire write access.
+	///
+	/// The async sibling of [`poll`](Self::poll). It's infallible: a `Shared` has no
+	/// liveness of its own, so there's no closure to report. A predicate that never
+	/// holds simply waits forever.
+	pub async fn wait<F>(&self, mut f: F) -> Mut<'_, T>
+	where
+		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
+	{
+		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
+	}
+
 	/// Returns `true` if both handles share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
@@ -191,6 +203,25 @@ mod test {
 		assert!(guard.is_empty());
 		drop(guard);
 		assert_eq!(waker.count(), 0, "reads spuriously woke a parked poll");
+	}
+
+	/// The async sibling of `poll`: parks until another handle enqueues, then hands
+	/// back the drainable guard.
+	#[tokio::test]
+	async fn wait_parks_until_enqueued() {
+		let shared = Shared::<Vec<u32>>::default();
+		let drain = shared.clone();
+
+		let task = tokio::spawn(async move {
+			let mut guard = drain.wait(nonempty).await;
+			guard.pop()
+		});
+
+		// Let the task park on an empty queue before anything is enqueued.
+		tokio::task::yield_now().await;
+		shared.lock().push(3);
+
+		assert_eq!(task.await.unwrap(), Some(3));
 	}
 
 	#[test]
