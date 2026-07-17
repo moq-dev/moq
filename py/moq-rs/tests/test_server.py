@@ -25,7 +25,7 @@ async def test_server_client_roundtrip():
         # Publish a broadcast on the server side.
         broadcast = moq.BroadcastProducer()
         media = broadcast.publish_media("opus", opus_head())
-        server.publish("hello", broadcast)
+        server.announce("hello", broadcast)
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions
@@ -145,7 +145,7 @@ async def test_serve_helper_accepts_clients():
     """Server.serve() accepts incoming sessions and holds them automatically."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.publish("via-serve", broadcast)
+        server.announce("via-serve", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -170,7 +170,7 @@ async def test_announcement_hops_over_wire():
     """An announcement received over the wire exposes its relay hop chain as a list of ints."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.publish("with-hops", broadcast)
+        server.announce("with-hops", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -196,24 +196,16 @@ async def test_announcement_hops_over_wire():
             broadcast.finish()
 
 
-async def test_serve_helper_with_on_request_rejection():
-    """on_request returning False causes Server.serve() to reject the request."""
+async def test_deprecated_publish_alias_warns():
+    """The publish() aliases forward to announce() but warn on use."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
-
-        async def reject_all(_request: moq.Request) -> bool:
-            return False
-
-        serve_task = asyncio.create_task(server.serve(on_request=reject_all))
+        broadcast = moq.BroadcastProducer()
         try:
-            client = moq_ffi.MoqClient()
-            client.set_tls_disable_verify(True)
-            client.set_bind("127.0.0.1:0")
-            session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
-            with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                await asyncio.wait_for(session.closed(), timeout=5.0)
+            with pytest.warns(DeprecationWarning, match="Server.publish"):
+                server.publish("deprecated", broadcast)
+
+            origin = moq.OriginProducer()
+            with pytest.warns(DeprecationWarning, match="OriginProducer.publish"):
+                origin.publish("deprecated", broadcast)
         finally:
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
+            broadcast.finish()

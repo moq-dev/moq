@@ -6,6 +6,7 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 from moq_ffi import MoqError as Error
 
 from .client import Client, connect
+from .errors import is_auth, is_shutdown
 from .log import log_level
 from .origin import (
     Announced,
@@ -116,5 +117,7 @@ __all__ = [
     "Video",
     "VideoHint",
     "connect",
+    "is_auth",
+    "is_shutdown",
     "log_level",
 ]

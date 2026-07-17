@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from moq_ffi import (
@@ -93,7 +94,10 @@ class GroupConsumer:
 
 
 class TrackConsumer:
-    """Async iterator of groups from a track.
+    """Async iterator of groups from a track, in sequence order.
+
+    Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
+    :meth:`groups_as_arrived`) for arrival order instead.
 
     Each group is itself an async iterator of timestamped frames. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
@@ -113,10 +117,22 @@ class TrackConsumer:
         return self
 
     async def __anext__(self) -> GroupConsumer:
-        group = await self.recv_group()
+        group = await self.next_group()
         if group is None:
             raise StopAsyncIteration
         return group
+
+    async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
+        """Iterate groups in arrival order, including out-of-sequence deliveries.
+
+        The default iteration uses sequence order instead. Use this for live
+        consumption where latency matters more than order.
+        """
+        while True:
+            group = await self.recv_group()
+            if group is None:
+                return
+            yield group
 
     async def recv_group(self) -> GroupConsumer | None:
         """Return the next group in arrival order. Returns `None` when the track ends.
@@ -132,8 +148,8 @@ class TrackConsumer:
     async def next_group(self) -> GroupConsumer | None:
         """Return the next group in sequence order, skipping forward if behind.
 
-        Returns `None` when the track ends. Use this when order matters more than
-        latency; `recv_group` is preferred for live consumption.
+        Returns `None` when the track ends. This is what the default iteration
+        yields; use `recv_group` when latency matters more than order.
         """
         group = await self._inner.next_group()
         if group is None:

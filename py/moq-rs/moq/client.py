@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 from moq_ffi import MoqClient
 
 from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
@@ -116,7 +118,11 @@ class Client:
         origin.announce(path, broadcast)
 
     def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        # Deprecated alias for announce(); kept for back-compat.
+        warnings.warn(
+            "Client.publish() is deprecated; use Client.announce() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.announce(path, broadcast)
 
     def announced(self, prefix: str = "") -> Announced:

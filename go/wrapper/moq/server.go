@@ -236,14 +236,25 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 	}
 }
 
-// Serve accepts sessions in a loop, holding each one alive in its own goroutine
-// until it closes, so memory does not grow with past connections. It returns
-// when Accept stops (nil) or fails, after the in-flight sessions wind down.
+// Serve accepts every session in a loop, holding each one alive in its own
+// goroutine until it closes, so memory does not grow with past connections. It
+// returns when Accept stops (nil) or fails, after the in-flight sessions wind
+// down.
 //
-// Pass onRequest to inspect a Request before accepting: return false to reject
-// with HTTP 403, or an error to reject with 500 and stop serving. Pass nil to
-// accept every request. For richer routing, drive Requests/Accept directly.
-func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, error)) error {
+// To inspect or reject requests, range over Requests instead:
+//
+//	for req, err := range server.Requests(ctx) {
+//	    if err != nil {
+//	        return err
+//	    }
+//	    if url := req.URL(); url != nil && strings.Contains(*url, "/admin") {
+//	        _ = req.Close(ctx, 403)
+//	        continue
+//	    }
+//	    session, err := req.OK(ctx)
+//	    // hold the session to keep the connection alive
+//	}
+func (s *Server) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -259,18 +270,6 @@ func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, erro
 		}
 		if req == nil {
 			return nil
-		}
-
-		if onRequest != nil {
-			ok, err := onRequest(req)
-			if err != nil {
-				_ = req.Close(ctx, 500)
-				return err
-			}
-			if !ok {
-				_ = req.Close(ctx, 403)
-				continue
-			}
 		}
 
 		wg.Add(1)

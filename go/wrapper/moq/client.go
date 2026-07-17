@@ -11,7 +11,7 @@ import (
 type ClientOption func(*clientConfig)
 
 type clientConfig struct {
-	tlsDisableVerify   bool
+	tlsVerify          bool
 	tlsRoots           []string
 	tlsRootsSet        bool
 	tlsSystemRoots     bool
@@ -25,9 +25,11 @@ type clientConfig struct {
 	subscribe          *OriginProducer
 }
 
-// WithTLSDisableVerify disables TLS certificate verification (development only).
-func WithTLSDisableVerify() ClientOption {
-	return func(c *clientConfig) { c.tlsDisableVerify = true }
+// WithTLSVerify toggles TLS certificate verification. Verification is on by
+// default; pass false only against a relay with a self-signed certificate
+// during development.
+func WithTLSVerify(verify bool) ClientOption {
+	return func(c *clientConfig) { c.tlsVerify = verify }
 }
 
 // WithTLSRoots trusts PEM root certificate files instead of the system roots.
@@ -100,7 +102,9 @@ type Client struct {
 // Dial connects to a MoQ server and returns the established client. Cancel ctx
 // to abort an in-flight connect.
 func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error) {
-	var cfg clientConfig
+	// Verification is on unless WithTLSVerify(false) says otherwise; the zero
+	// value would mean the opposite.
+	cfg := clientConfig{tlsVerify: true}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -116,7 +120,7 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 
 	inner := ffi.NewMoqClient()
-	if cfg.tlsDisableVerify {
+	if !cfg.tlsVerify {
 		inner.SetTlsDisableVerify(true)
 	}
 	if cfg.tlsRootsSet {

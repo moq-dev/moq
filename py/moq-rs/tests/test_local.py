@@ -94,7 +94,7 @@ async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.publish("live", broadcast)
+    origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -129,7 +129,7 @@ async def test_video_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("avc3", h264_init())
-    origin.publish("video-test", broadcast)
+    origin.announce("video-test", broadcast)
 
     consumer = origin.consume()
 
@@ -163,7 +163,7 @@ async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.publish("ordering-test", broadcast)
+    origin.announce("ordering-test", broadcast)
 
     consumer = origin.consume()
 
@@ -190,7 +190,7 @@ async def test_catalog_update_on_new_track():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     _media1 = broadcast.publish_media("opus", opus_head())
-    origin.publish("catalog-update", broadcast)
+    origin.announce("catalog-update", broadcast)
 
     consumer = origin.consume()
 
@@ -222,7 +222,7 @@ def test_finish_closes_producer():
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    origin.publish("test/broadcast", broadcast)
+    origin.announce("test/broadcast", broadcast)
 
     consumer = origin.consume()
 
@@ -545,7 +545,7 @@ async def test_subscribe_media_default_latency_and_context_manager():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.publish("live", broadcast)
+    origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -569,7 +569,7 @@ async def test_raw_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("events")
-    origin.publish("robot/arm", broadcast)
+    origin.announce("robot/arm", broadcast)
 
     consumer = origin.consume()
 
@@ -594,7 +594,7 @@ async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("commands")
-    origin.publish("robot/io", broadcast)
+    origin.announce("robot/io", broadcast)
 
     consumer = origin.consume()
 
@@ -676,7 +676,7 @@ async def test_raw_group_sequence():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("seq")
-    origin.publish("track/seq", broadcast)
+    origin.announce("track/seq", broadcast)
 
     consumer = origin.consume()
 
@@ -702,12 +702,51 @@ async def test_raw_group_sequence():
         break
 
 
+async def test_default_iteration_is_sequence_order():
+    """Iterating a track yields sequence order; groups_as_arrived yields arrival order.
+
+    Group 5 is produced before group 3, so the two orderings genuinely diverge and
+    this fails if the default iteration ever reverts to recv_group.
+    """
+    origin = moq.OriginProducer()
+    broadcast = moq.BroadcastProducer()
+    raw = broadcast.publish_track("ordering")
+    origin.announce("track/ordering", broadcast)
+
+    sequenced = origin.consume()
+    arrived = origin.consume()
+
+    seq_consumer = await (await anext(sequenced.announced())).broadcast.subscribe_track("ordering")
+    arr_consumer = await (await anext(arrived.announced())).broadcast.subscribe_track("ordering")
+
+    for sequence in (5, 3):
+        group = raw.create_group(sequence)
+        group.write_frame(f"group-{sequence}".encode(), 0)
+        group.finish()
+
+    # Arrival order sees them as produced, newest sequence first.
+    assert [g.sequence async for g in _take(arr_consumer.groups_as_arrived(), 2)] == [5, 3]
+
+    # The default iteration sorts them back into ascending sequence order.
+    assert [g.sequence async for g in _take(seq_consumer, 2)] == [3, 5]
+
+
+async def _take(iterator, count: int):
+    """Yield the first `count` items of an async iterator."""
+    taken = 0
+    async for item in iterator:
+        yield item
+        taken += 1
+        if taken == count:
+            return
+
+
 async def test_raw_multi_frame_group():
     """A single group can carry multiple frames, not just one per group."""
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("chunks")
-    origin.publish("stream/chunks", broadcast)
+    origin.announce("stream/chunks", broadcast)
 
     consumer = origin.consume()
 

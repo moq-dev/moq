@@ -152,9 +152,12 @@ client = moq.Client(
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
 - **`MediaConsumer`**. Async iterator of `Frame`.
-- **`TrackConsumer`**. Async iterator of groups, plus `.recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
-- **`TrackConsumer`**. Async iterator of raw groups.
+- **`TrackConsumer`**. Async iterator of raw groups, in sequence order.
+  - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
+  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
+  - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
+  - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
   - `await .info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, group ordering priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
@@ -194,6 +197,8 @@ For both `Subscription` and `TrackInfo`, `ordered` controls prioritization only.
 
 - **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
 - **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:` or `except moq.Error.Cancelled:`.
+- **`is_shutdown(err)`**. True for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
+- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401) and `Forbidden` (HTTP 403). Retrying without new credentials won't help, so surface these rather than reconnect.
 
 ## See Also
 

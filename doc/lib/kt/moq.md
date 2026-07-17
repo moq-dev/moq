@@ -48,6 +48,16 @@ Moq.connect(
 
 Advanced callers can pass their own `publish` / `subscribe` origins, or skip the facade entirely and drive `uniffi.moq.MoqClient` directly.
 
+To resolve a single broadcast rather than iterate announcements:
+
+```kotlin
+// Waits for the announcement, however long that takes.
+val broadcast = moq.announcedBroadcast("demos/clock").available()
+
+// Resolves as soon as it can be served (announced or dynamic), else throws.
+val broadcast = moq.requestBroadcast("demos/clock")
+```
+
 A server can reject the connection on auth grounds: `MoqException.Unauthorized` (HTTP 401) or `MoqException.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
 
 ```kotlin
@@ -107,6 +117,41 @@ Moq.connect("https://relay.example.com").use { moq ->
     broadcast.finish()
 }
 ```
+
+## Serve
+
+`Server.listen(bind)` binds a listener, wires an internal origin for both directions, and returns an `AutoCloseable` `Server`. `serve()` accepts every session and holds it alive until it closes:
+
+```kotlin
+import dev.moq.*
+
+Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
+    val broadcast = BroadcastProducer()
+    server.announce("live", broadcast)
+
+    server.serve()
+}
+```
+
+Collect `requests()` instead when you need to inspect or reject a session before accepting it. Each `Request` must be answered with `ok()` or `close(code)`, and the returned session held to keep the connection alive:
+
+```kotlin
+Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
+    server.requests().collect { request ->
+        val url = request.url()
+        if (url != null && "/admin" in url) {
+            request.close(403u)
+            return@collect
+        }
+        launch {
+            val session = request.ok()
+            session.closed()
+        }
+    }
+}
+```
+
+`server.certFingerprints()` returns the hex SHA-256 fingerprints of the configured certificates, for pinning a generated self-signed certificate in a browser via `serverCertificateHashes`. Advanced callers can pass their own `publish` / `subscribe` origins to `listen`, or drive `uniffi.moq.MoqServer` directly.
 
 ### Fetching raw groups
 
@@ -205,27 +250,31 @@ The served broadcast is not announced. It only resolves consumers that call `req
 
 ### JSON tracks
 
-For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved. Values cross as JSON strings; serialize with your JSON library of choice.
+For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved.
+
+Pass a `@Serializable` type and the wrapper encodes and decodes it with `kotlinx.serialization`:
 
 ```kotlin
 import dev.moq.*
-import uniffi.moq.MoqBroadcastProducer
-import uniffi.moq.MoqJsonSnapshotConfig
-import uniffi.moq.MoqJsonStreamConfig
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class Status(val state: String)
 
 // Snapshot: each update supersedes the last.
-val config = MoqJsonSnapshotConfig(deltaRatio = 8u, compression = true)
+val config = JsonSnapshotConfig(deltaRatio = 8u, compression = true)
 val status = broadcast.publishJsonSnapshot("status", config)
-status.update("""{"state":"live"}""")
+status.update(Status(state = "live"))
 
-val broadcastConsumer = broadcast.consume()
-val consumer = broadcastConsumer.subscribeJsonSnapshot("status", config)
-consumer.values().collect { value -> println(value) }
+val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+consumer.valuesAs<Status>().collect { value -> println(value.state) }
 
 // Stream: every record is delivered in order.
-val events = broadcast.publishJsonStream("events", MoqJsonStreamConfig(compression = false))
-events.append("""{"event":"started"}""")
+val events = broadcast.publishJsonStream("events", JsonStreamConfig(compression = false))
+events.append(Status(state = "started"))
 ```
+
+The raw string form stays available for other JSON libraries: `update("""{"state":"live"}""")` passes the payload straight through, and `values()` yields the undecoded strings. The same split applies to `setCatalogSection(name, value)`, which encodes a `@Serializable` value, or forwards a `String` unchanged.
 
 `compression` must match on the producer and subscriber. In snapshot mode, `deltaRatio` of `0` disables merge-patch deltas (every change is a fresh snapshot).
 

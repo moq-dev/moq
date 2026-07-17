@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+import warnings
+from collections.abc import Sequence
 from typing import Literal
 
 from moq_ffi import MoqRequest, MoqServer
@@ -55,7 +56,7 @@ class Request:
         """
         return Session(await self._inner.ok())
 
-    async def close(self, code: int = 404) -> None:
+    async def close(self, code: int) -> None:
         """Reject the session with the given HTTP status code.
 
         Raises `Error.AlreadyResponded` if `ok()` or `close()` has already
@@ -188,22 +189,26 @@ class Server:
         origin.announce(path, broadcast)
 
     def publish(self, path: str, broadcast: BroadcastProducer) -> None:
-        # Deprecated alias for announce(); kept for back-compat.
+        warnings.warn(
+            "Server.publish() is deprecated; use Server.announce() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.announce(path, broadcast)
 
-    async def serve(
-        self,
-        on_request: Callable[[Request], Awaitable[bool | None]] | None = None,
-    ) -> None:
-        """Accept sessions in a loop, holding each one alive until it closes.
+    async def serve(self) -> None:
+        """Accept every session in a loop, holding each one alive until it closes.
 
         Each session is handled by its own task that awaits `session.closed()`,
         so memory does not grow with the number of past connections.
 
-        Pass `on_request` to inspect a `Request` before accepting it; return
-        `False` (or raise) to reject the request with HTTP 403, `True` (or
-        `None`) to accept. For richer routing, hand-roll the accept loop
-        instead.
+        To inspect or reject requests, iterate the server directly instead:
+
+            async for request in server:
+                if request.url and "/admin" in request.url:
+                    await request.close(403)
+                    continue
+                session = await request.ok()
         """
         session_tasks: set[asyncio.Task] = set()
 
@@ -213,15 +218,6 @@ class Server:
 
         try:
             async for request in self:
-                if on_request is not None:
-                    try:
-                        decision = await on_request(request)
-                    except Exception:
-                        await request.close(500)
-                        raise
-                    if decision is False:
-                        await request.close(403)
-                        continue
                 task = asyncio.create_task(serve_session(request))
                 session_tasks.add(task)
                 task.add_done_callback(session_tasks.discard)

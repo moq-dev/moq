@@ -379,6 +379,11 @@ func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error
 	return &GroupRequest{inner: inner}, nil
 }
 
+// Requests ranges over uncached group requests until the dynamic source ends.
+func (d *TrackDynamic) Requests(ctx context.Context) iter.Seq2[*GroupRequest, error] {
+	return streamSeq(ctx, d.RequestedGroup)
+}
+
 // Cancel stops current and future requested-group waits.
 func (d *TrackDynamic) Cancel() {
 	d.inner.Cancel()

@@ -108,11 +108,40 @@ func ExampleListen() {
 	}
 	defer server.Close()
 
-	err = server.Serve(ctx, func(req *moq.Request) (bool, error) {
-		// Reject anything that didn't arrive over QUIC.
-		return req.Transport() == moq.TransportQUIC, nil
-	})
-	if err != nil && !moq.IsShutdown(err) {
+	if err := server.Serve(ctx); err != nil && !moq.IsShutdown(err) {
 		log.Fatal(err)
+	}
+}
+
+// Drive the accept loop directly to decide which sessions to admit.
+func ExampleServer_Requests() {
+	ctx := context.Background()
+
+	server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer server.Close()
+
+	for req, err := range server.Requests(ctx) {
+		if err != nil {
+			if moq.IsShutdown(err) {
+				break
+			}
+			log.Fatal(err)
+		}
+
+		// Reject anything that didn't arrive over QUIC.
+		if req.Transport() != moq.TransportQUIC {
+			_ = req.Close(ctx, 403)
+			continue
+		}
+
+		session, err := req.OK(ctx)
+		if err != nil {
+			continue
+		}
+		// Hold the session to keep the connection alive.
+		go func() { _ = session.Closed(ctx) }()
 	}
 }

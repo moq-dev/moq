@@ -2,7 +2,9 @@ package dev.moq
 
 import kotlinx.coroutines.flow.Flow
 import uniffi.moq.MoqAnnounced
+import uniffi.moq.MoqAnnouncedBroadcast
 import uniffi.moq.MoqAnnouncement
+import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqClient
 import uniffi.moq.MoqOriginOptions
 import uniffi.moq.MoqOriginProducer
@@ -43,6 +45,23 @@ class Moq internal constructor(
 
     /** Raw announcement handle under [prefix]. */
     fun announced(prefix: String = ""): MoqAnnounced = session.consumer().announced(prefix)
+
+    /**
+     * Await the broadcast announced at exactly [path].
+     *
+     * Unlike [requestBroadcast] this waits indefinitely for a future
+     * announcement. Cancel the returned handle to stop waiting.
+     */
+    fun announcedBroadcast(path: String): MoqAnnouncedBroadcast = session.consumer().announcedBroadcast(path)
+
+    /**
+     * Resolve the broadcast at [path] as soon as it can be served: the announced
+     * broadcast if present, otherwise a dynamic fallback on the origin.
+     *
+     * Unlike [announcedBroadcast] this does not wait for a future announcement;
+     * it throws when neither can serve the path.
+     */
+    suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consumer().requestBroadcast(path)
 
     override fun close() {
         session.shutdown()
