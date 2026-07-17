@@ -5,7 +5,7 @@ import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, reason } from "../util/error.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
@@ -308,7 +308,7 @@ export class Publisher {
 			await datagrams;
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
+			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.abort(e);
 			await datagrams;
@@ -345,7 +345,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(
-				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${e.message}`,
+				`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
 			);
 			group?.close(e);
 			stream.abort(e);
@@ -399,7 +399,7 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${e.message}`);
+			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${reason(e)}`);
 			track.close(e);
 			stream.reset(e);
 		}
@@ -488,7 +488,7 @@ export class Publisher {
 			}
 		} catch (err: unknown) {
 			// Best-effort: a datagram send failure stops sending but never fails the subscription.
-			console.debug(`datagram send stopped: sub=${sub} error=${error(err).message}`);
+			console.debug(`datagram send stopped: sub=${sub} error=${reason(err)}`);
 		}
 	}
 

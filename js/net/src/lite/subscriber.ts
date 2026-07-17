@@ -8,7 +8,7 @@ import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, reason } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -330,7 +330,7 @@ export class Subscriber {
 			const e = error(err);
 			request.reject(e);
 			this.#subscribes.delete(id);
-			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			// If the stream eventually opens after the timeout, abort it so we
 			// don't leak it. Cover both branches: setup may resolve late, or it
 			// may reject (e.g. encode/decode failure) after the stream is open.
@@ -369,7 +369,7 @@ export class Subscriber {
 		} catch (err) {
 			const e = error(err);
 			producer.close(e);
-			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${e.message}`);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
@@ -707,7 +707,7 @@ export class Subscriber {
 					try {
 						await this.#routeDatagram(value);
 					} catch (err: unknown) {
-						console.debug(`dropping datagram: ${error(err).message}`);
+						console.debug(`dropping datagram: ${reason(err)}`);
 					}
 				}
 			} finally {

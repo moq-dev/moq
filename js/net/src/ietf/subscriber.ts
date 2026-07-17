@@ -6,7 +6,7 @@ import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, reason } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
 import { TrackAliases } from "./aliases.ts";
@@ -196,7 +196,7 @@ export class Subscriber {
 			}
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`subscribe_namespace error: ${e.message}`);
+			console.warn(`subscribe_namespace error: ${reason(e)}`);
 		}
 	}
 
@@ -265,7 +265,7 @@ export class Subscriber {
 			const e = error(err);
 			producer.close(e);
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 			// If setup eventually settles after the timeout, abort the stream
 			// and drop any registration so we don't leak. Cover both branches:
@@ -302,7 +302,7 @@ export class Subscriber {
 			producer.close(e);
 			stream.abort(e);
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
 		} finally {
 			this.#aliases.delete(trackAlias, producer);
