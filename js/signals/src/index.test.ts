@@ -16,6 +16,19 @@ describe("Signal", () => {
 		expect(count.peek()).toBe(1); // value is synchronous; only notification is deferred
 	});
 
+	test("set stores a function as the value; update transforms", () => {
+		const fn = () => 1;
+		const held = new Signal<() => number>(fn);
+		expect(held.peek()).toBe(fn);
+
+		const other = () => 2;
+		held.set(other); // stored as-is, never invoked as a transform
+		expect(held.peek()).toBe(other);
+
+		held.update(() => fn);
+		expect(held.peek()).toBe(fn);
+	});
+
 	test("subscribers are notified asynchronously", async () => {
 		const count = new Signal(0);
 		const seen: number[] = [];
