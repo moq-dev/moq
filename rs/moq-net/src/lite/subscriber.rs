@@ -9,7 +9,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, TaskSet, Tasks, err_only, race2, race3};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
@@ -117,13 +117,32 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn run(self, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
-		tokio::select! {
-			Err(err) = self.clone().run_announce(connecting) => Err(err),
-			res = self.run_uni() => res,
-			Err(err) = bw.run_recv_bandwidth() => Err(err),
-			Err(err) = dg.run_datagrams() => Err(err),
-			_ = tasks.run() => Ok(()),
-		}
+		// The watchdog halves (announce/bandwidth/datagrams) only end the session on
+		// error; their clean completion parks and the other futures keep running.
+		let mut announce = std::pin::pin!(err_only(self.clone().run_announce(connecting)));
+		let mut uni = std::pin::pin!(self.run_uni());
+		let mut bandwidth = std::pin::pin!(err_only(bw.run_recv_bandwidth()));
+		let mut datagrams = std::pin::pin!(err_only(dg.run_datagrams()));
+		let mut tasks = std::pin::pin!(tasks.run());
+		kio::wait(|waiter| {
+			if let Poll::Ready(err) = waiter.poll_future(announce.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(res) = waiter.poll_future(uni.as_mut()) {
+				return Poll::Ready(res);
+			}
+			if let Poll::Ready(err) = waiter.poll_future(bandwidth.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if waiter.poll_future(tasks.as_mut()).is_ready() {
+				return Poll::Ready(Ok(()));
+			}
+			Poll::Pending
+		})
+		.await
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {
@@ -403,14 +422,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(());
 			}
 
-			tokio::select! {
-				res = bandwidth.unused() => {
+			match race2(bandwidth.unused(), self.run_probe_stream(bandwidth)).await {
+				Race::First(res) => {
 					if res.is_err() {
 						return Ok(());
 					}
 					// Loop back: a new consumer may arrive later.
 				}
-				res = self.run_probe_stream(bandwidth) => {
+				Race::Second(res) => {
 					match res {
 						Ok(()) => tracing::debug!("probe stream closed"),
 						Err(err) => tracing::warn!(%err, "probe stream error"),
@@ -547,9 +566,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let next = tracks
 				.drive(async {
-					tokio::select! {
-						request = broadcast.requested_track() => Some(request),
-						_ = self.session.closed() => None,
+					match race2(broadcast.requested_track(), self.session.closed()).await {
+						Race::First(request) => Some(request),
+						Race::Second(_) => None,
 					}
 				})
 				.await;
@@ -647,10 +666,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// The timescale came from TRACK_INFO (read before this subscription was even
 		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
 
-		let res = tokio::select! {
-			err = track.closed() => Err(err),
-			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), timescale) => res,
+		let res = match race3(
+			track.closed(),
+			group.closed(),
+			self.run_group(stream, group.clone(), track_stats.clone(), timescale),
+		)
+		.await
+		{
+			Race3::First(err) | Race3::Second(err) => Err(err),
+			Race3::Third(res) => res,
 		};
 
 		match res {
@@ -809,12 +833,6 @@ enum Sub<S: web_transport_trait::Session> {
 	Active(SubStream<S>),
 }
 
-impl<S: web_transport_trait::Session> Sub<S> {
-	fn is_active(&self) -> bool {
-		matches!(self, Sub::Active(_))
-	}
-}
-
 /// One step for the [`TrackServe`] loop, produced by racing track demand, the
 /// upstream stream, the broadcast, and the linger timer.
 enum Event {
@@ -898,12 +916,20 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			// and yields `Idle` to start the linger countdown.
 			let idle_eligible = linger.is_none() && fetches.is_empty();
 
-			let event = tokio::select! {
-				biased;
+			let event = {
+				// The upstream subscribe stream closed, or carried a START/END/DROP.
+				let mut sub_msg = std::pin::pin!(async {
+					match &mut sub {
+						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
+						Sub::None => std::future::pending().await,
+					}
+				});
+				let mut broadcast_closed = std::pin::pin!(self.broadcast.closed());
 
-				// (1) Track demand: a fetch, a subscription change, or full idle. One
-				// `kio::wait` so the borrows of `dynamic` and `track` are held together.
-				event = kio::wait(|waiter| {
+				// Biased: demand first, then completions, then closures, then the timer.
+				kio::wait(|waiter| {
+					// (1) Track demand: a fetch, a subscription change, or full idle. Polled
+					// under one waiter so the borrows of `dynamic` and `track` are held together.
 					let track = track.as_mut().expect("track present while serving");
 
 					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
@@ -920,34 +946,40 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					if idle_eligible && track.poll_unused(waiter).is_ready() {
 						return Poll::Ready(Event::Idle);
 					}
+
+					// (2) An in-flight fetch completed. An empty set is skipped (it reports
+					// terminated without registering a waker); this loop is what refills it.
+					if !fetches.is_empty() {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						if let Poll::Ready(Some(())) = fetches.poll_next_unpin(&mut cx) {
+							return Poll::Ready(Event::FetchDone);
+						}
+					}
+
+					// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
+					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
+						return Poll::Ready(match res {
+							Ok(Some(msg)) => Event::SubResponse(msg),
+							Ok(None) => Event::SubClosed(Ok(())),
+							Err(err) => Event::SubClosed(Err(err)),
+						});
+					}
+
+					// (4) The whole broadcast went away on the publisher side.
+					if let Poll::Ready(err) = waiter.poll_future(broadcast_closed.as_mut()) {
+						return Poll::Ready(Event::BroadcastClosed(err));
+					}
+
+					// (5) The linger window elapsed.
+					if let Some(timer) = linger.as_mut()
+						&& waiter.poll_future(timer.as_mut()).is_ready()
+					{
+						return Poll::Ready(Event::LingerExpired);
+					}
+
 					Poll::Pending
-				}) => event,
-
-				// (2) An in-flight fetch completed.
-				Some(()) = fetches.next(), if !fetches.is_empty() => Event::FetchDone,
-
-				// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
-				res = async {
-					match &mut sub {
-						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
-						Sub::None => std::future::pending().await,
-					}
-				}, if sub.is_active() => match res {
-					Ok(Some(msg)) => Event::SubResponse(msg),
-					Ok(None) => Event::SubClosed(Ok(())),
-					Err(err) => Event::SubClosed(Err(err)),
-				},
-
-				// (4) The whole broadcast went away on the publisher side.
-				err = self.broadcast.closed() => Event::BroadcastClosed(err),
-
-				// (5) The linger window elapsed.
-				_ = async {
-					match linger.as_mut() {
-						Some(timer) => timer.as_mut().await,
-						None => std::future::pending::<()>().await,
-					}
-				}, if linger.is_some() => Event::LingerExpired,
+				})
+				.await
 			};
 
 			match event {
@@ -1044,9 +1076,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			})
 			.await?;
 
-		let info = tokio::select! {
-			err = self.broadcast.closed() => return Err(err),
-			info = stream.reader.decode::<lite::TrackInfo>() => info?,
+		let info = match race2(self.broadcast.closed(), stream.reader.decode::<lite::TrackInfo>()).await {
+			Race::First(err) => return Err(err),
+			Race::Second(info) => info?,
 		};
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
@@ -1226,9 +1258,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		if !self.subscriber.version.has_track_stream() {
 			// Older drafts: the first SUBSCRIBE_OK confirms it. Bail if the broadcast
 			// dies meanwhile.
-			let resp = tokio::select! {
-				err = self.broadcast.closed() => Err(err),
-				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp,
+			let resp = match race2(
+				self.broadcast.closed(),
+				stream.reader.decode::<lite::SubscribeResponse>(),
+			)
+			.await
+			{
+				Race::First(err) => Err(err),
+				Race::Second(resp) => resp,
 			};
 
 			let ok = match resp {

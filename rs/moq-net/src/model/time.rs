@@ -427,12 +427,6 @@ mod clock {
 			from_std_instant(instant)
 		}
 	}
-
-	impl From<tokio::time::Instant> for Timestamp {
-		fn from(instant: tokio::time::Instant) -> Self {
-			from_std_instant(instant.into_std())
-		}
-	}
 }
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]

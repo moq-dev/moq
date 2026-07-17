@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::sync::mpsc;
+use futures::{StreamExt, channel::mpsc, lock::Mutex as AsyncMutex};
 
 use crate::{
 	Error, PathOwned,
@@ -42,7 +42,7 @@ impl VirtualRecvStream {
 			return false;
 		}
 
-		match self.rx.recv().await {
+		match self.rx.next().await {
 			Some(data) => {
 				self.buffer = data;
 				true
@@ -101,7 +101,7 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 			return Ok(());
 		}
 		// Drain remaining messages
-		while self.rx.recv().await.is_some() {}
+		while self.rx.next().await.is_some() {}
 		self.closed = true;
 		Ok(())
 	}
@@ -201,11 +201,11 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
+				self.control_tx.unbounded_send(buf).map_err(|_| crate::Error::Closed)?;
 			}
 		} else {
 			self.control_tx
-				.send(Bytes::copy_from_slice(buf))
+				.unbounded_send(Bytes::copy_from_slice(buf))
 				.map_err(|_| crate::Error::Closed)?;
 		}
 
@@ -220,10 +220,12 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
+				self.control_tx.unbounded_send(buf).map_err(|_| crate::Error::Closed)?;
 			}
 		} else {
-			self.control_tx.send(chunk).map_err(|_| crate::Error::Closed)?;
+			self.control_tx
+				.unbounded_send(chunk)
+				.map_err(|_| crate::Error::Closed)?;
 		}
 
 		Ok(())
@@ -236,7 +238,7 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		if let Some(pending) = self.pending.take()
 			&& !pending.buf.is_empty()
 		{
-			let _ = self.control_tx.send(pending.buf.freeze());
+			let _ = self.control_tx.unbounded_send(pending.buf.freeze());
 		}
 		Ok(())
 	}
@@ -359,7 +361,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for Adapte
 
 struct Shared {
 	incoming_tx: mpsc::UnboundedSender<(VirtualSendStream, VirtualRecvStream)>,
-	incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(VirtualSendStream, VirtualRecvStream)>>,
+	incoming_rx: AsyncMutex<mpsc::UnboundedReceiver<(VirtualSendStream, VirtualRecvStream)>>,
 
 	/// Channel that VirtualSendStreams write to; the writer task reads from this.
 	control_tx: mpsc::UnboundedSender<Bytes>,
@@ -381,12 +383,12 @@ pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Bytes>, control: Control, version: Version) -> Self {
-		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+		let (incoming_tx, incoming_rx) = mpsc::unbounded();
 		Self {
 			inner,
 			shared: Arc::new(Shared {
 				incoming_tx,
-				incoming_rx: tokio::sync::Mutex::new(incoming_rx),
+				incoming_rx: AsyncMutex::new(incoming_rx),
 				control_tx,
 				streams: Mutex::new(HashMap::new()),
 				namespaces: Mutex::new(HashMap::new()),
@@ -412,9 +414,8 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		writer: Writer<S::SendStream, Version>,
 		rx: mpsc::UnboundedReceiver<Bytes>,
 	) -> Result<(), Error> {
-		tokio::select! {
-			res = self.run_read(reader) => res,
-			res = Self::run_write(writer, rx) => res,
+		match crate::util::race2(self.run_read(reader), Self::run_write(writer, rx)).await {
+			crate::util::Race::First(res) | crate::util::Race::Second(res) => res,
 		}
 	}
 
@@ -423,7 +424,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		mut writer: Writer<S::SendStream, Version>,
 		mut rx: mpsc::UnboundedReceiver<Bytes>,
 	) -> Result<(), Error> {
-		while let Some(msg) = rx.recv().await {
+		while let Some(msg) = rx.next().await {
 			let mut buf = std::io::Cursor::new(msg);
 			writer.write_all(&mut buf).await?;
 		}
@@ -450,25 +451,28 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 
 			match route {
 				Route::NewRequest(request_id) => {
-					let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+					let (follow_tx, follow_rx) = mpsc::unbounded();
 					let recv = VirtualRecvStream::new(raw, follow_rx);
 					let send = VirtualSendStream::new(self.shared.control_tx.clone());
 					self.shared.streams.lock().unwrap().insert(request_id, follow_tx);
-					self.shared.incoming_tx.send((send, recv)).map_err(|_| Error::Closed)?;
+					self.shared
+						.incoming_tx
+						.unbounded_send((send, recv))
+						.map_err(|_| Error::Closed)?;
 				}
 				Route::Response(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().get(&request_id) {
-						let _ = tx.send(raw);
+						let _ = tx.unbounded_send(raw);
 					}
 				}
 				Route::FollowUp(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().get(&request_id) {
-						let _ = tx.send(raw);
+						let _ = tx.unbounded_send(raw);
 					}
 				}
 				Route::CloseStream(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().remove(&request_id) {
-						let _ = tx.send(raw);
+						let _ = tx.unbounded_send(raw);
 					}
 				}
 				Route::MaxRequestId(max) => {
@@ -690,24 +694,18 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 
 		match self.version {
 			// v16: SubscribeNamespace uses real bidi streams, so race both sources.
-			Version::Draft16 => {
-				tokio::select! {
-					result = rx.recv() => {
-						match result {
-							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-							None => Err(crate::Error::Closed),
-						}
-					}
-					result = self.inner.accept_bi() => {
-						match result {
-							Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
-							Err(_) => Err(crate::Error::Closed),
-						}
-					}
-				}
-			}
+			Version::Draft16 => match crate::util::race2(rx.next(), self.inner.accept_bi()).await {
+				crate::util::Race::First(result) => match result {
+					Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+					None => Err(crate::Error::Closed),
+				},
+				crate::util::Race::Second(result) => match result {
+					Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
+					Err(_) => Err(crate::Error::Closed),
+				},
+			},
 			// v14/v15: Only virtual streams from control stream.
-			_ => match rx.recv().await {
+			_ => match rx.next().await {
 				Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
 				None => Err(crate::Error::Closed),
 			},
@@ -715,7 +713,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let (follow_tx, follow_rx) = mpsc::unbounded_channel();
+		let (follow_tx, follow_rx) = mpsc::unbounded();
 		let recv = VirtualRecvStream::new(Bytes::new(), follow_rx);
 		let send = VirtualSendStream::with_registration(
 			self.shared.control_tx.clone(),
@@ -829,11 +827,11 @@ mod tests {
 	fn classify_msg(version: Version, type_id: u64, body: &Bytes) -> Result<Route, Error> {
 		// Build a minimal adapter just for the classify method.
 		// classify() only reads self.version and self.shared.namespaces.
-		let (control_tx, _) = mpsc::unbounded_channel();
-		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+		let (control_tx, _) = mpsc::unbounded();
+		let (incoming_tx, incoming_rx) = mpsc::unbounded();
 		let shared = Arc::new(Shared {
 			incoming_tx,
-			incoming_rx: tokio::sync::Mutex::new(incoming_rx),
+			incoming_rx: AsyncMutex::new(incoming_rx),
 			control_tx,
 			streams: Mutex::new(HashMap::new()),
 			namespaces: Mutex::new(HashMap::new()),
@@ -1119,7 +1117,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_virtual_recv_stream_reads_initial_then_followup() {
 		let initial = Bytes::from_static(b"initial");
-		let (tx, rx) = mpsc::unbounded_channel();
+		let (tx, rx) = mpsc::unbounded();
 		let mut stream = VirtualRecvStream::new(initial, rx);
 
 		// Read initial data
@@ -1128,7 +1126,7 @@ mod tests {
 		assert_eq!(&buf[..n], b"initial");
 
 		// Send follow-up
-		tx.send(Bytes::from_static(b"followup")).unwrap();
+		tx.unbounded_send(Bytes::from_static(b"followup")).unwrap();
 		let n = stream.read(&mut buf).await.unwrap().unwrap();
 		assert_eq!(&buf[..n], b"followup");
 
@@ -1141,7 +1139,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_virtual_recv_stream_partial_reads() {
 		let initial = Bytes::from_static(b"hello world");
-		let (_tx, rx) = mpsc::unbounded_channel();
+		let (_tx, rx) = mpsc::unbounded();
 		let mut stream = VirtualRecvStream::new(initial, rx);
 
 		// Read small chunks
@@ -1159,13 +1157,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_virtual_send_stream_writes_to_channel() {
-		let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+		let (control_tx, mut control_rx) = mpsc::unbounded();
 		let mut stream = VirtualSendStream::new(control_tx);
 
 		let n = stream.write(b"hello").await.unwrap();
 		assert_eq!(n, 5);
 
-		let data = control_rx.recv().await.unwrap();
+		let data = control_rx.next().await.unwrap();
 		assert_eq!(data, &b"hello"[..]);
 	}
 

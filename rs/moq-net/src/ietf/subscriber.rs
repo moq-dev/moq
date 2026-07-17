@@ -11,7 +11,7 @@ use crate::{
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	origin, stats, track,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
+	util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, TaskSet, Tasks, race2, race3},
 };
 
 use super::{Message, Version};
@@ -112,14 +112,9 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 			})
 			.map(|result| result.map_err(|_| Error::Dropped))
 	});
-	let timeout = web_async::time::sleep(TRACK_ALIAS_TIMEOUT);
-
-	tokio::pin!(resolved);
-	tokio::pin!(timeout);
-
-	tokio::select! {
-		request_id = &mut resolved => request_id,
-		_ = &mut timeout => Err(Error::NotFound),
+	match race2(resolved, web_async::time::sleep(TRACK_ALIAS_TIMEOUT)).await {
+		Race::First(request_id) => request_id,
+		Race::Second(()) => Err(Error::NotFound),
 	}
 }
 
@@ -677,9 +672,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let next = subscribes
 				.drive(async {
-					tokio::select! {
-						request = broadcast.requested_track() => Some(request),
-						_ = self.session.closed() => None,
+					match race2(broadcast.requested_track(), self.session.closed()).await {
+						Race::First(request) => Some(request),
+						Race::Second(_) => None,
 					}
 				})
 				.await;
@@ -792,27 +787,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// lifetime. It drops (releasing `broadcasts_closed`) when this fn returns.
 		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
-		tokio::select! {
-			_ = track.unused() => {
+		match race3(track.unused(), broadcast.closed(), stream.reader.closed()).await {
+			Race3::First(_) => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
-			err = broadcast.closed() => {
+			Race3::Second(err) => {
 				tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "broadcast closed");
 				let _ = track.abort(err);
 			}
-			res = stream.reader.closed() => {
-				match res {
-					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
-						let _ = track.finish();
-					}
-					Err(err) => {
-						tracing::debug!(%err, "subscribe stream closed with error");
-						let _ = track.abort(err);
-					}
+			Race3::Third(res) => match res {
+				Ok(()) => {
+					tracing::info!(broadcast = %self.origin.absolute(&broadcast_path), track = %track.name(), "subscribe complete");
+					let _ = track.finish();
 				}
-			}
+				Err(err) => {
+					tracing::debug!(%err, "subscribe stream closed with error");
+					let _ = track.abort(err);
+				}
+			},
 		}
 
 		// Clean up
@@ -898,10 +891,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Bump groups counter for this incoming group on the subscriber side.
 		track_stats.group();
 
-		let res = tokio::select! {
-			err = track.closed() => Err(err),
-			err = producer.closed() => Err(err),
-			res = self.run_group(group, stream, producer.clone(), track_stats.clone()) => res,
+		let res = match race3(
+			track.closed(),
+			producer.closed(),
+			self.run_group(group, stream, producer.clone(), track_stats.clone()),
+		)
+		.await
+		{
+			Race3::First(err) | Race3::Second(err) => Err(err),
+			Race3::Third(res) => res,
 		};
 
 		match res {

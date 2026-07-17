@@ -3,7 +3,7 @@ use crate::{
 	Error, Origin, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
+	util::{MaybeBoxedExt, MaybeSendBox, Race3, TaskSet, err_only, race3},
 };
 
 use super::{
@@ -149,10 +149,18 @@ pub fn start<S: web_transport_trait::Session>(
 	});
 
 	let driver = async move {
-		let res = tokio::select! {
-			Err(res) = run_session(setup_stream) => Err(res),
-			res = publisher.run() => res,
-			res = subscriber.run(sub_connecting, task_set) => res,
+		// Only a session-stream error ends the race; its clean completion (no stream)
+		// parks so the publisher and subscriber keep running.
+		let res = match race3(
+			err_only(run_session(setup_stream)),
+			publisher.run(),
+			subscriber.run(sub_connecting, task_set),
+		)
+		.await
+		{
+			Race3::First(err) => Err(err),
+			Race3::Second(res) => res,
+			Race3::Third(res) => res,
 		};
 
 		match &res {

@@ -32,6 +32,71 @@ pub(crate) trait MaybeBoxedExt<'a>: Future + Sized + 'a {
 #[cfg(target_family = "wasm")]
 impl<'a, F: Future + 'a> MaybeBoxedExt<'a> for F {}
 
+/// The winner of a [`race2`] between two futures.
+pub(crate) enum Race<A, B> {
+	First(A),
+	Second(B),
+}
+
+/// Await whichever future completes first, dropping the loser.
+///
+/// Biased: `a` is polled before `b` on every wake, so when both are ready the
+/// first argument wins deterministically.
+pub(crate) async fn race2<A: Future, B: Future>(a: A, b: B) -> Race<A::Output, B::Output> {
+	let mut a = std::pin::pin!(a);
+	let mut b = std::pin::pin!(b);
+	kio::wait(move |waiter| {
+		if let Poll::Ready(output) = waiter.poll_future(a.as_mut()) {
+			return Poll::Ready(Race::First(output));
+		}
+		if let Poll::Ready(output) = waiter.poll_future(b.as_mut()) {
+			return Poll::Ready(Race::Second(output));
+		}
+		Poll::Pending
+	})
+	.await
+}
+
+/// The winner of a [`race3`] between three futures.
+pub(crate) enum Race3<A, B, C> {
+	First(A),
+	Second(B),
+	Third(C),
+}
+
+/// Await whichever of three futures completes first, dropping the losers.
+///
+/// Biased like [`race2`]: earlier arguments win ties.
+pub(crate) async fn race3<A: Future, B: Future, C: Future>(a: A, b: B, c: C) -> Race3<A::Output, B::Output, C::Output> {
+	let mut a = std::pin::pin!(a);
+	let mut b = std::pin::pin!(b);
+	let mut c = std::pin::pin!(c);
+	kio::wait(move |waiter| {
+		if let Poll::Ready(output) = waiter.poll_future(a.as_mut()) {
+			return Poll::Ready(Race3::First(output));
+		}
+		if let Poll::Ready(output) = waiter.poll_future(b.as_mut()) {
+			return Poll::Ready(Race3::Second(output));
+		}
+		if let Poll::Ready(output) = waiter.poll_future(c.as_mut()) {
+			return Poll::Ready(Race3::Third(output));
+		}
+		Poll::Pending
+	})
+	.await
+}
+
+/// Resolve with the error of a fallible future, parking forever on success.
+///
+/// The building block for racing "watchdog" futures whose clean completion should
+/// not end the race (only their failure should).
+pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
+	match fut.await {
+		Err(err) => err,
+		Ok(()) => std::future::pending().await,
+	}
+}
+
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
 #[derive(Clone)]
 pub(crate) struct Tasks {

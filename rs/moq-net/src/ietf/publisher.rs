@@ -2,7 +2,6 @@ use crate::{group, origin, stats, track};
 use std::collections::HashMap;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
@@ -10,7 +9,7 @@ use crate::{
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::{MaybeBoxedExt, MaybeSendBox, Race, Race3, race2, race3},
 };
 
 use super::{Message, Version};
@@ -185,10 +184,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.await?;
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
-		let res = tokio::select! {
-			res = self.run_track(track, request_id, track_stats) => res,
-			_ = stream.reader.closed() => Ok(()),
-			_ = self.session.closed() => Ok(()),
+		let res = match race3(
+			self.run_track(track, request_id, track_stats),
+			stream.reader.closed(),
+			self.session.closed(),
+		)
+		.await
+		{
+			Race3::First(res) => res,
+			Race3::Second(_) | Race3::Third(_) => Ok(()),
 		};
 
 		// Send PublishDone
@@ -270,15 +274,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
-			let group = tokio::select! {
-				// Poll all active group futures; never matches but keeps them running.
-				true = async {
-					while tasks.next().await.is_some() {}
-					false
-				} => unreachable!(),
-				Some(group) = track.recv_group().transpose() => group,
-				else => return Ok(()),
-			}?;
+			// Await the next group while driving the in-flight group futures.
+			let group = {
+				let mut recv = std::pin::pin!(track.recv_group());
+				kio::wait(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					while let std::task::Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
+					waiter.poll_future(recv.as_mut())
+				})
+				.await
+			};
+
+			let Some(group) = group? else {
+				// Track finished: drain the in-flight group futures, then FIN.
+				while tasks.next().await.is_some() {}
+				return Ok(());
+			};
 
 			let sequence = group.sequence;
 			tracing::debug!(subscribe = %request_id, track = %track.name(), sequence, "serving group");
@@ -328,10 +339,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		track_stats.group();
 
 		loop {
-			let frame = tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				frame = group.next_frame() => frame,
+			let frame = match race2(stream.closed(), group.next_frame()).await {
+				Race::First(_) => return Err(Error::Cancel),
+				Race::Second(frame) => frame,
 			};
 
 			let mut frame = match frame? {
@@ -360,10 +370,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			} else {
 				// Stream each chunk of the frame.
 				loop {
-					let chunk = tokio::select! {
-						biased;
-						_ = stream.closed() => return Err(Error::Cancel),
-						chunk = frame.read_chunk() => chunk,
+					let chunk = match race2(stream.closed(), frame.read_chunk()).await {
+						Race::First(_) => return Err(Error::Cancel),
+						Race::Second(chunk) => chunk,
 					};
 
 					match chunk? {
@@ -519,10 +528,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut announced = self.origin.announced();
 
 		loop {
-			let next = tokio::select! {
-				biased;
-				_ = self.session.closed() => return Ok(()),
-				next = announced.next() => next,
+			let next = match race2(self.session.closed(), announced.next()).await {
+				Race::First(_) => return Ok(()),
+				Race::Second(next) => next,
 			};
 
 			let Some(crate::announce::Update { path, broadcast }) = next else {
@@ -710,31 +718,33 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 				// Stream updates
 				loop {
-					tokio::select! {
-						biased;
-						res = stream.reader.closed() => return res,
-					next = announced.next() => {
-						let Some(crate::announce::Update { path, broadcast }) = next else {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
-						};
+					match race2(stream.reader.closed(), announced.next()).await {
+						Race::First(res) => return res,
+						Race::Second(next) => {
+							let Some(crate::announce::Update { path, broadcast }) = next else {
+								stream.writer.finish()?;
+								return stream.writer.closed().await;
+							};
 
-						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
-						let absolute = origin.absolute(&path).to_owned();
+							let suffix = path
+								.strip_prefix(&prefix)
+								.expect("origin returned invalid path")
+								.to_owned();
+							let absolute = origin.absolute(&path).to_owned();
 
-						match broadcast {
-							Some(_) => {
-								tracing::debug!(broadcast = %absolute, "namespace");
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							}
-							None => {
-								tracing::debug!(broadcast = %absolute, "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							match broadcast {
+								Some(_) => {
+									tracing::debug!(broadcast = %absolute, "namespace");
+									stream.writer.encode(&ietf::Namespace::ID).await?;
+									stream.writer.encode(&ietf::Namespace { suffix }).await?;
+								}
+								None => {
+									tracing::debug!(broadcast = %absolute, "namespace_done");
+									stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+									stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+								}
 							}
 						}
-					}
 					}
 				}
 			}
