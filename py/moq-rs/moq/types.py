@@ -1,9 +1,6 @@
 """Re-export moq-ffi record types without the Moq prefix."""
 
 from moq_ffi import (
-    Container as Container,
-)
-from moq_ffi import (
     MoqAudio as Audio,
 )
 from moq_ffi import (
@@ -31,6 +28,9 @@ from moq_ffi import (
     MoqConnectionStats as ConnectionStats,
 )
 from moq_ffi import (
+    MoqContainer as Container,
+)
+from moq_ffi import (
     MoqDatagram as Datagram,
 )
 from moq_ffi import (
@@ -41,6 +41,9 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqFrame as Frame,
+)
+from moq_ffi import (
+    MoqMediaFrame as MediaFrame,
 )
 from moq_ffi import (
     MoqSubscription as Subscription,
@@ -70,6 +73,7 @@ __all__ = [
     "Dimensions",
     "Frame",
     "FetchGroupOptions",
+    "MediaFrame",
     "Subscription",
     "TrackInfo",
     "Video",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 
 from moq_ffi import (
+    MoqAnnounce,
     MoqAnnounced,
     MoqAnnouncedBroadcast,
     MoqAnnouncement,
@@ -17,6 +18,30 @@ from moq_ffi import (
 
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
+
+
+class Announce:
+    """A live announcement, returned by :meth:`OriginProducer.announce`.
+
+    The broadcast stays announced until :meth:`unannounce` is called or this object is
+    collected. Closing the broadcast does not unannounce it. Usable as a context manager::
+
+        with origin.announce("live", broadcast):
+            ...
+    """
+
+    def __init__(self, inner: MoqAnnounce) -> None:
+        self._inner = inner
+
+    def unannounce(self) -> None:
+        """Unannounce the broadcast, removing it from the origin. Idempotent."""
+        self._inner.unannounce()
+
+    def __enter__(self) -> Announce:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.unannounce()
 
 
 class Announcement:
@@ -168,14 +193,18 @@ class OriginProducer:
         """Serve broadcasts that consumers request without an announcement."""
         return OriginDynamic(self._inner.dynamic())
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
-        """Advertise ``broadcast`` at ``path`` so subscribers can discover it."""
-        self._inner.announce(path, broadcast._inner)
+    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
+        """Advertise ``broadcast`` at ``path`` so subscribers can discover it.
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+        Hold the returned :class:`Announce` for as long as the broadcast should stay
+        discoverable; unannouncing it (or dropping it) removes the path.
+        """
+        return Announce(self._inner.announce(path, broadcast._inner))
+
+    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
         warnings.warn(
             "OriginProducer.publish() is deprecated; use OriginProducer.announce() instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        self.announce(path, broadcast)
+        return self.announce(path, broadcast)

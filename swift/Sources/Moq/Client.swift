@@ -61,6 +61,10 @@ public final class Client: Sendable {
     }
 
     /// Connect and wait for the session to be established. Cancellable via `cancel()`.
+    ///
+    /// With neither `setPublish` nor `setConsume` wired, both sides of the session share one
+    /// origin, so a broadcast announced via `Session.publisher` is also discoverable through
+    /// `Session.consumer`. Wiring either side opts out and isolates the two directions.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))
     }

@@ -87,16 +87,14 @@ func WithSubscribeOrigin(o *OriginProducer) ClientOption {
 }
 
 // Client is a connected MoQ client with automatic origin wiring. When no origin
-// option is given, Dial creates a shared internal origin used for both
-// publishing and consuming.
+// option is given, both sides share one origin, so a broadcast announced here is
+// also discoverable here.
 type Client struct {
-	inner         *ffi.MoqClient
-	origin        *OriginProducer
-	publishOrigin *OriginProducer
-	consumeOrigin *OriginProducer
-	consumer      *OriginConsumer
-	session       *Session
-	closeOnce     sync.Once
+	inner     *ffi.MoqClient
+	publisher *OriginProducer
+	consumer  *OriginConsumer
+	session   *Session
+	closeOnce sync.Once
 }
 
 // Dial connects to a MoQ server and returns the established client. Cancel ctx
@@ -110,15 +108,6 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 
 	c := &Client{}
-	if cfg.publish == nil && cfg.subscribe == nil {
-		c.origin = NewOriginProducer()
-		c.publishOrigin = c.origin
-		c.consumeOrigin = c.origin
-	} else {
-		c.publishOrigin = cfg.publish
-		c.consumeOrigin = cfg.subscribe
-	}
-
 	inner := ffi.NewMoqClient()
 	if !cfg.tlsVerify {
 		inner.SetTlsDisableVerify(true)
@@ -144,11 +133,11 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 			return nil, err
 		}
 	}
-	if c.publishOrigin != nil {
-		inner.SetPublish(&c.publishOrigin.inner)
+	if cfg.publish != nil {
+		inner.SetPublish(&cfg.publish.inner)
 	}
-	if c.consumeOrigin != nil {
-		inner.SetConsume(&c.consumeOrigin.inner)
+	if cfg.subscribe != nil {
+		inner.SetConsume(&cfg.subscribe.inner)
 	}
 	c.inner = inner
 
@@ -161,42 +150,33 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	}
 	c.session = &Session{inner: session}
 
-	// Only a configured consume origin yields a consumer. A publish-only client
-	// has none, so Announced/AnnouncedBroadcast surface ErrNoConsumeOrigin
-	// rather than silently reading from the local publish origin.
-	if c.consumeOrigin != nil {
-		c.consumer = c.consumeOrigin.Consume()
-	}
+	// The session always exposes both sides, wired from the options above or auto-created,
+	// so publishing and discovery always have somewhere to go.
+	c.publisher = c.session.Publisher()
+	c.consumer = c.session.Consumer()
 
 	return c, nil
 }
 
 // Announce advertises a broadcast under path so the remote can discover it.
-func (c *Client) Announce(path string, broadcast *BroadcastProducer) error {
-	if c.publishOrigin == nil {
-		return ErrNoPublishOrigin
-	}
-	return c.publishOrigin.Announce(path, broadcast)
+//
+// Hold the returned Announce for as long as the broadcast should stay discoverable.
+func (c *Client) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
+	return c.publisher.Announce(path, broadcast)
 }
 
 // Deprecated: use Announce.
-func (c *Client) Publish(path string, broadcast *BroadcastProducer) error {
+func (c *Client) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
 	return c.Announce(path, broadcast)
 }
 
 // Announced streams broadcasts announced by the remote under prefix.
 func (c *Client) Announced(prefix string) (*Announced, error) {
-	if c.consumer == nil {
-		return nil, ErrNoConsumeOrigin
-	}
 	return c.consumer.Announced(prefix)
 }
 
 // AnnouncedBroadcast resolves a single announced broadcast at path.
 func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
-	if c.consumer == nil {
-		return nil, ErrNoConsumeOrigin
-	}
 	return c.consumer.AnnouncedBroadcast(path)
 }
 
@@ -204,9 +184,6 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 // announced broadcast if present, otherwise a dynamic fallback on the origin, or an
 // error. Unlike AnnouncedBroadcast, it does not wait for a future announcement.
 func (c *Client) RequestBroadcast(path string) (*BroadcastConsumer, error) {
-	if c.consumer == nil {
-		return nil, ErrNoConsumeOrigin
-	}
 	return c.consumer.RequestBroadcast(path)
 }
 

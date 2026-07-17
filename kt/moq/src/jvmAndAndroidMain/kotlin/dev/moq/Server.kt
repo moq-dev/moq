@@ -32,10 +32,15 @@ class Server internal constructor(
     val localAddr: String,
     private val publishOrigin: MoqOriginProducer?,
 ) : AutoCloseable {
-    /** Announce [broadcast] under [path] so incoming sessions can discover it. */
-    fun announce(path: String, broadcast: BroadcastProducer) {
+    /**
+     * Announce [broadcast] under [path] so incoming sessions can discover it.
+     *
+     * Hold the returned [Announce] for as long as the broadcast should stay discoverable;
+     * unannouncing it removes the path. Closing the broadcast does not unannounce it.
+     */
+    fun announce(path: String, broadcast: BroadcastProducer): Announce {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")
-        origin.announce(path, broadcast)
+        return origin.announce(path, broadcast)
     }
 
     /**
@@ -48,7 +53,7 @@ class Server internal constructor(
 
     /**
      * Stream of incoming sessions. Each [MoqRequest] must be answered with
-     * `ok()` to complete the handshake or `close(code)` to reject it; the
+     * `accept()` to complete the handshake or `reject(code)` to reject it; the
      * returned session must be held to keep the connection alive.
      *
      * The Flow completes when the server stops accepting.
@@ -76,7 +81,7 @@ class Server internal constructor(
                 // routine. Swallow it: letting it escape would cancel the scope
                 // and let one client take the whole accept loop down.
                 try {
-                    request.ok().closed()
+                    request.accept().closed()
                 } catch (e: MoqException) {
                     // Nothing to do; this session is already gone.
                 }

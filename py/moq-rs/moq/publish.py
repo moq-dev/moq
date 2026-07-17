@@ -23,7 +23,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Subscription, TrackInfo, VideoHint
+from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Frame, Subscription, TrackInfo, VideoHint
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -52,8 +52,8 @@ class MediaProducer:
         """Wait until this media track has no active subscribers."""
         await self._inner.unused()
 
-    def write_frame(self, payload: bytes, timestamp_us: int) -> None:
-        self._inner.write_frame(payload, timestamp_us)
+    def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
+        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def finish(self) -> None:
         self._inner.finish()
@@ -96,9 +96,9 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp_us: int) -> None:
+    def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
         """Write a frame with a presentation timestamp in microseconds."""
-        self._inner.write_frame(payload, timestamp_us)
+        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def finish(self) -> None:
         self._inner.finish()
@@ -142,17 +142,17 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp_us: int) -> None:
+    def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
         """Write a single-frame group with a timestamp in microseconds."""
-        self._inner.write_frame(payload, timestamp_us)
+        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
-    def append_datagram(self, timestamp_us: int, payload: bytes) -> int:
+    def append_datagram(self, payload: bytes, timestamp_us: int = 0) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
         transport and wire version; there is no stream fallback.
         """
-        return self._inner.append_datagram(timestamp_us, payload)
+        return self._inner.append_datagram(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
@@ -391,17 +391,23 @@ class BroadcastProducer:
         return TrackProducer(self._inner.publish_track(name, info))
 
     def publish_json_snapshot(
-        self, name: str, *, delta_ratio: int = 8, compression: bool = False
+        self, name: str, *, delta_ratio: int | None = None, compression: bool = False
     ) -> JsonSnapshotProducer:
         """Publish a JSON snapshot track (lossy latest-value).
 
         Each update supersedes the last; a late joiner only sees the newest value.
         ``delta_ratio`` controls how aggressively deltas are emitted instead of full
-        snapshots (0 disables deltas). Set ``compression`` to DEFLATE-compress each group;
-        the consumer must pass the same flag. Advertise the track with
-        :meth:`set_catalog_section` if consumers should discover it.
+        snapshots (0 disables deltas); ``None`` uses the binding's default. Set
+        ``compression`` to DEFLATE-compress each group; the consumer must pass the same
+        flag. Advertise the track with :meth:`set_catalog_section` if consumers should
+        discover it.
         """
-        config = MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
+        # Let the record supply delta_ratio's default rather than restating it here.
+        config = (
+            MoqJsonSnapshotConfig(compression=compression)
+            if delta_ratio is None
+            else MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
+        )
         return JsonSnapshotProducer(self._inner.publish_json_snapshot(name, config))
 
     def publish_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamProducer:

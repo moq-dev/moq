@@ -57,10 +57,14 @@ func ExampleClient_Publish() {
 		log.Fatal(err)
 	}
 
-	if err := client.Announce("me/mic", broadcast); err != nil {
+	announce, err := client.Announce("me/mic", broadcast)
+	if err != nil {
 		log.Fatal(err)
 	}
-	if err := media.WriteFrame([]byte("opus frame"), 0); err != nil {
+	// The broadcast stays announced until this handle goes away.
+	defer announce.Unannounce()
+
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -133,11 +137,11 @@ func ExampleServer_Requests() {
 
 		// Reject anything that didn't arrive over QUIC.
 		if req.Transport() != moq.TransportQUIC {
-			_ = req.Close(ctx, 403)
+			_ = req.Reject(ctx, 403)
 			continue
 		}
 
-		session, err := req.OK(ctx)
+		session, err := req.Accept(ctx)
 		if err != nil {
 			continue
 		}

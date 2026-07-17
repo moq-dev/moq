@@ -64,7 +64,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame("cached".encodeToByteArray(), timestampUs = 0u)
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -118,7 +118,8 @@ class SmokeTest {
             assertEquals(64, fingerprints[0].length)
 
             BroadcastProducer().use { broadcast ->
-                server.announce("live", broadcast)
+                val announce = server.announce("live", broadcast)
+                announce.unannounce()
             }
         }
     }

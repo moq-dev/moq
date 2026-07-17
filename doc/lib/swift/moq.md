@@ -87,7 +87,7 @@ Raw track subscribers can query the publisher's track properties and change thei
 let track = try await announcement.broadcast.subscribeTrack(
     name: "events",
     subscription: Subscription(priority: 10))
-let info = try await track.info()
+let info = try track.info()
 track.update(subscription: Subscription(priority: 20, ordered: false))
 ```
 
@@ -99,7 +99,7 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 let broadcast = try BroadcastProducer()
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
 
-try session.publisher.announce(path: "my-stream", broadcast: broadcast)
+let announce = try session.publisher.announce(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload, timestampUs: 0)
 try audio.writeFrame(payload, timestampUs: 20_000)
@@ -148,7 +148,7 @@ Use a dynamic broadcast when subscribers should be able to request raw tracks th
 let broadcast = try BroadcastProducer()
 let dynamic = try broadcast.dynamic()
 
-try session.publisher.announce(path: "events", broadcast: broadcast)
+let announce = try session.publisher.announce(path: "events", broadcast: broadcast)
 
 for try await request in dynamic {
     if try request.name == "alerts" {
@@ -161,14 +161,14 @@ for try await request in dynamic {
 }
 ```
 
-Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber. Use `writeFrame(_:timestampUs:)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `Frame` values from `readFrame()` and group iteration.
+Each request arrives as a `TrackRequest`; call `accept(info:)` to turn it into a `TrackProducer` (omit `info` for defaults), or `abort(errorCode:)` to reject the subscriber. Use `writeFrame(_:timestampUs:)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `Frame` values (payload plus timestamp) from `readFrame()` and group iteration; media subscriptions yield `MediaFrame`, which adds the codec-derived `keyframe` flag.
 
 ### Raw datagrams
 
 Raw tracks can send a single best-effort payload without opening a group stream:
 
 ```swift
-let sequence = try track.appendDatagram(timestampUs: 42_000, payload: Data("meter update".utf8))
+let sequence = try track.appendDatagram(Data("meter update".utf8), timestampUs: 42_000)
 let datagram = try await consumer.recvDatagram()
 
 for try await datagram in consumer.datagrams {

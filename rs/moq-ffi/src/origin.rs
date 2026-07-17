@@ -131,6 +131,29 @@ impl MoqOriginConsumer {
 	}
 }
 
+/// Resolve the (publish, subscribe) origin pair backing a session.
+///
+/// With neither side wired, both sides share ONE origin, so a broadcast announced on a session
+/// is discoverable through that same session's consumer. Wiring either side opts out of the
+/// loopback and gives the other side a fresh origin, keeping the two directions isolated.
+pub(crate) fn resolve_pair(
+	publish: Option<&Arc<MoqOriginProducer>>,
+	consume: Option<&Arc<MoqOriginProducer>>,
+) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
+	if publish.is_none() && consume.is_none() {
+		// Clones of a Producer share the underlying origin, so this is one origin, not two.
+		let shared = moq_net::Origin::random().produce();
+		return (shared.clone(), shared);
+	}
+
+	let resolve = |origin: Option<&Arc<MoqOriginProducer>>| {
+		origin
+			.map(|o| o.inner().clone())
+			.unwrap_or_else(|| moq_net::Origin::random().produce())
+	};
+	(resolve(publish), resolve(consume))
+}
+
 #[uniffi::export]
 impl MoqOriginProducer {
 	/// Create a new origin for publishing and/or consuming broadcasts.
@@ -161,24 +184,45 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Announce a broadcast to this origin under the given path so
-	/// subscribers can discover it. Named `announce` (not `publish`) so
-	/// the `MoqSession::publisher().announce(...)` chain doesn't stutter
-	/// "publisher.publish".
-	pub fn announce(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+	/// Announce a broadcast to this origin under the given path so subscribers can discover it.
+	/// Named `announce` (not `publish`) so the `MoqSession::publisher().announce(...)` chain
+	/// doesn't stutter "publisher.publish".
+	///
+	/// The broadcast stays announced until the returned [`MoqAnnounce`] is unannounced or
+	/// dropped. Closing the broadcast alone does not unannounce it, so hold the handle for as
+	/// long as the broadcast should be discoverable.
+	pub fn announce(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<Arc<MoqAnnounce>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let consumer = broadcast.consume_inner()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let publish = self.inner.publish_broadcast(path.as_str(), &consumer)?;
 
-		// Auto-unannounce when the broadcast closes (all producers dropped). The origin no longer
-		// watches closure itself, so the spawn lives here at the runtime-bound FFI boundary.
-		tokio::spawn(async move {
-			consumer.closed().await;
-			drop(publish);
-		});
+		Ok(Arc::new(MoqAnnounce {
+			inner: std::sync::Mutex::new(Some(publish)),
+		}))
+	}
+}
 
-		Ok(())
+// ---- MoqAnnounce ----
+
+/// A live announcement, returned by [`MoqOriginProducer::announce`].
+///
+/// This is the publish-side guard: it keeps one broadcast announced, and unannouncing it
+/// removes the path from the origin. (The subscribe-side [`MoqAnnounced`] is the unrelated
+/// stream of announcements arriving from a remote.)
+#[derive(uniffi::Object)]
+pub struct MoqAnnounce {
+	inner: std::sync::Mutex<Option<moq_net::origin::Publish>>,
+}
+
+#[uniffi::export]
+impl MoqAnnounce {
+	/// Unannounce the broadcast, removing it from the origin. Idempotent, and implied by
+	/// dropping this handle.
+	pub fn unannounce(&self) {
+		let _guard = crate::ffi::RUNTIME.enter();
+		// Dropping the moq-net guard is what unannounces.
+		drop(self.inner.lock().unwrap().take());
 	}
 }
 

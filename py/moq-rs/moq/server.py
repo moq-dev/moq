@@ -9,7 +9,7 @@ from typing import Literal
 
 from moq_ffi import MoqRequest, MoqServer
 
-from .origin import OriginProducer
+from .origin import Announce, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 
@@ -19,11 +19,11 @@ Transport = Literal["quic", "iroh", "websocket"]
 class Request:
     """Wraps MoqRequest, an incoming session that can be accepted or rejected.
 
-    Use `await request.ok()` to complete the handshake, or
-    `await request.close(code)` to reject with an HTTP status code.
+    Use `await request.accept()` to complete the handshake, or
+    `await request.reject(code)` to reject with an HTTP status code.
 
     Dropping a Request without responding closes the underlying connection
-    silently; call `close(code)` to send an explicit HTTP status.
+    silently; call `reject(code)` to send an explicit HTTP status.
     """
 
     def __init__(self, inner: MoqRequest) -> None:
@@ -47,25 +47,25 @@ class Request:
         server's configured consume origin if unset."""
         self._inner.set_consume(origin._inner if origin is not None else None)
 
-    async def ok(self) -> Session:
+    async def accept(self) -> Session:
         """Complete the MoQ handshake and return the established session.
 
         The caller must hold the returned session to keep the connection
         alive; dropping it closes the session. Raises `Error.AlreadyResponded`
-        if `ok()` or `close()` has already been called.
+        if `accept()` or `reject()` has already been called.
         """
-        return Session(await self._inner.ok())
+        return Session(await self._inner.accept())
 
-    async def close(self, code: int) -> None:
+    async def reject(self, code: int) -> None:
         """Reject the session with the given HTTP status code.
 
-        Raises `Error.AlreadyResponded` if `ok()` or `close()` has already
+        Raises `Error.AlreadyResponded` if `accept()` or `reject()` has already
         been called.
         """
-        await self._inner.close(code)
+        await self._inner.reject(code)
 
     def cancel(self) -> None:
-        """Cancel an in-flight `ok()` or `close()` call."""
+        """Cancel an in-flight `accept()` or `reject()` call."""
         self._inner.cancel()
 
 
@@ -75,7 +75,7 @@ class Server:
     In simple mode (no origin provided), creates an internal origin automatically:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-            server.announce("live", broadcast)
+            announce = server.announce("live", broadcast)
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control:
@@ -83,9 +83,9 @@ class Server:
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             async for request in server:
                 if request.url and "/admin" in request.url:
-                    await request.close(403)
+                    await request.reject(403)
                     continue
-                session = await request.ok()  # hold to keep the connection alive
+                session = await request.accept()  # hold to keep the connection alive
 
     Exiting the context manager stops accepting new sessions but does not
     close in-flight sessions; those stay alive until their handles are
@@ -181,20 +181,24 @@ class Server:
             raise StopAsyncIteration
         return Request(request)
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> None:
-        """Advertise a broadcast under the given path, served to incoming sessions."""
+    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
+        """Advertise a broadcast under the given path, served to incoming sessions.
+
+        Hold the returned :class:`Announce` for as long as the broadcast should stay
+        discoverable; unannouncing it removes the path.
+        """
         origin = self._publish_origin
         if origin is None:
             raise RuntimeError("no publish origin configured")
-        origin.announce(path, broadcast)
+        return origin.announce(path, broadcast)
 
-    def publish(self, path: str, broadcast: BroadcastProducer) -> None:
+    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
         warnings.warn(
             "Server.publish() is deprecated; use Server.announce() instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        self.announce(path, broadcast)
+        return self.announce(path, broadcast)
 
     async def serve(self) -> None:
         """Accept every session in a loop, holding each one alive until it closes.
@@ -206,14 +210,14 @@ class Server:
 
             async for request in server:
                 if request.url and "/admin" in request.url:
-                    await request.close(403)
+                    await request.reject(403)
                     continue
-                session = await request.ok()
+                session = await request.accept()
         """
         session_tasks: set[asyncio.Task] = set()
 
         async def serve_session(request: Request) -> None:
-            session = await request.ok()
+            session = await request.accept()
             await session.closed()
 
         try:

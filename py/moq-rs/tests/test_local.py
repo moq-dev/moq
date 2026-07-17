@@ -94,7 +94,7 @@ async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.announce("live", broadcast)
+    _announce = origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -129,7 +129,7 @@ async def test_video_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("avc3", h264_init())
-    origin.announce("video-test", broadcast)
+    _announce = origin.announce("video-test", broadcast)
 
     consumer = origin.consume()
 
@@ -163,7 +163,7 @@ async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.announce("ordering-test", broadcast)
+    _announce = origin.announce("ordering-test", broadcast)
 
     consumer = origin.consume()
 
@@ -190,7 +190,7 @@ async def test_catalog_update_on_new_track():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     _media1 = broadcast.publish_media("opus", opus_head())
-    origin.announce("catalog-update", broadcast)
+    _announce = origin.announce("catalog-update", broadcast)
 
     consumer = origin.consume()
 
@@ -222,7 +222,7 @@ def test_finish_closes_producer():
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    origin.announce("test/broadcast", broadcast)
+    _announce = origin.announce("test/broadcast", broadcast)
 
     consumer = origin.consume()
 
@@ -545,7 +545,7 @@ async def test_subscribe_media_default_latency_and_context_manager():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     media = broadcast.publish_media("opus", opus_head())
-    origin.announce("live", broadcast)
+    _announce = origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -569,7 +569,7 @@ async def test_raw_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("events")
-    origin.announce("robot/arm", broadcast)
+    _announce = origin.announce("robot/arm", broadcast)
 
     consumer = origin.consume()
 
@@ -594,7 +594,7 @@ async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("commands")
-    origin.announce("robot/io", broadcast)
+    _announce = origin.announce("robot/io", broadcast)
 
     consumer = origin.consume()
 
@@ -676,7 +676,7 @@ async def test_raw_group_sequence():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("seq")
-    origin.announce("track/seq", broadcast)
+    _announce = origin.announce("track/seq", broadcast)
 
     consumer = origin.consume()
 
@@ -711,7 +711,7 @@ async def test_default_iteration_is_sequence_order():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("ordering")
-    origin.announce("track/ordering", broadcast)
+    _announce = origin.announce("track/ordering", broadcast)
 
     sequenced = origin.consume()
     arrived = origin.consume()
@@ -746,7 +746,7 @@ async def test_raw_multi_frame_group():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
     raw = broadcast.publish_track("chunks")
-    origin.announce("stream/chunks", broadcast)
+    _announce = origin.announce("stream/chunks", broadcast)
 
     consumer = origin.consume()
 
@@ -799,7 +799,6 @@ async def test_raw_read_frame_preserves_timestamp():
     assert frame is not None
     assert frame.payload == b"ready"
     assert frame.timestamp_us == 12_345
-    assert not frame.keyframe
 
     group = track.append_group()
     group_consumer = group.consume()
@@ -810,7 +809,6 @@ async def test_raw_read_frame_preserves_timestamp():
     assert frame is not None
     assert frame.payload == b"group"
     assert frame.timestamp_us == 23_456
-    assert not frame.keyframe
 
 
 async def test_read_frame_skips_remaining_frames_in_group():

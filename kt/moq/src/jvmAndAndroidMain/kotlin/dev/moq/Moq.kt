@@ -26,15 +26,16 @@ class Moq internal constructor(
     val session: MoqSession,
     private val client: MoqClient,
 ) : AutoCloseable {
-    /** Announce [broadcast] under [path] so subscribers can discover it. */
-    fun announce(path: String, broadcast: BroadcastProducer) {
-        session.publisher().announce(path, broadcast)
-    }
+    /**
+     * Announce [broadcast] under [path] so subscribers can discover it.
+     *
+     * Hold the returned [Announce] for as long as the broadcast should stay discoverable;
+     * unannouncing it removes the path. Closing the broadcast does not unannounce it.
+     */
+    fun announce(path: String, broadcast: BroadcastProducer): Announce = session.publisher().announce(path, broadcast)
 
     @Deprecated("Renamed to announce()", ReplaceWith("announce(path, broadcast)"))
-    fun publish(path: String, broadcast: BroadcastProducer) {
-        announce(path, broadcast)
-    }
+    fun publish(path: String, broadcast: BroadcastProducer): Announce = announce(path, broadcast)
 
     /**
      * Discover broadcasts whose path starts with [prefix] as a [Flow]. The
@@ -81,6 +82,10 @@ class Moq internal constructor(
          * @param bind local socket address to bind, e.g. "0.0.0.0:0".
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.
+         *
+         * With neither [publish] nor [subscribe] given, both sides share one origin, so a
+         * broadcast announced on this connection is discoverable via its own [announcements]
+         * (loopback). Wiring either side opts out and isolates the two directions.
          */
         suspend fun connect(
             url: String,
@@ -94,14 +99,6 @@ class Moq internal constructor(
             publish: MoqOriginProducer? = null,
             subscribe: MoqOriginProducer? = null,
         ): Moq {
-            // With neither side specified, wire ONE shared origin to both so a
-            // broadcast published on this connection is discoverable via its own
-            // announcements() (loopback). Otherwise honor what the caller passed
-            // and let the FFI auto-create any side left null.
-            val shared = if (publish == null && subscribe == null) MoqOriginProducer(MoqOriginOptions()) else null
-            val publishOrigin = publish ?: shared
-            val subscribeOrigin = subscribe ?: shared
-
             val client = MoqClient()
             try {
                 if (!tlsVerify) client.setTlsDisableVerify(true)
@@ -111,8 +108,8 @@ class Moq internal constructor(
                 if (tlsCert != null) client.setTlsCert(tlsCert)
                 if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
-                if (publishOrigin != null) client.setPublish(publishOrigin)
-                if (subscribeOrigin != null) client.setConsume(subscribeOrigin)
+                if (publish != null) client.setPublish(publish)
+                if (subscribe != null) client.setConsume(subscribe)
 
                 val session = client.connect(url)
                 return Moq(session, client)

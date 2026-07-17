@@ -109,10 +109,10 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
-    moq.announce("my-stream", broadcast)
+    val announce = moq.announce("my-stream", broadcast)
 
-    audio.writeFrame(payload, timestampUs = 0u)
-    audio.writeFrame(payload, timestampUs = 20_000u)
+    audio.writeFrame(Frame(payload = payload))
+    audio.writeFrame(Frame(payload = payload, timestampUs = 20_000u))
     audio.finish()
     broadcast.finish()
 }
@@ -127,7 +127,7 @@ import dev.moq.*
 
 Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
     val broadcast = BroadcastProducer()
-    server.announce("live", broadcast)
+    val announce = server.announce("live", broadcast)
 
     server.serve()
 }
@@ -140,11 +140,11 @@ Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server 
     server.requests().collect { request ->
         val url = request.url()
         if (url != null && "/admin" in url) {
-            request.close(403u)
+            request.reject(403u)
             return@collect
         }
         launch {
-            val session = request.ok()
+            val session = request.accept()
             session.closed()
         }
     }
@@ -175,7 +175,7 @@ val dynamic = track.dynamic()
 
 dynamic.requestedGroups().collect { request ->
     val group = request.accept()
-    group.writeFrame(loadArchivedFrame(request.sequence()), timestampUs = request.sequence() * 20_000uL)
+    group.writeFrame(Frame(payload = loadArchivedFrame(request.sequence()), timestampUs = request.sequence() * 20_000uL))
     group.finish()
 }
 ```
@@ -193,12 +193,12 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
     val dynamic = broadcast.dynamic()
 
-    moq.announce("events", broadcast)
+    val announce = moq.announce("events", broadcast)
 
     dynamic.requestedTracks().collect { request ->
         if (request.name() == "alerts") {
             val track = request.accept(null)
-            track.writeFrame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u)
+            track.writeFrame(Frame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u))
             track.finish()
         } else {
             request.abort(404u)
@@ -207,14 +207,14 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(payload, timestampUs)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `MoqFrame` values from `readFrame()` or the `frames()` Flow extension.
+Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(Frame(payload, timestampUs))` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `Frame` values (payload plus timestamp) from `readFrame()` or the `frames()` Flow extension; media subscriptions yield `MediaFrame`, which adds the codec-derived `keyframe` flag.
 
 ### Raw datagrams
 
 Raw tracks can send a single best-effort payload without opening a group stream:
 
 ```kotlin
-val sequence = track.appendDatagram(timestampUs = 42_000u, payload = "meter update".encodeToByteArray())
+val sequence = track.appendDatagram(Frame(payload = "meter update".encodeToByteArray(), timestampUs = 42_000u))
 val datagram = consumer.recvDatagram()
 
 consumer.datagrams().collect { datagram ->
@@ -239,7 +239,7 @@ dynamic.requestedBroadcasts().collect { request ->
         val broadcast = BroadcastProducer()
         val track = broadcast.publishTrack("status", null)
         request.accept(broadcast)
-        track.writeFrame("ready".encodeToByteArray(), timestampUs = 0u)
+        track.writeFrame(Frame(payload = "ready".encodeToByteArray()))
     } else {
         request.abort(404u)
     }

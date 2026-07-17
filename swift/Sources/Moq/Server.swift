@@ -94,12 +94,12 @@ public final class Request: Sendable {
 
     /// Complete the handshake and return the established session.
     public func accept() async throws -> Session {
-        Session(try await ffi.ok())
+        Session(try await ffi.accept())
     }
 
     /// Reject the session with the given HTTP status code.
     public func reject(code: UInt16) async throws {
-        try await ffi.close(code: code)
+        try await ffi.reject(code: code)
     }
 
     /// Cancel any in-flight `accept()` or `reject()` call.

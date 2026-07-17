@@ -1050,8 +1050,8 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 
 /// Send a best-effort datagram on a raw track created by [moq_publish_track].
 ///
-/// `timestamp_us` is the presentation timestamp in microseconds. The payload must be at
-/// most 1200 bytes. On success the datagram's per-track sequence number (shared with the
+/// Takes `payload` then `timestamp_us`, matching [moq_publish_track_frame]. The payload must
+/// be at most 1200 bytes. On success the datagram's per-track sequence number (shared with the
 /// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
 /// delivered only on transports and wire versions with a datagram channel; there is no
 /// group fallback.
@@ -1064,9 +1064,9 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_datagram(
 	track: u32,
-	timestamp_us: u64,
 	payload: *const u8,
 	payload_size: usize,
+	timestamp_us: u64,
 	out_sequence: *mut u64,
 ) -> i32 {
 	ffi::enter(move || {
