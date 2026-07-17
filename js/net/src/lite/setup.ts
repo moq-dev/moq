@@ -14,6 +14,8 @@ import { hasSetupStream, type Version } from "./version.ts";
 const PARAM_PROBE = 0x1n;
 /** Setup Parameter id for the request Path (client-only, URI-less transports). */
 const PARAM_PATH = 0x2n;
+/** Setup Parameter id for the client's intended {@link Role} (client-only). */
+const PARAM_ROLE = 0x3n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -46,6 +48,45 @@ function probeFromCode(code: bigint): ProbeLevel {
 			return ProbeLevel.Report;
 		default:
 			return ProbeLevel.Increase;
+	}
+}
+
+/**
+ * The direction a client intends to use the session for.
+ *
+ * A client advertises this in its SETUP so the server can reject a token that lacks the
+ * matching scope during the handshake, instead of accepting a session that then silently
+ * carries no media (a subscribe-only token used to publish, or vice versa). It only ever
+ * narrows what the server grants, so it is not a security boundary: the server still
+ * enforces the token's scope regardless.
+ */
+export const Role = {
+	/** The client may do either, or declined to say. Equivalent to omitting the parameter. */
+	Both: 0,
+	/** The client will publish tracks (ingest); the server must consume. */
+	Publisher: 1,
+	/** The client will subscribe to tracks (egress); the server must publish. */
+	Subscriber: 2,
+} as const;
+
+/** A session role. See {@link Role}. */
+export type Role = (typeof Role)[keyof typeof Role];
+
+/**
+ * Map a wire value to a role, falling back to {@link Role.Both}.
+ *
+ * The draft requires a receiver that does not recognize the value to treat it as `Both`,
+ * so a newer client can't break an older server: it just loses the early reject and defers
+ * to the token's scope.
+ */
+function roleFromCode(code: bigint): Role {
+	switch (code) {
+		case 1n:
+			return Role.Publisher;
+		case 2n:
+			return Role.Subscriber;
+		default:
+			return Role.Both;
 	}
 }
 
@@ -117,6 +158,16 @@ class Parameters {
 	}
 }
 
+/** The capabilities a {@link Setup} advertises. Each defaults to the wire default, which is the absence of the parameter. */
+export interface SetupProps {
+	/** See {@link Setup.probe}. Defaults to {@link ProbeLevel.None}. */
+	probe?: ProbeLevel;
+	/** See {@link Setup.path}. Omitted by default. */
+	path?: string;
+	/** See {@link Setup.role}. Defaults to {@link Role.Both}. */
+	role?: Role;
+}
+
 /**
  * The SETUP message, sent once per endpoint on the unidirectional Setup Stream.
  *
@@ -135,9 +186,17 @@ export class Setup {
 	 */
 	path?: string;
 
-	constructor(probe: ProbeLevel = ProbeLevel.None, path?: string) {
-		this.probe = probe;
+	/**
+	 * The client's intended {@link Role}. `Both` is sent as the absence of the parameter, so
+	 * a client that never sets it decodes back to `Both`. Sent only by the client; a server
+	 * never sends one and a relay never forwards it.
+	 */
+	role: Role;
+
+	constructor({ probe, path, role }: SetupProps = {}) {
+		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
+		this.role = role ?? Role.Both;
 	}
 
 	static #guard(version: Version) {
@@ -154,6 +213,10 @@ export class Setup {
 		}
 		if (this.path !== undefined) {
 			params.setBytes(PARAM_PATH, new TextEncoder().encode(this.path));
+		}
+		// Both is the wire default, sent as the absence of the parameter.
+		if (this.role !== Role.Both) {
+			params.setVarint(PARAM_ROLE, this.role);
 		}
 		await params.encode(w);
 	}
@@ -173,7 +236,10 @@ export class Setup {
 			}
 		}
 
-		return new Setup(probe, path);
+		const roleCode = params.getVarint(PARAM_ROLE);
+		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
+
+		return new Setup({ probe, path, role });
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */

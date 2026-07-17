@@ -59,7 +59,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	const aRate = line(audioCard.grid, "Sample rate");
 	const aChannels = line(audioCard.grid, "Channels");
 	const aBitrate = line(audioCard.grid, "Bitrate");
-	trackActive(parent, audioCard.status, publish.audio.active);
+	trackActive(parent, audioCard.status, publish.audio.out.active);
 
 	const netCard = card("network", "Connection", wifiIcon);
 	const nStatus = line(netCard.grid, "Status");
@@ -78,7 +78,7 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	});
 
 	parent.run((effect) => {
-		const cfg = effect.get(publish.audio.config);
+		const cfg = effect.get(publish.audio.out.catalog);
 		audioCard.el.style.display = cfg ? "" : "none";
 		if (!cfg) return;
 		aCodec.textContent = cfg.codec ?? "—";

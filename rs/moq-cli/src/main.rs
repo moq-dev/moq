@@ -39,14 +39,20 @@ impl Net {
 	fn client(&self, config: moq_native::ClientConfig) -> anyhow::Result<moq_native::Client> {
 		let client = config.init()?;
 		#[cfg(feature = "iroh")]
-		let client = client.with_iroh(self.iroh.clone());
+		let client = match self.iroh.clone() {
+			Some(iroh) => client.with_iroh(iroh),
+			None => client,
+		};
 		Ok(client)
 	}
 
 	fn server(&self, config: moq_native::ServerConfig) -> anyhow::Result<moq_native::Server> {
 		let server = config.init()?;
 		#[cfg(feature = "iroh")]
-		let server = server.with_iroh(self.iroh.clone());
+		let server = match self.iroh.clone() {
+			Some(iroh) => server.with_iroh(iroh),
+			None => server,
+		};
 		Ok(server)
 	}
 }
@@ -130,11 +136,11 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
-		let tls_info = server.tls_info();
+		let certificates = server.certificates();
 		moq::notify_ready();
 		let origin = origin.consume();
 		tasks.spawn(async move { Ok(server.serve_publish(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
+		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
 
 	// Foreign side: the single source.
@@ -232,11 +238,11 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
-		let tls_info = server.tls_info();
+		let certificates = server.certificates();
 		moq::notify_ready();
 		let origin = origin.clone();
 		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, tls_info).await });
+		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
 
 	// Foreign side: the single sink.

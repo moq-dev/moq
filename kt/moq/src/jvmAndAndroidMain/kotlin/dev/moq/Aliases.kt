@@ -7,10 +7,10 @@ package dev.moq
 // are the exact same objects, so every FFI method and the extensions in
 // Flows.kt / Errors.kt apply unchanged.
 
-// Session + connection handles.
+// Session + connection handles. `Server` is not aliased: `dev.moq.Server` is the
+// listen facade (see Server.kt), which exposes the raw handle as `server`.
 typealias Client = uniffi.moq.MoqClient
 typealias Session = uniffi.moq.MoqSession
-typealias Server = uniffi.moq.MoqServer
 typealias Request = uniffi.moq.MoqRequest
 
 // Origin (broadcast discovery / announcement).
@@ -19,6 +19,8 @@ typealias OriginOptions = uniffi.moq.MoqOriginOptions
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
+/** The publish-side guard keeping one broadcast announced; unannounce it to remove the path. */
+typealias Announce = uniffi.moq.MoqAnnounce
 typealias Announced = uniffi.moq.MoqAnnounced
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announcement = uniffi.moq.MoqAnnouncement
@@ -58,6 +60,8 @@ typealias JsonStreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 typealias Catalog = uniffi.moq.MoqCatalog
 typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
+/** A [Frame] plus the codec metadata a media track carries. */
+typealias MediaFrame = uniffi.moq.MoqMediaFrame
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
@@ -83,8 +87,8 @@ typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 /** Configures a lossless JSON stream track. */
 typealias JsonStreamConfig = uniffi.moq.MoqJsonStreamConfig
 
-// NOTE: a few types are intentionally NOT aliased. `Container` (sealed) and
-// `MoqException` (sealed) need subtype access (`Container.Loc`,
+// NOTE: a few types are intentionally NOT aliased. `MoqContainer` (sealed) and
+// `MoqException` (sealed) need subtype access (`MoqContainer.Loc`,
 // `MoqException.Closed`), which Kotlin 2.0.21 can't resolve through a typealias.
-// Reference those as `uniffi.moq.Container` / `uniffi.moq.MoqException`. Enums
+// Reference those as `uniffi.moq.MoqContainer` / `uniffi.moq.MoqException`. Enums
 // (AudioCodec/AudioFormat) are fine: entry access through the alias works.

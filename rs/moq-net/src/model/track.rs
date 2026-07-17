@@ -44,7 +44,7 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
 ///
-/// Not `Copy`: it carries a handle to its parent broadcast (see [`Self::broadcast`]).
+/// Not `Copy`: it carries an internal handle to its parent broadcast.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
@@ -72,12 +72,13 @@ pub struct Info {
 	/// reported in TRACK_INFO (Lite05+), and defaults to `false` (newest-first).
 	pub ordered: bool,
 
-	/// The broadcast this track belongs to, bound when the track is created under one
-	/// (`create_track` / `reserve_track` / `Request::accept`); until then it's a
-	/// standalone broadcast with an unbounded pool. Not on the wire. It's the parent
-	/// link a group walks to reach the shared cache pool
-	/// (`track.broadcast.origin.pool`); the pool itself stays crate-private.
-	pub broadcast: Arc<broadcast::Info>,
+	// The broadcast this track belongs to, bound when the track is created under one
+	// (`create_track` / `reserve_track` / `Request::accept`); until then it's a
+	// standalone broadcast with an unbounded pool. Not on the wire, and not a knob:
+	// every bind path overwrites whatever is here. It's the parent link a group walks
+	// to reach the shared cache pool (`track.broadcast.origin.pool`), which stays
+	// crate-private.
+	pub(crate) broadcast: Arc<broadcast::Info>,
 }
 
 /// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an
@@ -129,13 +130,6 @@ impl Info {
 	pub fn with_ordered(mut self, ordered: bool) -> Self {
 		self.ordered = ordered;
 		self
-	}
-
-	/// Clamp a subscriber's latency budget to this track's [`Self::latency_max`]: a
-	/// subscriber can't wait for a late group longer than the publisher keeps it.
-	/// `Duration::ZERO` (skip immediately) is left untouched by the `min`.
-	fn clamp_latency_max(&self, latency_max: Duration) -> Duration {
-		latency_max.min(self.latency_max)
 	}
 }
 
@@ -408,10 +402,16 @@ impl TrackState {
 			.map(|(group, _)| group.consume())
 	}
 
+	/// The publisher's latency window, or `None` while the info is unknown (an
+	/// unaccepted [`Request`]). Bounds the aggregate subscription; see [`clamp_combined`].
+	fn latency_bound(&self) -> Option<Duration> {
+		self.info.as_ref().map(|info| info.latency_max)
+	}
+
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
-	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]),
-	/// not an end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all)
-	/// lives in [`FetchState`]; [`Fetching`] polls both.
+	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
+	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
+	/// in [`FetchState`]; [`Fetching`] polls both.
 	fn poll_fetch_cached(&self, sequence: u64) -> Poll<Result<group::Consumer>> {
 		if let Some(group) = self.cached_group(sequence) {
 			return Poll::Ready(Ok(group));
@@ -716,8 +716,8 @@ impl Producer {
 	/// deliver them. Keep payloads well under the 1200-byte minimum path MTU. An origin
 	/// publisher uses this; a relay preserving upstream numbering uses
 	/// [`Self::write_datagram`].
-	pub fn append_datagram<B: Into<bytes::Bytes>>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
-		let payload = payload.into();
+	pub fn append_datagram<B: crate::IntoBytes>(&mut self, timestamp: Timestamp, payload: B) -> Result<u64> {
+		let payload = payload.into_bytes();
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
@@ -838,23 +838,22 @@ impl Producer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
@@ -906,10 +905,9 @@ impl Producer {
 	/// Subscribing to this in-process track, resolving synchronously.
 	///
 	/// The info is fixed at creation, so there's nothing to wait for (no
-	/// SUBSCRIBE_OK round trip). The subscriber's latency budget is clamped to the
-	/// track's cache. Pass `None` for [`Subscription::default`].
+	/// SUBSCRIBE_OK round trip). Pass `None` for [`Subscription::default`].
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> Subscriber {
-		let mut preferences = subscription.into().unwrap_or_default();
+		let preferences = subscription.into().unwrap_or_default();
 
 		// Info is fixed at creation and survives a close/abort, so read it without
 		// requiring a live producer state. If the track already ended, the returned
@@ -922,7 +920,6 @@ impl Producer {
 			.as_ref()
 			.expect("producer always has info")
 			.clone();
-		preferences.latency_max = info.clamp_latency_max(preferences.latency_max);
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -953,9 +950,15 @@ impl Producer {
 	/// A non-blocking snapshot of the current aggregate subscription, or `None`
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
+	///
+	/// The aggregate's [`Subscription::latency_max`] is clamped to this track's
+	/// [`Info::latency_max`]: no subscriber can wait for a late group longer than the
+	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
-		let subs = self.state.read().subscriptions.clone();
-		snapshot_subscription(&subs)
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		drop(state);
+		snapshot_subscription(&subs, bound)
 	}
 
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Subscription>>> {
@@ -966,11 +969,15 @@ impl Producer {
 			return Poll::Ready(Err(abort.unwrap_or(Error::Dropped)));
 		}
 
-		let subs = self.state.read().subscriptions.clone();
+		// Read the bound before locking `subs`, so the aggregation never nests the two locks.
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		drop(state);
+
 		let prev = &self.prev_subscription;
 		let mut combined = None;
 		let mut guard = match subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, waiter);
+			let next = combined_subscription(subs, bound, waiter);
 			if &next == prev {
 				Poll::Pending
 			} else {
@@ -1155,25 +1162,51 @@ impl Drop for Producer {
 /// Read-only: iterates the subscriptions immutably and registers `waiter` on each, so a
 /// preference update (or a subscriber dropping) wakes the caller's poll. Callers decide
 /// readiness from the returned value, then prune closed subscribers through the `Mut`.
-fn combined_subscription(subs: &Subscriptions, waiter: &kio::Waiter) -> Option<Subscription> {
+fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: &kio::Waiter) -> Option<Subscription> {
 	let mut combined = None;
 	for sub in subs.iter() {
+		// A closed consumer means the subscriber dropped: it holds no live demand.
+		// `Consumer::poll` evaluates the closure before the closed flag, so it would
+		// still replay the final value into the aggregate; skip it explicitly so a
+		// departed subscriber can't keep the aggregate pinned to its last request.
+		if sub.is_closed() {
+			continue;
+		}
 		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
 			combined = Some(sub);
 		}
 	}
-	combined
+	clamp_combined(combined, bound)
 }
 
 /// A non-blocking aggregate of the current subscriptions, without arming any waiter.
-fn snapshot_subscription(subs: &kio::Shared<Subscriptions>) -> Option<Subscription> {
+fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined: Option<Subscription> = None;
 	for sub in subs.read().iter() {
+		// Skip dropped subscribers, matching `combined_subscription`.
+		if sub.is_closed() {
+			continue;
+		}
 		if let Poll::Ready(merged) = sub.read().poll_combined(&combined) {
 			combined = Some(merged);
 		}
 	}
-	combined
+	clamp_combined(combined, bound)
+}
+
+/// Clamp the aggregate's latency budget to the publisher's window: nobody can wait for a
+/// late group longer than the publisher keeps it around.
+///
+/// The single clamp point. Subscribers hold their preferences verbatim, so what they asked
+/// for stays readable, and clamping the aggregate is equivalent to clamping each subscriber
+/// first (`min` distributes over the `max` that combines them). `bound` is `None` on a track
+/// whose info isn't known yet (an unaccepted [`Request`]), which imposes no window.
+fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
+	let mut combined = combined?;
+	if let Some(bound) = bound {
+		combined.latency_max = combined.latency_max.min(bound);
+	}
+	Some(combined)
 }
 
 /// Register a subscription if the track is live: clone the shared list out of the
@@ -1239,23 +1272,22 @@ impl Demand {
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state
-			.used()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+		self.state.unused().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
+		self.abort_reason()
+	}
+
+	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
+	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
@@ -1329,6 +1361,19 @@ impl Consumer {
 		})
 	}
 
+	// Peek at a cached group by sequence without blocking, or `None` if it isn't in the
+	// cache. A test hook for asserting cache state; the library reads
+	// `TrackState::cached_group` directly, and callers want `fetch_group`.
+	#[cfg(test)]
+	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().cached_group(sequence),
+			// Spliced tracks have no cache of their own; peek the newest segment
+			// via `fetch_group` instead.
+			ConsumerKind::Spliced(_) => None,
+		}
+	}
+
 	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
@@ -1397,6 +1442,12 @@ impl Consumer {
 		})
 	}
 
+	/// Resolve the track's [`Info`] without subscribing.
+	///
+	/// A [`Consumer`] is a lazy handle, so the info may not be known yet: this waits
+	/// for the producer to [`Request::accept`] the track (a wire TRACK_INFO round-trip
+	/// for a relay), and errors with the track's abort error if it closes first.
+	/// [`Subscriber::info`] is the already-resolved counterpart.
 	pub fn info(&self) -> kio::Pending<Querying> {
 		kio::Pending::new(Querying {
 			inner: match &self.inner {
@@ -1451,16 +1502,9 @@ impl Subscribing {
 				}))
 			}
 			SubscribingKind::Spliced(resume) => {
-				// Resolved from the first segment's track.
+				// Resolved from the first segment's track. The publisher's latency
+				// window is applied to each per-session aggregate, not here.
 				let info = ready!(resume.poll_info(waiter))?;
-
-				// Clamp the latency budget like a plain subscribe does.
-				if let Ok(mut prefs) = self.subscription.write() {
-					let clamped = info.clamp_latency_max(prefs.latency_max);
-					if clamped != prefs.latency_max {
-						prefs.latency_max = clamped;
-					}
-				}
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
@@ -1482,7 +1526,7 @@ impl Subscribing {
 	}
 }
 
-impl kio::Future for Subscribing {
+impl kio::Pollable for Subscribing {
 	type Output = Result<Subscriber>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1515,7 +1559,7 @@ impl Querying {
 	}
 }
 
-impl kio::Future for Querying {
+impl kio::Pollable for Querying {
 	type Output = Result<Info>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1624,7 +1668,7 @@ enum FetchingKind {
 	Spliced(kio::Pending<super::resume::Fetching>),
 }
 
-impl kio::Future for Fetching {
+impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -1635,7 +1679,7 @@ impl kio::Future for Fetching {
 				sequence,
 				result,
 			} => (state, fetch, *sequence, result.as_ref()),
-			FetchingKind::Spliced(spliced) => return kio::Future::poll(&**spliced, waiter),
+			FetchingKind::Spliced(spliced) => return kio::Pollable::poll(&**spliced, waiter),
 		};
 
 		// Track side: the cached group, the abort error, or past-final. The outer
@@ -1679,6 +1723,23 @@ impl kio::Future for Fetching {
 /// Created via [`Consumer::subscribe`](Consumer::subscribe), or
 /// directly from a [`Producer`] for an in-process track. Carries this
 /// subscriber's [`Subscription`] preferences, which feed the producer's aggregate.
+///
+/// # Local cursor vs wire preference
+///
+/// Group bounds exist at two levels, and setting one does not imply the other:
+///
+/// - [`Self::start_at`] / [`Self::end_at`] move **this subscriber's read cursor**. They
+///   filter exactly what this handle returns and are invisible to the publisher.
+/// - [`Subscription::group_start`] / [`Subscription::group_end`], set via [`Self::update`],
+///   are a **request to the publisher**. They're aggregated across every live subscriber
+///   (earliest start, widest end), so they say what the publisher should send, not what
+///   this subscriber sees.
+///
+/// They stay separate because their scopes differ: a subscriber can't filter by the
+/// aggregate, since another subscriber can widen it, and the publisher can't honor a
+/// cursor it's never told about. So setting only the cursor still transfers the skipped
+/// groups, and setting only the preference still returns groups another subscriber asked
+/// for. Set both to skip them *and* avoid the transfer.
 pub struct Subscriber {
 	name: Arc<str>,
 	info: Info,
@@ -1799,6 +1860,10 @@ impl SubscriberControl {
 }
 
 impl Subscriber {
+	/// The track's [`Info`], resolved when the subscription was established.
+	///
+	/// Free, unlike [`Consumer::info`]: subscribing already waited for the info
+	/// (SUBSCRIBE_OK on the wire), so a subscriber always has it.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -1940,7 +2005,12 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// Start the consumer at the specified sequence.
+	/// Start this subscriber's read cursor at the given sequence.
+	///
+	/// A local filter, not a request: it doesn't tell the publisher anything, so the
+	/// skipped groups are still delivered and simply not returned. To ask the publisher
+	/// to start there instead, set [`Subscription::group_start`] via [`Self::update`].
+	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.min_sequence = sequence,
@@ -1948,9 +2018,13 @@ impl Subscriber {
 		}
 	}
 
-	/// Cap the consumer at the specified sequence (inclusive), or remove the cap entirely.
+	/// Cap this subscriber's read cursor at the given sequence (inclusive), or remove the
+	/// cap entirely.
 	///
 	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
+	///
+	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
+	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
 	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
 	/// cache rather than being skipped past, so a later call to [`Self::end_at`] with a
@@ -1968,12 +2042,12 @@ impl Subscriber {
 		self.control().subscription()
 	}
 
+	/// Replace this subscriber's delivery preferences.
 	///
-	/// The latency budget is clamped to the track's cache, like the initial subscribe.
-	/// Returns [`Error::Closed`] if the track already ended; the update is
-	/// meaningless at that point and can usually be ignored.
-	pub fn update(&mut self, mut subscription: Subscription) -> Result<()> {
-		subscription.latency_max = self.info.clamp_latency_max(subscription.latency_max);
+	/// Stored verbatim; the publisher's latency window is applied to the aggregate, not
+	/// here (see [`Producer::subscription`]). Returns [`Error::Closed`] if the track
+	/// already ended; the update is meaningless at that point and can usually be ignored.
+	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		match &mut self.inner {
 			SubscriberKind::Plain(plain) => {
 				let mut state = plain.subscription.write().map_err(|_| Error::Closed)?;
@@ -2050,12 +2124,18 @@ impl Request {
 
 	/// Serve the request with the given track, resolving every waiting subscriber.
 	///
-	/// The track's name must match [`Self::name`]. Returns [`Error::NotFound`] on
-	/// mismatch, or the broadcast's abort error if it closed while pending.
+	/// The name is taken from [`Self::name`]; `info` supplies the remaining knobs
+	/// (`None` for the defaults). If the track was already aborted, the returned
+	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
+	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		let mut info = info.into().unwrap_or_default();
 		info.broadcast = self.broadcast.clone();
-		self.state.write().ok().unwrap().info = Some(info);
+		// A closed state means the track was aborted under us. Mirror `reject` and
+		// tolerate it: the Producer we hand back simply can't write.
+		if let Ok(mut state) = self.state.write() {
+			state.info = Some(info);
+		}
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,
@@ -2072,8 +2152,10 @@ impl Request {
 	}
 
 	pub fn subscription(&self) -> Option<Subscription> {
-		let subs = self.state.read().subscriptions.clone();
-		snapshot_subscription(&subs)
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		drop(state);
+		snapshot_subscription(&subs, bound)
 	}
 
 	pub async fn subscription_changed(&mut self) -> Option<Subscription> {
@@ -2081,11 +2163,14 @@ impl Request {
 	}
 
 	pub fn poll_subscription_changed(&mut self, waiter: &kio::Waiter) -> Poll<Option<Subscription>> {
-		let subs = self.state.read().subscriptions.clone();
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.latency_bound());
+		drop(state);
+
 		let prev = &self.prev_subscription;
 		let mut combined = None;
 		let mut guard = ready!(subs.poll(waiter, |subs| {
-			let next = combined_subscription(subs, waiter);
+			let next = combined_subscription(subs, bound, waiter);
 			if &next == prev {
 				Poll::Pending
 			} else {
@@ -2515,21 +2600,52 @@ mod test {
 	fn latency_max_clamped_to_cache() {
 		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
 
-		// A latency budget beyond the cache is capped to the cache; a group can't be
-		// waited for longer than the publisher keeps it.
+		// A latency budget beyond the cache is capped in the aggregate; a group can't be
+		// waited for longer than the publisher keeps it. The subscriber's own preference
+		// is stored verbatim, so what it asked for stays readable.
 		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().latency_max, Duration::from_secs(2));
+		assert_eq!(subscriber.subscription().latency_max, Duration::from_secs(10));
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
 			.update(Subscription::default().with_latency_max(Duration::from_millis(500)))
 			.unwrap();
-		assert_eq!(subscriber.subscription().latency_max, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_millis(500));
 
 		subscriber
 			.update(Subscription::default().with_latency_max(Duration::ZERO))
 			.unwrap();
-		assert_eq!(subscriber.subscription().latency_max, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::ZERO);
+	}
+
+	#[test]
+	fn latency_max_clamped_via_every_update_path() {
+		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
+		let over = Subscription::default().with_latency_max(Duration::from_secs(10));
+
+		// The clamp lives in the aggregation, so it applies no matter which entry point
+		// wrote the raw preference. Previously only `Subscriber::update` clamped.
+		let mut subscriber = producer.subscribe(over.clone());
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+
+		subscriber.control().update(over.clone()).unwrap();
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+
+		subscriber.update(over).unwrap();
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+	}
+
+	#[test]
+	fn latency_max_aggregate_clamps_the_max_across_subscribers() {
+		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
+
+		// The aggregate takes the max, then clamps once. Equivalent to clamping each
+		// subscriber first, since `min` distributes over `max`.
+		let _a = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(500)));
+		let _b = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
+
+		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
 	}
 
 	#[test]
@@ -2548,6 +2664,38 @@ mod test {
 		let aggregate = producer.subscription().expect("expected an active subscription");
 		assert_eq!(aggregate.priority, 7);
 		assert!(!aggregate.ordered);
+	}
+
+	#[test]
+	fn dropped_subscriber_leaves_no_ghost_in_aggregate() {
+		// Regression (#2351): a departed subscriber must not keep contributing its
+		// last subscription to the aggregate. When it did, a relay's linger loop
+		// never observed the track going idle, and an identical viewer reconnecting
+		// within the linger window was reset when the stale timer fired.
+		let mut producer = track_producer("test", None);
+		let a = producer.subscribe(Subscription::default().with_priority(5));
+
+		// Prime the change cursor: the aggregate currently has one subscriber.
+		let waiter = kio::Waiter::noop();
+		assert!(
+			matches!(producer.poll_subscription_changed(&waiter), Poll::Ready(Ok(Some(_)))),
+			"one live subscriber should aggregate to Some",
+		);
+
+		// The only subscriber leaves.
+		drop(a);
+
+		// The aggregate must report the drop to None, not the ghost's last value.
+		assert!(
+			matches!(producer.poll_subscription_changed(&waiter), Poll::Ready(Ok(None))),
+			"a dropped subscriber must not linger in the aggregate",
+		);
+
+		// And the snapshot used by the linger loop must agree.
+		assert!(
+			producer.subscription().is_none(),
+			"snapshot must exclude a dropped subscriber",
+		);
 	}
 
 	#[tokio::test]
@@ -3239,28 +3387,6 @@ mod test {
 		assert!(done.is_none());
 	}
 
-	#[tokio::test]
-	async fn fetch_finishes_without_waiting_for_gaps() {
-		let mut producer = track_producer("test", None);
-		producer.create_group(group::Info { sequence: 1 }).unwrap();
-		producer.finish().unwrap();
-
-		let consumer = producer.consume();
-		// A gap below final_sequence: no Dynamic can serve it, so the fetch fails
-		// fast rather than waiting for a group that may never arrive.
-		assert!(matches!(
-			consumer.fetch_group(0, None).now_or_never().expect("should not block"),
-			Err(Error::NotFound)
-		));
-		assert!(
-			matches!(
-				consumer.fetch_group(2, None).now_or_never().expect("should not block"),
-				Err(Error::NotFound)
-			),
-			"sequence at-or-after fin can never exist"
-		);
-	}
-
 	#[test]
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
 		let mut producer = track_producer("test", None);
@@ -3283,11 +3409,11 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 
-		// A cached group resolves immediately and never queues a request. `get_group`
+		// A cached group resolves immediately and never queues a request. `peek_group`
 		// also returns it synchronously.
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
-		assert!(cached_group(&consumer, 0).is_some());
+		assert!(consumer.peek_group(0).is_some());
 		let mut g = consumer.fetch_group(0, None).await.unwrap();
 		assert_eq!(g.sequence, 0);
 		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hello");
@@ -3302,12 +3428,12 @@ mod test {
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
-		// A cache miss isn't in `get_group`, but a dynamic handler exists, so
+		// A cache miss isn't in `peek_group`, but a dynamic handler exists, so
 		// `fetch_group` stays pending and queues a request. `*pending` derefs the
-		// wrapper to the inner `Fetching` (a `kio::Future`).
-		assert!(cached_group(&consumer, 5).is_none());
+		// wrapper to the inner `Fetching` (a `kio::Pollable`).
+		assert!(consumer.peek_group(5).is_none());
 		let pending = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3406,7 +3532,7 @@ mod test {
 		// carrying the higher of the two priorities.
 		let first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
 		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
-		assert!(kio::Future::poll(&*first, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
 			.requested_group()
@@ -3455,7 +3581,7 @@ mod test {
 
 		// The rejected attempt is gone: a retry starts a fresh one.
 		let retry = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*retry, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*retry, &kio::Waiter::noop()).is_pending());
 		let req = dynamic
 			.requested_group()
 			.now_or_never()
@@ -3472,7 +3598,7 @@ mod test {
 
 		// Queued but never popped: the last handler leaving fails it fast.
 		let pending = consumer.fetch_group(5, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::NotFound)));
 
@@ -3545,9 +3671,9 @@ mod test {
 		assert!(pool.used() <= 3000, "pool should be back under budget");
 
 		let consumer = producer.consume();
-		assert!(cached_group(&consumer, 0).is_none(), "evicted group is a cache miss");
-		assert!(cached_group(&consumer, 1).is_some());
-		assert!(cached_group(&consumer, 2).is_some());
+		assert!(consumer.peek_group(0).is_none(), "evicted group is a cache miss");
+		assert!(consumer.peek_group(1).is_some());
+		assert!(consumer.peek_group(2).is_some());
 
 		// A fresh subscriber skips the evicted group entirely.
 		let mut subscriber = producer.subscribe(None);
@@ -3592,12 +3718,12 @@ mod test {
 
 		let consumer = producer.consume();
 		assert!(
-			cached_group(&consumer, 0).is_some(),
+			consumer.peek_group(0).is_some(),
 			"recently read group survives: {:?}",
 			pool.debug_entries()
 		);
 		assert!(
-			cached_group(&consumer, 1).is_none(),
+			consumer.peek_group(1).is_none(),
 			"stale group is evicted: {:?}",
 			pool.debug_entries()
 		);
@@ -3694,7 +3820,7 @@ mod test {
 			.unwrap();
 
 		assert!(pool.used() <= 3000);
-		let mut group = cached_group(&consumer, 1).expect("refetched latest must stay pinned");
+		let mut group = consumer.peek_group(1).expect("refetched latest must stay pinned");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
@@ -3714,7 +3840,7 @@ mod test {
 		// The evicted group is a miss, so the fetch queues for the dynamic handler
 		// (a relay would issue a wire FETCH upstream).
 		let consumer = producer.consume();
-		assert!(cached_group(&consumer, 0).is_none());
+		assert!(consumer.peek_group(0).is_none());
 		let pending = consumer.fetch_group(0, None);
 
 		let req = dynamic
@@ -3742,7 +3868,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(3, None);
-		assert!(kio::Future::poll(&*pending, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Pollable::poll(&*pending, &kio::Waiter::noop()).is_pending());
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());

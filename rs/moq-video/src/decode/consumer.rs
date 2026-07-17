@@ -11,7 +11,7 @@ use crate::Error;
 /// Subscribe to a moq-mux video track and emit decoded I420.
 ///
 /// The codec/backend are fixed at construction; [`read`](Self::read) returns
-/// plain [`Frame`]s. The direct mirror of `moq_audio::AudioConsumer`.
+/// plain [`Frame`]s. The direct mirror of `moq_audio::decode::Consumer`.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::container::legacy::Wire>,
@@ -33,7 +33,10 @@ impl Consumer {
 		let decoder = Decoder::new(catalog, &config)?;
 
 		let name = name.into();
-		let track = broadcast.track(&name)?.subscribe(None).await?;
+		let track = broadcast
+			.track(&name)?
+			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
+			.await?;
 		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 		if let Some(latency) = config.latency_max {
 			track = track.with_latency(latency);

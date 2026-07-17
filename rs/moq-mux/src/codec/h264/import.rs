@@ -281,12 +281,7 @@ mod tests {
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
-		let track = broadcast
-			.create_track(
-				name,
-				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-			)
-			.unwrap();
+		let track = broadcast.create_track(name, hang::container::track_info()).unwrap();
 		(track, catalog)
 	}
 

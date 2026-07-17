@@ -73,7 +73,7 @@ async def main():
     async with moq.Client("https://relay.quic.video") as client:
         broadcast = moq.BroadcastProducer()
         audio = broadcast.publish_media("opus", opus_init_bytes)
-        client.announce("my-stream", broadcast)
+        announce = client.announce("my-stream", broadcast)
 
         audio.write_frame(payload, timestamp_us=0)
         audio.write_frame(payload, timestamp_us=20_000)

@@ -775,7 +775,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
-				let jitter = max - min + min_duration;
+				// All three share the track timescale (min/max are this fragment's frame
+				// timestamps, min_duration is derived from them).
+				let jitter = max.checked_sub(min)?.checked_add(min_duration)?;
 
 				if track.jitter.is_none_or(|j| jitter < j) {
 					track.jitter = Some(jitter);

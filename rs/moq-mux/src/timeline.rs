@@ -41,7 +41,7 @@ use moq_net::{Timescale, Timestamp};
 
 /// The default [`granularity`](Producer::with_granularity): at most one record per second of
 /// media time.
-pub const DEFAULT_GRANULARITY: Timestamp = Timestamp::from_secs_unchecked(1);
+pub const DEFAULT_GRANULARITY: Timestamp = Timestamp::new_const(1, Timescale::SECOND);
 
 /// Owns one media track's timeline: its catalog [`section`](Self::section) and wall anchor, and the
 /// `Recorder` its group opens are recorded through.

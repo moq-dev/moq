@@ -1,18 +1,18 @@
 //! Relay-side stats configuration.
 //!
-//! The actual aggregator lives in [`moq_net::Stats`]; this module just
+//! The actual aggregator lives in [`moq_net::stats::Producer`]; this module just
 //! holds the relay-specific config knobs.
 
 use std::time::Duration;
 
 use clap::Args;
+use moq_net::PathOwned;
 use moq_net::origin;
-use moq_net::{PathOwned, Stats};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the relay's stats publishing.
 ///
-/// Set `enabled = true` to attach a [`moq_net::Stats`] aggregator to every
+/// Set `enabled = true` to attach a [`moq_net::stats::Producer`] aggregator to every
 /// session the relay accepts (and every cluster dial). The aggregator
 /// publishes a single `<prefix>/node/<node>` broadcast (or `<prefix>/node`
 /// when [`Self::node`] is unset) on the cluster origin. Each frame is a
@@ -70,32 +70,32 @@ pub struct StatsConfig {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_net::StatsConfig::depth`].
+	/// stats. See [`moq_net::stats::Config::depth`].
 	#[arg(long = "stats-depth", env = "MOQ_STATS_DEPTH")]
 	pub depth: Option<usize>,
 }
 
 impl StatsConfig {
-	/// Build a [`Stats`] aggregator from this config, publishing on `origin`.
+	/// Build a [`moq_net::stats::Producer`] aggregator from this config, publishing on
+	/// `origin`.
 	///
-	/// Returns a no-op aggregator ([`Stats::default`]) when [`Self::enabled`]
-	/// is false, so the relay can attach the result unconditionally.
-	pub fn build(&self, origin: origin::Producer) -> Stats {
+	/// Returns a no-op aggregator when [`Self::enabled`] is false, so the relay can
+	/// attach the result unconditionally.
+	pub fn build(&self, origin: origin::Producer) -> moq_net::stats::Producer {
 		if !self.enabled.unwrap_or(false) {
-			return Stats::default();
+			return moq_net::stats::Producer::default();
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth.unwrap_or(0);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
-		// Fully qualified to disambiguate from this module's clap-derived StatsConfig.
-		let config = moq_net::StatsConfig::new()
+		let config = moq_net::stats::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
-		Stats::new(config)
+		moq_net::stats::Producer::new(config)
 	}
 }

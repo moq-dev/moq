@@ -1,3 +1,10 @@
+//! WebSocket fallback transport, running the QMux wire format over `ws://` or `wss://`.
+//!
+//! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
+//! network that only passes TCP/443. The client races this against QUIC and gives QUIC
+//! a small head start ([`Client::delay`]), so WebSocket only wins when QUIC can't get
+//! through. Servers accept it on a separate TCP port via [`Listener`].
+
 use qmux::tokio_tungstenite;
 use qmux::tokio_tungstenite::tungstenite::{self, http};
 use std::collections::HashSet;
@@ -9,33 +16,44 @@ use url::Url;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The TCP socket failed to bind, accept, or connect.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
+	/// WebSocket fallback was turned off via [`Client::enabled`].
 	#[error("WebSocket support is disabled")]
 	Disabled,
 
+	/// The URL had no host to dial.
 	#[error("missing hostname")]
 	MissingHostname,
 
+	/// The URL scheme can't carry WebSocket. Only `http`, `https`, `ws`, and `wss` work.
 	#[error("unsupported URL scheme for WebSocket: {0}")]
 	UnsupportedScheme(String),
 
+	/// The qmux handshake failed while dialing, including a non-101 upgrade response
+	/// from the server.
 	#[error("failed to connect WebSocket")]
 	Connect(#[source] qmux::Error),
 
+	/// The URL couldn't be turned into a valid WebSocket handshake request.
 	#[error("failed to build WebSocket request")]
 	BuildRequest(#[source] tungstenite::Error),
 
+	/// An ALPN contained bytes that aren't legal in the `Sec-WebSocket-Protocol` header.
 	#[error("failed to build WebSocket protocols header")]
 	ProtocolHeader(#[source] http::header::InvalidHeaderValue),
 
+	/// The TCP/TLS connection or the WebSocket upgrade itself failed.
 	#[error("failed to connect WebSocket")]
 	WebSocketConnect(#[source] tungstenite::Error),
 
+	/// The server refused the connection outright, so retrying won't help.
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
+	/// The qmux handshake failed while accepting an incoming connection.
 	#[error("WebSocket accept failed")]
 	Accept(#[source] qmux::Error),
 }
@@ -217,10 +235,12 @@ pub struct Listener {
 }
 
 impl Listener {
+	/// Bind a listener to the given address, accepting every moq ALPN we know about.
 	pub async fn bind(addr: net::SocketAddr) -> Result<Self> {
 		Self::bind_with_alpns(addr, moq_net::ALPNS).await
 	}
 
+	/// Bind a listener that only accepts the given moq ALPNs, in preference order.
 	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
@@ -230,10 +250,15 @@ impl Listener {
 		Ok(Self { listener, server })
 	}
 
+	/// The local address the listener is bound to.
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {
 		Ok(self.listener.local_addr()?)
 	}
 
+	/// Accept the next connection, performing the WebSocket upgrade and qmux handshake.
+	///
+	/// Returns `None` only if the listener itself is gone; a per-connection failure is
+	/// yielded as `Some(Err(..))` so the accept loop keeps running.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
 		match self.listener.accept().await {
 			Ok((stream, addr)) => {

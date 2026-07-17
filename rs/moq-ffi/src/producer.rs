@@ -5,7 +5,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::media::MoqInit;
+use crate::media::{MoqFrame, MoqInit};
 use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
@@ -695,30 +695,29 @@ impl MoqTrackProducer {
 		}))
 	}
 
-	/// Write a single-frame group with a presentation timestamp in microseconds.
+	/// Write `frame` as a single-frame group.
 	///
 	/// Raw tracks default to a microsecond timescale. Custom timescales may round
 	/// the timestamp during conversion.
-	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
+	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		track.write_frame(timestamp, payload)?;
+		track.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
 
-	/// Send a best-effort datagram, returning its per-track sequence number.
+	/// Send `frame` as a best-effort datagram, returning the sequence number assigned to it.
 	///
-	/// `timestamp_us` is the presentation timestamp in microseconds. The payload
-	/// must be at most 1200 bytes. Datagrams are only delivered on transports and
+	/// The payload must be at most 1200 bytes. Datagrams are only delivered on transports and
 	/// wire versions with a datagram channel; there is no stream fallback.
-	pub fn append_datagram(&self, timestamp_us: u64, payload: Vec<u8>) -> Result<u64, MoqError> {
+	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(track.append_datagram(timestamp, payload)?)
+		Ok(track.append_datagram(timestamp, frame.payload)?)
 	}
 
 	/// Abort this track with an application error code.
@@ -779,16 +778,16 @@ impl MoqGroupProducer {
 		Ok(Arc::new(MoqGroupConsumer::new(group.consume())))
 	}
 
-	/// Write a frame into this group with a presentation timestamp in microseconds.
+	/// Write `frame` into this group.
 	///
 	/// Raw tracks default to a microsecond timescale. Custom timescales may round
 	/// the timestamp during conversion.
-	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
+	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let group = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
-		group.write_frame(timestamp, payload)?;
+		group.write_frame(timestamp, frame.payload)?;
 		Ok(())
 	}
 
@@ -869,18 +868,19 @@ impl MoqMediaProducer {
 		}
 	}
 
-	/// Write a frame to this media track.
+	/// Write `frame` to this media track.
 	///
-	/// `timestamp_us` is the presentation timestamp in microseconds.
-	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
+	/// The importer derives keyframe status from the bitstream, so a [`MoqFrame`] carries only
+	/// the payload and its timestamp.
+	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
-		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = hang::container::Timestamp::from_micros(frame.timestamp_us)?;
 		media
 			.decoder
-			.decode(&payload, Some(timestamp))
+			.decode(&frame.payload, Some(timestamp))
 			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
 
 		Ok(())

@@ -10,6 +10,7 @@
 //! predicate, with no liveness of its own.
 
 use std::{
+	fmt,
 	ops::{Deref, DerefMut},
 	sync::atomic::AtomicUsize,
 };
@@ -18,7 +19,7 @@ mod lock;
 mod waiter;
 
 mod consumer;
-mod future;
+mod pollable;
 mod producer;
 mod shared;
 mod weak;
@@ -30,11 +31,30 @@ pub mod tokio;
 mod tests;
 
 pub use consumer::Consumer;
-pub use future::{Future, Pending};
+pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref};
 pub use shared::Shared;
 pub use waiter::{Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak};
+
+/// The channel closed before the awaited condition held.
+///
+/// The `async` methods report closure with this instead of handing back a [`Ref`],
+/// because a guard bound from an `Err` and held across a later `.await` would keep
+/// kio's mutex locked and stall every other handle. The synchronous `poll_*`/`write`
+/// methods still return a [`Ref`]: there is no await to deadlock across, and the
+/// caller already holds the lock. If you need the final state after an `async`
+/// method returns `Closed`, call `read()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Closed;
+
+impl fmt::Display for Closed {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "channel closed")
+	}
+}
+
+impl std::error::Error for Closed {}
 
 /// Waiters split by what they're waiting on, so an event only wakes the
 /// waiters that care about it. The big win is per-modification writes (the hot

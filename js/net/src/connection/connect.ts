@@ -67,6 +67,22 @@ export interface ConnectProps {
 	 * so the caller must not hold it.
 	 */
 	transport?: WebTransport;
+
+	/**
+	 * Whether the relay supports broadcast discovery; see {@link Established.discovery}.
+	 * Defaults to true, except for relays known to lack it.
+	 */
+	discovery?: boolean;
+}
+
+// Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would
+// never yield and a consumer waiting on an announcement would hang forever. Override with the
+// `discovery` option. Drop a host once its relay ships discovery.
+const NO_DISCOVERY_HOSTS = ["mediaoverquic.com"];
+
+/** Whether the relay at `url` is expected to support broadcast discovery. */
+function defaultDiscovery(url: URL): boolean {
+	return !NO_DISCOVERY_HOSTS.some((host) => url.hostname.endsWith(host));
 }
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -84,8 +100,10 @@ const isFirefox = typeof navigator !== "undefined" && navigator.userAgent.toLowe
  * @returns A promise that resolves to a Connection instance
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
+	const discovery = props?.discovery ?? defaultDiscovery(url);
+
 	if (props?.transport) {
-		return connectTransport(url, props.transport);
+		return connectTransport(url, props.transport, discovery);
 	}
 
 	// Create a cancel promise to kill whichever is still connecting.
@@ -149,23 +167,23 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 					? Ietf.Version.DRAFT_17
 					: undefined;
 	if (modernVersion !== undefined) {
-		return await handshakeAlpn(url, session as WebTransport, modernVersion);
+		return await handshakeAlpn(url, session as WebTransport, modernVersion, discovery);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === Lite.ALPN_06_WIP) {
 		// moq-lite draft-06 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_06, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_06, discovery });
 	} else if (protocol === Lite.ALPN_05) {
 		// moq-lite draft-05 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_05, discovery });
 	} else if (protocol === Lite.ALPN_04) {
 		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_04, discovery });
 	} else if (protocol === Lite.ALPN_03) {
 		// moq-lite draft-03 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_03, discovery });
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
 		// then negotiates the actual version via the SETUP message.
@@ -209,10 +227,17 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		return new Lite.Connection({
+			url,
+			quic: session,
+			version: server.version as Lite.Version,
+			session: stream,
+			discovery,
+		});
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
+			discovery,
 			url,
 			quic: session,
 			control: stream,
@@ -224,7 +249,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 }
 
-async function connectTransport(url: URL, session: WebTransport): Promise<Established> {
+async function connectTransport(url: URL, session: WebTransport, discovery: boolean): Promise<Established> {
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = session.protocol;
 
@@ -239,19 +264,19 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 					? Ietf.Version.DRAFT_17
 					: undefined;
 	if (modernVersion !== undefined) {
-		return await handshakeAlpn(url, session, modernVersion);
+		return await handshakeAlpn(url, session, modernVersion, discovery);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === Lite.ALPN_06_WIP) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_06, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_06, discovery });
 	} else if (protocol === Lite.ALPN_05) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_05, discovery });
 	} else if (protocol === Lite.ALPN_04) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_04, discovery });
 	} else if (protocol === Lite.ALPN_03) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
+		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_03, discovery });
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		setupVersion = Ietf.Version.DRAFT_14;
 	} else {
@@ -286,10 +311,17 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		return new Lite.Connection({
+			url,
+			quic: session,
+			version: server.version as Lite.Version,
+			session: stream,
+			discovery,
+		});
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
+			discovery,
 			url,
 			quic: session,
 			control: stream,
@@ -305,10 +337,16 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
  * Draft-17+ client handshake. ALPN already pinned the version; SETUP is
  * exchanged over a pair of uni streams using stream type 0x2F00.
  */
-async function handshakeAlpn(url: URL, session: WebTransport, version: Ietf.IetfVersion): Promise<Established> {
+async function handshakeAlpn(
+	url: URL,
+	session: WebTransport,
+	version: Ietf.IetfVersion,
+	discovery: boolean,
+): Promise<Established> {
 	const controlStream = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
+		discovery,
 		url,
 		quic: session,
 		control: controlStream,

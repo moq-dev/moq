@@ -47,6 +47,7 @@ mod codec;
 mod egress;
 mod error;
 mod ingest;
+mod net;
 mod sdp;
 mod session;
 

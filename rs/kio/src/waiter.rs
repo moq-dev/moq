@@ -81,6 +81,7 @@ pub struct WaiterList {
 }
 
 impl WaiterList {
+	/// Create an empty list, allocating nothing until the first [`register`](Self::register).
 	pub fn new() -> Self {
 		Self {
 			entries: SmallVec::new(),

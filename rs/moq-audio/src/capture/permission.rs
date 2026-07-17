@@ -8,14 +8,13 @@
 //! On every other platform this is a no-op: permission, if any, is enforced by
 //! the OS audio stack and surfaces through cpal or the timeout.
 
-use crate::AudioError;
+use crate::Error;
 
 #[cfg(target_os = "macos")]
-pub(super) async fn ensure_microphone_access() -> Result<(), AudioError> {
+pub(super) async fn ensure_microphone_access() -> Result<(), Error> {
 	use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 
-	let media =
-		unsafe { AVMediaTypeAudio }.ok_or_else(|| AudioError::Unsupported("AVMediaTypeAudio unavailable".into()))?;
+	let media = unsafe { AVMediaTypeAudio }.ok_or_else(|| Error::Capture("AVMediaTypeAudio unavailable".into()))?;
 
 	let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media) };
 
@@ -26,7 +25,7 @@ pub(super) async fn ensure_microphone_access() -> Result<(), AudioError> {
 		return Err(denied());
 	}
 	if status == AVAuthorizationStatus::Restricted {
-		return Err(AudioError::Unsupported(
+		return Err(Error::Capture(
 			"microphone access is restricted by system policy (parental controls / MDM)".into(),
 		));
 	}
@@ -50,7 +49,7 @@ const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Trigger the system prompt and await the user's answer. Unbundled CLIs usually
 /// get auto-denied without UI, which we surface as the same clear error.
 #[cfg(target_os = "macos")]
-async fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), AudioError> {
+async fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), Error> {
 	use std::sync::Mutex;
 
 	use objc2_av_foundation::AVCaptureDevice;
@@ -79,13 +78,11 @@ async fn request_access(media: &objc2_av_foundation::AVMediaType) -> Result<(), 
 }
 
 #[cfg(target_os = "macos")]
-fn denied() -> AudioError {
-	AudioError::Unsupported(
-		"microphone access denied; grant it in System Settings > Privacy & Security > Microphone".into(),
-	)
+fn denied() -> Error {
+	Error::Capture("microphone access denied; grant it in System Settings > Privacy & Security > Microphone".into())
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) async fn ensure_microphone_access() -> Result<(), AudioError> {
+pub(super) async fn ensure_microphone_access() -> Result<(), Error> {
 	Ok(())
 }

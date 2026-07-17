@@ -471,7 +471,7 @@ static void on_catalog(void *user_data, int32_t catalog)
 	// Subscribe to the video track (index 0). This takes the catalog snapshot,
 	// not the consume handle, and does not retain it - so free the snapshot
 	// immediately after.
-	int32_t track = moq_consume_video_ordered(catalog, 0, 0, on_video_frame, ctx);
+	int32_t track = moq_consume_video(catalog, 0, 0, on_video_frame, ctx);
 	moq_consume_catalog_free(catalog);
 	if (track < 0) {
 		LOG_ERROR("Failed to subscribe to video track: %d", track);

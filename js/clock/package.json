@@ -18,11 +18,11 @@
 	},
 	"dependencies": {
 		"@moq/net": "workspace:*",
-		"@fails-components/webtransport": "^1.6.3",
-		"@fails-components/webtransport-transport-http3-quiche": "^1.6.3"
+		"@fails-components/webtransport": "^1.6.5",
+		"@fails-components/webtransport-transport-http3-quiche": "^1.6.5"
 	},
 	"devDependencies": {
-		"@types/node": "^26.0.0",
+		"@types/node": "^26.1.1",
 		"typescript": "7.0.2"
 	}
 }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2](https://github.com/moq-dev/moq/compare/moq-native-v0.18.1...moq-native-v0.18.2) - 2026-07-16
+
+### Fixed
+
+- *(moq-native)* accept SNI-less raw QUIC connections ([#2294](https://github.com/moq-dev/moq/pull/2294))
+
+### Other
+
+- *(moq-native)* ignore flaky quiche_webtransport (SIGSEGV on CI) ([#2300](https://github.com/moq-dev/moq/pull/2300))
+
 ## [0.18.1](https://github.com/moq-dev/moq/compare/moq-native-v0.18.0...moq-native-v0.18.1) - 2026-07-15
 
 ### Fixed

@@ -176,11 +176,10 @@ impl<S: Stream> Export<S> {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeMap;
 	use std::task::Poll;
 
 	use bytes::{Bytes, BytesMut};
-	use hang::catalog::{H265, Video, VideoConfig};
+	use hang::catalog::{H265, VideoConfig};
 
 	use super::*;
 	use crate::catalog::Stream;
@@ -211,18 +210,9 @@ mod tests {
 		config.description = Some(hvcc);
 		config.container = hang::catalog::Container::Legacy;
 
-		let mut renditions = BTreeMap::new();
-		renditions.insert(name.to_string(), config);
-
-		Catalog {
-			video: Video {
-				renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
-		}
+		let mut catalog = Catalog::default();
+		catalog.video.insert(name, config).expect("duplicate rendition");
+		catalog
 	}
 
 	fn hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Bytes {
@@ -268,10 +258,7 @@ mod tests {
 		let catalog = hvc1_catalog("video.hvc1", hvcc(vps, sps, pps));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut track = broadcast
-			.create_track(
-				"video.hvc1",
-				moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-			)
+			.create_track("video.hvc1", hang::container::track_info())
 			.unwrap();
 
 		let mut g0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();

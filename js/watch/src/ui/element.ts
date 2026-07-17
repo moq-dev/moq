@@ -1,3 +1,10 @@
+/**
+ * The `<moq-watch-ui>` custom element: playback controls wrapped around a `<moq-watch>`.
+ *
+ * Side-effectful: importing this registers the element.
+ *
+ * @module
+ */
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";

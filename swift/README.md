@@ -64,7 +64,7 @@ The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastPr
 
 Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
 
-Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(timestampUs:payload:)`
+Raw tracks also expose best-effort datagrams: `TrackProducer.appendDatagram(_:timestampUs:)`
 returns the assigned sequence number, `TrackConsumer.recvDatagram()` receives one datagram,
 and `TrackConsumer.datagrams` streams them in arrival order. Payloads are capped at 1200 bytes.
 Datagrams require a datagram-capable transport and lite-05 or newer moq-lite; IETF moq-transport,

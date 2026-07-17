@@ -52,7 +52,7 @@ export interface Config {
 }
 
 // Signals the encoder reads.
-type EncoderInput = {
+export type EncoderInput = {
 	// Whether to publish (and encode) this rendition. When false the rendition drops out of the
 	// catalog and stops encoding, but stays registered so a subscriber still gets an idle track.
 	enabled: Getter<boolean>;

@@ -1,3 +1,10 @@
+/**
+ * The `<moq-watch>` custom element: a broadcast player driven by HTML attributes.
+ *
+ * Side-effectful: importing this registers the element.
+ *
+ * @module
+ */
 import type * as Catalog from "@moq/hang/catalog";
 import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
@@ -36,6 +43,11 @@ function parseVisible(value: string | null): Video.Visible {
 	return "20%";
 }
 
+/**
+ * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
+ * `"false"`/`"0"` is false. Presence alone can't express false, and attributes that default to
+ * true (`reload`) need to, so every boolean attribute accepts the explicit form.
+ */
 function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	if (value === null) return defaultValue;
 	const normalized = value.trim().toLowerCase();
@@ -105,8 +117,13 @@ export default class MoqWatch extends HTMLElement {
 	// Stashed volume to restore on unmute.
 	#unmuteVolume = 0.5;
 
-	// Expose the Effect class, so users can easily create effects scoped to this element.
-	signals = new Effect();
+	/**
+	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 *
+	 * Public because the element is the top of the tree: it's where an application hangs its own
+	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
+	 */
+	readonly signals = new Effect();
 
 	constructor() {
 		super();
@@ -256,7 +273,7 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) => {
 			const paused = effect.get(this.controls.paused);
 			if (paused) {
-				this.setAttribute("paused", "true");
+				this.setAttribute("paused", "");
 			} else {
 				this.removeAttribute("paused");
 			}
@@ -342,12 +359,12 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
-			this.controls.paused.set(newValue !== null);
+			this.controls.paused.set(parseBoolean(newValue, false));
 		} else if (name === "volume") {
 			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
 			this.controls.volume.set(volume);
 		} else if (name === "muted") {
-			this.controls.muted.set(newValue !== null);
+			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "visible") {
 			this.controls.visible.set(parseVisible(newValue));
 		} else if (name === "reload") {

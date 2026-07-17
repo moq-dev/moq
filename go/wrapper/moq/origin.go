@@ -36,16 +36,35 @@ func (o *OriginProducer) Dynamic() *OriginDynamic {
 }
 
 // Announce advertises a broadcast at the given path so subscribers can discover it.
-func (o *OriginProducer) Announce(path string, broadcast *BroadcastProducer) error {
+//
+// Hold the returned Announce for as long as the broadcast should stay discoverable;
+// unannouncing it removes the path. Closing the broadcast does not unannounce it.
+func (o *OriginProducer) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
 	if broadcast == nil {
-		return errors.New("moq: nil broadcast producer")
+		return nil, errors.New("moq: nil broadcast producer")
 	}
-	return o.inner.Announce(path, broadcast.inner)
+	inner, err := o.inner.Announce(path, broadcast.inner)
+	if err != nil {
+		return nil, err
+	}
+	return &Announce{inner: inner}, nil
 }
 
 // Deprecated: use Announce.
-func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) error {
+func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
 	return o.Announce(path, broadcast)
+}
+
+// Announce is a live announcement returned by [OriginProducer.Announce]: the publish-side
+// guard keeping one broadcast announced. The subscribe-side [Announced] is the unrelated
+// stream of announcements arriving from a remote.
+type Announce struct {
+	inner *ffi.MoqAnnounce
+}
+
+// Unannounce removes the broadcast from the origin. Idempotent.
+func (a *Announce) Unannounce() {
+	a.inner.Unannounce()
 }
 
 // OriginDynamic streams broadcast requests for paths that are not announced.
@@ -62,8 +81,9 @@ func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastReque
 	return &BroadcastRequest{inner: inner}, nil
 }
 
-// All ranges over requested broadcasts until the stream errors or the loop breaks.
-func (d *OriginDynamic) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+// Requests ranges over requested broadcasts until the stream errors or the loop
+// breaks.
+func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
 	return streamSeq(ctx, d.RequestedBroadcast)
 }
 

@@ -16,7 +16,7 @@ pub enum MoqError {
 	JsonTrack(#[from] moq_json::Error),
 
 	#[error(transparent)]
-	Audio(#[from] moq_audio::AudioError),
+	Audio(#[from] moq_audio::Error),
 
 	#[error(transparent)]
 	Url(#[from] url::ParseError),
@@ -64,7 +64,7 @@ pub enum MoqError {
 	#[error("not found")]
 	NotFound,
 
-	/// The negotiated protocol does not support the requested operation.
+	/// The requested operation is not supported.
 	#[error("unsupported")]
 	Unsupported,
 

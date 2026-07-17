@@ -23,6 +23,8 @@ Requires Python 3.10+. The distribution is `moq-rs` (the `moq` name is taken on 
 
 A **broadcast** is a collection of tracks identified by a path. A **track** is a live stream of frames. Producers write broadcasts to an origin; consumers subscribe to whatever has been announced.
 
+`announce` returns an `Announce` handle that owns the announcement: the broadcast stays discoverable until you call `unannounce()` or drop the handle. Closing the broadcast does not unannounce it, so keep the handle alive for as long as the path should resolve.
+
 For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_media` / `subscribe_media` and the catalog will be populated automatically.
 
 ## API summary
@@ -36,22 +38,26 @@ async with moq.Client("https://relay.example.com") as client:
 
 `Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
 
-A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting:
+A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting. `moq.is_auth(err)` catches both:
 
 ```python
 try:
     async with moq.Client("https://relay.example.com") as client:
         ...
-except (moq.Error.Unauthorized, moq.Error.Forbidden):
-    ...  # Prompt for credentials; don't reconnect.
+except moq.Error as err:
+    if moq.is_auth(err):
+        ...  # Prompt for credentials; don't reconnect.
+    raise
 ```
+
+`moq.is_shutdown(err)` is the companion: true for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
 
 ### Publishing media
 
 ```python
 broadcast = moq.BroadcastProducer()
 audio = broadcast.publish_media("opus", opus_init_bytes)
-client.announce("my-stream", broadcast)
+announce = client.announce("my-stream", broadcast)
 
 audio.write_frame(payload, timestamp_us=0)
 audio.finish()
@@ -86,15 +92,15 @@ async for announcement in client.announced("prefix/"):
 
 ### Catalog extensions
 
-Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON string; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.
+Advertise application-specific metadata (for example a side-channel transcript track) as an untyped catalog section. The value is any JSON-serializable object; it rides alongside `video`/`audio` and reaches subscribers as `Catalog.sections`.
 
 ```python
 import json
 
 # Publish: attach a custom section.
 broadcast = moq.BroadcastProducer()
-broadcast.set_catalog_section("transcript", json.dumps({"track": "transcript.json"}))
-client.announce("my-stream", broadcast)
+broadcast.set_catalog_section("transcript", {"track": "transcript.json"})
+announce = client.announce("my-stream", broadcast)
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
 catalog = await announcement.broadcast.catalog()
@@ -119,14 +125,14 @@ track = await broadcast_consumer.subscribe_track(
     "events",
     subscription=moq.Subscription(priority=10),
 )
-info = await track.info()
+info = track.info()
 track.update(moq.Subscription(priority=20, ordered=False))
 async for group in track:
     async for frame in group:
         print(frame.timestamp_us, frame.payload)
 ```
 
-`write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, including `payload`, `timestamp_us`, and `keyframe`. Use `append_group()` for multi-frame groups (e.g., a video GOP).
+`write_frame` on a track creates a one-frame group by default, using a microsecond raw-track timescale. Consumers receive a `Frame` from `read_frame()` or group iteration, carrying `payload` and `timestamp_us`. (Media tracks yield a `MediaFrame`, which adds the codec-derived `keyframe` flag.) Use `append_group()` for multi-frame groups (e.g., a video GOP).
 Use `create_group(sequence)` for sparse or replayed groups. `finish_at(final_sequence)` declares the exclusive end while still permitting lower groups to arrive, and `abort(error_code)` terminates a track or group with an application error.
 `TrackConsumer.info()` returns the publisher's track properties (timescale, cache, priority, ordering priority), and `update()` changes this subscriber's delivery preferences without resubscribing.
 `ordered` controls prioritization only. When true, groups are prioritized in sequence order. Groups may always arrive out-of-order (or not at all) over the network.
@@ -163,7 +169,7 @@ Call `request.abort(code)` when the requested group cannot be produced. Fetch is
 Raw tracks can also send best-effort datagrams:
 
 ```python
-seq = track.append_datagram(timestamp_us=42_000, payload=b"meter update")
+seq = track.append_datagram(b"meter update", timestamp_us=42_000)
 datagram = await track_consumer.recv_datagram()
 ```
 
@@ -202,7 +208,7 @@ Use a dynamic broadcast when subscribers should be able to request raw tracks th
 ```python
 broadcast = moq.BroadcastProducer()
 dynamic = broadcast.dynamic()
-client.announce("events", broadcast)
+announce = client.announce("events", broadcast)
 
 async for request in dynamic:
     if request.name == "alerts":

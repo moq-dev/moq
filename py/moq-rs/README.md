@@ -46,7 +46,7 @@ async def main():
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = broadcast.publish_media("opus", opus_init_bytes)
-        client.announce("my-stream", broadcast)
+        announce = client.announce("my-stream", broadcast)
 
         # Write frames
         audio.write_frame(payload, timestamp_us=0)
@@ -69,18 +69,18 @@ async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
         track = broadcast.publish_track("events")
-        server.announce("hello", broadcast)
+        announce = server.announce("hello", broadcast)
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
         async for request in server:
             print(f"  + {request.transport} from {request.url}")
-            sessions.append(await request.ok())
+            sessions.append(await request.accept())
 
 asyncio.run(main())
 ```
 
-Reject a request instead of accepting it with `await request.close(403)`.
+Reject a request instead of accepting it with `await request.reject(403)`.
 
 ### Advanced: Manual origin wiring
 
@@ -111,13 +111,13 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.announce(path, broadcast)`. Advertise a broadcast to be served.
+  - `.announce(path, broadcast) → Announce`. Advertise a broadcast to be served; hold the handle to keep it announced.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.transport`. Properties.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
-  - `await .ok() → Session`. Complete the handshake (hold the result to keep the connection alive).
-  - `await .close(code)`. Reject with an HTTP status code.
-  - `.cancel()`. Cancel an in-flight `ok()`/`close()` call.
+  - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
+  - `await .reject(code)`. Reject with an HTTP status code.
+  - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
 - **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
   - `await .closed()`. Wait until the session closes.
   - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
@@ -134,14 +134,14 @@ client = moq.Client(
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
 - **`MediaProducer`**. Write frames to a track.
-  - `.write_frame(payload, timestamp_us)`
+  - `.write_frame(payload, timestamp_us=0)`
   - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
-  - `.write_frame(payload, timestamp_us)` writes a payload with a presentation timestamp in microseconds.
+  - `.write_frame(payload, timestamp_us=0)` writes a payload with a presentation timestamp in microseconds.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(timestamp_us, payload) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.append_datagram(payload, timestamp_us=0) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing
 
@@ -151,11 +151,14 @@ client = moq.Client(
   - `await .subscribe_media(name, track, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
   - `await .catalog() → Catalog` (convenience)
 - **`CatalogConsumer`**. Async iterator of `Catalog`.
-- **`MediaConsumer`**. Async iterator of `Frame`.
-- **`TrackConsumer`**. Async iterator of groups, plus `.recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
-- **`TrackConsumer`**. Async iterator of raw groups.
+- **`MediaConsumer`**. Async iterator of `MediaFrame`.
+- **`TrackConsumer`**. Async iterator of raw groups, in sequence order.
+  - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
+  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
+  - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
-  - `await .info() → TrackInfo`
+  - `await .recv_datagram() -> Datagram | None` for best-effort raw track datagrams.
+  - `.info() → TrackInfo`
   - `.update(subscription)`. Change delivery priority, group ordering priority, staleness, or group range after subscribing.
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
@@ -167,7 +170,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
   - `.dynamic() → OriginDynamic`
-  - `.announce(path, broadcast)`
+  - `.announce(path, broadcast) → Announce`
 - **`OriginDynamic`**. Async source of broadcasts requested by consumers.
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.abort(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
@@ -179,7 +182,8 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 ### Types
 
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`.
+- **`Frame`**. `.payload: bytes`, `.timestamp_us: int`. The unit of every write and every raw read.
+- **`MediaFrame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`. Returned by media subscriptions.
 - **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.framerate`, `.description`.
@@ -194,6 +198,8 @@ For both `Subscription` and `TrackInfo`, `ordered` controls prioritization only.
 
 - **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
 - **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:` or `except moq.Error.Cancelled:`.
+- **`is_shutdown(err)`**. True for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
+- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401) and `Forbidden` (HTTP 403). Retrying without new credentials won't help, so surface these rather than reconnect.
 
 ## See Also
 

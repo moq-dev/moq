@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-	Counts, State,
+	Closed, Counts, State,
 	consumer::Consumer,
 	lock::*,
 	producer::{Producer, Ref},
@@ -75,7 +75,8 @@ impl<T> ProducerWeak<T> {
 		crate::wait(move |waiter| self.poll_closed(waiter)).await
 	}
 
-	fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
+	/// Poll for channel closure, registering the waiter if still open.
+	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(());
@@ -87,22 +88,26 @@ impl<T> ProducerWeak<T> {
 
 	/// Wait until all consumers have been dropped.
 	///
-	/// Returns `Ok(())` when no consumers remain, or `Err(Ref)` if the channel closes first.
-	pub async fn unused(&self) -> Result<(), Ref<'_, T>> {
+	/// Returns `Ok(())` when no consumers remain, or [`Closed`] if the channel closes first.
+	pub async fn unused(&self) -> Result<(), Closed> {
 		match crate::wait(move |waiter| self.poll_unused(waiter)).await {
 			Some(()) => Ok(()),
-			None => Err(self.read()),
+			None => Err(Closed),
 		}
 	}
 
-	fn poll_unused(&self, waiter: &Waiter) -> Poll<Option<()>> {
-		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Some(()));
-		}
-
+	/// Poll-based variant of [`Self::unused`]: `Ready(Some(()))` when no consumers
+	/// remain, `Ready(None)` if the channel closed first, else `Pending`.
+	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Option<()>> {
+		// Closure is checked first, matching `Producer::poll_unused`: a closed channel
+		// with no consumers resolves `None` from either handle.
 		let mut state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(None);
+		}
+
+		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Some(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -118,22 +123,25 @@ impl<T> ProducerWeak<T> {
 
 	/// Wait until at least one consumer exists.
 	///
-	/// Returns `Ok(())` when a consumer is created, or `Err(Ref)` if the channel closes first.
-	pub async fn used(&self) -> Result<(), Ref<'_, T>> {
+	/// Returns `Ok(())` when a consumer is created, or [`Closed`] if the channel closes first.
+	pub async fn used(&self) -> Result<(), Closed> {
 		match crate::wait(move |waiter| self.poll_used(waiter)).await {
 			Some(()) => Ok(()),
-			None => Err(self.read()),
+			None => Err(Closed),
 		}
 	}
 
-	fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
-		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Some(()));
-		}
-
+	/// Poll-based variant of [`Self::used`]: `Ready(Some(()))` once a consumer
+	/// exists, `Ready(None)` if the channel closed first, else `Pending`.
+	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
+		// Closure is checked first, matching `Producer::poll_used`.
 		let mut state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(None);
+		}
+
+		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
+			return Poll::Ready(Some(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -188,9 +196,32 @@ impl<T> ConsumerWeak<T> {
 		}
 	}
 
+	/// Get read-only access to the shared state.
+	pub fn read(&self) -> Ref<'_, T> {
+		Ref {
+			state: self.state.lock(),
+		}
+	}
+
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.lock().closed
+	}
+
+	/// Wait until the channel is closed.
+	pub async fn closed(&self) {
+		crate::wait(move |waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll for channel closure, registering the waiter if still open.
+	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
+		let mut state = self.state.lock();
+		if state.closed {
+			return Poll::Ready(());
+		}
+
+		waiter.register(&mut state.waiters_closed);
+		Poll::Pending
 	}
 
 	/// Returns `true` if both handles share the same underlying state.
@@ -205,5 +236,61 @@ impl<T> Clone for ConsumerWeak<T> {
 			state: self.state.clone(),
 			counts: self.counts.clone(),
 		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	/// A closed, consumer-free channel reports the same thing through either handle.
+	/// Both check closure before the consumer count, so neither reports `Ok(())` for a
+	/// channel that is merely out of consumers because it's dead.
+	#[tokio::test]
+	async fn weak_and_producer_agree_once_closed() {
+		let producer = Producer::new(0u32);
+		let weak = producer.weak();
+
+		// No consumers were ever created, and the channel is now closed.
+		producer.close().ok().expect("open");
+
+		assert_eq!(producer.unused().await, Err(Closed));
+		assert_eq!(weak.unused().await, Err(Closed));
+
+		assert_eq!(producer.used().await, Err(Closed));
+		assert_eq!(weak.used().await, Err(Closed));
+	}
+
+	/// While the channel is open the two handles still agree on the consumer count.
+	#[tokio::test]
+	async fn weak_and_producer_agree_while_open() {
+		let producer = Producer::new(0u32);
+		let weak = producer.weak();
+
+		assert_eq!(producer.unused().await, Ok(()));
+		assert_eq!(weak.unused().await, Ok(()));
+
+		let consumer = producer.consume();
+		assert_eq!(producer.used().await, Ok(()));
+		assert_eq!(weak.used().await, Ok(()));
+
+		drop(consumer);
+		assert_eq!(weak.unused().await, Ok(()));
+	}
+
+	#[tokio::test]
+	async fn consumer_weak_reads_and_observes_close() {
+		let producer = Producer::new(7u32);
+		let consumer = producer.consume();
+		let weak = consumer.weak();
+
+		assert_eq!(*weak.read(), 7);
+		assert!(!weak.is_closed());
+
+		// Dropping the last producer closes the channel, resolving `closed()`.
+		drop(producer);
+		weak.closed().await;
+		assert!(weak.is_closed());
+		assert!(weak.read().is_closed());
 	}
 }

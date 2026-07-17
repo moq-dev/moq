@@ -55,7 +55,7 @@ GPU-less builder and still starts on a GPU-less machine.
 
 ## Decode
 
-`decode::Consumer` (the mirror of `moq-audio`'s `AudioConsumer`) subscribes to an
+`decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
 H.264, H.265, or AV1 track and returns raw I420 frames. Backends are tried
 hardware-first, like encode:
 

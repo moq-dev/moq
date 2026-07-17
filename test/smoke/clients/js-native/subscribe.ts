@@ -88,7 +88,7 @@ async function run(): Promise<void> {
 			for (;;) {
 				const frame = await group.readFrame();
 				if (!frame) break;
-				total += frame.data.byteLength;
+				total += frame.payload.byteLength;
 				if (total > 0) {
 					// The harness judges success by this marker, not the exit code: the
 					// @moq/web-transport NAPI addon can segfault during the runtime's exit

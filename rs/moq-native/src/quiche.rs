@@ -1,3 +1,6 @@
+//! QUIC backend built on [`web_transport_quiche`], speaking WebTransport over HTTP/3
+//! (`https://`) or raw QUIC (`moqt://` / `moql://`).
+
 use crate::client::ClientConfig;
 use crate::crypto;
 use crate::quic::Resolved;
@@ -10,96 +13,126 @@ use std::sync::{Arc, RwLock};
 use url::Url;
 use web_transport_quiche::proto::ConnectRequest;
 
+/// Re-exported because this module's public API exposes its types. A major
+/// `web-transport-quiche` bump is therefore a breaking change for this crate.
 pub use web_transport_quiche;
 
 /// Errors specific to the quiche QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The UDP socket failed to bind, or another I/O operation failed.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
+	/// The URL had no host to dial and use as the TLS SNI.
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
-	/// No longer returned: the `http://` scheme now fetches and pins the
-	/// certificate fingerprint instead of failing.
+	#[doc(hidden)]
 	#[deprecated(note = "fingerprint verification over http:// is now supported; this is never returned")]
 	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
 	FingerprintUnsupported,
 
+	/// The `http://` fingerprint bootstrap could not reach the relay.
 	#[error("failed to fetch certificate fingerprint")]
 	FetchFingerprint(#[source] reqwest::Error),
 
+	/// The relay answered the fingerprint bootstrap with a non-success status.
 	#[error("certificate fingerprint request failed")]
 	FingerprintStatus(#[source] reqwest::Error),
 
+	/// The fingerprint response body could not be read.
 	#[error("failed to read certificate fingerprint")]
 	ReadFingerprint(#[source] reqwest::Error),
 
+	/// The fetched fingerprint was not valid hex.
 	#[error("invalid certificate fingerprint")]
 	InvalidFingerprint(#[source] hex::FromHexError),
 
+	/// The fetched fingerprint decoded to the wrong length, so it isn't a SHA-256.
 	#[error("certificate fingerprint must be 32 bytes (SHA-256), got {0}")]
 	FingerprintLength(usize),
 
+	/// The URL scheme is one this backend cannot dial.
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
 
+	/// quiche resolves the dial target and the TLS SNI from the same host, so the
+	/// two cannot be decoupled. Drop the override or use the quinn backend.
 	#[error("client tls host_name override is not supported with the quiche backend")]
 	HostNameUnsupported,
 
+	/// quiche probes GSO from the socket and offers no knob to force it off.
 	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 
+	/// The handshake completed without negotiating an ALPN, so there is no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
 
+	/// The negotiated ALPN was not valid UTF-8.
 	#[error("failed to decode ALPN")]
 	DecodeAlpn(#[from] std::str::Utf8Error),
 
+	/// The peer negotiated an ALPN this server does not serve.
 	#[error("unsupported ALPN: {0}")]
 	UnsupportedAlpn(String),
 
+	/// The server's configured bind address could not be resolved.
 	#[error("failed to resolve bind address")]
 	ResolveBind(#[source] std::io::Error),
 
+	/// The server is not bound to any address, so there is no local address to report.
 	#[error("failed to get local address")]
 	NoLocalAddr,
 
+	/// The server was given neither a certificate pair nor hostnames to generate one from.
 	#[error("--tls-cert and --tls-key are required with the quiche backend")]
 	CertRequired,
 
+	/// The server was given a different number of certificates than keys.
 	#[error("must provide matching --tls-cert and --tls-key pairs")]
 	CertPairMismatch,
 
+	/// The QUIC connection could not be started, usually a bad address or an unusable socket.
 	#[error("failed to connect to quiche server")]
 	Connect(#[source] std::io::Error),
 
+	/// An established connection failed, including when accepting an incoming one.
 	#[error(transparent)]
 	Connection(#[from] web_transport_quiche::ez::ConnectionError),
 
+	/// The QUIC handshake failed, most often TLS verification or a timeout.
 	#[error("failed to establish quiche connection")]
 	Establish(#[source] web_transport_quiche::ez::ConnectionError),
 
+	/// The WebTransport CONNECT failed over an otherwise healthy QUIC connection.
 	#[error("failed to connect to quiche server")]
 	ClientConnect(#[from] web_transport_quiche::ClientError),
 
+	/// The server refused the WebTransport CONNECT with a recognized status, such as
+	/// an auth failure. See [`crate::ConnectError`].
 	#[error(transparent)]
 	ConnectRejected(#[from] crate::ConnectError),
 
+	/// The server could not bind its socket or load the supplied certificate.
 	#[error("failed to create quiche server")]
 	ServerBuild(#[source] std::io::Error),
 
+	/// The client never sent a usable WebTransport CONNECT request.
 	#[error("failed to accept WebTransport request")]
 	AcceptRequest(#[source] web_transport_quiche::ServerError),
 
+	/// The `200 OK` response to a WebTransport CONNECT could not be sent.
 	#[error("failed to accept quiche WebTransport")]
 	Accept(#[source] web_transport_quiche::ServerError),
 
+	/// The rejection response to a WebTransport CONNECT could not be sent.
 	#[error("failed to close quiche WebTransport request")]
 	Reject(#[source] web_transport_quiche::ServerError),
 
+	/// The TLS configuration was invalid. See [`crate::tls::Error`].
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
 }
@@ -334,7 +367,7 @@ fn classify_proto_error(err: &web_transport_quiche::proto::ConnectError) -> Opti
 
 pub(crate) struct QuicheServer {
 	pub server: web_transport_quiche::ez::Server,
-	pub fingerprints: Arc<RwLock<crate::tls::Info>>,
+	pub certs: crate::tls::Certificates,
 }
 
 impl QuicheServer {
@@ -373,11 +406,11 @@ impl QuicheServer {
 			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
 			.collect();
 
-		let info = Arc::new(RwLock::new(crate::tls::Info {
+		let certs = crate::tls::Certificates::new(Arc::new(RwLock::new(crate::tls::Info {
 			#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 			certs: Vec::new(),
 			fingerprints,
-		}));
+		})));
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -398,18 +431,15 @@ impl QuicheServer {
 			.with_single_cert(chain, key)
 			.map_err(Error::ServerBuild)?;
 
-		Ok(Self {
-			server,
-			fingerprints: info,
-		})
+		Ok(Self { server, certs })
 	}
 
 	pub fn accept(&mut self) -> impl std::future::Future<Output = Option<web_transport_quiche::ez::Incoming>> + '_ {
 		self.server.accept()
 	}
 
-	pub fn tls_info(&self) -> Arc<RwLock<crate::tls::Info>> {
-		self.fingerprints.clone()
+	pub fn certificates(&self) -> crate::tls::Certificates {
+		self.certs.clone()
 	}
 
 	pub fn local_addr(&self) -> Result<net::SocketAddr> {

@@ -75,7 +75,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            int32_t track = moq_consume_video_ordered((uint32_t)catalog, 0, 1000, on_frame, ud);
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, 1000, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_started = 1;

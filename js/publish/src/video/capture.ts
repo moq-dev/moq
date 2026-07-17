@@ -3,7 +3,7 @@ import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";
 
 // The raw capture source to pump frames from.
-type CaptureInput = {
+export type CaptureInput = {
 	source: Getter<Source | undefined>;
 };
 
@@ -29,14 +29,14 @@ export class Capture {
 	};
 	readonly out = readonlys(this.#out);
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props?: Inputs<CaptureInput>) {
 		this.in = {
 			source: getter(props?.source),
 		};
 
-		this.signals.run(this.#run.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {
@@ -72,7 +72,7 @@ export class Capture {
 	}
 
 	close() {
-		this.signals.close();
+		this.#signals.close();
 
 		this.#out.frame.update((prev) => {
 			prev?.close();

@@ -9,12 +9,12 @@ from .types import ConnectionStats
 
 
 class Session:
-    """An established MoQ connection, returned by `Client` and `Request.ok()`.
+    """An established MoQ connection, returned by `Client` and `Request.accept()`.
 
     Hold the session to keep the connection alive; dropping it closes the
     connection. As an async context manager it shuts down gracefully on exit:
 
-        session = await request.ok()
+        session = await request.accept()
         async with session:
             await session.closed()
     """

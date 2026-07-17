@@ -11,8 +11,8 @@ use crate::{Error, Rung};
 pub(crate) struct Resolved {
 	/// The rendition/track name, e.g. `video/360p`.
 	pub name: String,
-	pub width: u32,
-	pub height: u32,
+	/// The output resolution, derived from the source aspect ratio.
+	pub size: moq_video::Size,
 	pub bitrate: u64,
 	pub framerate: u32,
 }
@@ -80,8 +80,7 @@ pub(crate) fn resolve_rungs(rungs: &[Rung], source_name: &str, source: &VideoCon
 
 		let rung = Resolved {
 			name: format!("video/{height}p"),
-			width: width as u32,
-			height: height as u32,
+			size: moq_video::Size::new(width as u32, height as u32),
 			bitrate: rung.bitrate,
 			framerate,
 		};
@@ -106,10 +105,10 @@ pub(crate) fn rung_entry(rung: &Resolved, source: &VideoConfig) -> VideoConfig {
 		inline: true,
 		profile: 0x64,
 		constraints: 0,
-		level: h264_level(rung.width, rung.height, rung.framerate, rung.bitrate),
+		level: h264_level(rung.size.width, rung.size.height, rung.framerate, rung.bitrate),
 	});
-	config.coded_width = Some(rung.width);
-	config.coded_height = Some(rung.height);
+	config.coded_width = Some(rung.size.width);
+	config.coded_height = Some(rung.size.height);
 	config.bitrate = Some(rung.bitrate);
 	config.framerate = Some(rung.framerate as f64);
 	config.optimize_for_latency = source.optimize_for_latency;
@@ -258,7 +257,7 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(resolved.len(), 1);
-		assert_eq!((resolved[0].width, resolved[0].height), (640, 360));
+		assert_eq!(resolved[0].size, moq_video::Size::new(640, 360));
 
 		// Vertical video: aspect preserved, width rounded to even.
 		let resolved = resolve_rungs(
@@ -267,7 +266,7 @@ mod tests {
 			&source(1080, 1920, Some(6_000_000)),
 		)
 		.unwrap();
-		assert_eq!((resolved[0].width, resolved[0].height), (202, 360));
+		assert_eq!(resolved[0].size, moq_video::Size::new(202, 360));
 	}
 
 	#[test]

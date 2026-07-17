@@ -31,7 +31,8 @@ int32_t moq_session_close(uint32_t session);
 // Origin
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
-int32_t moq_origin_publish(uint32_t origin, const char *path, uintptr_t path_len, uint32_t broadcast);
+int32_t moq_origin_announce(uint32_t origin, const char *path, uintptr_t path_len, uint32_t broadcast);
+int32_t moq_origin_unannounce(uint32_t announce);
 int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, void (*on_broadcast)(void *user_data, int32_t broadcast), void *user_data);
 int32_t moq_origin_request_close(uint32_t task);
 int32_t moq_origin_consume_announced(uint32_t origin, const char *path, uintptr_t path_len, void (*on_broadcast)(void *user_data, int32_t broadcast), void *user_data);
@@ -43,16 +44,16 @@ int32_t moq_origin_announced_close(uint32_t announced);
 
 // Publishing
 int32_t moq_publish_create(void);
-int32_t moq_publish_close(uint32_t broadcast);
-int32_t moq_publish_media_ordered(uint32_t broadcast, const char *format, uintptr_t format_len, const uint8_t *init, uintptr_t init_size);
-int32_t moq_publish_media_close(uint32_t media);
+int32_t moq_publish_finish(uint32_t broadcast);
+int32_t moq_publish_media(uint32_t broadcast, const char *format, uintptr_t format_len, const uint8_t *init, uintptr_t init_size);
+int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len);
 int32_t moq_publish_track_group(uint32_t track);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
-int32_t moq_publish_group_close(uint32_t group);
-int32_t moq_publish_track_close(uint32_t track);
+int32_t moq_publish_group_finish(uint32_t group);
+int32_t moq_publish_track_finish(uint32_t track);
 
 // Consuming
 int32_t moq_consume_close(uint32_t consume);
@@ -65,11 +66,11 @@ int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_con
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video_ordered(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_video_close(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio_ordered(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames

@@ -270,10 +270,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 		};
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)?;
+		let track = self
+			.broadcast
+			.create_track(self.broadcast.unique_name(suffix), hang::container::track_info())?;
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
 

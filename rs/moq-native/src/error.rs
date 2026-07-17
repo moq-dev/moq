@@ -8,80 +8,107 @@ use std::sync::Arc;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// Reading or writing a socket, certificate, or key file failed.
 	#[error(transparent)]
 	Io(Arc<std::io::Error>),
 
+	/// The MoQ session itself failed, after the transport was established.
 	#[error(transparent)]
 	MoqNet(#[from] moq_net::Error),
 
+	/// The log filter string (ex. `RUST_LOG`) isn't a valid tracing directive.
 	#[error("invalid log directive")]
 	Directive(#[source] Arc<tracing_subscriber::filter::ParseError>),
 
+	/// Logging was initialized twice, or something else already claimed the global subscriber.
 	#[error("failed to set global tracing subscriber")]
 	SetSubscriber(#[source] Arc<tracing_subscriber::util::TryInitError>),
 
+	/// Logging couldn't attach to Android's logcat.
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
+	/// No backend feature is compiled in that can serve this URL. The string names the features to enable.
 	#[error("{0}")]
 	NoBackend(&'static str),
 
+	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
 
+	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
 	#[error(transparent)]
 	Connect(#[from] crate::ConnectError),
 
+	/// Both halves of the QUIC/WebSocket race failed, so neither error alone tells the story.
 	#[cfg(feature = "websocket")]
 	#[error("failed to connect to server: QUIC failed: {quic}; WebSocket failed: {websocket}")]
-	TransportRace { quic: Arc<Error>, websocket: Arc<Error> },
+	TransportRace {
+		/// Why the QUIC attempt failed.
+		quic: Arc<Error>,
+		/// Why the WebSocket attempt failed.
+		websocket: Arc<Error>,
+	},
 
+	/// An `iroh://` URL was dialed but the client was built without an Iroh endpoint.
 	#[cfg(feature = "iroh")]
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
+	/// A client certificate was configured, but this QUIC backend can't do mTLS.
 	#[error("tls.root (mTLS) is not supported by the selected QUIC backend")]
 	MtlsUnsupported,
 
+	/// The server's WebTransport response carried a status outside the valid HTTP range.
 	#[error("invalid status code")]
 	InvalidStatusCode,
 
+	/// Reconnecting gave up, usually after the backoff timeout expired. The string has the details.
 	#[error("{0}")]
 	Reconnect(String),
 
+	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
 
+	/// The Quinn backend failed.
 	#[cfg(feature = "quinn")]
 	#[error(transparent)]
 	Quinn(Arc<crate::quinn::Error>),
 
+	/// The noq backend failed.
 	#[cfg(feature = "noq")]
 	#[error(transparent)]
 	Noq(Arc<crate::noq::Error>),
 
+	/// The quiche backend failed.
 	#[cfg(feature = "quiche")]
 	#[error(transparent)]
 	Quiche(Arc<crate::quiche::Error>),
 
+	/// The Iroh backend failed.
 	#[cfg(feature = "iroh")]
 	#[error(transparent)]
 	Iroh(Arc<crate::iroh::Error>),
 
+	/// The WebSocket fallback transport failed.
 	#[cfg(feature = "websocket")]
 	#[error(transparent)]
 	WebSocket(Arc<crate::websocket::Error>),
 
+	/// The TCP (qmux) transport failed.
 	#[cfg(feature = "tcp")]
 	#[error(transparent)]
 	Tcp(Arc<crate::tcp::Error>),
 
+	/// The Unix socket transport failed.
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
 }
 
 impl Error {
+	/// The auth rejection behind this error, digging through backend and race variants.
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::Connect(err) => Some(*err),
@@ -100,6 +127,7 @@ impl Error {
 		}
 	}
 
+	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	pub fn is_auth(&self) -> bool {
 		self.connect_error().is_some_and(|err| err.is_auth())
 	}

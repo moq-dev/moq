@@ -20,7 +20,6 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 	Ok(MoqFrame {
 		payload: frame.payload.to_vec(),
 		timestamp_us,
-		keyframe: false,
 	})
 }
 
@@ -162,7 +161,7 @@ struct Media {
 }
 
 impl Media {
-	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
+	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
 		let frame = self.inner.read().await?;
 
 		let Some(frame) = frame else {
@@ -174,7 +173,7 @@ impl Media {
 		let mut buf = frame.payload;
 		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
 
-		Ok(Some(MoqFrame {
+		Ok(Some(MoqMediaFrame {
 			payload,
 			timestamp_us,
 			keyframe: frame.keyframe,
@@ -257,7 +256,7 @@ impl MoqBroadcastConsumer {
 	pub async fn subscribe_media(
 		&self,
 		name: String,
-		container: Container,
+		container: MoqContainer,
 		subscription: Option<MoqSubscription>,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		// Parse the container before subscribing so we don't leave a dangling
@@ -377,7 +376,6 @@ impl MoqTrackConsumer {
 	///
 	/// Convenience for tracks using one-frame-per-group (like moq-boy's
 	/// status/command tracks). Returns `None` when the track ends.
-	/// `keyframe` is always false for raw frames because no codec metadata is parsed.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
@@ -393,7 +391,7 @@ impl MoqTrackConsumer {
 	}
 
 	/// Return the publisher-side track properties learned during subscription.
-	pub async fn info(&self) -> Result<MoqTrackInfo, MoqError> {
+	pub fn info(&self) -> Result<MoqTrackInfo, MoqError> {
 		MoqTrackInfo::try_from(&self.info)
 	}
 
@@ -444,8 +442,7 @@ impl MoqGroupConsumer {
 
 	/// Read the next frame in this group, including its timestamp.
 	///
-	/// Returns `None` when the group ends. `keyframe` is always false for raw frames
-	/// because no codec metadata is parsed.
+	/// Returns `None` when the group ends.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
@@ -475,7 +472,7 @@ impl MoqCatalogConsumer {
 #[uniffi::export]
 impl MoqMediaConsumer {
 	/// Get the next frame. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<MoqFrame>, MoqError> {
+	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 

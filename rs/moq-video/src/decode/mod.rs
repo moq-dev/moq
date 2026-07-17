@@ -1,7 +1,7 @@
 //! Subscribe to an H.264, H.265, or AV1 track and decode it to raw frames.
 //!
 //! The decode counterpart to [`encode`](crate::encode), and the mirror of
-//! `moq-audio`'s `AudioConsumer`. [`Consumer`] subscribes to a moq-mux video
+//! `moq_audio::decode::Consumer`. [`Consumer`] subscribes to a moq-mux video
 //! track and hands back decoded [`Frame`]s; a native backend does the work
 //! (VideoToolbox on macOS, Media Foundation / DXVA on Windows, NVDEC on Linux,
 //! openh264 everywhere as the software fallback for H.264).
@@ -14,7 +14,7 @@
 use bytes::Bytes;
 use moq_net::Timestamp;
 
-use crate::Error;
+use crate::{Error, Size};
 
 // Crate-visible so the NVENC encode backend's round-trip test can decode its
 // output with the software decoder (an in-crate, ffmpeg-free encode->decode
@@ -38,29 +38,25 @@ pub struct Frame {
 	/// the decoder with each picture, so a reordered frame (B-frames) keeps its own
 	/// time rather than the input access unit's.
 	pub timestamp: Timestamp,
-	/// Frame width in pixels (even).
-	pub width: u32,
-	/// Frame height in pixels (even).
-	pub height: u32,
+	/// The decoded resolution, which is [`Config::resize`] when the backend
+	/// honored it and the stream's native size otherwise.
+	pub size: Size,
 	/// The pixels: CPU I420 or a GPU surface.
 	pub(crate) inner: crate::frame::Frame,
 }
 
 impl Frame {
-	/// A copy of this frame scaled to `width` x `height` (both even and
-	/// non-zero), preserving the timestamp. A GPU frame scales on the GPU (a
-	/// box filter, correct at any downscale factor) and stays there, so
-	/// resize -> [`encode`](crate::encode::Encoder::encode) never touches the
-	/// CPU; a CPU frame scales on the CPU. When one output size is enough,
-	/// prefer decoding straight to it ([`Config::resize`]), which is free on
-	/// decoders with a hardware scaler; this method is for fanning one decoded
-	/// stream out to several sizes.
-	pub fn resize(&self, width: u32, height: u32) -> Result<Frame, Error> {
-		if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"resize to {width}x{height}: dimensions must be even and non-zero"
-			)));
-		}
+	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
+	/// preserving the timestamp. A GPU frame scales on the GPU (a box filter,
+	/// correct at any downscale factor) and stays there, so resize ->
+	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU; a CPU
+	/// frame scales on the CPU. When one output size is enough, prefer decoding
+	/// straight to it ([`Config::resize`]), which is free on decoders with a
+	/// hardware scaler; this method is for fanning one decoded stream out to
+	/// several sizes.
+	pub fn resize(&self, size: Size) -> Result<Frame, Error> {
+		size.validate("resize to")?;
+		let Size { width, height } = size;
 
 		let inner = match &self.inner {
 			crate::frame::Frame::I420(i420) => crate::frame::Frame::I420(i420.resize(width, height)?),
@@ -83,8 +79,7 @@ impl Frame {
 
 		Ok(Frame {
 			timestamp: self.timestamp,
-			width,
-			height,
+			size,
 			inner,
 		})
 	}

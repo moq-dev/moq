@@ -225,9 +225,10 @@ func (m *MediaProducer) Unused(ctx context.Context) error {
 	return runErr(ctx, nil, m.inner.Unused)
 }
 
-// WriteFrame appends a frame with a presentation timestamp in microseconds.
-func (m *MediaProducer) WriteFrame(payload []byte, timestampUs uint64) error {
-	return m.inner.WriteFrame(payload, timestampUs)
+// WriteFrame appends frame to the media track. The importer derives keyframe status from
+// the bitstream, so a Frame carries only the payload and its timestamp.
+func (m *MediaProducer) WriteFrame(frame Frame) error {
+	return m.inner.WriteFrame(frame)
 }
 
 // Finish closes the media track.
@@ -300,16 +301,15 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 	return &GroupProducer{inner: inner}, nil
 }
 
-// WriteFrame writes a single-frame group with a timestamp in microseconds.
-func (t *TrackProducer) WriteFrame(payload []byte, timestampUs uint64) error {
-	return t.inner.WriteFrame(payload, timestampUs)
+// WriteFrame writes frame as a single-frame group.
+func (t *TrackProducer) WriteFrame(frame Frame) error {
+	return t.inner.WriteFrame(frame)
 }
 
-// AppendDatagram sends a best-effort datagram and returns its sequence number.
-// timestampUs is the presentation timestamp in microseconds. Payloads are capped
-// at 1200 bytes. There is no stream fallback.
-func (t *TrackProducer) AppendDatagram(timestampUs uint64, payload []byte) (uint64, error) {
-	return t.inner.AppendDatagram(timestampUs, payload)
+// AppendDatagram sends frame as a best-effort datagram and returns the sequence number
+// assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
+func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
+	return t.inner.AppendDatagram(frame)
 }
 
 // Abort closes the track with an application error code.
@@ -357,9 +357,9 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// WriteFrame appends a frame with a timestamp in microseconds.
-func (g *GroupProducer) WriteFrame(payload []byte, timestampUs uint64) error {
-	return g.inner.WriteFrame(payload, timestampUs)
+// WriteFrame appends frame to the group.
+func (g *GroupProducer) WriteFrame(frame Frame) error {
+	return g.inner.WriteFrame(frame)
 }
 
 // Finish closes the group.
@@ -384,6 +384,11 @@ func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error
 		return nil, err
 	}
 	return &GroupRequest{inner: inner}, nil
+}
+
+// Requests ranges over uncached group requests until the dynamic source ends.
+func (d *TrackDynamic) Requests(ctx context.Context) iter.Seq2[*GroupRequest, error] {
+	return streamSeq(ctx, d.RequestedGroup)
 }
 
 // Cancel stops current and future requested-group waits.

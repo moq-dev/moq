@@ -153,11 +153,7 @@ impl MoqServer {
 			.server
 			.as_ref()
 			.ok_or_else(|| MoqError::Bind("not listening; call listen() first".into()))?;
-		let info_handle = server.tls_info();
-		let info = info_handle
-			.read()
-			.map_err(|err| MoqError::Bind(format!("tls info lock poisoned: {err}")))?;
-		Ok(info.fingerprints.clone())
+		Ok(server.certificates().fingerprints())
 	}
 
 	/// Cancel any in-flight `listen()` or `accept()` call.
@@ -230,23 +226,14 @@ impl MoqRequest {
 
 	/// Complete the MoQ handshake and return the established session.
 	///
-	/// Returns `AlreadyResponded` if `ok()` or `close()` has already been called.
-	pub async fn ok(&self) -> Result<Arc<MoqSession>, MoqError> {
+	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
+	pub async fn accept(&self) -> Result<Arc<MoqSession>, MoqError> {
 		self.task
 			.run(|mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				// Materialize both origin sides (reusing the caller's if wired) so the
-				// session can publish/subscribe and the FFI can hand back a publisher/consumer.
-				let publish = state
-					.publish
-					.as_ref()
-					.map(|p| p.inner().clone())
-					.unwrap_or_else(|| moq_net::Origin::random().produce());
-				let subscribe = state
-					.consume
-					.as_ref()
-					.map(|p| p.inner().clone())
-					.unwrap_or_else(|| moq_net::Origin::random().produce());
+				// Materialize both origin sides so the session can publish/subscribe and the
+				// FFI can hand back a publisher/consumer.
+				let (publish, subscribe) = crate::origin::resolve_pair(state.publish.as_ref(), state.consume.as_ref());
 				let session = request
 					.with_publisher(&publish)
 					.with_subscriber(subscribe.clone())
@@ -260,8 +247,8 @@ impl MoqRequest {
 
 	/// Reject the session with the given HTTP status code.
 	///
-	/// Returns `AlreadyResponded` if `ok()` or `close()` has already been called.
-	pub async fn close(&self, code: u16) -> Result<(), MoqError> {
+	/// Returns `AlreadyResponded` if `accept()` or `reject()` has already been called.
+	pub async fn reject(&self, code: u16) -> Result<(), MoqError> {
 		self.task
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
@@ -274,7 +261,7 @@ impl MoqRequest {
 			.await
 	}
 
-	/// Cancel any in-flight `ok()` or `close()` call.
+	/// Cancel any in-flight `accept()` or `reject()` call.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}

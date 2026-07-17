@@ -72,7 +72,8 @@ public final class BroadcastConsumer: Sendable {
         as _: Value.Type,
         compression: Bool = false
     ) async throws -> JsonSnapshotConsumer<Value> {
-        JsonSnapshotConsumer(try await ffi.subscribeJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(deltaRatio: 0, compression: compression)))
+        // deltaRatio is producer-only, so leave it at its default here.
+        JsonSnapshotConsumer(try await ffi.subscribeJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(compression: compression)))
     }
 
     /// Subscribe to a JSON stream track (lossless append-log), decoding each record as `Value`.
@@ -198,7 +199,7 @@ public final class BroadcastProducer: Sendable {
     public func publishJsonSnapshot<Value: Encodable>(
         name: String,
         of _: Value.Type,
-        deltaRatio: UInt32 = 8,
+        deltaRatio: UInt32 = MoqJsonSnapshotConfig().deltaRatio,
         compression: Bool = false
     ) throws -> JsonSnapshotProducer<Value> {
         JsonSnapshotProducer(try ffi.publishJsonSnapshot(name: name, config: MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression)))

@@ -53,20 +53,21 @@ impl Connection {
 		let transport = self.request.transport();
 
 		// The client advertises which direction it intends to use (moq-lite-05 SETUP).
-		// A bidirectional connection (e.g. a cluster peer) leaves this `Both`, so the
+		// A bidirectional connection (e.g. a cluster peer) advertises nothing, so the
 		// only requirement is that the token grants *something*. But a gateway that only
 		// publishes or only subscribes says so, and a token missing that direction's
 		// scope is rejected here during the handshake, instead of being accepted and
 		// then silently carrying no media (the bug that motivated the role hint).
 		let role = self.request.role();
 		let authorized = match role {
-			moq_net::Role::Publisher => publish.is_some(),
-			moq_net::Role::Subscriber => subscribe.is_some(),
-			moq_net::Role::Both => publish.is_some() || subscribe.is_some(),
+			Some(moq_net::Role::Publisher) => publish.is_some(),
+			Some(moq_net::Role::Subscriber) => subscribe.is_some(),
+			None => publish.is_some() || subscribe.is_some(),
 		};
 		if !authorized {
 			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-			anyhow::bail!("token does not grant {role:?} access to {}", token.root);
+			let wanted = role.map(|role| role.as_str()).unwrap_or("any");
+			anyhow::bail!("token does not grant {wanted} access to {}", token.root);
 		}
 
 		match (&publish, &subscribe) {
@@ -97,12 +98,12 @@ impl Connection {
 		// (enforced above) caps what it *may* do; the role caps what it *will* do.
 		// Pruning the unused half means moq-net feeds that side a no-op origin, so a
 		// publish-only ingest isn't announced every cluster broadcast it would ignore,
-		// and a subscribe-only egress issues no announce-interest. A `Both` client (and
-		// any transport that carries no role) keeps whatever the token grants.
+		// and a subscribe-only egress issues no announce-interest. A bidirectional
+		// client (and any transport that carries no role) keeps whatever the token grants.
 		let (publish, subscribe) = match role {
-			moq_net::Role::Publisher => (publish, None),
-			moq_net::Role::Subscriber => (None, subscribe),
-			moq_net::Role::Both => (publish, subscribe),
+			Some(moq_net::Role::Publisher) => (publish, None),
+			Some(moq_net::Role::Subscriber) => (None, subscribe),
+			None => (publish, subscribe),
 		};
 
 		// Accept the connection.
@@ -127,12 +128,12 @@ impl Connection {
 		// connect time, so hold the session open no longer than the credential is
 		// valid. Without an expiry, just wait for the session to close.
 		let Some(expires) = token.expires else {
-			return Ok(session.closed().await?);
+			return Err(session.closed().await.into());
 		};
 
 		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
 		match tokio::time::timeout(remaining, session.closed()).await {
-			Ok(res) => Ok(res?),
+			Ok(err) => Err(err.into()),
 			Err(_) => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);

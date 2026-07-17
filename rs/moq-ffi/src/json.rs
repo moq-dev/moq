@@ -23,9 +23,11 @@ pub struct MoqJsonSnapshotConfig {
 	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
 	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
 	/// deltas before rolling a new group. Ignored by the consumer.
+	#[uniffi(default = 8)]
 	pub delta_ratio: u32,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
+	#[uniffi(default = false)]
 	pub compression: bool,
 }
 
@@ -52,6 +54,7 @@ impl From<MoqJsonSnapshotConfig> for moq_json::snapshot::ConsumerConfig {
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonStreamConfig {
 	/// DEFLATE-compress the group. Must match on the producer and consumer.
+	#[uniffi(default = false)]
 	pub compression: bool,
 }
 
@@ -64,6 +67,23 @@ impl From<MoqJsonStreamConfig> for moq_json::stream::ProducerConfig {
 impl From<MoqJsonStreamConfig> for moq_json::stream::ConsumerConfig {
 	fn from(config: MoqJsonStreamConfig) -> Self {
 		moq_json::stream::ConsumerConfig::default().with_compression(config.compression)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	// The `#[uniffi(default = ...)]` attributes have to be literals, so they restate moq-json's
+	// own defaults. Every binding inherits those literals, so a drift here would silently give
+	// each wrapper different behavior than the Rust API.
+	#[test]
+	fn record_defaults_match_moq_json() {
+		let snapshot = moq_json::snapshot::ProducerConfig::default();
+		assert_eq!(snapshot.delta_ratio, 8, "update #[uniffi(default)] on delta_ratio");
+		assert!(!snapshot.compression, "update #[uniffi(default)] on compression");
+		assert!(
+			!moq_json::stream::ProducerConfig::default().compression,
+			"update #[uniffi(default)] on MoqJsonStreamConfig::compression"
+		);
 	}
 }
 

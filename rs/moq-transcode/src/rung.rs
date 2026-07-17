@@ -61,7 +61,8 @@ impl Rung {
 
 	/// An encoder producing this rung's rendition.
 	fn encode(&self) -> Result<moq_video::encode::Encoder, Error> {
-		let mut config = moq_video::encode::Config::new(self.info.width, self.info.height, self.info.framerate);
+		let mut config =
+			moq_video::encode::Config::new(self.info.size.width, self.info.size.height, self.info.framerate);
 		config.bitrate = Some(self.info.bitrate);
 		config.kind = self.encoder.clone();
 		// Keyframes are forced at every group boundary; the GOP is only a
@@ -76,7 +77,7 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.dynamic();
-	let info = moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE);
+	let info = hang::container::track_info();
 	let mut producer = request.accept(info);
 
 	let result = tokio::select! {
@@ -168,10 +169,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					// The feed decodes at the source's native size; size this
 					// rung's copy here. A GPU frame resizes on the GPU and feeds
 					// the encoder without touching the CPU.
-					let encoded = if (frame.width, frame.height) == (rung.info.width, rung.info.height) {
+					let encoded = if frame.size == rung.info.size {
 						encoder.encode(&frame, keyframe)?
 					} else {
-						let scaled = frame.resize(rung.info.width, rung.info.height)?;
+						let scaled = frame.resize(rung.info.size)?;
 						encoder.encode(&scaled, keyframe)?
 					};
 					let timestamp = frame.timestamp;
@@ -269,7 +270,7 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
 	// so the encoder starts clean at the group's keyframe.
-	let (mut pipeline, container) = match rung.pipeline().and_then(|p| rung.container().map(|c| (p, c))) {
+	let (pipeline, container) = match rung.pipeline().and_then(|p| rung.container().map(|c| (p, c))) {
 		Ok(built) => built,
 		Err(err) => {
 			request.reject(moq_net::Error::Cancel);
@@ -281,7 +282,7 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 		Ok(output) => output,
 		Err(err) => return Err(err.into()),
 	};
-	transcode_group(&mut pipeline, &container, &mut source, &mut output).await?;
+	transcode_group(pipeline, &container, &mut source, &mut output).await?;
 	Ok(())
 }
 
@@ -289,7 +290,7 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 /// draining the encoder at the end. (The live path rides the shared feed
 /// instead; see [`live`].)
 async fn transcode_group(
-	pipeline: &mut Pipeline,
+	pipeline: Pipeline,
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	output: &mut moq_net::group::Producer,
@@ -307,7 +308,7 @@ async fn transcode_group(
 }
 
 async fn transcode_group_inner(
-	pipeline: &mut Pipeline,
+	mut pipeline: Pipeline,
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
 	output: &mut moq_net::group::Producer,
@@ -351,7 +352,7 @@ async fn transcode_group_inner(
 fn write(output: &mut moq_net::group::Producer, packets: Vec<(moq_net::Timestamp, Bytes)>) -> Result<(), Error> {
 	for (timestamp, payload) in packets {
 		let frame = hang::container::Frame { timestamp, payload };
-		frame.encode(output)?;
+		frame.write_to(output)?;
 	}
 	Ok(())
 }
@@ -366,22 +367,20 @@ fn write(output: &mut moq_net::group::Producer, packets: Vec<(moq_net::Timestamp
 struct Pipeline {
 	decoder: moq_video::decode::Decoder,
 	encoder: moq_video::encode::Encoder,
-	width: u32,
-	height: u32,
+	size: moq_video::Size,
 }
 
 impl Pipeline {
 	fn new(rung: &Rung) -> Result<Self, Error> {
 		let mut decode = moq_video::decode::Config::new();
 		decode.kind = rung.decoder.clone();
-		decode.resize = Some((rung.info.width, rung.info.height));
+		decode.resize = Some(rung.info.size);
 		let decoder = moq_video::decode::Decoder::new(&rung.config, &decode)?;
 
 		Ok(Self {
 			decoder,
 			encoder: rung.encode()?,
-			width: rung.info.width,
-			height: rung.info.height,
+			size: rung.info.size,
 		})
 	}
 
@@ -396,12 +395,12 @@ impl Pipeline {
 		let mut packets = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
 			let raw_timestamp = raw.timestamp;
-			let encoded = if (raw.width, raw.height) == (self.width, self.height) {
+			let encoded = if raw.size == self.size {
 				// Already at the rung size (the decoder scaled): feed the frame
 				// through as-is, keeping a GPU frame on the GPU.
 				self.encoder.encode(&raw, keyframe)?
 			} else {
-				self.encoder.encode(&raw.resize(self.width, self.height)?, keyframe)?
+				self.encoder.encode(&raw.resize(self.size)?, keyframe)?
 			};
 			for packet in encoded {
 				packets.push((raw_timestamp, packet));
@@ -411,7 +410,10 @@ impl Pipeline {
 	}
 
 	/// Drain the encoder, pairing any buffered packets with `timestamp`.
-	fn finish(&mut self, timestamp: moq_net::Timestamp) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
+	///
+	/// Consumes the pipeline, since flushing the encoder consumes it: a one-shot
+	/// group's pipeline is done once drained.
+	fn finish(self, timestamp: moq_net::Timestamp) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
 		Ok(self
 			.encoder
 			.finish()?

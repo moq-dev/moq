@@ -1,13 +1,27 @@
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Video from "../video";
 import { Device, type DeviceProps } from "./device";
 
-export interface CameraProps {
-	enabled?: boolean | Signal<boolean>;
+// Signals the camera reads.
+export type CameraInput = {
+	// Whether to hold the camera open. When false the track is stopped and `out.source` clears.
+	enabled: Getter<boolean>;
+};
+
+/** Constructor options: the wired inputs, the live-editable constraints, and the device seed. */
+export interface CameraProps extends Inputs<CameraInput> {
+	/** Seed the device selection; also live-editable via `camera.device`. */
 	device?: DeviceProps;
+	/** Seed the capture constraints; also live-editable via `camera.constraints`. */
 	constraints?: Video.Constraints | Signal<Video.Constraints | undefined>;
 }
 
+type CameraOutput = {
+	// The live camera track, or undefined while disabled or denied.
+	source: Signal<Video.Source | undefined>;
+};
+
+/** Captures video from a camera, tracking the available devices. */
 export class Camera {
 	// The browser picks a low default resolution (often 640x480), so request 720p.
 	// Caller-supplied constraints take precedence per field.
@@ -16,27 +30,36 @@ export class Camera {
 		height: { ideal: 720 },
 	};
 
-	enabled: Signal<boolean>;
-	device: Device<"video">;
+	readonly in: Readonlys<CameraInput>;
 
+	/** The available cameras and which one to use. */
+	readonly device: Device<"video">;
+
+	/** The live-editable capture constraints, merged over {@link DEFAULT_CONSTRAINTS}. */
 	constraints: Signal<Video.Constraints | undefined>;
 
-	source = new Signal<Video.Source | undefined>(undefined);
-	signals = new Effect();
+	readonly #out: CameraOutput = {
+		source: new Signal<Video.Source | undefined>(undefined),
+	};
+	readonly out = readonlys(this.#out);
+
+	#signals = new Effect();
 
 	constructor(props?: CameraProps) {
+		this.in = {
+			enabled: getter(props?.enabled ?? false),
+		};
 		this.device = new Device("video", props?.device);
-		this.enabled = Signal.from(props?.enabled ?? false);
 		this.constraints = Signal.from(props?.constraints);
 
-		this.signals.run(this.#run.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
+		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
-		const device = effect.get(this.device.requested);
+		const device = effect.get(this.device.out.requested);
 		const constraints = effect.get(this.constraints) ?? {};
 
 		// Build final constraints with device selection, defaulting resolution unless overridden.
@@ -61,20 +84,19 @@ export class Camera {
 			const stream = await Promise.race([media, effect.cancel]);
 			if (!stream) return;
 
-			this.device.permission.set(true);
-
 			const source = stream.getVideoTracks()[0] as Video.Source | undefined;
+
+			// getUserMedia resolved, so we have permission even if no track came back.
+			effect.cleanup(this.device.capture(source?.getSettings().deviceId));
 			if (!source) return;
 
-			const settings = source.getSettings();
-
-			effect.set(this.device.active, settings.deviceId);
-			effect.set(this.source, source);
+			effect.set(this.#out.source, source);
 		});
 	}
 
+	/** Stop the capture and release the device. */
 	close() {
-		this.signals.close();
+		this.#signals.close();
 		this.device.close();
 	}
 }

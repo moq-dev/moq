@@ -3,7 +3,7 @@ import { Time } from "@moq/net";
 /** A decoded media frame: codec payload plus its presentation timestamp and keyframe flag. */
 export interface Frame {
 	/** The codec bitstream payload. */
-	data: Uint8Array;
+	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
 	timestamp: Time.Micro;
 	/** Whether this frame is a keyframe (can be decoded standalone). */

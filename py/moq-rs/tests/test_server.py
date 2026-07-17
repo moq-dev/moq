@@ -25,7 +25,7 @@ async def test_server_client_roundtrip():
         # Publish a broadcast on the server side.
         broadcast = moq.BroadcastProducer()
         media = broadcast.publish_media("opus", opus_head())
-        server.publish("hello", broadcast)
+        _announce = server.announce("hello", broadcast)
 
         # Auto-accept incoming sessions in the background so the handshake
         # completes from the server side. Hold references so the sessions
@@ -34,7 +34,7 @@ async def test_server_client_roundtrip():
 
         async def accept_loop() -> None:
             async for request in server:
-                sessions.append(await request.ok())
+                sessions.append(await request.accept())
 
         accept_task = asyncio.create_task(accept_loop())
 
@@ -79,7 +79,7 @@ async def test_server_request_close():
 
         async def reject_loop() -> None:
             async for request in server:
-                await request.close(403)
+                await request.reject(403)
 
         reject_task = asyncio.create_task(reject_loop())
         try:
@@ -108,20 +108,20 @@ async def test_cert_fingerprints_after_listen():
         assert all(c in "0123456789abcdef" for c in fps[0])
 
 
-async def test_request_double_ok_returns_already_responded():
-    """Calling ok() twice on the same request raises AlreadyResponded."""
+async def test_request_double_accept_returns_already_responded():
+    """Calling accept() twice on the same request raises AlreadyResponded."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         sessions: list = []
 
         async def accept_once() -> None:
             async for request in server:
-                sessions.append(await request.ok())
-                # Second ok() must fail; MoqError is an Exception at runtime,
+                sessions.append(await request.accept())
+                # A second accept() must fail; MoqError is an Exception at runtime,
                 # UniFFI's static rebind hides that from pyright.
                 with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                    await request.ok()
+                    await request.accept()
                 with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                    await request.close(403)
+                    await request.reject(403)
                 break
 
         accept_task = asyncio.create_task(accept_once())
@@ -145,7 +145,7 @@ async def test_serve_helper_accepts_clients():
     """Server.serve() accepts incoming sessions and holds them automatically."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.publish("via-serve", broadcast)
+        _announce = server.announce("via-serve", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -170,7 +170,7 @@ async def test_broadcast_route_over_wire():
     """A broadcast received over the wire exposes its route: hop chain and cost."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         broadcast = moq.BroadcastProducer()
-        server.publish("with-route", broadcast)
+        _announce = server.announce("with-route", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -213,7 +213,7 @@ async def test_route_changed_observes_update():
         # across the update below makes the restart an in-place route change
         # rather than a broadcast replacement.
         broadcast.set_route(moq.Route(hops=[42], cost=0))
-        server.publish("routed", broadcast)
+        _announce = server.announce("routed", broadcast)
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -242,8 +242,11 @@ async def test_route_changed_observes_update():
                     assert updated is not None
                     assert 77 in updated.hops
 
-                    # Once the broadcast ends, the watch ends cleanly with None.
+                    # Once the broadcast is retracted, the watch ends cleanly
+                    # with None (closing the broadcast alone does not
+                    # unannounce it; the announce guard owns the lifetime).
                     broadcast.finish()
+                    _announce.unannounce()
                     ended = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
                     assert ended is None
                     break
@@ -255,24 +258,16 @@ async def test_route_changed_observes_update():
                 pass
 
 
-async def test_serve_helper_with_on_request_rejection():
-    """on_request returning False causes Server.serve() to reject the request."""
+async def test_deprecated_publish_alias_warns():
+    """The publish() aliases forward to announce() but warn on use."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
-
-        async def reject_all(_request: moq.Request) -> bool:
-            return False
-
-        serve_task = asyncio.create_task(server.serve(on_request=reject_all))
+        broadcast = moq.BroadcastProducer()
         try:
-            client = moq_ffi.MoqClient()
-            client.set_tls_disable_verify(True)
-            client.set_bind("127.0.0.1:0")
-            session = await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
-            with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
-                await asyncio.wait_for(session.closed(), timeout=5.0)
+            with pytest.warns(DeprecationWarning, match="Server.publish"):
+                server.publish("deprecated", broadcast)
+
+            origin = moq.OriginProducer()
+            with pytest.warns(DeprecationWarning, match="OriginProducer.publish"):
+                origin.publish("deprecated", broadcast)
         finally:
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
+            broadcast.finish()

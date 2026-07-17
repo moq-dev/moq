@@ -359,7 +359,7 @@ pub struct Fetching {
 	inner: web_async::Lock<Option<kio::Pending<track::Fetching>>>,
 }
 
-impl kio::Future for Fetching {
+impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -389,7 +389,7 @@ impl kio::Future for Fetching {
 			*inner = Some(track.fetch_group(self.sequence, self.options.clone()));
 		}
 
-		kio::Future::poll(&**inner.as_ref().expect("latched above"), waiter)
+		kio::Pollable::poll(&**inner.as_ref().expect("latched above"), waiter)
 	}
 }
 

@@ -6,11 +6,11 @@ use std::{
 };
 
 use crate::{
-	Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, broadcast,
+	Error, Path, PathOwned, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
-	origin, track,
+	origin, stats, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
@@ -63,7 +63,7 @@ struct TrackState {
 	alias: Option<u64>,
 	/// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 	/// Dropping on subscription end records `subscriptions_closed`.
-	stats: Arc<SubscriberTrack>,
+	stats: Arc<stats::SubscriberTrack>,
 }
 
 struct BroadcastState {
@@ -79,7 +79,7 @@ struct BroadcastState {
 
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
-	_stats: SubscriberStats,
+	_stats: stats::Subscriber,
 }
 
 #[derive(Clone)]
@@ -87,11 +87,11 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 	origin: origin::Producer,
 	control: Control,
-	stats: StatsHandle,
+	stats: stats::Handle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: crate::SessionBroadcasts,
+	broadcasts: stats::SessionBroadcasts,
 	// A random per-connection origin stamped into the hop chain of every
 	// broadcast. moq-transport never carries hop ids on the wire, so each
 	// upstream session needs a stable, unique identity in the hop list for two
@@ -128,7 +128,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		session: S,
 		origin: origin::Producer,
 		control: Control,
-		stats: StatsHandle,
+		stats: stats::Handle,
 		version: Version,
 		tasks: Tasks,
 	) -> Self {
@@ -927,7 +927,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: group::Producer,
-		track_stats: Arc<SubscriberTrack>,
+		track_stats: Arc<stats::SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -981,7 +981,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut frame::Producer<'_>,
-		track_stats: &SubscriberTrack,
+		track_stats: &stats::SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
 			match stream.read_chunk(frame.remaining()).await? {

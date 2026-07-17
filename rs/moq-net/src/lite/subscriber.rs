@@ -1,4 +1,4 @@
-use crate::{frame, group, origin, track};
+use crate::{frame, group, origin, stats, track};
 use std::{
 	collections::HashMap,
 	sync::{Arc, atomic},
@@ -11,7 +11,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
 
 use crate::{
-	AsPath, Error, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Timescale, Timestamp, bandwidth,
+	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
 	coding::{Decode, Reader, Stream},
 	lite,
 	track::Subscription,
@@ -28,9 +28,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Receiver-side bandwidth producer for PROBE feedback. None disables the
 	/// feature (used by versions that don't carry probe streams).
 	pub recv_bandwidth: Option<bandwidth::Producer>,
-	/// Stats aggregator for this session's ingress. Use [`StatsHandle::default`]
+	/// Stats aggregator for this session's ingress. Use [`stats::Handle::default`]
 	/// to opt out.
-	pub stats: StatsHandle,
+	pub stats: stats::Handle,
 	pub version: Version,
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
@@ -44,11 +44,11 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: origin::Producer,
-	stats: StatsHandle,
+	stats: stats::Handle,
 	/// Per-session ingress broadcast-subscription tracker. Each upstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
 	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: crate::SessionBroadcasts,
+	broadcasts: stats::SessionBroadcasts,
 	recv_bandwidth: Option<bandwidth::Producer>,
 	// Session-level origin id shared with the Publisher. Used to filter out
 	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
@@ -72,7 +72,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 #[derive(Clone)]
 struct TrackEntry {
 	producer: track::Producer,
-	stats: Arc<SubscriberTrack>,
+	stats: Arc<stats::SubscriberTrack>,
 	/// Timestamp scale from this track's TRACK_INFO, known before the SUBSCRIBE is
 	/// even opened, so group streams decode frames without blocking.
 	timescale: Option<Timescale>,
@@ -217,7 +217,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
 		// actually accepted the announcement (it may drop reflected loops), so the
 		// guard set tracks `routes` exactly.
-		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
+		let mut stats_guards: HashMap<PathOwned, stats::Subscriber> = HashMap::new();
 
 		// Lite06+: announce ids. Each received `active` implicitly assigns the next
 		// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
@@ -742,7 +742,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: group::Producer,
-		track_stats: Arc<SubscriberTrack>,
+		track_stats: Arc<stats::SubscriberTrack>,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		// Previous frame's raw timestamp value (in `timescale` units), for the
@@ -794,7 +794,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut frame::Producer<'_>,
-		track_stats: &SubscriberTrack,
+		track_stats: &stats::SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
 			match stream.read_chunk(frame.remaining()).await? {
@@ -835,7 +835,7 @@ struct SubStream<S: web_transport_trait::Session> {
 	start_group: Option<u64>,
 	priority: u8,
 	/// Per-(session, broadcast) viewer sentinel, held for the subscription's life.
-	_broadcast_sub: crate::BroadcastSubscription,
+	_broadcast_sub: stats::BroadcastSubscription,
 }
 
 enum Sub<S: web_transport_trait::Session> {
@@ -894,7 +894,7 @@ enum Event {
 struct TrackServe<S: web_transport_trait::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
-	track_stats: Arc<SubscriberTrack>,
+	track_stats: Arc<stats::SubscriberTrack>,
 	name: String,
 }
 
@@ -1023,7 +1023,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// stream FIN then finds the track already finished. START/DROP just
 					// resolve the range (the producer already orders groups), so log on.
 					if let lite::SubscribeResponse::End(end) = &msg {
-						let _ = serving.finish_at(end.group);
+						// finish_at rejects a boundary at or below the live edge, which is what a
+						// peer sending an inclusive bound looks like once the final group has
+						// already arrived. Don't abort: the stream FIN still finishes the track,
+						// so this only costs the early boundary. Warn anyway, since it's our only
+						// signal that a peer disagrees about the encoding.
+						if let Err(err) = serving.finish_at(end.group) {
+							tracing::warn!(track = %self.name, group = end.group, %err, "invalid subscribe end");
+						}
 					} else {
 						tracing::debug!(track = %self.name, ?msg, "subscribe response");
 					}

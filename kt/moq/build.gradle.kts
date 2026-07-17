@@ -25,11 +25,14 @@ import com.android.build.gradle.LibraryExtension
 import com.vanniktech.maven.publish.SonatypeHost
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// Plugin versions are pinned in the root build.gradle.kts (Kotlin, publish) and
+// settings.gradle.kts (Android); request them by id alone here.
 plugins {
-    kotlin("multiplatform") version "2.0.21"
-    // Version pinned in settings.gradle.kts.
+    kotlin("multiplatform")
+    // Powers the typed JSON track helpers in Json.kt.
+    kotlin("plugin.serialization")
     id("com.android.library") apply false
-    id("com.vanniktech.maven.publish") version "0.30.0"
+    id("com.vanniktech.maven.publish")
 }
 
 version = providers.gradleProperty("moq.version").get()
@@ -66,6 +69,9 @@ kotlin {
         val commonMain by getting {
             dependencies {
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+                // api: the typed JSON helpers are inline+reified, so they
+                // resolve serializers at the consumer's call site.
+                api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
             }
         }
         val commonTest by getting {

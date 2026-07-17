@@ -6,7 +6,7 @@ import { type Kind, Rendition } from "./rendition";
 
 // Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
 // whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
-type BroadcastInput = {
+export type BroadcastInput = {
 	connection: Getter<Moq.Connection.Established | undefined>;
 
 	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
@@ -59,7 +59,7 @@ export class Broadcast {
 	// The request loop sets these on accept; teardown and unregister clear them.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
@@ -70,8 +70,8 @@ export class Broadcast {
 			flip: getter(props?.flip ?? false),
 		};
 
-		this.signals.run(this.#runCatalog.bind(this));
-		this.signals.run(this.#run.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	/** Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken. */
@@ -234,6 +234,6 @@ export class Broadcast {
 	}
 
 	close() {
-		this.signals.close();
+		this.#signals.close();
 	}
 }

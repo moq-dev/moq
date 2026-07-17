@@ -3,7 +3,7 @@ import type * as broadcast from "../broadcast.ts";
 import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { error } from "../util/error.ts";
+import { error, reason } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -108,7 +108,7 @@ export class Publisher {
 			}
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`announce failed: broadcast=${path} error=${e.message}`);
+			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 		} finally {
 			broadcast.close();
 			this.#broadcasts.delete(path);
@@ -196,7 +196,7 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.warn(`publish error: broadcast=${name} track=${track.name} error=${e.message}`);
+			console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
 			track.close();
@@ -231,7 +231,7 @@ export class Publisher {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					const obj = new Frame({ payload: frame.data, timestamp: frame.timestamp });
+					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
 					await obj.encode(stream, header.flags, this.#session.version);
 				}
 
@@ -306,7 +306,7 @@ export class Publisher {
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			console.debug(`subscribe_namespace stream error: ${e.message}`);
+			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
 		}
 	}

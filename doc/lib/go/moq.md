@@ -105,7 +105,7 @@ go func() {
     if err != nil {
         return
     }
-    _ = track.WriteFrame([]byte("ready"), 0)
+    _ = track.WriteFrame(moq.Frame{Payload: []byte("ready")})
 }()
 ```
 
@@ -120,7 +120,7 @@ media, err := broadcast.PublishMediaOnTrack(request, "opus", opusInit)
 if err != nil {
     log.Fatal(err)
 }
-_ = media.WriteFrame(opusFrame, 20_000)
+_ = media.WriteFrame(moq.Frame{Payload: opusFrame, TimestampUs: 20_000})
 ```
 
 Video catalog fields that are known before the first keyframe can be supplied
@@ -177,7 +177,7 @@ if err != nil {
 	log.Fatal(err)
 }
 
-info, err := track.Info(ctx)
+info, err := track.Info()
 if err != nil {
 	log.Fatal(err)
 }
@@ -228,23 +228,43 @@ producer, err := request.Accept()
 if err != nil {
     log.Fatal(err)
 }
-_ = producer.WriteFrame(loadArchivedFrame(request.Sequence()), request.Sequence()*20_000)
+_ = producer.WriteFrame(moq.Frame{Payload: loadArchivedFrame(request.Sequence()), TimestampUs: request.Sequence() * 20_000})
 _ = producer.Finish()
 ```
 
 Call `request.Abort(code)` when the requested group cannot be produced. Fetch is currently a single-group operation and is supported by the moq-lite 05+ FETCH wire path.
 
+To serve requests in a loop, range over `dynamic.Requests(ctx)` instead, the same shape `BroadcastDynamic` and `OriginDynamic` use:
+
+```go
+for request, err := range dynamic.Requests(ctx) {
+    if err != nil {
+        if moq.IsShutdown(err) {
+            break
+        }
+        log.Fatal(err)
+    }
+
+    producer, err := request.Accept()
+    if err != nil {
+        log.Fatal(err)
+    }
+    _ = producer.WriteFrame(loadArchivedFrame(request.Sequence()), request.Sequence()*20_000)
+    _ = producer.Finish()
+}
+```
+
 ## Raw track timestamps
 
-Raw tracks carry arbitrary byte payloads. `WriteFrame` takes a caller-supplied
-presentation timestamp in microseconds, and raw tracks default to a microsecond
-timescale. `ReadFrame` returns the timestamped raw frame:
+Raw tracks carry arbitrary byte payloads. `WriteFrame` takes a `Frame`, whose
+`TimestampUs` is a caller-supplied presentation timestamp in microseconds, and raw
+tracks default to a microsecond timescale. `ReadFrame` returns the timestamped raw frame:
 
 ```go
 track, _ := broadcast.PublishTrack("events", nil)
 consumer, _ := track.Consume(nil)
 
-_ = track.WriteFrame([]byte("ready"), 20_000)
+_ = track.WriteFrame(moq.Frame{Payload: []byte("ready"), TimestampUs: 20_000})
 
 frame, err := consumer.ReadFrame(ctx)
 if err != nil {
@@ -258,7 +278,7 @@ fmt.Println(string(frame.Payload), frame.TimestampUs)
 Raw tracks can send a single best-effort payload without opening a group stream:
 
 ```go
-sequence, err := track.AppendDatagram(42_000, []byte("meter update"))
+sequence, err := track.AppendDatagram(moq.Frame{Payload: []byte("meter update"), TimestampUs: 42_000})
 if err != nil {
     return err
 }
@@ -291,7 +311,7 @@ origin := moq.NewOriginProducerWithOptions(moq.OriginOptions{
 dynamic := origin.Dynamic()
 defer dynamic.Cancel()
 
-for request, err := range dynamic.All(ctx) {
+for request, err := range dynamic.Requests(ctx) {
 	if err != nil {
 		if moq.IsShutdown(err) {
 			break
@@ -321,7 +341,7 @@ for request, err := range dynamic.All(ctx) {
 	if err := request.Accept(broadcast); err != nil {
 		log.Fatal(err)
 	}
-	if err := track.WriteFrame([]byte("ready"), 0); err != nil {
+	if err := track.WriteFrame(moq.Frame{Payload: []byte("ready")}); err != nil {
 		log.Fatal(err)
 	}
 }

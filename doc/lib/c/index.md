@@ -89,7 +89,7 @@ generated header at `../../target/release/moq.h`.
 
 ## Callback lifetime
 
-Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video_ordered`, `moq_consume_audio_ordered`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
+Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:
 
 - **`> 0`**: a live result you can use: a frame, catalog, or announce ID (or `1` to mean "session connected"). May fire any number of times.
 - **`0`**: closed cleanly. **Terminal.**
@@ -133,7 +133,7 @@ Use `moq_publish_track_group_at` to create sparse or replayed groups at an
 explicit sequence. `moq_publish_track_finish_at` declares the exclusive end
 while still permitting lower groups. `moq_publish_track_abort` and
 `moq_publish_group_abort` terminate a producer with an application error. Call
-`moq_publish_track_close` after filling the groups below a declared end.
+`moq_publish_track_finish` after filling the groups below a declared end.
 
 Subscribers receive raw frame handles from `moq_consume_track`; read each one
 with `moq_consume_track_frame`. The returned `moq_frame.timestamp_us` carries

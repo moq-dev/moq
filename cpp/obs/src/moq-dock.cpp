@@ -217,10 +217,8 @@ bool MoQDock::CreateConfiguredEncoders()
 	if (audioBitrate <= 0)
 		audioBitrate = 160;
 
-	// MoQ publishes inline headers (avc3/hev1), so force repeat_headers and no
-	// B-frames, mirroring MoQService::ApplyEncoderSettings.
+	// MoQ publishes inline headers (avc3/hev1), so force repeat_headers
 	obs_data_set_bool(videoSettings, "repeat_headers", true);
-	obs_data_set_int(videoSettings, "bf", 0);
 	obs_data_set_int(audioSettings, "bitrate", audioBitrate);
 
 	videoEncoder =

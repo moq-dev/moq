@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[non_exhaustive]
 pub enum Error {
 	/// An error from the underlying MoQ transport layer.
-	#[error("moq lite error: {0}")]
+	#[error("moq error: {0}")]
 	Moq(#[from] moq_net::Error),
 
 	/// JSON serialization/deserialization error.

@@ -19,7 +19,7 @@ const (
 	TransportWebSocket Transport = "websocket"
 )
 
-// Request is an incoming session that can be accepted (OK) or rejected (Close).
+// Request is an incoming session that can be accepted (Accept) or rejected (Reject).
 // Dropping a Request without responding closes the connection silently.
 type Request struct {
 	inner *ffi.MoqRequest
@@ -55,24 +55,24 @@ func (r *Request) SetConsume(o *OriginProducer) {
 	r.inner.SetConsume(&o.inner)
 }
 
-// OK completes the handshake and returns the established session. Hold the
+// Accept completes the handshake and returns the established session. Hold the
 // session to keep the connection alive.
-func (r *Request) OK(ctx context.Context) (*Session, error) {
-	inner, err := runCancellable(ctx, r.inner.Cancel, r.inner.Ok)
+func (r *Request) Accept(ctx context.Context) (*Session, error) {
+	inner, err := runCancellable(ctx, r.inner.Cancel, r.inner.Accept)
 	if err != nil {
 		return nil, err
 	}
 	return &Session{inner: inner}, nil
 }
 
-// Close rejects the session with an HTTP status code (default convention: 404).
-func (r *Request) Close(ctx context.Context, code uint16) error {
+// Reject refuses the session with an HTTP status code (default convention: 404).
+func (r *Request) Reject(ctx context.Context, code uint16) error {
 	return runErr(ctx, r.inner.Cancel, func() error {
-		return r.inner.Close(code)
+		return r.inner.Reject(code)
 	})
 }
 
-// Cancel aborts an in-flight OK or Close.
+// Cancel aborts an in-flight Accept or Reject.
 func (r *Request) Cancel() {
 	r.inner.Cancel()
 }
@@ -186,15 +186,17 @@ func (s *Server) CertFingerprints() ([]string, error) {
 }
 
 // Announce advertises a broadcast under path, served to incoming sessions.
-func (s *Server) Announce(path string, broadcast *BroadcastProducer) error {
+//
+// Hold the returned Announce for as long as the broadcast should stay discoverable.
+func (s *Server) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
 	if s.publishOrigin == nil {
-		return ErrNoPublishOrigin
+		return nil, ErrNoPublishOrigin
 	}
 	return s.publishOrigin.Announce(path, broadcast)
 }
 
 // Deprecated: use Announce.
-func (s *Server) Publish(path string, broadcast *BroadcastProducer) error {
+func (s *Server) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
 	return s.Announce(path, broadcast)
 }
 
@@ -217,7 +219,7 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 }
 
 // Requests ranges over incoming requests until the server stops or the loop
-// breaks. Each request must be answered with OK or Close.
+// breaks. Each request must be answered with Accept or Reject.
 func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 	return func(yield func(*Request, error) bool) {
 		for {
@@ -236,14 +238,25 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 	}
 }
 
-// Serve accepts sessions in a loop, holding each one alive in its own goroutine
-// until it closes, so memory does not grow with past connections. It returns
-// when Accept stops (nil) or fails, after the in-flight sessions wind down.
+// Serve accepts every session in a loop, holding each one alive in its own
+// goroutine until it closes, so memory does not grow with past connections. It
+// returns when Accept stops (nil) or fails, after the in-flight sessions wind
+// down.
 //
-// Pass onRequest to inspect a Request before accepting: return false to reject
-// with HTTP 403, or an error to reject with 500 and stop serving. Pass nil to
-// accept every request. For richer routing, drive Requests/Accept directly.
-func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, error)) error {
+// To inspect or reject requests, range over Requests instead:
+//
+//	for req, err := range server.Requests(ctx) {
+//	    if err != nil {
+//	        return err
+//	    }
+//	    if url := req.URL(); url != nil && strings.Contains(*url, "/admin") {
+//	        _ = req.Reject(ctx, 403)
+//	        continue
+//	    }
+//	    session, err := req.Accept(ctx)
+//	    // hold the session to keep the connection alive
+//	}
+func (s *Server) Serve(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -261,22 +274,10 @@ func (s *Server) Serve(ctx context.Context, onRequest func(*Request) (bool, erro
 			return nil
 		}
 
-		if onRequest != nil {
-			ok, err := onRequest(req)
-			if err != nil {
-				_ = req.Close(ctx, 500)
-				return err
-			}
-			if !ok {
-				_ = req.Close(ctx, 403)
-				continue
-			}
-		}
-
 		wg.Add(1)
 		go func(req *Request) {
 			defer wg.Done()
-			session, err := req.OK(ctx)
+			session, err := req.Accept(ctx)
 			if err != nil {
 				return
 			}

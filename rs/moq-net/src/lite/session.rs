@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, StatsHandle, bandwidth,
+	Error, Origin, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
@@ -60,8 +60,8 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<origin::Consumer>,
 	// We will consume any remote broadcasts, inserting them into this origin, when set.
 	subscribe: Option<origin::Producer>,
-	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
-	stats: StatsHandle,
+	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
+	stats: crate::stats::Handle,
 	// The version of the protocol to use.
 	version: Version,
 	// The capabilities (and optional request path) we advertise in our SETUP message.

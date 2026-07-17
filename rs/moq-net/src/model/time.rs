@@ -124,6 +124,28 @@ impl std::fmt::Display for Timescale {
 /// The scale is a [`Timescale`] (always non-zero), so unit conversions (`as_secs`, `as_millis`,
 /// etc.) are infallible. Use [`Option<Timestamp>`] at call sites that need a "missing" sentinel
 /// instead of relying on a magic value.
+///
+/// # An instant, not a number
+///
+/// A `Timestamp` is a point in time (like [`std::time::Instant`]), not a scalar, so it has no
+/// arithmetic operators: adding two instants is meaningless, and a scale mismatch can't be a
+/// silent panic. Use [`Self::checked_add`] / [`Self::checked_sub`], which **require both
+/// operands to share a scale** and return [`TimeOverflow`] otherwise. To combine timestamps
+/// from different scales, [`Self::convert`] one to the other's scale first.
+///
+/// # Equality vs ordering
+///
+/// These two intentionally disagree, so pick the one you mean:
+///
+/// - [`Eq`] / [`Hash`] are **structural** (field-wise): `from_secs(1) != from_millis(1000)`,
+///   because they encode as different `(value, scale)` pairs on the wire. Two timestamps are
+///   equal only when both their value and scale match.
+/// - [`Ord`] is **temporal**: it cross-multiplies scales, so `from_millis(1000)` orders after
+///   `from_millis(999)` and `from_secs(1)` slots in between. When a cross-scale comparison is
+///   otherwise a tie, it breaks by `(scale, value)` to stay consistent with `Eq`.
+///
+/// So `from_secs(1).cmp(&from_millis(1000))` is *not* `Equal`, and neither is `==` true. If you
+/// want "same instant regardless of encoding", compare after a [`Self::convert`] to a common scale.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Timestamp {
 	value: VarInt,
@@ -131,8 +153,14 @@ pub struct Timestamp {
 }
 
 impl Timestamp {
-	/// The zero timestamp (0 at [`Timescale::SECOND`]); compares equal to zero at any scale.
-	pub const ZERO: Self = Self::from_secs_unchecked(0);
+	/// The zero timestamp: value `0` at [`Timescale::SECOND`].
+	///
+	/// The scale is not incidental. Equality and ordering are scale-aware (see the type
+	/// docs), so this is *not* interchangeable with `0` at another scale; use
+	/// [`Self::is_zero`] to test a zero value regardless of scale. In particular, don't
+	/// seed a `.max()` accumulator with this: a later value at a finer scale would lose
+	/// the tie-break. Reach for `Option<Timestamp>` instead.
+	pub const ZERO: Self = Self::new_const(0, Timescale::SECOND);
 
 	/// Construct a timestamp directly from a raw value at the given scale.
 	/// Returns [`TimeOverflow`] if `value` exceeds `2^62 - 1`.
@@ -140,6 +168,19 @@ impl Timestamp {
 		match VarInt::from_u64(value) {
 			Some(value) => Ok(Self { value, scale }),
 			None => Err(TimeOverflow),
+		}
+	}
+
+	/// Const-context twin of [`Self::new`] that panics on overflow.
+	///
+	/// For building `const` timestamps where `?`/`unwrap` on the [`Result`] isn't
+	/// available. The panic fires only on a compile-time-known out-of-range literal, so
+	/// it's a build-time assertion, not a runtime failure path. Use [`Self::new`]
+	/// everywhere else.
+	pub const fn new_const(value: u64, scale: Timescale) -> Self {
+		match Self::new(value, scale) {
+			Ok(time) => time,
+			Err(_) => panic!("timestamp value exceeds 2^62 - 1"),
 		}
 	}
 
@@ -154,25 +195,9 @@ impl Timestamp {
 		Self::new(seconds, Timescale::SECOND)
 	}
 
-	/// Like [`Self::from_secs`] but panics on overflow.
-	pub const fn from_secs_unchecked(seconds: u64) -> Self {
-		match Self::from_secs(seconds) {
-			Ok(time) => time,
-			Err(_) => panic!("time overflow"),
-		}
-	}
-
 	/// Convert a number of milliseconds to a timestamp at [`Timescale::MILLI`].
 	pub const fn from_millis(millis: u64) -> Result<Self, TimeOverflow> {
 		Self::new(millis, Timescale::MILLI)
-	}
-
-	/// Like [`Self::from_millis`] but panics on overflow.
-	pub const fn from_millis_unchecked(millis: u64) -> Self {
-		match Self::from_millis(millis) {
-			Ok(time) => time,
-			Err(_) => panic!("time overflow"),
-		}
 	}
 
 	/// Convert a number of microseconds to a timestamp at [`Timescale::MICRO`].
@@ -180,25 +205,9 @@ impl Timestamp {
 		Self::new(micros, Timescale::MICRO)
 	}
 
-	/// Like [`Self::from_micros`] but panics on overflow.
-	pub const fn from_micros_unchecked(micros: u64) -> Self {
-		match Self::from_micros(micros) {
-			Ok(time) => time,
-			Err(_) => panic!("time overflow"),
-		}
-	}
-
 	/// Convert a number of nanoseconds to a timestamp at [`Timescale::NANO`].
 	pub const fn from_nanos(nanos: u64) -> Result<Self, TimeOverflow> {
 		Self::new(nanos, Timescale::NANO)
-	}
-
-	/// Like [`Self::from_nanos`] but panics on overflow.
-	pub const fn from_nanos_unchecked(nanos: u64) -> Self {
-		match Self::from_nanos(nanos) {
-			Ok(time) => time,
-			Err(_) => panic!("time overflow"),
-		}
 	}
 
 	/// The raw value in the timestamp's own scale.
@@ -343,14 +352,13 @@ impl PartialOrd for Timestamp {
 }
 
 impl Ord for Timestamp {
-	/// Compare two timestamps, normalizing across scales when they differ.
+	/// Temporal comparison, normalizing across scales (see the type-level docs for how
+	/// this relates to structural `Eq`).
 	///
-	/// - If both scales are equal, compares raw values directly.
+	/// - Equal scales compare raw values directly.
 	/// - Otherwise cross-multiplies in 128-bit so e.g. `1s > 2ms` orders correctly.
-	///
-	/// When the cross-scale comparison would otherwise be `Equal` (e.g. `from_secs(1)`
-	/// vs `from_millis(1000)`), breaks ties by `(scale, value)` so the result agrees
-	/// with derived `PartialEq`/`Eq`/`Hash` (which are field-wise).
+	/// - A would-be cross-scale tie (e.g. `from_secs(1)` vs `from_millis(1000)`) breaks by
+	///   `(scale, value)`, keeping `Ord` consistent with the field-wise `Eq`/`Hash`.
 	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
 		if self.scale.0.get() == other.scale.0.get() {
 			return self.value.cmp(&other.value);
@@ -360,34 +368,6 @@ impl Ord for Timestamp {
 		lhs.cmp(&rhs)
 			.then_with(|| self.scale.0.get().cmp(&other.scale.0.get()))
 			.then_with(|| self.value.cmp(&other.value))
-	}
-}
-
-impl std::ops::Add for Timestamp {
-	type Output = Self;
-
-	fn add(self, rhs: Self) -> Self {
-		self.checked_add(rhs).expect("time overflow or scale mismatch")
-	}
-}
-
-impl std::ops::AddAssign for Timestamp {
-	fn add_assign(&mut self, rhs: Self) {
-		*self = *self + rhs;
-	}
-}
-
-impl std::ops::Sub for Timestamp {
-	type Output = Self;
-
-	fn sub(self, rhs: Self) -> Self {
-		self.checked_sub(rhs).expect("time overflow or scale mismatch")
-	}
-}
-
-impl std::ops::SubAssign for Timestamp {
-	fn sub_assign(&mut self, rhs: Self) {
-		*self = *self - rhs;
 	}
 }
 
@@ -587,6 +567,23 @@ mod tests {
 		let a = Timestamp::from_millis(1000).unwrap();
 		let b = Timestamp::from_micros(1000).unwrap();
 		assert!(a.checked_add(b).is_err());
+	}
+
+	#[test]
+	fn test_new_const_matches_fallible() {
+		const C: Timestamp = Timestamp::new_const(42, Timescale::MICRO);
+		assert_eq!(C, Timestamp::new(42, Timescale::MICRO).unwrap());
+	}
+
+	#[test]
+	fn test_zero_is_scale_aware() {
+		// ZERO is second-scale. is_zero() sees the value regardless of scale, but
+		// equality is structural, so it's not interchangeable with 0 at another scale.
+		assert!(Timestamp::ZERO.is_zero());
+		let zero_ms = Timestamp::from_millis(0).unwrap();
+		assert!(zero_ms.is_zero());
+		assert_ne!(Timestamp::ZERO, zero_ms);
+		assert_ne!(Timestamp::ZERO.cmp(&zero_ms), std::cmp::Ordering::Equal);
 	}
 
 	#[test]

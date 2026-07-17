@@ -365,7 +365,7 @@ ui.run((effect) => {
 
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
 ui.run((effect) => {
-	const a = effect.get(publish.audio.config);
+	const a = effect.get(publish.audio.out.catalog);
 	setActual("audiocodec-actual", a?.codec);
 	setActual("samplerate-actual", a?.sampleRate ? `${a.sampleRate} Hz` : undefined);
 	setActual("channels-actual", a?.numberOfChannels ? String(a.numberOfChannels) : undefined);

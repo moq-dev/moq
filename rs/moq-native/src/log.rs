@@ -26,14 +26,21 @@ impl Default for Log {
 }
 
 impl Log {
+	/// Log at the given level and below.
 	pub fn new(level: Level) -> Self {
 		Self { level }
 	}
 
+	/// The configured level as a filter.
 	pub fn level(&self) -> LevelFilter {
 		LevelFilter::from_level(self.level)
 	}
 
+	/// Install this as the process-wide tracing subscriber.
+	///
+	/// `RUST_LOG` overrides the configured level. Logs go to stderr, or to
+	/// logcat on Android. Errors if a subscriber is already installed, so call
+	/// it once at startup.
 	pub fn init(&self) -> crate::Result<()> {
 		let filter = EnvFilter::builder()
 			.with_default_directive(self.level().into()) // Default to our -q/-v args

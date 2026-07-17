@@ -1,3 +1,9 @@
+//! Iroh P2P transport, dialed by endpoint id instead of a hostname.
+//!
+//! A single [`Endpoint`] serves both roles, hole-punching directly to peers and
+//! falling back to an iroh relay. Both WebTransport-over-H3 and raw QUIC are
+//! negotiated via ALPN.
+
 use std::{net, path::PathBuf, str::FromStr};
 
 use url::Url;
@@ -12,63 +18,82 @@ pub use web_transport_iroh;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// Reading or writing the secret key file failed.
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
+	/// The configured secret was neither a valid hex key nor a readable key file.
 	#[error("invalid iroh secret key")]
 	Secret(#[source] iroh::KeyParsingError),
 
+	/// The endpoint could not bind its UDP socket.
 	#[error(transparent)]
 	Bind(#[from] iroh::endpoint::BindError),
 
+	/// A configured bind address was rejected by iroh.
 	#[error(transparent)]
 	BindAddr(#[from] iroh::endpoint::InvalidSocketAddr),
 
+	/// Dialing the peer failed before a connection was started.
 	#[error(transparent)]
 	Connect(#[from] iroh::endpoint::ConnectWithOptsError),
 
+	/// The QUIC handshake failed while connecting.
 	#[error(transparent)]
 	Connecting(#[from] iroh::endpoint::ConnectingError),
 
+	/// The peer never settled on an ALPN.
 	#[error(transparent)]
 	Alpn(#[from] iroh::endpoint::AlpnError),
 
+	/// An established connection was lost or closed.
 	#[error(transparent)]
 	Connection(#[from] iroh::endpoint::ConnectionError),
 
+	/// The client side of the WebTransport handshake failed.
 	#[error(transparent)]
 	Client(#[from] web_transport_iroh::ClientError),
 
+	/// The server side of the WebTransport handshake failed.
 	#[error(transparent)]
 	Server(#[from] web_transport_iroh::ServerError),
 
+	/// The negotiated ALPN was not valid UTF-8.
 	#[error("failed to decode ALPN")]
 	DecodeAlpn(#[from] std::string::FromUtf8Error),
 
+	/// The peer negotiated an ALPN this build does not speak.
 	#[error("unsupported ALPN: {0}")]
 	UnsupportedAlpn(String),
 
+	/// The URL had no host, so there is no endpoint id to dial.
 	#[error("Invalid URL: missing host")]
 	MissingHost,
 
+	/// The URL host was not an iroh endpoint id. Unlike QUIC, iroh dials a public key, not a hostname.
 	#[error("Invalid URL: host is not an iroh endpoint id")]
 	InvalidEndpointId(#[source] iroh::KeyParsingError),
 
+	/// The URL could not be rewritten to the `https` scheme for the H3 request.
 	#[error("invalid URL")]
 	InvalidUrl,
 
+	/// The rewritten URL failed to parse.
 	#[error(transparent)]
 	Url(#[from] url::ParseError),
 
+	/// The client connected but never sent a valid WebTransport CONNECT request.
 	#[error("failed to receive WebTransport request")]
 	RecvRequest(#[source] web_transport_iroh::ServerError),
 
+	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
 	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// Settings for the shared iroh endpoint, used by both the client and server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]

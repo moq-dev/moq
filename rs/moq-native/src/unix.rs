@@ -15,6 +15,85 @@ use url::Url;
 /// raw stream has no TLS ALPN to carry it.
 const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 
+/// Plaintext Unix-socket qmux listener settings, with an optional
+/// peer-credential allowlist.
+///
+/// Flattened onto [`crate::ServerConfig::unix`].
+// The derived arg group is named after the struct, so it needs an explicit id to
+// stay unique across the flattened sections.
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[group(id = "server-unix")]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Bind a plaintext qmux Unix-socket listener at this path.
+	#[arg(long = "server-unix-bind", id = "server-unix-bind", env = "MOQ_SERVER_UNIX_BIND")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<PathBuf>,
+
+	/// Peer-credential allowlist. `None` (the default) enforces nothing, so the
+	/// socket's filesystem permissions are the only gate.
+	#[command(flatten)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub allow: Option<Allow>,
+}
+
+/// Peer-credential allowlist for a `unix://` listener.
+///
+/// The kernel reports the connecting process's credentials. Each populated list
+/// constrains the corresponding credential (AND across the three, OR within
+/// each); all empty means no check.
+#[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[group(id = "server-unix-allow")]
+#[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
+pub struct Allow {
+	/// Allowed peer user IDs. Empty means any uid.
+	#[arg(
+		long = "server-unix-allow-uid",
+		env = "MOQ_SERVER_UNIX_ALLOW_UID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub uid: Vec<u32>,
+
+	/// Allowed peer group IDs. Empty means any gid.
+	#[arg(
+		long = "server-unix-allow-gid",
+		env = "MOQ_SERVER_UNIX_ALLOW_GID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub gid: Vec<u32>,
+
+	/// Allowed peer PIDs. Empty means any pid; a populated list rejects peers
+	/// whose PID the platform doesn't report.
+	#[arg(
+		long = "server-unix-allow-pid",
+		env = "MOQ_SERVER_UNIX_ALLOW_PID",
+		value_delimiter = ','
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub pid: Vec<i32>,
+}
+
+impl Allow {
+	/// Whether any field is populated (i.e. the allowlist enforces something).
+	pub(crate) fn is_empty(&self) -> bool {
+		self.uid.is_empty() && self.gid.is_empty() && self.pid.is_empty()
+	}
+
+	/// Whether `cred` satisfies every populated field (AND across fields, OR
+	/// within a field). A required pid is unsatisfiable when the platform
+	/// reports none.
+	pub(crate) fn permits(&self, cred: &PeerCred) -> bool {
+		let uid_ok = self.uid.is_empty() || self.uid.contains(&cred.uid);
+		let gid_ok = self.gid.is_empty() || self.gid.contains(&cred.gid);
+		let pid_ok = self.pid.is_empty() || cred.pid.is_some_and(|pid| self.pid.contains(&pid));
+		uid_ok && gid_ok && pid_ok
+	}
+}
+
 /// Errors specific to the Unix-domain-socket qmux transport.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

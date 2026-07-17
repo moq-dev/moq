@@ -12,7 +12,34 @@
 use std::net;
 use std::time::Duration;
 
-use crate::ServerId;
+/// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
+///
+/// Parsed from, and serialized as, a hex string. Its length must match the load
+/// balancer's configured server-ID length.
+#[serde_with::serde_as]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
+
+impl ServerId {
+	#[allow(dead_code)]
+	pub(crate) fn len(&self) -> usize {
+		self.0.len()
+	}
+}
+
+impl std::fmt::Debug for ServerId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("ServerId").field(&hex::encode(&self.0)).finish()
+	}
+}
+
+impl std::str::FromStr for ServerId {
+	type Err = hex::FromHexError;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		hex::decode(s).map(Self)
+	}
+}
 
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
@@ -270,6 +297,11 @@ impl Resolved {
 	}
 
 	/// Whether the config asks to turn GSO off, which not every backend can honor.
+	///
+	/// Only the quiche and iroh backends consult this, to reject a GSO-off request
+	/// they can't satisfy; quinn and noq toggle GSO directly. A default build
+	/// compiles neither, so the method is intentionally unused there.
+	#[cfg_attr(not(any(feature = "quiche", feature = "iroh")), allow(dead_code))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}

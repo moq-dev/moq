@@ -3,7 +3,7 @@ use axum::handler::HandlerWithoutStateExt;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Router, routing::get};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 /// Browser CORS policy for HTTP gateway listeners.
@@ -60,7 +60,7 @@ pub async fn serve(
 
 /// Serve the `/certificate.sha256` self-signed fingerprint over HTTP, so an
 /// `http://` client can pin a `--server-bind` server's generated cert.
-pub async fn run_web(bind: &str, tls_info: Arc<RwLock<moq_native::tls::Info>>) -> anyhow::Result<()> {
+pub async fn run_web(bind: &str, certificates: moq_native::tls::Certificates) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
 		.await
 		.context("invalid listen address")?
@@ -74,13 +74,11 @@ pub async fn run_web(bind: &str, tls_info: Arc<RwLock<moq_native::tls::Info>>) -
 	let fingerprint_handler = move || async move {
 		// Get the first certificate's fingerprint.
 		// TODO serve all of them so we can support multiple signature algorithms.
-		tls_info
-			.read()
-			.expect("tls_info read lock poisoned")
-			.fingerprints
-			.first()
-			.expect("missing certificate")
-			.clone()
+		match certificates.fingerprints().into_iter().next() {
+			Some(fingerprint) => fingerprint.into_response(),
+			// A stream-only server has no certificate to pin.
+			None => (StatusCode::NOT_FOUND, "no certificate\n").into_response(),
+		}
 	};
 
 	let app = Router::new()

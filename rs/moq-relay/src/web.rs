@@ -126,7 +126,7 @@ pub(crate) struct WebState {
 	/// The cluster state for resolving origins.
 	pub(crate) cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub(crate) tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
+	pub(crate) certificates: moq_native::tls::Certificates,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) conn_id: AtomicU64,
@@ -139,19 +139,14 @@ pub struct Web {
 }
 
 impl Web {
-	/// Build a web server from its parts. `tls_info` is the relay's TLS
-	/// certificate info (e.g. `server.tls_info()`), served at
-	/// `/certificate.sha256`.
-	pub fn new(
-		auth: Auth,
-		cluster: Cluster,
-		tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
-		config: WebConfig,
-	) -> Self {
+	/// Build a web server from its parts. `certificates` is the relay's TLS
+	/// certificate handle (e.g. `server.certificates()`), whose fingerprints are
+	/// served at `/certificate.sha256`.
+	pub fn new(auth: Auth, cluster: Cluster, certificates: moq_native::tls::Certificates, config: WebConfig) -> Self {
 		let state = Arc::new(WebState {
 			auth,
 			cluster,
-			tls_info,
+			certificates,
 			conn_id: AtomicU64::new(0),
 		});
 		Self { state, config }
@@ -424,17 +419,14 @@ async fn serve_health() -> Response {
 	(StatusCode::OK, "ok\n").into_response()
 }
 
-async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
+async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> Response {
 	// Get the first certificate's fingerprint.
 	// TODO serve all of them so we can support multiple signature algorithms.
-	state
-		.tls_info
-		.read()
-		.expect("tls_info lock poisoned")
-		.fingerprints
-		.first()
-		.expect("missing certificate")
-		.clone()
+	match state.certificates.fingerprints().into_iter().next() {
+		Some(fingerprint) => fingerprint.into_response(),
+		// A stream-only relay has no certificate to pin.
+		None => (StatusCode::NOT_FOUND, "no certificate\n").into_response(),
+	}
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -565,18 +557,16 @@ async fn serve_fetch(
 			.await
 			.ok_or(StatusCode::NOT_FOUND)?;
 		let group = match params.group {
-			// "latest" needs a live subscription to learn the newest sequence;
-			// fetch only retrieves a specified past group.
+			// "latest" needs a live subscription to learn the newest sequence, since a
+			// fetch can only retrieve a sequence you already know. Once it's known, fetch
+			// it rather than reading it off the subscription, so an evicted latest is
+			// re-retrieved from upstream instead of waited on forever.
 			FetchGroup::Latest => {
 				async {
-					let track = broadcast.track(&track)?;
-					let mut sub = track.subscribe(None).await?;
+					let consumer = broadcast.track(&track)?;
+					let mut sub = consumer.subscribe(None).await?;
 					match sub.latest() {
-						// The newest group is cached, so the fetch resolves immediately.
-						// If it was evicted in the meantime the fetch fails rather than
-						// waiting for a group that has already come and gone.
-						Some(sequence) => track.fetch_group(sequence, None).await.map(Some),
-						// Nothing published yet: wait for the first group to arrive.
+						Some(sequence) => consumer.fetch_group(sequence, None).await.map(Some),
 						None => sub.recv_group().await,
 					}
 				}

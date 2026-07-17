@@ -1,12 +1,17 @@
 package dev.moq
 
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.Serializable
 import uniffi.moq.MoqException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+@Serializable
+private data class Status(val state: String)
 
 class SmokeTest {
     /**
@@ -59,7 +64,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", null)
             val group = track.appendGroup()
-            group.writeFrame("cached".encodeToByteArray(), timestampUs = 0u)
+            group.writeFrame(Frame(payload = "cached".encodeToByteArray()))
             group.finish()
 
             val fetched = broadcast.consume().fetchGroup(
@@ -70,6 +75,52 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    /** The typed JSON helpers round-trip a `@Serializable` value. */
+    @Test
+    fun `typed json snapshot round-trips a serializable value`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = broadcast.publishJsonSnapshot("status", config)
+            producer.update(Status(state = "live"))
+
+            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+        }
+    }
+
+    /**
+     * A pre-encoded `String` must reach the wire untouched: the member overload
+     * wins over the reified extension, which would otherwise double-encode it
+     * into a JSON string literal.
+     */
+    @Test
+    fun `raw json string passes through unencoded`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = JsonSnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = broadcast.publishJsonSnapshot("status", config)
+            producer.update("""{"state":"raw"}""")
+
+            val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+            assertEquals(Status(state = "raw"), consumer.valuesAs<Status>().first())
+        }
+    }
+
+    @Test
+    fun `server listens, announces, and streams requests`() = runTest {
+        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
+            assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
+
+            val fingerprints = server.certFingerprints()
+            assertEquals(1, fingerprints.size)
+            assertEquals(64, fingerprints[0].length)
+
+            BroadcastProducer().use { broadcast ->
+                val announce = server.announce("live", broadcast)
+                announce.unannounce()
+            }
         }
     }
 

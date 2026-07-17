@@ -73,8 +73,7 @@ Full API documentation: [docs.rs/moq-mux](https://docs.rs/moq-mux)
 
 Key types:
 
-- `Fmp4` - fMP4/CMAF importer
-- `Fmp4Config` - Configuration for fMP4 import
+- `container::fmp4::Import` - fMP4/CMAF importer
 - `Decoder` - Codec-specific decoders (AAC, Opus, AVC, HEVC)
 
 ## CLI Tool

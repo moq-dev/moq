@@ -48,6 +48,16 @@ Moq.connect(
 
 Advanced callers can pass their own `publish` / `subscribe` origins, or skip the facade entirely and drive `uniffi.moq.MoqClient` directly.
 
+To resolve a single broadcast rather than iterate announcements:
+
+```kotlin
+// Waits for the announcement, however long that takes.
+val broadcast = moq.announcedBroadcast("demos/clock").available()
+
+// Resolves as soon as it can be served (announced or dynamic), else throws.
+val broadcast = moq.requestBroadcast("demos/clock")
+```
+
 A server can reject the connection on auth grounds: `MoqException.Unauthorized` (HTTP 401) or `MoqException.Forbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. Use the `isAuth` helper to catch both:
 
 ```kotlin
@@ -99,14 +109,49 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
-    moq.announce("my-stream", broadcast)
+    val announce = moq.announce("my-stream", broadcast)
 
-    audio.writeFrame(payload, timestampUs = 0u)
-    audio.writeFrame(payload, timestampUs = 20_000u)
+    audio.writeFrame(Frame(payload = payload))
+    audio.writeFrame(Frame(payload = payload, timestampUs = 20_000u))
     audio.finish()
     broadcast.finish()
 }
 ```
+
+## Serve
+
+`Server.listen(bind)` binds a listener, wires an internal origin for both directions, and returns an `AutoCloseable` `Server`. `serve()` accepts every session and holds it alive until it closes:
+
+```kotlin
+import dev.moq.*
+
+Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
+    val broadcast = BroadcastProducer()
+    val announce = server.announce("live", broadcast)
+
+    server.serve()
+}
+```
+
+Collect `requests()` instead when you need to inspect or reject a session before accepting it. Each `Request` must be answered with `ok()` or `close(code)`, and the returned session held to keep the connection alive:
+
+```kotlin
+Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
+    server.requests().collect { request ->
+        val url = request.url()
+        if (url != null && "/admin" in url) {
+            request.reject(403u)
+            return@collect
+        }
+        launch {
+            val session = request.accept()
+            session.closed()
+        }
+    }
+}
+```
+
+`server.certFingerprints()` returns the hex SHA-256 fingerprints of the configured certificates, for pinning a generated self-signed certificate in a browser via `serverCertificateHashes`. Advanced callers can pass their own `publish` / `subscribe` origins to `listen`, or drive `uniffi.moq.MoqServer` directly.
 
 ### Fetching raw groups
 
@@ -130,7 +175,7 @@ val dynamic = track.dynamic()
 
 dynamic.requestedGroups().collect { request ->
     val group = request.accept()
-    group.writeFrame(loadArchivedFrame(request.sequence()), timestampUs = request.sequence() * 20_000uL)
+    group.writeFrame(Frame(payload = loadArchivedFrame(request.sequence()), timestampUs = request.sequence() * 20_000uL))
     group.finish()
 }
 ```
@@ -148,12 +193,12 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = BroadcastProducer()
     val dynamic = broadcast.dynamic()
 
-    moq.announce("events", broadcast)
+    val announce = moq.announce("events", broadcast)
 
     dynamic.requestedTracks().collect { request ->
         if (request.name() == "alerts") {
             val track = request.accept(null)
-            track.writeFrame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u)
+            track.writeFrame(Frame(payload = "ready".encodeToByteArray(), timestampUs = 20_000u))
             track.finish()
         } else {
             request.abort(404u)
@@ -162,14 +207,14 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(payload, timestampUs)` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `MoqFrame` values from `readFrame()` or the `frames()` Flow extension.
+Each requested track arrives as a `TrackRequest`; call `accept(info)` to turn it into a `TrackProducer` (pass `null` for defaults), or `abort(code)` to reject the subscriber. Use `writeFrame(Frame(payload, timestampUs))` with a presentation timestamp in microseconds. Raw tracks default to a microsecond timescale. Raw consumers receive `Frame` values (payload plus timestamp) from `readFrame()` or the `frames()` Flow extension; media subscriptions yield `MediaFrame`, which adds the codec-derived `keyframe` flag.
 
 ### Raw datagrams
 
 Raw tracks can send a single best-effort payload without opening a group stream:
 
 ```kotlin
-val sequence = track.appendDatagram(timestampUs = 42_000u, payload = "meter update".encodeToByteArray())
+val sequence = track.appendDatagram(Frame(payload = "meter update".encodeToByteArray(), timestampUs = 42_000u))
 val datagram = consumer.recvDatagram()
 
 consumer.datagrams().collect { datagram ->
@@ -194,7 +239,7 @@ dynamic.requestedBroadcasts().collect { request ->
         val broadcast = BroadcastProducer()
         val track = broadcast.publishTrack("status", null)
         request.accept(broadcast)
-        track.writeFrame("ready".encodeToByteArray(), timestampUs = 0u)
+        track.writeFrame(Frame(payload = "ready".encodeToByteArray()))
     } else {
         request.abort(404u)
     }
@@ -205,27 +250,31 @@ The served broadcast is not announced. It only resolves consumers that call `req
 
 ### JSON tracks
 
-For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved. Values cross as JSON strings; serialize with your JSON library of choice.
+For JSON payloads, publish and subscribe with the framing handled for you, in one of two modes. Snapshot (lossy) carries one value updated over time; a subscriber only sees the latest. Stream (lossless) is an ordered append-log where every record is preserved.
+
+Pass a `@Serializable` type and the wrapper encodes and decodes it with `kotlinx.serialization`:
 
 ```kotlin
 import dev.moq.*
-import uniffi.moq.MoqBroadcastProducer
-import uniffi.moq.MoqJsonSnapshotConfig
-import uniffi.moq.MoqJsonStreamConfig
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class Status(val state: String)
 
 // Snapshot: each update supersedes the last.
-val config = MoqJsonSnapshotConfig(deltaRatio = 8u, compression = true)
+val config = JsonSnapshotConfig(deltaRatio = 8u, compression = true)
 val status = broadcast.publishJsonSnapshot("status", config)
-status.update("""{"state":"live"}""")
+status.update(Status(state = "live"))
 
-val broadcastConsumer = broadcast.consume()
-val consumer = broadcastConsumer.subscribeJsonSnapshot("status", config)
-consumer.values().collect { value -> println(value) }
+val consumer = broadcast.consume().subscribeJsonSnapshot("status", config)
+consumer.valuesAs<Status>().collect { value -> println(value.state) }
 
 // Stream: every record is delivered in order.
-val events = broadcast.publishJsonStream("events", MoqJsonStreamConfig(compression = false))
-events.append("""{"event":"started"}""")
+val events = broadcast.publishJsonStream("events", JsonStreamConfig(compression = false))
+events.append(Status(state = "started"))
 ```
+
+The raw string form stays available for other JSON libraries: `update("""{"state":"live"}""")` passes the payload straight through, and `values()` yields the undecoded strings. The same split applies to `setCatalogSection(name, value)`, which encodes a `@Serializable` value, or forwards a `String` unchanged.
 
 `compression` must match on the producer and subscriber. In snapshot mode, `deltaRatio` of `0` disables merge-patch deltas (every change is a fresh snapshot).
 

@@ -15,7 +15,6 @@ type Error = ffi.MoqError
 // Configuration errors returned by the wrapper itself (not the FFI layer).
 var (
 	ErrNoPublishOrigin = errors.New("moq: no publish origin configured")
-	ErrNoConsumeOrigin = errors.New("moq: no consume origin configured")
 )
 
 // Error sentinels re-exported from the ffi layer without the MoqError prefix, so

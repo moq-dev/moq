@@ -57,10 +57,14 @@ func ExampleClient_Publish() {
 		log.Fatal(err)
 	}
 
-	if err := client.Announce("me/mic", broadcast); err != nil {
+	announce, err := client.Announce("me/mic", broadcast)
+	if err != nil {
 		log.Fatal(err)
 	}
-	if err := media.WriteFrame([]byte("opus frame"), 0); err != nil {
+	// The broadcast stays announced until this handle goes away.
+	defer announce.Unannounce()
+
+	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -108,11 +112,40 @@ func ExampleListen() {
 	}
 	defer server.Close()
 
-	err = server.Serve(ctx, func(req *moq.Request) (bool, error) {
-		// Reject anything that didn't arrive over QUIC.
-		return req.Transport() == moq.TransportQUIC, nil
-	})
-	if err != nil && !moq.IsShutdown(err) {
+	if err := server.Serve(ctx); err != nil && !moq.IsShutdown(err) {
 		log.Fatal(err)
+	}
+}
+
+// Drive the accept loop directly to decide which sessions to admit.
+func ExampleServer_Requests() {
+	ctx := context.Background()
+
+	server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer server.Close()
+
+	for req, err := range server.Requests(ctx) {
+		if err != nil {
+			if moq.IsShutdown(err) {
+				break
+			}
+			log.Fatal(err)
+		}
+
+		// Reject anything that didn't arrive over QUIC.
+		if req.Transport() != moq.TransportQUIC {
+			_ = req.Reject(ctx, 403)
+			continue
+		}
+
+		session, err := req.Accept(ctx)
+		if err != nil {
+			continue
+		}
+		// Hold the session to keep the connection alive.
+		go func() { _ = session.Closed(ctx) }()
 	}
 }

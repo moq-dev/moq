@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from moq_ffi import (
@@ -27,6 +28,7 @@ from .types import (
     Datagram,
     FetchGroupOptions,
     Frame,
+    MediaFrame,
     Route,
     Subscription,
     TrackInfo,
@@ -35,7 +37,7 @@ from .types import (
 
 
 class MediaConsumer:
-    """Wraps MoqMediaConsumer as an async iterator of Frame."""
+    """Wraps MoqMediaConsumer as an async iterator of MediaFrame."""
 
     def __init__(self, inner: MoqMediaConsumer) -> None:
         self._inner = inner
@@ -49,7 +51,7 @@ class MediaConsumer:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> Frame:
+    async def __anext__(self) -> MediaFrame:
         frame = await self._inner.next()
         if frame is None:
             raise StopAsyncIteration
@@ -94,7 +96,10 @@ class GroupConsumer:
 
 
 class TrackConsumer:
-    """Async iterator of groups from a track.
+    """Async iterator of groups from a track, in sequence order.
+
+    Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
+    :meth:`groups_as_arrived`) for arrival order instead.
 
     Each group is itself an async iterator of timestamped frames. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
@@ -114,10 +119,22 @@ class TrackConsumer:
         return self
 
     async def __anext__(self) -> GroupConsumer:
-        group = await self.recv_group()
+        group = await self.next_group()
         if group is None:
             raise StopAsyncIteration
         return group
+
+    async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
+        """Iterate groups in arrival order, including out-of-sequence deliveries.
+
+        The default iteration uses sequence order instead. Use this for live
+        consumption where latency matters more than order.
+        """
+        while True:
+            group = await self.recv_group()
+            if group is None:
+                return
+            yield group
 
     async def recv_group(self) -> GroupConsumer | None:
         """Return the next group in arrival order. Returns `None` when the track ends.
@@ -133,8 +150,8 @@ class TrackConsumer:
     async def next_group(self) -> GroupConsumer | None:
         """Return the next group in sequence order, skipping forward if behind.
 
-        Returns `None` when the track ends. Use this when order matters more than
-        latency; `recv_group` is preferred for live consumption.
+        Returns `None` when the track ends. This is what the default iteration
+        yields; use `recv_group` when latency matters more than order.
         """
         group = await self._inner.next_group()
         if group is None:
@@ -157,9 +174,9 @@ class TrackConsumer:
         """
         return await self._inner.recv_datagram()
 
-    async def info(self) -> TrackInfo:
+    def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""
-        return await self._inner.info()
+        return self._inner.info()
 
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences."""
@@ -313,7 +330,8 @@ class BroadcastConsumer:
 
         Yields parsed Python objects. Pass the same ``compression`` the producer used.
         """
-        config = MoqJsonSnapshotConfig(delta_ratio=0, compression=compression)
+        # delta_ratio is producer-only, so leave it at its default here.
+        config = MoqJsonSnapshotConfig(compression=compression)
         return JsonSnapshotConsumer(await self._inner.subscribe_json_snapshot(name, config))
 
     async def subscribe_json_stream(self, name: str, *, compression: bool = False) -> JsonStreamConsumer:
@@ -368,7 +386,8 @@ class BroadcastConsumer:
 
         ``catalog_audio`` comes from the catalog (e.g.
         ``await broadcast.catalog()`` followed by
-        ``catalog.audio[name]``). Use ``output.latency_max_ms`` to
+        ``catalog.audio[name]``). Only Opus tracks are currently supported.
+        Use ``output.latency_max_ms`` to
         control how aggressively stalled groups get skipped. That's
         the congestion-control knob. (Named ``_max`` to leave room for
         a future ``latency_min_ms`` jitter-buffer floor.)

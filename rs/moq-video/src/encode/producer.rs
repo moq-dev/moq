@@ -3,7 +3,7 @@
 //! Encoding is strictly on demand: the track and catalog entry are advertised
 //! immediately, but the camera stays closed (LED off, no CPU) until a subscriber
 //! appears. When the last viewer leaves, the camera is released again. This
-//! mirrors `moq-boy`, which pauses its emulator on `TrackProducer::used()` /
+//! mirrors `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
 use std::time::Instant;
@@ -104,7 +104,10 @@ impl Producer {
 	}
 
 	/// Finalize the track.
-	pub fn finish(&mut self) -> Result<(), Error> {
+	///
+	/// Consumes the producer: nothing can be published after the track ends, so
+	/// this is the last call rather than one leaving a dead producer in your hands.
+	pub fn finish(mut self) -> Result<(), Error> {
 		match &mut self.codecs {
 			Codecs::H264 { import, .. } => import.finish()?,
 			Codecs::H265 { import, .. } => import.finish()?,
@@ -114,7 +117,9 @@ impl Producer {
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	///
+	/// Consumes the producer, like [`finish`](Self::finish).
+	pub fn abort(mut self, err: moq_net::Error) {
 		match &mut self.codecs {
 			Codecs::H264 { import, .. } => import.abort(err),
 			Codecs::H265 { import, .. } => import.abort(err),
@@ -422,7 +427,7 @@ mod tests {
 
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for i in 0..10u64 {
-			let packets = encoder.encode_rgba(&rgba, 320, 240, i == 0).unwrap();
+			let packets = encoder.encode_rgba(&rgba, crate::Size::new(320, 240), i == 0).unwrap();
 			let ts = Timestamp::from_micros(i * 33_333).unwrap();
 			producer.publish(packets, ts).unwrap();
 		}

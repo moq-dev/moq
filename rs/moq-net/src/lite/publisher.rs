@@ -1,4 +1,4 @@
-use crate::{announce, frame, group, origin, track};
+use crate::{announce, frame, group, origin, stats, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use bytes::Buf;
@@ -6,7 +6,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, Error, Origin, OriginList, StatsHandle as MoqStats,
+	AsPath, Error, Origin, OriginList,
 	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
@@ -30,20 +30,20 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
 	/// The origin we read local broadcasts from.
 	pub origin: origin::Consumer,
-	/// Stats aggregator for this session's egress. Use [`MoqStats::default`]
+	/// Stats aggregator for this session's egress. Use [`stats::Handle::default`]
 	/// to opt out.
-	pub stats: MoqStats,
+	pub stats: stats::Handle,
 	pub version: Version,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: origin::Consumer,
-	stats: MoqStats,
+	stats: stats::Handle,
 	/// Per-session egress broadcast-subscription tracker. Each downstream
 	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
 	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: crate::SessionBroadcasts,
+	broadcasts: stats::SessionBroadcasts,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
@@ -210,7 +210,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// reflected announces (cluster loops) never hit the wire. Zero means
 		// the peer didn't set it (Lite03 or earlier), pass through.
 		exclude_hop: u64,
-		stats: MoqStats,
+		stats: stats::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
@@ -218,7 +218,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
 		// The origin contract guarantees announce/unannounce toggles per path, so a
 		// new active announcement must always be for a path with no live guard.
-		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
+		let mut stats_guards: std::collections::HashMap<crate::PathOwned, stats::Publisher> =
 			std::collections::HashMap::new();
 
 		// Lite06+: announce ids. Every `active` we send implicitly assigns the next
@@ -709,7 +709,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The track guard (bumps `subscriptions`), the per-session broadcast
 		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
 		// below, after the subscription is validated, and held for its lifetime.
-		stats: (crate::PublisherTrack, crate::SessionBroadcasts, crate::PathOwned),
+		stats: (stats::PublisherTrack, stats::SessionBroadcasts, crate::PathOwned),
 		version: Version,
 	) -> Result<(), Error> {
 		let (track_stats, broadcasts, absolute) = stats;
@@ -836,7 +836,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
 		broadcast: kio::Pending<origin::Requesting>,
-		track_stats: crate::PublisherTrack,
+		track_stats: stats::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let broadcast = broadcast.await?;
@@ -992,7 +992,7 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &crate::PublisherTrack,
+	track_stats: &stats::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
@@ -1069,7 +1069,7 @@ struct Subscription<S: web_transport_trait::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
-	track_stats: Arc<crate::PublisherTrack>,
+	track_stats: Arc<stats::PublisherTrack>,
 	priority: PriorityQueue,
 	track_priority: tokio::sync::watch::Receiver<u8>,
 	version: Version,

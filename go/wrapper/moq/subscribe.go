@@ -115,12 +115,12 @@ type MediaConsumer struct {
 }
 
 // Next returns the next frame, or (nil, nil) when the track ends.
-func (m *MediaConsumer) Next(ctx context.Context) (*Frame, error) {
+func (m *MediaConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	return runCancellable(ctx, m.inner.Cancel, m.inner.Next)
 }
 
 // Frames ranges over frames until the track ends or the loop breaks.
-func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*Frame, error] {
+func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
 	return streamSeq(ctx, m.Next)
 }
 
@@ -201,8 +201,8 @@ func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
 }
 
 // Info returns the publisher-side track properties learned during subscription.
-func (t *TrackConsumer) Info(ctx context.Context) (TrackInfo, error) {
-	return runCancellable(ctx, nil, t.inner.Info)
+func (t *TrackConsumer) Info() (TrackInfo, error) {
+	return t.inner.Info()
 }
 
 // Update changes this subscriber's delivery preferences.

@@ -393,10 +393,7 @@ async fn export_rejects_cmaf_track() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc1"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".avc1"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x64,
@@ -439,10 +436,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let track = producer
-		.create_track(
-			producer.unique_name(".avc3"),
-			moq_net::track::Info::default().with_timescale(hang::container::TIMESCALE),
-		)
+		.create_track(producer.unique_name(".avc3"), hang::container::track_info())
 		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,

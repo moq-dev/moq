@@ -16,6 +16,10 @@
 //! Each level lives in its own module (`broadcast`, `track`, `group`, `frame`, `origin`,
 //! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
+//! Traffic counters for the levels above live in [`stats`]: build a [`stats::Producer`]
+//! and hand each session a [`stats::Handle`] via [`Client::with_stats`] /
+//! [`Server::with_stats`].
+//!
 //! ## Compatibility
 //! The API exposes the intersection of features supported by both protocols, intentionally
 //! keeping it small rather than polluting it with half-baked features.
@@ -71,9 +75,10 @@ mod path;
 mod server;
 mod session;
 mod setup;
-mod stats;
 mod util;
 mod version;
+
+pub mod stats;
 
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
@@ -84,7 +89,6 @@ pub use model::*;
 pub use path::*;
 pub use server::*;
 pub use session::*;
-pub use stats::*;
 pub use version::*;
 
 // Re-export the bytes crate

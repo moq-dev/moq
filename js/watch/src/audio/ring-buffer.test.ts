@@ -634,6 +634,33 @@ describe("resize", () => {
 	});
 });
 
+describe("decoded rate must match the ring (#2352)", () => {
+	// The ring maps a frame's timestamp to a sample index using its own rate, so the ring must run at
+	// the rate the decoder actually output. A 20ms Opus frame decodes to 960 samples (48kHz); if the
+	// ring runs at that rate they land contiguously, but if it runs at a mismatched rate (e.g. 44100,
+	// the machine default a file publish leaked into the catalog) each frame overruns its slot and
+	// every frame after the first is misplaced, which is the noise reported in #2352.
+	function writeOpusFrames(rate: number): AudioRingBuffer {
+		// 1s floor so nothing overflows while we fill 10 frames.
+		const buffer = new AudioRingBuffer({ rate, channels: 1, latency: 1000 as Time.Milli });
+		for (let i = 0; i < 10; i++) {
+			write(buffer, (i * 20) as Time.Milli, 960, { channels: 1, value: (i + 1) / 10 });
+		}
+		return buffer;
+	}
+
+	it("places 20ms/960-sample frames contiguously at 48kHz", () => {
+		// 20ms at 48kHz is exactly 960 samples, so 10 frames pack into 9600 with no gaps or overlap.
+		expect(writeOpusFrames(48000).length).toBe(9600);
+	});
+
+	it("misplaces the frames when the ring rate disagrees", () => {
+		// 20ms at 44100 is 882 samples, so each 960-sample frame overlaps the next and the buffer never
+		// reaches the contiguous 9600 it would at the matching rate.
+		expect(writeOpusFrames(44100).length).toBeLessThan(9600);
+	});
+});
+
 describe("buffered mode", () => {
 	function createBuffered(latency: number) {
 		return new AudioRingBuffer({ rate: 1000, channels: 1, latency: latency as Time.Milli, buffered: true });

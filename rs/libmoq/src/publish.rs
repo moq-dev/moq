@@ -67,9 +67,9 @@ impl Publish {
 		Ok((broadcast, catalog))
 	}
 
-	/// Cleanly close the broadcast and finalize the catalog stream, so subscribers
+	/// Cleanly finish the broadcast and finalize the catalog stream, so subscribers
 	/// see a normal end rather than [`moq_net::Error::Dropped`].
-	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
+	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
 		let (broadcast, mut catalog) = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
 		// Finish the broadcast first so the clean end reaches subscribers even if
 		// finalizing the catalog fails.
@@ -78,7 +78,7 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media_ordered(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
+	pub fn media(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
 
 		// A container may publish several tracks; a single codec fills one reserved
@@ -114,7 +114,7 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media_close(&mut self, media: Id) -> Result<(), Error> {
+	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
 		let mut media = self.media.remove(media).ok_or(Error::MediaNotFound)?;
 		match &mut media {
 			Media::Track(track) => track.finish()?,
@@ -251,7 +251,7 @@ impl Publish {
 	///
 	/// Values published via [`Self::json_snapshot_update`] reach subscribers as a single latest
 	/// state; a late joiner only sees the newest value. Advertise the track in the catalog with
-	/// [`Self::catalog_section`] if consumers should discover it.
+	/// [`Self::catalog_section_set`] if consumers should discover it.
 	pub fn json_snapshot(
 		&mut self,
 		broadcast: Id,
@@ -272,7 +272,7 @@ impl Publish {
 	}
 
 	/// Finish a JSON snapshot track. No more values can be published.
-	pub fn json_snapshot_close(&mut self, json: Id) -> Result<(), Error> {
+	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
 		let mut producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
 		producer.finish()?;
 		Ok(())
@@ -301,7 +301,7 @@ impl Publish {
 	}
 
 	/// Finish a JSON stream track. No more records can be appended.
-	pub fn json_stream_close(&mut self, stream: Id) -> Result<(), Error> {
+	pub fn json_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
 		let mut producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
 		producer.finish()?;
 		Ok(())
