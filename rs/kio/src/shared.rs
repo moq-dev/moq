@@ -83,6 +83,9 @@ impl<T> Shared<T> {
 	/// The async sibling of [`poll`](Self::poll). It's infallible: a `Shared` has no
 	/// liveness of its own, so there's no closure to report. A predicate that never
 	/// holds simply waits forever.
+	///
+	/// The returned [`Mut`] holds the lock, so do your mutation and drop it rather than
+	/// carrying it across another `.await`, which would block every other handle.
 	pub async fn wait<F>(&self, mut f: F) -> Mut<'_, T>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
