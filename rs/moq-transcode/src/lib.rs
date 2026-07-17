@@ -194,7 +194,10 @@ mod tests {
 			let mut group = track.create_group(sequence.into()).unwrap();
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
-				for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+				for payload in encoder
+					.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+					.unwrap()
+				{
 					let frame = hang::container::Frame {
 						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 						payload,
@@ -259,7 +262,10 @@ mod tests {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
 					let timestamp = (sequence * frames + index) * 33_333;
-					for payload in encoder.encode_rgba(&gray, 320, 240, index == 0).unwrap() {
+					for payload in encoder
+						.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+						.unwrap()
+					{
 						let frame = hang::container::Frame {
 							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
 							payload,

@@ -63,7 +63,7 @@ struct State {
 	api: &'static cuvid::Api,
 	ctx: Arc<CudaContext>,
 	/// Requested output size; `None` decodes at the stream's display size.
-	resize: Option<(u32, u32)>,
+	resize: Option<crate::Size>,
 	decoder: Option<Decoder>,
 	/// Pictures the display callback queued, in presentation order. Drained
 	/// (mapped and copied out) after each parse call.
@@ -108,11 +108,9 @@ impl Nvdec {
 		}
 		let api = cuvid::Api::get().map_err(|e| codec_err(format!("NVDEC unavailable: {e}")))?;
 
-		if let Some((w, h)) = config.resize {
-			// NV12 output: chroma is 2x2 subsampled, so the target must be even.
-			if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
-				return Err(codec_err(format!("NVDEC resize {w}x{h} must be even and non-zero")));
-			}
+		// NV12 output: chroma is 2x2 subsampled, so the target must be even.
+		if let Some(size) = config.resize {
+			size.validate("NVDEC resize to")?;
 		}
 
 		let cuda_codec = match codec {
@@ -254,11 +252,11 @@ impl State {
 
 		// Output size: the requested resize, or the display area (the coded size
 		// minus cropping). Rounded down to even for NV12.
-		let display = (
+		let display = crate::Size::new(
 			(format.display_area.right - format.display_area.left).max(2) as u32 & !1,
 			(format.display_area.bottom - format.display_area.top).max(2) as u32 & !1,
 		);
-		let (width, height) = self.resize.unwrap_or(display);
+		let crate::Size { width, height } = self.resize.unwrap_or(display);
 		let coded = (format.coded_width, format.coded_height);
 		let display_area = (
 			format.display_area.left,
@@ -479,7 +477,7 @@ mod tests {
 		assert!(Nvdec::open(Codec::H264, &decode_config(None)).is_err());
 	}
 
-	fn decode_config(resize: Option<(u32, u32)>) -> DecodeConfig {
+	fn decode_config(resize: Option<crate::Size>) -> DecodeConfig {
 		DecodeConfig {
 			kind: DecodeKind::Named(NAME.into()),
 			resize,
@@ -517,7 +515,7 @@ mod tests {
 		let mut out = Vec::new();
 		for i in 0..10u64 {
 			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, w, h, i == 0).unwrap() {
+			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
 				for decoded in decoder.decode(packet, timestamp, i == 0).unwrap() {
 					let i420 = decoded.frame.to_i420().unwrap().into_owned();
 					out.push((decoded.timestamp.as_micros() as u64, i420));
@@ -572,7 +570,8 @@ mod tests {
 			..EncodeConfig::new(w, h, 30)
 		})
 		.unwrap();
-		let decoder = Nvdec::open(Codec::H264, &decode_config(Some((160, 120)))).expect("NVDEC H.264 decoder");
+		let decoder =
+			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC H.264 decoder");
 
 		// Nearest-neighbor reference downscale of the expected picture.
 		let full = I420::from_rgba(&gradient_rgba(w, h), w * 4, w, h).unwrap();
@@ -636,7 +635,8 @@ mod tests {
 		})
 		.unwrap();
 		// Decode at half size so the hardware scaler is in the loop too.
-		let decoder = Nvdec::open(Codec::H264, &decode_config(Some((160, 120)))).expect("NVDEC decoder");
+		let decoder =
+			Nvdec::open(Codec::H264, &decode_config(Some(crate::Size::new(160, 120)))).expect("NVDEC decoder");
 
 		let mut nvenc = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("nvenc".into()),
@@ -652,7 +652,7 @@ mod tests {
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
 				let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-				for packet in source.encode_rgba(&rgba, w, h, i == 0).unwrap() {
+				for packet in source.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
 					frames.extend(decoder.decode(packet, timestamp, i == 0).unwrap());
 				}
 			}

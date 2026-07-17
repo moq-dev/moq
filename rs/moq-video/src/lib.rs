@@ -1,8 +1,10 @@
 //! Native video capture, encoding, and publishing for Media over QUIC.
 //!
-//! Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio) for
-//! video tracks. Sits on top of [`moq_mux`] (and the `hang` catalog) and
-//! adds the native pieces a desktop/CLI publisher needs:
+//! Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio) for video
+//! tracks, and shaped the same way: both split into `capture` / `encode` /
+//! `decode` role modules over a shared root [`Error`]. Sits on top of [`moq_mux`]
+//! (and the `hang` catalog) and adds the native pieces a desktop/CLI publisher
+//! needs:
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
@@ -24,10 +26,11 @@
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
 //!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
-//!   [`decode::Consumer`] is the mirror of `moq-audio`'s `AudioConsumer`. An
+//!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
-//!   [`decode::Config::resize`].
+//!   [`decode::Config::resize`]. [`Size`] names a resolution wherever one
+//!   crosses the API.
 //!
 //! ## API stability
 //!
@@ -46,8 +49,10 @@ pub mod encode;
 
 mod error;
 mod frame;
+mod size;
 
 #[cfg(target_os = "windows")]
 mod mf;
 
 pub use error::Error;
+pub use size::Size;

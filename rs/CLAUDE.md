@@ -25,8 +25,8 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 **Media bridge / codecs**
 
 - `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).
-- `moq-audio` (lib): native PCM <-> Opus (`unsafe-libopus`). `AudioProducer`/`AudioConsumer`, `Encoder`/`Decoder`, `AudioFormat`. Optional `capture` feature (cpal microphone), `resample`.
-- `moq-video` (lib): native video capture, H.264/H.265 encode, and decode; no ffmpeg. Hardware backends (VideoToolbox / Media Foundation / NVENC / VAAPI / NVDEC) with openh264 as the software H.264 fallback; NVDEC frames stay in CUDA memory and feed NVENC zero-copy. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`.
+- `moq-audio` (lib): native PCM <-> Opus (`unsafe-libopus`). Shaped like `moq-video`: `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`, plus root `Error`/`Format`/`Frame`. Optional `capture` feature (cpal microphone, macOS system audio), `resample`.
+- `moq-video` (lib): native video capture, H.264/H.265 encode, and decode; no ffmpeg. Hardware backends (VideoToolbox / Media Foundation / NVENC / VAAPI / NVDEC) with openh264 as the software H.264 fallback; NVDEC frames stay in CUDA memory and feed NVENC zero-copy. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`, root `Error`/`Size`.
 - `moq-transcode` (lib): just-in-time live transcoding of hang broadcasts. `run(source, output, config)` publishes a derivative catalog (ladder rungs + relative refs to the source) and encodes each rung only while subscribed/fetched, via `moq-video`. Live rungs share one decode per source (the `feed` module); output groups mirror source group sequences 1:1. Also a moq-cli verb (`moq ... transcode`, feature-gated).
 
 **Apps / binaries**

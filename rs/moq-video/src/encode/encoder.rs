@@ -8,8 +8,8 @@
 use bytes::Bytes;
 
 use super::backend::{self, Backend};
-use crate::Error;
 use crate::frame::{Frame, I420};
+use crate::{Error, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -70,6 +70,8 @@ pub struct Config {
 }
 
 impl Config {
+	/// A config encoding `width` x `height` at `framerate`, with the default
+	/// codec, GOP, and bitrate.
 	pub fn new(width: u32, height: u32, framerate: u32) -> Self {
 		Self {
 			width,
@@ -83,13 +85,17 @@ impl Config {
 		}
 	}
 
+	/// The encoded resolution.
+	pub fn size(&self) -> Size {
+		Size::new(self.width, self.height)
+	}
+
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
 	pub(crate) fn resolved_bitrate(&self) -> u64 {
 		self.bitrate.unwrap_or_else(|| {
-			let pixels = self.width as u64 * self.height as u64;
 			// 0.07 bits per pixel per second matches the JS publisher's
 			// default and lands ~4.4 Mbps for 1080p30.
-			((pixels * self.framerate as u64) as f64 * 0.07) as u64
+			((self.size().pixels() * self.framerate as u64) as f64 * 0.07) as u64
 		})
 	}
 }
@@ -100,12 +106,12 @@ impl Config {
 pub struct Encoder {
 	backend: Box<dyn Backend>,
 	codec: Codec,
-	width: u32,
-	height: u32,
+	size: Size,
 	bitrate: u64,
 }
 
 impl Encoder {
+	/// Open an encoder for `config`.
 	pub fn new(config: &Config) -> Result<Self, Error> {
 		// Validate at the construction boundary so both entry points (the
 		// capture loop and a bring-your-own-frames caller) reject a zero
@@ -113,28 +119,15 @@ impl Encoder {
 		if config.framerate == 0 {
 			return Err(Error::InvalidFramerate(0));
 		}
-		if config.width == 0 || config.height == 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"encoder dimensions must be non-zero (got {}x{})",
-				config.width,
-				config.height
-			)));
-		}
 		// I420 chroma is subsampled 2x2, so the encoded resolution must be even.
-		if config.width % 2 != 0 || config.height % 2 != 0 {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"encoder dimensions must be even (got {}x{})",
-				config.width,
-				config.height
-			)));
-		}
+		let size = config.size();
+		size.validate("encoder")?;
 
 		let backend = backend::open(config)?;
 		Ok(Self {
 			backend,
 			codec: config.codec,
-			width: config.width,
-			height: config.height,
+			size,
 			bitrate: config.resolved_bitrate(),
 		})
 	}
@@ -142,6 +135,11 @@ impl Encoder {
 	/// The encoder name in use, e.g. `"videotoolbox"`.
 	pub fn name(&self) -> &str {
 		self.backend.name()
+	}
+
+	/// The resolution this encoder emits, which every frame fed to it must match.
+	pub fn size(&self) -> Size {
+		self.size
 	}
 
 	/// The current target bitrate in bits per second: what
@@ -182,62 +180,64 @@ impl Encoder {
 		self.codec
 	}
 
-	/// Encode one tightly-packed RGBA frame (`width * height * 4` bytes),
-	/// returning zero or more encoded packets in the codec's framing. Set
-	/// `keyframe` to force an IDR (e.g. on resume so a re-subscribing viewer can
-	/// start decoding at once). The frame must already be at the encoder's resolution.
-	pub fn encode_rgba(&mut self, rgba: &[u8], width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		// Validate geometry up front: the encoder resolution is even (checked in
-		// `new`), so a matching frame is even too, and the conversion can't fail
-		// on odd dimensions.
-		if width != self.width || height != self.height {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"frame {width}x{height} does not match encoder {}x{}",
-				self.width,
-				self.height
-			)));
-		}
-		let expected = (width as usize)
-			.checked_mul(height as usize)
-			.and_then(|pixels| pixels.checked_mul(4))
-			.ok_or_else(|| Error::Codec(anyhow::anyhow!("RGBA size overflow for {width}x{height}")))?;
-		if rgba.len() < expected {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"RGBA buffer too small: {} < {expected} for {width}x{height}",
-				rgba.len()
-			)));
-		}
+	/// Encode one tightly-packed RGBA frame of `size`, returning zero or more
+	/// encoded packets in the codec's framing. Set `keyframe` to force an IDR
+	/// (e.g. on resume so a re-subscribing viewer can start decoding at once).
+	///
+	/// `size` must equal the encoder's [`size`](Self::size), and `rgba` must hold
+	/// exactly `width * height * 4` bytes with no row padding.
+	pub fn encode_rgba(&mut self, rgba: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		// The encoder resolution is validated even and non-zero in `new`, so a
+		// frame matching it is even too and the conversion below can't fail on odd
+		// dimensions.
+		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
 
-		let frame = Frame::I420(I420::from_rgba(rgba, width * 4, width, height)?);
+		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
 		self.encode_raw(&frame, keyframe)
 	}
 
-	/// Encode one tightly-packed I420 frame (`width * height * 3 / 2` bytes: Y
-	/// then U then V, no row padding, BT.601 limited range), returning zero or
-	/// more encoded packets in the codec's framing. Set `keyframe` to force an
-	/// IDR. The frame must already be at the encoder's resolution.
+	/// Encode one tightly-packed I420 frame of `size` (Y then U then V, no row
+	/// padding, BT.601 limited range), returning zero or more encoded packets in
+	/// the codec's framing. Set `keyframe` to force an IDR.
 	///
-	/// The zero-conversion input path for callers that already hold I420, e.g. a
-	/// transcoder feeding decoder output back in; [`encode_rgba`](Self::encode_rgba)
-	/// is the convenience path for RGBA sources.
-	pub fn encode_i420(&mut self, data: Vec<u8>, width: u32, height: u32, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		if width != self.width || height != self.height {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"frame {width}x{height} does not match encoder {}x{}",
-				self.width,
-				self.height
-			)));
-		}
-		let expected = I420::len(width, height);
-		if data.len() != expected {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"I420 buffer is {} bytes, expected {expected} for {width}x{height}",
-				data.len()
-			)));
-		}
+	/// `size` must equal the encoder's [`size`](Self::size), and `i420` must hold
+	/// exactly `width * height * 3 / 2` bytes.
+	///
+	/// The bring-your-own-I420 path, which copies the buffer to take ownership of
+	/// it. A transcoder should prefer [`encode`](Self::encode): it takes a decoded
+	/// frame directly and keeps a GPU one on the GPU, so it neither copies nor
+	/// round-trips through system memory.
+	pub fn encode_i420(&mut self, i420: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		self.check_frame(size, i420.len(), I420::len(size.width, size.height), "I420")?;
 
-		let frame = Frame::I420(I420 { width, height, data });
+		let frame = Frame::I420(I420 {
+			width: size.width,
+			height: size.height,
+			data: i420.to_vec(),
+		});
 		self.encode_raw(&frame, keyframe)
+	}
+
+	/// Reject a frame the encoder can't encode: the wrong shape, or a buffer that
+	/// doesn't hold exactly one frame of that shape.
+	///
+	/// Both halves are load-bearing. `size` catches a transposed frame, which the
+	/// byte count alone cannot: 240x320 and 320x240 are the same number of bytes.
+	/// The exact length then catches a buffer that doesn't match the shape it
+	/// claims, rather than encoding its first frame's worth and ignoring the rest.
+	fn check_frame(&self, size: Size, got: usize, expected: usize, what: &str) -> Result<(), Error> {
+		if size != self.size {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"frame {size} does not match encoder {}",
+				self.size
+			)));
+		}
+		if got != expected {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"{what} buffer is {got} bytes, expected {expected} for {size}"
+			)));
+		}
+		Ok(())
 	}
 
 	/// Encode a decoded [`Frame`](crate::decode::Frame), the transcode input
@@ -253,20 +253,21 @@ impl Encoder {
 	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
 	/// already be at the encoder's resolution.
 	pub(crate) fn encode_raw(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		if frame.width() != self.width || frame.height() != self.height {
+		let size = Size::new(frame.width(), frame.height());
+		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
-				"frame {}x{} does not match encoder {}x{}",
-				frame.width(),
-				frame.height(),
-				self.width,
-				self.height
+				"frame {size} does not match encoder {}",
+				self.size
 			)));
 		}
 		self.backend.encode(frame, keyframe)
 	}
 
 	/// Flush the encoder, returning any buffered packets.
-	pub fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	///
+	/// Consumes the encoder: nothing can be encoded after a flush, so this is the
+	/// last call rather than one leaving a drained encoder in your hands.
+	pub fn finish(mut self) -> Result<Vec<Bytes>, Error> {
 		self.backend.finish()
 	}
 }
@@ -292,7 +293,7 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
+			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -318,7 +319,7 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		let rgba = gray_rgba(320, 240);
-		let mut packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		let mut packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 		assert!(!packets.is_empty());
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
@@ -334,20 +335,21 @@ mod tests {
 
 		// A mid-gray I420 frame: flat 0x80 across all three planes.
 		let data = vec![0x80u8; I420::len(320, 240)];
-		let mut packets = encoder.encode_i420(data, 320, 240, true).unwrap();
+		let mut packets = encoder.encode_i420(&data, Size::new(320, 240), true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 		assert!(!packets.is_empty());
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
 
+	/// A buffer that doesn't hold one whole frame of the declared size must error
+	/// rather than reach a backend short.
 	#[test]
 	fn encode_i420_rejects_wrong_size() {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
 			return;
 		};
-		// Not width * height * 3 / 2: must error, not feed a short buffer to a backend.
 		assert!(matches!(
-			encoder.encode_i420(vec![0u8; 16], 320, 240, false),
+			encoder.encode_i420(&[0u8; 16], Size::new(320, 240), false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -359,11 +361,13 @@ mod tests {
 		};
 		// Far smaller than 320*240*4: must error, not panic on conversion.
 		assert!(matches!(
-			encoder.encode_rgba(&[0u8; 16], 320, 240, false),
+			encoder.encode_rgba(&[0u8; 16], Size::new(320, 240), false),
 			Err(Error::Codec(_))
 		));
 	}
 
+	/// A frame that isn't the encoder's size must error rather than encode its
+	/// top-left corner.
 	#[test]
 	fn encode_rgba_rejects_dimension_mismatch() {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
@@ -371,7 +375,45 @@ mod tests {
 		};
 		let rgba = gray_rgba(640, 480);
 		assert!(matches!(
-			encoder.encode_rgba(&rgba, 640, 480, false),
+			encoder.encode_rgba(&rgba, Size::new(640, 480), false),
+			Err(Error::Codec(_))
+		));
+	}
+
+	/// The I420 counterpart: an oversized buffer is a mis-sized frame, not slack
+	/// to truncate.
+	#[test]
+	fn encode_i420_rejects_oversized_buffer() {
+		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
+			return;
+		};
+		let data = vec![0x80u8; I420::len(640, 480)];
+		assert!(matches!(
+			encoder.encode_i420(&data, Size::new(640, 480), false),
+			Err(Error::Codec(_))
+		));
+	}
+
+	/// A transposed frame is exactly why `size` is still a parameter: 240x320 and
+	/// 320x240 hold the same number of bytes, so a length check alone would accept
+	/// this and encode garbage. Both entry points must reject it.
+	#[test]
+	fn encode_rejects_transposed_frame() {
+		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
+			return;
+		};
+
+		let rgba = gray_rgba(240, 320);
+		assert_eq!(rgba.len(), gray_rgba(320, 240).len(), "the byte counts must collide");
+		assert!(matches!(
+			encoder.encode_rgba(&rgba, Size::new(240, 320), false),
+			Err(Error::Codec(_))
+		));
+
+		let i420 = vec![0x80u8; I420::len(240, 320)];
+		assert_eq!(i420.len(), I420::len(320, 240), "the byte counts must collide");
+		assert!(matches!(
+			encoder.encode_i420(&i420, Size::new(240, 320), false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -409,7 +451,7 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
+			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -446,7 +488,7 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, 320, 240, i == 0).unwrap());
+			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -603,7 +645,7 @@ mod tests {
 		let frame = gray_rgba(640, 480);
 		let mut packets = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, 640, 480, i == 0).unwrap());
+			packets.extend(encoder.encode_rgba(&frame, Size::new(640, 480), i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -670,14 +712,14 @@ mod tests {
 		assert_eq!(opened, config.resolved_bitrate());
 
 		// Encode first: this is the live-retune path, once the encoder exists.
-		encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
 
 		let halved = opened / 2;
 		encoder.set_bitrate(halved).unwrap();
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The retuned encoder must still emit a decodable keyframe, not wedge.
-		let packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
 		assert!(!packets.is_empty(), "encoder produced nothing after a retune");
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
@@ -699,12 +741,12 @@ mod tests {
 
 		// The deferred rate is applied during this encode, which must still work.
 		let rgba = gray_rgba(320, 240);
-		let packets = encoder.encode_rgba(&rgba, 320, 240, true).unwrap();
+		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
 		assert!(!packets.is_empty());
 
 		// And the encoder is live now, so a further retune takes the direct path.
 		encoder.set_bitrate(halved / 2).unwrap();
-		assert!(encoder.encode_rgba(&rgba, 320, 240, false).is_ok());
+		assert!(encoder.encode_rgba(&rgba, Size::new(320, 240), false).is_ok());
 	}
 
 	/// Setting the current rate must not reach the backend at all: the control

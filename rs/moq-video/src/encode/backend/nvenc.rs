@@ -373,7 +373,9 @@ mod tests {
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
 			let keyframe = i == 0 || i == 5;
-			let packets = encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap();
+			let packets = encoder
+				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.unwrap();
 			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
 			if i == 0 {
 				first = joined;
@@ -418,7 +420,9 @@ mod tests {
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
 			let keyframe = i == 0 || i == 5;
-			let packets = encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap();
+			let packets = encoder
+				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.unwrap();
 			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
 			if i == 0 {
 				first = joined;
@@ -462,7 +466,7 @@ mod tests {
 		// Never force a keyframe (only frame 0 would be); the backend must insert
 		// IDRs at frames 3 and 6 on its own.
 		for i in 0..7u32 {
-			let packets = encoder.encode_rgba(&frame, 320, 240, false).unwrap();
+			let packets = encoder.encode_rgba(&frame, crate::Size::new(320, 240), false).unwrap();
 			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
 			let types = h264_nal_types(&joined);
 			if types.contains(&5) {
@@ -525,7 +529,7 @@ mod tests {
 		let mut decoded = None;
 		for i in 0..10u64 {
 			let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, w, h, i == 0).unwrap() {
+			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
 				for out in decoder.decode(packet, timestamp, i == 0).unwrap() {
 					decoded = Some(out.frame.to_i420().unwrap().into_owned());
 				}

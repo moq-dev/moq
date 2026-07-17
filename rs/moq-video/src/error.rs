@@ -41,7 +41,7 @@ pub enum Error {
 
 	/// moq-net transport error.
 	#[error(transparent)]
-	Moq(#[from] moq_net::Error),
+	Net(#[from] moq_net::Error),
 
 	/// Timestamp overflow converting to the moq microsecond timescale.
 	#[error(transparent)]

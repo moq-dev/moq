@@ -141,7 +141,7 @@ pub enum Error {
 
 	/// Error from the moq-audio codec layer.
 	#[error("audio error: {0}")]
-	Audio(Arc<moq_audio::AudioError>),
+	Audio(Arc<moq_audio::Error>),
 
 	/// Error from the moq-video codec layer.
 	#[error("video error: {0}")]
@@ -171,8 +171,8 @@ impl From<serde_json::Error> for Error {
 	}
 }
 
-impl From<moq_audio::AudioError> for Error {
-	fn from(err: moq_audio::AudioError) -> Self {
+impl From<moq_audio::Error> for Error {
+	fn from(err: moq_audio::Error) -> Self {
 		Error::Audio(Arc::new(err))
 	}
 }

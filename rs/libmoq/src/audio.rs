@@ -44,17 +44,17 @@ pub enum moq_audio_format {
 	MOQ_AUDIO_FORMAT_F32_PLANAR = 7,
 }
 
-fn audio_format_from_u32(value: u32) -> Result<moq_audio::AudioFormat, Error> {
-	use moq_audio::AudioFormat;
+fn audio_format_from_u32(value: u32) -> Result<moq_audio::Format, Error> {
+	use moq_audio::Format;
 	Ok(match value {
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8 as u32 => AudioFormat::U8,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16 as u32 => AudioFormat::S16,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32 as u32 => AudioFormat::S32,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32 => AudioFormat::F32,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8_PLANAR as u32 => AudioFormat::U8Planar,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16_PLANAR as u32 => AudioFormat::S16Planar,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32_PLANAR as u32 => AudioFormat::S32Planar,
-		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32_PLANAR as u32 => AudioFormat::F32Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8 as u32 => Format::U8,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16 as u32 => Format::S16,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32 as u32 => Format::S32,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32 => Format::F32,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_U8_PLANAR as u32 => Format::U8Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S16_PLANAR as u32 => Format::S16Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_S32_PLANAR as u32 => Format::S32Planar,
+		v if v == moq_audio_format::MOQ_AUDIO_FORMAT_F32_PLANAR as u32 => Format::F32Planar,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -126,7 +126,7 @@ pub struct moq_audio_frame {
 
 #[derive(Default)]
 pub struct Audio {
-	producers: NonZeroSlab<moq_audio::AudioProducer<moq_mux::catalog::hang::Extra>>,
+	producers: NonZeroSlab<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>,
 	consumer_tasks: NonZeroSlab<Option<AudioTaskEntry>>,
 	frames: NonZeroSlab<moq_audio::Frame>,
 }
@@ -146,11 +146,10 @@ impl Audio {
 		&mut self,
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
-		name: &str,
-		input: moq_audio::EncoderInput,
-		output: moq_audio::EncoderOutput,
+		input: moq_audio::encode::Input,
+		options: moq_audio::encode::Options,
 	) -> Result<Id, Error> {
-		let producer = moq_audio::AudioProducer::new(broadcast, catalog, name, input, output)?;
+		let producer = moq_audio::encode::Producer::new(broadcast, catalog, input, &options)?;
 		self.producers.insert(producer)
 	}
 
@@ -171,7 +170,7 @@ impl Audio {
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &hang::catalog::AudioConfig,
 		name: &str,
-		output: moq_audio::DecoderOutput,
+		config: moq_audio::decode::Config,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let broadcast = broadcast.clone();
@@ -185,11 +184,11 @@ impl Audio {
 		};
 		let id = self.consumer_tasks.insert(Some(entry))?;
 
-		// `AudioConsumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it
+		// `decode::Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it
 		// inside the task to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
 			let res = async move {
-				let consumer = moq_audio::AudioConsumer::new(&broadcast, &catalog, name, output).await?;
+				let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
 				Self::run(on_frame, consumer, channel.1).await
 			}
 			.await;
@@ -207,7 +206,7 @@ impl Audio {
 
 	async fn run(
 		callback: OnStatus,
-		mut consumer: moq_audio::AudioConsumer,
+		mut consumer: moq_audio::decode::Consumer,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -242,7 +241,11 @@ impl Audio {
 	pub fn frame_info(&self, id: Id, dst: &mut moq_audio_frame) -> Result<(), Error> {
 		let frame = self.frames.get(id).ok_or(Error::FrameNotFound)?;
 		*dst = moq_audio_frame {
-			timestamp_us: frame.timestamp_us,
+			// The C ABI carries plain microseconds, so flatten the scaled
+			// `Timestamp` here at the boundary. Saturating rather than erroring:
+			// this is a getter on a frame we already decoded, and a u64 overflow
+			// needs a timestamp ~580,000 years out.
+			timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
 			data: frame.data.as_ptr(),
 			data_size: frame.data.len(),
 		};
@@ -284,45 +287,36 @@ pub unsafe extern "C" fn moq_publish_audio_raw(
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let codec_str = unsafe { ffi::parse_str(raw_output.codec, raw_output.codec_len)? };
 
-		let encoder_input = moq_audio::EncoderInput {
+		let encoder_input = moq_audio::encode::Input {
 			format: audio_format_from_u32(raw_input.format)?,
 			sample_rate: raw_input.sample_rate,
 			channels: raw_input.channels,
 		};
-		let encoder_output = moq_audio::EncoderOutput {
-			codec: codec_str
-				.parse()
-				.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?,
-			sample_rate: if raw_output.sample_rate == 0 {
-				None
-			} else {
-				Some(raw_output.sample_rate)
-			},
-			channels: if raw_output.channels == 0 {
-				None
-			} else {
-				Some(raw_output.channels)
-			},
-			bitrate: if raw_output.bitrate == 0 {
-				None
-			} else {
-				Some(raw_output.bitrate)
-			},
-			frame_duration: Duration::from_millis(raw_output.frame_duration_ms.into()),
-		};
+
+		// The C ABI takes an explicit track name and spells "unset" as 0, so map
+		// both onto the Rust options here rather than leaking either convention.
+		let mut options = moq_audio::encode::Options::default();
+		options.track = Some(name);
+		options.codec = codec_str
+			.parse()
+			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
+		options.sample_rate = zeroable(raw_output.sample_rate);
+		options.channels = zeroable(raw_output.channels);
+		options.bitrate = zeroable(raw_output.bitrate);
+		options.frame_duration = Duration::from_millis(raw_output.frame_duration_ms.into());
 
 		let mut state = State::lock();
 		let State { publish, audio, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		audio.publish(
-			broadcast_producer,
-			catalog.clone(),
-			&name,
-			encoder_input,
-			encoder_output,
-		)
+		audio.publish(broadcast_producer, catalog.clone(), encoder_input, options)
 	})
+}
+
+/// The C ABI spells an unset `u32` knob as 0, which no field here accepts as a
+/// real value.
+fn zeroable(value: u32) -> Option<u32> {
+	(value != 0).then_some(value)
 }
 
 /// Push one audio frame.
@@ -341,7 +335,8 @@ pub unsafe extern "C" fn moq_publish_audio_raw_frame(producer: u32, frame: *cons
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
 		let owned = moq_audio::Frame {
-			timestamp_us: frame.timestamp_us,
+			// The C ABI carries plain microseconds; scale them at the boundary.
+			timestamp: moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?,
 			data: Bytes::copy_from_slice(data),
 		};
 
@@ -388,27 +383,19 @@ pub unsafe extern "C" fn moq_consume_audio_raw(
 		let catalog = ffi::parse_id(catalog)?;
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
-		let decoder_output = moq_audio::DecoderOutput {
-			format: audio_format_from_u32(raw.format)?,
-			sample_rate: if raw.sample_rate == 0 {
-				None
-			} else {
-				Some(raw.sample_rate)
-			},
-			channels: if raw.channels == 0 { None } else { Some(raw.channels) },
-			latency_max: if raw.latency_max_ms == 0 {
-				None
-			} else {
-				Some(Duration::from_millis(raw.latency_max_ms))
-			},
-		};
+		let mut config = moq_audio::decode::Config::default();
+		config.format = audio_format_from_u32(raw.format)?;
+		config.sample_rate = zeroable(raw.sample_rate);
+		config.channels = zeroable(raw.channels);
+		config.latency_max = (raw.latency_max_ms != 0).then(|| Duration::from_millis(raw.latency_max_ms));
+
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame) };
 
 		let mut state = State::lock();
 		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume(&broadcast, &audio_cfg, &name, decoder_output, on_frame)
+		audio.consume(&broadcast, &audio_cfg, &name, config, on_frame)
 	})
 }
 

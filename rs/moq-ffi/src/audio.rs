@@ -28,7 +28,7 @@ pub enum MoqAudioFormat {
 	F32Planar,
 }
 
-impl From<MoqAudioFormat> for moq_audio::AudioFormat {
+impl From<MoqAudioFormat> for moq_audio::Format {
 	fn from(f: MoqAudioFormat) -> Self {
 		match f {
 			MoqAudioFormat::U8 => Self::U8,
@@ -49,7 +49,7 @@ pub enum MoqAudioCodec {
 	Opus,
 }
 
-impl From<MoqAudioCodec> for moq_audio::Codec {
+impl From<MoqAudioCodec> for moq_audio::encode::Codec {
 	fn from(c: MoqAudioCodec) -> Self {
 		match c {
 			MoqAudioCodec::Opus => Self::Opus,
@@ -105,25 +105,33 @@ pub struct MoqAudioDecoderOutput {
 /// PCM in the configured `output_format`.
 #[derive(uniffi::Record)]
 pub struct MoqAudioFrame {
+	/// Presentation timestamp of the first sample, in microseconds.
 	pub timestamp_us: u64,
+	/// The samples, in the configured PCM layout.
 	pub data: Vec<u8>,
 }
 
 impl From<moq_audio::Frame> for MoqAudioFrame {
 	fn from(f: moq_audio::Frame) -> Self {
 		Self {
-			timestamp_us: f.timestamp_us,
+			// The binding surface carries plain microseconds, so flatten the
+			// scaled `Timestamp` here. Saturating rather than erroring: this is a
+			// frame we already decoded, and a u64 overflow needs a timestamp
+			// ~580,000 years out.
+			timestamp_us: u64::try_from(f.timestamp.as_micros()).unwrap_or(u64::MAX),
 			data: f.data.to_vec(),
 		}
 	}
 }
 
-impl From<MoqAudioFrame> for moq_audio::Frame {
-	fn from(f: MoqAudioFrame) -> Self {
-		Self {
-			timestamp_us: f.timestamp_us,
+impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
+	type Error = moq_audio::Error;
+
+	fn try_from(f: MoqAudioFrame) -> Result<Self, Self::Error> {
+		Ok(Self {
+			timestamp: moq_net::Timestamp::from_micros(f.timestamp_us)?,
 			data: f.data.into(),
-		}
+		})
 	}
 }
 
@@ -137,16 +145,17 @@ impl From<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
-	inner: std::sync::Mutex<Option<moq_audio::AudioProducer<moq_mux::catalog::hang::Extra>>>,
+	inner: std::sync::Mutex<Option<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>>,
 }
 
 #[uniffi::export]
 impl MoqAudioProducer {
 	pub fn write(&self, frame: MoqAudioFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
+		let frame = moq_audio::Frame::try_from(frame)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.write(&frame.into())?;
+		producer.write(&frame)?;
 		Ok(())
 	}
 
@@ -171,25 +180,24 @@ impl MoqBroadcastProducer {
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 
+		let input = moq_audio::encode::Input {
+			format: input.format.into(),
+			sample_rate: input.sample_rate,
+			channels: input.channels,
+		};
+		// The binding surface takes an explicit track name, so pin it here rather
+		// than letting the codec derive one.
+		let mut options = moq_audio::encode::Options::default();
+		options.track = Some(name);
+		options.codec = output.codec.into();
+		options.sample_rate = output.sample_rate;
+		options.channels = output.channels;
+		options.bitrate = output.bitrate;
+		options.frame_duration = Duration::from_millis(output.frame_duration_ms.into());
+
 		let producer = self.with_state(|state| {
-			moq_audio::AudioProducer::new(
-				&mut state.broadcast,
-				state.catalog.clone(),
-				name,
-				moq_audio::EncoderInput {
-					format: input.format.into(),
-					sample_rate: input.sample_rate,
-					channels: input.channels,
-				},
-				moq_audio::EncoderOutput {
-					codec: output.codec.into(),
-					sample_rate: output.sample_rate,
-					channels: output.channels,
-					bitrate: output.bitrate,
-					frame_duration: Duration::from_millis(output.frame_duration_ms.into()),
-				},
-			)
-			.map_err(Into::into)
+			moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)
+				.map_err(Into::into)
 		})?;
 
 		Ok(Arc::new(MoqAudioProducer {
@@ -201,7 +209,7 @@ impl MoqBroadcastProducer {
 // ---- Consumer ----
 
 struct ConsumerInner {
-	consumer: moq_audio::AudioConsumer,
+	consumer: moq_audio::decode::Consumer,
 }
 
 impl ConsumerInner {
@@ -248,18 +256,13 @@ impl MoqBroadcastConsumer {
 		cfg.description = catalog_audio.description.map(Into::into);
 		cfg.container = catalog_audio.container.into();
 
-		let consumer = moq_audio::AudioConsumer::new(
-			self.inner(),
-			&cfg,
-			name,
-			moq_audio::DecoderOutput {
-				format: output.format.into(),
-				sample_rate: output.sample_rate,
-				channels: output.channels,
-				latency_max: output.latency_max_ms.map(Duration::from_millis),
-			},
-		)
-		.await?;
+		let mut config = moq_audio::decode::Config::default();
+		config.format = output.format.into();
+		config.sample_rate = output.sample_rate;
+		config.channels = output.channels;
+		config.latency_max = output.latency_max_ms.map(Duration::from_millis);
+
+		let consumer = moq_audio::decode::Consumer::new(self.inner(), &cfg, name, config).await?;
 
 		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }),

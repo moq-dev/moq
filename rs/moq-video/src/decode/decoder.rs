@@ -17,7 +17,7 @@ use moq_net::Timestamp;
 
 use super::Frame;
 use super::backend::{self, Backend, Codec};
-use crate::Error;
+use crate::{Error, Size};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -49,12 +49,12 @@ pub struct Config {
 	/// the moq-mux default (skip aggressively); set it to your playout buffer for
 	/// a softer skip. Forwarded to the container consumer's `with_latency`.
 	pub latency_max: Option<Duration>,
-	/// Ask the decoder to emit frames at this `(width, height)` (both even)
-	/// instead of the stream's native size. Best effort: a hardware decoder with
-	/// a built-in scaler (NVDEC) honors it for free, other backends ignore it.
+	/// Ask the decoder to emit frames at this size (both dimensions even) instead
+	/// of the stream's native one. Best effort: a hardware decoder with a
+	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
 	/// Check each [`Frame`](super::Frame)'s dimensions and scale the remainder
 	/// yourself.
-	pub resize: Option<(u32, u32)>,
+	pub resize: Option<Size>,
 }
 
 impl Config {
@@ -177,8 +177,7 @@ impl Decoder {
 			.into_iter()
 			.map(|decoded| Frame {
 				timestamp: decoded.timestamp,
-				width: decoded.frame.width(),
-				height: decoded.frame.height(),
+				size: Size::new(decoded.frame.width(), decoded.frame.height()),
 				inner: decoded.frame,
 			})
 			.collect())
@@ -234,7 +233,10 @@ mod tests {
 			let keyframe = i == 0;
 			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
 			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&frame, 320, 240, keyframe).unwrap() {
+			for packet in encoder
+				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.unwrap()
+			{
 				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
 			}
 		}
