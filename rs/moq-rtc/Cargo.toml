@@ -34,4 +34,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# Signs the MESSAGE-INTEGRITY on a forged STUN binding request: str0m rejects a
+# request without one, and its own SHA1 provider is private.
+aws-lc-rs = "1"
 tokio = { workspace = true, features = ["test-util"] }

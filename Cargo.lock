@@ -4290,6 +4290,7 @@ name = "moq-rtc"
 version = "0.1.4"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "axum",
  "bytes",
  "hang",

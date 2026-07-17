@@ -167,6 +167,9 @@ impl Session {
 	pub async fn run(mut self) -> Result<()> {
 		let started = Instant::now();
 		let mut connected = false;
+		// str0m hands back the canonical destination we fed it, so a dual-stack
+		// socket needs IPv4 re-mapped before each send (see crate::net).
+		let socket_v6 = self.socket.local_addr().map_err(Error::Io)?.is_ipv6();
 		loop {
 			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
 			// return a never-firing timeout instead of erroring, which would hang
@@ -185,8 +188,9 @@ impl Session {
 			let timeout = match self.rtc.poll_output().map_err(Error::Rtc)? {
 				Output::Timeout(t) => t,
 				Output::Transmit(t) => {
-					if let Err(err) = self.socket.send_to(&t.contents, t.destination).await {
-						tracing::warn!(%err, dst = %t.destination, "send failed");
+					let dst = crate::net::to_family(t.destination, socket_v6);
+					if let Err(err) = self.socket.send_to(&t.contents, dst).await {
+						tracing::warn!(%err, %dst, "send failed");
 					}
 					continue;
 				}
@@ -615,6 +619,7 @@ pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
 				// Bounded like a socket buffer: drop on full, stop once the
 				// session's receiver is gone.
 				Ok((len, src)) => {
+					let src = crate::net::canonical(src);
 					if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), src)) {
 						break;
 					}
