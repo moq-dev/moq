@@ -166,9 +166,6 @@ clean:
     rm -rf result .direnv
     find . -name .claude -prune -o -type d -name .wrangler -prune -exec rm -rf {} +
 
-    # Reclaim Nix store space too, if Nix is installed.
-    if command -v nix-collect-garbage &> /dev/null; then nix-collect-garbage -d; fi
-
     # Agent worktrees each carry their own artifacts now that the shared
     # target dir is gone. Worktrees don't nest, so this recurses exactly one
     # level. Tolerate stale worktrees on branches that predate this recipe.
