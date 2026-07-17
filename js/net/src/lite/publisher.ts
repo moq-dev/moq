@@ -366,7 +366,7 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
 		let startSent = false;
-		let lastSequence = 0;
+		let lastSequence: number | undefined;
 
 		try {
 			for (;;) {
@@ -387,7 +387,9 @@ export class Publisher {
 			}
 
 			if (emitRange) {
-				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(lastSequence) }, this.version);
+				// The boundary is exclusive, so a track that produced no groups sends 0.
+				const end = lastSequence === undefined ? 0 : lastSequence + 1;
+				await encodeSubscribeResponse(stream, { end: new SubscribeEnd(end) }, this.version);
 			}
 
 			console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);

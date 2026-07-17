@@ -281,10 +281,11 @@ export class SubscribeStart {
 }
 
 /**
- * Signals that no group after `group` (inclusive upper bound) will be produced on
- * a Draft-05+ subscription.
+ * Signals that no group at or after `group` (exclusive upper bound) will be produced
+ * on a Draft-05+ subscription. `0` means the track ended before producing any groups.
  */
 export class SubscribeEnd {
+	/** The exclusive final group sequence: the first sequence that will never be produced. */
 	group: number;
 
 	constructor(group: number) {
