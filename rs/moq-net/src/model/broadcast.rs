@@ -1,13 +1,12 @@
 use crate::track;
 use std::{
-	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
 };
 
 use crate::Error;
 
-use super::{OriginList, WeakCache};
+use super::{OriginList, Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -61,17 +60,11 @@ struct BroadcastState {
 	// broadcast churning distinct track names stays bounded by the live count.
 	tracks: WeakCache<Arc<str>, track::TrackWeak>,
 
-	// Pending requests keyed by track name, waiting for the dynamic handler to
-	// accept or deny them.
-	requests: HashMap<Arc<str>, track::Request>,
-
-	// Requested names in FIFO order for the dynamic handler to drain. A name
-	// stays in `requests` (but not here) once handed out as a `track::Request`.
-	request_order: VecDeque<Arc<str>>,
-
-	// The current number of dynamic producers.
-	// If this is 0, requests must be empty.
-	dynamic: usize,
+	// Pending requests keyed by track name, coalescing concurrent `track()` calls
+	// and waiting for a dynamic handler to accept or deny them. A request leaves
+	// here once handed out (the handler caches it in `tracks`, so lookups keep
+	// coalescing onto it there).
+	requests: Requests<Arc<str>, track::Request>,
 
 	// Set by an explicit `Producer::finish()` so `Drop` can tell a deliberate
 	// shutdown apart from a producer that was dropped by accident.
@@ -86,15 +79,6 @@ impl BroadcastState {
 			Some(_) => Err(Error::Duplicate),
 			None => Ok(()),
 		}
-	}
-
-	/// Reject any pending dynamic track requests. Called when the last dynamic handler
-	/// goes away, so consumers don't block forever on requests nobody will fulfill.
-	fn reject_requests(&mut self, err: Error) {
-		for (_, request) in self.requests.drain() {
-			request.reject(err.clone());
-		}
-		self.request_order.clear();
 	}
 }
 
@@ -285,11 +269,10 @@ pub struct Dynamic {
 
 impl Clone for Dynamic {
 	fn clone(&self) -> Self {
-		// Mirror `new`: bump `state.dynamic` so each live handle is counted.
-		// Without this, deriving Clone would let `Drop` decrement past `new`'s
-		// single increment and prematurely flip `dynamic` to zero, causing
-		// future `track` calls to return `NotFound`.
-		self.state.lock().dynamic += 1;
+		// Mirror `new`: count each live handle. Without this, deriving Clone would
+		// let `Drop` decrement past `new`'s single increment and prematurely flip
+		// the handler count to zero, causing future `track` calls to return `NotFound`.
+		self.state.lock().requests.add_handler();
 
 		Self {
 			info: self.info.clone(),
@@ -301,7 +284,7 @@ impl Clone for Dynamic {
 
 impl Dynamic {
 	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>) -> Self {
-		state.lock().dynamic += 1;
+		state.lock().requests.add_handler();
 
 		Self { info, alive, state }
 	}
@@ -313,15 +296,15 @@ impl Dynamic {
 	/// Poll for the next consumer-requested track, without blocking.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.request_order.is_empty() {
-				Poll::Pending
-			} else {
+			if state.requests.has_queued() {
 				Poll::Ready(())
+			} else {
+				Poll::Pending
 			}
 		}));
 
-		let name = state.request_order.pop_front().expect("predicate guaranteed a request");
-		let pending = state.requests.remove(&name).expect("request_order out of sync");
+		let name = state.requests.pop().expect("predicate guaranteed a request");
+		let pending = state.requests.remove(&name).expect("popped key must be pending");
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.tracks.insert(name, pending.weak());
@@ -356,16 +339,16 @@ impl Dynamic {
 
 impl Drop for Dynamic {
 	fn drop(&mut self) {
-		// Decrement and reject under one lock, so a `track` call that saw
-		// `dynamic > 0` through the same lock can't slip a request past the rejection.
+		// Decrement and reject under one lock, so a `track` call that saw a live
+		// handler through the same lock can't slip a request past the rejection.
 		let mut state = self.state.lock();
-		state.dynamic -= 1;
-		if state.dynamic != 0 {
-			return;
+		if state.requests.remove_handler() {
+			// No handlers left to fulfill pending requests; reject them so consumers
+			// don't block forever on tracks nobody will serve.
+			for request in state.requests.drain_queued() {
+				request.reject(Error::Dropped);
+			}
 		}
-
-		// No dynamic handlers left to fulfill pending requests; reject them.
-		state.reject_requests(Error::Dropped);
 	}
 }
 
@@ -416,13 +399,9 @@ impl Consumer {
 			return Ok(weak.consume());
 		}
 
-		if let Some(pending) = state.requests.get_mut(name) {
-			// Coalesce onto an in-flight request for the same name.
+		if let Some(pending) = state.requests.join(name) {
+			// Coalesce onto a queued request for the same name.
 			return Ok(pending.consume());
-		}
-
-		if state.dynamic == 0 {
-			return Err(Error::NotFound);
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
@@ -432,8 +411,11 @@ impl Consumer {
 		let request = track::Request::new(self.info.clone(), name.clone());
 		let consumer = request.consume();
 
-		state.requests.insert(name.clone(), request);
-		state.request_order.push_back(name);
+		// With no handler alive to serve it, the request is dropped: `NotFound` beats
+		// handing back a consumer that would only resolve `Dropped`.
+		if state.requests.insert(name, request).is_err() {
+			return Err(Error::NotFound);
+		}
 
 		Ok(consumer)
 	}
@@ -717,8 +699,8 @@ mod test {
 		);
 	}
 
-	// Cloning a `Dynamic` and dropping the clone must not flip
-	// `state.dynamic` to zero. The relay's lite subscriber clones the
+	// Cloning a `Dynamic` and dropping the clone must not flip the handler
+	// count to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
 	// first finished subscribe would tear down the broadcast and any
 	// follow-up `track` would return `NotFound`.

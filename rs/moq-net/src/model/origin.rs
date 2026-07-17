@@ -9,7 +9,7 @@ use std::{
 use rand::RngExt;
 use web_async::Lock;
 
-use super::WeakCache;
+use super::{Requests, WeakCache};
 use crate::{
 	AsPath, Error, Path, PathOwned, PathPrefixes,
 	coding::{BoundsExceeded, Decode, DecodeError, Encode, EncodeError},
@@ -1048,18 +1048,12 @@ impl std::ops::DerefMut for Broadcast {
 ///
 /// Lives off to the side of the announce tree because dynamically served broadcasts
 /// are never announced. Carried in a [`kio::Shared`], so consumers enqueue and handlers
-/// drain under one lock. Mirrors the `dynamic`/`requests`/`request_order` fields of the
-/// broadcast and track models.
+/// drain under one lock. Mirrors the fetch state of the track model.
 #[derive(Default)]
 struct OriginDynamicState {
-	// Result channels for queued requests, keyed by absolute path. Concurrent
-	// `request_broadcast` calls for the same path coalesce onto the same channel while
-	// it is queued. The producer is moved out (and the entry removed) when the handler
-	// picks the request up via [`Dynamic::requested_broadcast`].
-	requests: HashMap<PathOwned, kio::Producer<PendingBroadcast>>,
-
-	// Requesting paths in FIFO order for the handler to drain.
-	request_order: VecDeque<PathOwned>,
+	// Result channels for pending requests, keyed by absolute path so concurrent
+	// `request_broadcast` calls for the same path coalesce onto one channel.
+	requests: Requests<PathOwned, kio::Producer<PendingBroadcast>>,
 
 	// Broadcasts a handler has already served, kept weakly so a repeat request for the
 	// same path resolves to a shared clone instead of re-invoking the handler (which would
@@ -1067,19 +1061,6 @@ struct OriginDynamicState {
 	// its real consumers drop. The cache reclaims closed entries incrementally on insert, so a
 	// long-lived origin serving many distinct one-shot paths stays bounded by the live count.
 	served: WeakCache<PathOwned, broadcast::WeakConsumer>,
-
-	// The number of live `Dynamic` handlers. While zero, `request_broadcast`
-	// fails fast with `Unroutable` rather than queueing a request nobody will serve.
-	dynamic: usize,
-}
-
-impl OriginDynamicState {
-	/// Drop every queued request, closing its result channel so awaiting requesters
-	/// resolve to an error. Called when the last handler goes away.
-	fn reject_requests(&mut self) {
-		self.requests.clear();
-		self.request_order.clear();
-	}
 }
 
 /// One-shot result of a dynamic broadcast request.
@@ -1111,10 +1092,10 @@ pub struct Dynamic {
 
 impl Clone for Dynamic {
 	fn clone(&self) -> Self {
-		// Mirror `new`: bump `dynamic` so each live handle is counted. Without this,
-		// dropping a clone would decrement past `new`'s increment and prematurely flip
-		// `dynamic` to zero, making future `request_broadcast` calls return `Unroutable`.
-		self.state.lock().dynamic += 1;
+		// Mirror `new`: count each live handle. Without this, dropping a clone would
+		// decrement past `new`'s increment and prematurely flip the handler count to
+		// zero, making future `request_broadcast` calls return `Unroutable`.
+		self.state.lock().requests.add_handler();
 
 		Self {
 			info: self.info,
@@ -1126,7 +1107,7 @@ impl Clone for Dynamic {
 
 impl Dynamic {
 	fn new(info: Origin, root: PathOwned, state: kio::Shared<OriginDynamicState>) -> Self {
-		state.lock().dynamic += 1;
+		state.lock().requests.add_handler();
 
 		Self { info, root, state }
 	}
@@ -1139,20 +1120,20 @@ impl Dynamic {
 	/// Poll for the next requested broadcast, without blocking.
 	pub fn poll_requested_broadcast(&mut self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.request_order.is_empty() {
-				Poll::Pending
-			} else {
+			if state.requests.has_queued() {
 				Poll::Ready(())
+			} else {
+				Poll::Pending
 			}
 		}));
 
-		let path = state.request_order.pop_front().expect("predicate guaranteed a request");
-		// Leave the request in `requests` (only drain it from `request_order`) so a repeat
-		// request in the window between hand-off and accept coalesces onto it instead of
-		// re-invoking the handler. The producer is a shared clone; `Request::{accept, reject,
-		// drop}` removes the entry. This mirrors how `poll_requested_track` keeps a served
-		// track discoverable via the weak cache across the same window.
-		let producer = state.requests.get(&path).expect("request_order out of sync").clone();
+		let path = state.requests.pop().expect("predicate guaranteed a request");
+		// The popped request stays pending, so a repeat request in the window between
+		// hand-off and accept coalesces onto it instead of re-invoking the handler. The
+		// producer is a shared clone; `Request::{accept, reject, drop}` removes the
+		// entry. This mirrors how `poll_requested_track` keeps a served track
+		// discoverable via the weak cache across the same window.
+		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
 		Poll::Ready(Ok(Request {
 			path,
 			producer,
@@ -1174,13 +1155,14 @@ impl Dynamic {
 
 impl Drop for Dynamic {
 	fn drop(&mut self) {
-		// Decrement and reject under one lock, so a `request_broadcast` that saw
-		// `dynamic > 0` through the same lock can't slip a request past the rejection.
+		// Decrement and reject under one lock, so a `request_broadcast` that saw a
+		// live handler through the same lock can't slip a request past the rejection.
 		let mut state = self.state.lock();
-		state.dynamic -= 1;
-		if state.dynamic == 0 {
-			// No handlers left to fulfill queued requests; close them.
-			state.reject_requests();
+		if state.requests.remove_handler() {
+			// No handlers left to pop queued requests; drop them, closing their result
+			// channels so awaiting requesters resolve to `Unroutable`. A request already
+			// handed to a handler stays, resolved by its `Request` instead.
+			state.requests.drain_queued();
 		}
 	}
 }
@@ -1225,7 +1207,9 @@ impl Request {
 		let resolved = {
 			let mut state = self.state.lock();
 			let existing = state.served.insert(self.path.clone(), broadcast.weak());
-			state.requests.remove(&self.path);
+			state
+				.requests
+				.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
 			existing.map(|weak| weak.consume()).unwrap_or(broadcast)
 		};
 
@@ -1237,7 +1221,10 @@ impl Request {
 
 	/// Reject the request, resolving every awaiting requester with `err`.
 	pub fn reject(self, err: Error) {
-		self.state.lock().requests.remove(&self.path);
+		self.state
+			.lock()
+			.requests
+			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
 		if let Ok(mut state) = self.producer.write() {
 			state.resolved = Some(Err(err));
 		}
@@ -1246,22 +1233,17 @@ impl Request {
 
 impl Drop for Request {
 	fn drop(&mut self) {
-		// Handed off but neither accepted nor rejected: drop the still-queued entry so its
+		// Handed off but neither accepted nor rejected: drop the still-pending entry so its
 		// producer clone (plus this one) closes the channel, resolving coalesced requesters to
 		// `Unroutable` rather than hanging.
 		//
-		// Guard on channel identity: `accept`/`reject` already removed our entry and released the
-		// lock before we run, so a concurrent request for the same path may have registered a
-		// *new* one here. Removing unconditionally would clobber it (stranding its requesters and
-		// desyncing `request_order` from `requests`), so only remove while it's still ours.
-		let mut state = self.state.lock();
-		if state
+		// The identity guard matters: `accept`/`reject` already removed our entry and released
+		// the lock before we run, so a concurrent request for the same path may have registered
+		// a *new* one here. Removing unconditionally would clobber it, stranding its requesters.
+		self.state
+			.lock()
 			.requests
-			.get(&self.path)
-			.is_some_and(|producer| producer.same_channel(&self.producer))
-		{
-			state.requests.remove(&self.path);
-		}
+			.remove_if(&self.path, |producer| producer.same_channel(&self.producer));
 	}
 }
 
@@ -1559,18 +1541,16 @@ impl Consumer {
 			return kio::Pending::new(Requesting::ready(weak.consume()));
 		}
 
-		// Coalesce onto a queued request for the same path; otherwise register a new one.
-		let consumer = if let Some(producer) = state.requests.get(&absolute) {
+		// Coalesce onto a pending request for the same path; otherwise register a new
+		// one, unless there is no handler alive to serve it.
+		let consumer = if let Some(producer) = state.requests.join(&absolute) {
 			producer.consume()
 		} else {
-			if state.dynamic == 0 {
-				return kio::Pending::new(Requesting::failed(Error::Unroutable));
-			}
-
 			let producer = kio::Producer::<PendingBroadcast>::default();
 			let consumer = producer.consume();
-			state.requests.insert(absolute.clone(), producer);
-			state.request_order.push_back(absolute);
+			if state.requests.insert(absolute, producer).is_err() {
+				return kio::Pending::new(Requesting::failed(Error::Unroutable));
+			}
 			consumer
 		};
 
@@ -3324,7 +3304,7 @@ mod tests {
 	}
 
 	// After a rejected hand-off, a fresh request for the same path reaches the handler again:
-	// the rejected `Request`'s removal + `Drop` leave `requests` and `request_order` consistent
+	// the rejected `Request`'s removal + `Drop` leave the request queue consistent
 	// (a stale/clobbered entry would strand this request or panic the handler).
 	#[tokio::test(start_paused = true)]
 	async fn dynamic_request_rerequest_after_reject() {

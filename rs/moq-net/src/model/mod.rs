@@ -13,10 +13,12 @@ mod origin_impl;
 
 mod bytes;
 mod datagram;
+mod requests;
 mod subscription;
 mod time;
 mod weak_cache;
 
+pub(crate) use requests::Requests;
 pub(crate) use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
