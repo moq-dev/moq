@@ -121,11 +121,16 @@ export class Decoder {
 		effect.cleanup(() => context.close());
 
 		effect.spawn(async () => {
-			// Register the AudioWorklet processor
-			await Promise.race([context.audioWorklet.addModule(RenderWorklet), effect.cancel]);
-
-			// Ensure the context is running before creating the worklet
-			if (context.state === "closed") return;
+			// Register the AudioWorklet processor, racing the load against teardown. If teardown wins,
+			// `loaded` is undefined and we bail before constructing the node: the module registration was
+			// abandoned, so building against its name would throw. Gate on the race result, not
+			// `context.state`, because `AudioContext.close()` only flips `.state` to "closed" synchronously
+			// on Chrome (Firefox/Safari report "suspended").
+			const loaded = await Promise.race([
+				context.audioWorklet.addModule(RenderWorklet).then(() => true),
+				effect.cancel,
+			]);
+			if (!loaded) return;
 
 			// Create the worklet node. outputChannelCount must be set explicitly
 			// so the process() callback receives a matching channel layout —

@@ -152,8 +152,15 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await Promise.race([context.audioWorklet.addModule(CaptureWorklet), effect.cancel]);
-			if (context.state === "closed") return;
+			// Race the module load against teardown. If teardown wins, `loaded` is undefined and we bail
+			// before constructing the node: the module registration was abandoned, so building against its
+			// name would throw. Gate on the race result, not `context.state`, because `AudioContext.close()`
+			// only flips `.state` to "closed" synchronously on Chrome (Firefox/Safari report "suspended").
+			const loaded = await Promise.race([
+				context.audioWorklet.addModule(CaptureWorklet).then(() => true),
+				effect.cancel,
+			]);
+			if (!loaded) return;
 
 			const channelCount = requestedChannels ?? settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
