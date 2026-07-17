@@ -162,13 +162,13 @@ fn last_error_set_before_callback() {
 fn publish_media_lifecycle() {
 	let broadcast = id(moq_publish_create());
 	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
+		moq_publish_finish(broadcast);
 	}));
 
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -181,8 +181,8 @@ fn publish_media_lifecycle() {
 	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
 	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
 
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn publish_catalog_config_null_pointer() {
 		-6,
 		"null config should return InvalidPointer (-6)"
 	);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn publish_catalog_roundtrip() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 
-	// Author the catalog directly instead of via moq_publish_media_ordered.
+	// Author the catalog directly instead of via moq_publish_media.
 	let video_name = "video";
 	let video_codec = "vp8";
 	let width: u32 = 1920;
@@ -273,7 +273,7 @@ fn publish_catalog_roundtrip() {
 
 	// Publish and consume the broadcast to verify the catalog round-trips.
 	let path = b"catalog-producer";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -335,7 +335,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -409,7 +409,7 @@ fn catalog_section_roundtrip() {
 
 	// Publish and consume to verify the sections survive the wire.
 	let path = b"catalog-sections";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -468,7 +468,7 @@ fn catalog_section_roundtrip() {
 
 	// Removing a section republishes the catalog without it.
 	assert_eq!(
-		unsafe { moq_remove_catalog_section(broadcast, name_a.as_ptr() as *const c_char, name_a.len()) },
+		unsafe { moq_publish_catalog_section_remove(broadcast, name_a.as_ptr() as *const c_char, name_a.len()) },
 		0
 	);
 	let catalog_id2 = id(catalog_cb.recv());
@@ -487,7 +487,7 @@ fn catalog_section_roundtrip() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -507,8 +507,8 @@ fn publish_track_invalid_broadcast() {
 	assert!(moq_publish_track_group(9999) < 0);
 	assert!(unsafe { moq_publish_track_frame(9999, name.as_ptr(), name.len(), 0) } < 0);
 	assert!(unsafe { moq_publish_group_frame(9999, name.as_ptr(), name.len(), 0) } < 0);
-	assert!(moq_publish_track_close(9999) < 0);
-	assert!(moq_publish_group_close(9999) < 0);
+	assert!(moq_publish_track_finish(9999) < 0);
+	assert!(moq_publish_group_finish(9999) < 0);
 
 	let subscription = moq_subscription {
 		priority: 1,
@@ -536,7 +536,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -586,7 +586,7 @@ fn raw_track_publish_consume() {
 	});
 
 	let path = b"raw-track";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 
@@ -633,7 +633,7 @@ fn raw_track_publish_consume() {
 			0
 		);
 	}
-	assert_eq!(moq_publish_group_close(group), 0);
+	assert_eq!(moq_publish_group_finish(group), 0);
 
 	for (expected, timestamp_us) in parts {
 		let frame_id = id(frame_cb.recv());
@@ -655,10 +655,10 @@ fn raw_track_publish_consume() {
 	// before the Callback (user_data) drops.
 	assert_eq!(frame_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_track_close(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_track_close(track), 0);
-	assert!(moq_publish_track_close(track) < 0, "double-close should fail");
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert!(moq_publish_track_finish(track) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -678,7 +678,7 @@ fn raw_track_datagram_publish_consume() {
 	});
 
 	let path = b"raw-datagram";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 
@@ -720,9 +720,9 @@ fn raw_track_datagram_publish_consume() {
 	// before the Callback (user_data) drops.
 	assert_eq!(dg_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_datagrams_close(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_track_close(track), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -734,13 +734,13 @@ fn raw_track_sparse_groups_and_known_end() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
 	let group = id(moq_publish_track_group_at(track, 2));
-	assert_eq!(moq_publish_group_close(group), 0);
+	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(moq_publish_track_finish_at(track, 5), 0);
 	let group = id(moq_publish_track_group_at(track, 4));
-	assert_eq!(moq_publish_group_close(group), 0);
+	assert_eq!(moq_publish_group_finish(group), 0);
 	assert!(moq_publish_track_group_at(track, 5) < 0);
-	assert_eq!(moq_publish_track_close(track), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -751,10 +751,10 @@ fn raw_track_and_group_abort_consume_their_handles() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let group = id(moq_publish_track_group(track));
 	assert_eq!(moq_publish_group_abort(group, 409), 0);
-	assert!(moq_publish_group_close(group) < 0);
+	assert!(moq_publish_group_finish(group) < 0);
 	assert_eq!(moq_publish_track_abort(track, 410), 0);
-	assert!(moq_publish_track_close(track) < 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(moq_publish_track_finish(track) < 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -783,7 +783,7 @@ fn raw_track_subscription_options_and_update() {
 	}
 
 	let path = b"raw-track-options";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
@@ -841,9 +841,9 @@ fn raw_track_subscription_options_and_update() {
 
 	assert_eq!(moq_consume_track_close(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_track_close(track), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -867,7 +867,7 @@ fn json_snapshot_publish_consume() {
 	});
 
 	let path = b"json-snapshot";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 	let consume = request_broadcast(origin, path);
 
 	let value_cb = Callback::new();
@@ -904,13 +904,13 @@ fn json_snapshot_publish_consume() {
 	assert_eq!(moq_consume_json_close(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_json_snapshot_close(producer), 0);
+	assert_eq!(moq_publish_json_snapshot_finish(producer), 0);
 	assert!(
-		moq_publish_json_snapshot_close(producer) < 0,
+		moq_publish_json_snapshot_finish(producer) < 0,
 		"double-close should fail"
 	);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -931,7 +931,7 @@ fn json_stream_publish_consume() {
 	});
 
 	let path = b"json-stream";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 	let consume = request_broadcast(origin, path);
 
 	let value_cb = Callback::new();
@@ -968,10 +968,10 @@ fn json_stream_publish_consume() {
 	assert_eq!(moq_consume_json_close(consumer), 0);
 	assert_eq!(value_cb.recv_terminal(), 0, "clean close delivers terminal 0");
 	assert!(moq_consume_json_close(consumer) < 0, "double-close should fail");
-	assert_eq!(moq_publish_json_stream_close(producer), 0);
-	assert!(moq_publish_json_stream_close(producer) < 0, "double-close should fail");
+	assert_eq!(moq_publish_json_stream_finish(producer), 0);
+	assert!(moq_publish_json_stream_finish(producer) < 0, "double-close should fail");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -979,13 +979,13 @@ fn json_stream_publish_consume() {
 fn close_invalid_or_zero_ids() {
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);
-	assert!(moq_publish_close(9999) < 0);
+	assert!(moq_publish_finish(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
 	assert!(moq_consume_frame_close(9999) < 0);
 
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
-	assert!(moq_publish_close(0) < 0);
+	assert!(moq_publish_finish(0) < 0);
 }
 
 #[test]
@@ -995,7 +995,7 @@ fn announced_free_lifecycle() {
 
 	// Publish a broadcast so the announce listener has something to deliver.
 	let path = b"announced-free";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let ann_cb = Callback::new();
 	let ann_task = id(unsafe { moq_origin_announced(origin, Some(channel_callback), ann_cb.ptr) });
@@ -1027,7 +1027,7 @@ fn announced_free_lifecycle() {
 	ann_cb.recv_terminal();
 
 	assert_eq!(moq_origin_close(origin), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 }
 
 #[test]
@@ -1040,7 +1040,7 @@ fn double_close_all_resource_types() {
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1049,15 +1049,15 @@ fn double_close_all_resource_types() {
 		)
 	});
 
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert!(moq_publish_media_close(media) < 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert!(moq_publish_media_finish(media) < 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 	let init = opus_head();
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1066,7 +1066,7 @@ fn double_close_all_resource_types() {
 		)
 	});
 	let path = b"double-close-test";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1075,7 +1075,7 @@ fn double_close_all_resource_types() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"test";
 	assert_eq!(
@@ -1099,8 +1099,8 @@ fn double_close_all_resource_types() {
 	assert!(moq_consume_catalog_close(catalog_task) < 0);
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1108,12 +1108,12 @@ fn double_close_all_resource_types() {
 fn unknown_format() {
 	let broadcast = id(moq_publish_create());
 	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
+		moq_publish_finish(broadcast);
 	}));
 
 	let format = b"nope";
 	let ret = unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1133,7 +1133,7 @@ fn local_announce() {
 
 	let broadcast = id(moq_publish_create());
 	let path = b"test/broadcast";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let announced_id = id(cb.recv());
 
@@ -1151,7 +1151,7 @@ fn local_announce() {
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1163,7 +1163,7 @@ fn announced_deactivation() {
 
 	let broadcast = id(moq_publish_create());
 	let path = b"deactivate/test";
-	let publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let publish = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let announced_id = id(cb.recv());
 	let mut info = moq_announced {
@@ -1176,15 +1176,15 @@ fn announced_deactivation() {
 
 	// Dropping the publish guard is what unannounces the broadcast; closing the
 	// broadcast producer itself no longer deactivates the announcement.
-	assert_eq!(moq_origin_unpublish(publish), 0);
+	assert_eq!(moq_origin_unannounce(publish), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after unpublish");
+	assert!(!info.active, "broadcast should be inactive after unannounce");
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "announced close delivers terminal 0");
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1196,7 +1196,7 @@ fn local_publish_consume() {
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1206,7 +1206,7 @@ fn local_publish_consume() {
 	});
 
 	let path = b"live";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1253,7 +1253,7 @@ fn local_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"opus audio payload data";
 	let timestamp_us: u64 = 1_000_000;
@@ -1284,8 +1284,8 @@ fn local_publish_consume() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1310,7 +1310,7 @@ fn consume_announced_local() {
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1318,7 +1318,7 @@ fn consume_announced_local() {
 			init.len(),
 		)
 	});
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	// First the broadcast handle, then a terminal 0 once the wait finishes.
 	let consume = id(cb.recv());
@@ -1347,8 +1347,8 @@ fn consume_announced_local() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1384,7 +1384,7 @@ fn video_publish_consume() {
 	let init = h264_init();
 	let format = b"avc3";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1394,7 +1394,7 @@ fn video_publish_consume() {
 	});
 
 	let path = b"video-test";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1453,7 +1453,7 @@ fn video_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_video_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_video(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
 	let keyframe = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	assert_eq!(
@@ -1479,8 +1479,8 @@ fn video_publish_consume() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1512,7 +1512,7 @@ fn video_raw_decode() {
 	let init = h264_init();
 	let format = b"avc3";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1522,7 +1522,7 @@ fn video_raw_decode() {
 	});
 
 	let path = b"video-raw-test";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1583,8 +1583,8 @@ fn video_raw_decode() {
 		}
 	}
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1596,7 +1596,7 @@ fn multiple_frames_ordering() {
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1606,7 +1606,7 @@ fn multiple_frames_ordering() {
 	});
 
 	let path = b"ordering-test";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1614,7 +1614,7 @@ fn multiple_frames_ordering() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
@@ -1653,8 +1653,8 @@ fn multiple_frames_ordering() {
 		"catalog close delivers terminal 0"
 	);
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -1666,7 +1666,7 @@ fn catalog_update_on_new_track() {
 	let init = opus_head();
 	let format = b"opus";
 	let media1 = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1676,7 +1676,7 @@ fn catalog_update_on_new_track() {
 	});
 
 	let path = b"catalog-update";
-	let _publish = id(unsafe { moq_origin_publish(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
+	let _announce = id(unsafe { moq_origin_announce(origin, path.as_ptr() as *const c_char, path.len(), broadcast) });
 
 	let consume = request_broadcast(origin, path);
 	let catalog_cb = Callback::new();
@@ -1697,7 +1697,7 @@ fn catalog_update_on_new_track() {
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);
 
 	let media2 = id(unsafe {
-		moq_publish_media_ordered(
+		moq_publish_media(
 			broadcast,
 			format.as_ptr() as *const c_char,
 			format.len(),
@@ -1716,9 +1716,9 @@ fn catalog_update_on_new_track() {
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_media_close(media1), 0);
-	assert_eq!(moq_publish_media_close(media2), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_publish_media_finish(media1), 0);
+	assert_eq!(moq_publish_media_finish(media2), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

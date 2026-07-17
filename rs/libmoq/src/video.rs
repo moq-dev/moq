@@ -3,7 +3,7 @@
 //! The video counterpart to [`audio`](crate::audio)'s decoder: subscribe to an
 //! H.264 track and hand back decoded raw frames, with the decode happening
 //! inside the FFI boundary (VideoToolbox on macOS, openh264 elsewhere; no
-//! ffmpeg). Sibling to `moq_consume_video_ordered`, which delivers the
+//! ffmpeg). Sibling to `moq_consume_video`, which delivers the
 //! still-encoded frames for a caller that brings its own decoder.
 //!
 //! Only H.264 is supported. A non-H.264 rendition fails the subscribe with a
@@ -29,7 +29,7 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
-	/// `moq_consume_video_ordered`'s `max_latency_ms`. 0 = skip aggressively
+	/// `moq_consume_video`'s `max_latency_ms`. 0 = skip aggressively
 	/// (the moq-mux default); set to your playout buffer for a softer skip.
 	pub latency_max_ms: u64,
 }
@@ -187,7 +187,7 @@ impl Video {
 /// Subscribe to a video track and decode it into raw I420 frames.
 ///
 /// The catalog `index` selects which video rendition to subscribe to, matching
-/// the existing `moq_consume_video_ordered` selection model. Only H.264 is
+/// the existing `moq_consume_video` selection model. Only H.264 is
 /// supported; a non-H.264 rendition fails on the terminal callback.
 ///
 /// Returns a non-zero handle on success or a negative error code.

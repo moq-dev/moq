@@ -308,7 +308,7 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn video_ordered(
+	pub fn video(
 		&mut self,
 		catalog: Id,
 		index: usize,
@@ -360,7 +360,7 @@ impl Consume {
 		Ok(id)
 	}
 
-	pub fn audio_ordered(
+	pub fn audio(
 		&mut self,
 		catalog: Id,
 		index: usize,
@@ -759,7 +759,7 @@ impl Consume {
 
 	/// Look up a video rendition by catalog index, returning the
 	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `video_ordered`.
+	/// the index-based selection in `video`.
 	pub fn video_rendition(
 		&self,
 		catalog: Id,
@@ -935,7 +935,7 @@ impl Consume {
 	}
 	/// Look up an audio rendition by catalog index, returning the
 	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `audio_ordered`.
+	/// the index-based selection in `audio`.
 	pub fn audio_rendition(
 		&self,
 		catalog: Id,

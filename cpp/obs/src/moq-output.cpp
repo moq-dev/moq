@@ -23,7 +23,7 @@ MoQOutput::MoQOutput(obs_data_t *, obs_output_t *output)
 
 MoQOutput::~MoQOutput()
 {
-	moq_publish_close(broadcast);
+	moq_publish_finish(broadcast);
 	moq_origin_close(origin);
 
 	Stop();
@@ -130,9 +130,10 @@ bool MoQOutput::Start()
 
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 
-	// Publish the broadcast to the origin we created.
-	// TODO: There is currently no unpublish function.
-	auto result = moq_origin_publish(origin, path.data(), path.size(), broadcast);
+	// Announce the broadcast on the origin we created. The announce handle is dropped:
+	// the announcement lives until the destructor closes the origin, which is the whole
+	// lifetime of the output anyway.
+	auto result = moq_origin_announce(origin, path.data(), path.size(), broadcast);
 	if (result < 0) {
 		LOG_ERROR("Failed to publish broadcast to session: %d", result);
 		// The session connected above; close it so a retry on this same output
@@ -157,13 +158,13 @@ void MoQOutput::Stop(bool signal)
 
 	for (auto &[encoder, handle] : video_tracks) {
 		if (handle > 0)
-			moq_publish_media_close(handle);
+			moq_publish_media_finish(handle);
 	}
 	video_tracks.clear();
 
 	for (auto &[encoder, handle] : audio_tracks) {
 		if (handle > 0)
-			moq_publish_media_close(handle);
+			moq_publish_media_finish(handle);
 	}
 	audio_tracks.clear();
 
@@ -297,7 +298,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 
 	// Intialize the media import module with the codec and initialization data.
-	int handle = moq_publish_media_ordered(broadcast, moq_codec, strlen(moq_codec), extra_data, extra_size);
+	int handle = moq_publish_media(broadcast, moq_codec, strlen(moq_codec), extra_data, extra_size);
 	video_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize video track: %d", handle);
@@ -336,7 +337,7 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 	const char *codec = obs_encoder_get_codec(encoder);
 
-	int handle = moq_publish_media_ordered(broadcast, codec, strlen(codec), extra_data, extra_size);
+	int handle = moq_publish_media(broadcast, codec, strlen(codec), extra_data, extra_size);
 	audio_tracks[encoder] = handle;
 	if (handle < 0) {
 		LOG_ERROR("Failed to initialize audio track: %d", handle);

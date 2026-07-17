@@ -12,9 +12,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linking `libmoq.a` on macOS no longer fails on undefined Apple framework
   symbols, and the CMake package config carries the same libraries the
   pkg-config file does.
+- `moq_track_info.timescale_valid` documented that it overrides a default
+  millisecond timescale. The default is and was microseconds, matching the
+  `timestamp_us` units used everywhere else in the ABI. Only the doc was wrong.
 
 ### Changed
 
+- Producer teardown is now spelled `_finish`, not `_close`, so the name states
+  the end-of-stream semantics and no longer reads as a synonym for the `_abort`
+  that sits next to it: `moq_publish_close` -> `moq_publish_finish`, and the
+  same for `moq_publish_media_close`, `moq_publish_track_close`,
+  `moq_publish_group_close`, `moq_publish_json_snapshot_close`,
+  `moq_publish_json_stream_close`, and `moq_publish_audio_raw_close`.
+  `moq_publish_track_finish` now also pairs with `moq_publish_track_finish_at`.
+  `_close` keeps its other two meanings (stop a listener, close a connection),
+  so `moq_consume_*_close`, `moq_origin_*_close`, and `moq_session_close` are
+  unchanged.
+- `moq_origin_publish` / `moq_origin_unpublish` -> `moq_origin_announce` /
+  `moq_origin_unannounce`, so the C ABI uses the same announce verb as every
+  other layer. The `origin_publish` / `origin_consume` parameters of
+  `moq_session_connect` keep their names: they name a direction, not this
+  operation.
+- `moq_remove_catalog_section` -> `moq_publish_catalog_section_remove`, putting
+  it under the `moq_publish_catalog_section` sibling it belongs to instead of
+  breaking the verb-prefix scheme.
+- Dropped the `_ordered` suffix, which leaked a long-gone internal type:
+  `moq_publish_media_ordered` -> `moq_publish_media`,
+  `moq_consume_video_ordered` -> `moq_consume_video`, and
+  `moq_consume_audio_ordered` -> `moq_consume_audio`. These now match the
+  `publish_media` / `subscribe_media` names moq-ffi already uses.
 - The native libraries an external linker needs alongside `libmoq.a` now come
   from `rs/libmoq/native-libs/`, so the pkg-config file and the CMake package
   config can no longer drift apart. This adds the Apple media frameworks, the
@@ -23,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON snapshot C ABI renamed for symmetry with the stream mode, so the caller
   opts explicitly into one of the two modes: `moq_json_config` ->
   `moq_json_snapshot_config`, `moq_publish_json` -> `moq_publish_json_snapshot`
-  (and `_update` / `_close`), and `moq_consume_json` ->
+  (and `_update` / `_finish`), and `moq_consume_json` ->
   `moq_consume_json_snapshot`. The shared `moq_json_value`,
   `moq_consume_json_value{,_close}`, and `moq_consume_json_close` are unchanged.
 

@@ -1,6 +1,6 @@
 //! Raw-audio import/export via [`moq_audio`].
 //!
-//! Sibling to `moq_publish_media_*` / `moq_consume_audio_ordered`
+//! Sibling to `moq_publish_media_*` / `moq_consume_audio`
 //! (those handle already-encoded frames). These functions accept and
 //! return raw PCM, with Opus encode/decode happening inside the FFI
 //! boundary.
@@ -101,7 +101,7 @@ pub struct moq_audio_decoder_output {
 	pub channels: u32,
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// milliseconds. Same congestion-control knob as
-	/// `moq_consume_audio_ordered`'s `max_latency_ms`. 0 = skip
+	/// `moq_consume_audio`'s `max_latency_ms`. 0 = skip
 	/// aggressively (the moq-mux default); set to your playout
 	/// buffer (tens to a few hundred ms) for a softer skip. Named
 	/// `_max` to leave room for a future `latency_min_ms`
@@ -159,7 +159,7 @@ impl Audio {
 		Ok(())
 	}
 
-	pub fn publish_close(&mut self, id: Id) -> Result<(), Error> {
+	pub fn publish_finish(&mut self, id: Id) -> Result<(), Error> {
 		let producer = self.producers.remove(id).ok_or(Error::MediaNotFound)?;
 		producer.finish()?;
 		Ok(())
@@ -346,17 +346,17 @@ pub unsafe extern "C" fn moq_publish_audio_raw_frame(producer: u32, frame: *cons
 
 /// Flush any pending samples and finalize an audio producer.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_audio_raw_close(producer: u32) -> i32 {
+pub extern "C" fn moq_publish_audio_raw_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		State::lock().audio.publish_close(producer)
+		State::lock().audio.publish_finish(producer)
 	})
 }
 
 /// Subscribe to an audio track and decode it into PCM.
 ///
 /// The catalog `index` identifies which audio rendition to subscribe
-/// to, matching the existing `moq_consume_audio_ordered` selection
+/// to, matching the existing `moq_consume_audio` selection
 /// model. TODO: a future API will pick the right rendition
 /// automatically (ABR).
 ///

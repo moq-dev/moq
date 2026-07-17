@@ -139,7 +139,8 @@ pub struct moq_track_info {
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
-	/// Whether `timescale` should override the default millisecond timescale.
+	/// Whether `timescale` should override the default microsecond timescale,
+	/// which matches the `timestamp_us` units used everywhere else in this ABI.
 	pub timescale_valid: bool,
 }
 
@@ -489,18 +490,18 @@ pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::enter(move || State::lock().origin.create())
 }
 
-/// Publish a broadcast to an origin.
+/// Announce a broadcast on an origin under `path`.
 ///
-/// The broadcast will be announced to any origin consumers, such as over the network.
+/// The broadcast becomes available to any origin consumers, such as over the network.
 ///
-/// Returns a positive publish handle on success, or a negative code on failure. The broadcast
-/// stays announced until the handle is passed to [moq_origin_unpublish]; closing the broadcast
+/// Returns a positive announce handle on success, or a negative code on failure. The broadcast
+/// stays announced until the handle is passed to [moq_origin_unannounce]; finishing the broadcast
 /// itself does not unannounce it.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, path_len: usize, broadcast: u32) -> i32 {
+pub unsafe extern "C" fn moq_origin_announce(origin: u32, path: *const c_char, path_len: usize, broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
@@ -508,19 +509,19 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 
 		let mut state = State::lock();
 		let broadcast = state.publish.get(broadcast)?.consume();
-		state.origin.publish(origin, path, broadcast)
+		state.origin.announce(origin, path, broadcast)
 	})
 }
 
-/// Unannounce a broadcast previously published with [moq_origin_publish].
+/// Unannounce a broadcast previously announced with [moq_origin_announce].
 ///
-/// Takes the publish handle returned by [moq_origin_publish]. Returns zero on success, or a
+/// Takes the announce handle returned by [moq_origin_announce]. Returns zero on success, or a
 /// negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_unpublish(publish: u32) -> i32 {
+pub extern "C" fn moq_origin_unannounce(announce: u32) -> i32 {
 	ffi::enter(move || {
-		let publish = ffi::parse_id(publish)?;
-		State::lock().origin.unpublish(publish)
+		let announce = ffi::parse_id(announce)?;
+		State::lock().origin.unannounce(announce)
 	})
 }
 
@@ -721,14 +722,17 @@ pub extern "C" fn moq_publish_create() -> i32 {
 	ffi::enter(move || State::lock().publish.create())
 }
 
-/// Close a broadcast and clean up its resources.
+/// Finish a broadcast and release it, ending its catalog cleanly.
+///
+/// Subscribers see a normal end of stream rather than an error. An announcement made with
+/// [moq_origin_announce] outlives this; drop it with [moq_origin_unannounce].
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
+pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.close(broadcast)
+		State::lock().publish.finish(broadcast)
 	})
 }
 
@@ -743,7 +747,7 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 /// - The caller must ensure that format is a valid pointer to format_len bytes of data.
 /// - The caller must ensure that init is a valid pointer to init_size bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_media_ordered(
+pub unsafe extern "C" fn moq_publish_media(
 	broadcast: u32,
 	format: *const c_char,
 	format_len: usize,
@@ -755,18 +759,18 @@ pub unsafe extern "C" fn moq_publish_media_ordered(
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
 
-		State::lock().publish.media_ordered(broadcast, format, init)
+		State::lock().publish.media(broadcast, format, init)
 	})
 }
 
-/// Remove a track from a broadcast.
+/// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_media_close(export: u32) -> i32 {
+pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	ffi::enter(move || {
 		let export = ffi::parse_id(export)?;
-		State::lock().publish.media_close(export)
+		State::lock().publish.media_finish(export)
 	})
 }
 
@@ -949,7 +953,11 @@ pub unsafe extern "C" fn moq_publish_catalog_section(
 /// # Safety
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_remove_catalog_section(broadcast: u32, name: *const c_char, name_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_catalog_section_remove(
+	broadcast: u32,
+	name: *const c_char,
+	name_len: usize,
+) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
@@ -959,7 +967,7 @@ pub unsafe extern "C" fn moq_remove_catalog_section(broadcast: u32, name: *const
 
 /// Create a raw track on a broadcast for arbitrary byte payloads.
 ///
-/// Unlike [moq_publish_media_ordered], this is the bare moq-net primitive: no
+/// Unlike [moq_publish_media], this is the bare moq-net primitive: no
 /// codec, container, or catalog framing. Frames written to it are delivered
 /// as-is to subscribers using [moq_consume_track]. Use it for non-media tracks
 /// (control channels, JSON metadata, etc.), or pair it with
@@ -1076,7 +1084,7 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
+pub extern "C" fn moq_publish_track_finish(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_finish(track)
@@ -1087,7 +1095,7 @@ pub extern "C" fn moq_publish_track_close(track: u32) -> i32 {
 ///
 /// Groups below `final_sequence` may still be created. Groups at or above it
 /// are rejected. The track remains open for groups below the boundary. Call
-/// [moq_publish_track_close] after producing the remaining groups.
+/// [moq_publish_track_finish] after producing the remaining groups.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_track_finish_at(track: u32, final_sequence: u64) -> i32 {
 	ffi::enter(move || {
@@ -1132,7 +1140,7 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_group_close(group: u32) -> i32 {
+pub extern "C" fn moq_publish_group_finish(group: u32) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		State::lock().publish.group_finish(group)
@@ -1197,10 +1205,10 @@ pub unsafe extern "C" fn moq_publish_json_snapshot_update(json: u32, value: *con
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_json_snapshot_close(json: u32) -> i32 {
+pub extern "C" fn moq_publish_json_snapshot_finish(json: u32) -> i32 {
 	ffi::enter(move || {
 		let json = ffi::parse_id(json)?;
-		State::lock().publish.json_snapshot_close(json)
+		State::lock().publish.json_snapshot_finish(json)
 	})
 }
 
@@ -1248,10 +1256,10 @@ pub unsafe extern "C" fn moq_publish_json_stream_append(stream: u32, value: *con
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_json_stream_close(stream: u32) -> i32 {
+pub extern "C" fn moq_publish_json_stream_finish(stream: u32) -> i32 {
 	ffi::enter(move || {
 		let stream = ffi::parse_id(stream)?;
-		State::lock().publish.json_stream_close(stream)
+		State::lock().publish.json_stream_finish(stream)
 	})
 }
 
@@ -1427,7 +1435,7 @@ pub unsafe extern "C" fn moq_catalog_get_section(
 /// # Safety
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_video_ordered(
+pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
@@ -1439,16 +1447,14 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock()
-			.consume
-			.video_ordered(catalog, index, max_latency, on_frame)
+		State::lock().consume.video(catalog, index, max_latency, on_frame)
 	})
 }
 
 /// Stop a video track consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the [moq_consume_video_ordered] `on_frame` callback
+/// Does NOT free `user_data`; the [moq_consume_video] `on_frame` callback
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]
@@ -1473,7 +1479,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// # Safety
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_audio_ordered(
+pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
@@ -1485,16 +1491,14 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock()
-			.consume
-			.audio_ordered(catalog, index, max_latency, on_frame)
+		State::lock().consume.audio(catalog, index, max_latency, on_frame)
 	})
 }
 
 /// Stop an audio track consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the [moq_consume_audio_ordered] `on_frame` callback
+/// Does NOT free `user_data`; the [moq_consume_audio] `on_frame` callback
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]

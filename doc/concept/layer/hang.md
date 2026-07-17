@@ -102,7 +102,7 @@ The catalog is a JSON document published through the merge-patch snapshot helper
 - **Writing**: the catalog producer holds one shared document.
   Each owner edits only its own keys and publishes: `producer.mutate(c => { c.scte35 = ... })` in TypeScript; the `Deref`/`DerefMut` lock guard from `producer.lock()` for a typed Rust extension, or `producer.set_section("scte35", value)` for an untyped one; `broadcast.set_catalog_section("scte35", value)` in Python; `moq_publish_catalog_section()` in C.
   Every edit starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.
-  Removing a key publishes a deletion (`producer.remove_section(...)`, `broadcast.remove_catalog_section(...)` in Python, `moq_remove_catalog_section()` in C), which a consumer reads as the section being removed.
+  Removing a key publishes a deletion (`producer.remove_section(...)`, `broadcast.remove_catalog_section(...)` in Python, `moq_publish_catalog_section_remove()` in C), which a consumer reads as the section being removed.
 
 This keeps application-specific sections in the application layer while the base catalog stays generic.
 
