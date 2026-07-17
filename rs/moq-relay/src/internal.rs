@@ -51,17 +51,16 @@ pub struct InternalConfig {
 	pub listen: Option<net::SocketAddr>,
 }
 
-/// The internal (ops) service: a plain-HTTP server over the node's [`Stats`].
-///
-/// [`Stats`]: moq_net::Stats
+/// The internal (ops) service: a plain-HTTP server over the node's stats
+/// aggregator ([`moq_net::stats::Producer`]).
 pub struct Internal {
 	config: InternalConfig,
-	stats: moq_net::Stats,
+	stats: moq_net::stats::Producer,
 }
 
 impl Internal {
 	/// Create the service from its config and the node's stats handle.
-	pub fn new(config: InternalConfig, stats: moq_net::Stats) -> Self {
+	pub fn new(config: InternalConfig, stats: moq_net::stats::Producer) -> Self {
 		Self { config, stats }
 	}
 
@@ -112,26 +111,26 @@ async fn serve_health() -> Response {
 /// exporter for those, per the relay's separation of concerns. Returns the
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
-async fn serve_metrics(State(stats): State<moq_net::Stats>) -> Response {
+async fn serve_metrics(State(stats): State<moq_net::stats::Producer>) -> Response {
 	let body = render_metrics(&stats.snapshot());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
-/// Render a [`moq_net::StatsSnapshot`] as Prometheus text exposition (v0.0.4).
+/// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
 ///
 /// Hand-formatted rather than pulling in a metrics registry crate: the atomics
 /// already are the registry, and a snapshot is a fixed handful of labeled
 /// counters, so a registry would only add a second source of truth to keep in
 /// sync.
-fn render_metrics(snap: &moq_net::StatsSnapshot) -> String {
+fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 	use std::fmt::Write as _;
 
 	let traffic = snap.traffic();
 	let mut out = String::new();
 
 	// One HELP/TYPE header followed by a (tier, role) row per active tier for a
-	// counter selected out of `CounterTotals` by `field`.
-	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::CounterTotals) -> u64| {
+	// counter selected out of `TrafficTotals` by `field`.
+	let counter = |out: &mut String, name: &str, help: &str, field: fn(&moq_net::stats::TrafficTotals) -> u64| {
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} counter");
 		for (tier, role, totals) in &traffic {
@@ -219,10 +218,13 @@ mod tests {
 	/// value, summed across broadcasts.
 	#[tokio::test]
 	async fn metrics_render_exposition() {
-		use moq_net::{Origin, Stats, StatsConfig, Tier};
+		use moq_net::{
+			Origin,
+			stats::{Config, Producer, Tier},
+		};
 
 		let origin = Origin::random().produce();
-		let stats = Stats::new(StatsConfig::new().with_origin(origin));
+		let stats = Producer::new(Config::new().with_origin(origin));
 
 		let track = stats
 			.tier(Tier::default())

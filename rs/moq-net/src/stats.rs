@@ -1,6 +1,10 @@
 //! Generic stats publishing for moq-net sessions.
 //!
-//! [`Stats`] aggregates per-broadcast counter bumps for traffic this relay
+//! Build one [`Producer`] from a [`Config`], hand each session a tier-scoped
+//! [`Handle`] via [`Producer::tier`], and read node totals back with
+//! [`Producer::snapshot`].
+//!
+//! [`Producer`] aggregates per-broadcast counter bumps for traffic this relay
 //! node is handling and publishes them on a single `<prefix>/node/<node>`
 //! broadcast (or `<prefix>/node` when no node is configured). Traffic is
 //! bucketed by an arbitrary [`Tier`] label chosen by business logic (billing
@@ -50,8 +54,8 @@
 //!   announce and unannounce of this broadcast (the name, not the encoded
 //!   message size, so hop/framing overhead isn't charged, and the count is
 //!   the same across protocol versions). Recorded keyed by path via
-//!   [`BroadcastStats::publisher_announced_bytes`] /
-//!   [`BroadcastStats::subscriber_announced_bytes`], independent of the
+//!   [`Broadcast::publisher_announced_bytes`] /
+//!   [`Broadcast::subscriber_announced_bytes`], independent of the
 //!   announce lifetime guard, so filtered/reflected/unmatched control flows
 //!   still count. Kept separate from the `bytes` payload counter.
 //! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
@@ -68,7 +72,7 @@
 //!   the session loops (both lite and IETF).
 //! * `sessions` / `sessions_closed` (session tracks only): cumulative count
 //!   of sessions connected/disconnected under an auth root on this tier.
-//!   Driven by [`StatsHandle::session`].
+//!   Driven by [`Handle::session`].
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across snapshots means the underlying entry was garbage
@@ -76,8 +80,8 @@
 //! as a fresh session segment, summing across resets when computing
 //! lifetime totals.
 //!
-//! A caller hands each session a tier-scoped [`StatsHandle`] (built from the
-//! single shared [`Stats`] via [`Stats::tier`]) which determines which counter
+//! A caller hands each session a tier-scoped [`Handle`] (built from the
+//! single shared [`Producer`] via [`Producer::tier`]) which determines which counter
 //! set its bumps land in. Multiple relays in the same cluster origin can
 //! coexist by giving each one a distinct `<node>` suffix on the advertised
 //! path. The suffix itself may be multi-segment (e.g. `sjc/1`, `sjc/2`) so a
@@ -86,19 +90,19 @@
 //!
 //! # Disabled stats
 //!
-//! A [`StatsConfig`] with no origin (the default) builds a no-op aggregator:
+//! A [`Config`] with no origin (the default) builds a no-op aggregator:
 //! all counter bumps are silently dropped, no snapshot task spawns, and no
-//! broadcast is published. [`Stats::default`] / [`StatsHandle::default`]
-//! return one, so call sites can hold a [`StatsHandle`] unconditionally
+//! broadcast is published. [`Producer::default`] / [`Handle::default`]
+//! return one, so call sites can hold a [`Handle`] unconditionally
 //! instead of threading an `Option`.
 //!
 //! # Lifecycle
 //!
-//! When the config has an origin, [`Stats::new`] spawns the snapshot task
+//! When the config has an origin, [`Producer::new`] spawns the snapshot task
 //! immediately, publishes the stats broadcast, and ticks at the configured
 //! interval, writing a frame per (tier, role) track. The broadcast stays
-//! announced for the lifetime of the [`Stats`] aggregator, even while idle
-//! (frames just go to `{}`). The task exits when the last [`Stats`] clone is
+//! announced for the lifetime of the [`Producer`] aggregator, even while idle
+//! (frames just go to `{}`). The task exits when the last [`Producer`] clone is
 //! dropped (the task holds only a `Weak` to the shared state).
 //!
 //! # Idle frame skipping
@@ -110,7 +114,7 @@
 //!
 //! # Snapshot atomicity
 //!
-//! Each [`Counters`] snapshot reads `*_closed` atomics (with `Acquire`)
+//! Each internal counter snapshot reads `*_closed` atomics (with `Acquire`)
 //! before their open counterparts (with `Relaxed`). The matching close
 //! bumps in the RAII guards' `Drop` impls use `Release`. With this
 //! pairing the snapshot always satisfies `open >= closed` even on
@@ -126,7 +130,7 @@
 //!
 //! # Cycles
 //!
-//! Calling [`StatsHandle::broadcast`] for a path under the configured
+//! Calling [`Handle::broadcast`] for a path under the configured
 //! top-level prefix returns an empty handle whose bumps no-op. This breaks
 //! the feedback loop where serving a `<top-prefix>/...` broadcast would
 //! itself generate more stats traffic.
@@ -212,7 +216,7 @@ impl Counters {
 }
 
 /// Per-(tier, root) session gauge. One of these is shared (via `Arc`) by every
-/// [`SessionStats`] guard for the same auth root on the same tier: `sessions`
+/// [`Session`] guard for the same auth root on the same tier: `sessions`
 /// bumps on connect, `sessions_closed` on disconnect.
 #[derive(Default, Debug)]
 struct SessionCounters {
@@ -247,7 +251,7 @@ struct RawCounts {
 }
 
 /// Traffic-class label that selects which counter set a session's bumps record
-/// in, so a single [`Stats`] can split customer-facing, cluster-peer, regional,
+/// in, so a single [`Producer`] can split customer-facing, cluster-peer, regional,
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
@@ -307,11 +311,16 @@ impl fmt::Display for Tier {
 }
 
 /// Publisher (egress) vs subscriber (ingress) side of a broadcast, used as a
-/// label on a [`StatsSnapshot`] traffic row. The internal bump paths track the
+/// label on a [`Snapshot`] traffic row. The internal bump paths track the
 /// side statically, so this only surfaces on the aggregate read side.
+///
+/// This is the direction traffic flowed, not the session role a client advertises
+/// in its SETUP ([`crate::Role`]): one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Role {
+	/// Egress: bytes this node published to a peer.
 	Publisher,
+	/// Ingress: bytes this node consumed from a peer.
 	Subscriber,
 }
 
@@ -339,7 +348,7 @@ impl Role {
 /// rate is `delta / delta_t` and a live count is `open - closed`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CounterTotals {
+pub struct TrafficTotals {
 	pub announced: u64,
 	pub announced_closed: u64,
 	pub announced_bytes: u64,
@@ -352,7 +361,7 @@ pub struct CounterTotals {
 	pub groups: u64,
 }
 
-impl CounterTotals {
+impl TrafficTotals {
 	/// Fold one broadcast slot's raw readout into the running total.
 	fn add(&mut self, raw: RawCounts) {
 		self.announced += raw.announced;
@@ -379,7 +388,7 @@ pub struct SessionTotals {
 }
 
 /// A point-in-time, host-level rollup of this node's stats counters, returned
-/// by [`Stats::snapshot`].
+/// by [`Producer::snapshot`].
 ///
 /// Every counter is summed across all broadcasts the node is tracking and split
 /// by tier and role, plus per-tier connected-session presence. One entry per
@@ -390,18 +399,18 @@ pub struct SessionTotals {
 /// aggregator (stats disabled) yields no rows.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct StatsSnapshot {
+pub struct Snapshot {
 	/// Traffic totals per tier, indexed by [`Role`] within each tier; read via
 	/// [`Self::traffic`].
-	traffic: HashMap<Tier, [CounterTotals; 2]>,
+	traffic: HashMap<Tier, [TrafficTotals; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, SessionTotals>,
 }
 
-impl StatsSnapshot {
+impl Snapshot {
 	/// The `(tier, role, totals)` traffic rows, one publisher and one subscriber
 	/// row per tier present. Sorted by tier label then role for stable output.
-	pub fn traffic(&self) -> Vec<(Tier, Role, CounterTotals)> {
+	pub fn traffic(&self) -> Vec<(Tier, Role, TrafficTotals)> {
 		let mut rows = Vec::with_capacity(self.traffic.len() * 2);
 		for (tier, roles) in &self.traffic {
 			rows.push((tier.clone(), Role::Publisher, roles[Role::Publisher.idx()]));
@@ -420,24 +429,24 @@ impl StatsSnapshot {
 	}
 }
 
-/// Settings for a [`Stats`] aggregator. Construct with [`StatsConfig::new`]
+/// Settings for a [`Producer`] aggregator. Construct with [`Config::new`]
 /// and chain the `with_*` setters (e.g.
-/// `StatsConfig::new().with_origin(origin).with_prefix(".foo")`), then hand it
-/// to [`Stats::new`].
+/// `Config::new().with_origin(origin).with_prefix(".foo")`), then hand it
+/// to [`Producer::new`].
 ///
 /// With no origin set the resulting aggregator is a no-op: bumps are dropped
-/// and no task spawns. Call [`StatsConfig::with_origin`] to publish.
+/// and no task spawns. Call [`Config::with_origin`] to publish.
 ///
 /// Distinct from the relay's clap-derived `StatsConfig`, which holds the raw
 /// CLI/TOML knobs and resolves into one of these.
 ///
 /// `#[non_exhaustive]` so new knobs can land without breaking call sites; build
-/// via [`StatsConfig::new`] rather than a struct literal.
+/// via [`Config::new`] rather than a struct literal.
 #[derive(Clone)]
 #[non_exhaustive]
-pub struct StatsConfig {
+pub struct Config {
 	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
-	/// When `None`, [`Stats::new`] spawns no task and publishes nothing.
+	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
@@ -461,7 +470,7 @@ pub struct StatsConfig {
 	pub depth: usize,
 }
 
-impl StatsConfig {
+impl Config {
 	/// A config with default settings: no origin (no-op), `.stats` prefix, 1s
 	/// snapshot interval, and no node suffix. Call [`Self::with_origin`] to
 	/// actually publish.
@@ -507,7 +516,7 @@ impl StatsConfig {
 	}
 }
 
-impl Default for StatsConfig {
+impl Default for Config {
 	fn default() -> Self {
 		Self::new()
 	}
@@ -515,18 +524,18 @@ impl Default for StatsConfig {
 
 /// Top-level stats aggregator. Cheap to clone (`Arc` inside for the shared
 /// runtime state). One instance per relay; sessions get tier-scoped handles via
-/// [`Stats::tier`]. Build it from a [`StatsConfig`] via [`Stats::new`].
+/// [`Producer::tier`]. Build it from a [`Config`] via [`Producer::new`].
 #[derive(Clone)]
-pub struct Stats {
+pub struct Producer {
 	prefix: PathOwned,
 	/// `None` for a no-op aggregator (config had no origin): bumps are
 	/// dropped and no task was spawned.
-	shared: Option<Arc<StatsShared>>,
+	shared: Option<Arc<Shared>>,
 }
 
-/// Runtime state shared by every clone of a [`Stats`] and held by the
+/// Runtime state shared by every clone of a [`Producer`] and held by the
 /// snapshot task through a `Weak`. Only allocated when an origin is set.
-struct StatsShared {
+struct Shared {
 	origin: origin::Producer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	/// Connected-session gauges keyed by `(tier, auth root)`. Independent of any
@@ -575,9 +584,9 @@ struct TierCounters {
 /// side)` in a task-local map.
 #[derive(Default)]
 struct SlotState {
-	/// Last `Snapshot` we wrote to the frame for this slot, used to detect
+	/// Last `BroadcastFrame` we wrote to the frame for this slot, used to detect
 	/// changes that warrant re-emission.
-	prev_emitted: Option<Snapshot>,
+	prev_emitted: Option<BroadcastFrame>,
 }
 
 /// Snapshot-task-local change-detection state for one `(path, tier)`: a
@@ -594,16 +603,16 @@ const PUBLISHER_TRACK: &str = "publisher.json";
 const SUBSCRIBER_TRACK: &str = "subscriber.json";
 const SESSIONS_TRACK: &str = "sessions.json";
 
-impl Stats {
+impl Producer {
 	/// Build a stats aggregator from `config`.
 	///
 	/// When `config` has an origin, this spawns the snapshot task immediately
-	/// and publishes the stats broadcast; the task runs until the last [`Stats`]
+	/// and publishes the stats broadcast; the task runs until the last [`Producer`]
 	/// clone is dropped. With no origin the aggregator is a no-op (bumps are
 	/// dropped, nothing is published) and no task spawns, so it's safe to build
 	/// outside an async runtime.
-	pub fn new(config: StatsConfig) -> Self {
-		let StatsConfig {
+	pub fn new(config: Config) -> Self {
+		let Config {
 			origin,
 			prefix,
 			node,
@@ -617,7 +626,7 @@ impl Stats {
 		let node = node.filter(|p| !p.is_empty());
 
 		let shared = origin.map(|origin| {
-			let shared = Arc::new(StatsShared {
+			let shared = Arc::new(Shared {
 				origin,
 				entries: Lock::default(),
 				sessions: Default::default(),
@@ -643,14 +652,14 @@ impl Stats {
 	/// The shared state, panicking for a no-op aggregator. Tests build with an
 	/// origin so this is always present.
 	#[cfg(test)]
-	fn shared(&self) -> &Arc<StatsShared> {
+	fn shared(&self) -> &Arc<Shared> {
 		self.shared.as_ref().expect("enabled stats aggregator")
 	}
 
 	/// Returns a tier-scoped handle. Bumps through this handle land in the
 	/// tier's counters.
-	pub fn tier(&self, tier: Tier) -> StatsHandle {
-		StatsHandle {
+	pub fn tier(&self, tier: Tier) -> Handle {
+		Handle {
 			stats: self.clone(),
 			tier,
 		}
@@ -693,15 +702,15 @@ impl Stats {
 		)
 	}
 
-	/// Take a host-level [`StatsSnapshot`]: every counter summed across all
+	/// Take a host-level [`Snapshot`]: every counter summed across all
 	/// tracked broadcasts, split by tier and role, plus per-tier session
 	/// presence. Briefly takes the entry then the session locks. Returns an
 	/// all-zero snapshot for a no-op aggregator (stats disabled).
 	///
 	/// Unlike the published `.stats` broadcast, this collapses per-broadcast
 	/// detail into node totals, which is what a `/metrics`-style scrape wants.
-	pub fn snapshot(&self) -> StatsSnapshot {
-		let mut snap = StatsSnapshot::default();
+	pub fn snapshot(&self) -> Snapshot {
+		let mut snap = Snapshot::default();
 		let Some(shared) = self.shared.as_ref() else {
 			return snap;
 		};
@@ -731,23 +740,23 @@ impl Stats {
 	}
 }
 
-impl Default for Stats {
+impl Default for Producer {
 	fn default() -> Self {
-		Self::new(StatsConfig::new())
+		Self::new(Config::new())
 	}
 }
 
-/// Tier-scoped wrapper around [`Stats`]. What [`crate::Client::with_stats`] and
+/// Tier-scoped wrapper around [`Producer`]. What [`crate::Client::with_stats`] and
 /// [`crate::Server::with_stats`] accept. Cheap to clone.
 #[derive(Clone)]
-pub struct StatsHandle {
-	stats: Stats,
+pub struct Handle {
+	stats: Producer,
 	tier: Tier,
 }
 
-impl StatsHandle {
+impl Handle {
 	/// The aggregator this handle is tied to.
-	pub fn parent(&self) -> &Stats {
+	pub fn parent(&self) -> &Producer {
 		&self.stats
 	}
 
@@ -761,8 +770,8 @@ impl StatsHandle {
 	/// Paths under the aggregator's configured `prefix` return an empty handle
 	/// whose bumps are no-ops. This keeps stats traffic from feeding back into
 	/// the aggregator.
-	pub fn broadcast(&self, path: impl AsPath) -> BroadcastStats {
-		BroadcastStats {
+	pub fn broadcast(&self, path: impl AsPath) -> Broadcast {
+		Broadcast {
 			counters: self.stats.entry(path).map(|entry| entry.tier(&self.tier)),
 		}
 	}
@@ -786,15 +795,15 @@ impl StatsHandle {
 	/// `sessions_closed`. Counts presence regardless of any data flow, so a
 	/// session that merely connects is still billable. Surfaced on the session
 	/// track for this tier, keyed by `root`.
-	pub fn session(&self, root: impl AsPath) -> SessionStats {
-		SessionStats::new(self.stats.session_counters(&self.tier, root))
+	pub fn session(&self, root: impl AsPath) -> Session {
+		Session::new(self.stats.session_counters(&self.tier, root))
 	}
 }
 
-impl Default for StatsHandle {
-	/// A no-op handle backed by a [`Stats::default`] aggregator.
+impl Default for Handle {
+	/// A no-op handle backed by a [`Producer::default`] aggregator.
 	fn default() -> Self {
-		Stats::default().tier(Tier::default())
+		Producer::default().tier(Tier::default())
 	}
 }
 
@@ -805,13 +814,13 @@ impl Default for StatsHandle {
 /// [`Self::subscriber_track`] when the broadcast's lifetime is tracked
 /// elsewhere.
 #[derive(Clone)]
-pub struct BroadcastStats {
+pub struct Broadcast {
 	/// Resolved counters for this `(broadcast, tier)`, or `None` when the path
 	/// was under the aggregator's own prefix or stats are disabled.
 	counters: Option<Arc<TierCounters>>,
 }
 
-impl BroadcastStats {
+impl Broadcast {
 	/// True if this handle has no underlying entry (path was under the
 	/// aggregator's own prefix, or stats are disabled). All bumps through an
 	/// empty handle are no-ops.
@@ -823,11 +832,11 @@ impl BroadcastStats {
 	/// Bumps `announced` on construction and `announced_closed` on drop.
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
-	pub fn publisher(&self) -> PublisherStats {
+	pub fn publisher(&self) -> Publisher {
 		if let Some(counters) = &self.counters {
 			counters.publisher.announced.fetch_add(1, Ordering::Relaxed);
 		}
-		PublisherStats {
+		Publisher {
 			counters: self.counters.clone(),
 		}
 	}
@@ -836,11 +845,11 @@ impl BroadcastStats {
 	/// Bumps `announced` on construction and `announced_closed` on drop.
 	/// (The `broadcasts` sentinel is driven separately by
 	/// [`SessionBroadcasts`]; see the module docs.)
-	pub fn subscriber(&self) -> SubscriberStats {
+	pub fn subscriber(&self) -> Subscriber {
 		if let Some(counters) = &self.counters {
 			counters.subscriber.announced.fetch_add(1, Ordering::Relaxed);
 		}
-		SubscriberStats {
+		Subscriber {
 			counters: self.counters.clone(),
 		}
 	}
@@ -921,14 +930,14 @@ impl Side {
 /// logical session that clones its handle still counts as one).
 #[derive(Clone)]
 pub struct SessionBroadcasts {
-	stats: Stats,
+	stats: Producer,
 	tier: Tier,
 	side: Side,
 	counts: Arc<Mutex<HashMap<PathOwned, u32>>>,
 }
 
 impl SessionBroadcasts {
-	fn new(stats: Stats, tier: Tier, side: Side) -> Self {
+	fn new(stats: Producer, tier: Tier, side: Side) -> Self {
 		Self {
 			stats,
 			tier,
@@ -995,7 +1004,7 @@ impl Drop for BroadcastSubscription {
 		if last {
 			if let Some(counters) = &self.counters {
 				// Release pairs with the snapshot reader's Acquire load of
-				// `broadcasts_closed`; see `PublisherStats::drop`.
+				// `broadcasts_closed`; see `Publisher::drop`.
 				self.side
 					.counters(counters)
 					.broadcasts_closed
@@ -1007,14 +1016,14 @@ impl Drop for BroadcastSubscription {
 
 /// RAII guard for a connected session, keyed by auth root and tier. Bumps
 /// `sessions` on construction and `sessions_closed` on drop. See
-/// [`StatsHandle::session`].
+/// [`Handle::session`].
 #[must_use = "drop the guard to record the session as closed"]
-pub struct SessionStats {
+pub struct Session {
 	/// `None` for a no-op aggregator; bumps are then dropped.
 	counters: Option<Arc<SessionCounters>>,
 }
 
-impl SessionStats {
+impl Session {
 	fn new(counters: Option<Arc<SessionCounters>>) -> Self {
 		if let Some(counters) = &counters {
 			counters.sessions.fetch_add(1, Ordering::Relaxed);
@@ -1023,34 +1032,34 @@ impl SessionStats {
 	}
 }
 
-impl Drop for SessionStats {
+impl Drop for Session {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
 			// Release pairs with the snapshot reader's Acquire load of
-			// `sessions_closed`; see `PublisherStats::drop`.
+			// `sessions_closed`; see `Publisher::drop`.
 			counters.sessions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
 
-/// RAII broadcast guard for the publisher role. See [`BroadcastStats::publisher`].
+/// RAII broadcast guard for the publisher role. See [`Broadcast::publisher`].
 #[must_use = "drop the guard to record the broadcast as closed"]
-pub struct PublisherStats {
+pub struct Publisher {
 	counters: Option<Arc<TierCounters>>,
 }
 
-impl PublisherStats {
+impl Publisher {
 	/// Open a track-subscription guard. Bumps `subscriptions` on construction
 	/// and `subscriptions_closed` on drop.
 	pub fn track(&self, name: &str) -> PublisherTrack {
-		BroadcastStats {
+		Broadcast {
 			counters: self.counters.clone(),
 		}
 		.publisher_track(name)
 	}
 }
 
-impl Drop for PublisherStats {
+impl Drop for Publisher {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
 			// Release pairs with the snapshot reader's Acquire load of
@@ -1061,26 +1070,26 @@ impl Drop for PublisherStats {
 	}
 }
 
-/// RAII broadcast guard for the subscriber role. See [`BroadcastStats::subscriber`].
+/// RAII broadcast guard for the subscriber role. See [`Broadcast::subscriber`].
 #[must_use = "drop the guard to record the broadcast as closed"]
-pub struct SubscriberStats {
+pub struct Subscriber {
 	counters: Option<Arc<TierCounters>>,
 }
 
-impl SubscriberStats {
-	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
+impl Subscriber {
+	/// Open a track-subscription guard. Mirrors [`Publisher::track`].
 	pub fn track(&self, name: &str) -> SubscriberTrack {
-		BroadcastStats {
+		Broadcast {
 			counters: self.counters.clone(),
 		}
 		.subscriber_track(name)
 	}
 }
 
-impl Drop for SubscriberStats {
+impl Drop for Subscriber {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
-			// See `PublisherStats::drop` for why this is Release.
+			// See `Publisher::drop` for why this is Release.
 			counters.subscriber.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
@@ -1118,7 +1127,7 @@ impl PublisherTrack {
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
-			// See `PublisherStats::drop` for why this is Release.
+			// See `Publisher::drop` for why this is Release.
 			counters.publisher.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
@@ -1156,19 +1165,19 @@ impl SubscriberTrack {
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
-			// See `PublisherStats::drop` for why this is Release.
+			// See `Publisher::drop` for why this is Release.
 			counters.subscriber.subscriptions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
 
 /// Per-tick work for a single `(side, tier)` slot: build the emitted
-/// `Snapshot` from the raw counters, update the slot's `prev_emitted`, and
+/// `BroadcastFrame` from the raw counters, update the slot's `prev_emitted`, and
 /// hand the snap to `emit` iff the slot is live or changed this tick.
-fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl FnMut(Snapshot)) {
+fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl FnMut(BroadcastFrame)) {
 	let raw = counters.snapshot();
 
-	let snap = Snapshot {
+	let snap = BroadcastFrame {
 		announced: raw.announced,
 		announced_closed: raw.announced_closed,
 		announced_bytes: raw.announced_bytes,
@@ -1196,7 +1205,7 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 	// (incl. sub-tick flickers) and emits the final close snapshot on the
 	// tick a slot transitions to fully closed.
 	//
-	// `None` (slot never emitted) is treated as the default Snapshot so a
+	// `None` (slot never emitted) is treated as the default BroadcastFrame so a
 	// first-tick all-zeros snap on an unused tier-side slot doesn't count
 	// as a "change". Without this, every entry would surface in all four
 	// tracks with zeros on the tick after creation even if only one slot
@@ -1215,7 +1224,7 @@ fn process_slot(counters: &Counters, slot_state: &mut SlotState, mut emit: impl 
 /// mirroring [`SlotState`].
 #[derive(Default)]
 struct SessionSlotState {
-	prev_emitted: Option<SessionSnapshot>,
+	prev_emitted: Option<SessionFrame>,
 }
 
 /// Per-tick work for one session-track root (a `(tier, root)` gauge): build the
@@ -1225,10 +1234,10 @@ struct SessionSlotState {
 fn process_session_slot(
 	counters: &SessionCounters,
 	slot_state: &mut SessionSlotState,
-	mut emit: impl FnMut(SessionSnapshot),
+	mut emit: impl FnMut(SessionFrame),
 ) {
 	let (sessions, sessions_closed) = counters.snapshot();
-	let snap = SessionSnapshot {
+	let snap = SessionFrame {
 		sessions,
 		sessions_closed,
 	};
@@ -1379,10 +1388,10 @@ fn group_key(path: &str, depth: usize) -> PathOwned {
 }
 
 /// Publishes stats broadcasts and writes a frame per tick. Spawned once by
-/// [`Stats::new`] when an origin is set; runs until every [`Stats`] clone is
+/// [`Producer::new`] when an origin is set; runs until every [`Producer`] clone is
 /// dropped (`weak.upgrade()` returns `None`).
 async fn run_publisher(
-	weak: Weak<StatsShared>,
+	weak: Weak<Shared>,
 	prefix: PathOwned,
 	node: Option<PathOwned>,
 	depth: usize,
@@ -1472,7 +1481,7 @@ async fn run_publisher(
 			}
 			let publisher = groups.get_mut(group).expect("just inserted");
 
-			let mut frames: HashMap<String, BTreeMap<String, Snapshot>> = HashMap::new();
+			let mut frames: HashMap<String, BTreeMap<String, BroadcastFrame>> = HashMap::new();
 			if let Some(group_entries) = entries_by_group.get(group) {
 				for &(path, tiers) in group_entries {
 					let path_local = publisher.local.entry(path.clone()).or_default();
@@ -1494,7 +1503,7 @@ async fn run_publisher(
 				}
 			}
 
-			let mut session_frames: HashMap<String, BTreeMap<String, SessionSnapshot>> = HashMap::new();
+			let mut session_frames: HashMap<String, BTreeMap<String, SessionFrame>> = HashMap::new();
 			for (tier, roots) in &sessions {
 				for (root, counters) in roots {
 					if group_key(root.as_str(), depth) != *group {
@@ -1581,7 +1590,7 @@ async fn run_publisher(
 /// [`SessionBroadcasts`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
-struct Snapshot {
+struct BroadcastFrame {
 	announced: u64,
 	announced_closed: u64,
 	announced_bytes: u64,
@@ -1598,7 +1607,7 @@ struct Snapshot {
 /// is the live session count for the root.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(serde::Deserialize))]
-struct SessionSnapshot {
+struct SessionFrame {
 	sessions: u64,
 	sessions_closed: u64,
 }
@@ -1632,7 +1641,7 @@ mod tests {
 	use super::*;
 
 	/// Counters for `(path, tier)`, creating the tier slot if absent.
-	fn tier_counters(stats: &Stats, path: &str, tier: &Tier) -> Arc<TierCounters> {
+	fn tier_counters(stats: &Producer, path: &str, tier: &Tier) -> Arc<TierCounters> {
 		stats
 			.shared()
 			.entries
@@ -1643,7 +1652,7 @@ mod tests {
 	}
 
 	/// `(sessions, sessions_closed)` for `(tier, root)`, or `None` if absent.
-	fn session_snapshot(stats: &Stats, tier: &Tier, root: &str) -> Option<(u64, u64)> {
+	fn session_snapshot(stats: &Producer, tier: &Tier, root: &str) -> Option<(u64, u64)> {
 		stats
 			.shared()
 			.sessions
@@ -1653,7 +1662,7 @@ mod tests {
 	}
 
 	/// True if a session gauge exists for `(tier, root)`.
-	fn session_contains(stats: &Stats, tier: &Tier, root: &str) -> bool {
+	fn session_contains(stats: &Producer, tier: &Tier, root: &str) -> bool {
 		stats
 			.shared()
 			.sessions
@@ -1662,10 +1671,10 @@ mod tests {
 			.is_some_and(|roots| roots.contains_key(&PathOwned::from(root.to_string())))
 	}
 
-	fn test_stats(node: Option<&str>) -> (Stats, origin::Producer) {
+	fn test_stats(node: Option<&str>) -> (Producer, origin::Producer) {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(
-			StatsConfig::new()
+		let stats = Producer::new(
+			Config::new()
 				.with_origin(origin.clone())
 				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
 		);
@@ -1710,8 +1719,8 @@ mod tests {
 	/// announces at construction.
 	async fn announced_path_for_node(node: &str) -> String {
 		let origin = Origin::random().produce();
-		let _stats = Stats::new(
-			StatsConfig::new()
+		let _stats = Producer::new(
+			Config::new()
 				.with_origin(origin.clone())
 				.with_node(PathOwned::from(node.to_string())),
 		);
@@ -1847,7 +1856,7 @@ mod tests {
 	async fn disabled_stats_are_noop() {
 		// A no-op aggregator (no origin) allocates no shared state and never
 		// announces; every handle is empty and bumps are dropped.
-		let stats = Stats::default();
+		let stats = Producer::default();
 		assert!(stats.shared.is_none());
 		let bs = stats.tier(Tier::default()).broadcast("demo/bbb");
 		assert!(bs.is_empty());
@@ -1879,7 +1888,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(StatsConfig::new().with_origin(origin.clone()));
+		let stats = Producer::new(Config::new().with_origin(origin.clone()));
 		let mut consumer = origin.consume().announced();
 
 		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
@@ -2296,7 +2305,7 @@ mod tests {
 	#[test]
 	fn snapshot_reads_closed_before_open() {
 		// Reading closed counters before their open counterparts is the
-		// guarantee that the emitted Snapshot never shows close > open
+		// guarantee that the emitted BroadcastFrame never shows close > open
 		// under concurrent bumps. This unit-test pins the ordering at the
 		// source level so a future refactor that re-orders the loads
 		// trips the test.
@@ -2346,12 +2355,12 @@ mod tests {
 		assert!(closed_pos < open_pos, "sessions_closed must be loaded before sessions",);
 	}
 
-	async fn read_frame(mut track: track::Subscriber) -> BTreeMap<String, Snapshot> {
+	async fn read_frame(mut track: track::Subscriber) -> BTreeMap<String, BroadcastFrame> {
 		let frame = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&frame.payload).expect("json parse")
 	}
 
-	async fn read_session_frame(mut track: track::Subscriber) -> BTreeMap<String, SessionSnapshot> {
+	async fn read_session_frame(mut track: track::Subscriber) -> BTreeMap<String, SessionFrame> {
 		let frame = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&frame.payload).expect("json parse")
 	}

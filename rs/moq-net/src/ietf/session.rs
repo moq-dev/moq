@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, StatsHandle,
+	Error, Origin,
 	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
@@ -19,8 +19,8 @@ pub fn start<S: web_transport_trait::Session>(
 	client: bool,
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
-	stats: StatsHandle,
+	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
+	stats: crate::stats::Handle,
 	version: Version,
 	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
 	// transports). A server passes `None`.

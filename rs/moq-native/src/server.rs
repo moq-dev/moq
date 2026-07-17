@@ -264,8 +264,8 @@ impl Server {
 		self.with_subscriber(subscribe)
 	}
 
-	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions accepted by this server.
-	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+	/// Attach a tier-scoped [`moq_net::stats::Handle`] to all sessions accepted by this server.
+	pub fn with_stats(mut self, stats: moq_net::stats::Handle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}
@@ -956,8 +956,8 @@ impl Request {
 		self.with_subscriber(subscribe)
 	}
 
-	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
-	pub fn with_stats(self, stats: moq_net::StatsHandle) -> Self {
+	/// Attach a tier-scoped [`moq_net::stats::Handle`] to this session.
+	pub fn with_stats(self, stats: moq_net::stats::Handle) -> Self {
 		let Request {
 			transport,
 			url,
@@ -1002,10 +1002,11 @@ impl Request {
 		setup.or(self.url.as_ref().map(Url::path))
 	}
 
-	/// The direction the client advertised in its SETUP ([`moq_net::Role::Both`] when it
-	/// omitted one), available on every transport. Use it to reject a token that lacks the
-	/// scope for the client's intended direction.
-	pub fn role(&self) -> moq_net::Role {
+	/// The single direction the client advertised in its SETUP, or `None` for a
+	/// bidirectional session (it omitted the role, or the version carries none).
+	/// Available on every transport. Use it to reject a token that lacks the scope for
+	/// the client's intended direction.
+	pub fn role(&self) -> Option<moq_net::Role> {
 		request_ref!(self, r => r.role())
 	}
 

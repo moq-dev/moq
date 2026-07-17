@@ -248,8 +248,8 @@ impl Client {
 		self.with_subscriber(subscribe)
 	}
 
-	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions opened by this client.
-	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
+	/// Attach a tier-scoped [`moq_net::stats::Handle`] to all sessions opened by this client.
+	pub fn with_stats(mut self, stats: moq_net::stats::Handle) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}

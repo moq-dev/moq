@@ -14,8 +14,8 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_net::StatsHandle;
 use moq_net::origin;
+use moq_net::stats::Handle;
 
 use crate::{AuthParams, web::AuthQuery, web::MtlsPeer, web::WebState, web::landing_response};
 
@@ -90,7 +90,7 @@ async fn handle_socket<T>(
 	alpn: Option<String>,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
-	stats: StatsHandle,
+	stats: Handle,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>

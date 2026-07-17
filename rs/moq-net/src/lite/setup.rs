@@ -48,58 +48,70 @@ impl ProbeLevel {
 	}
 }
 
-/// The direction a client intends to use the session for.
+/// The single direction a client intends to use the session for.
 ///
 /// A client advertises this in its SETUP so the server can reject a token that lacks
 /// the matching scope during the handshake, instead of accepting a connection that
 /// then silently carries no media (a subscribe-only token used to publish, or vice
 /// versa). It only ever narrows what the server grants, so it is not a security
 /// boundary: the server still enforces the token's scope regardless.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A session is bidirectional by default, which the wire says by omitting the
+/// parameter. `Option<Role>` mirrors that: `None` is the default, and it's also what
+/// a client that predates the parameter decodes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
 	/// The client will publish tracks (ingest); the server must consume.
 	Publisher,
 	/// The client will subscribe to tracks (egress); the server must publish.
 	Subscriber,
-	/// The client may do either, or declined to say. The default, and the behavior of
-	/// clients that predate this parameter (they omit it, and it decodes back to this).
-	#[default]
-	Both,
 }
 
 impl Role {
-	/// Map the wire value to a role. `0` and any unrecognized future value fall back to
-	/// [`Both`](Role::Both): the draft requires a receiver that does not recognize the
-	/// value to treat it as `Both`, so a newer client can't break an older server (it
+	/// Map the wire value to a role. `0` and any unrecognized future value are `None`
+	/// (bidirectional): the draft requires a receiver that does not recognize the value
+	/// to treat it as both directions, so a newer client can't break an older server (it
 	/// just loses the early reject and defers fully to the token's scope).
-	fn from_code(code: u64) -> Self {
+	fn from_code(code: u64) -> Option<Self> {
 		match code {
-			1 => Role::Publisher,
-			2 => Role::Subscriber,
-			_ => Role::Both,
+			1 => Some(Role::Publisher),
+			2 => Some(Role::Subscriber),
+			_ => None,
 		}
 	}
 
-	/// The wire value for a directional role, or `None` for [`Role::Both`], which is the
-	/// absence of the parameter and so is never encoded.
-	fn to_code(self) -> Option<u64> {
+	/// The wire value for this role.
+	fn to_code(self) -> u64 {
 		match self {
-			Role::Publisher => Some(1),
-			Role::Subscriber => Some(2),
-			Role::Both => None,
+			Role::Publisher => 1,
+			Role::Subscriber => 2,
 		}
 	}
 
 	/// Derive the advertised role from which origins a client wired up: publish-only is
 	/// a [`Publisher`](Role::Publisher), consume-only a [`Subscriber`](Role::Subscriber),
-	/// and both (or neither) stays [`Both`](Role::Both). This keeps the advertised role
-	/// from drifting away from what the session actually does.
-	pub(crate) fn from_origins(publishes: bool, consumes: bool) -> Self {
+	/// and both (or neither) advertises nothing. This keeps the advertised role from
+	/// drifting away from what the session actually does.
+	pub(crate) fn from_origins(publishes: bool, consumes: bool) -> Option<Self> {
 		match (publishes, consumes) {
-			(true, false) => Role::Publisher,
-			(false, true) => Role::Subscriber,
-			_ => Role::Both,
+			(true, false) => Some(Role::Publisher),
+			(false, true) => Some(Role::Subscriber),
+			_ => None,
 		}
+	}
+
+	/// Lowercase label for this role (`"publisher"` / `"subscriber"`).
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Role::Publisher => "publisher",
+			Role::Subscriber => "subscriber",
+		}
+	}
+}
+
+impl std::fmt::Display for Role {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
 	}
 }
 
@@ -116,9 +128,10 @@ pub struct Setup {
 	/// qmux over TCP/TLS). Sent only by the client; a server never sends one and a
 	/// relay never forwards it. `None` on URI-carrying bindings.
 	pub path: Option<String>,
-	/// The client's intended [`Role`]. `Both` (the default) is sent as the absence of
-	/// the parameter, so an old client that never sets it decodes back to `Both`.
-	pub role: Role,
+	/// The single direction the client intends to use, or `None` for a bidirectional
+	/// session. `None` is sent as the absence of the parameter, which is also how a
+	/// client that predates the parameter decodes.
+	pub role: Option<Role>,
 }
 
 impl Message for Setup {
@@ -142,7 +155,7 @@ impl Message for Setup {
 			}
 			None => None,
 		};
-		let role = params.get_varint(PARAM_ROLE)?.map(Role::from_code).unwrap_or_default();
+		let role = params.get_varint(PARAM_ROLE)?.and_then(Role::from_code);
 
 		Ok(Self { probe, path, role })
 	}
@@ -160,9 +173,10 @@ impl Message for Setup {
 		if let Some(path) = &self.path {
 			params.set_bytes(PARAM_PATH, path.as_bytes().to_vec());
 		}
-		// Both is the wire default (absence of the parameter), so only a directional role is encoded.
-		if let Some(code) = self.role.to_code() {
-			params.set_varint(PARAM_ROLE, code);
+		// Bidirectional is the wire default (absence of the parameter), so only a
+		// directional role is encoded.
+		if let Some(role) = self.role {
+			params.set_varint(PARAM_ROLE, role.to_code());
 		}
 
 		params.encode(w, version)
@@ -243,14 +257,14 @@ mod tests {
 		let msg = Setup {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
-			role: Role::Both,
+			role: None,
 		};
 		assert_eq!(round_trip(&msg), msg);
 	}
 
 	#[test]
 	fn roles_round_trip() {
-		for role in [Role::Publisher, Role::Subscriber, Role::Both] {
+		for role in [Some(Role::Publisher), Some(Role::Subscriber), None] {
 			let msg = Setup {
 				path: Some("/room/123".to_string()),
 				role,
@@ -258,25 +272,6 @@ mod tests {
 			};
 			assert_eq!(round_trip(&msg), msg);
 		}
-	}
-
-	#[test]
-	fn role_both_omits_parameter() {
-		// Both is the absence of the parameter, so a SETUP is byte-identical whether the
-		// role is set to Both or left at its default. This is what lets a client that
-		// predates the parameter decode back to Both.
-		let mut with = bytes::BytesMut::new();
-		Setup {
-			role: Role::Both,
-			..Default::default()
-		}
-		.encode(&mut with, Version::Lite05)
-		.unwrap();
-
-		let mut without = bytes::BytesMut::new();
-		Setup::default().encode(&mut without, Version::Lite05).unwrap();
-
-		assert_eq!(with, without);
 	}
 
 	#[test]
@@ -298,9 +293,19 @@ mod tests {
 	}
 
 	#[test]
-	fn unknown_role_decodes_as_both() {
+	fn role_wire_codes() {
+		// The draft pins Publisher=1 / Subscriber=2. A swap here would still round-trip
+		// against our own decoder, but break every other implementation.
+		for (role, code) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
+			assert_eq!(role.to_code(), code);
+			assert_eq!(Role::from_code(code), Some(role));
+		}
+	}
+
+	#[test]
+	fn unknown_role_decodes_as_bidirectional() {
 		// A role value the receiver doesn't recognize (a future extension, or an explicit
-		// 0) decodes to Both rather than failing, so a newer client can't break an older
+		// 0) decodes to `None` rather than failing, so a newer client can't break an older
 		// server. The draft mandates this fallback.
 		for code in [0u64, 9, 250] {
 			let mut params = Parameters::default();
@@ -314,7 +319,7 @@ mod tests {
 
 			let mut slice = &buf[..];
 			let got = Setup::decode(&mut slice, Version::Lite05).unwrap();
-			assert_eq!(got.role, Role::Both, "role code {code} should decode as Both");
+			assert_eq!(got.role, None, "role code {code} should decode as bidirectional");
 		}
 	}
 
