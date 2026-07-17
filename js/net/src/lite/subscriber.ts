@@ -206,6 +206,7 @@ export class Subscriber {
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
+				// undefined: the stream ended. null: the consumer closed cleanly.
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
 
@@ -350,7 +351,7 @@ export class Subscriber {
 			// drain them (we don't drive delivery off the resolved range) so the FIN is
 			// observed. Older drafts just wait for the stream to close.
 			const closed = supportsTrackStream(this.version) ? this.#drainResponses(stream) : stream.reader.closed;
-			const waits: Promise<unknown>[] = [closed, producer.closed];
+			const waits: PromiseLike<unknown>[] = [closed, producer.closed];
 			switch (this.version) {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02:
@@ -585,10 +586,10 @@ export class Subscriber {
 		let lastSent: number | undefined;
 
 		for (;;) {
-			const current = track.subscriptionSignal.peek()?.priority;
+			const current = track.subscription.peek()?.priority;
 			if (current === undefined || current === lastSent) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await Promise.race([track.subscriptionSignal.changed(), stopped]);
+				const next = await Promise.race([track.subscription.changed(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -634,13 +635,13 @@ export class Subscriber {
 			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
 			let scale = timescale.peek();
 			while (scale === undefined) {
-				if (track.closedSignal.peek()) {
+				if (track.closed.peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
 					producer.close();
 					stream.stop(new Error("cancel"));
 					return;
 				}
-				await Signal.race(timescale, track.closedSignal);
+				await Signal.race(timescale, track.closed);
 				scale = timescale.peek();
 			}
 

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Signal } from "@moq/signals";
+import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { CacheFull, type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { hooks } from "./internal.ts";
@@ -188,22 +188,19 @@ class TrackState {
 	groups = new Signal<GroupConsumer[]>([]);
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
-	closed = new Signal<boolean | Error>(false);
+	closed = new Once<Error | null>();
 	update = new Signal<Subscription | undefined>(undefined);
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
 }
 
-// Build the closed promise from a state's closed signal: resolves with the abort error
-// (or undefined) once the track closes.
-function trackClosedPromise(state: TrackState): Promise<Error | undefined> {
-	return new Promise((resolve) => {
-		const dispose = state.closed.subscribe((closed) => {
-			if (!closed) return;
-			resolve(closed instanceof Error ? closed : undefined);
-			dispose();
-		});
-	});
+// Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
+// Producer closing its sinks races the Subscriber closing itself (the sink is only removed from
+// #sinks a microtask later, via the closed subscription below).
+function closeTrackState(state: TrackState, abort?: Error): boolean {
+	if (state.closed.peek() !== undefined) return false;
+	state.closed.set(abort ?? null);
+	return true;
 }
 
 // Resolve the track's immutable publisher properties, or reject if it closes first.
@@ -217,7 +214,7 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 
 		const closed = state.closed.peek();
 		if (closed instanceof Error) throw closed;
-		if (closed) throw new Error("track closed before info was known");
+		if (closed !== undefined) throw new Error("track closed before info was known");
 
 		await Signal.race(state.info, state.closed);
 	}
@@ -248,9 +245,6 @@ export class Producer {
 	/** The track name. */
 	readonly name: string;
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	// The producer's own state is the source of truth (info/closed); subscribers
 	// read mirrored sinks, never this state directly.
 	#state = new TrackState();
@@ -268,7 +262,6 @@ export class Producer {
 
 	constructor(name: string) {
 		this.name = name;
-		this.closed = trackClosedPromise(this.#state);
 	}
 
 	/**
@@ -279,13 +272,19 @@ export class Producer {
 		return resolveInfo(this.#state);
 	}
 
-	/** Reactive closed state: `false` while open, `true` or the abort `Error` once closed. Await {@link closed} (the promise) to block on it instead. */
-	get closedSignal(): Signal<boolean | Error> {
+	/**
+	 * Settles once the track closes: `null` on a clean close, or the abort {@link Error}.
+	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
+	 */
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
-	/** Reactive subscription update; the wire layer watches this to emit SUBSCRIBE_UPDATE. `undefined` until first set via {@link Subscriber.update} on any subscriber. */
-	get subscriptionSignal(): Signal<Subscription | undefined> {
+	/**
+	 * The current subscription, or `undefined` until a subscriber first calls
+	 * {@link Subscriber.update}. The wire layer watches this to emit SUBSCRIBE_UPDATE.
+	 */
+	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
 	}
 
@@ -313,7 +312,7 @@ export class Producer {
 		if (info) sink.info.set(info);
 
 		const closed = this.#state.closed.peek();
-		if (!closed) {
+		if (closed === undefined) {
 			this.#sinks.add(sink);
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
@@ -327,7 +326,7 @@ export class Producer {
 			// covers mirrors already handed out via recvGroup (no longer in sink.groups)
 			// by closing them through the cache's per-sink tracking.
 			const dispose = sink.closed.subscribe((c) => {
-				if (!c) return;
+				if (c === undefined) return;
 				const abort = c instanceof Error ? c : undefined;
 				forward();
 				this.#sinks.delete(sink);
@@ -346,7 +345,7 @@ export class Producer {
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
-		if (closed) sink.closed.set(closed);
+		if (closed !== undefined) closeTrackState(sink, closed instanceof Error ? closed : undefined);
 	}
 
 	// Mirror a cached source group into a sink. The mirror fills synchronously as the
@@ -396,7 +395,7 @@ export class Producer {
 
 	/** Append a new group with the next sequence number. */
 	appendGroup(): GroupProducer {
-		if (this.#state.closed.peek()) throw new Error("track is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 
 		const group = new GroupProducer(this.#next ?? 0);
 		this.#next = group.sequence + 1;
@@ -407,7 +406,7 @@ export class Producer {
 
 	/** Insert an existing group into the track. */
 	writeGroup(group: GroupProducer) {
-		if (this.#state.closed.peek()) throw new Error("track is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 
 		// Only advance #next upward (for appendGroup auto-increment).
 		if (group.sequence >= (this.#next ?? 0)) {
@@ -443,7 +442,7 @@ export class Producer {
 	 * relay preserving upstream numbering uses {@link writeDatagram}.
 	 */
 	appendDatagram(timestamp: Timestamp, payload: Uint8Array): number {
-		if (this.#state.closed.peek()) throw new Error("track is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
 		const sequence = this.#next ?? 0;
@@ -460,7 +459,7 @@ export class Producer {
 	 * apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
 	writeDatagram(datagram: Datagram) {
-		if (this.#state.closed.peek()) throw new Error("track is closed");
+		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		if (datagram.payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 
 		if (datagram.sequence >= (this.#next ?? 0)) {
@@ -469,13 +468,13 @@ export class Producer {
 		this.#publishDatagram(datagram);
 	}
 
-	/** Close the track and every subscriber, mirroring the abort to their groups. */
+	/** Close the track and every subscriber, mirroring the abort to their groups. Idempotent. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
+		closeTrackState(this.#state, abort);
 		for (const { group } of this.#cache) group.close(abort);
 		for (const sink of this.#sinks) {
 			for (const group of sink.groups.peek()) group.close(abort);
-			sink.closed.set(abort ?? true);
+			closeTrackState(sink, abort);
 		}
 		this.#sinks.clear();
 	}
@@ -520,16 +519,12 @@ export class Subscriber {
 	/** The track name. */
 	readonly name: string;
 
-	/** Resolves with the abort error (or undefined) once closed. */
-	readonly closed: Promise<Error | undefined>;
-
 	#state: TrackState;
 	#nextSequence = 0;
 
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
-		this.closed = trackClosedPromise(state);
 	}
 
 	static {
@@ -547,19 +542,19 @@ export class Subscriber {
 		return resolveInfo(this.#state);
 	}
 
-	/** Reactive closed state; see {@link Producer.closedSignal}. */
-	get closedSignal(): Signal<boolean | Error> {
+	/** Settles once the track closes; see {@link Producer.closed}. */
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
 	/** The last {@link update} requested on this subscriber, or `undefined` if none yet. */
-	get subscriptionSignal(): Signal<Subscription | undefined> {
+	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
 	}
 
-	/** Close the track (optionally with an error), closing any pending groups. */
+	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
-		this.#state.closed.set(abort ?? true);
+		if (!closeTrackState(this.#state, abort)) return;
 		for (const group of this.#state.groups.peek()) {
 			group.close(abort);
 		}
@@ -580,7 +575,7 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.groups, this.#state.closed);
 		}
@@ -614,7 +609,7 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			await Signal.race(this.#state.datagrams, this.#state.closed);
 		}
@@ -679,7 +674,7 @@ export class Subscriber {
 			if (groups.length === 0) {
 				const closed = this.#state.closed.peek();
 				if (closed instanceof Error) throw closed;
-				if (closed) return undefined;
+				if (closed !== undefined) return undefined;
 				await Signal.race(this.#state.groups, this.#state.closed);
 				continue;
 			}
@@ -697,7 +692,7 @@ export class Subscriber {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return undefined;
+			if (closed !== undefined) return undefined;
 
 			// A finished (drained + closed) group has nothing left: drop it and loop, rather than
 			// busy-waiting on its already-resolved readable() (which would livelock and starve the

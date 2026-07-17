@@ -21,7 +21,7 @@ export class BroadcastCache {
 	/** A shared handle to the live broadcast cached for `path`, or `undefined` on a miss. */
 	get(path: Path.Valid): broadcast.Consumer | undefined {
 		const base = this.#cache.get(path);
-		if (base && !base.closedSignal.peek()) return base.clone();
+		if (base && base.closed.peek() === undefined) return base.clone();
 		return undefined;
 	}
 
@@ -34,7 +34,7 @@ export class BroadcastCache {
 
 		// Drop the entry once the broadcast closes (every handle released), so the next request
 		// re-consumes rather than cloning a dead handle. Guard against a newer entry for the path.
-		void consumer.closed.finally(() => {
+		void consumer.closed.then(() => {
 			if (this.#cache.get(path) === consumer) this.#cache.delete(path);
 		});
 

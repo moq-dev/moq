@@ -57,13 +57,13 @@ test("a consumer clone shares the broadcast until every handle closes", () => {
 
 	// Closing one handle leaves the shared broadcast live for the other...
 	consumer.close();
-	expect(consumer.closedSignal.peek()).toBeFalsy();
-	expect(clone.closedSignal.peek()).toBeFalsy();
+	expect(consumer.closed.peek()).toBeUndefined();
+	expect(clone.closed.peek()).toBeUndefined();
 
 	// ...and closing the last handle closes it for both.
 	clone.close();
-	expect(consumer.closedSignal.peek()).toBeTruthy();
-	expect(clone.closedSignal.peek()).toBeTruthy();
+	expect(consumer.closed.peek()).toBeDefined();
+	expect(clone.closed.peek()).toBeDefined();
 });
 
 test("double-closing a consumer handle does not prematurely close the broadcast", () => {
@@ -73,11 +73,11 @@ test("double-closing a consumer handle does not prematurely close the broadcast"
 	// The double close must decrement the shared count only once...
 	clone.close();
 	clone.close();
-	expect(consumer.closedSignal.peek()).toBeFalsy();
+	expect(consumer.closed.peek()).toBeUndefined();
 
 	// ...so the broadcast still stays live until the other handle closes.
 	consumer.close();
-	expect(consumer.closedSignal.peek()).toBeTruthy();
+	expect(consumer.closed.peek()).toBeDefined();
 });
 
 test("consumer track subscriptions fan out and close independently", async () => {

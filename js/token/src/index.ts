@@ -1,3 +1,8 @@
+/**
+ * Generate and validate the JWTs that authorize a MoQ connection.
+ *
+ * @module
+ */
 export * from "./algorithm.ts";
 export * from "./claims.ts";
 export * from "./generate.ts";

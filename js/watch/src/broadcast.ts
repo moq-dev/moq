@@ -11,14 +11,13 @@ import { toHang } from "./msf";
 // announcement check logs at most once per connection.
 const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
 
-// Whether to skip the announcement gate for this connection. Cloudflare's relay does not yet support
-// SUBSCRIBE_NAMESPACE, so waiting on announcements there would hang forever; subscribe immediately
-// instead, warning once per connection.
+// Whether to skip the announcement gate for this connection: without discovery, waiting on an
+// announcement would hang forever, so subscribe immediately and warn once per connection.
 function skipDiscovery(conn: Moq.Connection.Established): boolean {
-	if (!conn.url.hostname.endsWith("mediaoverquic.com")) return false;
+	if (conn.discovery) return false;
 	if (!warnedNoDiscovery.has(conn)) {
 		warnedNoDiscovery.add(conn);
-		console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+		console.warn("relay does not support broadcast discovery; ignoring reload signal.");
 	}
 	return true;
 }
@@ -39,7 +38,7 @@ type Status = "offline" | "loading" | "live";
 
 // Signals the component reads. Whoever owns the backing Signal (the caller, or
 // another component whose output is wired in) does the writing.
-type BroadcastInput = {
+export type BroadcastInput = {
 	connection: Getter<Moq.Connection.Established | undefined>;
 
 	// Whether to start downloading the broadcast.
@@ -94,7 +93,7 @@ export class Broadcast {
 	// no cross-broadcast renditions never opens the (broad) connection-scoped announcement stream.
 	readonly #wantAnnounced = new Signal(false);
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
@@ -106,9 +105,9 @@ export class Broadcast {
 			catalog: getter(props?.catalog),
 		};
 
-		this.signals.run(this.#runAnnounced.bind(this));
-		this.signals.run(this.#runBroadcast.bind(this));
-		this.signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runAnnounced.bind(this));
+		this.#signals.run(this.#runBroadcast.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
 	// Maintain the set of announced paths used by `relativeBroadcast`, by draining a connection-scoped
@@ -197,7 +196,7 @@ export class Broadcast {
 
 				if (event.active) {
 					// A live subscription survives a redundant (re-)announce; only replace a dead one.
-					if (current && !current.closedSignal.peek()) continue;
+					if (current && current.closed.peek() === undefined) continue;
 					current?.close();
 					current = conn.consume(name);
 					this.#out.active.set(current);
@@ -309,6 +308,6 @@ export class Broadcast {
 	}
 
 	close() {
-		this.signals.close();
+		this.#signals.close();
 	}
 }

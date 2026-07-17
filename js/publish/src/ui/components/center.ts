@@ -1,9 +1,8 @@
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../../element";
+import type { SourceType } from "../../element";
 import { camera, cameraOff, file, icon, screen } from "../icons";
-
-type SourceType = "camera" | "screen" | "file";
 
 const OPTIONS: { id: SourceType; label: string; svg: string }[] = [
 	{ id: "camera", label: "Camera", svg: camera },
@@ -44,8 +43,8 @@ export function center(parent: Effect, publish: MoqPublish): HTMLElement {
 	const container = DOM.create("div", { className: "center" });
 
 	parent.run((effect) => {
-		const source = effect.get(publish.state.source);
-		const invisible = effect.get(publish.state.invisible);
+		const source = effect.get(publish.controls.source);
+		const invisible = effect.get(publish.controls.invisible);
 
 		if (source === undefined) {
 			DOM.render(effect, container, sourcePicker(effect, publish));

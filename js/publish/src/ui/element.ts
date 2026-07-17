@@ -1,3 +1,10 @@
+/**
+ * The `<moq-publish-ui>` custom element: capture controls wrapped around a `<moq-publish>`.
+ *
+ * Side-effectful: importing this registers the element.
+ *
+ * @module
+ */
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../element";
@@ -57,9 +64,9 @@ export default class MoqPublishUi extends HTMLElement {
 		if (!this.#initialized) {
 			this.#initialized = true;
 			const pristine =
-				publish.state.source.peek() === undefined &&
-				!publish.state.muted.peek() &&
-				!publish.state.invisible.peek();
+				publish.controls.source.peek() === undefined &&
+				!publish.controls.muted.peek() &&
+				!publish.controls.invisible.peek();
 			if (pristine) {
 				publish.muted = true;
 				publish.invisible = true;
@@ -125,13 +132,13 @@ export default class MoqPublishUi extends HTMLElement {
 		effect.event(this, "pointerdown", bump);
 		effect.event(this, "focusin", bump);
 
-		const pinned = () => state.panel.peek() || publish.state.source.peek() === undefined;
+		const pinned = () => state.panel.peek() || publish.controls.source.peek() === undefined;
 
 		// Reveal on activity and reschedule the hide timer. Reruns when pinned
 		// state changes too, so leaving pinned re-arms the auto-hide.
 		// effect.timer auto-clears on rerun.
 		effect.run((e) => {
-			const isPinned = e.get(state.panel) || e.get(publish.state.source) === undefined;
+			const isPinned = e.get(state.panel) || e.get(publish.controls.source) === undefined;
 			e.get(activity);
 			state.chrome.set(true);
 			if (isPinned) return;

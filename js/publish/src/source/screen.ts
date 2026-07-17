@@ -1,33 +1,54 @@
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Audio from "../audio";
 import type * as Video from "../video";
 
-export interface ScreenProps {
-	enabled?: boolean | Signal<boolean>;
+// Signals the screen capture reads.
+export type ScreenInput = {
+	// Whether to hold the capture open. Enabling it prompts the user to pick a surface.
+	enabled: Getter<boolean>;
+};
+
+/** Constructor options: the wired inputs plus the live-editable track constraints. */
+export interface ScreenProps extends Inputs<ScreenInput> {
+	/** Seed the video constraints; also live-editable via `screen.video`. */
 	video?: Video.Constraints | boolean | Signal<Video.Constraints | boolean | undefined>;
+	/** Seed the audio constraints; also live-editable via `screen.audio`. */
 	audio?: Audio.Constraints | boolean | Signal<Audio.Constraints | boolean | undefined>;
 }
 
-export class Screen {
-	enabled: Signal<boolean>;
+type ScreenOutput = {
+	// The captured surface, or undefined while disabled or dismissed.
+	source: Signal<{ audio?: Audio.Source; video?: Video.Source } | undefined>;
+};
 
+/** Captures a screen, window, or tab that the user picks. */
+export class Screen {
+	readonly in: Readonlys<ScreenInput>;
+
+	/** The live-editable video constraints, or false to capture audio only. */
 	video: Signal<Video.Constraints | boolean | undefined>;
+	/** The live-editable audio constraints, or false to capture video only. */
 	audio: Signal<Audio.Constraints | boolean | undefined>;
 
-	source = new Signal<{ audio?: Audio.Source; video?: Video.Source } | undefined>(undefined);
+	readonly #out: ScreenOutput = {
+		source: new Signal<{ audio?: Audio.Source; video?: Video.Source } | undefined>(undefined),
+	};
+	readonly out = readonlys(this.#out);
 
-	signals = new Effect();
+	#signals = new Effect();
 
 	constructor(props?: ScreenProps) {
-		this.enabled = Signal.from(props?.enabled ?? false);
+		this.in = {
+			enabled: getter(props?.enabled ?? false),
+		};
 		this.video = Signal.from(props?.video);
 		this.audio = Signal.from(props?.audio);
 
-		this.signals.run(this.#run.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
+		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
 		const video = effect.get(this.video);
@@ -68,14 +89,15 @@ export class Screen {
 			effect.cleanup(() => v?.stop());
 			effect.cleanup(() => a?.stop());
 
-			effect.set(this.source, {
+			effect.set(this.#out.source, {
 				video: v,
 				audio: a ? { track: a, kind: "music" } : undefined,
 			});
 		});
 	}
 
+	/** Stop the capture and release the surface. */
 	close() {
-		this.signals.close();
+		this.#signals.close();
 	}
 }

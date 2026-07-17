@@ -8,8 +8,8 @@ export function audioToggle(parent: Effect, publish: MoqPublish): HTMLElement {
 	const button = controlButton(microphone, "Mute");
 
 	parent.run((effect) => {
-		const hasSource = effect.get(publish.state.source) !== undefined;
-		const muted = effect.get(publish.state.muted);
+		const hasSource = effect.get(publish.controls.source) !== undefined;
+		const muted = effect.get(publish.controls.muted);
 		button.disabled = !hasSource;
 		button.classList.toggle("control--off", hasSource && muted);
 		button.title = muted ? "Unmute microphone" : "Mute microphone";

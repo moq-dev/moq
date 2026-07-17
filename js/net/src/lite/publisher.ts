@@ -111,7 +111,7 @@ export class Publisher {
 		});
 
 		// Remove the broadcast from the lookup when it's closed.
-		void broadcast.closed.finally(() => {
+		void broadcast.closed.then(() => {
 			this.#broadcasts.mutate((broadcasts) => {
 				broadcasts?.delete(path);
 			});

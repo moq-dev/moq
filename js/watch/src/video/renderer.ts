@@ -17,7 +17,7 @@ const INTERSECTION_THRESHOLD = 0.01;
  */
 export type Visible = "never" | "always" | (string & {});
 
-type RendererInput = {
+export type RendererInput = {
 	canvas: Getter<HTMLCanvasElement | undefined>;
 
 	// When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to "20%".
@@ -38,7 +38,7 @@ type RendererOutput = {
 
 // An component to render a video to a canvas.
 export class Renderer {
-	decoder: Decoder;
+	readonly decoder: Decoder;
 
 	readonly in: Readonlys<RendererInput>;
 

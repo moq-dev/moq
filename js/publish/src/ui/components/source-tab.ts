@@ -1,23 +1,11 @@
-import type { Effect, Getter, Signal } from "@moq/signals";
+import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../../element";
+import type { SourceType } from "../../element";
+import type * as Source from "../../source";
 import { ban, camera, file, icon, microphone, screen } from "../icons";
 
-type SourceType = "camera" | "screen" | "file";
 type SourceValue = SourceType | undefined;
-
-// Structural view of source/device.ts Device, avoiding a cross-module import.
-interface DeviceLike {
-	available: Getter<MediaDeviceInfo[] | undefined>;
-	requested: Getter<string | undefined>;
-	preferred: Signal<string | undefined>;
-}
-
-// Structural view of source/file.ts File, avoiding a cross-module import.
-interface FileLike {
-	file: Getter<File | undefined>;
-	prompt(): void;
-}
 
 const OPTIONS: { id: SourceValue; label: string; svg: string }[] = [
 	{ id: "camera", label: "Camera", svg: camera },
@@ -49,7 +37,7 @@ function sourceGrid(parent: Effect, publish: MoqPublish): HTMLElement {
 	});
 
 	parent.run((effect) => {
-		const active = effect.get(publish.state.source);
+		const active = effect.get(publish.controls.source);
 		for (const { opt, button } of buttons) {
 			button.classList.toggle("source-opt--active", opt.id === active);
 		}
@@ -58,7 +46,12 @@ function sourceGrid(parent: Effect, publish: MoqPublish): HTMLElement {
 	return grid;
 }
 
-function deviceField(parent: Effect, label: string, svg: string, device: DeviceLike): HTMLElement {
+function deviceField(
+	parent: Effect,
+	label: string,
+	svg: string,
+	device: Source.Device<"audio" | "video">,
+): HTMLElement {
 	const field = DOM.create("div", { className: "device-field" });
 	const labelEl = DOM.create("div", { className: "device-field-label" });
 	labelEl.append(icon(svg), DOM.create("span", {}, label));
@@ -66,8 +59,8 @@ function deviceField(parent: Effect, label: string, svg: string, device: DeviceL
 	field.append(labelEl, dropdown);
 
 	parent.run((effect) => {
-		const devices = effect.get(device.available) ?? [];
-		const selected = effect.get(device.requested);
+		const devices = effect.get(device.out.available) ?? [];
+		const selected = effect.get(device.out.requested);
 		dropdown.replaceChildren();
 
 		if (devices.length === 0) {
@@ -96,14 +89,13 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// Device selection only applies to the camera source.
 	const devices = DOM.create("div");
 	parent.run((effect) => {
-		if (effect.get(publish.state.source) !== "camera") return;
+		if (effect.get(publish.controls.source) !== "camera") return;
 
 		const video = effect.get(publish.sources.video);
 		const audio = effect.get(publish.sources.audio);
 		const fields: HTMLElement[] = [];
-		if (video && "device" in video) fields.push(deviceField(effect, "Camera", camera, video.device as DeviceLike));
-		if (audio && "device" in audio)
-			fields.push(deviceField(effect, "Microphone", microphone, audio.device as DeviceLike));
+		if (video && "device" in video) fields.push(deviceField(effect, "Camera", camera, video.device));
+		if (audio && "device" in audio) fields.push(deviceField(effect, "Microphone", microphone, audio.device));
 		if (fields.length === 0) return;
 
 		const section = DOM.create("div");
@@ -115,7 +107,7 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// File selection only applies to the file source.
 	const filePicker = DOM.create("div");
 	parent.run((effect) => {
-		const source = effect.get(publish.state.source);
+		const source = effect.get(publish.controls.source);
 		if (source !== "file" && !(source instanceof File)) return;
 
 		const fileSource = effect.get(publish.sources.file);
@@ -128,7 +120,7 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	return container;
 }
 
-function fileField(parent: Effect, source: FileLike): HTMLElement {
+function fileField(parent: Effect, source: Source.File): HTMLElement {
 	const section = DOM.create("div");
 	section.appendChild(DOM.create("div", { className: "tab-section-label" }, "File"));
 

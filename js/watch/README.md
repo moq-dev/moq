@@ -72,7 +72,7 @@ The simplest way to watch a stream:
 | `muted`   | boolean                             | false    | Mute audio                               |
 | `visible` | never, distance, or always          | `20%`    | When to download video (see below)       |
 | `volume`  | number                              | 0.5      | Audio volume (0-1)                       |
-| `reload`  | boolean                             | true     | Wait for (re)announcement before subscribing. Defaults off for `mediaoverquic.com` relays until they support broadcast discovery. |
+| `reload`  | boolean                             | true     | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
 position relative to the viewport:

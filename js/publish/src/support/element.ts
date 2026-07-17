@@ -1,6 +1,13 @@
+/**
+ * The `<moq-publish-support>` custom element: renders the {@link isSupported} report.
+ *
+ * Side-effectful: importing this registers the element.
+ *
+ * @module
+ */
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
-import { type Codec, type Full, isSupported, type Partial } from "./";
+import { type Codec, type Full, isSupported, type Level } from "./";
 
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
 const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
@@ -75,7 +82,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		this.#details.set(details);
 	}
 
-	#getSummary(support: Full): Partial {
+	#getSummary(support: Full): Level {
 		if (support.webtransport === "none") return "none";
 
 		if (!support.audio.encoding || !support.video.encoding) return "none";
@@ -128,7 +135,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		}
 	}
 
-	#renderHeader(parent: HTMLDivElement, summary: Partial, effect: Effect) {
+	#renderHeader(parent: HTMLDivElement, summary: Level, effect: Effect) {
 		const headerDiv = DOM.create("div", {
 			style: {
 				display: "flex",
@@ -203,7 +210,7 @@ export default class MoqPublishSupport extends HTMLElement {
 		const binary = (value: boolean | undefined) => (value ? "🟢 Yes" : "🔴 No");
 		const hardware = (codec: Codec | undefined) =>
 			codec?.hardware ? "🟢 Hardware" : codec?.software ? `🟡 Software${isFirefox ? "*" : ""}` : "🔴 No";
-		const partial = (value: Partial | undefined) =>
+		const partial = (value: Level | undefined) =>
 			value === "full" ? "🟢 Full" : value === "partial" ? "🟡 Polyfill" : "🔴 None";
 
 		const addRow = (label: string, col2: string, col3: string) => {

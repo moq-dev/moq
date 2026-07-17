@@ -5,14 +5,14 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
-import type { BufferedRanges } from "../buffered";
+
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 
-type DecoderInput = {
+export type DecoderInput = {
 	// Enable to download the audio track.
 	enabled: Getter<boolean>;
 };
@@ -34,7 +34,7 @@ type DecoderOutput = {
 	stalled: Signal<boolean>;
 
 	// Combined buffered ranges (network jitter + decode buffer)
-	buffered: Signal<BufferedRanges>;
+	buffered: Signal<Container.BufferedRanges>;
 };
 
 /** Cumulative audio statistics since the decoder started. */
@@ -50,8 +50,8 @@ export interface Stats {
  */
 export class Decoder {
 	readonly in: Readonlys<DecoderInput>;
-	source: Source;
-	sync: Sync;
+	readonly source: Source;
+	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
 		context: new Signal<AudioContext | undefined>(undefined),
@@ -60,12 +60,12 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Time.Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
-		buffered: new Signal<BufferedRanges>([]),
+		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
 
 	// Decode buffer: audio sent to worklet but not yet played
-	#decodeBuffered = new Signal<BufferedRanges>([]);
+	#decodeBuffered = new Signal<Container.BufferedRanges>([]);
 
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;

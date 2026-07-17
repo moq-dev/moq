@@ -8,8 +8,8 @@ export function videoToggle(parent: Effect, publish: MoqPublish): HTMLElement {
 	const button = controlButton(camera, "Hide video");
 
 	parent.run((effect) => {
-		const hasSource = effect.get(publish.state.source) !== undefined;
-		const invisible = effect.get(publish.state.invisible);
+		const hasSource = effect.get(publish.controls.source) !== undefined;
+		const invisible = effect.get(publish.controls.invisible);
 		button.disabled = !hasSource;
 		button.classList.toggle("control--off", hasSource && invisible);
 		button.title = invisible ? "Show video" : "Hide video";

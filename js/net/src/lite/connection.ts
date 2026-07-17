@@ -24,6 +24,24 @@ import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts
 const SEND_BW_POLL_INTERVAL = 100; // ms
 
 /**
+ * Constructor options for {@link Connection}.
+ *
+ * @internal
+ */
+export interface ConnectionProps {
+	/** The URL of the connection. */
+	url: URL;
+	/** The established WebTransport session. */
+	quic: WebTransport;
+	/** The negotiated wire version. */
+	version: Version;
+	/** The session stream, absent on drafts that have none. */
+	session?: Stream;
+	/** Whether the relay supports broadcast discovery. Defaults to true. */
+	discovery?: boolean;
+}
+
+/**
  * Represents a connection to a MoQ server.
  *
  * @public
@@ -37,6 +55,9 @@ export class Connection implements Established {
 
 	// The wire transport this session runs over.
 	readonly transport: Transport;
+
+	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
+	readonly discovery: boolean;
 
 	// The version used for encoding/decoding.
 	#version: Version;
@@ -73,19 +94,17 @@ export class Connection implements Established {
 
 	/**
 	 * Creates a new Connection instance.
-	 * @param url - The URL of the connection
-	 * @param quic - The WebTransport session
-	 * @param session - The session stream
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, version: Version, session?: Stream) {
+	constructor({ url, quic, version, session, discovery = true }: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
+		this.discovery = discovery;
 
 		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
 		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";

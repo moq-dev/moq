@@ -63,7 +63,7 @@ export class Reload {
 	delay: ReloadDelay;
 
 	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
-	signals = new Effect();
+	#signals = new Effect();
 
 	/** Resolves when the reconnect loop stops via {@link Reload.close} or the retry timeout. */
 	closed: Promise<void>;
@@ -99,17 +99,17 @@ export class Reload {
 		});
 
 		if (typeof window !== "undefined" && typeof document !== "undefined") {
-			this.signals.event(window, "pagehide", () => this.#suspended.set(true));
-			this.signals.event(window, "pageshow", () => this.#suspended.set(false));
-			this.signals.event(window, "unload", () => this.#suspended.set(true));
-			this.signals.event(document, "visibilitychange", () => {
+			this.#signals.event(window, "pagehide", () => this.#suspended.set(true));
+			this.#signals.event(window, "pageshow", () => this.#suspended.set(false));
+			this.#signals.event(window, "unload", () => this.#suspended.set(true));
+			this.#signals.event(document, "visibilitychange", () => {
 				if (!document.hidden) this.#suspended.set(false);
 			});
 		}
 
-		this.#url = this.signals.computed((effect) => effect.get(this.url)?.href);
+		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
-		this.signals.run(this.#connect.bind(this));
+		this.#signals.run(this.#connect.bind(this));
 	}
 
 	#connect(effect: Effect): void {
@@ -176,6 +176,8 @@ export class Reload {
 	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
 	 * is retracted (an `active: false` update) whenever the connection drops and re-announced on
 	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
+	 *
+	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
 		const producer = new Announce.Producer(prefix);
@@ -192,9 +194,9 @@ export class Reload {
 			const conn = effect.get(this.established);
 			if (!conn) return;
 
-			// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so skip the
-			// subscription for those hosts (the consumer just stays empty).
-			if (conn.url.hostname.endsWith("mediaoverquic.com")) return;
+			// Without discovery the upstream announce stream never yields, so leave the
+			// consumer empty rather than opening a subscription that can't be answered.
+			if (!conn.discovery) return;
 
 			const upstream = conn.announced(prefix);
 			effect.cleanup(() => upstream.close());
@@ -225,7 +227,7 @@ export class Reload {
 			});
 		});
 
-		this.signals.cleanup(() => pump.close());
+		this.#signals.cleanup(() => pump.close());
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
@@ -233,7 +235,7 @@ export class Reload {
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
 	close() {
-		this.signals.close();
+		this.#signals.close();
 		this.#closedResolve();
 	}
 }

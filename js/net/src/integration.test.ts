@@ -478,22 +478,22 @@ async function runConsumeDedup(protocol: string, version?: number) {
 	const first = client.consume(Path.from("shared"));
 	const second = client.consume(Path.from("shared"));
 	first.close();
-	expect(first.closedSignal.peek()).toBeFalsy();
-	expect(second.closedSignal.peek()).toBeFalsy();
+	expect(first.closed.peek()).toBeUndefined();
+	expect(second.closed.peek()).toBeUndefined();
 
 	// ...and closing the last handle closes the shared broadcast (both handles observe it).
 	second.close();
-	expect(first.closedSignal.peek()).toBeTruthy();
-	expect(second.closedSignal.peek()).toBeTruthy();
+	expect(first.closed.peek()).toBeDefined();
+	expect(second.closed.peek()).toBeDefined();
 
 	// A different path is independent: a lone handle closes the broadcast immediately.
 	const other = client.consume(Path.from("other"));
 	other.close();
-	expect(other.closedSignal.peek()).toBeTruthy();
+	expect(other.closed.peek()).toBeDefined();
 
 	// Once closed, the path re-consumes fresh (a new live handle).
 	const third = client.consume(Path.from("shared"));
-	expect(third.closedSignal.peek()).toBeFalsy();
+	expect(third.closed.peek()).toBeUndefined();
 	third.close();
 
 	client.close();

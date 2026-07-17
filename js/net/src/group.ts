@@ -49,7 +49,7 @@ export class CacheFull extends Error {
 class GroupState {
 	readonly sequence: number;
 	frames = new Signal<Frame[]>([]);
-	closed = new Once<true | Error>();
+	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Frames evicted from the front by the cache cap. A reader that had not consumed
@@ -63,7 +63,7 @@ class GroupState {
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
-	if (state.closed.peek()) throw new Error("group is closed");
+	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
 	state.cacheBytes += frame.data.byteLength;
 	state.frames.mutate((frames) => {
@@ -98,10 +98,10 @@ export class Producer {
 	}
 
 	/**
-	 * Settles once the group closes: `true` on a clean close, or the abort {@link Error}.
+	 * Settles once the group closes: `null` on a clean close, or the abort {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
-	get closed(): GetPromise<true | Error> {
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
@@ -114,7 +114,9 @@ export class Producer {
 	 * Create an independent read handle that receives every frame written here.
 	 *
 	 * Frames written so far are replayed synchronously; later writes and close are teed
-	 * in as they happen. Internal to track fan-out.
+	 * in as they happen.
+	 *
+	 * @internal Track fan-out and fetch coalescing only. Use {@link consume} instead.
 	 */
 	mirror(): Consumer {
 		const dst = new GroupState(this.sequence);
@@ -122,7 +124,7 @@ export class Producer {
 		dst.offset = this.#state.offset;
 
 		const closed = this.#state.closed.peek();
-		if (closed) {
+		if (closed !== undefined) {
 			dst.closed.set(closed);
 			return makeConsumer(dst);
 		}
@@ -138,7 +140,7 @@ export class Producer {
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek()) this.#mirrors.delete(mirror);
+				if (mirror.closed.peek() !== undefined) this.#mirrors.delete(mirror);
 				else appendFrame(mirror, frame);
 			}
 		}
@@ -167,11 +169,11 @@ export class Producer {
 	/** Closes the group, optionally with an error to abort readers. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
-		this.#state.closed.set(abort ?? true);
+		this.#state.closed.set(abort ?? null);
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? true);
+				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? null);
 			}
 			this.#mirrors.clear();
 		}
@@ -200,10 +202,10 @@ export class Consumer {
 	}
 
 	/**
-	 * Settles once the group closes: `true` on a clean close, or the abort {@link Error}.
+	 * Settles once the group closes: `null` on a clean close, or the abort {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 */
-	get closed(): GetPromise<true | Error> {
+	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
 
@@ -258,7 +260,7 @@ export class Consumer {
 	async readable(): Promise<void> {
 		for (;;) {
 			if (this.#state.frames.peek().length > 0) return;
-			if (this.#state.closed.peek()) return;
+			if (this.#state.closed.peek() !== undefined) return;
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
 	}
@@ -276,7 +278,7 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return;
+			if (closed !== undefined) return;
 
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
@@ -295,7 +297,7 @@ export class Consumer {
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;
-			if (closed) return;
+			if (closed !== undefined) return;
 
 			await Signal.race(this.#state.frames, this.#state.closed);
 		}
@@ -322,6 +324,6 @@ export class Consumer {
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return; // already closed
-		this.#state.closed.set(abort ?? true);
+		this.#state.closed.set(abort ?? null);
 	}
 }

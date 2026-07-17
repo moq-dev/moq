@@ -3,7 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type * as Capture from "./capture";
 import { type Kind, normalizeSource, type Source } from "./types";
@@ -60,14 +60,22 @@ export interface Stats {
 	bytes: number;
 }
 
-// The initial values for our signals.
-export type EncoderProps = {
+// Signals the encoder reads.
+export type EncoderInput = {
+	// Whether to publish (and encode) this rendition. When false the rendition drops out of the
+	// catalog and stops encoding, but stays registered so a subscriber still gets an idle track.
+	enabled: Getter<boolean>;
+
 	// The broadcast to register the rendition on. Undefined resolves the config but has nowhere to publish.
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
+	broadcast: Getter<Broadcast | undefined>;
 
-	enabled?: boolean | Signal<boolean>;
-	source?: Source | Signal<Source | undefined>;
+	// The microphone (or other) track supplying samples.
+	source: Getter<Source | undefined>;
+};
 
+/** Constructor options: the wired inputs plus the live-editable tuning knobs. */
+export type EncoderProps = Inputs<EncoderInput> & {
+	// User tuning knobs. Seed a value or wire a Signal; also live-editable via the matching field.
 	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
 	sampleRate?: number | Signal<number | undefined>;
@@ -75,56 +83,74 @@ export type EncoderProps = {
 
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
+};
 
-	container?: Catalog.Container;
+type EncoderOutput = {
+	// The catalog config published for this rendition, or undefined while there's no capture.
+	catalog: Signal<Catalog.AudioConfig | undefined>;
+	// The tail of the capture graph, so callers can tap the (gain-adjusted) audio.
+	root: Signal<AudioNode | undefined>;
+	// True when a subscriber is attached and we're encoding.
+	active: Signal<boolean>;
+	// Cumulative output totals (frames, bytes) measured while serving.
+	stats: Signal<Stats>;
 };
 
 // The audio format observed from the capture worklet: the AudioContext sample rate and the actual
 // channel count (which can differ from the requested count on some platforms, e.g. Safari/macOS).
 type Captured = { sampleRate: number; channelCount: number };
 
+/**
+ * A single audio rendition encoder.
+ *
+ * Registers itself on the {@link Broadcast} under {@link name} (via `broadcast.audio(name)`), builds a
+ * capture graph from the source track, and encodes samples only while a subscriber is attached (the
+ * demand gate). Rename by constructing a new encoder; the name is not a signal.
+ */
 export class Encoder {
 	/** The full track name of this rendition, e.g. `"audio/data"`. */
 	readonly name: string;
 
-	// The broadcast to register on. Swapping it re-registers the rendition.
-	broadcast: Signal<Broadcast | undefined>;
+	readonly in: Readonlys<EncoderInput>;
 
-	enabled: Signal<boolean>;
-
+	/** Silence the encoded audio without tearing down the capture graph. */
 	muted: Signal<boolean>;
+	/** Linear gain applied before encoding, where 1 is unity. */
 	volume: Signal<number>;
+	/** Override the capture sample rate in Hz. Defaults to the track's own rate. */
 	sampleRate: Signal<number | undefined>;
+	/** Override the captured channel count. Defaults to the track's requested count. */
 	channelCount: Signal<number | undefined>;
+	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 
-	source: Signal<Source | undefined>;
-
-	// Observed capture format. #config is derived from this plus the codec, so the
-	// worklet handlers only ever write here, never read-modify-write #config.
+	// Observed capture format. #out.catalog is derived from this plus the codec, so the
+	// worklet handlers only ever write here, never read-modify-write the catalog.
 	#captured = new Signal<Captured | undefined>(undefined);
 
-	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
-	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
+	readonly #out: EncoderOutput = {
+		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
+		root: new Signal<AudioNode | undefined>(undefined),
+		active: new Signal<boolean>(false),
+		stats: new Signal<Stats>({ frames: 0, bytes: 0 }),
+	};
+	readonly out = readonlys(this.#out);
 
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 
+	// The tail of the capture graph, typed for the gain ramps in #runGain. #out.root is the
+	// same node, widened for consumers.
 	#gain = new Signal<GainNode | undefined>(undefined);
-	readonly root: Getter<AudioNode | undefined> = this.#gain;
-
-	active = new Signal<boolean>(false);
-
-	#stats = new Signal<Stats>({ frames: 0, bytes: 0 });
-	/** Cumulative encoder output totals (frames, bytes) measured while serving. */
-	readonly stats: Getter<Stats> = this.#stats;
 
 	#signals = new Effect();
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
-		this.broadcast = Signal.from(props?.broadcast);
-		this.source = Signal.from(props?.source);
-		this.enabled = Signal.from(props?.enabled ?? false);
+		this.in = {
+			enabled: getter(props?.enabled ?? false),
+			broadcast: getter(props?.broadcast),
+			source: getter(props?.source),
+		};
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
@@ -140,20 +166,20 @@ export class Encoder {
 	// Register the rendition on the broadcast, publish its config, and encode only while a subscriber
 	// is attached (the demand gate). Re-registers cleanly when the broadcast swaps.
 	#runRegister(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
 		const rendition = broadcast.audio(this.name);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved config; undefined (no capture) drops it from the catalog.
-		effect.proxy(rendition.config, this.config);
+		effect.proxy(rendition.config, this.out.catalog);
 
 		effect.run((effect) => {
-			const enabled = effect.get(this.enabled);
+			const enabled = effect.get(this.in.enabled);
 			const worklet = effect.get(this.#worklet);
 			const track = effect.get(rendition.track);
-			effect.set(this.active, enabled && !!worklet && !!track, false);
+			effect.set(this.#out.active, enabled && !!worklet && !!track, false);
 			if (!enabled || !worklet || !track) return;
 
 			this.#encode(track, worklet, effect);
@@ -161,7 +187,7 @@ export class Encoder {
 	}
 
 	#runSource(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.source]);
+		const values = effect.getAll([this.in.enabled, this.in.source]);
 		if (!values) return;
 		const [_, rawSource] = values;
 		const source = normalizeSource(rawSource);
@@ -238,6 +264,7 @@ export class Encoder {
 
 			// Only set the gain after the worklet is registered.
 			effect.set(this.#gain, gain);
+			effect.set(this.#out.root, gain);
 		});
 	}
 
@@ -272,17 +299,17 @@ export class Encoder {
 		};
 	}
 
-	// Derive #config from the captured format and the codec. Re-runs whenever either changes, so a
+	// Derive the catalog from the captured format and the codec. Re-runs whenever either changes, so a
 	// codec update (bitrate, frame duration) reconfigures without waiting for a channel-count change.
 	#runConfig(effect: Effect): void {
 		const captured = effect.get(this.#captured);
 		if (!captured) {
-			effect.set(this.#config, undefined);
+			effect.set(this.#out.catalog, undefined);
 			return;
 		}
 
 		const codec = normalizeCodec(effect.get(this.codec));
-		effect.set(this.#config, this.#createConfig(captured, codec));
+		effect.set(this.#out.catalog, this.#createConfig(captured, codec));
 	}
 
 	// Collect the encode-only Opus knobs that are set, reading the codec through the effect so the
@@ -328,7 +355,7 @@ export class Encoder {
 						throw new Error("only key frames are supported");
 					}
 
-					this.#stats.update((stats) => ({
+					this.#out.stats.update((stats) => ({
 						frames: stats.frames + 1,
 						bytes: stats.bytes + frame.byteLength,
 					}));
@@ -349,10 +376,10 @@ export class Encoder {
 
 			let config: Catalog.AudioConfig | undefined;
 			effect.run((effect: Effect) => {
-				config = effect.get(this.#config);
+				config = effect.get(this.out.catalog);
 				if (!config) return;
 
-				const source = effect.get(this.source);
+				const source = effect.get(this.in.source);
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
 				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
 
