@@ -23,9 +23,20 @@ pub struct Subscription {
 	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
 	/// locally, and a group is skipped once either measure exceeds it.
 	pub latency_max: Duration,
-	/// First group to deliver, or `None` to start at the latest group.
+	/// First group the publisher should deliver, or `None` to start at the latest group.
+	///
+	/// A request, aggregated across every live subscriber (the earliest explicit start
+	/// wins), so it says what the publisher sends, not what any one subscriber sees.
+	/// [`crate::track::Subscriber::start_at`] is the local read cursor; setting one does
+	/// not imply the other. See [Local cursor vs wire
+	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub group_start: Option<u64>,
-	/// Last group to deliver (inclusive), or `None` for no end.
+	/// Last group the publisher should deliver (inclusive), or `None` for no end.
+	///
+	/// A request, aggregated across every live subscriber (any unbounded subscriber makes
+	/// the aggregate unbounded). [`crate::track::Subscriber::end_at`] is the local read
+	/// cursor; setting one does not imply the other. See [Local cursor vs wire
+	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub group_end: Option<u64>,
 }
 
