@@ -34,8 +34,9 @@ pub struct Publish {
 }
 
 impl Publish {
-	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+	/// Store an origin-created broadcast producer, attaching the catalog track every
+	/// libmoq broadcast carries.
+	pub fn create(&mut self, mut broadcast: moq_net::broadcast::Producer) -> Result<Id, Error> {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 
@@ -43,11 +44,13 @@ impl Publish {
 		Ok(id)
 	}
 
-	pub fn get(&self, id: Id) -> Result<&moq_net::broadcast::Producer, Error> {
-		self.broadcasts
-			.get(id)
-			.ok_or(Error::BroadcastNotFound)
-			.map(|(broadcast, _)| broadcast)
+	/// Set whether the broadcast is live (announced by its origin), keeping the rest
+	/// of its route (hops, cost).
+	pub fn set_live(&mut self, broadcast: Id, live: bool) -> Result<(), Error> {
+		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let route = broadcast.consume().route();
+		broadcast.set_route(route.with_live(live))?;
+		Ok(())
 	}
 
 	/// Mutable access to both the broadcast and its catalog producer.

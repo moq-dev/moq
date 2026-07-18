@@ -15,7 +15,7 @@ import uniffi.moq.MoqSession
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins you pass to [connect], or
- * auto-created), so you can [announce] broadcasts and iterate [announcements]
+ * auto-created), so you can [createBroadcast] and iterate [announcements]
  * without touching the raw [MoqClient] handle.
  *
  * [Moq] is [AutoCloseable]; `use { ... }` (or [close]) gracefully shuts down
@@ -27,15 +27,12 @@ class Moq internal constructor(
     private val client: MoqClient,
 ) : AutoCloseable {
     /**
-     * Announce [broadcast] under [path] so subscribers can discover it.
+     * Create a live broadcast at [path] so subscribers can discover it.
      *
-     * Hold the returned [Announce] for as long as the broadcast should stay discoverable;
-     * unannouncing it removes the path. Closing the broadcast does not unannounce it.
+     * The origin announces the path, becoming visible shortly after this returns.
+     * Toggle discoverability with `setLive`; `finish()` unpublishes immediately.
      */
-    fun announce(path: String, broadcast: BroadcastProducer): Announce = session.publisher().announce(path, broadcast)
-
-    @Deprecated("Renamed to announce()", ReplaceWith("announce(path, broadcast)"))
-    fun publish(path: String, broadcast: BroadcastProducer): Announce = announce(path, broadcast)
+    fun createBroadcast(path: String): BroadcastProducer = session.publisher().createBroadcast(path)
 
     /**
      * Discover broadcasts whose path starts with [prefix] as a [Flow]. The

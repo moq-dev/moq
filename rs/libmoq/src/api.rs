@@ -490,38 +490,26 @@ pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::enter(move || State::lock().origin.create())
 }
 
-/// Announce a broadcast on an origin under `path`.
+/// Create a broadcast at `path` on an origin, for publishing media tracks.
 ///
-/// The broadcast becomes available to any origin consumers, such as over the network.
+/// The broadcast starts live: the origin announces the path so consumers can discover it,
+/// becoming visible shortly after this returns. Fill it with the `moq_publish_*` functions.
+/// Toggle discoverability with [moq_publish_set_live]; [moq_publish_finish] unpublishes
+/// immediately.
 ///
-/// Returns a positive announce handle on success, or a negative code on failure. The broadcast
-/// stays announced until the handle is passed to [moq_origin_unannounce]; finishing the broadcast
-/// itself does not unannounce it.
+/// Returns a non-zero broadcast handle on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_announce(origin: u32, path: *const c_char, path_len: usize, broadcast: u32) -> i32 {
+pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, path_len: usize) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
-		let broadcast = ffi::parse_id(broadcast)?;
 
 		let mut state = State::lock();
-		let broadcast = state.publish.get(broadcast)?.consume();
-		state.origin.announce(origin, path, broadcast)
-	})
-}
-
-/// Unannounce a broadcast previously announced with [moq_origin_announce].
-///
-/// Takes the announce handle returned by [moq_origin_announce]. Returns zero on success, or a
-/// negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_unannounce(announce: u32) -> i32 {
-	ffi::enter(move || {
-		let announce = ffi::parse_id(announce)?;
-		State::lock().origin.unannounce(announce)
+		let broadcast = state.origin.publish(origin, path)?;
+		state.publish.create(broadcast)
 	})
 }
 
@@ -714,18 +702,25 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 	})
 }
 
-/// Create a new broadcast for publishing media tracks.
+/// Set whether a broadcast created by [moq_origin_publish] is live: announced by its origin.
 ///
-/// Returns a non-zero handle to the broadcast on success, or a negative code on failure.
+/// A non-live broadcast stays reachable by exact path for subscribes and fetches; it just is
+/// not announced. This is how a publisher goes on and off the air without tearing down the
+/// broadcast.
+///
+/// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_create() -> i32 {
-	ffi::enter(move || State::lock().publish.create())
+pub extern "C" fn moq_publish_set_live(broadcast: u32, live: bool) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.set_live(broadcast, live)
+	})
 }
 
 /// Finish a broadcast and release it, ending its catalog cleanly.
 ///
-/// Subscribers see a normal end of stream rather than an error. An announcement made with
-/// [moq_origin_announce] outlives this; drop it with [moq_origin_unannounce].
+/// Subscribers see a normal end of stream rather than an error, and the origin unpublishes
+/// the path immediately.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -802,7 +797,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 ///
 /// This is the producer counterpart to [moq_consume_video_config]: instead of
 /// reading a rendition out of a catalog, it writes one into the catalog of a
-/// broadcast created with [moq_publish_create]. The rendition is keyed by
+/// broadcast created with [moq_origin_publish]. The rendition is keyed by
 /// `config.name`; calling this again with the same name replaces it. The
 /// updated catalog is published to subscribers automatically.
 ///
@@ -914,7 +909,7 @@ pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c
 ///
 /// This is the producer counterpart to [moq_catalog_get_section] /
 /// [moq_catalog_section_at]: it writes an arbitrary top-level JSON key into the
-/// catalog of a broadcast created with [moq_publish_create], beyond the
+/// catalog of a broadcast created with [moq_origin_publish], beyond the
 /// `video`/`audio` keys owned by the media pipeline. Calling it again with the
 /// same name replaces the section. The updated catalog is published to
 /// subscribers automatically.

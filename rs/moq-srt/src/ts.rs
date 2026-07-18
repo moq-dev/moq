@@ -20,30 +20,22 @@ use crate::Result;
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// Dropping the publisher ends the broadcast: the held [`origin::Publish`] guard
-/// unannounces it from the origin.
+/// Dropping the publisher ends the broadcast: the importer owns the
+/// origin-created producer, so its drop unannounces the path.
 pub struct Publisher {
-	/// Held to keep the broadcast announced for the publisher's lifetime; the
-	/// importer owns its own clone of the broadcast for writing frames.
-	_publish: origin::Publish,
 	importer: ts::Import,
 }
 
 impl Publisher {
-	/// Create the broadcast, wire up the TS importer + catalog, and announce it
-	/// into `origin` at `path`.
+	/// Create the broadcast on `origin` at `path` and wire up the TS importer +
+	/// catalog.
 	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
-		let mut broadcast = broadcast::Info::new().produce();
+		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_live(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let importer = ts::Import::new(broadcast.clone(), catalog.reserve());
-
-		let publish = origin.publish_broadcast(path, broadcast.consume())?;
+		let importer = ts::Import::new(broadcast, catalog.reserve());
 		tracing::info!(%path, "publishing ingest broadcast");
 
-		Ok(Self {
-			_publish: publish,
-			importer,
-		})
+		Ok(Self { importer })
 	}
 
 	/// Feed a chunk of MPEG-TS bytes (one SRT payload) into the importer.

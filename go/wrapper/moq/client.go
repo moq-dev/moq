@@ -158,16 +158,11 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 	return c, nil
 }
 
-// Announce advertises a broadcast under path so the remote can discover it.
+// CreateBroadcast creates a live broadcast at path so the remote can discover it.
 //
-// Hold the returned Announce for as long as the broadcast should stay discoverable.
-func (c *Client) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
-	return c.publisher.Announce(path, broadcast)
-}
-
-// Deprecated: use Announce.
-func (c *Client) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
-	return c.Announce(path, broadcast)
+// See [OriginProducer.CreateBroadcast].
+func (c *Client) CreateBroadcast(path string) (*BroadcastProducer, error) {
+	return c.publisher.CreateBroadcast(path)
 }
 
 // Announced streams broadcasts announced by the remote under prefix.

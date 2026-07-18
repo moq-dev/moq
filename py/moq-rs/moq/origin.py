@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import warnings
-
 from moq_ffi import (
-    MoqAnnounce,
     MoqAnnounced,
     MoqAnnouncedBroadcast,
     MoqAnnouncement,
@@ -18,30 +15,6 @@ from moq_ffi import (
 
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
-
-
-class Announce:
-    """A live announcement, returned by :meth:`OriginProducer.announce`.
-
-    The broadcast stays announced until :meth:`unannounce` is called or this object is
-    collected. Closing the broadcast does not unannounce it. Usable as a context manager::
-
-        with origin.announce("live", broadcast):
-            ...
-    """
-
-    def __init__(self, inner: MoqAnnounce) -> None:
-        self._inner = inner
-
-    def unannounce(self) -> None:
-        """Unannounce the broadcast, removing it from the origin. Idempotent."""
-        self._inner.unannounce()
-
-    def __enter__(self) -> Announce:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.unannounce()
 
 
 class Announcement:
@@ -196,18 +169,13 @@ class OriginProducer:
         """Serve broadcasts that consumers request without an announcement."""
         return OriginDynamic(self._inner.dynamic())
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        """Advertise ``broadcast`` at ``path`` so subscribers can discover it.
+    def create_broadcast(self, path: str) -> BroadcastProducer:
+        """Create a broadcast at ``path``, returning the producer that feeds it.
 
-        Hold the returned :class:`Announce` for as long as the broadcast should stay
-        discoverable; unannouncing it (or dropping it) removes the path.
+        The broadcast starts live: the origin announces the path so subscribers can
+        discover it, becoming visible shortly after this returns. Toggle
+        discoverability with :meth:`BroadcastProducer.set_live`; ``finish()``
+        unpublishes immediately, while dropping the producer without finishing
+        lingers briefly so a replacement publisher can take over.
         """
-        return Announce(self._inner.announce(path, broadcast._inner))
-
-    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        warnings.warn(
-            "OriginProducer.publish() is deprecated; use OriginProducer.announce() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.announce(path, broadcast)
+        return BroadcastProducer._from_inner(self._inner.create_broadcast(path))

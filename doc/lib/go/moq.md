@@ -145,22 +145,26 @@ if moq.IsAuthError(err) {
 
 ## Publishing lifetime
 
-A broadcast stays live only while you hold its `MoqBroadcastProducer`. The origin keeps a consumer, not the producer, so publishing does not keep it alive: once the producer is garbage-collected the broadcast is torn down and subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
+A broadcast stays live only while you hold its `BroadcastProducer`. Once the producer is garbage-collected the broadcast is treated as a failure: the path lingers briefly for a replacement publisher, then subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
 
 Keep a reference for as long as you are publishing, then close it explicitly when done:
 
 ```go
+broadcast, err := origin.CreateBroadcast("my-broadcast.hang")
+if err != nil {
+    // handle error
+}
 mediaProducer, err := broadcast.PublishMedia("aac", asc)
 if err != nil {
     // handle error
 }
-origin.Publish("my-broadcast.hang", broadcast)
 
 // Keep `broadcast` reachable while producing (e.g. store it on a struct the
 // publishing goroutine owns). Don't let it fall out of scope here.
 produceAudio(mediaProducer)
 
-// Finish() closes the broadcast cleanly so subscribers see a normal end.
+// Finish() closes the broadcast cleanly and unpublishes it immediately,
+// so subscribers see a normal end.
 broadcast.Finish()
 ```
 

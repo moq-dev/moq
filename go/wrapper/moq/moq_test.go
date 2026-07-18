@@ -226,7 +226,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	defer cancel()
 
 	origin := moq.NewOriginProducer()
-	broadcast, err := moq.NewBroadcastProducer()
+	broadcast, err := origin.CreateBroadcast("live")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +234,6 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	announce, err := origin.Announce("live", broadcast)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The announcement lives as long as this handle, so keep it past the reads below.
-	defer announce.Unannounce()
 
 	consumer := origin.Consume()
 	announced, err := consumer.Announced("")

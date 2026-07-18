@@ -49,9 +49,8 @@ session.shutdown()
 To publish through the auto-created origin:
 
 ```swift
-let broadcast = try BroadcastProducer()
+let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 // ... configure tracks on broadcast ...
-try session.publisher.announce(path: "my-stream", broadcast: broadcast)
 ```
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").

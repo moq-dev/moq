@@ -24,7 +24,9 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	// Write a group containing a single frame.
@@ -125,7 +127,9 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_native::moq_net::{Timescale, Timestamp};
 
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 
 	// Track with an explicit microsecond timescale (the default is milliseconds).
 	let mut track = broadcast
@@ -242,7 +246,9 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	use moq_native::moq_net::{Timescale, Timestamp};
 
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(
 			"video",
@@ -368,7 +374,9 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	}
 
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(
 			"video",
@@ -486,7 +494,9 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	use moq_native::moq_net::Timescale;
 
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
@@ -580,7 +590,9 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let pub_origin = Origin::random().produce();
 
 	// Announced before the client connects, so it rides the initial set.
-	let first = pub_origin.create_broadcast("first").expect("create broadcast");
+	let first = pub_origin
+		.create_broadcast("first", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
@@ -618,42 +630,47 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	assert!(broadcast.is_some(), "expected initial announce");
 
 	// A live announce after the initial set.
-	let second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let second = pub_origin
+		.create_broadcast("second", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_some(), "expected live announce");
 
-	// Unannounce: retracted by announce id on the wire.
-	drop(second);
+	// Unannounce: retracted by announce id on the wire. A deliberate finish
+	// unannounces immediately (a bare drop would linger for a reconnect).
+	second.finish();
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_none(), "expected unannounce");
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
-	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
+	let _second = pub_origin
+		.create_broadcast("second", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_some(), "expected re-announce");
 
-	// Replace the broadcast at "first": publish a replacement, then retire the original
-	// so the origin promotes it. A replacement is an unannounce/announce pair, which on
-	// the wire retires the old id and assigns a fresh one.
-	let mut replacement_info = moq_net::broadcast::Info::new();
-	replacement_info.origin = pub_origin.info();
-	let replacement = replacement_info.produce();
-	let _replacement_guard = pub_origin
-		.publish_broadcast("first", &replacement)
-		.expect("publish replacement");
-	drop(first);
+	// Replace the broadcast at "first": finish the original (retiring its announce
+	// id on the wire), then create a fresh broadcast at the same path (assigning a
+	// fresh id). Await the unannounce first so the re-create can't splice into the
+	// original's teardown.
+	first.finish();
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "first");
 	assert!(broadcast.is_none(), "expected the replaced unannounce");
+	let _replacement = pub_origin
+		.create_broadcast("first", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create replacement");
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "first");
 	assert!(broadcast.is_some(), "expected the replacement announce");
 
 	// A sentinel proves no stray event for "first" snuck in behind the replacement.
-	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
+	let _sentinel = pub_origin
+		.create_broadcast("sentinel", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "sentinel");
 	assert!(broadcast.is_some(), "expected sentinel announce");
@@ -699,7 +716,9 @@ async fn broadcast_route_migration() {
 
 	// ── publisher A: the preferred route (shorter hop chain) ────────
 	let origin_a = Origin::random().produce();
-	let mut broadcast_a = origin_a.create_broadcast("test").expect("create broadcast");
+	let mut broadcast_a = origin_a
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track_a = broadcast_a.create_track("video", None).expect("create track");
 	for sequence in 0..2u64 {
 		let mut group = track_a
@@ -713,14 +732,14 @@ async fn broadcast_route_migration() {
 
 	// ── publisher B: the standby, carrying an extra hop so A wins ───
 	let origin_b = Origin::random().produce();
-	let mut info_b = moq_net::broadcast::Info::new();
-	info_b.origin = origin_b.info();
-	let mut broadcast_b = info_b.produce();
 	let mut hops_b = moq_net::OriginList::new();
 	hops_b.push(Origin::new(0x1234).unwrap()).unwrap();
-	broadcast_b
-		.set_route(moq_net::broadcast::Route::new().with_hops(hops_b))
-		.expect("update route");
+	let mut broadcast_b = origin_b
+		.create_broadcast(
+			"test",
+			moq_net::broadcast::Route::new().with_hops(hops_b).with_live(true),
+		)
+		.expect("create broadcast");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track");
 	// B carries the continuation of the same content: groups 2 and 3.
 	for sequence in 2..4u64 {
@@ -732,10 +751,6 @@ async fn broadcast_route_migration() {
 			.expect("write frame");
 		group.finish().expect("finish group");
 	}
-	let publish_b = origin_b
-		.publish_broadcast("test", broadcast_b.consume())
-		.expect("publish broadcast");
-
 	let mut server_a = {
 		let mut config = moq_native::ServerConfig::default();
 		config.bind = Some("[::]:0".to_string());
@@ -764,7 +779,6 @@ async fn broadcast_route_migration() {
 		let session = request.with_publisher(&origin_b).ok().await?;
 		let _broadcast = broadcast_b;
 		let _track = track_b;
-		let _publish = publish_b;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
@@ -836,18 +850,18 @@ async fn route_reannounce_test(version: Option<&str>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let origin = Origin::random().produce();
-	let mut info = moq_net::broadcast::Info::new();
-	info.origin = origin.info();
-	let mut producer = info.produce();
 	// The original publisher: the first hop of every advertised chain. Keeping
 	// it stable across the update is what makes the restart an in-place route
 	// change rather than a broadcast replacement.
 	let publisher_hop = Origin::new(0x4444).unwrap();
 	let mut initial_hops = moq_net::OriginList::new();
 	initial_hops.push(publisher_hop).unwrap();
-	producer
-		.set_route(moq_net::broadcast::Route::new().with_hops(initial_hops))
-		.expect("set initial route");
+	let mut producer = origin
+		.create_broadcast(
+			"test",
+			moq_net::broadcast::Route::new().with_hops(initial_hops).with_live(true),
+		)
+		.expect("create broadcast");
 	let mut track = producer.create_track("video", None).expect("create track");
 	{
 		let mut group = track
@@ -856,10 +870,6 @@ async fn route_reannounce_test(version: Option<&str>) {
 		group.write_frame(Timestamp::ZERO, b"g0".as_ref()).expect("write frame");
 		group.finish().expect("finish group");
 	}
-	let publish = origin
-		.publish_broadcast("test", producer.consume())
-		.expect("publish broadcast");
-
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
@@ -876,7 +886,6 @@ async fn route_reannounce_test(version: Option<&str>) {
 		let request = server.accept().await.expect("accept");
 		let session = request.with_publisher(&origin).ok().await?;
 		let _producer = producer;
-		let _publish = publish;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
@@ -922,7 +931,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	hops.push(publisher_hop).unwrap();
 	hops.push(Origin::new(0x5555).unwrap()).unwrap();
 	route_producer
-		.set_route(moq_net::broadcast::Route::new().with_hops(hops))
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops).with_live(true))
 		.expect("update route");
 
 	// The subscriber sees the new chain on the same handle...
@@ -981,14 +990,14 @@ async fn route_replaced_test(version: Option<&str>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let origin = Origin::random().produce();
-	let mut info = moq_net::broadcast::Info::new();
-	info.origin = origin.info();
-	let mut producer = info.produce();
 	let mut hops_a = moq_net::OriginList::new();
 	hops_a.push(Origin::new(0x1111).unwrap()).unwrap();
-	producer
-		.set_route(moq_net::broadcast::Route::new().with_hops(hops_a))
-		.expect("set initial route");
+	let mut producer = origin
+		.create_broadcast(
+			"test",
+			moq_net::broadcast::Route::new().with_hops(hops_a).with_live(true),
+		)
+		.expect("create broadcast");
 	let mut track = producer.create_track("video", None).expect("create track");
 	{
 		let mut group = track
@@ -997,10 +1006,6 @@ async fn route_replaced_test(version: Option<&str>) {
 		group.write_frame(Timestamp::ZERO, b"g0".as_ref()).expect("write frame");
 		group.finish().expect("finish group");
 	}
-	let publish = origin
-		.publish_broadcast("test", producer.consume())
-		.expect("publish broadcast");
-
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
@@ -1016,7 +1021,6 @@ async fn route_replaced_test(version: Option<&str>) {
 		let request = server.accept().await.expect("accept");
 		let session = request.with_publisher(&origin).ok().await?;
 		let _producer = producer;
-		let _publish = publish;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
@@ -1052,7 +1056,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let mut hops_b = moq_net::OriginList::new();
 	hops_b.push(Origin::new(0x2222).unwrap()).unwrap();
 	route_producer
-		.set_route(moq_net::broadcast::Route::new().with_hops(hops_b))
+		.set_route(moq_net::broadcast::Route::new().with_hops(hops_b).with_live(true))
 		.expect("update route");
 
 	// The subscriber observes the swap as a real unannounce + fresh announce.
@@ -1451,7 +1455,9 @@ async fn broadcast_websocket() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
@@ -1559,7 +1565,9 @@ async fn broadcast_websocket_fallback() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
@@ -1674,7 +1682,9 @@ const NEWEST_LITE: &str = "moq-lite-05";
 #[tokio::test]
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -1742,7 +1752,9 @@ async fn broadcast_websocket_uses_newest_version() {
 #[tokio::test]
 async fn broadcast_race_quic_wins() {
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -1830,7 +1842,9 @@ async fn broadcast_race_quic_wins() {
 #[tokio::test]
 async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
@@ -2027,7 +2041,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	// ── publisher (server): only allowed to announce under "allowed" ──
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
-		.create_broadcast("allowed/test")
+		.create_broadcast("allowed/test", moq_net::broadcast::Route::new().with_live(true))
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
@@ -2163,7 +2177,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	// ── publisher (client): only allowed to serve under "allowed" ──
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
-		.create_broadcast("allowed/test")
+		.create_broadcast("allowed/test", moq_net::broadcast::Route::new().with_live(true))
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");

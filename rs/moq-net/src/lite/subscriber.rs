@@ -355,7 +355,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// A deliberate unannounce detaches gracefully: if this was the
 					// broadcast's last route it closes now, without the reconnect linger.
 					if let Some(entry) = routes.remove(&path) {
-						entry.route.unannounce();
+						entry.finish();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -378,7 +378,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// A deliberate unannounce detaches gracefully: if this was the
 					// broadcast's last route it closes now, without the reconnect linger.
 					if let Some(entry) = routes.remove(&path) {
-						entry.route.unannounce();
+						entry.finish();
 						stats_guards.remove(&abs);
 					}
 				}
@@ -546,23 +546,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// broadcast, not an alternate route to this one.
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
 
-		// Attach this session as a route feeding the origin-owned broadcast at the
-		// path. The first route creates and announces the broadcast; later routes
+		// Create this session's source feeding the origin-owned broadcast at the
+		// path. The first source creates and announces the broadcast; later sources
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let Ok(route) = self
-			.origin
-			.attach_route(path.clone(), crate::broadcast::Route::new().with_hops(hops))
-		else {
+		let route = crate::broadcast::Route::new().with_hops(hops).with_live(true);
+		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
 
-		// Serve track requests dispatched to this route in the background; the
-		// announce loop keeps the `Route` so an unannounce can detach it.
-		self.tasks
-			.push(self.clone().run_route(path.clone(), route.assignments()));
-		routes.insert(path, AnnouncedRoute { route, publisher });
+		// Serve the origin's track requests for this source in the background; the
+		// announce loop keeps the producer so an unannounce can finish it.
+		self.tasks.push(self.clone().run_source(path.clone(), source.dynamic()));
+		routes.insert(path, AnnouncedRoute::new(source, publisher));
 
 		Ok(true)
 	}
@@ -597,48 +594,46 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected restart");
 			// The peer retracted the route deliberately; detach gracefully.
 			if let Some(entry) = routes.remove(&path) {
-				entry.route.unannounce();
+				entry.finish();
 			}
 			return Ok(false);
 		}
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let metadata = crate::broadcast::Route::new().with_hops(hops);
+		let metadata = crate::broadcast::Route::new().with_hops(hops).with_live(true);
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {
 				// A different original publisher: a brand-new broadcast replaced the
 				// old one at this path. Detach gracefully (downstream unannounces if
-				// this was the last route) and attach fresh below; cached TRACK_INFO
+				// this was the last source) and attach fresh below; cached TRACK_INFO
 				// and subscriptions must not carry over.
 				let entry = routes.remove(&path).expect("matched above");
-				entry.route.unannounce();
+				entry.finish();
 			}
 			Some(entry) => {
-				if entry.route.update(metadata.clone()).is_ok() {
-					return Ok(true);
-				}
-				// The front closed underneath the handle (should not happen while we
-				// hold it); drop the stale route and attach fresh below.
-				routes.remove(&path);
+				// Same publisher, new path: update the source's route in place.
+				// In-flight tracks keep flowing; the origin only hands over if the
+				// winning source changed.
+				entry.set_route(metadata);
+				return Ok(true);
 			}
 			None => {}
 		}
 
-		let Ok(route) = self.origin.attach_route(path.clone(), metadata) else {
+		let Ok(source) = self.origin.create_broadcast(&path, metadata) else {
 			return Ok(false);
 		};
-		self.tasks
-			.push(self.clone().run_route(path.clone(), route.assignments()));
-		routes.insert(path, AnnouncedRoute { route, publisher });
+		self.tasks.push(self.clone().run_source(path.clone(), source.dynamic()));
+		routes.insert(path, AnnouncedRoute::new(source, publisher));
 
 		Ok(true)
 	}
 
-	async fn run_route(self, path: PathOwned, mut assignments: origin::Assignments) {
-		// Serve tracks assigned to this route until it is detached (the peer
-		// unannounced, or the broadcast closed) or the session dies.
+	/// Serve the origin's track requests for one announced source until the peer
+	/// unannounces (the source is finished) or the session dies.
+	async fn run_source(self, path: PathOwned, mut dynamic: crate::broadcast::Dynamic) {
 		let mut tracks = TaskSet::owned();
 		loop {
 			let next = tracks
@@ -648,23 +643,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
 						}
-						assignments.poll_next(waiter).map(Some)
+						dynamic.poll_requested_track(waiter).map(Some)
 					})
 					.await
 				})
 				.await;
 
-			let assignment = match next {
-				Some(Ok(assignment)) => assignment,
+			let request = match next {
+				Some(Ok(request)) => request,
+				// The source was finished (unannounced) or aborted.
 				Some(Err(err)) => {
-					tracing::debug!(%err, "route closed");
+					tracing::debug!(%err, "source closed");
 					break;
 				}
 				// Session gone.
 				None => break,
 			};
 
-			let name = assignment.name().to_string();
+			let name = request.name().to_string();
 			let abs = self.origin.absolute(&path);
 			// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
 			// subscriber_track avoids double-counting broadcasts: the broadcast lifetime
@@ -680,7 +676,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			// One task per track serves its lone subscription and any number of
 			// fetches concurrently.
-			tracks.push(serve.run(assignment));
+			tracks.push(serve.run(request));
 		}
 	}
 
@@ -881,21 +877,57 @@ enum Sub<S: web_transport_trait::Session> {
 	Active(SubStream<S>),
 }
 
-/// A route attached for one received announce, remembering the publisher
+/// The source created for one received announce, remembering the publisher
 /// identity (the first hop of the reconstructed chain) so a restart can tell an
 /// alternate route to the same broadcast from a brand-new broadcast.
 struct AnnouncedRoute {
-	route: origin::Route,
+	// `Option` so `finish` can consume the producer while `Drop` aborts it.
+	source: Option<crate::broadcast::Producer>,
 	publisher: crate::Origin,
+}
+
+impl AnnouncedRoute {
+	fn new(source: crate::broadcast::Producer, publisher: crate::Origin) -> Self {
+		Self {
+			source: Some(source),
+			publisher,
+		}
+	}
+
+	/// The peer deliberately retracted the path: finish the source so the origin
+	/// detaches it immediately (unannouncing downstream if it was the last).
+	fn finish(mut self) {
+		if let Some(source) = self.source.take() {
+			source.finish();
+		}
+	}
+
+	/// Update the source's advertised route in place (a restart on the same
+	/// publisher).
+	fn set_route(&mut self, route: crate::broadcast::Route) {
+		if let Some(source) = &mut self.source {
+			let _ = source.set_route(route);
+		}
+	}
+}
+
+impl Drop for AnnouncedRoute {
+	fn drop(&mut self) {
+		// Dropped without a deliberate finish (the session died): mark the source
+		// aborted so the origin lingers for a reconnect instead of unannouncing,
+		// and the dropped-without-finish warning stays quiet.
+		if let Some(source) = &self.source {
+			source.abort();
+		}
+	}
 }
 
 /// How a [`TrackServe`] run ends.
 enum Teardown {
 	/// The upstream FIN'd: the track is over for good.
 	Finished,
-	/// The origin handed the track to another route; this segment's slice is done.
-	Superseded,
-	/// The route or session failed: mark the segment dead and hand the track back.
+	/// The route or session failed: abort the track so the origin re-splices it
+	/// from another source.
 	GiveBack(Error),
 }
 
@@ -912,16 +944,15 @@ enum Event {
 	SubResponse(lite::SubscribeResponse),
 	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
 	SubClosed(Result<(), Error>),
-	/// The origin re-assigned the track to another route.
-	Superseded,
 	/// The whole session died.
 	SessionClosed,
 }
 
-/// Serves one assigned track for a relay: owns this session's segment of the
-/// logical track, driving the single upstream subscription (opened lazily on the
-/// first downstream subscriber, paused/resumed across consumer churn)
-/// concurrently with any number of one-shot fetches.
+/// Serves one requested track for a relay: owns this session's copy of the
+/// track (spliced into the origin's logical track), driving the single upstream
+/// subscription (opened lazily on the first downstream subscriber,
+/// paused/resumed across consumer churn) concurrently with any number of
+/// one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: web_transport_trait::Session> {
 	subscriber: Subscriber<S>,
@@ -931,7 +962,7 @@ struct TrackServe<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> TrackServe<S> {
-	async fn run(self, assignment: origin::Assignment) {
+	async fn run(self, request: track::Request) {
 		// SUBSCRIBE_UPDATE (and thus pause/resume) only exists on Lite03+.
 		let supports_update = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 		let supports_fetch = self.subscriber.version.has_track_stream();
@@ -950,10 +981,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Err(err) => {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "track info failed");
-					// Dropping the assignment hands the track back: another route (or a
-					// bounded retry on this one) may still serve it, and the waiting
-					// subscribers stall rather than error meanwhile.
-					drop(assignment);
+					// Rejecting the request lets the origin retry (bounded) on another
+					// source; waiting subscribers stall rather than error meanwhile.
+					request.reject(err);
 					return;
 				}
 			}
@@ -961,17 +991,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			(track::Info::default(), None)
 		};
 
-		// Splice this session's own track into the logical track. Demand from the
-		// logical subscribers arrives through the producer's aggregate, sliced to
-		// this segment's bounds (including the resume floor after a route change).
-		let mut serving = match assignment.serve(info) {
-			Ok(serving) => serving,
-			// The failed serve already handed the track back.
-			Err(err) => {
-				tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "assignment rejected");
-				return;
-			}
-		};
+		// Accept with the resolved info. The origin splices this session's copy
+		// into the logical track; demand from the logical subscribers arrives
+		// through the producer's aggregate, sliced to this segment's bounds
+		// (including the resume floor after a source change).
+		let mut serving = request.accept(info);
 
 		// Serve on-demand fetches of uncached groups from this session.
 		let dynamic = serving.dynamic();
@@ -1001,14 +1025,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						// Our own producer is alive (we hold it); treat as terminal anyway.
 						Poll::Ready(Err(_)) => return Poll::Ready(Event::SessionClosed),
 						Poll::Pending => {}
-					}
-					// A superseded serve winds down: its segment is capped at the
-					// handover boundary, so nothing it could deliver past the cap is
-					// surfaced anyway. Without this exit the loop outlives the
-					// handover (leaking the task and its upstream subscription), and
-					// a route flapping back would serve the same track twice.
-					if serving.poll_superseded(waiter).is_ready() {
-						return Poll::Ready(Event::Superseded);
 					}
 					match serving.poll_subscription_changed(waiter) {
 						Poll::Ready(Ok(pref)) => return Poll::Ready(Event::Subscription(pref)),
@@ -1094,10 +1110,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
 					break Teardown::GiveBack(err);
 				}
-				Event::Superseded => {
-					tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "superseded");
-					break Teardown::Superseded;
-				}
 				Event::SessionClosed => {
 					break Teardown::GiveBack(Error::Dropped);
 				}
@@ -1110,12 +1122,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		}
 
 		match teardown {
-			Teardown::Finished => serving.complete(),
-			// Another route serves the rest; this segment ended at its boundary cap.
-			Teardown::Superseded => serving.retire(),
+			// The upstream ended the track for good; the origin observes the
+			// completed copy and finishes the logical track.
+			Teardown::Finished => {
+				let _ = serving.finish();
+			}
 			Teardown::GiveBack(err) => {
-				// Mark this segment dead (subscribers stall and splice to the next
-				// route); dropping the serving hands the track back for re-assignment.
+				// Mark this copy dead: subscribers stall while the origin
+				// re-splices the track from the next source.
 				let _ = serving.abort(err);
 			}
 		}
@@ -1150,8 +1164,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		// Publisher Max Latency rides on the wire, so the local retention window
 		// matches what the upstream advertises (relays re-serve with the same bound).
-		// `broadcast` is left at its default here; `Assignment::serve` stamps the
-		// track's real broadcast.
+		// `broadcast` is left at its default here; `track::Request::accept` stamps
+		// the track's real broadcast.
 		let model = track::Info::default()
 			.with_timescale(info.timescale)
 			.with_latency_max(info.latency_max)

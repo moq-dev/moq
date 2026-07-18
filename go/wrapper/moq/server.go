@@ -185,19 +185,14 @@ func (s *Server) CertFingerprints() ([]string, error) {
 	return s.inner.CertFingerprints()
 }
 
-// Announce advertises a broadcast under path, served to incoming sessions.
+// CreateBroadcast creates a live broadcast at path, served to incoming sessions.
 //
-// Hold the returned Announce for as long as the broadcast should stay discoverable.
-func (s *Server) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
+// See [OriginProducer.CreateBroadcast].
+func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
 	if s.publishOrigin == nil {
 		return nil, ErrNoPublishOrigin
 	}
-	return s.publishOrigin.Announce(path, broadcast)
-}
-
-// Deprecated: use Announce.
-func (s *Server) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
-	return s.Announce(path, broadcast)
+	return s.publishOrigin.CreateBroadcast(path)
 }
 
 // Accept returns the next incoming request, or (nil, nil) when the server stops.

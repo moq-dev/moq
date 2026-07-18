@@ -28,14 +28,9 @@ pub use bytes::*;
 pub use datagram::*;
 pub use time::*;
 
-/// Publishing and consuming the set of broadcasts announced at an origin.
+/// Publishing and consuming the set of broadcasts routed through an origin.
 pub mod origin {
-	pub use super::origin_impl::{Broadcast, Consumer, Dynamic, Info, Producer, Publish, Request, Requesting};
-
-	// The route-serving surface (how sessions feed a broadcast reached over the
-	// network) is crate-internal until an external consumer shapes it; apps see
-	// only the spliced `broadcast::Consumer` and the dynamic `broadcast::Route`.
-	pub(crate) use super::origin_impl::{Assignment, Assignments, Route};
+	pub use super::origin_impl::{Consumer, Dynamic, Info, Producer, Request, Requesting};
 }
 
 /// Subscribing to broadcast (un)announcements from an origin.

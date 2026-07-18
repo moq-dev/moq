@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import warnings
 from collections.abc import Sequence
 from typing import Literal
 
 from moq_ffi import MoqRequest, MoqServer
 
-from .origin import Announce, OriginProducer
+from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 
@@ -75,7 +74,7 @@ class Server:
     In simple mode (no origin provided), creates an internal origin automatically:
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-            announce = server.announce("live", broadcast)
+            broadcast = server.create_broadcast("live")
             await server.serve()
 
     Or hand-roll the accept loop if you need per-request control:
@@ -181,24 +180,15 @@ class Server:
             raise StopAsyncIteration
         return Request(request)
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        """Advertise a broadcast under the given path, served to incoming sessions.
+    def create_broadcast(self, path: str) -> BroadcastProducer:
+        """Create a live broadcast at ``path``, served to incoming sessions.
 
-        Hold the returned :class:`Announce` for as long as the broadcast should stay
-        discoverable; unannouncing it removes the path.
+        See :meth:`OriginProducer.create_broadcast`.
         """
         origin = self._publish_origin
         if origin is None:
             raise RuntimeError("no publish origin configured")
-        return origin.announce(path, broadcast)
-
-    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        warnings.warn(
-            "Server.publish() is deprecated; use Server.announce() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.announce(path, broadcast)
+        return origin.create_broadcast(path)
 
     async def serve(self) -> None:
         """Accept every session in a loop, holding each one alive until it closes.

@@ -26,6 +26,10 @@ pub struct MoqRoute {
 	/// Preference among routes serving the same broadcast: lower wins.
 	#[uniffi(default = 0)]
 	pub cost: u64,
+	/// Whether the broadcast is live: actively produced, so the origin announces it.
+	/// A non-live broadcast stays reachable by exact path for subscribes and fetches.
+	#[uniffi(default = false)]
+	pub live: bool,
 }
 
 impl From<moq_net::broadcast::Route> for MoqRoute {
@@ -33,6 +37,7 @@ impl From<moq_net::broadcast::Route> for MoqRoute {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			cost: route.cost,
+			live: route.live,
 		}
 	}
 }
@@ -41,7 +46,9 @@ impl TryFrom<MoqRoute> for moq_net::broadcast::Route {
 	type Error = MoqError;
 
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
-		let mut out = moq_net::broadcast::Route::new().with_cost(route.cost);
+		let mut out = moq_net::broadcast::Route::new()
+			.with_cost(route.cost)
+			.with_live(route.live);
 		for id in route.hops {
 			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
@@ -220,45 +227,23 @@ impl MoqOriginProducer {
 		})
 	}
 
-	/// Announce a broadcast to this origin under the given path so subscribers can discover it.
-	/// Named `announce` (not `publish`) so the `MoqSession::publisher().announce(...)` chain
-	/// doesn't stutter "publisher.publish".
+	/// Create a broadcast at `path` on this origin, returning the producer that feeds it.
 	///
-	/// The broadcast stays announced until the returned [`MoqAnnounce`] is unannounced or
-	/// dropped. Closing the broadcast alone does not unannounce it, so hold the handle for as
-	/// long as the broadcast should be discoverable.
-	pub fn announce(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<Arc<MoqAnnounce>, MoqError> {
+	/// The broadcast starts live: the origin announces the path so subscribers can discover
+	/// it, becoming visible shortly after this returns. Toggle discoverability with
+	/// [`MoqBroadcastProducer::set_live`]; a non-live broadcast stays reachable by exact
+	/// path for subscribes and fetches without being announced.
+	///
+	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
+	/// without finishing is treated as a failure: the path lingers briefly so a
+	/// replacement publisher can take over without subscribers noticing.
+	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let consumer = broadcast.consume_inner()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
-		let publish = self.inner.publish_broadcast(path.as_str(), &consumer)?;
-
-		Ok(Arc::new(MoqAnnounce {
-			inner: std::sync::Mutex::new(Some(publish)),
-		}))
-	}
-}
-
-// ---- MoqAnnounce ----
-
-/// A live announcement, returned by [`MoqOriginProducer::announce`].
-///
-/// This is the publish-side guard: it keeps one broadcast announced, and unannouncing it
-/// removes the path from the origin. (The subscribe-side [`MoqAnnounced`] is the unrelated
-/// stream of announcements arriving from a remote.)
-#[derive(uniffi::Object)]
-pub struct MoqAnnounce {
-	inner: std::sync::Mutex<Option<moq_net::origin::Publish>>,
-}
-
-#[uniffi::export]
-impl MoqAnnounce {
-	/// Unannounce the broadcast, removing it from the origin. Idempotent, and implied by
-	/// dropping this handle.
-	pub fn unannounce(&self) {
-		let _guard = crate::ffi::RUNTIME.enter();
-		// Dropping the moq-net guard is what unannounces.
-		drop(self.inner.lock().unwrap().take());
+		let broadcast = self
+			.inner
+			.create_broadcast(path.as_str(), moq_net::broadcast::Route::new().with_live(true))?;
+		Ok(Arc::new(MoqBroadcastProducer::from_inner(broadcast)?))
 	}
 }
 

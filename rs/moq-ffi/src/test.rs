@@ -3,6 +3,7 @@ use super::producer::*;
 use super::server::MoqServer;
 use super::session::MoqClient;
 use crate::consumer::MoqFetchGroupOptions;
+use crate::consumer::MoqRouteWatch;
 use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
@@ -703,65 +704,95 @@ fn unknown_format() {
 }
 
 #[tokio::test]
-async fn announce_handle_unannounces() {
+async fn create_broadcast_announces() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let consumer = origin.consume();
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let _broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	let announce = origin.announce("live".into(), &broadcast).unwrap();
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	// Visibility is asynchronous, so wait for the announcement rather than requesting.
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	tokio::time::timeout(TIMEOUT, announced.available())
 		.await
-		.expect("timed out waiting for the announced broadcast")
-		.expect("an announced broadcast should resolve");
+		.expect("timed out waiting for the announcement")
+		.expect("a created broadcast should be announced");
 
-	announce.unannounce();
-	let result = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
-		.await
-		.expect("timed out waiting for the unannounced broadcast");
-	assert!(
-		result.is_err(),
-		"unannounce should remove the broadcast from the origin"
-	);
+	_broadcast.finish().unwrap();
 }
 
 #[tokio::test]
-async fn closing_broadcast_leaves_it_announced() {
-	// The handle owns the announcement's lifetime: closing the broadcast is not an implicit
-	// unannounce, matching libmoq's moq_origin_unpublish contract.
+async fn set_live_toggles_announcement() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let consumer = origin.consume();
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	let _announce = origin.announce("live".into(), &broadcast).unwrap();
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	let bc = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+
+	// The consumer observes the live flag through the route. Skip intermediate
+	// updates and wait for the flag itself, since route propagation is asynchronous.
+	async fn wait_live(watch: &MoqRouteWatch, live: bool) {
+		loop {
+			let route = tokio::time::timeout(TIMEOUT, watch.next())
+				.await
+				.expect("timed out waiting for a route update")
+				.unwrap()
+				.expect("broadcast ended while waiting for a route");
+			if route.live == live {
+				return;
+			}
+		}
+	}
+	let watch = bc.route_updates();
+	wait_live(&watch, true).await;
+
+	broadcast.set_live(false).unwrap();
+	wait_live(&watch, false).await;
+
+	// Non-live: unannounced, but still reachable by exact path.
+	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+		.await
+		.expect("timed out requesting the non-live broadcast")
+		.expect("a non-live broadcast stays reachable by exact path");
+
 	broadcast.finish().unwrap();
-
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
-		.await
-		.expect("timed out waiting for the closed broadcast")
-		.expect("closing a broadcast must not unannounce it");
 }
 
 #[tokio::test]
-async fn dropping_announce_handle_unannounces() {
+async fn finish_unpublishes() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let consumer = origin.consume();
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("live".into()).unwrap();
 
-	drop(origin.announce("live".into(), &broadcast).unwrap());
-
-	let result = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("live".into()))
+	let announced = consumer.announced_broadcast("live".into()).unwrap();
+	tokio::time::timeout(TIMEOUT, announced.available())
 		.await
-		.expect("timed out waiting for the dropped announcement");
-	assert!(result.is_err(), "dropping the handle should unannounce");
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+
+	// A graceful finish detaches immediately; the path stops resolving. Removal is
+	// asynchronous, so poll until it takes effect.
+	broadcast.finish().unwrap();
+	let removed = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			if consumer.request_broadcast("live".into()).await.is_err() {
+				return;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await;
+	assert!(removed.is_ok(), "finish should unpublish the broadcast");
 }
 
 #[tokio::test]
 async fn local_publish_consume_audio() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("live".into()).unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
-	let _announce = origin.announce("live".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -811,15 +842,16 @@ async fn local_publish_consume_audio() {
 
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
+
+	broadcast.finish().unwrap();
 }
 
 #[tokio::test]
 async fn video_publish_consume() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("video-test".into()).unwrap();
 	let init = h264_init();
 	let media = broadcast.publish_media(media_init("avc3", init)).unwrap();
-	let _announce = origin.announce("video-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -872,15 +904,16 @@ async fn video_publish_consume() {
 
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(!frame.payload.is_empty(), "frame should have payload data");
+
+	broadcast.finish().unwrap();
 }
 
 #[tokio::test]
 async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("ordering-test".into()).unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
-	let _announce = origin.announce("ordering-test".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -926,15 +959,16 @@ async fn multiple_frames_ordering() {
 		let expected = format!("frame-{i}");
 		assert_eq!(frame.payload, expected.as_bytes(), "frame {i} has wrong payload");
 	}
+
+	broadcast.finish().unwrap();
 }
 
 #[tokio::test]
 async fn catalog_update_on_new_track() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = origin.create_broadcast("catalog-update".into()).unwrap();
 	let init = opus_head();
 	let _media1 = broadcast.publish_media(media_init("opus", init.clone())).unwrap();
-	let _announce = origin.announce("catalog-update".into(), &broadcast).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -962,6 +996,8 @@ async fn catalog_update_on_new_track() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(catalog2.audio.len(), 2);
+
+	broadcast.finish().unwrap();
 }
 
 #[test]
@@ -981,8 +1017,7 @@ fn finish_closes_producer() {
 #[tokio::test]
 async fn announced_broadcast() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let _announce = origin.announce("test/broadcast".into(), &broadcast).unwrap();
+	let _broadcast = origin.create_broadcast("test/broadcast".into()).unwrap();
 
 	let consumer = origin.consume();
 	let announced = consumer.announced("".into()).unwrap();
@@ -995,6 +1030,9 @@ async fn announced_broadcast() {
 
 	assert_eq!(announcement.path(), "test/broadcast");
 	let _catalog = announcement.broadcast().subscribe_catalog().await.unwrap();
+	// Finish so the origin tears the broadcast down immediately (the canonical
+	// end for a publisher; dropping without finish is the failure-linger path).
+	_broadcast.finish().unwrap();
 }
 
 #[tokio::test]
@@ -1079,7 +1117,7 @@ fn without_runtime() {
 		let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 		let consumer = origin.consume();
 
-		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let broadcast = origin.create_broadcast("test".into()).unwrap();
 		let init = opus_head();
 		let media = broadcast.publish_media(media_init("opus", init)).unwrap();
 		media
@@ -1088,7 +1126,6 @@ fn without_runtime() {
 				timestamp_us: 1000,
 			})
 			.unwrap();
-		let _announce = origin.announce("test".into(), &broadcast).unwrap();
 
 		let announced = consumer.announced("".into()).unwrap();
 		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
@@ -1154,10 +1191,9 @@ async fn server_client_roundtrip() {
 		.expect("server accept task panicked");
 
 	// Publish a broadcast on the server side.
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
-	let _announce = server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	// Receive the announcement on the client side via the consume origin.
 	let consumer = client_origin.consume();
@@ -1253,10 +1289,9 @@ async fn server_client_roundtrip_auto_origin() {
 		.expect("server accept task panicked");
 
 	// Server publishes; client receives via the auto consumer.
-	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let broadcast = server_origin.create_broadcast("hello".into()).unwrap();
 	let init = opus_head();
 	let media = broadcast.publish_media(media_init("opus", init)).unwrap();
-	let _announce = server_origin.announce("hello".into(), &broadcast).unwrap();
 
 	let announced = consumer.announced("".into()).unwrap();
 	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
@@ -1268,9 +1303,10 @@ async fn server_client_roundtrip_auto_origin() {
 
 	// With neither side wired, both share one origin, so a broadcast announced on this
 	// session's publisher is discoverable through its own consumer.
-	let local_broadcast = MoqBroadcastProducer::new().unwrap();
-	let _local_announce = publisher.announce("local-only".into(), &local_broadcast).unwrap();
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("local-only".into()))
+	let local_broadcast = publisher.create_broadcast("local-only".into()).unwrap();
+	// Visibility is asynchronous, so wait for the announcement rather than requesting.
+	let local_announced = consumer.announced_broadcast("local-only".into()).unwrap();
+	tokio::time::timeout(TIMEOUT, local_announced.available())
 		.await
 		.expect("timed out waiting for the loopback broadcast")
 		.expect("an auto-origin session should discover its own announcement");
@@ -1410,8 +1446,7 @@ async fn request_per_session_publish_override() {
 		.expect("accept task panicked");
 
 	// Publishing on the override origin must reach the client.
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let _announce = override_origin.announce("override-only".into(), &broadcast).unwrap();
+	let broadcast = override_origin.create_broadcast("override-only".into()).unwrap();
 
 	let consumer = client_origin.consume();
 	let announced = consumer.announced("".into()).unwrap();

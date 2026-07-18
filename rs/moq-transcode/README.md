@@ -37,11 +37,12 @@ let mut config = moq_transcode::Config::default();
 // renditions are referenced one level up.
 config.source = Some(moq_net::PathRelativeOwned::from("..".to_string()));
 
-let output = moq_net::broadcast::Info::default().produce();
-let announce = origin.publish_broadcast(format!("{path}/transcode.hang"), &output)?;
+let output = origin.create_broadcast(
+    format!("{path}/transcode.hang"),
+    moq_net::broadcast::Route::new().with_live(true),
+)?;
 
 moq_transcode::run(source, output, config).await?;
-drop(announce);
 ```
 
 Only renditions strictly below the source survive the ladder: a 480p source is

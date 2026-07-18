@@ -96,10 +96,8 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 ## Publish
 
 ```swift
-let broadcast = try BroadcastProducer()
+let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
-
-let announce = try session.publisher.announce(path: "my-stream", broadcast: broadcast)
 
 try audio.writeFrame(payload, timestampUs: 0)
 try audio.writeFrame(payload, timestampUs: 20_000)
@@ -145,10 +143,8 @@ Call `request.abort(errorCode:)` when the requested group cannot be produced. Fe
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
 
 ```swift
-let broadcast = try BroadcastProducer()
+let broadcast = try session.publisher.createBroadcast(path: "events")
 let dynamic = try broadcast.dynamic()
-
-let announce = try session.publisher.announce(path: "events", broadcast: broadcast)
 
 for try await request in dynamic {
     if try request.name == "alerts" {

@@ -109,7 +109,7 @@ class SmokeTest {
     }
 
     @Test
-    fun `server listens, announces, and streams requests`() = runTest {
+    fun `server listens, publishes, and streams requests`() = runTest {
         Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
             assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
 
@@ -117,9 +117,9 @@ class SmokeTest {
             assertEquals(1, fingerprints.size)
             assertEquals(64, fingerprints[0].length)
 
-            BroadcastProducer().use { broadcast ->
-                val announce = server.announce("live", broadcast)
-                announce.unannounce()
+            server.createBroadcast("live").use { broadcast ->
+                broadcast.setLive(false)
+                broadcast.finish()
             }
         }
     }

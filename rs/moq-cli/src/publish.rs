@@ -208,14 +208,16 @@ enum Source {
 /// a broadcast that the MoQ side announces.
 pub struct Publish {
 	source: Source,
+	// Keeps the origin-created broadcast alive for the publisher's lifetime;
+	// tracks and importers don't. Only the capture path also writes through it.
+	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publish {
-	/// Build a publisher decoding the given container format from stdin.
-	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-
+	/// Build a publisher decoding the given container format from stdin into
+	/// `broadcast` (typically created on the origin that announces it).
+	pub fn new(mut broadcast: moq_net::broadcast::Producer, format: &PublishFormat) -> anyhow::Result<Self> {
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
 		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
@@ -264,8 +266,11 @@ impl Publish {
 	/// overshooting a pipe that can't carry it. Pass `None` to encode at the
 	/// configured bitrate regardless.
 	#[cfg(feature = "capture")]
-	pub fn capture(args: &CaptureArgs, bandwidth: Option<moq_net::bandwidth::Consumer>) -> anyhow::Result<Self> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
+	pub fn capture(
+		mut broadcast: moq_net::broadcast::Producer,
+		args: &CaptureArgs,
+		bandwidth: Option<moq_net::bandwidth::Consumer>,
+	) -> anyhow::Result<Self> {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
@@ -276,11 +281,6 @@ impl Publish {
 			source: Source::Capture { catalog, video, audio },
 			broadcast,
 		})
-	}
-
-	/// A consumer of the broadcast being published, for announcing it on an Origin.
-	pub fn consume(&self) -> moq_net::broadcast::Consumer {
-		self.broadcast.consume()
 	}
 
 	/// Drive the source until stdin EOF (or the capture devices stop).
@@ -479,12 +479,21 @@ mod tests {
 	/// verbatim stream (SCTE-35) and one PES-framed verbatim stream, by importing
 	/// `bbb.ts` into a broadcast that also holds the two ancillary tracks and
 	/// re-exporting with the `mpegts` catalog extension.
+	/// Let the origin's spawned attach task run: a created broadcast becomes
+	/// routable asynchronously, shortly after `create_broadcast` returns.
+	async fn settle() {
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	async fn manufacture_input() -> Vec<u8> {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_net::Origin::random().produce();
-		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
+		let mut broadcast = origin
+			.create_broadcast("cli", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
+		settle().await;
 		let mut catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, Catalog::<tscat::Ext>::default()).unwrap();
 
@@ -562,11 +571,13 @@ mod tests {
 
 		// Publish side: `Publish::new(Ts)` builds a `ts::Import<Ext>`, so the verbatim
 		// streams land in the broadcast instead of being dropped by the media-only path.
-		let mut publish = Publish::new(&PublishFormat::Ts).unwrap();
-		let consumer = publish.consume();
-		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
+		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_net::Origin::random().produce();
-		let _publish = origin.publish_broadcast("cli", &consumer).unwrap();
+		let broadcast = origin
+			.create_broadcast("cli", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
+		settle().await;
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");

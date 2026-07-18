@@ -33,13 +33,16 @@ func mediaInit(format string, init []byte, opts []MediaOption) ffi.MoqInit {
 	return ffi.MoqInit{Format: format, Data: init, Video: cfg.video}
 }
 
-// BroadcastProducer publishes a collection of tracks. Build one, publish tracks
-// onto it, then publish the broadcast itself to an origin/client/server.
+// BroadcastProducer publishes a collection of tracks. Create one at a path with
+// [OriginProducer.CreateBroadcast] (or [Client.CreateBroadcast]), then publish
+// tracks onto it.
 type BroadcastProducer struct {
 	inner *ffi.MoqBroadcastProducer
 }
 
-// NewBroadcastProducer creates an empty broadcast.
+// NewBroadcastProducer creates a standalone broadcast, not attached to any
+// origin: use it to serve a dynamic request ([BroadcastRequest.Accept]) or for
+// local pub/sub. To publish at a path, use [OriginProducer.CreateBroadcast].
 func NewBroadcastProducer() (*BroadcastProducer, error) {
 	inner, err := ffi.NewMoqBroadcastProducer()
 	if err != nil {
@@ -57,11 +60,20 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	return &BroadcastDynamic{inner: inner}, nil
 }
 
-// SetRoute sets the broadcast's route: the hop chain and cost it
+// SetRoute sets the broadcast's route: the hop chain, cost, and liveness it
 // advertises. Use it as conditions shift (e.g. a standby transcoder lowering
 // its cost once warm); consumers observe the change via RouteUpdates.
 func (b *BroadcastProducer) SetRoute(route Route) error {
 	return b.inner.SetRoute(route)
+}
+
+// SetLive sets whether the broadcast is live, keeping the rest of its route.
+//
+// The origin announces the path only while the broadcast is live; a non-live
+// broadcast stays reachable by exact path for subscribes and fetches. This is
+// how a publisher goes on and off the air without tearing down the broadcast.
+func (b *BroadcastProducer) SetLive(live bool) error {
+	return b.inner.SetLive(live)
 }
 
 // PublishMedia publishes a media track from an init segment, fed frame by

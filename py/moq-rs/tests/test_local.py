@@ -92,9 +92,8 @@ def test_unknown_format():
 
 async def test_local_publish_consume_audio():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("live")
     media = broadcast.publish_media("opus", opus_head())
-    _announce = origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -127,9 +126,8 @@ async def test_local_publish_consume_audio():
 
 async def test_video_publish_consume():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("video-test")
     media = broadcast.publish_media("avc3", h264_init())
-    _announce = origin.announce("video-test", broadcast)
 
     consumer = origin.consume()
 
@@ -161,9 +159,8 @@ async def test_video_publish_consume():
 
 async def test_multiple_frames_ordering():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("ordering-test")
     media = broadcast.publish_media("opus", opus_head())
-    _announce = origin.announce("ordering-test", broadcast)
 
     consumer = origin.consume()
 
@@ -188,9 +185,8 @@ async def test_multiple_frames_ordering():
 
 async def test_catalog_update_on_new_track():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("catalog-update")
     _media1 = broadcast.publish_media("opus", opus_head())
-    _announce = origin.announce("catalog-update", broadcast)
 
     consumer = origin.consume()
 
@@ -221,8 +217,7 @@ def test_finish_closes_producer():
 
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
-    _announce = origin.announce("test/broadcast", broadcast)
+    broadcast = origin.create_broadcast("test/broadcast")
 
     consumer = origin.consume()
 
@@ -543,9 +538,8 @@ async def test_subscribe_media_default_latency_and_context_manager():
     """subscribe_media takes the catalog record directly and defaults the
     latency; the returned consumer is also an async context manager."""
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("live")
     media = broadcast.publish_media("opus", opus_head())
-    _announce = origin.announce("live", broadcast)
 
     consumer = origin.consume()
 
@@ -567,9 +561,8 @@ async def test_subscribe_media_default_latency_and_context_manager():
 
 async def test_raw_publish_consume():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("robot/arm")
     raw = broadcast.publish_track("events")
-    _announce = origin.announce("robot/arm", broadcast)
 
     consumer = origin.consume()
 
@@ -592,9 +585,8 @@ async def test_raw_publish_consume():
 
 async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("robot/io")
     raw = broadcast.publish_track("commands")
-    _announce = origin.announce("robot/io", broadcast)
 
     consumer = origin.consume()
 
@@ -674,9 +666,8 @@ async def test_broadcast_producer_consume_direct():
 async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("track/seq")
     raw = broadcast.publish_track("seq")
-    _announce = origin.announce("track/seq", broadcast)
 
     consumer = origin.consume()
 
@@ -709,9 +700,8 @@ async def test_default_iteration_is_sequence_order():
     this fails if the default iteration ever reverts to recv_group.
     """
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("track/ordering")
     raw = broadcast.publish_track("ordering")
-    _announce = origin.announce("track/ordering", broadcast)
 
     sequenced = origin.consume()
     arrived = origin.consume()
@@ -744,9 +734,8 @@ async def _take(iterator, count: int):
 async def test_raw_multi_frame_group():
     """A single group can carry multiple frames, not just one per group."""
     origin = moq.OriginProducer()
-    broadcast = moq.BroadcastProducer()
+    broadcast = origin.create_broadcast("stream/chunks")
     raw = broadcast.publish_track("chunks")
-    _announce = origin.announce("stream/chunks", broadcast)
 
     consumer = origin.consume()
 

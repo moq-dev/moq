@@ -4,7 +4,7 @@
 //! Each test is gated with `#[cfg(feature = "...")]` so it only compiles when the
 //! corresponding backend is enabled. Running `cargo test --all-features` exercises all.
 
-use moq_native::moq_net::Origin;
+use moq_native::moq_net::{self, Origin};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,7 +65,9 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
@@ -324,7 +326,9 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");

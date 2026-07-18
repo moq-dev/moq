@@ -1468,6 +1468,29 @@ impl Consumer {
 			ConsumerKind::Spliced(resume) => resume.latest(),
 		}
 	}
+
+	/// Poll for the track reaching a terminal state: `Ok(())` once it is complete
+	/// (the final group was produced), `Err` once it closed or aborted before
+	/// completing. The origin's dispatcher uses this to tell a track that truly
+	/// ended from one whose serving route died mid-stream.
+	pub(crate) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			// Spliced tracks are compositions; the dispatcher never monitors one.
+			return Poll::Pending;
+		};
+		match ready!(state.poll(waiter, |state| {
+			if state.is_complete() {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		})) {
+			Ok(_) => Poll::Ready(Ok(())),
+			// Closed before completing. Read through the returned guard: it holds
+			// the lock, so re-locking the channel here would deadlock.
+			Err(closed) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
+		}
+	}
 }
 
 /// The pollable state of a [`Consumer::subscribe`]; awaited via the

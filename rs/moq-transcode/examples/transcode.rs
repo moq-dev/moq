@@ -64,10 +64,9 @@ async fn main() -> anyhow::Result<()> {
 	// The default ladder and encoder (hardware first: NVENC on Linux) apply.
 	config.source = Some(moq_net::PathRelativeOwned::from("..".to_string()));
 
-	let output = moq_net::broadcast::Info::default().produce();
-	let _announce = publish
-		.publish_broadcast(&output_path, &output)
-		.context("failed to publish the derivative broadcast")?;
+	let output = publish
+		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_live(true))
+		.context("failed to create the derivative broadcast")?;
 	tracing::info!(source = %args.source, output = %output_path, "transcoding");
 
 	tokio::select! {

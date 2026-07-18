@@ -335,23 +335,44 @@ class BroadcastDynamic:
 
 
 class BroadcastProducer:
-    """Wraps MoqBroadcastProducer with a cleaner interface."""
+    """Wraps MoqBroadcastProducer with a cleaner interface.
+
+    Constructing one directly creates a standalone broadcast for serving dynamic
+    requests (:meth:`moq.BroadcastRequest.accept`) or local pub/sub. To publish at
+    a path, use :meth:`moq.OriginProducer.create_broadcast` instead.
+    """
 
     def __init__(self) -> None:
         self._inner = MoqBroadcastProducer()
+
+    @classmethod
+    def _from_inner(cls, inner: MoqBroadcastProducer) -> BroadcastProducer:
+        """Wrap an existing FFI producer (e.g. one created from an origin)."""
+        self = cls.__new__(cls)
+        self._inner = inner
+        return self
 
     def dynamic(self) -> BroadcastDynamic:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
     def set_route(self, route: Route) -> None:
-        """Update the broadcast's route: the hop chain and cost it advertises.
+        """Update the broadcast's route: the hop chain, cost, and liveness it advertises.
 
         Use this as conditions shift (e.g. a standby transcoder lowering its
         ``cost`` once warm); consumers observe the change via
         :meth:`BroadcastConsumer.route_changed`.
         """
         self._inner.set_route(route)
+
+    def set_live(self, live: bool) -> None:
+        """Set whether the broadcast is live, keeping the rest of its route.
+
+        The origin announces the path only while the broadcast is live; a non-live
+        broadcast stays reachable by exact path for subscribes and fetches. This is
+        how a publisher goes on and off the air without tearing down the broadcast.
+        """
+        self._inner.set_live(live)
 
     def publish_media(
         self,

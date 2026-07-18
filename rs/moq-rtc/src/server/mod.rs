@@ -50,18 +50,14 @@ impl std::fmt::Debug for Response {
 	}
 }
 
-/// The negotiated session runner behind [`Response::run`]: holds the broadcast
-/// announcement guard and mux registration for the session's lifetime, and
-/// unregisters the session from the server registry on drop. Built by
-/// [`whip::accept`] / [`whep::accept`] (descendant modules, so the private
-/// fields are in scope there).
+/// The negotiated session runner behind [`Response::run`]: holds the mux
+/// registration for the session's lifetime, and unregisters the session from
+/// the server registry on drop. Built by [`whip::accept`] / [`whep::accept`]
+/// (descendant modules, so the private fields are in scope there).
 struct AcceptedSession {
 	server: Server,
 	resource_id: String,
 	session: Option<crate::session::Session>,
-	/// Announcement guard for the ingest (WHIP) path; unannounces on drop.
-	/// `None` for egress (WHEP) sessions.
-	publish: Option<moq_net::origin::Publish>,
 	registration: Option<mux::Registration>,
 	cancel: Option<oneshot::Receiver<()>>,
 	role: &'static str,
@@ -77,9 +73,8 @@ impl AcceptedSession {
 		let cancel = self.cancel.take().expect("accepted session missing cancel receiver");
 
 		let result = {
-			// Hold the announcement guard + mux registration for the session's
-			// lifetime; both release (unannounce / unregister) on exit.
-			let _publish = self.publish.take();
+			// Hold the mux registration for the session's lifetime; it
+			// unregisters on exit.
 			let _registration = registration;
 			tokio::select! {
 				res = session.run() => {

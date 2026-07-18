@@ -112,10 +112,9 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		moq_net::PathRelativeOwned::from(vec![".."; depth].join("/"))
 	});
 
-	let output = moq_net::broadcast::Info::default().produce();
-	let _announce = publish
-		.publish_broadcast(&output_path, &output)
-		.context("failed to publish the derivative broadcast")?;
+	let output = publish
+		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_live(true))
+		.context("failed to create the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {

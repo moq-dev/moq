@@ -92,7 +92,13 @@ pub async fn run(ctx: Connection) {
 	for index in 0..rolled.broadcasts {
 		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
 
-		let mut broadcast = broadcast::Info::new().produce();
+		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_live(true)) {
+			Ok(broadcast) => broadcast,
+			Err(err) => {
+				tracing::error!(connection, %err, "failed to create broadcast");
+				continue;
+			}
+		};
 		let track = match broadcast.create_track(TRACK, None) {
 			Ok(track) => track,
 			Err(err) => {
@@ -100,17 +106,9 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-
-		let publish_handle = match publish.publish_broadcast(&path, &broadcast) {
-			Ok(handle) => handle,
-			Err(err) => {
-				tracing::error!(connection, %err, "failed to publish broadcast");
-				continue;
-			}
-		};
 		own.insert(path.clone());
-		// Hold the broadcast producer and publish handle for the connection's lifetime so it stays announced.
-		broadcasts.push((broadcast, publish_handle));
+		// Hold the broadcast producer for the connection's lifetime so it stays announced.
+		broadcasts.push(broadcast);
 
 		let stats = stats.clone();
 		tasks.spawn(produce(connection, path, rolled, track, stats));

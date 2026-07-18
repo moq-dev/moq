@@ -208,9 +208,6 @@ async fn run(config: &Config) -> Result<()> {
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
 	let client = config.client.clone().init()?;
 
-	// Create the broadcast producer.
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
 	let default_game_prefix = format!("{}/game", config.prefix);
@@ -218,10 +215,11 @@ async fn run(config: &Config) -> Result<()> {
 	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
 	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
 
+	// Create the broadcast on the publish origin; the live route announces it.
 	let broadcast_path = format!("{game_prefix}/{name}");
-	let _publish = publish_origin
-		.publish_broadcast(&broadcast_path, &broadcast)
-		.context("failed to publish broadcast")?;
+	let mut broadcast = publish_origin
+		.create_broadcast(&broadcast_path, moq_net::broadcast::Route::new().with_live(true))
+		.context("failed to create broadcast")?;
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
 	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"

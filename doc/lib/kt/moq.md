@@ -106,10 +106,8 @@ track.update(Subscription(priority = 20u.toUByte(), ordered = false))
 import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
-    val broadcast = BroadcastProducer()
+    val broadcast = moq.createBroadcast("my-stream")
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
-
-    val announce = moq.announce("my-stream", broadcast)
 
     audio.writeFrame(Frame(payload = payload))
     audio.writeFrame(Frame(payload = payload, timestampUs = 20_000u))
@@ -126,8 +124,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 import dev.moq.*
 
 Server.listen("127.0.0.1:4443", tlsGenerate = listOf("localhost")).use { server ->
-    val broadcast = BroadcastProducer()
-    val announce = server.announce("live", broadcast)
+    val broadcast = server.createBroadcast("live")
 
     server.serve()
 }
@@ -190,10 +187,8 @@ Use a dynamic broadcast when subscribers should be able to request raw tracks th
 import dev.moq.*
 
 Moq.connect("https://relay.example.com").use { moq ->
-    val broadcast = BroadcastProducer()
+    val broadcast = moq.createBroadcast("events")
     val dynamic = broadcast.dynamic()
-
-    val announce = moq.announce("events", broadcast)
 
     dynamic.requestedTracks().collect { request ->
         if (request.name() == "alerts") {

@@ -118,13 +118,20 @@ public final class RouteWatch: AsyncSequence, Sendable {
     }
 }
 
-/// Write side of a broadcast: open tracks and publish frames. Does nothing until
-/// announced to an origin (see `OriginProducer.announce`).
+/// Write side of a broadcast: open tracks and publish frames.
+///
+/// Constructing one directly creates a standalone broadcast for serving dynamic
+/// requests (`BroadcastRequest.accept`) or local pub/sub. To publish at a path,
+/// use `OriginProducer.createBroadcast(path:)` instead.
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
     public init() throws {
         ffi = try MoqBroadcastProducer()
+    }
+
+    init(_ ffi: MoqBroadcastProducer) {
+        self.ffi = ffi
     }
 
     /// A read handle for this broadcast's tracks.
@@ -138,12 +145,21 @@ public final class BroadcastProducer: Sendable {
         BroadcastDynamic(try ffi.dynamic())
     }
 
-    /// Update the broadcast's route: the hop chain and cost it advertises.
+    /// Update the broadcast's route: the hop chain, cost, and liveness it advertises.
     ///
     /// Use this as conditions shift (e.g. a standby transcoder lowering its cost
     /// once warm); consumers observe the change via `BroadcastConsumer.routeUpdates()`.
     public func setRoute(_ route: Route) throws {
         try ffi.setRoute(route: route)
+    }
+
+    /// Set whether the broadcast is live, keeping the rest of its route.
+    ///
+    /// The origin announces the path only while the broadcast is live; a non-live
+    /// broadcast stays reachable by exact path for subscribes and fetches. This is
+    /// how a publisher goes on and off the air without tearing down the broadcast.
+    public func setLive(_ live: Bool) throws {
+        try ffi.setLive(live: live)
     }
 
     /// Open a media track. `format` controls how `initData` and frame payloads

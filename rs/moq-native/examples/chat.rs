@@ -37,20 +37,17 @@ async fn run_session(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
 
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
-	// Create and publish a broadcast to the origin..
-	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	// Create a broadcast on the origin. A broadcast is a collection of tracks,
+	// but in this example we'll only create one. The live route announces it.
+	// NOTE: The path is empty because we're using the URL to scope the broadcast.
+	// If you put "alice" here, it would be published as "anon/chat-example/alice".
+	let mut broadcast = origin
+		.create_broadcast("", moq_net::broadcast::Route::new().with_live(true))
+		.context("failed to create broadcast")?;
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
 	let mut track = broadcast.create_track("chat", None)?;
-
-	// NOTE: The path is empty because we're using the URL to scope the broadcast.
-	// If you put "alice" here, it would be published as "anon/chat-example/alice".
-	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
-	let _publish = origin
-		.publish_broadcast("", &broadcast)
-		.context("failed to publish broadcast")?;
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.

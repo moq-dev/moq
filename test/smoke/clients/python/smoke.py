@@ -20,12 +20,10 @@ LATENCY_MAX_MS = 1_000  # subscribe_media congestion-control / lookahead window
 
 
 async def publish(url: str, broadcast: str) -> None:
-    producer = moq.BroadcastProducer()
-    media = producer.publish_media_stream("avc3")
-
     async with moq.Client(url, tls_verify=False) as client:
-        # Hold the announcement for the lifetime of the publish loop; dropping it unannounces.
-        _announce = client.announce(broadcast, producer)
+        # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
+        producer = client.create_broadcast(broadcast)
+        media = producer.publish_media_stream("avc3")
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin) to {url}")
 
         loop = asyncio.get_running_loop()

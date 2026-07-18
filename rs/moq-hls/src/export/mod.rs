@@ -258,7 +258,13 @@ mod tests {
 	#[tokio::test]
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		// Let the origin's spawned attach task run so the broadcast is routable.
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -318,7 +324,9 @@ mod tests {
 	#[tokio::test]
 	async fn reconciles_removed_and_reconfigured_renditions() {
 		let origin = moq_net::Origin::random().produce();
-		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let (ready, _) = watch::channel(0);
 		let broadcaster = Broadcaster {

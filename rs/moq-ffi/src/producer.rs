@@ -194,6 +194,16 @@ impl TrackDynamicProducer {
 }
 
 impl MoqBroadcastProducer {
+	/// Wrap a `moq_net::broadcast::Producer` (standalone or origin-created), attaching
+	/// the catalog track every FFI broadcast carries.
+	pub(crate) fn from_inner(mut broadcast: moq_net::broadcast::Producer) -> Result<Self, MoqError> {
+		let catalog =
+			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
+		Ok(Self {
+			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
+		})
+	}
+
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
@@ -246,21 +256,18 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Create a new broadcast for publishing media tracks.
+	/// Create a standalone broadcast, not attached to any origin.
 	///
-	/// NOTE: This will do nothing until published to an origin.
+	/// Use it to serve a dynamic broadcast request ([`MoqBroadcastRequest::accept`](crate::origin::MoqBroadcastRequest::accept))
+	/// or for local pub/sub via [`consume`](Self::consume). To publish at a path, use
+	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog =
-			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
-		Ok(Arc::new(Self {
-			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
-		}))
+		Ok(Arc::new(Self::from_inner(moq_net::broadcast::Info::new().produce())?))
 	}
 
-	/// Update the broadcast's route: the hop chain and cost it advertises.
+	/// Update the broadcast's route: the hop chain, cost, and liveness it advertises.
 	///
 	/// Use this as conditions shift (e.g. a standby transcoder lowering its cost
 	/// once it is warm); consumers observe the change via
@@ -269,6 +276,19 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let route = route.try_into()?;
 		self.with_state(|state| Ok(state.broadcast.set_route(route)?))
+	}
+
+	/// Set whether the broadcast is live, keeping the rest of its route (hops, cost).
+	///
+	/// The origin announces the path only while the broadcast is live; a non-live
+	/// broadcast stays reachable by exact path for subscribes and fetches. This is
+	/// how a publisher goes on and off the air without tearing down the broadcast.
+	pub fn set_live(&self, live: bool) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.with_state(|state| {
+			let route = state.broadcast.consume().route();
+			Ok(state.broadcast.set_route(route.with_live(live))?)
+		})
 	}
 
 	/// Set (or replace) a top-level application catalog section by name.

@@ -66,13 +66,11 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let mut broadcast = origin
+				.create_broadcast(&config.broadcast, moq_net::broadcast::Route::new().with_live(true))
+				.context("failed to create broadcast")?;
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
-
-			let _publish = origin
-				.publish_broadcast(&config.broadcast, &broadcast)
-				.context("failed to publish broadcast")?;
 
 			let reconnect = client.with_publisher(&origin).reconnect(config.url);
 

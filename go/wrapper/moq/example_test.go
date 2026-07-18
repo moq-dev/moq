@@ -37,7 +37,7 @@ func ExampleClient_Announced() {
 }
 
 // Publish a media track to a relay.
-func ExampleClient_Publish() {
+func ExampleClient_CreateBroadcast() {
 	ctx := context.Background()
 
 	client, err := moq.Dial(ctx, "https://relay.example.com")
@@ -46,23 +46,17 @@ func ExampleClient_Publish() {
 	}
 	defer client.Close()
 
-	broadcast, err := moq.NewBroadcastProducer()
+	broadcast, err := client.CreateBroadcast("me/mic")
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Finishing unpublishes the broadcast immediately.
 	defer broadcast.Finish()
 
 	media, err := broadcast.PublishMedia("opus", opusHead())
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	announce, err := client.Announce("me/mic", broadcast)
-	if err != nil {
-		log.Fatal(err)
-	}
-	// The broadcast stays announced until this handle goes away.
-	defer announce.Unannounce()
 
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
 		log.Fatal(err)

@@ -16,14 +16,19 @@ MoQOutput::MoQOutput(obs_data_t *, obs_output_t *output)
 	  connect_time_ms(0),
 	  origin(moq_origin_create()),
 	  session(0),
-	  broadcast(moq_publish_create()),
+	  broadcast(0),
 	  outstanding_sessions(0)
 {
 }
 
 MoQOutput::~MoQOutput()
 {
-	moq_publish_finish(broadcast);
+	// Finish the broadcast before closing the origin, matching the libmoq
+	// teardown order (broadcast first). Stop() skips it once zeroed.
+	if (broadcast > 0) {
+		moq_publish_finish(broadcast);
+		broadcast = 0;
+	}
 	moq_origin_close(origin);
 
 	Stop();
@@ -130,12 +135,12 @@ bool MoQOutput::Start()
 
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 
-	// Announce the broadcast on the origin we created. The announce handle is dropped:
-	// the announcement lives until the destructor closes the origin, which is the whole
-	// lifetime of the output anyway.
-	auto result = moq_origin_announce(origin, path.data(), path.size(), broadcast);
-	if (result < 0) {
-		LOG_ERROR("Failed to publish broadcast to session: %d", result);
+	// Create the broadcast on the origin we created; it starts live so the session
+	// announces it. Stop() finishes it, so each Start creates a fresh one.
+	broadcast = moq_origin_publish(origin, path.data(), path.size());
+	if (broadcast < 0) {
+		LOG_ERROR("Failed to publish broadcast to session: %d", broadcast);
+		broadcast = 0;
 		// The session connected above; close it so a retry on this same output
 		// doesn't reuse the stale handle. Its terminal callback releases the
 		// outstanding-session reference the destructor waits on.
@@ -167,6 +172,13 @@ void MoQOutput::Stop(bool signal)
 			moq_publish_media_finish(handle);
 	}
 	audio_tracks.clear();
+
+	// Finish the broadcast so the origin unpublishes it immediately; Start()
+	// creates a fresh one on restart.
+	if (broadcast > 0) {
+		moq_publish_finish(broadcast);
+		broadcast = 0;
+	}
 
 	if (signal) {
 		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);

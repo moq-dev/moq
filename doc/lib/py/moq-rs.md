@@ -21,9 +21,9 @@ Requires Python 3.10+. The distribution is `moq-rs` (the `moq` name is taken on 
 
 ## Concepts
 
-A **broadcast** is a collection of tracks identified by a path. A **track** is a live stream of frames. Producers write broadcasts to an origin; consumers subscribe to whatever has been announced.
+A **broadcast** is a collection of tracks identified by a path. A **track** is a live stream of frames. Producers create broadcasts on an origin; consumers subscribe to whatever has been announced.
 
-`announce` returns an `Announce` handle that owns the announcement: the broadcast stays discoverable until you call `unannounce()` or drop the handle. Closing the broadcast does not unannounce it, so keep the handle alive for as long as the path should resolve.
+`create_broadcast(path)` creates a live broadcast on the origin and returns its producer. The path stays announced while the broadcast is live: toggle discoverability with `set_live(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
 
 For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_media` / `subscribe_media` and the catalog will be populated automatically.
 
@@ -55,9 +55,8 @@ except moq.Error as err:
 ### Publishing media
 
 ```python
-broadcast = moq.BroadcastProducer()
+broadcast = client.create_broadcast("my-stream")
 audio = broadcast.publish_media("opus", opus_init_bytes)
-announce = client.announce("my-stream", broadcast)
 
 audio.write_frame(payload, timestamp_us=0)
 audio.finish()
@@ -98,9 +97,8 @@ Advertise application-specific metadata (for example a side-channel transcript t
 import json
 
 # Publish: attach a custom section.
-broadcast = moq.BroadcastProducer()
+broadcast = client.create_broadcast("my-stream")
 broadcast.set_catalog_section("transcript", {"track": "transcript.json"})
-announce = client.announce("my-stream", broadcast)
 
 # Subscribe: read it back. Sections are unknown to the base catalog, so decode the JSON yourself.
 catalog = await announcement.broadcast.catalog()
@@ -206,9 +204,8 @@ async for record in broadcast_consumer.subscribe_json_stream("events"):
 Use a dynamic broadcast when subscribers should be able to request raw tracks that are not published yet:
 
 ```python
-broadcast = moq.BroadcastProducer()
+broadcast = client.create_broadcast("events")
 dynamic = broadcast.dynamic()
-announce = client.announce("events", broadcast)
 
 async for request in dynamic:
     if request.name == "alerts":

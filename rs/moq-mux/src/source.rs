@@ -99,18 +99,22 @@ impl Source {
 	}
 }
 
-/// Test helper: announce `broadcast` on a throwaway origin and return a [`Source`] rooted at
-/// it, so exporter tests that build a local broadcast can still resolve it by path. The origin
-/// and its announcement are leaked so the broadcast stays reachable for the source's lifetime
-/// (harmless in a test binary).
+/// Test helper: serve `broadcast` on a throwaway origin's dynamic handler and return a
+/// [`Source`] rooted at it, so exporter tests that build a local broadcast can still resolve
+/// it by path. The origin is leaked so the broadcast stays reachable for the source's
+/// lifetime (harmless in a test binary).
 #[cfg(test)]
 pub(crate) fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = moq_net::Origin::random().produce();
-	let publish = origin
-		.publish_broadcast("test", broadcast)
-		.expect("publish test broadcast");
+	let mut dynamic = origin.dynamic();
+	let served = broadcast.clone();
+	tokio::spawn(async move {
+		while let Ok(request) = dynamic.requested_broadcast().await {
+			request.accept(served.clone());
+		}
+	});
 	let source = Source::new(origin.consume(), "test");
-	Box::leak(Box::new((origin, publish)));
+	Box::leak(Box::new(origin));
 	source
 }
 
@@ -119,11 +123,21 @@ mod tests {
 	use super::*;
 	use moq_net::{Origin, PathRelative};
 
+	/// Let the origin's spawned attach task run: a created broadcast becomes
+	/// routable asynchronously, shortly after `create_broadcast` returns.
+	async fn settle() {
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	#[tokio::test]
 	async fn no_override_targets_catalog_broadcast() {
 		let origin = Origin::random().produce();
-		let producer = moq_net::broadcast::Info::new().produce();
-		let _publish = origin.publish_broadcast("a/pub", &producer).unwrap();
+		let _producer = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
+		settle().await;
 
 		let source = Source::new(origin.consume(), "a/pub");
 
@@ -139,10 +153,12 @@ mod tests {
 	#[tokio::test]
 	async fn subscribe_track_resolves_catalog_broadcast() {
 		let origin = Origin::random().produce();
-		let mut producer = moq_net::broadcast::Info::new().produce();
+		let mut producer = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
 		// The track must exist for the subscription to resolve (SUBSCRIBE_OK).
 		let _video = producer.create_track("video", None).unwrap();
-		let _publish = origin.publish_broadcast("a/pub", &producer).unwrap();
+		settle().await;
 
 		let source = Source::new(origin.consume(), "a/pub");
 		source
@@ -154,9 +170,11 @@ mod tests {
 	#[tokio::test]
 	async fn self_reference_targets_catalog_broadcast() {
 		let origin = Origin::random().produce();
-		let mut producer = moq_net::broadcast::Info::new().produce();
+		let mut producer = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
 		let _video = producer.create_track("video", None).unwrap();
-		let _publish = origin.publish_broadcast("a/pub", &producer).unwrap();
+		settle().await;
 
 		let source = Source::new(origin.consume(), "a/pub");
 
@@ -179,12 +197,15 @@ mod tests {
 	async fn subscribe_track_resolves_referenced_broadcast() {
 		let origin = Origin::random().produce();
 
-		let catalog = moq_net::broadcast::Info::new().produce();
-		let _catalog_publish = origin.publish_broadcast("a/pub", &catalog).unwrap();
+		let _catalog = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
 
-		let mut referenced = moq_net::broadcast::Info::new().produce();
+		let mut referenced = origin
+			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_live(true))
+			.unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
-		let _referenced_publish = origin.publish_broadcast("a/source", &referenced).unwrap();
+		settle().await;
 
 		let source = Source::new(origin.consume(), "a/pub");
 

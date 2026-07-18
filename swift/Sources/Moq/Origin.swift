@@ -1,6 +1,6 @@
 import MoqFFI
 
-/// The publish side of an origin: announce local broadcasts so subscribers can
+/// The publish side of an origin: create broadcasts so subscribers can
 /// discover them.
 public final class OriginProducer: Sendable {
     let ffi: MoqOriginProducer
@@ -23,30 +23,15 @@ public final class OriginProducer: Sendable {
         OriginDynamic(ffi.dynamic())
     }
 
-    /// Announce a broadcast under the given path so subscribers can find it.
+    /// Create a broadcast at `path`, returning the producer that feeds it.
     ///
-    /// Hold the returned `Announce` for as long as the broadcast should stay discoverable;
-    /// unannouncing it (or releasing it) removes the path. Closing the broadcast does not.
-    @discardableResult
-    public func announce(path: String, broadcast: BroadcastProducer) throws -> Announce {
-        Announce(try ffi.announce(path: path, broadcast: broadcast.ffi))
-    }
-}
-
-/// A live announcement, returned by `OriginProducer.announce`.
-///
-/// The publish-side guard keeping one broadcast announced. (The subscribe-side `Announced` is
-/// the unrelated stream of announcements arriving from a remote.)
-public final class Announce: Sendable {
-    let ffi: MoqAnnounce
-
-    init(_ ffi: MoqAnnounce) {
-        self.ffi = ffi
-    }
-
-    /// Unannounce the broadcast, removing it from the origin. Idempotent.
-    public func unannounce() {
-        ffi.unannounce()
+    /// The broadcast starts live: the origin announces the path so subscribers can
+    /// discover it, becoming visible shortly after this returns. Toggle
+    /// discoverability with `BroadcastProducer.setLive(_:)`; `finish()` unpublishes
+    /// immediately, while releasing the producer without finishing lingers briefly
+    /// so a replacement publisher can take over.
+    public func createBroadcast(path: String) throws -> BroadcastProducer {
+        BroadcastProducer(try ffi.createBroadcast(path: path))
     }
 }
 

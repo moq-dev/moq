@@ -21,7 +21,7 @@ use crate::{COMPRESSED_SUFFIX, SessionsFrame, TrafficFrame, sessions_track, traf
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
-	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
+	/// Origin the stats broadcasts are created on.
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
@@ -204,6 +204,9 @@ impl Task {
 			ticker.tick().await;
 
 			if weak.upgrade().is_none() {
+				for (_, publisher) in groups.drain() {
+					publisher.broadcast.finish();
+				}
 				return;
 			}
 
@@ -306,7 +309,18 @@ impl Task {
 				});
 			}
 
-			groups.retain(|group, _| active.contains(group));
+			// Deliberate unpublish: finish evicted broadcasts so the origin
+			// drops them immediately instead of lingering for a reconnect.
+			let evicted: Vec<PathOwned> = groups
+				.keys()
+				.filter(|group| !active.contains(*group))
+				.cloned()
+				.collect();
+			for group in evicted {
+				if let Some(publisher) = groups.remove(&group) {
+					publisher.broadcast.finish();
+				}
+			}
 		}
 	}
 }
@@ -372,7 +386,6 @@ fn flush_dynamic<T: Serialize + Default>(
 
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
-	_publish: origin::Publish,
 	broadcast: broadcast::Producer,
 	traffic_tracks: HashMap<String, TrackPair<TrafficFrame>>,
 	session_tracks: HashMap<String, TrackPair<SessionsFrame>>,
@@ -382,7 +395,16 @@ struct GroupPublisher {
 
 impl GroupPublisher {
 	fn create(origin: &origin::Producer, prefix: &Path, group: &Path, node: Option<&str>) -> Option<Self> {
-		let mut broadcast = broadcast::Info::new().produce();
+		let advertised = advertised_path(prefix, group, node);
+		let mut broadcast = match origin.create_broadcast(&advertised, broadcast::Route::new().with_live(true)) {
+			Ok(broadcast) => broadcast,
+			Err(err) => {
+				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
+				return None;
+			}
+		};
+		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
+
 		let mut traffic_tracks = HashMap::new();
 		let mut session_tracks = HashMap::new();
 
@@ -411,18 +433,7 @@ impl GroupPublisher {
 			}
 		}
 
-		let advertised = advertised_path(prefix, group, node);
-		let publish = match origin.publish_broadcast(&advertised, &broadcast) {
-			Ok(publish) => publish,
-			Err(err) => {
-				tracing::warn!(advertised = %advertised, ?err, "stats: origin rejected stats broadcast");
-				return None;
-			}
-		};
-		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
-
 		Some(Self {
-			_publish: publish,
 			broadcast,
 			traffic_tracks,
 			session_tracks,
@@ -777,9 +788,12 @@ mod tests {
 		}
 
 		// The internal tier never saw traffic, so its tracks were never created.
+		// The announced broadcast is an origin-owned splice, so `track()` always
+		// hands back a logical track; only the subscription reveals absence.
 		for name in ["internal/publisher.json", "internal/publisher.json.z"] {
+			let track = broadcast.track(name).expect("logical track");
 			assert!(
-				broadcast.track(name).is_err(),
+				track.subscribe(None).await.is_err(),
 				"{name} must not exist for a tier with no traffic",
 			);
 		}

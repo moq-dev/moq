@@ -35,36 +35,20 @@ func (o *OriginProducer) Dynamic() *OriginDynamic {
 	return &OriginDynamic{inner: o.inner.Dynamic()}
 }
 
-// Announce advertises a broadcast at the given path so subscribers can discover it.
+// CreateBroadcast creates a broadcast at the given path, returning the producer
+// that feeds it.
 //
-// Hold the returned Announce for as long as the broadcast should stay discoverable;
-// unannouncing it removes the path. Closing the broadcast does not unannounce it.
-func (o *OriginProducer) Announce(path string, broadcast *BroadcastProducer) (*Announce, error) {
-	if broadcast == nil {
-		return nil, errors.New("moq: nil broadcast producer")
-	}
-	inner, err := o.inner.Announce(path, broadcast.inner)
+// The broadcast starts live: the origin announces the path so subscribers can
+// discover it, becoming visible shortly after this returns. Toggle
+// discoverability with [BroadcastProducer.SetLive]; Finish unpublishes
+// immediately, while dropping the producer without finishing lingers briefly so
+// a replacement publisher can take over.
+func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
+	inner, err := o.inner.CreateBroadcast(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Announce{inner: inner}, nil
-}
-
-// Deprecated: use Announce.
-func (o *OriginProducer) Publish(path string, broadcast *BroadcastProducer) (*Announce, error) {
-	return o.Announce(path, broadcast)
-}
-
-// Announce is a live announcement returned by [OriginProducer.Announce]: the publish-side
-// guard keeping one broadcast announced. The subscribe-side [Announced] is the unrelated
-// stream of announcements arriving from a remote.
-type Announce struct {
-	inner *ffi.MoqAnnounce
-}
-
-// Unannounce removes the broadcast from the origin. Idempotent.
-func (a *Announce) Unannounce() {
-	a.inner.Unannounce()
+	return &BroadcastProducer{inner: inner}, nil
 }
 
 // OriginDynamic streams broadcast requests for paths that are not announced.

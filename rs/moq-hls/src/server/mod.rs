@@ -140,6 +140,14 @@ async fn evict_closed(inner: Arc<Inner>, name: String, broadcaster: Arc<Broadcas
 mod tests {
 	use super::*;
 
+	/// Let the origin's spawned attach/detach tasks run: a created broadcast
+	/// becomes routable (and a finished one unroutable) asynchronously.
+	async fn settle() {
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	/// Mirrors the middleware example in this module's docs, which `doctest = false`
 	/// keeps out of the compiler's reach. Paused time skips the allowed request's
 	/// RESOLVE_TIMEOUT wait for a broadcast that never arrives.
@@ -190,13 +198,17 @@ mod tests {
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = moq_net::Origin::random().produce();
-		let producer = origin.create_broadcast("gone").expect("publish allowed");
+		let producer = origin
+			.create_broadcast("gone", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		settle().await;
 		let source = moq_mux::Source::new(origin.consume(), "gone");
 		let broadcaster = Broadcaster::new(source, Config::default())
 			.await
 			.expect("catalog broadcast resolves while announced");
-		// Drop the publisher so the resolved broadcast (and the broadcaster) reports closed.
-		drop(producer);
+		// Finish the publisher so the resolved broadcast (and the broadcaster) reports closed.
+		producer.finish();
+		settle().await;
 		broadcaster
 	}
 
@@ -212,7 +224,10 @@ mod tests {
 			.lock()
 			.unwrap()
 			.insert("live".to_string(), stale.clone());
-		let _producer = origin.create_broadcast("live").expect("publish allowed");
+		let _producer = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		settle().await;
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
 
@@ -225,7 +240,10 @@ mod tests {
 		let origin = moq_net::Origin::random().produce();
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
-		let new_producer = origin.create_broadcast("live").expect("publish allowed");
+		let new_producer = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		settle().await;
 		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())
 			.await
 			.expect("catalog broadcast resolves while announced");
@@ -241,6 +259,6 @@ mod tests {
 
 		let cached = server.inner.broadcasters.lock().unwrap().get("live").cloned();
 		assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &new)));
-		drop(new_producer);
+		new_producer.finish();
 	}
 }

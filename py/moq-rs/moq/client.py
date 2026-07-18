@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import warnings
-
 from moq_ffi import MoqClient
 
-from .origin import Announce, Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
+from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 from .subscribe import BroadcastConsumer
@@ -108,21 +106,12 @@ class Client:
             self._inner = None
         self._session = None
 
-    def announce(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        """Advertise ``broadcast`` at ``path`` so subscribers can discover it.
+    def create_broadcast(self, path: str) -> BroadcastProducer:
+        """Create a live broadcast at ``path`` so subscribers can discover it.
 
-        Hold the returned :class:`Announce` for as long as the broadcast should stay
-        discoverable; unannouncing it removes the path.
+        See :meth:`OriginProducer.create_broadcast`.
         """
-        return self._require_publisher().announce(path, broadcast)
-
-    def publish(self, path: str, broadcast: BroadcastProducer) -> Announce:
-        warnings.warn(
-            "Client.publish() is deprecated; use Client.announce() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.announce(path, broadcast)
+        return self._require_publisher().create_broadcast(path)
 
     def announced(self, prefix: str = "") -> Announced:
         return self._require_consumer().announced(prefix)

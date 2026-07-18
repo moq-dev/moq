@@ -142,7 +142,9 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -246,7 +248,9 @@ async fn relay_websocket_root_path_upgrades() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -310,7 +314,9 @@ async fn two_publish_only_clients_coexist() {
 
 	// ── two publish-only publishers, each serving a distinct broadcast ──
 	let pub_a = Origin::random().produce();
-	let mut broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
+	let mut broadcast_a = pub_a
+		.create_broadcast("alpha", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast a");
 	let mut track_a = broadcast_a.create_track("video", None).expect("create track a");
 	track_a
 		.append_group()
@@ -319,7 +325,9 @@ async fn two_publish_only_clients_coexist() {
 		.expect("write frame a");
 
 	let pub_b = Origin::random().produce();
-	let mut broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
+	let mut broadcast_b = pub_b
+		.create_broadcast("beta", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast b");
 	let mut track_b = broadcast_b.create_track("video", None).expect("create track b");
 	track_b
 		.append_group()
@@ -450,7 +458,9 @@ async fn internal_tcp_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -560,7 +570,9 @@ async fn internal_unix_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
@@ -645,7 +657,9 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
 	let pub_origin = Origin::random().produce();
-	let mut bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
+	let mut bc = pub_origin
+		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_live(true))
+		.expect("create broadcast");
 	let mut track = bc.create_track("video", None).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group

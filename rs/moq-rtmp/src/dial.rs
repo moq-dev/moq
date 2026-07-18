@@ -438,27 +438,20 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 /// An active pull: the moq-mux FLV importer publishing into the origin. Mirrors the
 /// server's publisher; dropping it unannounces the broadcast.
 struct Publisher {
-	/// Held to keep the broadcast announced for the publisher's lifetime.
-	_publish: origin::Publish,
 	importer: FlvImport,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
-		let mut broadcast = broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
-
-		let publish = origin
-			.publish_broadcast(path, broadcast.consume())
+		let mut broadcast = origin
+			.create_broadcast(path, broadcast::Route::new().with_live(true))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
-		Ok(Self {
-			_publish: publish,
-			importer,
-		})
+		Ok(Self { importer })
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
@@ -509,12 +502,11 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_net::Origin::random().produce();
-		let mut broadcast = broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
-		let _publish = server_origin
-			.publish_broadcast("live/cam0", broadcast.consume())
+		let mut broadcast = server_origin
+			.create_broadcast("live/cam0", broadcast::Route::new().with_live(true))
 			.unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();

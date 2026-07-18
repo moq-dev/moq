@@ -19,8 +19,6 @@ typealias OriginOptions = uniffi.moq.MoqOriginOptions
 typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
-/** The publish-side guard keeping one broadcast announced; unannounce it to remove the path. */
-typealias Announce = uniffi.moq.MoqAnnounce
 typealias Announced = uniffi.moq.MoqAnnounced
 typealias AnnouncedBroadcast = uniffi.moq.MoqAnnouncedBroadcast
 typealias Announcement = uniffi.moq.MoqAnnouncement

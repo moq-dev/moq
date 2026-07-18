@@ -571,13 +571,13 @@ impl Cluster {
 		// Held in scope so the registration stays announced until `run` exits.
 		// Discovery is paired with it: a gossip-only relay (passive rendezvous) has
 		// nothing to discover, so we only run it when we also have an outbound peer.
-		let _self_registration: Option<origin::Broadcast> = if gossip {
+		let self_registration: Option<moq_net::broadcast::Producer> = if gossip {
 			// Checked above: gossip requires `node`.
 			let node = node.as_deref().expect("gossip requires --cluster-node");
 			let path = Path::new(MESH_PREFIX).join(node);
 			let broadcast = self
 				.origin
-				.create_broadcast(&path)
+				.create_broadcast(&path, moq_net::broadcast::Route::new().with_live(true))
 				.expect(".internal/origins is within the relay origin's root");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
@@ -597,12 +597,18 @@ impl Cluster {
 		};
 
 		if tasks.is_empty() {
-			// Passive rendezvous: park to keep `_self_registration` alive. The
+			// Passive rendezvous: park to keep `self_registration` alive. The
 			// process still exits via the other arms of `tokio::select!` in main.
 			std::future::pending::<()>().await
 		}
 
 		while tasks.join_next().await.is_some() {}
+
+		// Deliberate shutdown: finish the registration so it unannounces
+		// immediately instead of lingering for a reconnect.
+		if let Some(registration) = self_registration {
+			registration.finish();
+		}
 		Ok(())
 	}
 

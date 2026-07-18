@@ -42,11 +42,10 @@ import moq
 
 async def main():
     async with moq.Client("https://relay.quic.video") as client:
-        broadcast = moq.BroadcastProducer()
+        broadcast = client.create_broadcast("my-stream")
 
         # Publish an Opus audio track (init bytes from your encoder)
         audio = broadcast.publish_media("opus", opus_init_bytes)
-        announce = client.announce("my-stream", broadcast)
 
         # Write frames
         audio.write_frame(payload, timestamp_us=0)
@@ -67,9 +66,8 @@ import moq
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
-        broadcast = moq.BroadcastProducer()
+        broadcast = server.create_broadcast("hello")
         track = broadcast.publish_track("events")
-        announce = server.announce("hello", broadcast)
         print(f"listening on https://{server.local_addr}")
 
         sessions = []
@@ -111,7 +109,7 @@ client = moq.Client(
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
-  - `.announce(path, broadcast) → Announce`. Advertise a broadcast to be served; hold the handle to keep it announced.
+  - `.create_broadcast(path) → BroadcastProducer`. Create a live broadcast served to incoming sessions; `finish()` unpublishes it.
 - **`Request`**. An incoming session, yielded by `async for request in server`.
   - `.url`, `.transport`. Properties.
   - `.set_publish(origin)`, `.set_consume(origin)`. Per-request overrides.
@@ -170,7 +168,7 @@ All consumers (`CatalogConsumer`, `MediaConsumer`, `TrackConsumer`, `AudioConsum
 - **`OriginProducer(cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
   - `.dynamic() → OriginDynamic`
-  - `.announce(path, broadcast) → Announce`
+  - `.create_broadcast(path) → BroadcastProducer`
 - **`OriginDynamic`**. Async source of broadcasts requested by consumers.
   - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.abort(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`

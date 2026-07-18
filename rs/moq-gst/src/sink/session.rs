@@ -126,10 +126,9 @@ impl Session {
 		let _rt = RUNTIME.enter();
 
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let broadcast_consumer = broadcast.consume();
+		let mut broadcast =
+			origin.create_broadcast(&settings.broadcast, moq_net::broadcast::Route::new().with_live(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
-		let publish = origin.publish_broadcast(&settings.broadcast, broadcast_consumer)?;
 
 		let status = Arc::new(Status::default());
 		let errored = Arc::new(AtomicBool::new(false));
@@ -148,14 +147,7 @@ impl Session {
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
 
-		let join = RUNTIME.spawn(forward(
-			reconnect,
-			origin,
-			publish,
-			status.clone(),
-			errored.clone(),
-			element,
-		));
+		let join = RUNTIME.spawn(forward(reconnect, origin, status.clone(), errored.clone(), element));
 
 		Ok((
 			Self {
@@ -217,16 +209,14 @@ impl Drop for Session {
 async fn forward(
 	mut reconnect: moq_native::Reconnect,
 	origin: moq_net::origin::Producer,
-	publish: moq_net::origin::Publish,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,
 	element: glib::WeakRef<Element>,
 ) {
-	// Hold the origin producer for the task's lifetime so the published broadcast stays alive: the
-	// reconnecting client owns the consumer (taken once, via `origin.consume()` at start) and
-	// re-publishes it on each connect.
+	// Hold the origin producer for the task's lifetime so the broadcast created on it stays routable:
+	// the reconnecting client owns the consumer (taken once, via `origin.consume()` at start) and
+	// serves it on each connect.
 	let _origin = origin;
-	let _publish = publish;
 
 	// Persistent across reconnects; watched only to fire property notifications.
 	let mut send_bandwidth = reconnect.send_bandwidth();

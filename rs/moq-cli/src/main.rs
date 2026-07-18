@@ -100,8 +100,6 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
-	// RAII guards keeping our broadcasts announced until the endpoints finish.
-	let mut announce = Vec::new();
 	// The stdin/capture pipeline runs on this task instead of the JoinSet: the
 	// platform capture stream is not Send, so its future cannot be spawned.
 	let mut local: Option<Publish> = None;
@@ -146,13 +144,10 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	// Foreign side: the single source.
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
-		let publish = Publish::new(&format)?;
-		announce.push(
-			origin
-				.publish_broadcast(&name, publish.consume())
-				.context("failed to publish broadcast")?,
-		);
-		local = Some(publish);
+		let broadcast = origin
+			.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+			.context("failed to create broadcast")?;
+		local = Some(Publish::new(broadcast, &format)?);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
@@ -194,13 +189,10 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let publish = Publish::capture(&capture, send_bandwidth)?;
-				announce.push(
-					origin
-						.publish_broadcast(&name, publish.consume())
-						.context("failed to publish broadcast")?,
-				);
-				local = Some(publish);
+				let broadcast = origin
+					.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+					.context("failed to create broadcast")?;
+				local = Some(Publish::capture(broadcast, &capture, send_bandwidth)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}

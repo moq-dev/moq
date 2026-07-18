@@ -79,15 +79,12 @@ fn create_track(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<
 
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> {
-	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let track = create_track(&mut broadcast)?;
-
+	// Create a broadcast on the origin; the live route announces it.
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
-	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	let _publish = origin
-		.publish_broadcast("", &broadcast)
-		.context("failed to publish broadcast")?;
+	let mut broadcast = origin
+		.create_broadcast("", moq_net::broadcast::Route::new().with_live(true))
+		.context("failed to create broadcast")?;
+	let track = create_track(&mut broadcast)?;
 
 	// Wrap in a Producer for keyframe-based group management.
 	let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Legacy);

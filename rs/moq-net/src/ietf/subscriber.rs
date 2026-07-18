@@ -67,19 +67,26 @@ struct TrackState {
 }
 
 struct BroadcastState {
-	producer: broadcast::Producer,
+	// The source feeding this broadcast into our origin. `Option` so a deliberate
+	// unannounce can consume it with `finish()` (detaching immediately) while
+	// `Drop` (a dying session) aborts it, letting the origin linger for a
+	// reconnect.
+	producer: Option<broadcast::Producer>,
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
 
-	/// Announcement guard into our origin. Dropped when the entry is removed,
-	/// which unannounces the broadcast.
-	#[allow(dead_code)]
-	publish: origin::Publish,
-
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
 	_stats: stats::Subscriber,
+}
+
+impl Drop for BroadcastState {
+	fn drop(&mut self) {
+		if let Some(producer) = &self.producer {
+			producer.abort();
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -547,7 +554,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count += 1;
-				Ok(entry.get().producer.clone())
+				Ok(entry.get().producer.clone().expect("live entry holds a producer"))
 			}
 			Entry::Vacant(entry) => {
 				// Stamp this connection's origin as the sole hop so the route is
@@ -556,27 +563,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let mut broadcast = broadcast::Info {
-					origin: self.origin.info(),
-				}
-				.produce();
-				broadcast
-					.set_route(broadcast::Route::new().with_hops(hops))
-					.expect("a freshly created broadcast accepts a route");
-
-				// Create the dynamic handler BEFORE publishing so consumers see
-				// dynamic >= 1 the moment they receive the announce. Otherwise a
-				// consumer can call subscribe_track() before the driver-owned
-				// run_broadcast bumps the counter and get NotFound (mirrors the
-				// note in lite::Subscriber).
-				let dynamic = broadcast.dynamic();
+				let route = broadcast::Route::new().with_hops(hops).with_live(true);
 
 				// Propagates Error::Unauthorized if the path is out of scope.
-				let publish = self.origin.publish_broadcast(path.clone(), &broadcast)?;
+				let broadcast = self.origin.create_broadcast(&path, route)?;
+
+				// Register the dynamic handler synchronously: the broadcast only
+				// becomes visible to consumers after this function returns to the
+				// executor, so the origin's first track dispatch finds a handler
+				// (mirrors the note in lite::Subscriber).
+				let dynamic = broadcast.dynamic();
+
 				entry.insert(BroadcastState {
-					producer: broadcast.clone(),
+					producer: Some(broadcast.clone()),
 					count: 1,
-					publish,
 					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
 
@@ -617,7 +617,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
-					entry.remove();
+					// A deliberate unannounce: finish the source so the origin
+					// detaches it immediately instead of lingering.
+					let mut removed = entry.remove();
+					if let Some(producer) = removed.producer.take() {
+						producer.finish();
+					}
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),

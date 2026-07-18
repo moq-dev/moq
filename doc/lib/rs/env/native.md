@@ -66,9 +66,9 @@ The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.
 ```rust
 let session = client.connect(url).await?;
 
-let mut broadcast = moq_net::Broadcast::new().produce();
+let route = moq_net::broadcast::Route::new().with_live(true);
+let mut broadcast = session.publisher().create_broadcast("", route)?;
 // ... add catalog and tracks to the broadcast ...
-session.publisher().publish_broadcast("", broadcast.consume());
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.
