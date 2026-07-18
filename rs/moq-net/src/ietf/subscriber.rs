@@ -67,11 +67,10 @@ struct TrackState {
 }
 
 struct BroadcastState {
-	// The source feeding this broadcast into our origin. `Option` so a deliberate
-	// unannounce can consume it with `finish()` (detaching immediately) while
-	// `Drop` (a dying session) aborts it, letting the origin linger for a
-	// reconnect.
-	producer: Option<broadcast::Producer>,
+	// The source feeding this broadcast into our origin: finish() on a
+	// deliberate unannounce detaches immediately, dropping (a dying session)
+	// aborts it so the origin lingers for a reconnect.
+	producer: crate::model::broadcast::SourceGuard,
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -79,14 +78,6 @@ struct BroadcastState {
 	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
 	/// held for as long as the broadcast is announced into our origin.
 	_stats: stats::Subscriber,
-}
-
-impl Drop for BroadcastState {
-	fn drop(&mut self) {
-		if let Some(producer) = &self.producer {
-			producer.abort();
-		}
-	}
 }
 
 #[derive(Clone)]
@@ -554,7 +545,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count += 1;
-				Ok(entry.get().producer.clone().expect("live entry holds a producer"))
+				Ok(entry.get().producer.producer())
 			}
 			Entry::Vacant(entry) => {
 				// Stamp this connection's origin as the sole hop so the route is
@@ -575,7 +566,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let dynamic = broadcast.dynamic();
 
 				entry.insert(BroadcastState {
-					producer: Some(broadcast.clone()),
+					producer: crate::model::broadcast::SourceGuard::new(broadcast.clone()),
 					count: 1,
 					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
@@ -619,10 +610,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
 					// A deliberate unannounce: finish the source so the origin
 					// detaches it immediately instead of lingering.
-					let mut removed = entry.remove();
-					if let Some(producer) = removed.producer.take() {
-						producer.finish();
-					}
+					entry.remove().producer.finish();
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),

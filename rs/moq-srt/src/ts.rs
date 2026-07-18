@@ -20,10 +20,14 @@ use crate::Result;
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// Dropping the publisher ends the broadcast: the importer owns the
-/// origin-created producer, so its drop unannounces the path.
+/// A deliberate [`Self::finish`] ends the broadcast and unannounces the path
+/// immediately; dropping the publisher instead lets the origin linger briefly
+/// so a reconnecting sender can resume.
 pub struct Publisher {
 	importer: ts::Import,
+	// A clone of the importer's producer, so a deliberate end can finish() the
+	// broadcast (prompt unannounce) even though the importer owns it.
+	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publisher {
@@ -32,10 +36,14 @@ impl Publisher {
 	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_live(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let handle = broadcast.clone();
 		let importer = ts::Import::new(broadcast, catalog.reserve());
 		tracing::info!(%path, "publishing ingest broadcast");
 
-		Ok(Self { importer })
+		Ok(Self {
+			importer,
+			broadcast: handle,
+		})
 	}
 
 	/// Feed a chunk of MPEG-TS bytes (one SRT payload) into the importer.
@@ -46,9 +54,12 @@ impl Publisher {
 		Ok(self.importer.decode(&data)?)
 	}
 
-	/// Flush any buffered media and close out the broadcast's open groups.
+	/// Flush any buffered media, close out the broadcast's open groups, and end
+	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
-		Ok(self.importer.finish()?)
+		self.importer.finish()?;
+		self.broadcast.clone().finish();
+		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause

@@ -1160,9 +1160,14 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
 /// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into.
-/// Dropping it closes and unannounces the broadcast.
+/// Dropping it closes the broadcast; the origin lingers briefly before
+/// unannouncing so a reconnecting encoder can resume, while [`Self::finish`]
+/// unannounces immediately.
 struct Publisher {
 	importer: FlvImport,
+	// A clone of the importer's producer, so a deliberate end can finish() the
+	// broadcast (prompt unannounce) even though the importer owns it.
+	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publisher {
@@ -1171,12 +1176,16 @@ impl Publisher {
 	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_live(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
 
-		Ok(Self { importer })
+		Ok(Self {
+			importer,
+			broadcast: handle,
+		})
 	}
 
 	/// Re-wrap one RTMP audio/video message body as an FLV tag and demux it.
@@ -1191,9 +1200,12 @@ impl Publisher {
 		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
-	/// Flush any buffered media and close out the broadcast's open groups.
+	/// Flush any buffered media, close out the broadcast's open groups, and end
+	/// the broadcast so the origin unannounces it immediately.
 	fn finish(&mut self) -> anyhow::Result<()> {
-		Ok(self.importer.finish()?)
+		self.importer.finish()?;
+		self.broadcast.clone().finish();
+		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause

@@ -61,6 +61,9 @@ struct AcceptedSession {
 	registration: Option<mux::Registration>,
 	cancel: Option<oneshot::Receiver<()>>,
 	role: &'static str,
+	// WHIP only: a clone of the ingest broadcast, so a deliberate DELETE can
+	// finish() it (prompt unannounce) instead of lingering for a reconnect.
+	broadcast: Option<moq_net::broadcast::Producer>,
 }
 
 impl AcceptedSession {
@@ -83,6 +86,11 @@ impl AcceptedSession {
 				}
 				_ = cancel => {
 					tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
+					// A deliberate end: finish the broadcast so the origin
+					// unannounces it immediately.
+					if let Some(broadcast) = self.broadcast.take() {
+						broadcast.finish();
+					}
 					Ok(())
 				}
 			}

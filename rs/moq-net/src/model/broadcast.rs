@@ -406,6 +406,53 @@ impl Producer {
 	}
 }
 
+/// A session-owned handle to a source broadcast created via
+/// [`crate::origin::Producer::create_broadcast`]: [`Self::finish`] ends it
+/// deliberately (the origin unannounces immediately), while dropping the guard
+/// marks the source aborted (the origin lingers for a reconnect, and the
+/// dropped-without-finish warning stays quiet). Shared by the lite and IETF
+/// subscribers so the drop-vs-finish contract lives in one place.
+pub(crate) struct SourceGuard {
+	// `Option` so `finish` can consume the producer while `Drop` aborts it.
+	producer: Option<Producer>,
+}
+
+impl SourceGuard {
+	pub fn new(producer: Producer) -> Self {
+		Self {
+			producer: Some(producer),
+		}
+	}
+
+	/// A clone of the guarded producer.
+	pub fn producer(&self) -> Producer {
+		self.producer.clone().expect("guard holds a producer until finished")
+	}
+
+	/// End the source deliberately: the origin detaches it immediately,
+	/// unannouncing the path if it was the last.
+	pub fn finish(mut self) {
+		if let Some(producer) = self.producer.take() {
+			producer.finish();
+		}
+	}
+
+	/// Update the source's advertised route in place.
+	pub fn set_route(&mut self, route: Route) {
+		if let Some(producer) = &mut self.producer {
+			let _ = producer.set_route(route);
+		}
+	}
+}
+
+impl Drop for SourceGuard {
+	fn drop(&mut self) {
+		if let Some(producer) = &self.producer {
+			producer.abort();
+		}
+	}
+}
+
 /// Handles on-demand track creation for a broadcast.
 ///
 /// When a consumer requests a track that doesn't exist, the dynamic producer
@@ -673,6 +720,14 @@ impl Consumer {
 	/// broadcast immediately instead of lingering for a reconnect.
 	pub(crate) fn is_finished(&self) -> bool {
 		self.state.read().close == Some(Close::Finish)
+	}
+
+	/// Whether the broadcast is on its way out: deliberately ended (finish/abort
+	/// marked, even while handles remain) or already fully closed. The origin's
+	/// dispatcher treats a rejection from such a source as imminent detach rather
+	/// than a strike.
+	pub(crate) fn is_closing(&self) -> bool {
+		self.is_closed() || self.state.read().close.is_some()
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.

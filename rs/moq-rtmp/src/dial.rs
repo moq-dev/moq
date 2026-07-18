@@ -436,9 +436,13 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 }
 
 /// An active pull: the moq-mux FLV importer publishing into the origin. Mirrors the
-/// server's publisher; dropping it unannounces the broadcast.
+/// server's publisher; a deliberate [`Self::finish`] unannounces immediately,
+/// while dropping it lets the origin linger briefly for a reconnect.
 struct Publisher {
 	importer: FlvImport,
+	// A clone of the importer's producer, so a deliberate end can finish() the
+	// broadcast (prompt unannounce) even though the importer owns it.
+	broadcast: moq_net::broadcast::Producer,
 }
 
 impl Publisher {
@@ -447,11 +451,15 @@ impl Publisher {
 			.create_broadcast(path, broadcast::Route::new().with_live(true))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
-		Ok(Self { importer })
+		Ok(Self {
+			importer,
+			broadcast: handle,
+		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
@@ -465,7 +473,9 @@ impl Publisher {
 	}
 
 	fn finish(&mut self) -> anyhow::Result<()> {
-		Ok(self.importer.finish()?)
+		self.importer.finish()?;
+		self.broadcast.clone().finish();
+		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause

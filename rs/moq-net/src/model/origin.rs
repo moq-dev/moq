@@ -1011,11 +1011,16 @@ impl FrontState {
 /// is attached (the linger window) the previous advert and announce state are
 /// kept, so a reconnect resumes invisibly; the front task unannounces on close.
 fn sync_front(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer, leaf: &Lock<OriginNode>) {
+	// Snapshot and apply under the leaf lock: two concurrent syncs would
+	// otherwise race their applies, letting a stale snapshot land last and
+	// leave the announce flag (or advert) contradicting the current table.
+	// Lock order (leaf, then table, then broadcast) matches attach_source.
+	let mut leaf_guard = leaf.lock();
 	let advert = state.read().active_route();
 	if let Some(advert) = advert {
 		let announce = advert.live;
 		let _ = broadcast.clone().set_route(advert);
-		leaf.lock().set_announced(state, announce);
+		leaf_guard.set_announced(state, announce);
 	}
 }
 
@@ -1149,6 +1154,7 @@ fn attach_source(
 	}
 
 	// First source: create the broadcast and publish it into the tree.
+	let live = route.live;
 	let broadcast = broadcast::Producer::new_spliced(broadcast::Info { origin: origin.clone() });
 	let _ = broadcast.clone().set_route(route.clone());
 	let state = kio::Producer::new(FrontState {
@@ -1175,7 +1181,7 @@ fn attach_source(
 		path: full.clone(),
 		broadcast: broadcast.clone(),
 		state: state.clone(),
-		announced: state.read().active_route().is_some_and(|r| r.live),
+		announced: live,
 	};
 	if entry.announced {
 		leaf_guard.notify.lock().announce(full, &broadcast.consume());
@@ -1426,10 +1432,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 						dead = None;
 						serving = Some((id, track));
 					}
-					// The source itself closed (its session died): not a
+					// The source itself closed or deliberately ended: not a
 					// rejection, so no strike. Park until its watcher detaches
 					// it and the table promotes a replacement.
-					Err(_) if source.is_closed() => {
+					Err(_) if source.is_closing() => {
 						dead = Some(id);
 						serving = None;
 					}

@@ -102,6 +102,7 @@ pub async fn accept(
 		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_live(true))
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
 
+	let handle = producer.clone();
 	let sink = Box::new(IngestSink::new(producer)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
@@ -135,6 +136,7 @@ pub async fn accept(
 			registration: Some(registration),
 			cancel: Some(cancel),
 			role: "whip server",
+			broadcast: Some(handle),
 		},
 	})
 }

@@ -881,44 +881,28 @@ enum Sub<S: web_transport_trait::Session> {
 /// identity (the first hop of the reconstructed chain) so a restart can tell an
 /// alternate route to the same broadcast from a brand-new broadcast.
 struct AnnouncedRoute {
-	// `Option` so `finish` can consume the producer while `Drop` aborts it.
-	source: Option<crate::broadcast::Producer>,
+	source: crate::model::broadcast::SourceGuard,
 	publisher: crate::Origin,
 }
 
 impl AnnouncedRoute {
 	fn new(source: crate::broadcast::Producer, publisher: crate::Origin) -> Self {
 		Self {
-			source: Some(source),
+			source: crate::model::broadcast::SourceGuard::new(source),
 			publisher,
 		}
 	}
 
 	/// The peer deliberately retracted the path: finish the source so the origin
 	/// detaches it immediately (unannouncing downstream if it was the last).
-	fn finish(mut self) {
-		if let Some(source) = self.source.take() {
-			source.finish();
-		}
+	fn finish(self) {
+		self.source.finish();
 	}
 
 	/// Update the source's advertised route in place (a restart on the same
 	/// publisher).
 	fn set_route(&mut self, route: crate::broadcast::Route) {
-		if let Some(source) = &mut self.source {
-			let _ = source.set_route(route);
-		}
-	}
-}
-
-impl Drop for AnnouncedRoute {
-	fn drop(&mut self) {
-		// Dropped without a deliberate finish (the session died): mark the source
-		// aborted so the origin lingers for a reconnect instead of unannouncing,
-		// and the dropped-without-finish warning stays quiet.
-		if let Some(source) = &self.source {
-			source.abort();
-		}
+		self.source.set_route(route);
 	}
 }
 
