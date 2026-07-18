@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.33](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.32...moq-ffi-v0.2.33) - 2026-07-18
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 3 updates ([#2273](https://github.com/moq-dev/moq/pull/2273))
+
 ## [0.2.32](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.31...moq-ffi-v0.2.32) - 2026-07-17
 
 ### Fixed
