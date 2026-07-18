@@ -2620,7 +2620,9 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source_a = origin.create_broadcast("test", announce().with_hops(hops.clone())).unwrap();
+		let source_a = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		settle().await;
@@ -2678,7 +2680,9 @@ mod tests {
 		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 
-		let source_a = origin.create_broadcast("test", announce().with_hops(hops_long)).unwrap();
+		let source_a = origin
+			.create_broadcast("test", announce().with_hops(hops_long))
+			.unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		settle().await;
@@ -2696,7 +2700,9 @@ mod tests {
 
 		// A strictly shorter source attaches: the live track is handed over with
 		// no announce churn.
-		let source_b = origin.create_broadcast("test", announce().with_hops(hops_short)).unwrap();
+		let source_b = origin
+			.create_broadcast("test", announce().with_hops(hops_short))
+			.unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
@@ -2730,7 +2736,9 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin.create_broadcast("test", announce().with_hops(hops.clone())).unwrap();
+		let source = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next_some("test");
@@ -2927,8 +2935,12 @@ mod tests {
 		// the given order.
 		async fn winner(first: &[u64], second: &[u64]) -> OriginList {
 			let origin = Origin::random().produce();
-			let _a = origin.create_broadcast("test", announce().with_hops(hops(first))).unwrap();
-			let _b = origin.create_broadcast("test", announce().with_hops(hops(second))).unwrap();
+			let _a = origin
+				.create_broadcast("test", announce().with_hops(hops(first)))
+				.unwrap();
+			let _b = origin
+				.create_broadcast("test", announce().with_hops(hops(second)))
+				.unwrap();
 			settle().await;
 			origin.consume().get_broadcast("test").unwrap().route().hops
 		}

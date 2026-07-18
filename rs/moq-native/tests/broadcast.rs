@@ -859,7 +859,9 @@ async fn route_reannounce_test(version: Option<&str>) {
 	let mut producer = origin
 		.create_broadcast(
 			"test",
-			moq_net::broadcast::Route::new().with_hops(initial_hops).with_announce(true),
+			moq_net::broadcast::Route::new()
+				.with_hops(initial_hops)
+				.with_announce(true),
 		)
 		.expect("create broadcast");
 	let mut track = producer.create_track("video", None).expect("create track");
