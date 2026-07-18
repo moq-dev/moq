@@ -259,6 +259,7 @@ mod tests {
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.set_live(true);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -319,6 +320,7 @@ mod tests {
 	async fn reconciles_removed_and_reconfigured_renditions() {
 		let origin = moq_net::Origin::random().produce();
 		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.set_live(true);
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let (ready, _) = watch::channel(0);
 		let broadcaster = Broadcaster {

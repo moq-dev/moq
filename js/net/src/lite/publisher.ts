@@ -110,8 +110,16 @@ export class Publisher {
 			broadcasts.set(path, broadcast);
 		});
 
+		// A broadcast is announced only while live (offline ones stay registered but hidden, so a
+		// fetch still resolves). Re-notify the announce loops when liveness flips; they recompute the
+		// active set from each broadcast's `live` flag.
+		const disposeLive = broadcast.live.subscribe(() => {
+			this.#broadcasts.set(this.#broadcasts.peek(), true);
+		});
+
 		// Remove the broadcast from the lookup when it's closed.
 		void broadcast.closed.then(() => {
+			disposeLive();
 			this.#broadcasts.mutate((broadcasts) => {
 				broadcasts?.delete(path);
 			});
@@ -134,7 +142,8 @@ export class Publisher {
 		const broadcasts = this.#broadcasts.peek();
 		if (!broadcasts) return; // closed
 
-		for (const name of broadcasts.keys()) {
+		for (const [name, producer] of broadcasts) {
+			if (!producer.live.peek()) continue; // offline: registered but not advertised
 			const suffix = Path.stripPrefix(msg.prefix, name);
 			if (suffix === null) continue;
 			console.debug(`announce: broadcast=${name} active=true`);
@@ -196,7 +205,8 @@ export class Publisher {
 			// Create a new set of active broadcasts.
 			// This is SLOW, but it's not worth optimizing because we often have just 1 broadcast anyway.
 			const newActive = new Set<Path.Valid>();
-			for (const name of broadcasts.keys()) {
+			for (const [name, producer] of broadcasts) {
+				if (!producer.live.peek()) continue; // offline: registered but not advertised
 				const suffix = Path.stripPrefix(msg.prefix, name);
 				if (suffix === null) continue; // Not our prefix.
 				newActive.add(suffix);

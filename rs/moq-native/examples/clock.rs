@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
+			broadcast.set_live(true);
 
 			let _publish = origin
 				.publish_broadcast(&config.broadcast, &broadcast)

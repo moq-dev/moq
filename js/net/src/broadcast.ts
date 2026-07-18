@@ -13,6 +13,9 @@ class BroadcastState {
 	requested = new Signal<track.Request[]>([]);
 	closed = new Once<Error | null>();
 	tracks = new Map<string, track.Producer>();
+	// Whether the broadcast is live, i.e. whether origins advertise it. Starts offline: publishing
+	// registers it (so a fetch resolves) without announcing it, until a producer flips this on.
+	live = new Signal<boolean>(false);
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
@@ -148,6 +151,22 @@ export class Producer implements track.Broadcast {
 		return makeConsumer(this.#state);
 	}
 
+	/**
+	 * Whether the broadcast is live, i.e. whether origins advertise it.
+	 *
+	 * Starts `false`: publishing registers the broadcast (so a fetch resolves) without announcing
+	 * it. Set it `true` to advertise it (typically once the catalog has its first group), and back
+	 * to `false` to stop advertising while keeping it fetchable. Read reactively or `.peek()` it.
+	 */
+	get live(): Signal<boolean> {
+		return this.#state.live;
+	}
+
+	/** Set whether the broadcast is live. Shorthand for `live.set(value)`. */
+	setLive(live: boolean): void {
+		this.#state.live.set(live);
+	}
+
 	/** Return the next track requested by a peer. */
 	async requested(): Promise<track.Request | undefined> {
 		for (;;) {
@@ -257,6 +276,17 @@ export class Consumer implements track.Broadcast {
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
+	}
+
+	/**
+	 * Whether the broadcast is live, i.e. whether origins advertise it.
+	 *
+	 * A live broadcast is announced; an offline one still exists and can answer a fetch but is not
+	 * advertised. Read reactively or `.peek()` it. Only meaningful for a locally-produced broadcast;
+	 * a broadcast consumed over the wire is discovered via its announcement, so this stays `false`.
+	 */
+	get live(): Signal<boolean> {
+		return this.#state.live;
 	}
 
 	/**

@@ -577,6 +577,9 @@ impl Cluster {
 				.origin
 				.create_broadcast(&path)
 				.expect(".internal/origins is within the relay origin's root");
+			// Peers discover this node by watching `.internal/origins/*` announcements, so it must
+			// be live, not merely registered.
+			broadcast.set_live(true);
 			tracing::info!(%node, %path, "advertising cluster node URL");
 
 			if has_outbound {

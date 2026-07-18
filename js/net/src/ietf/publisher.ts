@@ -53,11 +53,14 @@ export class Publisher {
 	 */
 	publish(path: Path.Valid, broadcast: broadcast.Producer) {
 		this.#broadcasts.set(path, broadcast);
-		this.#notifyConsumers(path, true);
-		void this.#runPublish(path, broadcast);
+		// Announced only while live; an offline broadcast stays registered (so a fetch resolves)
+		// but hidden. Notify the current state, then track changes.
+		if (broadcast.live.peek()) this.#notifyConsumers(path, true);
+		const disposeLive = broadcast.live.subscribe((live) => this.#notifyConsumers(path, live));
+		void this.#runPublish(path, broadcast, disposeLive);
 	}
 
-	async #runPublish(path: Path.Valid, broadcast: broadcast.Producer) {
+	async #runPublish(path: Path.Valid, broadcast: broadcast.Producer, disposeLive: () => void) {
 		try {
 			const requestId = await this.#session.nextRequestId();
 			if (requestId === undefined) return;
@@ -110,6 +113,7 @@ export class Publisher {
 			const e = error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 		} finally {
+			disposeLive();
 			broadcast.close();
 			this.#broadcasts.delete(path);
 			this.#notifyConsumers(path, false);
@@ -269,7 +273,8 @@ export class Publisher {
 			}
 
 			const announced = new announce.Producer(prefix);
-			for (const name of this.#broadcasts.keys()) {
+			for (const [name, producer] of this.#broadcasts) {
+				if (!producer.live.peek()) continue; // offline: registered but not advertised
 				const suffix = Path.stripPrefix(prefix, name);
 				if (suffix === null) continue;
 				announced.append({ path: suffix, active: true });

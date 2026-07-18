@@ -93,6 +93,7 @@ pub async fn run(ctx: Connection) {
 		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
 
 		let mut broadcast = broadcast::Info::new().produce();
+		broadcast.set_live(true);
 		let track = match broadcast.create_track(TRACK, None) {
 			Ok(track) => track,
 			Err(err) => {

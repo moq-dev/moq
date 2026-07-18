@@ -292,6 +292,7 @@ export class Game {
 		this.viewerId.set(viewerId);
 
 		const viewerBroadcast = new Moq.Broadcast.Producer();
+		viewerBroadcast.setLive(true);
 		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
 		effect.cleanup(() => {
 			viewerBroadcast.close();

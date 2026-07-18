@@ -449,6 +449,8 @@ impl Publisher {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 
+		// Live for as long as it is published; the catalog reservation gate covers completeness.
+		broadcast.set_live(true);
 		let publish = origin
 			.publish_broadcast(path, broadcast.consume())
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
@@ -512,6 +514,7 @@ mod tests {
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		broadcast.set_live(true);
 		let _publish = server_origin
 			.publish_broadcast("live/cam0", broadcast.consume())
 			.unwrap();

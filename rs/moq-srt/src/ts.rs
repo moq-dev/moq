@@ -37,6 +37,9 @@ impl Publisher {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let importer = ts::Import::new(broadcast.clone(), catalog.reserve());
 
+		// An ingest broadcast is live for as long as it is published (the catalog reservation
+		// gate keeps subscribers from seeing an incomplete catalog).
+		broadcast.set_live(true);
 		let publish = origin.publish_broadcast(path, broadcast.consume())?;
 		tracing::info!(%path, "publishing ingest broadcast");
 

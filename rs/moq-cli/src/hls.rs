@@ -47,6 +47,9 @@ pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: 
 	// consume the catalog as soon as it observes the announcement.
 	let catalog = moq_mux::catalog::Producer::new(&mut producer)?;
 
+	// Live for the lifetime of the import.
+	producer.set_live(true);
+
 	// Hold the RAII announcement for the lifetime of the import.
 	let _announce = origin
 		.publish_broadcast(&name, producer.consume())

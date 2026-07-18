@@ -65,6 +65,10 @@ This asks the peer to notify us of any existing broadcasts that match the prefix
 
 This is extremely useful for conference rooms, as you can live discover when participants join and leave.
 It's also useful for individual broadcasts as you can get notifications it comes online or goes offline (no spamming F5).
+
+An announcement signals **liveness**, not merely existence.
+A publisher registers a broadcast and then marks it *live* (via `set_live` / `setLive`) when it's ready to be discovered, typically once its catalog has landed, so a subscriber that reacts to the announcement never races an empty broadcast.
+A broadcast that is registered but not live stays reachable by an exact-path fetch but is not advertised, which lets a relay keep routing to offline broadcasts without announcing them.
 The [moq-relay clustering](/bin/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
 The peer first replies with the set of broadcasts that are currently live, then streams updates as they change.

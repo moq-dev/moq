@@ -82,6 +82,7 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 /// WHEP client: pull a remote broadcast into the Origin under `name` (import).
 pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
 	let producer = moq_net::broadcast::Info::new().produce();
+	producer.set_live(true);
 	// Hold the RAII announcement for the lifetime of the pull.
 	let _announce = origin
 		.publish_broadcast(&name, producer.consume())

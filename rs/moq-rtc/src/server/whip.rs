@@ -99,6 +99,7 @@ pub async fn accept(
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
 	let producer = moq_net::broadcast::Info::new().produce();
+	producer.set_live(true);
 	let consumer = producer.consume();
 	let publish = publisher
 		.publish_broadcast(broadcast, &consumer)

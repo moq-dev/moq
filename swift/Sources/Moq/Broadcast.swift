@@ -89,6 +89,13 @@ public final class BroadcastProducer: Sendable {
         BroadcastConsumer(try ffi.consume())
     }
 
+    /// Set whether the broadcast is live, i.e. whether origins advertise it. A broadcast starts
+    /// offline; ``OriginProducer/announce(_:broadcast:)`` marks it live. Pass `false` to stop
+    /// advertising it while keeping it fetchable, or `true` to advertise it again.
+    public func setLive(_ live: Bool) throws {
+        try ffi.setLive(live: live)
+    }
+
     /// Accept subscriptions to tracks that are not published yet. Hold and iterate
     /// the returned `BroadcastDynamic` while such requests should be served.
     public func dynamic() throws -> BroadcastDynamic {

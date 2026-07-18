@@ -77,6 +77,7 @@ async function publish(config: Config) {
 
 	// Create a new "broadcast", which is a collection of tracks.
 	const broadcast = new Moq.Broadcast.Producer();
+	broadcast.setLive(true);
 	connection.publish(Moq.Path.from(config.broadcast), broadcast);
 
 	console.log("✅ Published broadcast:", config.broadcast);

@@ -171,14 +171,13 @@ impl MoqOriginProducer {
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let publish = self.inner.publish_broadcast(path.as_str(), &consumer)?;
 
-		// Auto-unannounce when the broadcast closes (all producers dropped). The origin no longer
-		// watches closure itself, so the spawn lives here at the runtime-bound FFI boundary.
-		tokio::spawn(async move {
-			consumer.closed().await;
-			drop(publish);
-		});
-
-		Ok(())
+		// Mark the broadcast live and hold the guard on the producer: the origin advertises it
+		// while live and removes it once it closes, so no close-watching task is needed here.
+		broadcast.with_state(|state| {
+			state.broadcast.set_live(true);
+			state.announces.push(publish);
+			Ok(())
+		})
 	}
 }
 

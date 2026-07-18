@@ -215,6 +215,8 @@ impl Publish {
 	/// Build a publisher decoding the given container format from stdin.
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		// Live for the lifetime of the publish; the catalog reservation gate covers completeness.
+		broadcast.set_live(true);
 
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
@@ -266,6 +268,7 @@ impl Publish {
 	#[cfg(feature = "capture")]
 	pub fn capture(args: &CaptureArgs, bandwidth: Option<moq_net::bandwidth::Consumer>) -> anyhow::Result<Self> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		broadcast.set_live(true);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
@@ -481,6 +484,7 @@ mod tests {
 	/// re-exporting with the `mpegts` catalog extension.
 	async fn manufacture_input() -> Vec<u8> {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		broadcast.set_live(true);
 		let consumer = broadcast.consume();
 		// Announce the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_net::Origin::random().produce();

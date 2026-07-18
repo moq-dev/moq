@@ -499,6 +499,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 		.produce();
 
+		// The upstream announced this broadcast, so it is live: mark it so the origin advertises
+		// it. Retiring the announce later drops the publish guard, which removes it again.
+		broadcast.set_live(true);
+
 		// Create the dynamic handler BEFORE publishing, so that consumers
 		// see dynamic >= 1 immediately when they receive the announcement.
 		// Otherwise there's a race on multi-threaded runtimes where a consumer

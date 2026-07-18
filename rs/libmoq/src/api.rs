@@ -492,11 +492,12 @@ pub extern "C" fn moq_origin_create() -> i32 {
 
 /// Announce a broadcast on an origin under `path`.
 ///
-/// The broadcast becomes available to any origin consumers, such as over the network.
+/// The broadcast becomes available to any origin consumers, such as over the network. This also
+/// marks the broadcast live (see [moq_publish_set_live]) so it is advertised right away.
 ///
 /// Returns a positive announce handle on success, or a negative code on failure. The broadcast
-/// stays announced until the handle is passed to [moq_origin_unannounce]; finishing the broadcast
-/// itself does not unannounce it.
+/// stays registered until the handle is passed to [moq_origin_unannounce] or the broadcast is
+/// finished, whichever comes first.
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
@@ -508,8 +509,25 @@ pub unsafe extern "C" fn moq_origin_announce(origin: u32, path: *const c_char, p
 		let broadcast = ffi::parse_id(broadcast)?;
 
 		let mut state = State::lock();
-		let broadcast = state.publish.get(broadcast)?.consume();
+		let producer = state.publish.get(broadcast)?;
+		// Announcing implies going live; the origin advertises it while live and removes it on close.
+		producer.set_live(true);
+		let broadcast = producer.consume();
 		state.origin.announce(origin, path, broadcast)
+	})
+}
+
+/// Set whether a broadcast is live, i.e. whether origins advertise it.
+///
+/// A broadcast starts offline: [moq_origin_announce] registers it (so a fetch resolves) and marks
+/// it live. Pass `false` to stop advertising it while keeping it fetchable, or `true` to advertise
+/// it again. Returns zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_set_live(broadcast: u32, live: bool) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.get(broadcast)?.set_live(live);
+		Ok(0)
 	})
 }
 

@@ -340,6 +340,12 @@ class BroadcastProducer:
     def __init__(self) -> None:
         self._inner = MoqBroadcastProducer()
 
+    def set_live(self, live: bool) -> None:
+        """Set whether the broadcast is live, i.e. whether origins advertise it. A broadcast starts
+        offline; :meth:`Publisher.announce` marks it live. Pass ``False`` to stop advertising it
+        while keeping it fetchable, or ``True`` to advertise it again."""
+        self._inner.set_live(live)
+
     def dynamic(self) -> BroadcastDynamic:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())

@@ -112,6 +112,13 @@ pub struct Producer {
 	// producer (this handle and every `Dynamic`) ends the broadcast.
 	alive: kio::Producer<()>,
 
+	// Whether the broadcast is currently *live* (should be announced), separate from
+	// whether it exists. Starts `false`: the origin keeps an unannounced broadcast in
+	// its tree so it stays routable for a FETCH, and only advertises it once a producer
+	// flips this on with [`Self::set_live`] (typically after the catalog is populated).
+	// Shared across producer clones; closes when the last producer drops.
+	live: kio::Producer<bool>,
+
 	// Track registry plus the dynamic request queue, mutated by producers and
 	// consumers alike under one lock.
 	state: kio::Shared<BroadcastState>,
@@ -123,12 +130,31 @@ impl Producer {
 		Self {
 			info: Arc::new(info),
 			alive: Default::default(),
+			live: kio::Producer::new(false),
 			state: Default::default(),
 		}
 	}
 
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// Set whether the broadcast is live, i.e. whether the origin advertises it.
+	///
+	/// A broadcast starts offline (`false`); publishing it registers it in the origin's
+	/// tree (so it can still answer a FETCH) but does not announce it. Flip this to `true`
+	/// once the broadcast is ready to be discovered (e.g. the catalog track has its first
+	/// group), and back to `false` to stop advertising it without tearing it down. Closing
+	/// the broadcast implicitly makes it offline.
+	pub fn set_live(&self, live: bool) {
+		if let Ok(mut current) = self.live.write() {
+			*current = live;
+		}
+	}
+
+	/// Whether the broadcast is currently live (see [`Self::set_live`]).
+	pub fn is_live(&self) -> bool {
+		*self.live.read()
 	}
 
 	/// Remove a track from the lookup.
@@ -193,7 +219,12 @@ impl Producer {
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.info.clone(), self.alive.clone(), self.state.clone())
+		Dynamic::new(
+			self.info.clone(),
+			self.alive.clone(),
+			self.live.clone(),
+			self.state.clone(),
+		)
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -201,6 +232,7 @@ impl Producer {
 		Consumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
+			live: self.live.consume(),
 			state: self.state.clone(),
 		}
 	}
@@ -264,6 +296,9 @@ pub struct Dynamic {
 	info: Arc<Info>,
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
 	alive: kio::Producer<()>,
+	// Broadcast liveness, shared with the producer. A relay keeps a forwarded broadcast alive
+	// through its `Dynamic` (the bare producer is dropped), so the handler owns liveness too.
+	live: kio::Producer<bool>,
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -277,20 +312,46 @@ impl Clone for Dynamic {
 		Self {
 			info: self.info.clone(),
 			alive: self.alive.clone(),
+			live: self.live.clone(),
 			state: self.state.clone(),
 		}
 	}
 }
 
 impl Dynamic {
-	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>) -> Self {
+	fn new(
+		info: Arc<Info>,
+		alive: kio::Producer<()>,
+		live: kio::Producer<bool>,
+		state: kio::Shared<BroadcastState>,
+	) -> Self {
 		state.lock().requests.add_handler();
 
-		Self { info, alive, state }
+		Self {
+			info,
+			alive,
+			live,
+			state,
+		}
 	}
 
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// Set whether the broadcast is live (see [`Producer::set_live`]).
+	///
+	/// Available here too because a relay keeps a forwarded broadcast alive through its
+	/// [`Dynamic`] handler rather than a [`Producer`].
+	pub fn set_live(&self, live: bool) {
+		if let Ok(mut current) = self.live.write() {
+			*current = live;
+		}
+	}
+
+	/// Whether the broadcast is currently live (see [`Producer::set_live`]).
+	pub fn is_live(&self) -> bool {
+		*self.live.read()
 	}
 
 	/// Poll for the next consumer-requested track, without blocking.
@@ -321,6 +382,7 @@ impl Dynamic {
 		Consumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
+			live: self.live.consume(),
 			state: self.state.clone(),
 		}
 	}
@@ -375,6 +437,8 @@ pub struct Consumer {
 	info: Arc<Info>,
 	// Broadcast liveness (read-only): watched for close.
 	alive: kio::Consumer<()>,
+	// Whether the broadcast is currently live (read-only). Closes when the last producer drops.
+	live: kio::Consumer<bool>,
 	// Track registry plus request queue; `track()` reads the registry and enqueues requests.
 	state: kio::Shared<BroadcastState>,
 }
@@ -382,6 +446,46 @@ pub struct Consumer {
 impl Consumer {
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// Whether the broadcast is currently live, i.e. advertised by its origin.
+	///
+	/// A live broadcast is announced; an offline one still exists and can answer a FETCH but
+	/// is not advertised. A closed broadcast (every producer gone) reads as offline.
+	pub fn is_live(&self) -> bool {
+		// A closed live channel keeps its last value; treat "every producer gone" as offline.
+		!self.live.is_closed() && *self.live.read()
+	}
+
+	/// Poll for the next change to the broadcast's liveness relative to `last`.
+	///
+	/// Returns `Poll::Ready(Some(live))` once the flag differs from `last`, `Poll::Ready(None)`
+	/// when the broadcast closes (every producer gone, so it is permanently offline and won't
+	/// change again), or arms `waiter` otherwise. Seed `last` from [`Self::is_live`] and pass back
+	/// each value you observe. Counterpart to the async [`Self::live_changed`]; drives the origin's
+	/// announce reconciler.
+	pub fn poll_live(&self, waiter: &kio::Waiter, last: bool) -> Poll<Option<bool>> {
+		match self.live.poll(waiter, |live| {
+			if **live == last {
+				Poll::Pending
+			} else {
+				Poll::Ready(**live)
+			}
+		}) {
+			Poll::Ready(Ok(live)) => Poll::Ready(Some(live)),
+			// Every producer dropped: the broadcast is closed, so liveness is done.
+			Poll::Ready(Err(_closed)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Await the next change to the broadcast's liveness relative to `last`.
+	///
+	/// Resolves to `Some(live)` on the next change, or `None` once the broadcast closes. Seed
+	/// from [`Self::is_live`] and loop to follow liveness:
+	/// `while let Some(live) = consumer.live_changed(live).await { ... }`.
+	pub async fn live_changed(&self, last: bool) -> Option<bool> {
+		kio::wait(|waiter| self.poll_live(waiter, last)).await
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -456,6 +560,7 @@ impl Consumer {
 		WeakConsumer {
 			info: self.info.clone(),
 			alive: self.alive.weak(),
+			live: self.live.clone(),
 			state: self.state.clone(),
 		}
 	}
@@ -471,6 +576,8 @@ impl Consumer {
 pub(crate) struct WeakConsumer {
 	info: Arc<Info>,
 	alive: kio::ConsumerWeak<()>,
+	// A live-value consumer pins no producer, so a strong handle is safe to hold here.
+	live: kio::Consumer<bool>,
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -480,6 +587,7 @@ impl WeakConsumer {
 		Consumer {
 			info: self.info.clone(),
 			alive: self.alive.consume(),
+			live: self.live.clone(),
 			state: self.state.clone(),
 		}
 	}
@@ -521,6 +629,27 @@ mod test {
 			);
 			pending
 		}};
+	}
+
+	#[tokio::test]
+	async fn live_changed() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		assert!(!consumer.is_live(), "starts offline");
+
+		// Each toggle wakes the observer with the new value.
+		producer.set_live(true);
+		assert_eq!(consumer.live_changed(false).await, Some(true));
+		assert!(consumer.is_live());
+
+		producer.set_live(false);
+		assert_eq!(consumer.live_changed(true).await, Some(false));
+
+		// Closing the broadcast ends the liveness stream.
+		producer.set_live(true);
+		assert_eq!(consumer.live_changed(false).await, Some(true));
+		drop(producer);
+		assert_eq!(consumer.live_changed(true).await, None, "closed reads as end-of-stream");
 	}
 
 	#[tokio::test]

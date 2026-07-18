@@ -188,6 +188,8 @@ export class Broadcast {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
 
+		// Advertise it (a broadcast starts offline; publishing only registers it).
+		broadcast.setLive(true);
 		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));

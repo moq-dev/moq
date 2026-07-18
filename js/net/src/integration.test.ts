@@ -21,8 +21,10 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Server publishes a broadcast
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const prefixedBroadcast = new BroadcastProducer();
+	prefixedBroadcast.setLive(true);
 	server.publish(Path.from("root/child"), prefixedBroadcast);
 
 	// Serve every requested "video" track. On lite-05+ a subscribe is preceded by
@@ -105,6 +107,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 
 	// Announced before the client asks, so it can ride the initial set.
 	const first = new BroadcastProducer();
+	first.setLive(true);
 	server.publish(Path.from("first"), first);
 
 	const announced = client.announced();
@@ -115,6 +118,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 
 	// A live announce.
 	const second = new BroadcastProducer();
+	second.setLive(true);
 	server.publish(Path.from("second"), second);
 	entry = await announced.next();
 	if (!entry) throw new Error("expected announce");
@@ -130,6 +134,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	const secondAgain = new BroadcastProducer();
+	secondAgain.setLive(true);
 	server.publish(Path.from("second"), secondAgain);
 	entry = await announced.next();
 	if (!entry) throw new Error("expected re-announce");
@@ -153,6 +158,7 @@ test("integration: lite draft-05 datagram delivery", async () => {
 
 	// A static track fans datagrams out to whoever subscribes.
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -192,6 +198,7 @@ test("integration: lite draft-05 datagrams not sent on a non-datagram transport"
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -235,6 +242,7 @@ test("integration: lite draft-05 datagrams sent with standards-track createWrita
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -270,6 +278,7 @@ test("integration: lite draft-05 missing datagram writer does not close streams"
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -294,6 +303,7 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	server.publish(Path.from("test"), broadcast);
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -319,6 +329,7 @@ test("integration: lite draft-05 fetches a cached group", async () => {
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	const producer = broadcast.createTrack("video");
 	server.publish(Path.from("test"), broadcast);
 
@@ -359,6 +370,7 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	const producer = broadcast.createTrack("video");
 	server.publish(Path.from("test"), broadcast);
 
@@ -400,6 +412,7 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
+	broadcast.setLive(true);
 	const producer = broadcast.createTrack("video");
 	server.publish(Path.from("test"), broadcast);
 
@@ -527,6 +540,49 @@ test("integration: subscribe to non-existent broadcast", async () => {
 		})(),
 	).rejects.toThrow();
 
+	client.close();
+	server.close();
+});
+
+test("integration: liveness gates announcement, not existence", async () => {
+	const pair = createMockTransportPair("");
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	// Publish OFFLINE: the broadcast is registered but not announced.
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+
+	const serving = (async () => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			if (req.name === "video") req.accept().writeString("hello");
+			else req.reject(new Error(`unexpected track: ${req.name}`));
+		}
+	})();
+
+	// The announce stream does not surface an offline broadcast. Keep the same pending `next()`
+	// (racing a fresh one would leak a waiter that steals the later announce).
+	const announced = client.announced();
+	const next = announced.next();
+	const offline = await Promise.race([next, sleep(50).then(() => "timeout" as const)]);
+	expect(offline).toBe("timeout");
+
+	// It is still reachable: consuming a track resolves via the fetch/existence path.
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+	expect(await track.readString()).toBe("hello");
+
+	// Going live announces it: the previously-pending `next()` now resolves.
+	broadcast.setLive(true);
+	const entry = await next;
+	if (!entry) throw new Error("expected entry");
+	expect(entry.path).toBe("test" as Path.Valid);
+	expect(entry.active).toBe(true);
+
+	broadcast.close();
+	await serving;
 	client.close();
 	server.close();
 });

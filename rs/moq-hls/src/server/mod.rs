@@ -191,6 +191,7 @@ mod tests {
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = moq_net::Origin::random().produce();
 		let producer = origin.create_broadcast("gone").expect("publish allowed");
+		producer.set_live(true);
 		let source = moq_mux::Source::new(origin.consume(), "gone");
 		let broadcaster = Broadcaster::new(source, Config::default())
 			.await
@@ -213,6 +214,7 @@ mod tests {
 			.unwrap()
 			.insert("live".to_string(), stale.clone());
 		let _producer = origin.create_broadcast("live").expect("publish allowed");
+		_producer.set_live(true);
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
 
@@ -226,6 +228,7 @@ mod tests {
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
 		let new_producer = origin.create_broadcast("live").expect("publish allowed");
+		new_producer.set_live(true);
 		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())
 			.await
 			.expect("catalog broadcast resolves while announced");

@@ -25,6 +25,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	// Write a group containing a single frame.
@@ -126,6 +127,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 
 	// Track with an explicit microsecond timescale (the default is milliseconds).
 	let mut track = broadcast
@@ -243,6 +245,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast
 		.create_track(
 			"video",
@@ -369,6 +372,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast
 		.create_track(
 			"video",
@@ -487,6 +491,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group = track.append_group().expect("append group");
@@ -581,6 +586,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// Announced before the client connects, so it rides the initial set.
 	let first = pub_origin.create_broadcast("first").expect("create broadcast");
+	first.set_live(true);
 
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
@@ -619,6 +625,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// A live announce after the initial set.
 	let second = pub_origin.create_broadcast("second").expect("create broadcast");
+	second.set_live(true);
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_some(), "expected live announce");
@@ -631,6 +638,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// Re-announce the same path: a fresh announce assigning a fresh id.
 	let _second = pub_origin.create_broadcast("second").expect("create broadcast");
+	_second.set_live(true);
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_some(), "expected re-announce");
@@ -641,6 +649,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let mut replacement_info = moq_net::broadcast::Info::new();
 	replacement_info.origin = pub_origin.info();
 	let replacement = replacement_info.produce();
+	replacement.set_live(true);
 	let _replacement_guard = pub_origin
 		.publish_broadcast("first", &replacement)
 		.expect("publish replacement");
@@ -654,6 +663,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// A sentinel proves no stray event for "first" snuck in behind the replacement.
 	let _sentinel = pub_origin.create_broadcast("sentinel").expect("create broadcast");
+	_sentinel.set_live(true);
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "sentinel");
 	assert!(broadcast.is_some(), "expected sentinel announce");
@@ -1027,6 +1037,7 @@ async fn broadcast_websocket() {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
@@ -1135,6 +1146,7 @@ async fn broadcast_websocket_fallback() {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
@@ -1250,6 +1262,7 @@ const NEWEST_LITE: &str = "moq-lite-05";
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -1318,6 +1331,7 @@ async fn broadcast_websocket_uses_newest_version() {
 async fn broadcast_race_quic_wins() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -1406,6 +1420,7 @@ async fn broadcast_race_quic_wins() {
 async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("create track");
 
 	let mut group0 = track.append_group().expect("append group 0");
@@ -1604,6 +1619,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test")
 		.expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -1740,6 +1756,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	let mut broadcast = pub_origin
 		.create_broadcast("allowed/test")
 		.expect("failed to create broadcast");
+	broadcast.set_live(true);
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 	let mut group = track.append_group().expect("failed to append group");
 	group

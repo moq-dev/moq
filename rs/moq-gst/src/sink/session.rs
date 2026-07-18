@@ -129,6 +129,7 @@ impl Session {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let broadcast_consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		broadcast.set_live(true);
 		let publish = origin.publish_broadcast(&settings.broadcast, broadcast_consumer)?;
 
 		let status = Arc::new(Status::default());

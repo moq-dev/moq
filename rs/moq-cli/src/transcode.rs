@@ -113,6 +113,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	});
 
 	let output = moq_net::broadcast::Info::default().produce();
+	output.set_live(true);
 	let _announce = publish
 		.publish_broadcast(&output_path, &output)
 		.context("failed to publish the derivative broadcast")?;

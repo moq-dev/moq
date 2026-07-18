@@ -78,6 +78,9 @@ pub(crate) struct BroadcastProducer {
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
+	// Announce guards from `MoqOriginProducer::announce`. Held here so the broadcast stays
+	// registered for the producer's lifetime; the origin removes it once the broadcast closes.
+	pub(crate) announces: Vec<moq_net::origin::Publish>,
 }
 
 /// A whole-frame importer: a single codec track, or a container that may publish
@@ -255,8 +258,25 @@ impl MoqBroadcastProducer {
 		let catalog =
 			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())?;
 		Ok(Arc::new(Self {
-			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
+			state: std::sync::Mutex::new(Some(BroadcastProducer {
+				broadcast,
+				catalog,
+				announces: Vec::new(),
+			})),
 		}))
+	}
+
+	/// Set whether the broadcast is live, i.e. whether origins advertise it.
+	///
+	/// A broadcast starts offline: publishing it registers it (so a fetch resolves) without
+	/// advertising it. `announce` marks it live; call this with `false` to stop advertising it
+	/// while keeping it fetchable, or `true` to advertise it again.
+	pub fn set_live(&self, live: bool) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.with_state(|state| {
+			state.broadcast.set_live(live);
+			Ok(())
+		})
 	}
 
 	/// Set (or replace) a top-level application catalog section by name.

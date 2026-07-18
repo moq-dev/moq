@@ -564,6 +564,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				.produce();
 
+				// The upstream announced this broadcast, so it is live: mark it so the origin
+				// advertises it. Retiring the announce drops the publish guard, removing it again.
+				broadcast.set_live(true);
+
 				// Create the dynamic handler BEFORE publishing so consumers see
 				// dynamic >= 1 the moment they receive the announce. Otherwise a
 				// consumer can call subscribe_track() before the driver-owned

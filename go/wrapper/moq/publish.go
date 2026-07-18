@@ -48,6 +48,13 @@ func NewBroadcastProducer() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
+// SetLive sets whether the broadcast is live, i.e. whether origins advertise it. A broadcast
+// starts offline; OriginProducer.Announce marks it live. Pass false to stop advertising it while
+// keeping it fetchable, or true to advertise it again.
+func (b *BroadcastProducer) SetLive(live bool) error {
+	return b.inner.SetLive(live)
+}
+
 // Dynamic accepts requests for tracks that are not published yet.
 func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 	inner, err := b.inner.Dynamic()

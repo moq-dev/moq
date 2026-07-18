@@ -68,7 +68,11 @@ let session = client.connect(url).await?;
 
 let mut broadcast = moq_net::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
-session.publisher().publish_broadcast("", broadcast.consume());
+
+// Register the broadcast, then advertise it. A broadcast starts offline: publishing only
+// registers it (so a fetch can resolve), and `set_live(true)` announces it to subscribers.
+let _publish = session.publisher().publish_broadcast("", broadcast.consume())?;
+broadcast.set_live(true);
 ```
 
 See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.

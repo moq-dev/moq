@@ -1330,6 +1330,9 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
+		// The stats broadcast is always live once published.
+		broadcast.set_live(true);
+
 		Some(Self {
 			_publish: publish,
 			broadcast,

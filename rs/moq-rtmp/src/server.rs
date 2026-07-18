@@ -1175,6 +1175,8 @@ impl Publisher {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
 
+		// Live for as long as it is published; the catalog reservation gate covers completeness.
+		broadcast.set_live(true);
 		let publish = origin.publish_broadcast(path, broadcast.consume())?;
 
 		// Feed the FLV file header once up front; media tags follow per message.
@@ -1519,6 +1521,7 @@ mod tests {
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		broadcast.set_live(true);
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
@@ -1567,6 +1570,7 @@ mod tests {
 		let mut broadcast = broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		broadcast.set_live(true);
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
 		importer.decode(&flv::file_header()).unwrap();
 
@@ -1689,6 +1693,7 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		broadcast.set_live(true);
 		let _publish = origin.publish_broadcast("live/cam0", broadcast.consume()).unwrap();
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &seq)).unwrap();
