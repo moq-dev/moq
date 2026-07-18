@@ -7,33 +7,26 @@ use std::{
 };
 
 use axum::{
-	extract::{
-		Extension, Path, Query, State, WebSocketUpgrade, rejection::QueryRejection,
-		ws::rejection::WebSocketUpgradeRejection,
-	},
-	http::StatusCode,
+	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
+	http::{HeaderMap, StatusCode, Uri, header::HOST},
 	response::Response,
 };
 use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Tier};
 
-use crate::{AuthParams, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
+use crate::{Auth, AuthParams, WebState, web::MtlsPeer, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-	path: Option<Path<String>>,
-	query: Result<Query<AuthQuery>, QueryRejection>,
+	OriginalUri(uri): OriginalUri,
+	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
 	// the informational landing page instead of an error response.
-	let (Ok(ws), Ok(Query(query))) = (ws, query) else {
+	let Ok(ws) = ws else {
 		return Ok(landing_response());
 	};
-
-	// The `/{*path}` route captures the path; the bare `/` route captures none,
-	// which is the empty (root) auth scope. Mirrors `serve_announced`.
-	let path = path.map_or_else(String::new, |Path(path)| path);
 
 	// Advertise the full qmux × moq-net subprotocol matrix, with bare qmux
 	// fallbacks last. axum picks the first entry that the client also offered,
@@ -41,7 +34,12 @@ pub(crate) async fn serve_ws(
 	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 	let ws = ws.protocols(supported_subprotocols());
 
-	let params = AuthParams { path, jwt: query.jwt };
+	let host = uri
+		.authority()
+		.map(|authority| authority.as_str())
+		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
+		.ok_or(StatusCode::BAD_REQUEST)?;
+	let params = request_auth_params(&state.auth, host, &uri)?;
 	let token = if mtls.is_some() {
 		state.auth.verify_mtls(&params.path).await?
 	} else {
@@ -73,6 +71,14 @@ pub(crate) async fn serve_ws(
 		let socket = WebSocketAdapter::new(socket);
 		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats).await;
 	}))
+}
+
+/// Apply the same host + path authentication routing to WebSocket fallback that
+/// native WebTransport applies to its request URL.
+fn request_auth_params(auth: &Auth, host: &str, uri: &Uri) -> Result<AuthParams, StatusCode> {
+	let path = uri.path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
+	let url = url::Url::parse(&format!("https://{host}{path}")).map_err(|_| StatusCode::BAD_REQUEST)?;
+	Ok(auth.params_from_url(&url))
 }
 
 #[tracing::instrument("ws", err, skip_all, fields(id = _id))]
@@ -239,6 +245,7 @@ fn tungstenite_to_axum(message: tungstenite::Message) -> axum::extract::ws::Mess
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::AuthConfig;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
 	use futures::SinkExt;
 	use std::{io, sync::Mutex};
@@ -297,6 +304,23 @@ mod tests {
 
 	fn preferred_qmux_prefix() -> &'static str {
 		qmux::Version::QMux01.prefix()
+	}
+
+	#[tokio::test]
+	async fn websocket_auth_applies_subdomain_routing() {
+		let config: AuthConfig = serde_json::from_value(serde_json::json!({
+			"domains": ["cdn.moq.pro"],
+			"public": "viewer"
+		}))
+		.expect("parse auth config");
+		let auth = Auth::new(config).await.expect("build auth");
+		for uri in ["/bbb.hang?jwt=token", "https://demo.cdn.moq.pro/bbb.hang?jwt=token"] {
+			let uri: Uri = uri.parse().expect("parse URI");
+			let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
+
+			assert_eq!(params.path, "/demo/bbb.hang");
+			assert_eq!(params.jwt.as_deref(), Some("token"));
+		}
 	}
 
 	#[test]
