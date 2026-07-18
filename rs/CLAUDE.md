@@ -66,7 +66,7 @@ Each level is a role module (`broadcast`, `track`, `group`, `frame`, `origin`, `
 
 Two ways to drive things, both backed by `kio`:
 
-- `async fn` (requires an active tokio runtime; awaiting outside one may panic, see the Async section of `moq-net/src/lib.rs`).
+- `async fn` (runs on any executor; the exception is timer-backed paths like driving a session, which need a tokio runtime on native because `web_async::time` wraps tokio's time driver, see the Async section of `moq-net/src/lib.rs`).
 - `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `track::Consumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs`).
 
 Sessions are caller-driven: `Client::connect` / `Server::accept` return a `(Session, Driver)` pair; nothing is spawned behind the caller's back. The `Session` is the handle, with the library's usual refcount lifecycle (clones share the connection, transport closes when the last clone drops, `abort(err)` closes explicitly). The `Driver` is the future running the protocol work: spawn it, await it in place, or step `Driver::poll(&kio::Waiter)` from another poll function. The invariant that keeps close-on-last-drop honest: **the `Driver` holds no `Session` clone**, so handing it to an executor never keeps the session alive (`moq-net/src/session.rs`). moq-native's `connect`/`ok` spawn the driver on tokio and return the plain `moq_net::Session`.

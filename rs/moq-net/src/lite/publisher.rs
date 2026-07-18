@@ -126,9 +126,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut interval = web_async::time::interval(PROBE_INTERVAL);
 
 		loop {
-			tokio::select! {
-				res = stream.reader.closed() => return res,
-				_ = interval.tick() => {}
+			// Tick the probe interval, bailing as soon as the peer closes its side.
+			let closed = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				let mut tick = std::pin::pin!(interval.tick());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(Some(res));
+					}
+					waiter.poll_future(tick.as_mut()).map(|_| None)
+				})
+				.await
+			};
+			if let Some(res) = closed {
+				return res;
 			}
 
 			let Some(bitrate) = session.stats().estimated_send_rate() else {
@@ -369,25 +380,32 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Route(crate::PathOwned, Result<crate::broadcast::Route, Error>),
 		}
 
-		// Send updates as they arrive.
+		// Send updates as they arrive. Closure wins the race so a dead peer can't
+		// stall on a busy announce feed.
 		loop {
-			// Poll every watched broadcast for a route change. Wake-driven via the
-			// kio waiter, though each wake rescans the map; announce-control rates
-			// make that fine.
-			let route_update = kio::wait(|waiter| {
-				for (suffix, entry) in watched.iter_mut() {
-					if let Poll::Ready(res) = entry.consumer.poll_route_changed(waiter) {
-						return Poll::Ready((suffix.clone(), res));
+			let op = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(Err(res));
 					}
-				}
-				Poll::Pending
-			});
-
-			let op = tokio::select! {
-				biased;
-				res = stream.reader.closed() => return res,
-				next = announced.next() => Op::Announce(next),
-				(suffix, res) = route_update => Op::Route(suffix, res),
+					if let Poll::Ready(next) = announced.poll_next(waiter) {
+						return Poll::Ready(Ok(Op::Announce(next)));
+					}
+					// Poll every watched broadcast for a route change; each wake
+					// rescans the map, which announce-control rates make fine.
+					for (suffix, entry) in watched.iter_mut() {
+						if let Poll::Ready(res) = entry.consumer.poll_route_changed(waiter) {
+							return Poll::Ready(Ok(Op::Route(suffix.clone(), res)));
+						}
+					}
+					Poll::Pending
+				})
+				.await
+			};
+			let op = match op {
+				Ok(op) => op,
+				Err(res) => return res,
 			};
 
 			match op {
@@ -760,10 +778,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Track-level subscriber priority. SUBSCRIBE_UPDATE messages broadcast new values
 		// to both run_track (so future groups inherit the new priority) and serve_group
-		// tasks (so in-flight groups update via PriorityHandle::set_track). The Sender
+		// tasks (so in-flight groups update via PriorityHandle::set_track). The producer
 		// stays in run_subscribe and gets handed to run_track so the same loop that
 		// parses SUBSCRIBE_UPDATEs also fans the new priority out.
-		let (track_priority_tx, track_priority_rx) = tokio::sync::watch::channel(subscribe.priority);
+		let track_priority_tx = kio::Producer::new(subscribe.priority);
 
 		let sub = Subscription {
 			session,
@@ -771,7 +789,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			track_name: Arc::from(track.name()),
 			track_stats: Arc::new(track_stats),
 			priority,
-			track_priority: track_priority_rx,
+			track_priority: track_priority_tx.consume(),
+			track_priority_seen: subscribe.priority,
 			version,
 			timescale,
 		};
@@ -1029,8 +1048,13 @@ enum Recv {
 /// [`Recv::Boundary`] in an idle moment (after groups and datagrams), so the caller can send
 /// SUBSCRIBE_END as soon as the ending is known rather than waiting for the live edge to reach
 /// it. The caller clears `emit_boundary` after the first boundary so it fires once.
-async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
-	kio::wait(|waiter| {
+fn poll_recv_next(
+	track: &mut track::Subscriber,
+	datagrams: bool,
+	emit_boundary: bool,
+	waiter: &kio::Waiter,
+) -> Poll<Result<Recv, Error>> {
+	{
 		let mut groups_finished = false;
 		match track.poll_next_group(waiter) {
 			Poll::Ready(Ok(Some(group))) => return Poll::Ready(Ok(Recv::Group(group))),
@@ -1056,14 +1080,19 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 			return Poll::Ready(Ok(Recv::Finished));
 		}
 		Poll::Pending
-	})
-	.await
+	}
+}
+
+/// The async form of [`poll_recv_next`], for callers with nothing else to poll.
+#[cfg(test)]
+async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary: bool) -> Result<Recv, Error> {
+	kio::wait(|waiter| poll_recv_next(track, datagrams, emit_boundary, waiter)).await
 }
 
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed for each in-flight serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
-/// watch::Receiver.
+/// consumer cursor.
 #[derive(Clone)]
 struct Subscription<S: web_transport_trait::Session> {
 	session: S,
@@ -1071,7 +1100,9 @@ struct Subscription<S: web_transport_trait::Session> {
 	track_name: Arc<str>,
 	track_stats: Arc<stats::PublisherTrack>,
 	priority: PriorityQueue,
-	track_priority: tokio::sync::watch::Receiver<u8>,
+	track_priority: kio::Consumer<u8>,
+	/// Last track priority observed by this clone, so a change only fires once.
+	track_priority_seen: u8,
 	version: Version,
 	/// Negotiated timestamp scale for this track. `Some(_)` on lite-05+ after
 	/// TRACK_INFO; used to validate per-frame timestamps before encoding.
@@ -1086,7 +1117,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		initial_end_group: Option<u64>,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
 		writer: &mut Writer<S::SendStream, Version>,
-		track_priority_tx: &tokio::sync::watch::Sender<u8>,
+		track_priority_tx: &kio::Producer<u8>,
 	) -> Result<(), Error> {
 		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
@@ -1110,60 +1141,84 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		// transport (qmux/WebSocket/TCP/UDS report size 0). No group fallback: otherwise off.
 		let datagrams = self.version.has_datagrams() && self.session.max_datagram_size() > 0;
 
+		// Transient one-at-a-time value; the padding is never held in bulk (see `Recv`).
+		#[allow(clippy::large_enum_variant)]
+		enum Event {
+			Recv(Result<Recv, Error>),
+			Update(Result<Option<lite::SubscribeUpdate>, Error>),
+		}
+
 		loop {
-			tokio::select! {
-				// Drive in-flight group futures; never matches because the inner block returns false.
-				true = async {
-					while tasks.next().await.is_some() {}
-					false
-				} => unreachable!(),
-
-				// One cursor drives the whole subscription: poll the cap-aware next group and,
-				// when enabled, the next best-effort datagram. Groups are polled first so a
-				// datagram burst can't starve them; datagrams flow whenever no group is ready
-				// (including while groups are paused above the cap).
-				res = recv_next(&mut track, datagrams, emit_range && !end_sent) => {
-					match res? {
-						Recv::Group(group) => {
-							if emit_range && !start_sent {
-								start_sent = true;
-								writer
-									.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart { group: group.sequence }))
-									.await?;
-							}
-							self.queue_serve(group, &mut tasks);
-						}
-						Recv::Datagram(datagram) => self.serve_datagram(datagram),
-						Recv::Boundary(group) => {
-							// The track declared its exclusive final sequence. Forward it now,
-							// even if trailing groups (below `group`) are still in flight, then
-							// keep serving them until the live edge reaches the boundary.
-							end_sent = true;
-							writer
-								.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
-								.await?;
-						}
-						Recv::Finished => {
-							// The live edge reached the boundary; SUBSCRIBE_END was already sent
-							// (or the version predates the track stream). Drain in-flight group
-							// tasks and FIN by returning.
-							while tasks.next().await.is_some() {}
-							return Ok(());
-						}
-					}
-				}
-
+			let event = {
+				let emit_boundary = emit_range && !end_sent;
 				// SUBSCRIBE_UPDATE messages share this hot loop; safe because
 				// decode_maybe is cancel-safe given quinn/qmux's cancel-safe
 				// read primitives (see Reader::decode_maybe doc).
-				upd = reader.decode_maybe::<lite::SubscribeUpdate>() => {
+				let mut update = std::pin::pin!(reader.decode_maybe::<lite::SubscribeUpdate>());
+				kio::wait(|waiter| {
+					// Drive in-flight group futures; completions just drop.
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
+
+					// Control first: SUBSCRIBE_UPDATE/FIN messages are rare, so they can't
+					// starve the data path, while a deep group backlog polled first could
+					// defer an unsubscribe or priority change indefinitely.
+					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
+						return Poll::Ready(Event::Update(upd));
+					}
+					// One cursor drives the whole subscription: poll the cap-aware next group and,
+					// when enabled, the next best-effort datagram. Groups are polled first so a
+					// datagram burst can't starve them; datagrams flow whenever no group is ready
+					// (including while groups are paused above the cap).
+					if let Poll::Ready(res) = poll_recv_next(&mut track, datagrams, emit_boundary, waiter) {
+						return Poll::Ready(Event::Recv(res));
+					}
+					Poll::Pending
+				})
+				.await
+			};
+
+			match event {
+				Event::Recv(res) => match res? {
+					Recv::Group(group) => {
+						if emit_range && !start_sent {
+							start_sent = true;
+							writer
+								.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart {
+									group: group.sequence,
+								}))
+								.await?;
+						}
+						self.queue_serve(group, &mut tasks);
+					}
+					Recv::Datagram(datagram) => self.serve_datagram(datagram),
+					Recv::Boundary(group) => {
+						// The track declared its exclusive final sequence. Forward it now,
+						// even if trailing groups (below `group`) are still in flight, then
+						// keep serving them until the live edge reaches the boundary.
+						end_sent = true;
+						writer
+							.encode(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))
+							.await?;
+					}
+					Recv::Finished => {
+						// The live edge reached the boundary; SUBSCRIBE_END was already sent
+						// (or the version predates the track stream). Drain in-flight group
+						// tasks and FIN by returning.
+						while tasks.next().await.is_some() {}
+						return Ok(());
+					}
+				},
+				Event::Update(upd) => {
 					let Some(upd) = upd? else {
 						// Peer FIN'd. They're done with this subscription. Drop any
 						// in-flight serve_group tasks (don't drain) so half-sent
 						// groups get cancelled rather than completed pointlessly.
 						return Ok(());
 					};
-					let _ = track_priority_tx.send(upd.priority);
+					if let Ok(mut value) = track_priority_tx.write() {
+						*value = upd.priority;
+					}
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
 					let _ = track.update(crate::track::Subscription {
@@ -1188,7 +1243,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
-		let current_priority = *self.track_priority.borrow_and_update();
+		let current_priority = self.track_priority_current();
 		let handle = self.priority.insert(Priority::new(current_priority, sequence));
 		let fut = self.clone().serve_group(sequence, handle, group);
 		tasks.push(fut.map(|_| ()).maybe_boxed());
@@ -1291,15 +1346,14 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		group: &mut group::Consumer,
 	) -> Result<Option<frame::Consumer>, Error> {
-		loop {
-			tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				frame = group.next_frame() => return frame,
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
-			}
-		}
+		Self::serve_step(
+			stream,
+			priority,
+			&self.track_priority,
+			&mut self.track_priority_seen,
+			|waiter| group.poll_next_frame(waiter),
+		)
+		.await
 	}
 
 	/// Await the next chunk of `frame`, applying priority changes meanwhile.
@@ -1309,15 +1363,77 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		frame: &mut frame::Consumer,
 	) -> Result<Option<bytes::Bytes>, Error> {
+		Self::serve_step(
+			stream,
+			priority,
+			&self.track_priority,
+			&mut self.track_priority_seen,
+			|waiter| frame.poll_read_chunk(waiter),
+		)
+		.await
+	}
+
+	/// Poll `work` to completion while applying queue and SUBSCRIBE_UPDATE priority
+	/// changes to the stream. Errors with [`Error::Cancel`] if the peer closes first.
+	async fn serve_step<T>(
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		track_priority: &kio::Consumer<u8>,
+		track_priority_seen: &mut u8,
+		mut work: impl FnMut(&kio::Waiter) -> Poll<Result<T, Error>>,
+	) -> Result<T, Error> {
+		enum Event<T> {
+			Closed,
+			Work(Result<T, Error>),
+			Priority(u8),
+			TrackPriority(u8),
+		}
+
 		loop {
-			tokio::select! {
-				biased;
-				_ = stream.closed() => return Err(Error::Cancel),
-				chunk = frame.read_chunk() => return chunk,
-				new_pri = priority.next() => stream.set_priority(new_pri),
-				Ok(()) = self.track_priority.changed() => priority.set_track(*self.track_priority.borrow_and_update()),
+			let event = {
+				let mut closed = std::pin::pin!(stream.closed());
+				let seen = *track_priority_seen;
+				kio::wait(|waiter| {
+					if waiter.poll_future(closed.as_mut()).is_ready() {
+						return Poll::Ready(Event::Closed);
+					}
+					if let Poll::Ready(res) = work(waiter) {
+						return Poll::Ready(Event::Work(res));
+					}
+					if let Poll::Ready(new_pri) = priority.poll_next(waiter) {
+						return Poll::Ready(Event::Priority(new_pri));
+					}
+					// A dropped producer just disables this arm, like the queue arm above.
+					match track_priority.poll(waiter, |value| {
+						if **value != seen {
+							Poll::Ready(**value)
+						} else {
+							Poll::Pending
+						}
+					}) {
+						Poll::Ready(Ok(value)) => Poll::Ready(Event::TrackPriority(value)),
+						Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+					}
+				})
+				.await
+			};
+
+			match event {
+				Event::Closed => return Err(Error::Cancel),
+				Event::Work(res) => return res,
+				Event::Priority(new_pri) => stream.set_priority(new_pri),
+				Event::TrackPriority(new_track) => {
+					*track_priority_seen = new_track;
+					priority.set_track(new_track);
+				}
 			}
 		}
+	}
+
+	/// Read the latest SUBSCRIBE_UPDATE track priority, marking it seen.
+	fn track_priority_current(&mut self) -> u8 {
+		self.track_priority_seen = *self.track_priority.read();
+		self.track_priority_seen
 	}
 
 	/// Write a whole chunk, applying priority changes between partial writes,
@@ -1338,7 +1454,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	}
 
 	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
-		priority.set_track(*self.track_priority.borrow_and_update());
+		let track_priority = self.track_priority_current();
+		priority.set_track(track_priority);
 		stream.set_priority(priority.current());
 	}
 }

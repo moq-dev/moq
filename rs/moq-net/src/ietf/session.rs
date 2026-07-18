@@ -4,7 +4,7 @@ use crate::{
 	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
 };
 
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
@@ -43,41 +43,68 @@ pub fn start<S: web_transport_trait::Session>(
 					session.close(err.to_code(), "setup stream required");
 					return Err(err);
 				};
-				let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 				let control = Control::new(request_id_max, client);
-				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
+				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
-				let (tasks, task_set) = TaskSet::new();
+				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
 				let sub_ns_adapter = adapter.clone();
 
-				tokio::select! {
-					Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
-					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = publisher.run() => Err(err),
-					_ = task_set.run() => Ok(()),
-					Err(err) = async {
-						let stream = match version {
-							Version::Draft16 => {
-								let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-								Stream {
-									writer: crate::coding::Writer::new(send, version),
-									reader: crate::coding::Reader::new(recv, version),
-								}
+				// Every half only ends the session on error (err_only parks on clean
+				// completion); the task set draining is the one clean exit.
+				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
+				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version)));
+				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
+					dispatch_session,
+					publisher.clone(),
+					subscriber.clone(),
+					version
+				)));
+				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
+				let mut sub_ns_run = std::pin::pin!(err_only(async {
+					let stream = match version {
+						Version::Draft16 => {
+							let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+							Stream {
+								writer: crate::coding::Writer::new(send, version),
+								reader: crate::coding::Reader::new(recv, version),
 							}
-							_ => Stream::open(&sub_ns_adapter, version).await?,
-						};
-						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 						}
-						Ok(())
-					} => Err(err),
-				}
+						_ => Stream::open(&sub_ns_adapter, version).await?,
+					};
+					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+					}
+					Ok(())
+				}));
+
+				kio::wait(|waiter| {
+					use std::task::Poll;
+					if let Poll::Ready(err) = waiter.poll_future(adapter_run.as_mut()) {
+						return Poll::Ready(Err::<(), Error>(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if task_set.poll(waiter).is_ready() {
+						return Poll::Ready(Ok(()));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					Poll::Pending
+				})
+				.await
 			}
 			_ => {
 				// Send SETUP and keep the stream alive for GOAWAY.
@@ -93,7 +120,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				let control = Control::new(None, client);
 				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
-				let (tasks, task_set) = TaskSet::new();
+				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version, tasks);
 
 				let sub_ns_session = session.clone();
@@ -109,21 +136,53 @@ pub fn start<S: web_transport_trait::Session>(
 					}
 				};
 
-				tokio::select! {
-					Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
-					Err(err) = publisher.run() => Err(err),
-					Err(err) = goaway => Err(err),
-					_ = setup => Ok(()),
-					_ = task_set.run() => Ok(()),
-					Err(err) = async {
-						let stream = Stream::open(&sub_ns_session, version).await?;
-						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
-						}
-						Ok(())
-					} => Err(err),
-				}
+				// Every half only ends the session on error (err_only parks on clean
+				// completion); `setup` never resolves (it holds the stream open) and the
+				// task set draining is the one clean exit.
+				let mut unis = std::pin::pin!(err_only(run_unis(session.clone(), subscriber.clone(), version)));
+				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
+					session.clone(),
+					publisher.clone(),
+					subscriber.clone(),
+					version
+				)));
+				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
+				let mut goaway = std::pin::pin!(err_only(goaway));
+				let mut setup = std::pin::pin!(setup);
+				let mut sub_ns_run = std::pin::pin!(err_only(async {
+					let stream = Stream::open(&sub_ns_session, version).await?;
+					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+					}
+					Ok(())
+				}));
+
+				kio::wait(|waiter| {
+					use std::task::Poll;
+					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
+						return Poll::Ready(Err::<(), Error>(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(goaway.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					if waiter.poll_future(setup.as_mut()).is_ready() {
+						return Poll::Ready(Ok(()));
+					}
+					if task_set.poll(waiter).is_ready() {
+						return Poll::Ready(Ok(()));
+					}
+					if let Poll::Ready(err) = waiter.poll_future(sub_ns_run.as_mut()) {
+						return Poll::Ready(Err(err));
+					}
+					Poll::Pending
+				})
+				.await
 			}
 		};
 

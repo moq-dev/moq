@@ -122,8 +122,8 @@ impl Session {
 /// driver cancels the protocol work without closing the session. It resolves when
 /// the session ends, and keeps returning that same result if polled again.
 ///
-/// Driving still requires a tokio runtime with a time driver; see the crate-level
-/// Async docs.
+/// On native, driving requires a tokio runtime with a time driver (timers go
+/// through `web_async::time`); see the crate-level Async docs.
 pub struct Driver {
 	protocol: MaybeSendBox<'static, Result<(), Error>>,
 	// Bandwidth sampling, polled alongside the protocol. Its completion never ends

@@ -1,10 +1,10 @@
 use std::{
-	collections::HashMap,
+	collections::{HashMap, VecDeque},
 	sync::{Arc, Mutex},
+	task::Poll,
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::sync::mpsc;
 
 use crate::{
 	Error, PathOwned,
@@ -14,17 +14,111 @@ use crate::{
 
 use super::{Control, Message, Version};
 
+// === Message Queues ===
+
+struct QueueState<T> {
+	messages: VecDeque<T>,
+	closed: bool,
+}
+
+/// An unbounded FIFO over [`kio::Shared`]: any clone can push or pop.
+///
+/// Closure is a plain flag rather than handle liveness: [`close`](Self::close)
+/// (or dropping a [`QueueWriter`]) stops future pushes, and the reader drains
+/// what's buffered before seeing `None`.
+struct Queue<T>(kio::Shared<QueueState<T>>);
+
+impl<T> Queue<T> {
+	fn new() -> Self {
+		Self(kio::Shared::new(QueueState {
+			messages: VecDeque::new(),
+			closed: false,
+		}))
+	}
+
+	/// Enqueue a message. Returns false once the queue is closed (the message is
+	/// dropped), matching a write to a stream whose reader is gone.
+	fn push(&self, item: T) -> bool {
+		let mut state = self.0.lock();
+		if state.closed {
+			return false;
+		}
+		state.messages.push_back(item);
+		true
+	}
+
+	/// Dequeue the next message, waiting while the queue is open and empty.
+	/// Returns `None` once the queue is closed and drained.
+	async fn pop(&self) -> Option<T> {
+		kio::wait(|waiter| self.poll_pop(waiter)).await
+	}
+
+	/// Poll for the next message; ready with `None` once closed and drained.
+	fn poll_pop(&self, waiter: &kio::Waiter) -> Poll<Option<T>> {
+		self.0
+			.poll(waiter, |state| {
+				if state.messages.is_empty() && !state.closed {
+					Poll::Pending
+				} else {
+					Poll::Ready(())
+				}
+			})
+			.map(|mut state| state.messages.pop_front())
+	}
+
+	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
+	fn close(&self) {
+		self.0.lock().closed = true;
+	}
+
+	/// Mint the single owning push handle whose `Drop` closes the queue.
+	fn writer(&self) -> QueueWriter<T> {
+		QueueWriter(Self(self.0.clone()))
+	}
+}
+
+// Manual impls: derives would demand `T: Clone`/`T: Default`, which the queued
+// stream pairs don't satisfy.
+impl<T> Clone for Queue<T> {
+	fn clone(&self) -> Self {
+		Self(self.0.clone())
+	}
+}
+
+impl<T> Default for Queue<T> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+/// Single-owner push handle: dropping it closes the queue, which the reading
+/// [`VirtualRecvStream`] observes as a FIN after draining.
+struct QueueWriter<T>(Queue<T>);
+
+impl<T> QueueWriter<T> {
+	/// Enqueue a message, dropped silently if the reader already closed its side.
+	fn push(&self, item: T) {
+		let _ = self.0.push(item);
+	}
+}
+
+impl<T> Drop for QueueWriter<T> {
+	fn drop(&mut self) {
+		self.0.close();
+	}
+}
+
 // === Virtual Streams ===
 
-/// A virtual receive stream backed by an initial message buffer and a channel for follow-up messages.
+/// A virtual receive stream backed by an initial message buffer and a queue of follow-up messages.
 pub struct VirtualRecvStream {
 	buffer: Bytes,
-	rx: mpsc::UnboundedReceiver<Bytes>,
+	rx: Queue<Bytes>,
 	closed: bool,
 }
 
 impl VirtualRecvStream {
-	fn new(initial: Bytes, rx: mpsc::UnboundedReceiver<Bytes>) -> Self {
+	fn new(initial: Bytes, rx: Queue<Bytes>) -> Self {
 		Self {
 			buffer: initial,
 			rx,
@@ -32,7 +126,7 @@ impl VirtualRecvStream {
 		}
 	}
 
-	/// Fill the buffer from the channel if empty. Returns false if the stream is closed.
+	/// Fill the buffer from the queue if empty. Returns false if the stream is closed.
 	async fn fill(&mut self) -> bool {
 		if !self.buffer.is_empty() {
 			return true;
@@ -42,7 +136,7 @@ impl VirtualRecvStream {
 			return false;
 		}
 
-		match self.rx.recv().await {
+		match self.rx.pop().await {
 			Some(data) => {
 				self.buffer = data;
 				true
@@ -96,14 +190,22 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
-		// Wait until the channel is closed
+		// Wait until the queue is closed
 		if self.closed {
 			return Ok(());
 		}
 		// Drain remaining messages
-		while self.rx.recv().await.is_some() {}
+		while self.rx.pop().await.is_some() {}
 		self.closed = true;
 		Ok(())
+	}
+}
+
+impl Drop for VirtualRecvStream {
+	fn drop(&mut self) {
+		// The reader is gone: close the queue so routed follow-ups are discarded
+		// instead of buffering forever while the map entry lingers.
+		self.rx.close();
 	}
 }
 
@@ -113,7 +215,7 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 /// the first outgoing message to extract the request_id and register the
 /// stream for response routing.
 pub struct VirtualSendStream {
-	control_tx: mpsc::UnboundedSender<Bytes>,
+	control_tx: Queue<Bytes>,
 	/// Present only for outgoing requests (from open_bi).
 	/// Accumulates bytes until the request_id can be parsed,
 	/// then registers the stream and flushes.
@@ -121,7 +223,7 @@ pub struct VirtualSendStream {
 }
 
 struct OutgoingRegistration {
-	follow_tx: mpsc::UnboundedSender<Bytes>,
+	follow_tx: QueueWriter<Bytes>,
 	shared: Arc<Shared>,
 	version: Version,
 	buf: BytesMut,
@@ -173,14 +275,14 @@ impl OutgoingRegistration {
 }
 
 impl VirtualSendStream {
-	fn new(control_tx: mpsc::UnboundedSender<Bytes>) -> Self {
+	fn new(control_tx: Queue<Bytes>) -> Self {
 		Self {
 			control_tx,
 			pending: None,
 		}
 	}
 
-	fn with_registration(control_tx: mpsc::UnboundedSender<Bytes>, pending: OutgoingRegistration) -> Self {
+	fn with_registration(control_tx: Queue<Bytes>, pending: OutgoingRegistration) -> Self {
 		Self {
 			control_tx,
 			pending: Some(pending),
@@ -201,12 +303,12 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
+				if !self.control_tx.push(buf) {
+					return Err(crate::Error::Closed);
+				}
 			}
-		} else {
-			self.control_tx
-				.send(Bytes::copy_from_slice(buf))
-				.map_err(|_| crate::Error::Closed)?;
+		} else if !self.control_tx.push(Bytes::copy_from_slice(buf)) {
+			return Err(crate::Error::Closed);
 		}
 
 		Ok(len)
@@ -220,10 +322,12 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
+				if !self.control_tx.push(buf) {
+					return Err(crate::Error::Closed);
+				}
 			}
-		} else {
-			self.control_tx.send(chunk).map_err(|_| crate::Error::Closed)?;
+		} else if !self.control_tx.push(chunk) {
+			return Err(crate::Error::Closed);
 		}
 
 		Ok(())
@@ -236,7 +340,7 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		if let Some(pending) = self.pending.take()
 			&& !pending.buf.is_empty()
 		{
-			let _ = self.control_tx.send(pending.buf.freeze());
+			let _ = self.control_tx.push(pending.buf.freeze());
 		}
 		Ok(())
 	}
@@ -358,14 +462,16 @@ impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for Adapte
 // === Control Stream Adapter ===
 
 struct Shared {
-	incoming_tx: mpsc::UnboundedSender<(VirtualSendStream, VirtualRecvStream)>,
-	incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(VirtualSendStream, VirtualRecvStream)>>,
+	/// New virtual streams for accept_bi; any caller can pop directly.
+	incoming: Queue<(VirtualSendStream, VirtualRecvStream)>,
 
-	/// Channel that VirtualSendStreams write to; the writer task reads from this.
-	control_tx: mpsc::UnboundedSender<Bytes>,
+	/// Messages every VirtualSendStream writes; the run_write task drains this
+	/// onto the real control stream.
+	control: Queue<Bytes>,
 
-	/// Active virtual streams keyed by request_id.
-	streams: Mutex<HashMap<RequestId, mpsc::UnboundedSender<Bytes>>>,
+	/// Active virtual streams keyed by request_id. Removing an entry drops its
+	/// writer, which FINs the matching VirtualRecvStream.
+	streams: Mutex<HashMap<RequestId, QueueWriter<Bytes>>>,
 
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Mutex<HashMap<PathOwned, RequestId>>,
@@ -380,14 +486,12 @@ pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Bytes>, control: Control, version: Version) -> Self {
-		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+	pub fn new(inner: S, control: Control, version: Version) -> Self {
 		Self {
 			inner,
 			shared: Arc::new(Shared {
-				incoming_tx,
-				incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-				control_tx,
+				incoming: Queue::new(),
+				control: Queue::new(),
 				streams: Mutex::new(HashMap::new()),
 				namespaces: Mutex::new(HashMap::new()),
 			}),
@@ -405,25 +509,39 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 
 	/// Run the control stream read + write tasks.
 	/// This reads from the control stream and routes messages to virtual streams,
-	/// and also drains the write channel to the control stream writer.
+	/// and also drains the write queue to the control stream writer.
 	pub async fn run(
 		&self,
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
-		rx: mpsc::UnboundedReceiver<Bytes>,
 	) -> Result<(), Error> {
-		tokio::select! {
-			res = self.run_read(reader) => res,
-			res = Self::run_write(writer, rx) => res,
-		}
+		let res = {
+			let mut read = std::pin::pin!(self.run_read(reader));
+			let mut write = std::pin::pin!(self.run_write(writer));
+			kio::wait(|waiter| {
+				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
+					return Poll::Ready(res);
+				}
+				if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
+					return Poll::Ready(res);
+				}
+				Poll::Pending
+			})
+			.await
+		};
+
+		// The control stream is dead, so the mux is too: fail future virtual
+		// writes fast and end accept_bi instead of buffering into a queue nobody
+		// will ever drain.
+		self.shared.control.close();
+		self.shared.incoming.close();
+
+		res
 	}
 
-	/// Writer task: drains the channel and writes to the control stream.
-	async fn run_write(
-		mut writer: Writer<S::SendStream, Version>,
-		mut rx: mpsc::UnboundedReceiver<Bytes>,
-	) -> Result<(), Error> {
-		while let Some(msg) = rx.recv().await {
+	/// Writer task: drains the queue and writes to the control stream.
+	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
+		while let Some(msg) = self.shared.control.pop().await {
 			let mut buf = std::io::Cursor::new(msg);
 			writer.write_all(&mut buf).await?;
 		}
@@ -450,25 +568,28 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 
 			match route {
 				Route::NewRequest(request_id) => {
-					let (follow_tx, follow_rx) = mpsc::unbounded_channel();
-					let recv = VirtualRecvStream::new(raw, follow_rx);
-					let send = VirtualSendStream::new(self.shared.control_tx.clone());
-					self.shared.streams.lock().unwrap().insert(request_id, follow_tx);
-					self.shared.incoming_tx.send((send, recv)).map_err(|_| Error::Closed)?;
+					let follow = Queue::new();
+					let recv = VirtualRecvStream::new(raw, follow.clone());
+					let send = VirtualSendStream::new(self.shared.control.clone());
+					self.shared.streams.lock().unwrap().insert(request_id, follow.writer());
+					if !self.shared.incoming.push((send, recv)) {
+						return Err(Error::Closed);
+					}
 				}
 				Route::Response(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().get(&request_id) {
-						let _ = tx.send(raw);
+						tx.push(raw);
 					}
 				}
 				Route::FollowUp(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().get(&request_id) {
-						let _ = tx.send(raw);
+						tx.push(raw);
 					}
 				}
 				Route::CloseStream(request_id) => {
+					// The removed writer drops after the final message, FINing the stream.
 					if let Some(tx) = self.shared.streams.lock().unwrap().remove(&request_id) {
-						let _ = tx.send(raw);
+						tx.push(raw);
 					}
 				}
 				Route::MaxRequestId(max) => {
@@ -686,28 +807,32 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	type Error = crate::Error;
 
 	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let mut rx = self.shared.incoming_rx.lock().await;
-
 		match self.version {
 			// v16: SubscribeNamespace uses real bidi streams, so race both sources.
 			Version::Draft16 => {
-				tokio::select! {
-					result = rx.recv() => {
-						match result {
-							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-							None => Err(crate::Error::Closed),
-						}
-					}
-					result = self.inner.accept_bi() => {
-						match result {
+				// Native first: real bidi streams are rare and transport-paced, so
+				// they can't starve the queue, while a control-message flood could
+				// starve a native SubscribeNamespace under queue-first order.
+				let mut accept = std::pin::pin!(self.inner.accept_bi());
+				kio::wait(|waiter| {
+					if let Poll::Ready(result) = waiter.poll_future(accept.as_mut()) {
+						return Poll::Ready(match result {
 							Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
 							Err(_) => Err(crate::Error::Closed),
-						}
+						});
 					}
-				}
+					if let Poll::Ready(result) = self.shared.incoming.poll_pop(waiter) {
+						return Poll::Ready(match result {
+							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+							None => Err(crate::Error::Closed),
+						});
+					}
+					Poll::Pending
+				})
+				.await
 			}
 			// v14/v15: Only virtual streams from control stream.
-			_ => match rx.recv().await {
+			_ => match self.shared.incoming.pop().await {
 				Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
 				None => Err(crate::Error::Closed),
 			},
@@ -715,12 +840,12 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let (follow_tx, follow_rx) = mpsc::unbounded_channel();
-		let recv = VirtualRecvStream::new(Bytes::new(), follow_rx);
+		let follow = Queue::new();
+		let recv = VirtualRecvStream::new(Bytes::new(), follow.clone());
 		let send = VirtualSendStream::with_registration(
-			self.shared.control_tx.clone(),
+			self.shared.control.clone(),
 			OutgoingRegistration {
-				follow_tx,
+				follow_tx: follow.writer(),
 				shared: Arc::clone(&self.shared),
 				version: self.version,
 				buf: BytesMut::new(),
@@ -829,12 +954,9 @@ mod tests {
 	fn classify_msg(version: Version, type_id: u64, body: &Bytes) -> Result<Route, Error> {
 		// Build a minimal adapter just for the classify method.
 		// classify() only reads self.version and self.shared.namespaces.
-		let (control_tx, _) = mpsc::unbounded_channel();
-		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 		let shared = Arc::new(Shared {
-			incoming_tx,
-			incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-			control_tx,
+			incoming: Queue::new(),
+			control: Queue::new(),
 			streams: Mutex::new(HashMap::new()),
 			namespaces: Mutex::new(HashMap::new()),
 		});
@@ -1119,8 +1241,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_virtual_recv_stream_reads_initial_then_followup() {
 		let initial = Bytes::from_static(b"initial");
-		let (tx, rx) = mpsc::unbounded_channel();
-		let mut stream = VirtualRecvStream::new(initial, rx);
+		let follow = Queue::new();
+		let tx = follow.writer();
+		let mut stream = VirtualRecvStream::new(initial, follow);
 
 		// Read initial data
 		let mut buf = [0u8; 32];
@@ -1128,11 +1251,11 @@ mod tests {
 		assert_eq!(&buf[..n], b"initial");
 
 		// Send follow-up
-		tx.send(Bytes::from_static(b"followup")).unwrap();
+		tx.push(Bytes::from_static(b"followup"));
 		let n = stream.read(&mut buf).await.unwrap().unwrap();
 		assert_eq!(&buf[..n], b"followup");
 
-		// Close channel → FIN
+		// Drop the writer → FIN
 		drop(tx);
 		let result = stream.read(&mut buf).await.unwrap();
 		assert_eq!(result, None);
@@ -1141,8 +1264,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_virtual_recv_stream_partial_reads() {
 		let initial = Bytes::from_static(b"hello world");
-		let (_tx, rx) = mpsc::unbounded_channel();
-		let mut stream = VirtualRecvStream::new(initial, rx);
+		let mut stream = VirtualRecvStream::new(initial, Queue::new());
 
 		// Read small chunks
 		let mut buf = [0u8; 5];
@@ -1158,14 +1280,34 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_virtual_send_stream_errors_once_control_closes() {
+		// The adapter closes the control queue when its run() exits; writes must
+		// fail fast instead of buffering into a queue nobody drains.
+		let control = Queue::new();
+		let mut stream = VirtualSendStream::new(control.clone());
+		control.close();
+		assert!(matches!(stream.write(b"hello").await, Err(Error::Closed)));
+	}
+
+	#[test]
+	fn test_recv_stream_drop_discards_followups() {
+		// Dropping the reader closes the queue, so late routed messages are
+		// discarded instead of accumulating while the map entry lingers.
+		let follow = Queue::new();
+		let stream = VirtualRecvStream::new(Bytes::new(), follow.clone());
+		drop(stream);
+		assert!(!follow.push(Bytes::from_static(b"late")));
+	}
+
+	#[tokio::test]
 	async fn test_virtual_send_stream_writes_to_channel() {
-		let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-		let mut stream = VirtualSendStream::new(control_tx);
+		let control = Queue::new();
+		let mut stream = VirtualSendStream::new(control.clone());
 
 		let n = stream.write(b"hello").await.unwrap();
 		assert_eq!(n, 5);
 
-		let data = control_rx.recv().await.unwrap();
+		let data = control.pop().await.unwrap();
 		assert_eq!(data, &b"hello"[..]);
 	}
 

@@ -32,6 +32,17 @@ pub(crate) trait MaybeBoxedExt<'a>: Future + Sized + 'a {
 #[cfg(target_family = "wasm")]
 impl<'a, F: Future + 'a> MaybeBoxedExt<'a> for F {}
 
+/// Resolve with the error of a fallible future, parking forever on success.
+///
+/// The building block for racing "watchdog" futures whose clean completion should
+/// not end the race (only their failure should).
+pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
+	match fut.await {
+		Err(err) => err,
+		Ok(()) => std::future::pending().await,
+	}
+}
+
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
 #[derive(Clone)]
 pub(crate) struct Tasks {
@@ -133,7 +144,9 @@ impl TaskSet {
 	}
 
 	/// Drive submitted children until every submission handle is dropped and all
-	/// active children finish.
+	/// active children finish. The async form of [`Self::poll`], for callers with
+	/// nothing else to poll.
+	#[cfg(test)]
 	pub async fn run(mut self) {
 		kio::wait(|waiter| self.poll(waiter)).await
 	}

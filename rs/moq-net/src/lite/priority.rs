@@ -2,9 +2,8 @@ use std::{
 	cmp::{Ordering, Reverse},
 	collections::{BinaryHeap, HashMap},
 	sync::{Arc, Mutex},
+	task::Poll,
 };
-
-use tokio::sync::watch;
 
 // Hybrid priority queue that provides strict priority ordering for the top 255 items.
 //
@@ -100,8 +99,8 @@ struct PriorityState {
 	// return the *lowest*-priority overflow item, not the highest. With the
 	// wrapper, `pop()` returns the next item that should be promoted into vec.
 	overflow: BinaryHeap<Reverse<PriorityItem>>,
-	// Track location and watch channel for each ID
-	indexes: HashMap<usize, (Location, watch::Sender<u8>)>,
+	// Track location and notification channel for each ID
+	indexes: HashMap<usize, (Location, kio::Producer<u8>)>,
 	next_id: usize,
 }
 
@@ -110,9 +109,10 @@ impl PriorityState {
 		let id = self.next_id;
 		self.next_id += 1;
 
-		// Pre-register the watch channel so `place` can update it via `update_location`.
+		// Pre-register the channel so `place` can update it via `update_location`.
 		// The initial value is overwritten as soon as `place` decides where the item lands.
-		let (tx, rx) = watch::channel(u8::MAX);
+		let tx = kio::Producer::new(u8::MAX);
+		let rx = tx.consume();
 		self.indexes.insert(id, (Location::Overflow, tx));
 		self.place(PriorityItem { id, priority });
 
@@ -120,6 +120,7 @@ impl PriorityState {
 			id,
 			priority,
 			rx,
+			seen: u8::MAX,
 			queue: myself,
 		}
 	}
@@ -130,7 +131,7 @@ impl PriorityState {
 		}
 	}
 
-	fn update_location(indexes: &mut HashMap<usize, (Location, watch::Sender<u8>)>, id: usize, location: Location) {
+	fn update_location(indexes: &mut HashMap<usize, (Location, kio::Producer<u8>)>, id: usize, location: Location) {
 		let (loc, tx) = indexes.get_mut(&id).expect("item not in indexes");
 		*loc = location;
 
@@ -139,14 +140,14 @@ impl PriorityState {
 			Location::Overflow => u8::MAX,
 		};
 
-		tx.send_if_modified(|p| {
-			if *p != new_priority {
-				*p = new_priority;
-				true
-			} else {
-				false
-			}
-		});
+		// Only touch the write guard on a real change, so unchanged items don't wake.
+		// Read first and drop the guard: the write below takes the same lock.
+		let current = *tx.read();
+		if current != new_priority
+			&& let Ok(mut value) = tx.write()
+		{
+			*value = new_priority;
+		}
 	}
 
 	// Place an item into vec or overflow based on its priority, updating the HashMap
@@ -259,7 +260,10 @@ impl PriorityState {
 pub struct PriorityHandle {
 	id: usize,
 	priority: Priority,
-	rx: watch::Receiver<u8>,
+	rx: kio::Consumer<u8>,
+	/// Last value observed via [`current`](Self::current)/[`next`](Self::next), so
+	/// `next` fires only on a real change.
+	seen: u8,
 	queue: PriorityQueue,
 }
 
@@ -271,12 +275,34 @@ impl Drop for PriorityHandle {
 
 impl PriorityHandle {
 	pub fn current(&mut self) -> u8 {
-		*self.rx.borrow_and_update()
+		self.seen = *self.rx.read();
+		self.seen
 	}
 
+	/// Poll for a priority change since the last observed value.
+	///
+	/// The queue holds the producer while this handle is registered, so closure is
+	/// unreachable; it parks rather than spinning a caller's poll loop.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<u8> {
+		let seen = self.seen;
+		match self.rx.poll(waiter, |value| {
+			if **value != seen {
+				Poll::Ready(**value)
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(value)) => {
+				self.seen = value;
+				Poll::Ready(value)
+			}
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+
+	#[cfg(test)]
 	pub async fn next(&mut self) -> u8 {
-		let _ = self.rx.changed().await;
-		*self.rx.borrow_and_update()
+		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Change this item's track priority and re-sort the queue.

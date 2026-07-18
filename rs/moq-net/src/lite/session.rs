@@ -3,8 +3,10 @@ use crate::{
 	Error, Origin, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet},
+	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
 };
+
+use std::task::Poll;
 
 use super::{
 	Connecting, DataType, PeerSetup, Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version,
@@ -149,10 +151,25 @@ pub fn start<S: web_transport_trait::Session>(
 	});
 
 	let driver = async move {
-		let res = tokio::select! {
-			Err(res) = run_session(setup_stream) => Err(res),
-			res = publisher.run() => res,
-			res = subscriber.run(sub_connecting, task_set) => res,
+		let res = {
+			// Only a session-stream error ends the race; its clean completion (no
+			// stream) parks so the publisher and subscriber keep running.
+			let mut session = std::pin::pin!(err_only(run_session(setup_stream)));
+			let mut publisher = std::pin::pin!(publisher.run());
+			let mut subscriber = std::pin::pin!(subscriber.run(sub_connecting, task_set));
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = waiter.poll_future(session.as_mut()) {
+					return Poll::Ready(Err(err));
+				}
+				if let Poll::Ready(res) = waiter.poll_future(publisher.as_mut()) {
+					return Poll::Ready(res);
+				}
+				if let Poll::Ready(res) = waiter.poll_future(subscriber.as_mut()) {
+					return Poll::Ready(res);
+				}
+				Poll::Pending
+			})
+			.await
 		};
 
 		match &res {

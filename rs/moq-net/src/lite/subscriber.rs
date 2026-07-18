@@ -8,7 +8,7 @@ use std::{
 
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks};
+use crate::util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks, err_only};
 
 use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
@@ -107,16 +107,34 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// rather than stored on `Subscriber`: the struct is cloned for several long-lived
 	/// tasks (`bw`, `run_uni`), and any clone retaining a producer would keep the channel
 	/// open and hang `connect()`.
-	pub async fn run(self, connecting: Option<ConnectingProducer>, tasks: TaskSet) -> Result<(), Error> {
+	pub async fn run(self, connecting: Option<ConnectingProducer>, mut tasks: TaskSet) -> Result<(), Error> {
 		let bw = self.clone();
 		let dg = self.clone();
-		tokio::select! {
-			Err(err) = self.clone().run_announce(connecting) => Err(err),
-			res = self.run_uni() => res,
-			Err(err) = bw.run_recv_bandwidth() => Err(err),
-			Err(err) = dg.run_datagrams() => Err(err),
-			_ = tasks.run() => Ok(()),
-		}
+		// The watchdog halves (announce/bandwidth/datagrams) only end the session on
+		// error; their clean completion parks and the other futures keep running.
+		let mut announce = std::pin::pin!(err_only(self.clone().run_announce(connecting)));
+		let mut uni = std::pin::pin!(self.run_uni());
+		let mut bandwidth = std::pin::pin!(err_only(bw.run_recv_bandwidth()));
+		let mut datagrams = std::pin::pin!(err_only(dg.run_datagrams()));
+		kio::wait(|waiter| {
+			if let Poll::Ready(err) = waiter.poll_future(announce.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(res) = waiter.poll_future(uni.as_mut()) {
+				return Poll::Ready(res);
+			}
+			if let Poll::Ready(err) = waiter.poll_future(bandwidth.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = waiter.poll_future(datagrams.as_mut()) {
+				return Poll::Ready(Err(err));
+			}
+			if tasks.poll(waiter).is_ready() {
+				return Poll::Ready(Ok(()));
+			}
+			Poll::Pending
+		})
+		.await
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {
@@ -425,22 +443,30 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(());
 			}
 
-			tokio::select! {
-				res = bandwidth.unused() => {
-					if res.is_err() {
-						return Ok(());
+			// Race the last consumer leaving against the probe stream ending.
+			let unused = {
+				let mut probe = std::pin::pin!(self.run_probe_stream(bandwidth));
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = bandwidth.poll_unused(waiter) {
+						return Poll::Ready(Some(res));
 					}
-					// Loop back: a new consumer may arrive later.
-				}
-				res = self.run_probe_stream(bandwidth) => {
-					match res {
-						Ok(()) => tracing::debug!("probe stream closed"),
-						Err(err) => tracing::warn!(%err, "probe stream error"),
+					if let Poll::Ready(res) = waiter.poll_future(probe.as_mut()) {
+						match res {
+							Ok(()) => tracing::debug!("probe stream closed"),
+							Err(err) => tracing::warn!(%err, "probe stream error"),
+						}
+						return Poll::Ready(None);
 					}
-					// Stream ended (peer FIN'd or errored). Don't hammer an
-					// uncooperative peer; give up for the rest of the session.
-					return Ok(());
-				}
+					Poll::Pending
+				})
+				.await
+			};
+			match unused {
+				// Loop back: a new consumer may arrive later.
+				Some(Ok(())) => {}
+				// The channel closed, or the stream ended (peer FIN'd or errored).
+				// Don't hammer an uncooperative peer; give up for the rest of the session.
+				Some(Err(_)) | None => return Ok(()),
 			}
 		}
 	}
@@ -617,10 +643,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let next = tracks
 				.drive(async {
-					tokio::select! {
-						assigned = assignments.next() => Some(assigned),
-						_ = self.session.closed() => None,
-					}
+					let mut closed = std::pin::pin!(self.session.closed());
+					kio::wait(|waiter| {
+						if waiter.poll_future(closed.as_mut()).is_ready() {
+							return Poll::Ready(None);
+						}
+						assignments.poll_next(waiter).map(Some)
+					})
+					.await
 				})
 				.await;
 
@@ -716,10 +746,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// The timescale came from TRACK_INFO (read before this subscription was even
 		// registered), so frames decode immediately. No SUBSCRIBE_OK to wait on.
 
-		let res = tokio::select! {
-			err = track.closed() => Err(err),
-			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone(), track_stats.clone(), timescale) => res,
+		let res = {
+			let mut serve = std::pin::pin!(self.run_group(stream, group.clone(), track_stats.clone(), timescale));
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = track.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				if let Poll::Ready(err) = group.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				waiter.poll_future(serve.as_mut())
+			})
+			.await
 		};
 
 		match res {
@@ -843,12 +881,6 @@ enum Sub<S: web_transport_trait::Session> {
 	Active(SubStream<S>),
 }
 
-impl<S: web_transport_trait::Session> Sub<S> {
-	fn is_active(&self) -> bool {
-		matches!(self, Sub::Active(_))
-	}
-}
-
 /// A route attached for one received announce, remembering the publisher
 /// identity (the first hop of the reconstructed chain) so a restart can tell an
 /// alternate route to the same broadcast from a brand-new broadcast.
@@ -948,13 +980,21 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let mut fetches: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
 		let teardown = loop {
-			let event = tokio::select! {
-				biased;
+			let event = {
+				// The upstream subscribe stream closed, or carried a START/END/DROP.
+				let mut sub_msg = std::pin::pin!(async {
+					match &mut sub {
+						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
+						Sub::None => std::future::pending().await,
+					}
+				});
+				let mut session_closed = std::pin::pin!(self.subscriber.session.closed());
+				// Biased: demand first, then completions, then closures.
+				kio::wait(|waiter| {
+					// (1) Track demand: a fetch, a subscription change, or the origin
+					// handing the track to another route. Polled under one waiter so
+					// the borrows of `dynamic` and `serving` are held together.
 
-				// (1) Track demand: a fetch, a subscription change, or the origin
-				// handing the track to another route. One `kio::wait` so the borrows
-				// of `dynamic` and `serving` are held together.
-				event = kio::wait(|waiter| {
 					// A fetch is cheap and one-shot, so serve it ahead of subscription churn.
 					match dynamic.poll_requested_group(waiter) {
 						Poll::Ready(Ok(req)) => return Poll::Ready(Event::Fetch(req)),
@@ -975,26 +1015,33 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						Poll::Ready(Err(_)) => return Poll::Ready(Event::SessionClosed),
 						Poll::Pending => {}
 					}
-					Poll::Pending
-				}) => event,
 
-				// (2) An in-flight fetch completed.
-				Some(()) = fetches.next(), if !fetches.is_empty() => Event::FetchDone,
-
-				// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
-				res = async {
-					match &mut sub {
-						Sub::Active(active) => active.stream.reader.decode_maybe::<lite::SubscribeResponse>().await,
-						Sub::None => std::future::pending().await,
+					// (2) An in-flight fetch completed. An empty set is skipped (it reports
+					// terminated without registering a waker); this loop is what refills it.
+					if !fetches.is_empty() {
+						let mut cx = std::task::Context::from_waker(waiter.waker());
+						if let Poll::Ready(Some(())) = fetches.poll_next_unpin(&mut cx) {
+							return Poll::Ready(Event::FetchDone);
+						}
 					}
-				}, if sub.is_active() => match res {
-					Ok(Some(msg)) => Event::SubResponse(msg),
-					Ok(None) => Event::SubClosed(Ok(())),
-					Err(err) => Event::SubClosed(Err(err)),
-				},
 
-				// (4) The session died: hand the track back for another route.
-				_ = self.subscriber.session.closed() => Event::SessionClosed,
+					// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
+					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
+						return Poll::Ready(match res {
+							Ok(Some(msg)) => Event::SubResponse(msg),
+							Ok(None) => Event::SubClosed(Ok(())),
+							Err(err) => Event::SubClosed(Err(err)),
+						});
+					}
+
+					// (4) The session died: hand the track back for another route.
+					if waiter.poll_future(session_closed.as_mut()).is_ready() {
+						return Poll::Ready(Event::SessionClosed);
+					}
+
+					Poll::Pending
+				})
+				.await
 			};
 
 			match event {
@@ -1087,9 +1134,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			})
 			.await?;
 
-		let info = tokio::select! {
-			_ = self.subscriber.session.closed() => return Err(Error::Dropped),
-			info = stream.reader.decode::<lite::TrackInfo>() => info?,
+		let info = {
+			let mut closed = std::pin::pin!(self.subscriber.session.closed());
+			let mut decode = std::pin::pin!(stream.reader.decode::<lite::TrackInfo>());
+			kio::wait(|waiter| {
+				if waiter.poll_future(closed.as_mut()).is_ready() {
+					return Poll::Ready(Err(Error::Dropped));
+				}
+				waiter.poll_future(decode.as_mut())
+			})
+			.await?
 		};
 		// The publisher FINs after TRACK_INFO; FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
@@ -1251,9 +1305,16 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			// Older drafts: the first SUBSCRIBE_OK confirms it. Bail if the session
 			// dies meanwhile; a dying route hands the assignment back through the
 			// serve loop's teardown instead.
-			let resp = tokio::select! {
-				_ = self.subscriber.session.closed() => Err(Error::Dropped),
-				resp = stream.reader.decode::<lite::SubscribeResponse>() => resp,
+			let resp = {
+				let mut closed = std::pin::pin!(self.subscriber.session.closed());
+				let mut decode = std::pin::pin!(stream.reader.decode::<lite::SubscribeResponse>());
+				kio::wait(|waiter| {
+					if waiter.poll_future(closed.as_mut()).is_ready() {
+						return Poll::Ready(Err(Error::Dropped));
+					}
+					waiter.poll_future(decode.as_mut())
+				})
+				.await
 			};
 
 			let ok = match resp {

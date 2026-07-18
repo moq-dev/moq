@@ -1555,6 +1555,7 @@ impl Assignments {
 	}
 
 	/// Block until a track is assigned to the route. See [`Self::poll_next`].
+	#[cfg(test)]
 	pub async fn next(&mut self) -> Result<Assignment, Error> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
@@ -1562,7 +1563,7 @@ impl Assignments {
 
 /// One track assigned to a route for serving.
 ///
-/// Yielded by [`Assignments::next`]. The feeder learns the track's properties
+/// Yielded by [`Assignments::poll_next`]. The feeder learns the track's properties
 /// (e.g. via a wire TRACK_INFO) and starts serving with [`Self::serve`]; the
 /// origin splices the served track into the logical track at the right group
 /// boundary, so downstream consumers resume seamlessly.
@@ -1776,18 +1777,25 @@ async fn run_front_janitor(
 
 		// Linger: consumers keep their handles (serving from cache) while a
 		// reconnecting session gets a chance to re-attach and resume.
-		let reattached = tokio::select! {
-			biased;
-			res = kio::wait(|waiter| {
-				match state.poll(
-					waiter,
-					|s| if s.routes.is_empty() && !s.closed { Poll::Pending } else { Poll::Ready(()) },
-				) {
-					Poll::Ready(res) => Poll::Ready(res.is_ok()),
-					Poll::Pending => Poll::Pending,
+		let reattached = {
+			let mut linger = std::pin::pin!(web_async::time::sleep(ROUTE_LINGER));
+			kio::wait(|waiter| {
+				match state.poll(waiter, |s| {
+					if s.routes.is_empty() && !s.closed {
+						Poll::Pending
+					} else {
+						Poll::Ready(())
+					}
+				}) {
+					Poll::Ready(res) => return Poll::Ready(res.is_ok()),
+					Poll::Pending => {}
 				}
-			}) => res,
-			_ = web_async::time::sleep(ROUTE_LINGER) => false,
+				if waiter.poll_future(linger.as_mut()).is_ready() {
+					return Poll::Ready(false);
+				}
+				Poll::Pending
+			})
+			.await
 		};
 		if reattached {
 			// Either a route re-attached or a graceful close landed; loop back to

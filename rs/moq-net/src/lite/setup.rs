@@ -187,38 +187,34 @@ impl Message for Setup {
 ///
 /// Streams whose encoding depends on a negotiated capability (e.g. the PROBE
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
-/// shares the same watch channel.
-#[derive(Clone)]
-pub(crate) struct PeerSetup(tokio::sync::watch::Sender<Option<Setup>>);
-
-impl Default for PeerSetup {
-	fn default() -> Self {
-		Self(tokio::sync::watch::channel(None).0)
-	}
-}
+/// shares the same slot.
+#[derive(Clone, Default)]
+pub(crate) struct PeerSetup(kio::Shared<Option<Setup>>);
 
 impl PeerSetup {
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
-		// Ignored if every receiver has dropped; nothing is waiting on it then.
-		let _ = self.0.send(Some(setup));
+		*self.0.lock() = Some(setup);
 	}
 
 	/// Await the peer's advertised probe level, blocking until its SETUP arrives.
 	///
 	/// The peer MUST send exactly one SETUP, so this resolves once that stream is read.
+	/// Waits forever if it never does; the caller is a session task, cancelled when the
+	/// driver drops.
 	pub async fn probe_level(&self) -> ProbeLevel {
-		let mut rx = self.0.subscribe();
-		loop {
-			// Clone out of the borrow before awaiting so no guard crosses the await point.
-			if let Some(setup) = rx.borrow_and_update().clone() {
-				return setup.probe;
-			}
-			if rx.changed().await.is_err() {
-				// Sender dropped before sending: treat as no probe support.
-				return ProbeLevel::default();
-			}
-		}
+		let slot = self
+			.0
+			.wait(|setup| {
+				if setup.is_some() {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			})
+			.await;
+		let setup = slot.as_ref().expect("waited for Some");
+		setup.probe
 	}
 }
 

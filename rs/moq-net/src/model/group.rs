@@ -409,8 +409,12 @@ impl Producer {
 
 	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.abort_reason()
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Poll until the group is closed or aborted; ready with the cause.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.state.poll_closed(waiter).map(|()| self.abort_reason())
 	}
 
 	/// Block until there are no active consumers.
