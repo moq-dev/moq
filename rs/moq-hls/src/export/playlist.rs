@@ -11,8 +11,8 @@ use std::time::SystemTime;
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
 const VERSION: u32 = 6;
 
-/// Everything a media playlist render needs; built by
-/// [`Rendition::playlist`](super::Rendition::playlist).
+/// Everything a media playlist render needs; built by the crate-internal
+/// `Rendition::playlist`.
 pub struct Snapshot {
 	/// `EXT-X-TARGETDURATION`, in whole seconds.
 	pub target_duration: u64,

@@ -33,7 +33,7 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> 
 	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
 		return not_found();
 	};
-	broadcaster.wait_ready(READY_TIMEOUT).await;
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	if broadcaster.is_empty() {
 		return not_found();
 	}
@@ -50,8 +50,8 @@ async fn media(
 
 	// A playlist with no segments confuses players; give the timeline a moment to index the
 	// first complete segment before answering.
-	wait_playable(&rendition).await;
-	if !rendition.playable() {
+	let _ = tokio::time::timeout(READY_TIMEOUT, rendition.playable()).await;
+	if !rendition.is_playable() {
 		return not_found();
 	}
 
@@ -102,28 +102,8 @@ async fn segment(
 async fn rendition_for(server: &Server, broadcast: &str, kind: &str, rendition: &str) -> Option<Arc<Rendition>> {
 	let kind = kind.parse::<Kind>().ok()?;
 	let broadcaster = server.broadcaster(broadcast).await?;
-	broadcaster.wait_ready(READY_TIMEOUT).await;
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(kind, rendition)
-}
-
-/// Wait until the rendition has at least one complete segment (or ended), bounded by
-/// [`READY_TIMEOUT`].
-async fn wait_playable(rendition: &Rendition) {
-	if rendition.playable() {
-		return;
-	}
-	let mut rx = rendition.updated();
-	let _ = tokio::time::timeout(READY_TIMEOUT, async {
-		loop {
-			if rendition.playable() {
-				break;
-			}
-			if rx.changed().await.is_err() {
-				break;
-			}
-		}
-	})
-	.await;
 }
 
 fn m3u8(body: String) -> Response {
