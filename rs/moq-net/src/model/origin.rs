@@ -812,7 +812,7 @@ impl Producer {
 	/// replacement at the first missing group; consumers never observe the swap.
 	///
 	/// `route` is the source's initial metadata; update it with
-	/// [`broadcast::Producer::set_route`]. The [`broadcast::Route::live`] flag
+	/// [`broadcast::Producer::set_route`]. The [`broadcast::Route::announce`] flag
 	/// controls whether the path is announced: a non-live broadcast is invisible
 	/// to [`Consumer::announced`] but stays reachable by exact path for
 	/// subscribes and fetches (e.g. serving cached or on-demand content), so
