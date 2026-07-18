@@ -29,7 +29,7 @@ async function structure(track: Track.Subscriber): Promise<number[]> {
 
 test("deltas off: a snapshot group per change", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltaRatio: 0 });
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
@@ -40,7 +40,7 @@ test("deltas off: a snapshot group per change", async () => {
 
 test("deltaRatio 0 disables deltas, like off", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltaRatio: 0 });
 	producer.update({ a: 1 });
 	producer.update({ a: 2 });
 	producer.finish();
@@ -52,7 +52,7 @@ test("deltaRatio 0 disables deltas, like off", async () => {
 
 test("live consumer sees each update", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track);
+	const producer = new Producer<Value>({ track });
 	const consumer = new Consumer<Value>(track.subscribe());
 
 	for (let n = 1; n <= 3; n++) {
@@ -63,7 +63,7 @@ test("live consumer sees each update", async () => {
 
 test("unchanged value writes nothing", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track);
+	const producer = new Producer<Value>({ track });
 	producer.update({ a: 1 });
 	producer.update({ a: 1 });
 	producer.finish();
@@ -73,7 +73,7 @@ test("unchanged value writes nothing", async () => {
 
 test("deltas share one group", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
 	producer.update({ a: 1, b: 1 });
 	producer.update({ a: 1, b: 2 });
 	producer.update({ a: 1, b: 3 });
@@ -85,7 +85,7 @@ test("deltas share one group", async () => {
 
 test("deltas reconstruct to the final value", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
 	producer.update({ a: 1, b: 1 });
 	producer.update({ a: 1, b: 2 });
 	producer.update({ a: 5, b: 2 });
@@ -99,7 +99,7 @@ test("deltas reconstruct to the final value", async () => {
 // section) without a single owner having to rebuild the whole document.
 test("mutate composes independent owners", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { initial: {} });
+	const producer = new Producer<Value>({ track, initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
 	producer.mutate((v) => {
@@ -116,7 +116,7 @@ test("mutate composes independent owners", async () => {
 
 test("mutate starts from the configured initial value", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { initial: {} });
+	const producer = new Producer<Value>({ track, initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
 	producer.mutate((v) => {
@@ -126,7 +126,7 @@ test("mutate starts from the configured initial value", async () => {
 });
 
 test("mutate without a prior value or initial throws", () => {
-	const producer = new Producer<Value>(new Track.Producer("test"));
+	const producer = new Producer<Value>({ track: new Track.Producer("test") });
 	expect(() => producer.mutate(() => {})).toThrow();
 });
 
@@ -134,7 +134,7 @@ test("mutate without a prior value or initial throws", () => {
 // Exercised with deltas on to cover the merge-patch null-deletion path.
 test("mutate removes a section", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100, initial: {} });
+	const producer = new Producer<Value>({ track, deltaRatio: 100, initial: {} });
 	const consumer = new Consumer<Value>(track.subscribe());
 
 	producer.mutate((v) => {
@@ -154,7 +154,7 @@ test("tight ratio rolls snapshots", async () => {
 	// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate checks
 	// the deltas already written, so the delta that tips the group over budget still lands (a one-frame
 	// overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls group 1.
-	const producer = new Producer<Value>(track, { deltaRatio: 1 });
+	const producer = new Producer<Value>({ track, deltaRatio: 1 });
 	producer.update({ a: 1 }); // snapshot, group 0
 	producer.update({ a: 2 }); // delta, group 0 (deltas = 7)
 	producer.update({ a: 3 }); // delta, group 0 (deltas = 14, now over budget)
@@ -171,7 +171,7 @@ test("deltas stay within ratio times snapshot", async () => {
 	// budgets 56 bytes of deltas. The gate checks the deltas already written, so the group keeps filling
 	// until they first exceed 56 (nine deltas = 63 bytes) and the next update rolls (a one-frame
 	// overshoot past the 56-byte budget).
-	const producer = new Producer<Value>(track, { deltaRatio: 8 });
+	const producer = new Producer<Value>({ track, deltaRatio: 8 });
 	for (let n = 0; n <= 10; n++) producer.update({ n });
 	producer.finish();
 
@@ -180,7 +180,7 @@ test("deltas stay within ratio times snapshot", async () => {
 
 test("array change is a wholesale delta", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
 	producer.update({ list: [1, 2] });
 	producer.update({ list: [1, 2, 3] });
 	producer.finish();
@@ -191,7 +191,7 @@ test("array change is a wholesale delta", async () => {
 
 test("late joiner collapses a buffered backlog to the latest value", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 100 });
+	const producer = new Producer<Value>({ track, deltaRatio: 100 });
 	const subscriber = track.subscribe();
 	for (let n = 0; n <= 20; n++) {
 		producer.update({ n });
@@ -205,7 +205,7 @@ test("late joiner collapses a buffered backlog to the latest value", async () =>
 
 test("frame cap rolls snapshot", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>(track, { deltaRatio: 1_000_000 });
+	const producer = new Producer<Value>({ track, deltaRatio: 1_000_000 });
 	// First update is the snapshot; deltas fill the group until the frame cap forces a roll.
 	for (let i = 0; i <= 256; i++) {
 		producer.update({ n: i });

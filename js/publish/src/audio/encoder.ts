@@ -20,6 +20,7 @@ const AAC_CODEC = "mp4a.40.2";
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
+import { Framer } from "./framer";
 
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
 // object with the mime plus tuning knobs.
@@ -356,75 +357,76 @@ export class Encoder {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
-			const encoder = new AudioEncoder({
-				output: (frame) => {
-					if (frame.type !== "key") {
-						throw new Error("only key frames are supported");
-					}
-
-					this.#out.stats.update((stats) => ({
-						frames: stats.frames + 1,
-						bytes: stats.bytes + frame.byteLength,
-					}));
-
-					// Each audio frame is its own group so the relay can forward it without
-					// waiting for a group boundary. Loss is handled by the codec's PLC.
-					track.writeFrame({
-						payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
-						timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
-					});
-				},
-				error: (err) => {
-					console.error("encoder error", err);
-					track.close(err);
-				},
-			});
-			effect.cleanup(() => encoder.close());
-
-			let config: Catalog.AudioConfig | undefined;
 			effect.run((effect: Effect) => {
-				config = effect.get(this.out.catalog);
+				const config = effect.get(this.out.catalog);
 				if (!config) return;
 
 				const source = effect.get(this.in.source);
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
 				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
+				const framer = createFramer(config);
+
+				const encoder = new AudioEncoder({
+					output: (frame) => {
+						if (frame.type !== "key") {
+							throw new Error("only key frames are supported");
+						}
+
+						this.#out.stats.update((stats) => ({
+							frames: stats.frames + 1,
+							bytes: stats.bytes + frame.byteLength,
+						}));
+
+						// Each audio frame is its own group so the relay can forward it without
+						// waiting for a group boundary. Loss is handled by the codec's PLC.
+						track.writeFrame({
+							payload: Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro),
+							timestamp: Time.Timestamp.fromMicros(frame.timestamp as Time.Micro),
+						});
+					},
+					error: (err) => {
+						console.error("encoder error", err);
+						track.close(err);
+					},
+				});
+				effect.cleanup(() => encoder.close());
 
 				console.debug("encoding audio", encoderConfig);
 				encoder.configure(encoderConfig);
-			});
 
-			effect.event(worklet.port, "message", (event: Event) => {
-				const data = (event as MessageEvent<Capture.AudioFrame>).data;
-				const channelCount = data.channels.length;
-				if (!channelCount) return;
+				effect.event(worklet.port, "message", (event: Event) => {
+					const captured = (event as MessageEvent<Capture.AudioFrame>).data;
+					const channelCount = captured.channels.length;
+					if (!channelCount) return;
 
-				if (!config || channelCount !== config.numberOfChannels) {
-					this.#captured.set({ sampleRate: worklet.context.sampleRate, channelCount });
-					return;
-				}
+					if (channelCount !== config.numberOfChannels) {
+						this.#captured.set({ sampleRate: worklet.context.sampleRate, channelCount });
+						return;
+					}
 
-				const channels = data.channels;
-				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
-				const joined = new Float32Array(joinedLength);
+					for (const data of framer.push(captured)) {
+						const joinedLength = data.channels.reduce((total, channel) => total + channel.length, 0);
+						const joined = new Float32Array(joinedLength);
 
-				channels.reduce((offset: number, channel: Float32Array): number => {
-					joined.set(channel, offset);
-					return offset + channel.length;
-				}, 0);
+						data.channels.reduce((offset: number, channel: Float32Array): number => {
+							joined.set(channel, offset);
+							return offset + channel.length;
+						}, 0);
 
-				const frame = new AudioData({
-					format: "f32-planar",
-					sampleRate: worklet.context.sampleRate,
-					numberOfFrames: channels[0].length,
-					numberOfChannels: channels.length,
-					timestamp: data.timestamp,
-					data: joined,
-					transfer: [joined.buffer],
+						const frame = new AudioData({
+							format: "f32-planar",
+							sampleRate: worklet.context.sampleRate,
+							numberOfFrames: data.channels[0].length,
+							numberOfChannels: data.channels.length,
+							timestamp: data.timestamp,
+							data: joined,
+							transfer: [joined.buffer],
+						});
+
+						encoder.encode(frame);
+						frame.close();
+					}
 				});
-
-				encoder.encode(frame);
-				frame.close();
 			});
 			worklet.port.start();
 		});
@@ -442,6 +444,26 @@ function requestedChannelCount(track: MediaStreamTrack): number | undefined {
 	if (constraint === undefined) return undefined;
 	if (typeof constraint === "number") return constraint;
 	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
+}
+
+function createFramer(config: Catalog.AudioConfig): Framer {
+	// WebCodecs copies input AudioData timestamps to encoded chunks. Align those inputs to codec frames
+	// because the worklet's 128-sample quanta usually do not align with Opus frame boundaries.
+	if (config.codec.startsWith("mp4a")) {
+		return new Framer({
+			sampleRate: config.sampleRate,
+			channels: config.numberOfChannels,
+			size: { samples: AAC_FRAME_SAMPLES },
+		});
+	}
+
+	if (config.codec !== "opus") throw new Error(`unsupported audio codec: ${config.codec}`);
+	const duration = Time.Micro.fromMilli(Time.Milli(config.jitter ?? OPUS_FRAME_DURATION));
+	return new Framer({
+		sampleRate: config.sampleRate,
+		channels: config.numberOfChannels,
+		size: { duration },
+	});
 }
 
 // Resolve the bare codec shorthands to their full config object so callers can read fields uniformly.

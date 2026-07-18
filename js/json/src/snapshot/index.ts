@@ -16,4 +16,4 @@
  */
 
 export { Consumer } from "./consumer.ts";
-export { type Config, Producer } from "./producer.ts";
+export { type Config, Producer, type ProducerConfig } from "./producer.ts";

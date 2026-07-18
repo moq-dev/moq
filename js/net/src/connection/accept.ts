@@ -69,6 +69,7 @@ async function acceptAlpn(
 
 	return new Ietf.Connection({
 		discovery,
+		client: false,
 		url,
 		quic: transport,
 		control: controlStream,
@@ -113,6 +114,7 @@ async function acceptSetup(
 
 	return new Ietf.Connection({
 		discovery,
+		client: false,
 		url,
 		quic: transport,
 		control: stream,
@@ -172,6 +174,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			discovery,
+			client: false,
 			url,
 			quic: transport,
 			control: stream,

@@ -238,6 +238,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			discovery,
+			client: true,
 			url,
 			quic: session,
 			control: stream,
@@ -322,6 +323,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			discovery,
+			client: true,
 			url,
 			quic: session,
 			control: stream,
@@ -347,6 +349,7 @@ async function handshakeAlpn(
 
 	return new Ietf.Connection({
 		discovery,
+		client: true,
 		url,
 		quic: session,
 		control: controlStream,

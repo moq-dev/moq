@@ -42,6 +42,9 @@ export interface Config<T> {
 	compression?: boolean;
 }
 
+/** Snapshot producer options, including the destination track. */
+export type ProducerConfig<T> = Config<T> & { track: Moq.Track.Producer };
+
 /** Publishes a JSON value over a track, choosing snapshots and deltas automatically. */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
@@ -63,8 +66,8 @@ export class Producer<T> {
 	#compress = false;
 	#encoder?: Encoder;
 
-	constructor(track: Moq.Track.Producer, config: Config<T> = {}) {
-		this.#track = track;
+	constructor(config: ProducerConfig<T>) {
+		this.#track = config.track;
 		this.#config = config;
 		this.#compress = config.compression ?? false;
 	}

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/moq-dev/moq/compare/moq-native-v0.18.2...moq-native-v0.18.3) - 2026-07-18
+
+### Fixed
+
+- *(moq-native)* silence gso_disabled dead-code in default builds ([#2360](https://github.com/moq-dev/moq/pull/2360))
+
+### Other
+
+- *(deps)* bump the cargo group across 1 directory with 3 updates ([#2273](https://github.com/moq-dev/moq/pull/2273))
+
 ## [0.18.2](https://github.com/moq-dev/moq/compare/moq-native-v0.18.1...moq-native-v0.18.2) - 2026-07-16
 
 ### Fixed

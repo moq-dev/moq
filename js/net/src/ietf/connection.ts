@@ -65,6 +65,7 @@ export class Connection implements Established {
 		control,
 		maxRequestId,
 		version,
+		client,
 		discovery = true,
 	}: {
 		url: URL;
@@ -72,6 +73,8 @@ export class Connection implements Established {
 		control: Stream;
 		maxRequestId: bigint;
 		version: IetfVersion;
+		/** Whether this peer initiated the session, selecting the even request-ID space. */
+		client: boolean;
 		discovery?: boolean;
 	}) {
 		this.url = url;
@@ -82,11 +85,11 @@ export class Connection implements Established {
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
-			this.#session = new NativeSession(quic, version);
+			this.#session = new NativeSession(quic, version, client);
 			// v17+: control/setup stream only carries GoAway
 			void this.#runGoAway(control, version);
 		} else {
-			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId);
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId, client);
 			this.#session = adapter;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {

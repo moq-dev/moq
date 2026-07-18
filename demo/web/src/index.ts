@@ -17,9 +17,10 @@
  */
 
 import "./highlight";
+import * as Json from "@moq/json";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
-import { Hang, Json, Net, Signals } from "@moq/watch";
+import { Hang, Net, Signals } from "@moq/watch";
 import type MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import { bufferBars, formatBitrate, formatFps, graph, renderRows } from "./viz";

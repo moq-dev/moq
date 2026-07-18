@@ -16,9 +16,10 @@
  */
 
 import "./highlight";
+import * as Json from "@moq/json";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
-import { type Audio, Json, Net, Signals, Source, type Video } from "@moq/publish";
+import { type Audio, Net, Signals, Source, type Video } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
 import { formatBitrate, formatFps, graph } from "./viz";
@@ -403,7 +404,7 @@ meta.run((effect) => {
 	const track = net.createTrack(META_TRACK, { latencyMax: 86_400_000 });
 	effect.cleanup(() => track.close());
 
-	const producer = new Json.Snapshot.Producer<unknown>(track);
+	const producer = new Json.Snapshot.Producer<unknown>({ track });
 	producer.update(currentMeta);
 	activeMeta = producer;
 	effect.cleanup(() => {

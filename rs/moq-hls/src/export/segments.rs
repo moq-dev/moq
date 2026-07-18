@@ -509,6 +509,37 @@ mod tests {
 		assert_eq!(live.segment_groups(2), None, "the skipped record is not a boundary");
 	}
 
+	// `end()` is what promotes the live-edge record into the final segment, and it is a no-op
+	// once the channel is closed. So anything retiring a rendition must NOT force-close a
+	// timeline that is about to end on its own, or that last segment is silently lost -- which
+	// is why `renditions::Producer::clear` drops its renditions rather than closing them.
+	#[test]
+	fn closing_before_end_loses_the_final_segment() {
+		let window = Duration::from_secs(30);
+
+		// The watcher's own order: end() then close() -- the live edge finalizes.
+		let clean = Producer::new();
+		clean.push(entry(0, 0), window);
+		clean.push(entry(1, 2_000), window);
+		clean.end();
+		clean.close();
+		assert!(
+			matches!(clean.state.read().next_after(Some(0)), Next::Ready { .. }),
+			"end() before close() finalizes the live edge"
+		);
+
+		// Reversed: a close() that races ahead of end() strands it forever.
+		let raced = Producer::new();
+		raced.push(entry(0, 0), window);
+		raced.push(entry(1, 2_000), window);
+		raced.close();
+		raced.end();
+		assert!(
+			matches!(raced.state.read().next_after(Some(0)), Next::Pending),
+			"end() is a no-op after close(), so the final segment never finalizes"
+		);
+	}
+
 	// The cursor and the serve path must time the final (open-ended) segment identically:
 	// estimated from the observed cadence, not a flat DEFAULT_SEGMENT.
 	#[test]

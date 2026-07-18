@@ -155,7 +155,7 @@ impl Drop for Broadcaster {
 		// The rendition map lives in shared state, so unlike an owned map it does NOT free its
 		// renditions when this handle goes away: a surviving `renditions::Consumer` would pin
 		// every `Rendition`, and with it the timeline watcher and source subscription it holds.
-		// Drop them here so teardown can't leak a standing subscription.
+		// Release them here so teardown can't leak a standing subscription.
 		self.renditions.clear();
 	}
 }
@@ -279,6 +279,63 @@ mod tests {
 		drop((media, registration, broadcast));
 	}
 
+	// Dropping the broadcaster must not truncate a recording in progress. A cursor holds its
+	// rendition alive, so the rendition's own watcher still ends the timeline with `end()` --
+	// which is what promotes the live-edge record into the final segment. Force-closing the
+	// rendition here instead would race that (`end()` no-ops on a closed channel) and silently
+	// drop the last segment of every recording.
+	#[tokio::test]
+	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0");
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		registration.set(config);
+		drop(reserved);
+
+		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
+		// publisher finishes.
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster
+			.rendition(Kind::Video, "video0")
+			.expect("rendition discovered");
+		let mut segments = rendition.segments();
+
+		// The recorder drops the broadcaster before finalizing its uploads.
+		drop(broadcaster);
+
+		// Finish the source after teardown, forcing the broadcaster's drop to land before the
+		// rendition watcher's clean-end path.
+		media.finish().unwrap();
+		catalog.finish().unwrap();
+
+		let mut groups = Vec::new();
+		while let Some(segment) = tokio::time::timeout(Duration::from_secs(5), segments.next())
+			.await
+			.expect("the cursor drains without parking")
+			.unwrap()
+		{
+			groups.push(segment.group);
+		}
+		assert!(
+			groups.contains(&1),
+			"the final segment survives dropping the broadcaster, got {groups:?}"
+		);
+
+		drop((catalog, media, registration, broadcast, rendition));
+	}
+
 	// A rendition the catalog drops must end its segment cursors. The cursor holds an
 	// `Arc<Rendition>`, so without an explicit close the rendition (and its timeline
 	// subscription) would stay alive and the cursor would park at the live edge forever.
@@ -361,6 +418,13 @@ mod tests {
 			matches!(next, Some(renditions::Event::Removed { .. })),
 			"dropping the broadcaster releases its renditions to a live cursor"
 		);
+
+		// ...and the cursor then reaches a terminal state rather than parking. Releasing the
+		// renditions is only safe if consumers actually finish.
+		let ended = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+			.await
+			.expect("the cursor terminates after the broadcaster drops");
+		assert!(ended.is_none(), "the cursor ends once the broadcaster is gone");
 
 		drop((catalog, media, registration, broadcast));
 	}

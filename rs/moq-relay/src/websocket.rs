@@ -1,40 +1,33 @@
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, Stream};
 use qmux::tungstenite;
 use std::{
-	future::Future,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
+	task::{Context, Poll},
 };
 
 use axum::{
-	extract::{
-		Extension, Path, Query, State, WebSocketUpgrade, rejection::QueryRejection,
-		ws::rejection::WebSocketUpgradeRejection,
-	},
-	http::StatusCode,
+	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
+	http::{HeaderMap, StatusCode, Uri, header::HOST},
 	response::Response,
 };
 use moq_net::origin;
 use moq_net::stats::Handle;
 
-use crate::{AuthParams, web::AuthQuery, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{Auth, AuthParams, web::MtlsPeer, web::WebState, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-	path: Option<Path<String>>,
-	query: Result<Query<AuthQuery>, QueryRejection>,
+	OriginalUri(uri): OriginalUri,
+	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
 	// the informational landing page instead of an error response.
-	let (Ok(ws), Ok(Query(query))) = (ws, query) else {
+	let Ok(ws) = ws else {
 		return Ok(landing_response());
 	};
-
-	// The `/{*path}` route captures the path; the bare `/` route captures none,
-	// which is the empty (root) auth scope. Mirrors `serve_announced`.
-	let path = path.map_or_else(String::new, |Path(path)| path);
 
 	// Advertise the full qmux × moq-net subprotocol matrix, with bare qmux
 	// fallbacks last. axum picks the first entry that the client also offered,
@@ -42,11 +35,13 @@ pub(crate) async fn serve_ws(
 	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 	let ws = ws.protocols(supported_subprotocols());
 
-	let params = AuthParams {
-		path,
-		jwt: query.jwt,
-		transport: Some(moq_native::Transport::WebSocket),
-	};
+	let host = uri
+		.authority()
+		.map(|authority| authority.as_str())
+		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
+		.ok_or(StatusCode::BAD_REQUEST)?;
+	let mut params = request_auth_params(&state.auth, host, &uri)?;
+	params.transport = Some(moq_native::Transport::WebSocket);
 	let token = if mtls.is_some() {
 		// mTLS peers: the API returns the canonical root and the billing tier.
 		state.auth.verify_mtls(&params.path, params.transport).await?
@@ -71,16 +66,16 @@ pub(crate) async fn serve_ws(
 
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
-		let socket = socket
-			.map(axum_to_tungstenite)
-			// TODO Figure out how to avoid swallowing errors.
-			.sink_map_err(|err| {
-				tracing::warn!(%err, "WebSocket error");
-				tungstenite::Error::ConnectionClosed
-			})
-			.with(tungstenite_to_axum);
+		let socket = WebSocketAdapter::new(socket);
 		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats).await;
 	}))
+}
+
+/// Apply the same host and path authentication routing used by native WebTransport.
+fn request_auth_params(auth: &Auth, host: &str, uri: &Uri) -> Result<AuthParams, StatusCode> {
+	let path = uri.path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
+	let url = url::Url::parse(&format!("https://{host}{path}")).map_err(|_| StatusCode::BAD_REQUEST)?;
+	Ok(auth.params_from_url(&url))
 }
 
 #[tracing::instrument("ws", err, skip_all, fields(id = _id))]
@@ -160,56 +155,158 @@ fn supported_subprotocols() -> Vec<String> {
 
 // https://github.com/tokio-rs/axum/discussions/848#discussioncomment-11443587
 
-#[allow(clippy::result_large_err)]
-fn axum_to_tungstenite(
-	message: Result<axum::extract::ws::Message, axum::Error>,
-) -> Result<tungstenite::Message, tungstenite::Error> {
-	match message {
-		Ok(msg) => Ok(match msg {
-			axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(text.to_string().into()),
-			axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(Vec::from(bin).into()),
-			axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(Vec::from(ping).into()),
-			axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(Vec::from(pong).into()),
-			axum::extract::ws::Message::Close(close) => {
-				tungstenite::Message::Close(close.map(|c| tungstenite::protocol::CloseFrame {
-					code: c.code.into(),
-					reason: c.reason.to_string().into(),
-				}))
-			}
-		}),
-		Err(_err) => Err(tungstenite::Error::ConnectionClosed),
+struct WebSocketAdapter<T> {
+	inner: T,
+}
+
+impl<T> WebSocketAdapter<T> {
+	fn new(inner: T) -> Self {
+		Self { inner }
 	}
 }
 
-#[allow(clippy::result_large_err)]
-fn tungstenite_to_axum(
-	message: tungstenite::Message,
-) -> Pin<Box<dyn Future<Output = Result<axum::extract::ws::Message, tungstenite::Error>> + Send + Sync>> {
-	Box::pin(async move {
-		Ok(match message {
-			tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
-			tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
-			tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
-			tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
-			tungstenite::Message::Frame(_frame) => unreachable!(),
-			tungstenite::Message::Close(close) => {
-				axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
-					code: c.code.into(),
-					reason: c.reason.to_string().into(),
-				}))
-			}
-		})
-	})
+impl<T> Stream for WebSocketAdapter<T>
+where
+	T: Stream<Item = Result<axum::extract::ws::Message, axum::Error>> + Unpin,
+{
+	type Item = Result<tungstenite::Message, tungstenite::Error>;
+
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		Pin::new(&mut self.inner)
+			.poll_next(cx)
+			.map(|message| message.map(|message| message.map(axum_to_tungstenite).map_err(map_axum_error)))
+	}
+}
+
+impl<T> Sink<tungstenite::Message> for WebSocketAdapter<T>
+where
+	T: Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
+{
+	type Error = tungstenite::Error;
+
+	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_ready(cx).map_err(map_axum_error)
+	}
+
+	fn start_send(mut self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
+		Pin::new(&mut self.inner)
+			.start_send(tungstenite_to_axum(message))
+			.map_err(map_axum_error)
+	}
+
+	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_flush(cx).map_err(map_axum_error)
+	}
+
+	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_close(cx).map_err(map_axum_error)
+	}
+}
+
+fn map_axum_error(err: axum::Error) -> tungstenite::Error {
+	tracing::warn!(%err, "WebSocket error");
+	tungstenite::Error::ConnectionClosed
+}
+
+fn axum_to_tungstenite(message: axum::extract::ws::Message) -> tungstenite::Message {
+	match message {
+		axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(text.to_string().into()),
+		axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(Vec::from(bin).into()),
+		axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(Vec::from(ping).into()),
+		axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(Vec::from(pong).into()),
+		axum::extract::ws::Message::Close(close) => {
+			tungstenite::Message::Close(close.map(|c| tungstenite::protocol::CloseFrame {
+				code: c.code.into(),
+				reason: c.reason.to_string().into(),
+			}))
+		}
+	}
+}
+
+fn tungstenite_to_axum(message: tungstenite::Message) -> axum::extract::ws::Message {
+	match message {
+		tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
+		tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
+		tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
+		tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
+		tungstenite::Message::Frame(_frame) => unreachable!(),
+		tungstenite::Message::Close(close) => {
+			axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
+				code: c.code.into(),
+				reason: c.reason.to_string().into(),
+			}))
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::AuthConfig;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
-	use std::time::Duration;
+	use futures::SinkExt;
+	use std::{io, time::Duration};
 	use tokio::sync::mpsc;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;
+
+	struct DoubleErrorSocket;
+
+	impl Stream for DoubleErrorSocket {
+		type Item = Result<axum::extract::ws::Message, axum::Error>;
+
+		fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+			Poll::Pending
+		}
+	}
+
+	impl Sink<axum::extract::ws::Message> for DoubleErrorSocket {
+		type Error = axum::Error;
+
+		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn start_send(self: Pin<&mut Self>, _message: axum::extract::ws::Message) -> Result<(), Self::Error> {
+			Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe)))
+		}
+
+		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe))))
+		}
+	}
+
+	#[tokio::test]
+	async fn websocket_adapter_maps_close_error_after_send_error() {
+		let mut socket = WebSocketAdapter::new(DoubleErrorSocket);
+
+		let send = socket.send(tungstenite::Message::Binary(Vec::new().into())).await;
+		assert!(matches!(send, Err(tungstenite::Error::ConnectionClosed)));
+
+		let close = socket.close().await;
+		assert!(matches!(close, Err(tungstenite::Error::ConnectionClosed)));
+	}
+
+	#[tokio::test]
+	async fn websocket_auth_applies_subdomain_routing() {
+		let config: AuthConfig = serde_json::from_value(serde_json::json!({
+			"domains": ["cdn.moq.pro"],
+			"public": "viewer"
+		}))
+		.expect("parse auth config");
+		let auth = Auth::new(config).await.expect("build auth");
+		for uri in ["/bbb.hang?jwt=token", "https://demo.cdn.moq.pro/bbb.hang?jwt=token"] {
+			let uri: Uri = uri.parse().expect("parse URI");
+			let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
+
+			assert_eq!(params.path, "/demo/bbb.hang");
+			assert_eq!(params.jwt.as_deref(), Some("token"));
+		}
+	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
 	/// of truth that `supported_subprotocols` and `qmux::Client::with_protocols`
@@ -297,10 +394,7 @@ mod tests {
 				let ws = ws.protocols(supported_subprotocols());
 				ws.on_upgrade(move |socket| async move {
 					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
-					let socket = socket
-						.map(axum_to_tungstenite)
-						.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
-						.with(tungstenite_to_axum);
+					let socket = WebSocketAdapter::new(socket);
 
 					let upgraded = qmux::ws::Upgraded::new(socket);
 					let upgraded = match wire.as_deref() {

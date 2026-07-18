@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.5...moq-mux-v0.7.6) - 2026-07-18
+
+### Fixed
+
+- *(moq-mux)* strip edit lists from the CMAF init ([#2383](https://github.com/moq-dev/moq/pull/2383))
+
+### Other
+
+- *(moq-mux)* bump mp4-atom to 0.14 ([#2391](https://github.com/moq-dev/moq/pull/2391))
+
 ## [0.7.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.4...moq-mux-v0.7.5) - 2026-07-16
 
 ### Added

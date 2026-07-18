@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the video counterpart to `moq_consume_audio_raw`. Decoding happens inside
   libmoq (VideoToolbox / openh264), so consumers no longer need ffmpeg.
 
+## [0.3.14](https://github.com/moq-dev/moq/compare/libmoq-v0.3.13...libmoq-v0.3.14) - 2026-07-18
+
+### Fixed
+
+- *(libmoq)* write moq.pc under a profile-scoped path so debug/release don't collide ([#2379](https://github.com/moq-dev/moq/pull/2379))
+
 ## [0.3.13](https://github.com/moq-dev/moq/compare/libmoq-v0.3.12...libmoq-v0.3.13) - 2026-07-16
 
 ### Other

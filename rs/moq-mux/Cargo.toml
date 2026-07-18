@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.7.5"
+version = "0.7.6"
 edition = "2024"
 rust-version.workspace = true
 
@@ -28,7 +28,7 @@ moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true }
-mp4-atom = { version = "0.12", features = ["tokio", "bytes", "serde"] }
+mp4-atom = { version = "0.14", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = "0.7"
 scuffle-av1 = { version = "0.1.4" }

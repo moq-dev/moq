@@ -23,12 +23,15 @@ export interface Session {
  */
 export class NativeSession implements Session {
 	#quic: WebTransport;
-	#requestId = 0n;
+	// moq-transport reserves even request IDs for the client and odd for the server,
+	// so the two peers' ID spaces never overlap.
+	#requestId: bigint;
 	readonly version: IetfVersion;
 
-	constructor(quic: WebTransport, version: IetfVersion) {
+	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
+		this.#requestId = client ? 0n : 1n;
 	}
 
 	async openBi(): Promise<Stream> {
@@ -101,14 +104,26 @@ export class ControlStreamAdapter implements Session {
 	#incomingQueue: Stream[] = [];
 	#incomingWaiters: ((stream: Stream | undefined) => void)[] = [];
 
-	// Request ID flow control
-	#requestId = 0n;
+	// Request ID flow control. moq-transport reserves even request IDs for the
+	// client and odd for the server, so the two peers' ID spaces never overlap.
+	// This matters here because a single `#streams` map routes every request by
+	// ID: overlapping spaces would let an inbound request clobber the routing
+	// entry of an outbound one with the same number (e.g. an inbound
+	// PUBLISH_NAMESPACE stealing a pending SUBSCRIBE's slot, so SUBSCRIBE_OK is
+	// delivered to the wrong virtual stream).
+	#requestId: bigint;
 	#maxRequestId: bigint;
 	#maxRequestIdResolves: (() => void)[] = [];
 
 	#closed = false;
 
-	constructor(quic: WebTransport, controlStream: Stream, version: IetfVersion, maxRequestId: bigint) {
+	constructor(
+		quic: WebTransport,
+		controlStream: Stream,
+		version: IetfVersion,
+		maxRequestId: bigint,
+		client: boolean,
+	) {
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
 		this.#reader.version = version;
@@ -116,6 +131,7 @@ export class ControlStreamAdapter implements Session {
 		this.#writer.version = version;
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
+		this.#requestId = client ? 0n : 1n;
 	}
 
 	/**

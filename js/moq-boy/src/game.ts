@@ -306,7 +306,7 @@ export class Game {
 				if (req.name === "command") {
 					// accept() commits the track's immutable properties and returns the producer.
 					const track = req.accept();
-					const producer = new Json.Snapshot.Producer<Record<string, unknown>>(track);
+					const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 					effect.cleanup(() => producer.finish());
 					effect.run(this.#runCommandTrack.bind(this, track, producer));
 				}

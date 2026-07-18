@@ -9,7 +9,6 @@
 export * as Hang from "@moq/hang";
 // Re-exported from @moq/hang so watch consumers can name the decoders' buffered output.
 export type { BufferedRange, BufferedRanges } from "@moq/hang/container";
-export * as Json from "@moq/json";
 export * as Net from "@moq/net";
 export * as Signals from "@moq/signals";
 export * as Audio from "./audio";
