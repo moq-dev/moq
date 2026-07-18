@@ -70,23 +70,33 @@ impl Producer {
 		self.state.read().is_empty()
 	}
 
-	/// Retire every rendition, ending their segment cursors and releasing the source
-	/// subscriptions their timeline watchers hold.
+	/// Release every rendition the map is holding.
 	///
-	/// The map lives in shared state, so a surviving [`Consumer`] (or the `Arc<Rendition>`s it
-	/// was handed) would otherwise keep every rendition -- and its standing timeline
-	/// subscription -- alive after the owning `Broadcaster` is gone. `Broadcaster::drop` calls
-	/// this so teardown doesn't depend on consumers dropping first.
+	/// The map lives in shared state, so a surviving [`Consumer`] would otherwise keep every
+	/// rendition -- and the standing timeline subscription each watcher holds -- alive after the
+	/// owning `Broadcaster` is gone. `Broadcaster::drop` calls this so teardown doesn't depend on
+	/// consumers dropping first: a rendition nobody else holds drops here, and its `Drop` aborts
+	/// its watcher.
+	///
+	/// Deliberately drops rather than [`Rendition::close`]s. A rendition a cursor still holds is
+	/// left to finish on its own, because its watcher ends a cleanly-finished timeline with
+	/// `end()` *then* `close()`, and `end()` is what promotes the live-edge record into the final
+	/// segment. Force-closing here would race that: `end()` is a no-op on an already-closed
+	/// channel, so the last segment of a recording would be silently dropped.
 	pub fn clear(&self) {
 		if let Ok(mut current) = self.state.write() {
-			for rendition in current.values() {
-				rendition.close();
-			}
 			current.clear();
 		}
 	}
 
 	/// Close the channel, signalling consumers that no more renditions will appear.
+	///
+	/// Deliberately does NOT cascade into the renditions' own segment channels, for two reasons.
+	/// On a clean end it's unnecessary and harmful: each rendition's watcher already ends its
+	/// timeline with `end()` then `close()`, and cascading a bare `close()` here would race that
+	/// and lose the final segment (see [`Self::clear`]). On a catalog-stream *error* the media
+	/// tracks are usually still fine, so cutting every in-flight segment cursor would truncate a
+	/// recording over a transient fault.
 	pub fn close(&self) {
 		let _ = self.state.close();
 	}
