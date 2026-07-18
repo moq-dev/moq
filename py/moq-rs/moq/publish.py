@@ -365,14 +365,14 @@ class BroadcastProducer:
         """
         self._inner.set_route(route)
 
-    def set_live(self, live: bool) -> None:
-        """Set whether the broadcast is live, keeping the rest of its route.
+    def set_announce(self, announce: bool) -> None:
+        """Set whether the broadcast is announced, keeping the rest of its route.
 
-        The origin announces the path only while the broadcast is live; a non-live
+        The origin advertises the path only while announced; an unannounced
         broadcast stays reachable by exact path for subscribes and fetches. This is
         how a publisher goes on and off the air without tearing down the broadcast.
         """
-        self._inner.set_live(live)
+        self._inner.set_announce(announce)
 
     def publish_media(
         self,

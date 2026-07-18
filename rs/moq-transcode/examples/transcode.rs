@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 	config.source = Some(moq_net::PathRelativeOwned::from("..".to_string()));
 
 	let output = publish
-		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast(&output_path, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create the derivative broadcast")?;
 	tracing::info!(source = %args.source, output = %output_path, "transcoding");
 

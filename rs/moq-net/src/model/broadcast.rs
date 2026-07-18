@@ -62,17 +62,17 @@ pub struct Route {
 	/// hops, so a received route always has the default cost.
 	pub cost: u64,
 
-	/// Whether the broadcast is live: actively produced right now, not just
-	/// routable. The origin announces a broadcast only while its best route is
-	/// live; a non-live broadcast stays reachable for subscribes and fetches
-	/// (e.g. serving cached or on-demand content) without being advertised.
-	/// Toggle it with [`Producer::set_route`] to announce or unannounce without
-	/// touching the broadcast itself. Defaults to `false`.
-	pub live: bool,
+	/// Whether the broadcast should be announced: advertised to consumers via
+	/// [`crate::origin::Consumer::announced`] while this is the best route. A
+	/// non-announced broadcast stays reachable by exact path for subscribes and
+	/// fetches (e.g. serving cached or on-demand content), so toggling this via
+	/// [`Producer::set_route`] announces or unannounces without touching the
+	/// broadcast itself. Defaults to `false`.
+	pub announce: bool,
 }
 
 impl Route {
-	/// A non-live direct route: no hops, best cost, not announced.
+	/// An unannounced direct route: no hops, best cost.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -98,9 +98,9 @@ impl Route {
 		self
 	}
 
-	/// Set whether the broadcast is live (announced) via this route.
-	pub fn with_live(mut self, live: bool) -> Self {
-		self.live = live;
+	/// Set whether the broadcast is announced via this route.
+	pub fn with_announce(mut self, announce: bool) -> Self {
+		self.announce = announce;
 		self
 	}
 }

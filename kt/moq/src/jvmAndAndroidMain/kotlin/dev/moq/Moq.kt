@@ -30,7 +30,7 @@ class Moq internal constructor(
      * Create a live broadcast at [path] so subscribers can discover it.
      *
      * The origin announces the path, becoming visible shortly after this returns.
-     * Toggle discoverability with `setLive`; `finish()` unpublishes immediately.
+     * Toggle discoverability with `setAnnounce`; `finish()` unpublishes immediately.
      */
     fun createBroadcast(path: String): BroadcastProducer = session.publisher().createBroadcast(path)
 

@@ -371,12 +371,12 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	(hops.len(), hash)
 }
 
-/// Full ordering key for a [`broadcast::Route`]: live routes first (a live source
-/// beats any offline one), then cost (the publisher's own preference), then the
-/// [`route_key`] hop ordering. Lower wins.
+/// Full ordering key for a [`broadcast::Route`]: announced routes first (an
+/// actively published source beats an offline one), then cost (the publisher's
+/// own preference), then the [`route_key`] hop ordering. Lower wins.
 fn route_order(name: &Path, route: &broadcast::Route) -> (bool, u64, usize, u64) {
 	let (len, hash) = route_key(name, &route.hops);
-	(!route.live, route.cost, len, hash)
+	(!route.announce, route.cost, len, hash)
 }
 
 /// One coalesced update queued for an `AnnounceConsumer`.
@@ -1018,7 +1018,7 @@ fn sync_front(state: &kio::Producer<FrontState>, broadcast: &broadcast::Producer
 	let mut leaf_guard = leaf.lock();
 	let advert = state.read().active_route();
 	if let Some(advert) = advert {
-		let announce = advert.live;
+		let announce = advert.announce;
 		let _ = broadcast.clone().set_route(advert);
 		leaf_guard.set_announced(state, announce);
 	}
@@ -1154,7 +1154,7 @@ fn attach_source(
 	}
 
 	// First source: create the broadcast and publish it into the tree.
-	let live = route.live;
+	let announce = route.announce;
 	let broadcast = broadcast::Producer::new_spliced(broadcast::Info { origin: origin.clone() });
 	let _ = broadcast.clone().set_route(route.clone());
 	let state = kio::Producer::new(FrontState {
@@ -1181,7 +1181,7 @@ fn attach_source(
 		path: full.clone(),
 		broadcast: broadcast.clone(),
 		state: state.clone(),
-		announced: live,
+		announced: announce,
 	};
 	if entry.announced {
 		leaf_guard.notify.lock().announce(full, &broadcast.consume());
@@ -2190,9 +2190,9 @@ mod tests {
 
 	use super::*;
 
-	/// A live direct route: the broadcast is announced.
-	fn live() -> broadcast::Route {
-		broadcast::Route::new().with_live(true)
+	/// An announced direct route.
+	fn announce() -> broadcast::Route {
+		broadcast::Route::new().with_announce(true)
 	}
 
 	/// Let the spawned origin tasks (source watchers, front dispatch) run. The
@@ -2274,7 +2274,7 @@ mod tests {
 		consumer1.assert_next_wait();
 
 		// Publish the first broadcast; it becomes visible asynchronously.
-		let broadcast1 = origin.create_broadcast("test1", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test1", announce()).unwrap();
 		settle().await;
 
 		consumer1.assert_next_some("test1");
@@ -2285,7 +2285,7 @@ mod tests {
 		let mut consumer2 = origin.consume().announced();
 
 		// Publish the second broadcast.
-		let broadcast2 = origin.create_broadcast("test2", live()).unwrap();
+		let broadcast2 = origin.create_broadcast("test2", announce()).unwrap();
 		settle().await;
 
 		consumer1.assert_next_some("test2");
@@ -2329,9 +2329,9 @@ mod tests {
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let broadcast1 = origin.create_broadcast("test", live()).unwrap();
-		let broadcast2 = origin.create_broadcast("test", live()).unwrap();
-		let broadcast3 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
+		let broadcast3 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		assert!(consumer.get_broadcast("test").is_some());
 
@@ -2373,7 +2373,7 @@ mod tests {
 		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 
 		// The first source announces the broadcast.
-		let source_a = origin.create_broadcast("test", live().with_hops(hops_a)).unwrap();
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		settle().await;
@@ -2381,7 +2381,7 @@ mod tests {
 		announced.assert_next_some("test");
 
 		// A second (longer) source joins silently as a standby.
-		let source_b = origin.create_broadcast("test", live().with_hops(hops_b)).unwrap();
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
@@ -2470,7 +2470,7 @@ mod tests {
 
 		// A (shorter chain) wins at equal cost.
 		let mut source_a = origin
-			.create_broadcast("test", live().with_hops(hops_a.clone()))
+			.create_broadcast("test", announce().with_hops(hops_a.clone()))
 			.unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
@@ -2481,7 +2481,7 @@ mod tests {
 		assert_eq!(watch.route_changed().await.unwrap().hops, hops_a);
 
 		let mut source_b = origin
-			.create_broadcast("test", live().with_hops(hops_b.clone()))
+			.create_broadcast("test", announce().with_hops(hops_b.clone()))
 			.unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
@@ -2501,7 +2501,7 @@ mod tests {
 		// A's cost rises above B's: B takes over at the boundary and the
 		// broadcast re-advertises B's route. No announce events.
 		source_a
-			.set_route(live().with_hops(hops_a.clone()).with_cost(10))
+			.set_route(announce().with_hops(hops_a.clone()).with_cost(10))
 			.unwrap();
 		settle().await;
 		assert_eq!(watch.route_changed().await.unwrap().hops, hops_b);
@@ -2519,7 +2519,7 @@ mod tests {
 
 		// The active source updating its own metadata re-advertises in place.
 		source_b
-			.set_route(live().with_hops(hops_b.clone()).with_cost(5))
+			.set_route(announce().with_hops(hops_b.clone()).with_cost(5))
 			.unwrap();
 		settle().await;
 		let advertised = watch.route_changed().await.unwrap();
@@ -2540,10 +2540,10 @@ mod tests {
 		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 
-		let source_a = origin.create_broadcast("test", live().with_hops(hops_a)).unwrap();
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
-		let source_b = origin.create_broadcast("test", live().with_hops(hops_b)).unwrap();
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
@@ -2583,7 +2583,7 @@ mod tests {
 		let consumer = origin.consume();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin.create_broadcast("test", live().with_hops(hops)).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
 		settle().await;
@@ -2620,7 +2620,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source_a = origin.create_broadcast("test", live().with_hops(hops.clone())).unwrap();
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops.clone())).unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		settle().await;
@@ -2647,7 +2647,7 @@ mod tests {
 		sub.assert_not_closed();
 
 		// A reconnecting session re-attaches within the window and resumes.
-		let source_b = origin.create_broadcast("test", live().with_hops(hops)).unwrap();
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
@@ -2678,7 +2678,7 @@ mod tests {
 		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
 		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 
-		let source_a = origin.create_broadcast("test", live().with_hops(hops_long)).unwrap();
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_long)).unwrap();
 		let mut dynamic_a = source_a.dynamic();
 		settle().await;
 		settle().await;
@@ -2696,7 +2696,7 @@ mod tests {
 
 		// A strictly shorter source attaches: the live track is handed over with
 		// no announce churn.
-		let source_b = origin.create_broadcast("test", live().with_hops(hops_short)).unwrap();
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_short)).unwrap();
 		let mut dynamic_b = source_b.dynamic();
 		settle().await;
 		settle().await;
@@ -2730,7 +2730,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin.create_broadcast("test", live().with_hops(hops.clone())).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops.clone())).unwrap();
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next_some("test");
@@ -2742,7 +2742,7 @@ mod tests {
 		announced.assert_next_none("test");
 
 		// A re-create at the same path is a brand-new broadcast.
-		let _source = origin.create_broadcast("test", live().with_hops(hops)).unwrap();
+		let _source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		settle().await;
 		let fresh = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next_some("test");
@@ -2761,7 +2761,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin.create_broadcast("test", live().with_hops(hops)).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
 		settle().await;
@@ -2787,7 +2787,7 @@ mod tests {
 	/// A non-live broadcast is reachable by exact path but never announced;
 	/// toggling `live` announces and unannounces without touching the broadcast.
 	#[tokio::test]
-	async fn test_live_toggle() {
+	async fn test_announce_toggle() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -2802,14 +2802,14 @@ mod tests {
 		let broadcast = consumer
 			.get_broadcast("test")
 			.expect("offline broadcast is still routable");
-		assert!(!broadcast.route().live);
+		assert!(!broadcast.route().announce);
 
 		// request_broadcast resolves the offline broadcast too.
 		let requested = consumer.request_broadcast("test").await.unwrap();
 		assert!(requested.is_clone(&broadcast));
 
 		// Going live announces.
-		source.set_route(live()).unwrap();
+		source.set_route(announce()).unwrap();
 		settle().await;
 		let face = announced.assert_next_some("test");
 		assert!(face.is_clone(&broadcast));
@@ -2832,33 +2832,33 @@ mod tests {
 		assert!(consumer.get_broadcast("test").is_none());
 	}
 
-	/// A live source outranks a cheaper offline one, so the broadcast stays
-	/// announced and serves from the live copy.
+	/// An announced source outranks a cheaper offline one, so the broadcast
+	/// stays announced and serves from it.
 	#[tokio::test]
-	async fn test_live_beats_offline() {
+	async fn test_announce_beats_offline() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		// An offline source with the best cost.
+		// An unannounced source with the best cost.
 		let _offline = origin.create_broadcast("test", broadcast::Route::new()).unwrap();
 		settle().await;
 		announced.assert_next_wait();
 
-		// A live source with a worse cost still wins: the path announces and
-		// advertises the live route.
-		let live_source = origin.create_broadcast("test", live().with_cost(10)).unwrap();
+		// An announced source with a worse cost still wins: the path announces
+		// and advertises its route.
+		let announced_source = origin.create_broadcast("test", announce().with_cost(10)).unwrap();
 		settle().await;
 		announced.assert_next_some("test");
 		let face = consumer.get_broadcast("test").unwrap();
-		assert!(face.route().live);
+		assert!(face.route().announce);
 		assert_eq!(face.route().cost, 10);
 
-		// The live source leaving falls back to the offline one: unannounced,
-		// still routable.
-		live_source.finish();
+		// The announced source leaving falls back to the offline one: the path
+		// unannounces but stays routable.
+		announced_source.finish();
 		settle().await;
 		announced.assert_next_none("test");
 		assert!(consumer.get_broadcast("test").is_some());
@@ -2875,11 +2875,11 @@ mod tests {
 
 		// `a` carries one hop; `b` has none, so `b` wins dispatch when it joins.
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let _a = origin.create_broadcast("test", live().with_hops(hops)).unwrap();
+		let _a = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
 		settle().await;
 		let face = announced.assert_next_some("test");
 
-		let _b = origin.create_broadcast("test", live()).unwrap();
+		let _b = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		announced.assert_next_wait();
 		let current = origin.consume().get_broadcast("test").unwrap();
@@ -2894,8 +2894,8 @@ mod tests {
 
 		let origin = Origin::random().produce();
 
-		let broadcast1 = origin.create_broadcast("test", live()).unwrap();
-		let broadcast2 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		assert!(origin.consume().get_broadcast("test").is_some());
 
@@ -2927,8 +2927,8 @@ mod tests {
 		// the given order.
 		async fn winner(first: &[u64], second: &[u64]) -> OriginList {
 			let origin = Origin::random().produce();
-			let _a = origin.create_broadcast("test", live().with_hops(hops(first))).unwrap();
-			let _b = origin.create_broadcast("test", live().with_hops(hops(second))).unwrap();
+			let _a = origin.create_broadcast("test", announce().with_hops(hops(first))).unwrap();
+			let _b = origin.create_broadcast("test", announce().with_hops(hops(second))).unwrap();
 			settle().await;
 			origin.consume().get_broadcast("test").unwrap().route().hops
 		}
@@ -2954,7 +2954,7 @@ mod tests {
 
 		let mut consumer = origin.consume().announced();
 		for i in 0..256 {
-			let _broadcast = origin.create_broadcast(format!("test{i:03}"), live()).unwrap();
+			let _broadcast = origin.create_broadcast(format!("test{i:03}"), announce()).unwrap();
 			settle().await;
 		}
 
@@ -2970,7 +2970,7 @@ mod tests {
 
 		let mut consumer = origin.consume().announced();
 		for i in 0..256 {
-			let _broadcast = origin.create_broadcast(format!("test{i:03}"), live()).unwrap();
+			let _broadcast = origin.create_broadcast(format!("test{i:03}"), announce()).unwrap();
 			settle().await;
 		}
 
@@ -2991,7 +2991,7 @@ mod tests {
 
 		// When publishing to "bar/baz", it should actually publish to "foo/bar/baz"
 		let _broadcast = foo_producer
-			.create_broadcast("bar/baz", live())
+			.create_broadcast("bar/baz", announce())
 			.expect("publish allowed");
 		settle().await;
 		// The original consumer should see the full path
@@ -3015,7 +3015,7 @@ mod tests {
 
 		// Publishing to "baz" should actually publish to "foo/bar/baz"
 		let _broadcast = foo_bar_producer
-			.create_broadcast("baz", live())
+			.create_broadcast("baz", announce())
 			.expect("publish allowed");
 		settle().await;
 		// The original consumer sees the full path
@@ -3037,20 +3037,20 @@ mod tests {
 
 		// Should be able to publish to allowed paths
 		let _broadcast = limited_producer
-			.create_broadcast("allowed/path1", live())
+			.create_broadcast("allowed/path1", announce())
 			.expect("publish allowed");
 		let _keep2 = limited_producer
-			.create_broadcast("allowed/path1/nested", live())
+			.create_broadcast("allowed/path1/nested", announce())
 			.expect("publish allowed");
 		let _keep3 = limited_producer
-			.create_broadcast("allowed/path2", live())
+			.create_broadcast("allowed/path2", announce())
 			.expect("publish allowed");
 		settle().await;
 
 		// Should not be able to publish to disallowed paths
-		assert!(limited_producer.create_broadcast("notallowed", live()).is_err());
-		assert!(limited_producer.create_broadcast("allowed", live()).is_err()); // Parent of allowed path
-		assert!(limited_producer.create_broadcast("other/path", live()).is_err());
+		assert!(limited_producer.create_broadcast("notallowed", announce()).is_err());
+		assert!(limited_producer.create_broadcast("allowed", announce()).is_err()); // Parent of allowed path
+		assert!(limited_producer.create_broadcast("other/path", announce()).is_err());
 	}
 
 	#[tokio::test]
@@ -3062,16 +3062,16 @@ mod tests {
 			.collect::<Vec<_>>()
 			.join("/");
 		let _broadcast = origin
-			.create_broadcast(at_limit.as_str(), live())
+			.create_broadcast(at_limit.as_str(), announce())
 			.expect("publish allowed");
 		settle().await;
 
 		let too_deep = format!("{at_limit}/extra");
-		assert!(origin.create_broadcast(too_deep.as_str(), live()).is_err());
+		assert!(origin.create_broadcast(too_deep.as_str(), announce()).is_err());
 
 		// The root counts toward the limit; a joined path past 32 parts is rejected.
 		let rooted = origin.with_root("root").expect("wildcard allows any root");
-		assert!(rooted.create_broadcast(at_limit.as_str(), live()).is_err());
+		assert!(rooted.create_broadcast(at_limit.as_str(), announce()).is_err());
 	}
 
 	#[tokio::test]
@@ -3089,9 +3089,9 @@ mod tests {
 		let mut consumer = origin.consume().announced();
 
 		// Publish to different paths
-		let _broadcast1 = origin.create_broadcast("allowed", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("allowed/nested", live()).unwrap();
-		let _broadcast3 = origin.create_broadcast("notallowed", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("allowed", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("allowed/nested", announce()).unwrap();
+		let _broadcast3 = origin.create_broadcast("notallowed", announce()).unwrap();
 		settle().await;
 
 		// Create a consumer that only sees "allowed" paths
@@ -3116,9 +3116,9 @@ mod tests {
 	async fn test_consume_scope_multiple_prefixes() {
 		let origin = Origin::random().produce();
 
-		let _broadcast1 = origin.create_broadcast("foo/test", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("bar/test", live()).unwrap();
-		let _broadcast3 = origin.create_broadcast("baz/test", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("foo/test", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("bar/test", announce()).unwrap();
+		let _broadcast3 = origin.create_broadcast("baz/test", announce()).unwrap();
 		settle().await;
 
 		// Consumer that only sees "foo" and "bar" paths
@@ -3150,23 +3150,23 @@ mod tests {
 
 		// Should be able to publish to foo/bar and foo/goop/pee (but user sees as bar and goop/pee)
 		let _broadcast = limited_producer
-			.create_broadcast("bar", live())
+			.create_broadcast("bar", announce())
 			.expect("publish allowed");
 		let _keep2 = limited_producer
-			.create_broadcast("bar/nested", live())
+			.create_broadcast("bar/nested", announce())
 			.expect("publish allowed");
 		let _keep3 = limited_producer
-			.create_broadcast("goop/pee", live())
+			.create_broadcast("goop/pee", announce())
 			.expect("publish allowed");
 		let _keep4 = limited_producer
-			.create_broadcast("goop/pee/nested", live())
+			.create_broadcast("goop/pee/nested", announce())
 			.expect("publish allowed");
 		settle().await;
 
 		// Should not be able to publish outside allowed paths
-		assert!(limited_producer.create_broadcast("baz", live()).is_err());
-		assert!(limited_producer.create_broadcast("goop", live()).is_err()); // Parent of allowed
-		assert!(limited_producer.create_broadcast("goop/other", live()).is_err());
+		assert!(limited_producer.create_broadcast("baz", announce()).is_err());
+		assert!(limited_producer.create_broadcast("goop", announce()).is_err()); // Parent of allowed
+		assert!(limited_producer.create_broadcast("goop/other", announce()).is_err());
 
 		// Original consumer sees full paths
 		consumer.assert_next_some("foo/bar");
@@ -3180,9 +3180,9 @@ mod tests {
 		let origin = Origin::random().produce();
 
 		// Publish broadcasts
-		let _broadcast1 = origin.create_broadcast("foo/bar/test", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("foo/goop/pee/test", live()).unwrap();
-		let _broadcast3 = origin.create_broadcast("foo/other/test", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("foo/bar/test", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("foo/goop/pee/test", announce()).unwrap();
+		let _broadcast3 = origin.create_broadcast("foo/other/test", announce()).unwrap();
 		settle().await;
 
 		// User connects to /foo root
@@ -3229,10 +3229,10 @@ mod tests {
 
 		// Should be able to publish anywhere
 		let _broadcast = root_producer
-			.create_broadcast("any/path", live())
+			.create_broadcast("any/path", announce())
 			.expect("publish allowed");
 		let _keep2 = root_producer
-			.create_broadcast("other/path", live())
+			.create_broadcast("other/path", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3245,8 +3245,8 @@ mod tests {
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::random().produce();
 
-		let _broadcast1 = origin.create_broadcast("allowed/test", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("notallowed/test", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("allowed/test", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("notallowed/test", announce()).unwrap();
 		settle().await;
 
 		// Create limited consumer
@@ -3282,20 +3282,20 @@ mod tests {
 
 		// Should be able to publish to exact path and nested paths
 		let _broadcast = limited_producer
-			.create_broadcast("a/b/c", live())
+			.create_broadcast("a/b/c", announce())
 			.expect("publish allowed");
 		let _keep2 = limited_producer
-			.create_broadcast("a/b/c/d", live())
+			.create_broadcast("a/b/c/d", announce())
 			.expect("publish allowed");
 		let _keep3 = limited_producer
-			.create_broadcast("a/b/c/d/e", live())
+			.create_broadcast("a/b/c/d/e", announce())
 			.expect("publish allowed");
 		settle().await;
 
 		// Should not be able to publish to parent or sibling paths
-		assert!(limited_producer.create_broadcast("a", live()).is_err());
-		assert!(limited_producer.create_broadcast("a/b", live()).is_err());
-		assert!(limited_producer.create_broadcast("a/b/other", live()).is_err());
+		assert!(limited_producer.create_broadcast("a", announce()).is_err());
+		assert!(limited_producer.create_broadcast("a/b", announce()).is_err());
+		assert!(limited_producer.create_broadcast("a/b/other", announce()).is_err());
 	}
 
 	#[tokio::test]
@@ -3303,9 +3303,9 @@ mod tests {
 		let origin = Origin::random().produce();
 
 		// Publish to different paths
-		let _broadcast1 = origin.create_broadcast("foo/test", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("bar/test", live()).unwrap();
-		let _broadcast3 = origin.create_broadcast("baz/test", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("foo/test", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("bar/test", announce()).unwrap();
+		let _broadcast3 = origin.create_broadcast("baz/test", announce()).unwrap();
 		settle().await;
 
 		// Create consumers with different permissions
@@ -3351,10 +3351,10 @@ mod tests {
 
 		// Publish some broadcasts
 		let _broadcast1 = limited_producer
-			.create_broadcast("worm-node/test", live())
+			.create_broadcast("worm-node/test", announce())
 			.expect("publish allowed");
 		let _broadcast2 = limited_producer
-			.create_broadcast("foobar/test", live())
+			.create_broadcast("foobar/test", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3387,13 +3387,13 @@ mod tests {
 
 		// Publish broadcasts at different levels
 		let _broadcast1 = limited_producer
-			.create_broadcast("worm-node", live())
+			.create_broadcast("worm-node", announce())
 			.expect("publish allowed");
 		let _broadcast2 = limited_producer
-			.create_broadcast("worm-node/foo", live())
+			.create_broadcast("worm-node/foo", announce())
 			.expect("publish allowed");
 		let _broadcast3 = limited_producer
-			.create_broadcast("foobar/bar", live())
+			.create_broadcast("foobar/bar", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3431,13 +3431,13 @@ mod tests {
 
 		// Publish to each root
 		let _broadcast1 = limited_producer
-			.create_broadcast("app1/data", live())
+			.create_broadcast("app1/data", announce())
 			.expect("publish allowed");
 		let _broadcast2 = limited_producer
-			.create_broadcast("app2/config", live())
+			.create_broadcast("app2/config", announce())
 			.expect("publish allowed");
 		let _broadcast3 = limited_producer
-			.create_broadcast("shared/resource", live())
+			.create_broadcast("shared/resource", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3471,13 +3471,13 @@ mod tests {
 
 		// Should still have the same publishing restrictions
 		let _broadcast = same_producer
-			.create_broadcast("services/api", live())
+			.create_broadcast("services/api", announce())
 			.expect("publish allowed");
 		let _keep2 = same_producer
-			.create_broadcast("services/web", live())
+			.create_broadcast("services/web", announce())
 			.expect("publish allowed");
-		assert!(same_producer.create_broadcast("services/db", live()).is_err());
-		assert!(same_producer.create_broadcast("other", live()).is_err());
+		assert!(same_producer.create_broadcast("services/db", announce()).is_err());
+		assert!(same_producer.create_broadcast("other", announce()).is_err());
 	}
 
 	#[tokio::test]
@@ -3489,13 +3489,13 @@ mod tests {
 
 		// Publish at various depths
 		let _broadcast1 = limited_producer
-			.create_broadcast("org/team1/project1", live())
+			.create_broadcast("org/team1/project1", announce())
 			.expect("publish allowed");
 		let _broadcast2 = limited_producer
-			.create_broadcast("org/team1/project2", live())
+			.create_broadcast("org/team1/project2", announce())
 			.expect("publish allowed");
 		let _broadcast3 = limited_producer
-			.create_broadcast("org/team2/project1", live())
+			.create_broadcast("org/team2/project1", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3547,7 +3547,7 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap().announced();
 
-		let _b = origin.create_broadcast("some_prefix/test", live()).unwrap();
+		let _b = origin.create_broadcast("some_prefix/test", announce()).unwrap();
 		settle().await;
 		consumer.assert_next_some("test");
 	}
@@ -3561,7 +3561,7 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let rooted = origin.with_root(prefix).unwrap();
 
-		let _b = rooted.create_broadcast("test", live()).unwrap();
+		let _b = rooted.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let mut consumer = rooted.consume().announced();
@@ -3578,7 +3578,7 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap().announced();
 
-		let b = origin.create_broadcast("some_prefix/test", live()).unwrap();
+		let b = origin.create_broadcast("some_prefix/test", announce()).unwrap();
 		settle().await;
 		consumer.assert_next_some("test");
 
@@ -3602,10 +3602,10 @@ mod tests {
 
 		// Publish some data
 		let _broadcast1 = user_producer
-			.create_broadcast("worm-node/data", live())
+			.create_broadcast("worm-node/data", announce())
 			.expect("publish allowed");
 		let _broadcast2 = user_producer
-			.create_broadcast("foobar", live())
+			.create_broadcast("foobar", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3646,7 +3646,7 @@ mod tests {
 			.expect("should create producer");
 
 		let _broadcast = producer
-			.create_broadcast("demo/stream", live())
+			.create_broadcast("demo/stream", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3666,7 +3666,7 @@ mod tests {
 
 		// Can still publish under "demo/bar" since "demo" covers everything
 		let _broadcast = producer
-			.create_broadcast("demo/bar/stream", live())
+			.create_broadcast("demo/bar/stream", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3685,7 +3685,7 @@ mod tests {
 			.expect("should create producer");
 
 		let _broadcast = producer
-			.create_broadcast("demo/foo/stream", live())
+			.create_broadcast("demo/foo/stream", announce())
 			.expect("publish allowed");
 		settle().await;
 
@@ -3711,7 +3711,7 @@ mod tests {
 	async fn test_announced_broadcast_already_announced() {
 		let origin = Origin::random().produce();
 
-		let _broadcast = origin.create_broadcast("test", live()).unwrap();
+		let _broadcast = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let consumer = origin.consume();
@@ -3736,7 +3736,7 @@ mod tests {
 		// Give the spawned task a chance to subscribe.
 		tokio::task::yield_now().await;
 
-		let _broadcast = origin.create_broadcast("test", live()).unwrap();
+		let _broadcast = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let result = wait.await.unwrap().expect("should find it");
@@ -3759,12 +3759,12 @@ mod tests {
 		tokio::task::yield_now().await;
 
 		// Publish an unrelated broadcast first. announced_broadcast should skip it.
-		let _other = origin.create_broadcast("other", live()).unwrap();
+		let _other = origin.create_broadcast("other", announce()).unwrap();
 		settle().await;
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on unrelated path");
 
-		let _target = origin.create_broadcast("target", live()).unwrap();
+		let _target = origin.create_broadcast("target", announce()).unwrap();
 		settle().await;
 		let result = wait.await.unwrap().expect("should find target");
 		assert!(result.is_clone(&consumer.get_broadcast("target").unwrap()));
@@ -3786,12 +3786,12 @@ mod tests {
 		tokio::task::yield_now().await;
 
 		// "foo/bar" is under the prefix scope, but it's not the exact path. Skip it.
-		let _nested = origin.create_broadcast("foo/bar", live()).unwrap();
+		let _nested = origin.create_broadcast("foo/bar", announce()).unwrap();
 		settle().await;
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on a nested path");
 
-		let _exact = origin.create_broadcast("foo", live()).unwrap();
+		let _exact = origin.create_broadcast("foo", announce()).unwrap();
 		settle().await;
 		let result = wait.await.unwrap().expect("should find foo exactly");
 		assert!(result.is_clone(&consumer.get_broadcast("foo").unwrap()));
@@ -3838,7 +3838,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
 
-		let broadcast = origin.create_broadcast("test", live()).unwrap();
+		let broadcast = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast.finish();
 
@@ -3856,11 +3856,11 @@ mod tests {
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
 
-		let broadcast1 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast1.finish();
 		settle().await;
-		let _broadcast2 = origin.create_broadcast("test", live()).unwrap();
+		let _broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		announced.assert_next_some("test");
@@ -3874,7 +3874,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let broadcast1 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let mut announced = origin.consume().announced();
@@ -3884,7 +3884,7 @@ mod tests {
 		broadcast1.finish();
 		settle().await;
 
-		let _broadcast2 = origin.create_broadcast("test", live()).unwrap();
+		let _broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		// The cursor must see the unannounce before the new announce.
@@ -3900,7 +3900,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let broadcast1 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let mut announced = origin.consume().announced();
@@ -3909,7 +3909,7 @@ mod tests {
 		broadcast1.finish();
 		settle().await;
 
-		let broadcast2 = origin.create_broadcast("test", live()).unwrap();
+		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast2.finish();
 		settle().await;
@@ -3930,7 +3930,7 @@ mod tests {
 		let mut announced = origin.consume().announced();
 
 		for _ in 0..1000 {
-			let broadcast = origin.create_broadcast("test", live()).unwrap();
+			let broadcast = origin.create_broadcast("test", announce()).unwrap();
 			settle().await;
 			broadcast.finish();
 		}
@@ -3958,8 +3958,8 @@ mod tests {
 	async fn test_consumer_clone_is_side_effect_free() {
 		let origin = Origin::random().produce();
 
-		let _broadcast1 = origin.create_broadcast("test1", live()).unwrap();
-		let _broadcast2 = origin.create_broadcast("test2", live()).unwrap();
+		let _broadcast1 = origin.create_broadcast("test1", announce()).unwrap();
+		let _broadcast2 = origin.create_broadcast("test2", announce()).unwrap();
 		settle().await;
 
 		let consumer = origin.consume();
@@ -4275,7 +4275,7 @@ mod tests {
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
 
-		let _broadcast = origin.create_broadcast("live", live()).unwrap();
+		let _broadcast = origin.create_broadcast("live", announce()).unwrap();
 		settle().await;
 
 		let got = consumer.request_broadcast("live").await.unwrap();

@@ -1182,7 +1182,7 @@ fn announced_deactivation() {
 
 	// Going non-live unannounces the broadcast without tearing it down: it stays
 	// reachable by exact path for subscribes and fetches.
-	assert_eq!(moq_publish_set_live(broadcast, false), 0);
+	assert_eq!(moq_publish_set_announce(broadcast, false), 0);
 
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);

@@ -153,13 +153,13 @@ public final class BroadcastProducer: Sendable {
         try ffi.setRoute(route: route)
     }
 
-    /// Set whether the broadcast is live, keeping the rest of its route.
+    /// Set whether the broadcast is announced, keeping the rest of its route.
     ///
-    /// The origin announces the path only while the broadcast is live; a non-live
+    /// The origin advertises the path only while announced; an unannounced
     /// broadcast stays reachable by exact path for subscribes and fetches. This is
     /// how a publisher goes on and off the air without tearing down the broadcast.
-    public func setLive(_ live: Bool) throws {
-        try ffi.setLive(live: live)
+    public func setAnnounce(_ announce: Bool) throws {
+        try ffi.setAnnounce(announce: announce)
     }
 
     /// Open a media track. `format` controls how `initData` and frame payloads

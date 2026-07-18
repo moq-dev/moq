@@ -67,13 +67,13 @@ func (b *BroadcastProducer) SetRoute(route Route) error {
 	return b.inner.SetRoute(route)
 }
 
-// SetLive sets whether the broadcast is live, keeping the rest of its route.
+// SetAnnounce sets whether the broadcast is announced, keeping the rest of its route.
 //
-// The origin announces the path only while the broadcast is live; a non-live
+// The origin announces the path only while the broadcast is announced; a unannounced
 // broadcast stays reachable by exact path for subscribes and fetches. This is
 // how a publisher goes on and off the air without tearing down the broadcast.
-func (b *BroadcastProducer) SetLive(live bool) error {
-	return b.inner.SetLive(live)
+func (b *BroadcastProducer) SetAnnounce(live bool) error {
+	return b.inner.SetAnnounce(live)
 }
 
 // PublishMedia publishes a media track from an init segment, fed frame by

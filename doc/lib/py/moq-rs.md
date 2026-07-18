@@ -23,7 +23,7 @@ Requires Python 3.10+. The distribution is `moq-rs` (the `moq` name is taken on 
 
 A **broadcast** is a collection of tracks identified by a path. A **track** is a live stream of frames. Producers create broadcasts on an origin; consumers subscribe to whatever has been announced.
 
-`create_broadcast(path)` creates a live broadcast on the origin and returns its producer. The path stays announced while the broadcast is live: toggle discoverability with `set_live(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
+`create_broadcast(path)` creates an announced broadcast on the origin and returns its producer. Toggle discoverability with `set_announce(False)` (the broadcast stays reachable by exact path), and call `finish()` to unpublish it.
 
 For unstructured byte streams (status, commands, sensor data), use `publish_track` / `subscribe_track`. For media with a known container format (audio/video), use `publish_media` / `subscribe_media` and the catalog will be populated automatically.
 

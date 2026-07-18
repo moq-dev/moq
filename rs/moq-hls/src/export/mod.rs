@@ -217,7 +217,7 @@ mod tests {
 	async fn serves_playlist_and_segments_from_the_timeline() {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		// Let the origin's spawned attach task run so the broadcast is routable.
 		for _ in 0..10 {
@@ -286,7 +286,7 @@ mod tests {
 	async fn removing_a_rendition_ends_its_segment_cursor() {
 		let origin = moq_net::Origin::random().produce();
 		let broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		let source = moq_mux::Source::new(origin.consume(), "live");
 
@@ -320,7 +320,7 @@ mod tests {
 	async fn dropping_the_broadcaster_releases_its_renditions() {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		// Let the origin's spawned attach task run so the broadcast is routable.
 		for _ in 0..10 {
@@ -372,7 +372,7 @@ mod tests {
 	async fn record_cursors_yield_renditions_and_segments() {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		// Let the origin's spawned attach task run so the broadcast is routable.
 		for _ in 0..10 {

@@ -99,7 +99,7 @@ pub async fn accept(
 	// fast subscriber doesn't see a 404 in the gap between the SDP answer
 	// and the first RTP packet.
 	let producer = publisher
-		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast(broadcast, moq_net::broadcast::Route::new().with_announce(true))
 		.map_err(|err| Error::Other(anyhow::anyhow!("failed to create broadcast: {err}")))?;
 
 	let handle = producer.clone();

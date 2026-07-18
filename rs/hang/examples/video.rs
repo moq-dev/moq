@@ -82,7 +82,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	// Create a broadcast on the origin; the live route announces it.
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	let mut broadcast = origin
-		.create_broadcast("", moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast("", moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create broadcast")?;
 	let track = create_track(&mut broadcast)?;
 

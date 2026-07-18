@@ -42,7 +42,7 @@ pub struct ExportArgs {
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `name`.
 pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: String) -> anyhow::Result<()> {
 	let mut producer = origin
-		.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create broadcast")?;
 
 	// Create catalog tracks before the broadcast becomes visible so a subscriber

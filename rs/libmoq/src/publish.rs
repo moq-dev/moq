@@ -44,12 +44,12 @@ impl Publish {
 		Ok(id)
 	}
 
-	/// Set whether the broadcast is live (announced by its origin), keeping the rest
+	/// Set whether the broadcast is announced (announced by its origin), keeping the rest
 	/// of its route (hops, cost).
-	pub fn set_live(&mut self, broadcast: Id, live: bool) -> Result<(), Error> {
+	pub fn set_announce(&mut self, broadcast: Id, announce: bool) -> Result<(), Error> {
 		let (broadcast, _) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let route = broadcast.consume().route();
-		broadcast.set_route(route.with_live(live))?;
+		broadcast.set_route(route.with_announce(announce))?;
 		Ok(())
 	}
 

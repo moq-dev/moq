@@ -267,7 +267,7 @@ impl MoqBroadcastProducer {
 		Ok(Arc::new(Self::from_inner(moq_net::broadcast::Info::new().produce())?))
 	}
 
-	/// Update the broadcast's route: the hop chain, cost, and liveness it advertises.
+	/// Update the broadcast's route: the hop chain, cost, and announce flag it advertises.
 	///
 	/// Use this as conditions shift (e.g. a standby transcoder lowering its cost
 	/// once it is warm); consumers observe the change via
@@ -278,16 +278,16 @@ impl MoqBroadcastProducer {
 		self.with_state(|state| Ok(state.broadcast.set_route(route)?))
 	}
 
-	/// Set whether the broadcast is live, keeping the rest of its route (hops, cost).
+	/// Set whether the broadcast is announced, keeping the rest of its route (hops, cost).
 	///
-	/// The origin announces the path only while the broadcast is live; a non-live
+	/// The origin advertises the path only while announced; an unannounced
 	/// broadcast stays reachable by exact path for subscribes and fetches. This is
 	/// how a publisher goes on and off the air without tearing down the broadcast.
-	pub fn set_live(&self, live: bool) -> Result<(), MoqError> {
+	pub fn set_announce(&self, announce: bool) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		self.with_state(|state| {
 			let route = state.broadcast.consume().route();
-			Ok(state.broadcast.set_route(route.with_live(live))?)
+			Ok(state.broadcast.set_route(route.with_announce(announce))?)
 		})
 	}
 

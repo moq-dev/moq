@@ -250,7 +250,7 @@ impl Origin {
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
 	pub fn publish<P: moq_net::AsPath>(&self, origin: Id, path: P) -> Result<moq_net::broadcast::Producer, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		Ok(origin.create_broadcast(path, moq_net::broadcast::Route::new().with_live(true))?)
+		Ok(origin.create_broadcast(path, moq_net::broadcast::Route::new().with_announce(true))?)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

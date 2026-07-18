@@ -1174,7 +1174,7 @@ impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
 	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
-		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_live(true))?;
+		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1522,7 +1522,7 @@ mod tests {
 		// Publish the broadcast at `live/cam0` by feeding synthetic FLV to the importer.
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_live(true))
+			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1571,7 +1571,7 @@ mod tests {
 
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_live(true))
+			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
@@ -1694,7 +1694,7 @@ mod tests {
 
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_live(true))
+			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());

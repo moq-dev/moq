@@ -494,7 +494,7 @@ pub extern "C" fn moq_origin_create() -> i32 {
 ///
 /// The broadcast starts live: the origin announces the path so consumers can discover it,
 /// becoming visible shortly after this returns. Fill it with the `moq_publish_*` functions.
-/// Toggle discoverability with [moq_publish_set_live]; [moq_publish_finish] unpublishes
+/// Toggle discoverability with [moq_publish_set_announce]; [moq_publish_finish] unpublishes
 /// immediately.
 ///
 /// Returns a non-zero broadcast handle on success, or a negative code on failure.
@@ -710,10 +710,10 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_set_live(broadcast: u32, live: bool) -> i32 {
+pub extern "C" fn moq_publish_set_announce(broadcast: u32, announce: bool) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.set_live(broadcast, live)
+		State::lock().publish.set_announce(broadcast, announce)
 	})
 }
 

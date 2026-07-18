@@ -551,7 +551,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let route = crate::broadcast::Route::new().with_hops(hops).with_live(true);
+		let route = crate::broadcast::Route::new().with_hops(hops).with_announce(true);
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
@@ -601,7 +601,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let metadata = crate::broadcast::Route::new().with_hops(hops).with_live(true);
+		let metadata = crate::broadcast::Route::new().with_hops(hops).with_announce(true);
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {

@@ -66,7 +66,7 @@ The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.
 ```rust
 let session = client.connect(url).await?;
 
-let route = moq_net::broadcast::Route::new().with_live(true);
+let route = moq_net::broadcast::Route::new().with_announce(true);
 let mut broadcast = session.publisher().create_broadcast("", route)?;
 // ... add catalog and tracks to the broadcast ...
 ```

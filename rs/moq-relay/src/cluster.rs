@@ -577,7 +577,7 @@ impl Cluster {
 			let path = Path::new(MESH_PREFIX).join(node);
 			let broadcast = self
 				.origin
-				.create_broadcast(&path, moq_net::broadcast::Route::new().with_live(true))
+				.create_broadcast(&path, moq_net::broadcast::Route::new().with_announce(true))
 				.expect(".internal/origins is within the relay origin's root");
 			tracing::info!(%node, %path, "advertising cluster node URL");
 

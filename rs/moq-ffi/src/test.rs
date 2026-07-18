@@ -720,7 +720,7 @@ async fn create_broadcast_announces() {
 }
 
 #[tokio::test]
-async fn set_live_toggles_announcement() {
+async fn set_announce_toggles_announcement() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
 	let consumer = origin.consume();
 	let broadcast = origin.create_broadcast("live".into()).unwrap();
@@ -733,14 +733,14 @@ async fn set_live_toggles_announcement() {
 
 	// The consumer observes the live flag through the route. Skip intermediate
 	// updates and wait for the flag itself, since route propagation is asynchronous.
-	async fn wait_live(watch: &MoqRouteWatch, live: bool) {
+	async fn wait_live(watch: &MoqRouteWatch, announce: bool) {
 		loop {
 			let route = tokio::time::timeout(TIMEOUT, watch.next())
 				.await
 				.expect("timed out waiting for a route update")
 				.unwrap()
 				.expect("broadcast ended while waiting for a route");
-			if route.live == live {
+			if route.announce == announce {
 				return;
 			}
 		}
@@ -748,7 +748,7 @@ async fn set_live_toggles_announcement() {
 	let watch = bc.route_updates();
 	wait_live(&watch, true).await;
 
-	broadcast.set_live(false).unwrap();
+	broadcast.set_announce(false).unwrap();
 	wait_live(&watch, false).await;
 
 	// Non-live: unannounced, but still reachable by exact path.

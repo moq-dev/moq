@@ -34,7 +34,7 @@ impl Publisher {
 	/// Create the broadcast on `origin` at `path` and wire up the TS importer +
 	/// catalog.
 	pub fn new(origin: &origin::Producer, path: &str) -> Result<Self> {
-		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_live(true))?;
+		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let handle = broadcast.clone();
 		let importer = ts::Import::new(broadcast, catalog.reserve());

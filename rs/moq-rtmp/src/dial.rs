@@ -448,7 +448,7 @@ struct Publisher {
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
 		let mut broadcast = origin
-			.create_broadcast(path, broadcast::Route::new().with_live(true))
+			.create_broadcast(path, broadcast::Route::new().with_announce(true))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		let handle = broadcast.clone();
@@ -513,7 +513,7 @@ mod tests {
 
 		let server_origin = moq_net::Origin::random().produce();
 		let mut broadcast = server_origin
-			.create_broadcast("live/cam0", broadcast::Route::new().with_live(true))
+			.create_broadcast("live/cam0", broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());

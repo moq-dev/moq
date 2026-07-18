@@ -92,7 +92,7 @@ pub async fn run(ctx: Connection) {
 	for index in 0..rolled.broadcasts {
 		let path = format!("{name}/{run_id:08x}/{connection}/{index}");
 
-		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_live(true)) {
+		let mut broadcast = match publish.create_broadcast(&path, broadcast::Route::new().with_announce(true)) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");

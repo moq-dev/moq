@@ -199,7 +199,7 @@ mod tests {
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = moq_net::Origin::random().produce();
 		let producer = origin
-			.create_broadcast("gone", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("gone", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
 		let source = moq_mux::Source::new(origin.consume(), "gone");
@@ -225,7 +225,7 @@ mod tests {
 			.unwrap()
 			.insert("live".to_string(), stale.clone());
 		let _producer = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
 
@@ -241,7 +241,7 @@ mod tests {
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
 		let new_producer = origin
-			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
 		let new = Broadcaster::new(moq_mux::Source::new(origin.consume(), "live"), Config::default())

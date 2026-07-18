@@ -145,7 +145,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
 		let broadcast = origin
-			.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 			.context("failed to create broadcast")?;
 		local = Some(Publish::new(broadcast, &format)?);
 	} else {
@@ -190,7 +190,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin
-					.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 					.context("failed to create broadcast")?;
 				local = Some(Publish::capture(broadcast, &capture, send_bandwidth)?);
 			}

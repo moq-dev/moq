@@ -135,7 +135,7 @@ mod tests {
 	async fn no_override_targets_catalog_broadcast() {
 		let origin = Origin::random().produce();
 		let _producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		settle().await;
 
@@ -154,7 +154,7 @@ mod tests {
 	async fn subscribe_track_resolves_catalog_broadcast() {
 		let origin = Origin::random().produce();
 		let mut producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		// The track must exist for the subscription to resolve (SUBSCRIBE_OK).
 		let _video = producer.create_track("video", None).unwrap();
@@ -171,7 +171,7 @@ mod tests {
 	async fn self_reference_targets_catalog_broadcast() {
 		let origin = Origin::random().produce();
 		let mut producer = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let _video = producer.create_track("video", None).unwrap();
 		settle().await;
@@ -198,11 +198,11 @@ mod tests {
 		let origin = Origin::random().produce();
 
 		let _catalog = origin
-			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 
 		let mut referenced = origin
-			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("a/source", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		let _video = referenced.create_track("video", None).unwrap();
 		settle().await;

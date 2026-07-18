@@ -82,7 +82,7 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 /// WHEP client: pull a remote broadcast into the Origin under `name` (import).
 pub async fn connect_import(origin: moq_net::origin::Producer, url: Url, name: String) -> anyhow::Result<()> {
 	let producer = origin
-		.create_broadcast(&name, moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 		.context("failed to create broadcast")?;
 
 	tracing::info!(%url, %name, "WHEP client pulling");

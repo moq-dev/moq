@@ -491,7 +491,7 @@ mod tests {
 		// Create the broadcast on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
-			.create_broadcast("cli", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("cli", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		settle().await;
 		let mut catalog =
@@ -574,7 +574,7 @@ mod tests {
 		// The broadcast is created on a throwaway origin so the exporter can resolve it by path.
 		let origin = moq_net::Origin::random().produce();
 		let broadcast = origin
-			.create_broadcast("cli", moq_net::broadcast::Route::new().with_live(true))
+			.create_broadcast("cli", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts).unwrap();

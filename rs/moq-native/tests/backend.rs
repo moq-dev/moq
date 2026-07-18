@@ -66,7 +66,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 
@@ -327,7 +327,7 @@ async fn iroh_connect() {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_live(true))
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("failed to create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("failed to create track");
 

@@ -118,7 +118,7 @@ class SmokeTest {
             assertEquals(64, fingerprints[0].length)
 
             server.createBroadcast("live").use { broadcast ->
-                broadcast.setLive(false)
+                broadcast.setAnnounce(false)
                 broadcast.finish()
             }
         }

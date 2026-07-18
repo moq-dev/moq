@@ -39,7 +39,7 @@ config.source = Some(moq_net::PathRelativeOwned::from("..".to_string()));
 
 let output = origin.create_broadcast(
     format!("{path}/transcode.hang"),
-    moq_net::broadcast::Route::new().with_live(true),
+    moq_net::broadcast::Route::new().with_announce(true),
 )?;
 
 moq_transcode::run(source, output, config).await?;

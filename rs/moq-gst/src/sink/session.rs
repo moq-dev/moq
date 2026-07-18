@@ -127,7 +127,7 @@ impl Session {
 
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast =
-			origin.create_broadcast(&settings.broadcast, moq_net::broadcast::Route::new().with_live(true))?;
+			origin.create_broadcast(&settings.broadcast, moq_net::broadcast::Route::new().with_announce(true))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 		let status = Arc::new(Status::default());

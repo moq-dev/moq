@@ -554,7 +554,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let route = broadcast::Route::new().with_hops(hops).with_live(true);
+				let route = broadcast::Route::new().with_hops(hops).with_announce(true);
 
 				// Propagates Error::Unauthorized if the path is out of scope.
 				let broadcast = self.origin.create_broadcast(&path, route)?;

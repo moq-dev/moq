@@ -26,10 +26,10 @@ pub struct MoqRoute {
 	/// Preference among routes serving the same broadcast: lower wins.
 	#[uniffi(default = 0)]
 	pub cost: u64,
-	/// Whether the broadcast is live: actively produced, so the origin announces it.
-	/// A non-live broadcast stays reachable by exact path for subscribes and fetches.
+	/// Whether the broadcast is announced: advertised to subscribers via the origin.
+	/// An unannounced broadcast stays reachable by exact path for subscribes and fetches.
 	#[uniffi(default = false)]
-	pub live: bool,
+	pub announce: bool,
 }
 
 impl From<moq_net::broadcast::Route> for MoqRoute {
@@ -37,7 +37,7 @@ impl From<moq_net::broadcast::Route> for MoqRoute {
 		Self {
 			hops: route.hops.iter().map(|origin| origin.id()).collect(),
 			cost: route.cost,
-			live: route.live,
+			announce: route.announce,
 		}
 	}
 }
@@ -48,7 +48,7 @@ impl TryFrom<MoqRoute> for moq_net::broadcast::Route {
 	fn try_from(route: MoqRoute) -> Result<Self, MoqError> {
 		let mut out = moq_net::broadcast::Route::new()
 			.with_cost(route.cost)
-			.with_live(route.live);
+			.with_announce(route.announce);
 		for id in route.hops {
 			let origin = moq_net::Origin::new(id).map_err(|e| MoqError::InvalidRoute(e.to_string()))?;
 			out = out
@@ -229,9 +229,9 @@ impl MoqOriginProducer {
 
 	/// Create a broadcast at `path` on this origin, returning the producer that feeds it.
 	///
-	/// The broadcast starts live: the origin announces the path so subscribers can discover
+	/// The broadcast starts announced: the origin advertises the path so subscribers can discover
 	/// it, becoming visible shortly after this returns. Toggle discoverability with
-	/// [`MoqBroadcastProducer::set_live`]; a non-live broadcast stays reachable by exact
+	/// [`MoqBroadcastProducer::set_announce`]; an unannounced broadcast stays reachable by exact
 	/// path for subscribes and fetches without being announced.
 	///
 	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
@@ -242,7 +242,7 @@ impl MoqOriginProducer {
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
 		let broadcast = self
 			.inner
-			.create_broadcast(path.as_str(), moq_net::broadcast::Route::new().with_live(true))?;
+			.create_broadcast(path.as_str(), moq_net::broadcast::Route::new().with_announce(true))?;
 		Ok(Arc::new(MoqBroadcastProducer::from_inner(broadcast)?))
 	}
 }

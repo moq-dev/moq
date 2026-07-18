@@ -40,7 +40,7 @@ func (o *OriginProducer) Dynamic() *OriginDynamic {
 //
 // The broadcast starts live: the origin announces the path so subscribers can
 // discover it, becoming visible shortly after this returns. Toggle
-// discoverability with [BroadcastProducer.SetLive]; Finish unpublishes
+// discoverability with [BroadcastProducer.SetAnnounce]; Finish unpublishes
 // immediately, while dropping the producer without finishing lingers briefly so
 // a replacement publisher can take over.
 func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error) {
