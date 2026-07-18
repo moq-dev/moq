@@ -66,7 +66,7 @@ Each level is a role module (`broadcast`, `track`, `group`, `frame`, `origin`, `
 
 Two ways to drive things, both backed by `kio`:
 
-- `async fn` (runs on any executor; the exception is timer-backed paths like driving a session, which need a tokio runtime on native because `web_async::time` wraps tokio's time driver, see the Async section of `moq-net/src/lib.rs`).
+- `async fn` (runs on any executor, including timer-backed paths through `kio::time`).
 - `poll_*` counterparts that take a `&kio::Waiter` and return `Poll<...>`, drivable from any executor or synchronously (`kio` is built on `std::task::Waker`). The `async` method usually just wraps the `poll_*` one via `kio::wait`. Example pair: `track::Consumer::poll_recv_group` / `recv_group` (`moq-net/src/model/track.rs`).
 
 Sessions are caller-driven: `Client::connect` / `Server::accept` return a `(Session, Driver)` pair; nothing is spawned behind the caller's back. The `Session` is the handle, with the library's usual refcount lifecycle (clones share the connection, transport closes when the last clone drops, `abort(err)` closes explicitly). The `Driver` is the future running the protocol work: spawn it, await it in place, or step `Driver::poll(&kio::Waiter)` from another poll function. The invariant that keeps close-on-last-drop honest: **the `Driver` holds no `Session` clone**, so handing it to an executor never keeps the session alive (`moq-net/src/session.rs`). moq-native's `connect`/`ok` spawn the driver on tokio and return the plain `moq_net::Session`.
@@ -124,5 +124,5 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `cargo test -p <crate>` for one crate.
 - Rust tests are `#[cfg(test)] mod tests` inline in the source file.
-- Async tests that depend on time call `tokio::time::pause()` first so timers fire instantly and deterministically (e.g. the tests in `moq-net/src/model/origin.rs`).
+- Async tests that depend on moq-net time call `kio::time::pause()` first. Current-thread tokio tests auto-advance when idle and can use `kio::time::advance()` for explicit steps.
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.

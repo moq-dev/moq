@@ -371,6 +371,7 @@ mod tests {
 	use std::{
 		collections::VecDeque,
 		sync::{Arc, Mutex},
+		time::Duration,
 	};
 
 	use crate::coding::{Decode, Encode};
@@ -621,20 +622,18 @@ mod tests {
 		assert_ne!(code, Error::Version.to_code(), "SessionInfo failed to decode");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
+		kio::time::pause();
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn no_alpn_falls_back_to_draft14_and_switches_version_post_setup() {
+		kio::time::pause();
 		run_alpn_lite_fallback_case(None).await;
 	}
 
-	// This fake reports no send-rate estimate, so it never reaches the tokio timer in
-	// the bandwidth loop. A driver is NOT runtime-free in general; see the Async
-	// docs in lib.rs.
-	//
 	// The driver must hold no Session clone (the #2286 leak), so the transport still
 	// closes when the caller drops their last session handle, which is what lets a
 	// spawned driver task finish.
@@ -681,11 +680,29 @@ mod tests {
 		assert_eq!(fake.state.close_events.lock().unwrap().len(), 1);
 	}
 
+	#[test]
+	fn driver_timer_runs_without_a_tokio_runtime() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+		fake.set_send_rate(Some(1_000_000));
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let (session, mut driver) = futures::executor::block_on(client.connect(fake.clone())).unwrap();
+		let bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		let waiter = kio::Waiter::noop();
+
+		assert!(driver.poll(&waiter).is_pending());
+		assert_eq!(bandwidth.peek(), Some(1_000_000));
+
+		fake.set_send_rate(Some(2_000_000));
+		std::thread::sleep(Duration::from_millis(150));
+		assert!(driver.poll(&waiter).is_pending());
+		assert_eq!(bandwidth.peek(), Some(2_000_000));
+	}
+
 	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
-	// consumer exists and keeps sampling on its interval. Paused tokio time makes
-	// the interval fire deterministically.
-	#[tokio::test(start_paused = true)]
+	// consumer exists and keeps sampling on its interval.
+	#[tokio::test]
 	async fn send_bandwidth_samples_while_the_driver_runs() {
+		kio::time::pause();
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 

@@ -39,22 +39,17 @@ What works today:
    transport is `!Send`, but `SessionInner` used to hard-code `Send`.
    `web_async::MaybeSendBoxFuture` picks a `Send` boxed future on native and a
    local boxed future on wasm. Native behavior is unchanged.
-3. Timers and `Instant` routed through `web_async::time` instead of
-   `tokio::time` (session poll interval, subscriber linger, probe interval,
-   track-cache eviction). `web-async` re-exports `tokio::time` on native
-   and `wasmtimer` (a `performance.now()` + `setTimeout` shim) on wasm, so the
-   same code runs on both. tokio's clock is `std::time::Instant::now()`, which
-   *panics* on wasm (no clock) under `spawn_local` (no time driver); wasmtimer
-   fixes that. Native unchanged: `web_async::time::Instant` *is*
-   `tokio::time::Instant` there, so `tokio::time::pause`/`advance` test clocks
-   still work.
+3. Timers and `Instant` routed through moq-net's private time facade (session
+   poll interval, subscriber linger, probe interval, track-cache eviction).
+   Native uses kio's runtime-free timer thread. Browser wasm uses `wasmtimer`,
+   a `performance.now()` + `setTimeout` shim, because the standard clock and
+   Tokio time driver are unavailable under `spawn_local`.
 
 ### Timestamp fallback
 
-`model/time.rs` uses `web_async::time::{Instant, SystemTime}` for timestamp
-generation. Native keeps the Tokio-backed instant so paused-time tests still
-work; browser wasm uses wasmtimer-backed clocks, avoiding the `std::time` and
-Tokio paths that panic or lack a driver on `wasm32-unknown-unknown`.
+`model/time.rs` uses the facade's `Instant` for timestamp generation. Native
+uses kio's mockable instant, while browser wasm uses wasmtimer's clock and
+avoids the standard path that lacks a clock on `wasm32-unknown-unknown`.
 
 ### Out of scope here: moq-mux
 

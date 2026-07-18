@@ -9,8 +9,8 @@
 //! which is the highest-value target (the `@moq/watch` use case). The publish
 //! path follows the same shape and is left as the obvious next step.
 //!
-//! moq-net's timers and `Instant` go through `web_async::time` (tokio on native,
-//! wasmtimer on wasm), so the consume path runs in the browser. (`model/time.rs`
+//! moq-net uses runtime-free kio timers on native and wasmtimer in the browser,
+//! so the consume path runs in both environments. (`model/time.rs`
 //! has an unused wall-clock helper that isn't wasm-portable, but nothing calls
 //! it, so it never runs. See README.md.)
 

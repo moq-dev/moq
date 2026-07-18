@@ -104,7 +104,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
-	let mut timeout = std::pin::pin!(web_async::time::sleep(TRACK_ALIAS_TIMEOUT));
+	let mut timeout = std::pin::pin!(crate::time::sleep(TRACK_ALIAS_TIMEOUT));
 	kio::wait(|waiter| {
 		let resolved = aliases.poll(waiter, |aliases| match aliases.get(&alias) {
 			Some(request_id) => Poll::Ready(*request_id),
@@ -1030,8 +1030,9 @@ mod tests {
 
 	use super::*;
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn track_alias_waits_for_control_message() {
+		kio::time::pause();
 		let aliases = TrackAliases::default();
 		let pending = resolve_track_alias(aliases.consume(), 7);
 		tokio::pin!(pending);
@@ -1043,8 +1044,9 @@ mod tests {
 		assert_eq!(pending.await.unwrap(), RequestId(11));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn unknown_track_alias_times_out() {
+		kio::time::pause();
 		let aliases = TrackAliases::default();
 		assert!(matches!(
 			resolve_track_alias(aliases.consume(), 7).await,

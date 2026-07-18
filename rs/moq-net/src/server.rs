@@ -663,30 +663,34 @@ mod tests {
 		buf
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn accept_request_reads_lite05_path() {
+		kio::time::pause();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn accept_request_lite05_without_path_is_none() {
+		kio::time::pause();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), None);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn accept_request_reads_lite05_role() {
+		kio::time::pause();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), Some(Role::Publisher))]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.role(), Some(Role::Publisher));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn accept_request_skips_uni_stream_before_setup() {
+		kio::time::pause();
 		// A GROUP racing ahead of the SETUP is STOP_SENDING-ed and skipped; the gate
 		// keeps reading until it finds the SETUP.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_group(), lite05_setup(Some("/team/room"), None)]);

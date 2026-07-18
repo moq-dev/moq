@@ -24,8 +24,8 @@ mod producer;
 mod shared;
 mod weak;
 
-#[cfg(feature = "tokio")]
-pub mod tokio;
+#[cfg(not(target_family = "wasm"))]
+pub mod time;
 
 #[cfg(test)]
 mod tests;

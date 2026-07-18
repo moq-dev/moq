@@ -25,7 +25,7 @@ use moq_net::{Broadcast, Timestamp, Track};
 use wasm_bindgen_test::*;
 
 /// The producer timestamp clock works on wasm: `Timestamp::now()` (which flows
-/// through the web_async clock) returns a non-decreasing local time.
+/// through the wasmtimer clock) returns a non-decreasing local time.
 /// On the old code this panicked (`std::time` has no clock on wasm32).
 #[wasm_bindgen_test]
 fn timescale_now_is_sane_and_monotonic() {
@@ -39,7 +39,7 @@ fn timescale_now_is_sane_and_monotonic() {
 
 /// Bidirectional model round-trip in-process on wasm: produce a track + frame,
 /// then consume it back. Exercises the produce path (which stamps groups via the
-/// wasm `web_async::time` clock) and the consume path together.
+/// wasm time facade) and the consume path together.
 #[wasm_bindgen_test]
 async fn produce_consume_frame_roundtrip() {
 	let mut broadcast = Broadcast::new().produce();

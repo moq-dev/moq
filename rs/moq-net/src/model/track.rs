@@ -150,12 +150,12 @@ struct TrackState {
 	latest_entry: Option<Arc<cache::Entry>>,
 
 	// Groups in arrival order. `None` entries are tombstones for evicted groups.
-	groups: VecDeque<Option<(group::Producer, web_async::time::Instant)>>,
+	groups: VecDeque<Option<(group::Producer, crate::time::Instant)>>,
 
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
 	// is otherwise independent.
-	datagrams: VecDeque<(Datagram, web_async::time::Instant)>,
+	datagrams: VecDeque<(Datagram, crate::time::Instant)>,
 
 	// Number of datagrams dropped off the front (aged out), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -272,7 +272,7 @@ impl TrackState {
 
 	/// Push a datagram onto the buffer, dropping any that have aged past [`MAX_DATAGRAM_AGE`].
 	fn push_datagram(&mut self, datagram: Datagram) {
-		let now = web_async::time::Instant::now();
+		let now = crate::time::Instant::now();
 		self.datagrams.push_back((datagram, now));
 		while let Some((_, at)) = self.datagrams.front() {
 			if now.duration_since(*at) <= MAX_DATAGRAM_AGE {
@@ -439,7 +439,7 @@ impl TrackState {
 	/// Also reaps slots whose group the cache pool already evicted (walked before
 	/// the early exit); ones behind fresh groups stay as soft tombstones that every
 	/// read path skips, and are replaced in place if the sequence is re-fetched.
-	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
+	fn evict_expired(&mut self, now: crate::time::Instant, max_age: Duration) {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -537,7 +537,7 @@ impl TrackState {
 		&mut self,
 		sequence: u64,
 		track: Info,
-		now: web_async::time::Instant,
+		now: crate::time::Instant,
 	) -> Option<Result<group::Producer>> {
 		let slot = self
 			.groups
@@ -572,7 +572,7 @@ impl TrackState {
 
 		// Adopt the supplied info only if the track hasn't been accepted yet, binding
 		// it to this track's broadcast so its groups reach the shared pool.
-		let now = web_async::time::Instant::now();
+		let now = crate::time::Instant::now();
 		let broadcast = self.broadcast.clone();
 		let info = self
 			.info
@@ -658,7 +658,7 @@ impl Producer {
 		let info = state.info.as_ref().unwrap();
 		let track = info.clone();
 		let latency_max = info.latency_max;
-		let now = web_async::time::Instant::now();
+		let now = crate::time::Instant::now();
 
 		if !state.duplicates.insert(group.sequence) {
 			// A pool-evicted group can be re-created into its old slot.
@@ -695,7 +695,7 @@ impl Producer {
 
 		let group = group::Producer::new(group::Info { sequence }, track);
 
-		let now = web_async::time::Instant::now();
+		let now = crate::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
@@ -2229,7 +2229,7 @@ mod test {
 
 	#[tokio::test]
 	async fn datagram_evicts_stale() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 		let mut dg = producer.subscribe(None);
@@ -2238,7 +2238,7 @@ mod test {
 		producer.append_datagram(ts, &b"old"[..]).unwrap(); // sequence 0
 
 		// Age past the send-buffer window, then push a fresh datagram: the stale one is evicted.
-		tokio::time::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10)).await;
+		kio::time::advance(MAX_DATAGRAM_AGE + Duration::from_millis(10)).await;
 		producer.append_datagram(ts, &b"new"[..]).unwrap(); // sequence 1
 
 		// A lagging consumer resumes at the oldest still-buffered datagram (the fresh one).
@@ -2310,7 +2310,7 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_expired_groups() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 
@@ -2326,7 +2326,7 @@ mod test {
 		}
 
 		// Advance time past the eviction threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
@@ -2347,13 +2347,13 @@ mod test {
 
 	#[tokio::test]
 	async fn evict_keeps_max_sequence() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		// Advance time past threshold.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
@@ -2368,7 +2368,7 @@ mod test {
 
 	#[tokio::test]
 	async fn no_eviction_when_fresh() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
@@ -2384,14 +2384,14 @@ mod test {
 
 	#[tokio::test]
 	async fn consumer_skips_evicted_groups() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 		producer.append_group().unwrap(); // seq 0
 
 		let mut consumer = producer.subscribe(None);
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Group 0 was evicted. Consumer should get group 1.
@@ -2401,14 +2401,14 @@ mod test {
 
 	#[tokio::test]
 	async fn cache_age_controls_eviction() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		// A shorter cache evicts sooner than the default.
 		let mut producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(1)));
 		producer.append_group().unwrap(); // seq 0
 
 		// Past the custom budget but well within DEFAULT_LATENCY_MAX.
-		tokio::time::advance(Duration::from_secs(2)).await;
+		kio::time::advance(Duration::from_secs(2)).await;
 		producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is gone because the publisher only keeps groups for 1s.
@@ -2521,7 +2521,7 @@ mod test {
 
 	#[tokio::test]
 	async fn out_of_order_max_sequence_at_front() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 
@@ -2537,7 +2537,7 @@ mod test {
 		}
 
 		// Expire all three groups.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Append seq 6 (becomes new max_sequence).
 		producer.append_group().unwrap(); // seq 6
@@ -2557,14 +2557,14 @@ mod test {
 
 	#[tokio::test]
 	async fn max_sequence_at_front_blocks_trim() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let mut producer = track_producer("test", None);
 
 		// Arrive: seq 5, then seq 3.
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
 
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Seq 3 arrives late; max_sequence is still 5 (at front).
 		producer.create_group(group::Info { sequence: 3 }).unwrap();
@@ -2578,7 +2578,7 @@ mod test {
 		}
 
 		// Expire seq 3 as well.
-		tokio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
+		kio::time::advance(DEFAULT_LATENCY_MAX + Duration::from_secs(1)).await;
 
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
@@ -3476,15 +3476,15 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_evicts_oldest_group() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		// Fits two 1000-byte groups (plus per-group overhead) but not three.
 		let (mut producer, pool) = pooled_producer(3000);
 
 		finished_group(&mut producer, 1000); // seq 0
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 1
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 2, pinned as latest
 
 		// The write to seq 2 pushed the pool over budget: seq 0 (stalest, unpinned)
@@ -3504,7 +3504,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_never_evicts_latest() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		// Far too small for even one group: the latest is pinned and survives anyway.
 		let (mut producer, pool) = pooled_producer(100);
@@ -3518,21 +3518,21 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_reads_bump_recency() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let (mut producer, pool) = pooled_producer(3000);
 		let mut subscriber = producer.subscribe(None);
 
 		finished_group(&mut producer, 1000); // seq 0
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 1
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// Read seq 0 so seq 1 becomes the least recently used.
 		let mut group = subscriber.assert_group();
 		assert_eq!(group.sequence, 0);
 		group.read_frame().await.unwrap().unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// Over budget: seq 1 (stale) is the victim, the just-read seq 0 survives.
 		finished_group(&mut producer, 1000); // seq 2, pinned
@@ -3552,7 +3552,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_eviction_aborts_readers() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let (mut producer, pool) = pooled_producer(3000);
 		let mut subscriber = producer.subscribe(None);
@@ -3560,9 +3560,9 @@ mod test {
 		finished_group(&mut producer, 1000); // seq 0
 		let group0 = subscriber.assert_group();
 
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 1
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 2 evicts seq 0
 
 		// A consumer holding the evicted group surfaces the eviction, not a hang
@@ -3578,16 +3578,16 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_growth_on_old_group_charges() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let (mut producer, pool) = pooled_producer(3000);
 
 		// Seq 0 stays open (a straggler still being written).
 		let mut group0 = producer.append_group().unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		// Seq 1 becomes the pinned latest; seq 0 is now evictable.
 		let _group1 = producer.append_group().unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// A late frame on the old group still counts against the budget, and can
 		// evict that very group once it blows past capacity.
@@ -3600,7 +3600,7 @@ mod test {
 
 	#[tokio::test]
 	async fn refetched_latest_group_is_repinned() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let (mut producer, pool) = pooled_producer(3000);
 		let dynamic = producer.dynamic();
@@ -3610,12 +3610,12 @@ mod test {
 		straggler
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 1000]))
 			.unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// The publisher aborts its own latest group; the slot stays at max_sequence.
 		let mut latest = producer.append_group().unwrap(); // seq 1
 		latest.abort(Error::Cancel).unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// Re-fetch it: the replacement takes over max_sequence and must be
 		// re-pinned, or memory pressure could evict the live edge.
@@ -3632,7 +3632,7 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 		pending.await.unwrap();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// Blow the budget with the straggler; the refetched latest is pinned, so
 		// the straggler itself is the only eligible victim.
@@ -3647,15 +3647,15 @@ mod test {
 
 	#[tokio::test]
 	async fn pool_eviction_allows_refetch() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let (mut producer, _pool) = pooled_producer(3000);
 		let dynamic = producer.dynamic();
 
 		finished_group(&mut producer, 1000); // seq 0
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 1
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		finished_group(&mut producer, 1000); // seq 2 evicts seq 0
 
 		// The evicted group is a miss, so the fetch queues for the dynamic handler

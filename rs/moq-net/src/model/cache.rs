@@ -46,7 +46,7 @@ struct Inner {
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
 	// Reference point for the coarse `last_access` clock.
-	epoch: web_async::time::Instant,
+	epoch: crate::time::Instant,
 	lru: Lock<Lru>,
 }
 
@@ -55,7 +55,7 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
-			epoch: web_async::time::Instant::now(),
+			epoch: crate::time::Instant::now(),
 			lru: Lock::default(),
 		}
 	}
@@ -88,7 +88,7 @@ pub(crate) struct Entry {
 	pinned: AtomicBool,
 	// Aborts the group with Error::Evicted. Called without any pool lock held.
 	evict: Box<dyn Fn() + Send + Sync>,
-	epoch: web_async::time::Instant,
+	epoch: crate::time::Instant,
 }
 
 impl Entry {
@@ -379,7 +379,7 @@ mod test {
 
 	#[tokio::test]
 	async fn evicts_least_recently_used() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let pool = Pool::new(3 * ENTRY_OVERHEAD + 2500);
 		let (evicted_a, hook_a) = flag();
@@ -388,14 +388,14 @@ mod test {
 
 		let a = pool.register(hook_a);
 		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		let b = pool.register(hook_b);
 		b.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// Read A so B becomes the least recently used.
 		a.touch();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		let c = pool.register(hook_c);
 		c.add(1000);
@@ -413,7 +413,7 @@ mod test {
 
 	#[tokio::test]
 	async fn pinned_entries_survive() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let pool = Pool::new(ENTRY_OVERHEAD);
 		let (evicted_a, hook_a) = flag();
@@ -422,7 +422,7 @@ mod test {
 		let a = pool.register(hook_a);
 		a.entry().unwrap().set_pinned(true);
 		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		let b = pool.register(hook_b);
 		b.add(1000);
@@ -442,7 +442,7 @@ mod test {
 
 	#[tokio::test]
 	async fn resize_evicts() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let pool = Pool::unbounded();
 		let (evicted_a, hook_a) = flag();
@@ -462,7 +462,7 @@ mod test {
 
 	#[tokio::test]
 	async fn touched_entry_is_rekeyed_not_evicted() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let pool = Pool::new(2 * ENTRY_OVERHEAD + 1500);
 		let (evicted_a, hook_a) = flag();
@@ -470,15 +470,15 @@ mod test {
 
 		let a = pool.register(hook_a);
 		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		let b = pool.register(hook_b);
 		b.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 
 		// A's heap snapshot is stale after this touch, so eviction re-keys A and
 		// picks B instead.
 		a.touch();
-		tokio::time::advance(Duration::from_millis(10)).await;
+		kio::time::advance(Duration::from_millis(10)).await;
 		pool.evict();
 
 		assert!(!evicted_a.load(Ordering::Relaxed));

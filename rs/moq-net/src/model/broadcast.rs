@@ -650,8 +650,9 @@ mod test {
 		track2.assert_group();
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn requested_unused() {
+		kio::time::pause();
 		let mut broadcast = Info::new().produce().dynamic();
 		let bc = broadcast.consume();
 

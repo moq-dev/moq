@@ -28,10 +28,13 @@ tracing = "0.1"
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasmtimer = { version = "0.4", default-features = false, features = ["tokio"] }
+
 [dev-dependencies]
 criterion = "0.8"
-# test-util (tokio::time::pause/advance) is test-only and is NOT supported on
-# wasm, so it must not leak into the normal dependency feature set.
+kio = { workspace = true, features = ["test-util"] }
+# Tokio powers the kio test clock's auto-advance and does not leak into normal builds.
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time", "rt"] }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled

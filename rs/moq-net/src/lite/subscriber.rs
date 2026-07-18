@@ -922,7 +922,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// which no longer holds now that Lite05 accepts up front.
 		let mut completed = false;
 		let mut fetches: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
-		let mut linger: Option<Pin<Box<web_async::time::Sleep>>> = None;
+		let mut linger: Option<Pin<Box<crate::time::Sleep>>> = None;
 
 		loop {
 			// Once nothing is in flight, the `poll_unused` check below confirms no
@@ -1014,7 +1014,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 				Event::Idle => {
 					if supports_linger {
-						linger = Some(Box::pin(web_async::time::sleep(LINGER_TIMEOUT)));
+						linger = Some(Box::pin(crate::time::sleep(LINGER_TIMEOUT)));
 					} else {
 						// No SUBSCRIBE_UPDATE to pause with, so there's nothing to keep
 						// open: tear down as soon as the last consumer leaves.

@@ -1841,7 +1841,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announce() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast1 = broadcast::Info::new().produce();
@@ -1907,7 +1907,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 
@@ -2008,7 +2008,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate_reverse() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast1 = broadcast::Info::new().produce();
@@ -2034,7 +2034,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_deterministic_tiebreak() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		fn route(ids: &[u64]) -> broadcast::Producer {
 			let hops = OriginList::try_from(
@@ -2077,7 +2077,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_double_publish() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast = broadcast::Info::new().produce();
@@ -2676,7 +2676,7 @@ mod tests {
 	// Verify unannounce also doesn't panic with trailing slash
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_unannounce() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 
@@ -2816,7 +2816,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announced_broadcast_delayed() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast = broadcast::Info::new().produce();
@@ -2840,7 +2840,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announced_broadcast_ignores_unrelated_paths() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let other = broadcast::Info::new().produce();
@@ -2867,7 +2867,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announced_broadcast_skips_nested_paths() {
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let nested = broadcast::Info::new().produce();
@@ -2928,7 +2928,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_coalesce_announce_then_unannounce() {
 		// announce + unannounce that the cursor hasn't observed yet collapses to nothing.
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
@@ -2946,7 +2946,7 @@ mod tests {
 	async fn test_coalesce_announce_unannounce_announce() {
 		// announce, unannounce, announce that the cursor hasn't drained collapses
 		// to a single Announce of the latest broadcast.
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
@@ -2967,7 +2967,7 @@ mod tests {
 	async fn test_coalesce_unannounce_announce_preserved() {
 		// unannounce followed by announce of a different broadcast must be preserved
 		// as two deliveries so the cursor learns the origin changed.
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast1 = broadcast::Info::new().produce();
@@ -2993,7 +2993,7 @@ mod tests {
 	async fn test_coalesce_unannounce_announce_unannounce() {
 		// unannounce + announce + unannounce collapses to a single unannounce: the
 		// embedded announce was never observed.
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let broadcast1 = broadcast::Info::new().produce();
@@ -3020,7 +3020,7 @@ mod tests {
 		// Backup promotion during cleanup can leave the cursor with zero or one
 		// pending update for "test" depending on the order tasks run; we only
 		// require that churn doesn't accumulate across iterations.
-		tokio::time::pause();
+		kio::time::pause();
 
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
@@ -3104,8 +3104,9 @@ mod tests {
 
 	// A dynamically served broadcast resolves the requester and serves tracks, but is
 	// never announced.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_served_not_announced() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3141,8 +3142,9 @@ mod tests {
 	}
 
 	// Concurrent requests for the same queued path coalesce onto one handler request.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_coalesces() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3168,8 +3170,9 @@ mod tests {
 
 	// A repeat request for an already-served, still-live path shares the same broadcast
 	// instead of asking the handler again (no duplicate upstream subscription).
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_dedups_served() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3193,8 +3196,9 @@ mod tests {
 	}
 
 	// Once a served broadcast closes, its cache entry is stale, so the next request re-serves.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_reserves_after_close() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3219,8 +3223,9 @@ mod tests {
 
 	// Serving many distinct one-shot paths that each close must not grow the `served` cache
 	// unboundedly: the amortized GC on `accept` reclaims the stale entries left by closed ones.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_served_cache_bounded() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3247,8 +3252,9 @@ mod tests {
 
 	// A repeat request in the window after the handler picks one up but before it accepts
 	// coalesces onto the in-flight request instead of queuing a duplicate.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_coalesces_after_handoff() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3272,8 +3278,9 @@ mod tests {
 	}
 
 	// Dropping a handed-off request without accept/reject rejects every coalesced requester.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_dropped_after_handoff() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3289,8 +3296,9 @@ mod tests {
 	}
 
 	// Rejecting a request resolves the requester with the error.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_rejected() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3306,8 +3314,9 @@ mod tests {
 	// After a rejected hand-off, a fresh request for the same path reaches the handler again:
 	// the rejected `Request`'s removal + `Drop` leave the request queue consistent
 	// (a stale/clobbered entry would strand this request or panic the handler).
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_rerequest_after_reject() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3327,8 +3336,9 @@ mod tests {
 
 	// Dropping the last handler resolves queued requests with an error and reverts to
 	// resolving Unroutable.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_handler_dropped() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3347,8 +3357,9 @@ mod tests {
 	// `accept` is decoupled from the dynamic count: once a handler has picked a request up,
 	// it can still serve it even if every handler (including itself) drops first, flipping the
 	// count to zero. The in-flight request must not be rejected as `Unroutable`.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_accept_after_handler_dropped() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3366,8 +3377,9 @@ mod tests {
 	}
 
 	// A live announcement wins over the dynamic fallback; no request is queued.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_request_prefers_announced() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let mut dynamic = origin.dynamic();
 		let consumer = origin.consume();
@@ -3387,8 +3399,9 @@ mod tests {
 	}
 
 	// Cloning a handler and dropping the clone must not flip the count to zero.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn dynamic_clone_keeps_alive() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let dynamic = origin.dynamic();
 		let consumer = origin.consume();

@@ -780,7 +780,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_set_track_notifies_swapped_overflow_item() {
-		tokio::time::pause();
+		kio::time::pause();
 		let queue = PriorityQueue::default();
 
 		// Fill vec, then insert top, kicking f1 (filler at group=1) into overflow.

@@ -55,18 +55,10 @@
 //! [`Session`] clone drops (or on [`Session::abort`]), which in turn finishes the
 //! driver.
 //!
-//! The crate has no direct tokio dependency: every future is built on [`kio`]
-//! (plain [`std::task::Waker`] plumbing) and `futures`, so any executor can poll
-//! them, and the `poll_xxx` counterparts can be stepped synchronously with a
-//! [`kio::Waiter`].
-//!
-//! The one remaining runtime tie is time. Timers go through `web_async::time`,
-//! which is backed by tokio's time driver on native (and `wasmtimer` in the
-//! browser), and those timers panic when polled outside a tokio runtime. So on
-//! native you still need a tokio runtime to poll a [`Driver`] (bandwidth sampling,
-//! the control stream timeout, and subscription linger all sleep); purely
-//! model-layer methods (tracks, groups, frames, origins) never touch a timer and
-//! run on any executor.
+//! The crate has no direct tokio dependency: every future and native timer is
+//! built on [`kio`] (plain [`std::task::Waker`] plumbing), so any executor can
+//! poll them. The `poll_xxx` counterparts can also be stepped synchronously with
+//! a [`kio::Waiter`]. Browser timers use `wasmtimer`.
 
 mod client;
 mod coding;
@@ -78,6 +70,7 @@ mod path;
 mod server;
 mod session;
 mod setup;
+mod time;
 mod util;
 mod version;
 

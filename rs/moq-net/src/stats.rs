@@ -1411,8 +1411,7 @@ async fn run_publisher(
 		drop(shared);
 	}
 
-	let mut ticker = web_async::time::interval(interval);
-	ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
+	let mut ticker = crate::time::interval(interval);
 
 	loop {
 		ticker.tick().await;
@@ -1725,19 +1724,21 @@ mod tests {
 				.with_node(PathOwned::from(node.to_string())),
 		);
 		let mut consumer = origin.consume().announced();
-		tokio::time::advance(Duration::from_millis(1)).await;
+		kio::time::advance(Duration::from_millis(1)).await;
 		let crate::announce::Update { path, .. } = consumer.next().await.expect("expected announce");
 		path.as_str().to_string()
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn new_normalizes_and_drops_empty_node() {
+		kio::time::pause();
 		assert_eq!(announced_path_for_node("/sjc//1/").await, ".stats/node/sjc/1");
 		assert_eq!(announced_path_for_node("///").await, ".stats/node");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn per_broadcast_counters_isolated() {
+		kio::time::pause();
 		// Bumps on one broadcast must not leak into another.
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let bs1 = stats.tier(Tier::default()).broadcast("demo/bbb");
@@ -1763,8 +1764,9 @@ mod tests {
 		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn external_and_internal_tiers_are_independent() {
+		kio::time::pause();
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let ext = stats.tier(Tier::default());
 		let int = stats.tier(Tier::new("internal"));
@@ -1782,8 +1784,9 @@ mod tests {
 		assert_eq!(int_c.subscriber.bytes.load(Relaxed), 7);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn snapshot_rolls_up_by_tier_role_and_sessions() {
+		kio::time::pause();
 		let (stats, _origin) = test_stats(Some("sjc"));
 		let ext = stats.tier(Tier::default());
 		let int = stats.tier(Tier::new("internal"));
@@ -1837,8 +1840,9 @@ mod tests {
 		assert_eq!(sessions(Tier::new("internal")).sessions, 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn paths_under_prefix_are_no_op() {
+		kio::time::pause();
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the aggregator.
 		let (stats, _origin) = test_stats(Some("sjc"));
@@ -1852,8 +1856,9 @@ mod tests {
 		assert!(stats.shared().entries.lock().is_empty());
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn disabled_stats_are_noop() {
+		kio::time::pause();
 		// A no-op aggregator (no origin) allocates no shared state and never
 		// announces; every handle is empty and bumps are dropped.
 		let stats = Producer::default();
@@ -1867,8 +1872,9 @@ mod tests {
 		drop(p);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn single_broadcast_path_announced() {
+		kio::time::pause();
 		// No matter how many broadcasts get bumped, exactly one stats
 		// broadcast is announced (the per-node aggregate).
 		let (stats, origin) = test_stats(Some("sjc/1"));
@@ -1879,14 +1885,15 @@ mod tests {
 		let bs2 = stats.tier(Tier::default()).broadcast("baz/qux");
 		let _t2 = bs2.publisher().track("video");
 
-		tokio::time::advance(Duration::from_millis(1)).await;
+		kio::time::advance(Duration::from_millis(1)).await;
 		let crate::announce::Update { path, broadcast } = consumer.next().await.expect("expected announce");
 		assert!(broadcast.is_some());
 		assert_eq!(path.as_str(), ".stats/node/sjc/1");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn task_announces_without_node_suffix() {
+		kio::time::pause();
 		let origin = Origin::random().produce();
 		let stats = Producer::new(Config::new().with_origin(origin.clone()));
 		let mut consumer = origin.consume().announced();
@@ -1894,20 +1901,20 @@ mod tests {
 		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _t = bs.publisher().track("video");
 
-		tokio::time::advance(Duration::from_millis(1)).await;
+		kio::time::advance(Duration::from_millis(1)).await;
 		let crate::announce::Update { path, broadcast } = consumer.next().await.expect("expected announce");
 		assert!(broadcast.is_some());
 		assert_eq!(path.as_str(), ".stats/node");
 	}
 
 	/// Drives the snapshot task forward by `count` ticks. In paused-time
-	/// tests, `tokio::time::advance` doesn't poll spawned tasks itself; we
+	/// tests, `kio::time::advance` doesn't poll spawned tasks itself; we
 	/// have to combine it with explicit awaits. This helper interleaves
 	/// `advance` with `consumer.next()` (and later `yield_now` calls)
 	/// so the task wakes, processes the tick, and re-parks each iteration.
 	async fn drive_ticks(count: u32) {
 		for _ in 0..count {
-			tokio::time::advance(Duration::from_secs(1)).await;
+			kio::time::advance(Duration::from_secs(1)).await;
 			// Yield several times to let the task wake, snapshot, write the
 			// frame, and re-await the next tick.
 			for _ in 0..4 {
@@ -1916,8 +1923,9 @@ mod tests {
 		}
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn live_entry_kept_while_idle() {
+		kio::time::pause();
 		// A broadcast with a live announce guard but no traffic must stay in
 		// the map indefinitely: announced != announced_closed means a
 		// subscription could still begin at any moment.
@@ -1943,8 +1951,9 @@ mod tests {
 		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn entry_dropped_once_fully_closed() {
+		kio::time::pause();
 		// Once every open counter equals its `*_closed` counterpart and no
 		// guard holds the Arc, the entry is removed the very next tick.
 		let (stats, _origin) = test_stats(Some("sjc"));
@@ -1967,8 +1976,9 @@ mod tests {
 		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn frame_emits_expected_counters() {
+		kio::time::pause();
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
@@ -1978,7 +1988,7 @@ mod tests {
 		let sessions = stats.tier(Tier::default()).publisher_broadcasts();
 		let _sub = sessions.subscribe("foo/bar");
 
-		tokio::time::advance(Duration::from_millis(1100)).await;
+		kio::time::advance(Duration::from_millis(1100)).await;
 
 		let crate::announce::Update { broadcast, .. } = consumer.next().await.expect("expected announce");
 		let broadcast = broadcast.expect("active");
@@ -1997,8 +2007,9 @@ mod tests {
 		assert_eq!(snap.frames, 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn announced_bytes_recorded_per_side() {
+		kio::time::pause();
 		// Path-keyed announce-byte recording is isolated per side, accumulates,
 		// works without holding a lifetime guard, and doesn't touch the payload
 		// `bytes` counter.
@@ -2016,15 +2027,16 @@ mod tests {
 		assert_eq!(sub_ext.announced_bytes, 7, "subscriber side tracked independently");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn announced_bytes_surfaces_in_frame() {
+		kio::time::pause();
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
 		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _guard = bs.publisher();
 		bs.publisher_announced_bytes(123);
 
-		tokio::time::advance(Duration::from_millis(1100)).await;
+		kio::time::advance(Duration::from_millis(1100)).await;
 
 		let crate::announce::Update { broadcast, .. } = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
@@ -2040,8 +2052,9 @@ mod tests {
 		assert_eq!(snap.announced_bytes, 123);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn announced_decouples_from_broadcasts() {
+		kio::time::pause();
 		// publisher() (announce) with no subscription should bump announced but
 		// NOT broadcasts (which only counts sessions with an active sub).
 		let (stats, origin) = test_stats(Some("sjc"));
@@ -2049,7 +2062,7 @@ mod tests {
 		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
 		let _guard = bs.publisher();
 
-		tokio::time::advance(Duration::from_millis(1100)).await;
+		kio::time::advance(Duration::from_millis(1100)).await;
 
 		let crate::announce::Update { broadcast, .. } = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
@@ -2066,8 +2079,9 @@ mod tests {
 		assert_eq!(snap.subscriptions, 0);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn short_lived_sub_is_surfaced() {
+		kio::time::pause();
 		// A subscription that opens AND closes within a single tick window
 		// must still surface as a complete broadcasts open/close cycle. The
 		// cumulative counters retain broadcasts=1/broadcasts_closed=1, and the
@@ -2085,7 +2099,7 @@ mod tests {
 			// track + sub dropped here, all within tick 1
 		}
 
-		tokio::time::advance(Duration::from_millis(1100)).await;
+		kio::time::advance(Duration::from_millis(1100)).await;
 
 		let crate::announce::Update { broadcast, .. } = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
@@ -2106,8 +2120,9 @@ mod tests {
 		assert_eq!(snap.frames, 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn multiple_subs_count_as_one_broadcast() {
+		kio::time::pause();
 		// Two concurrent subs from the SAME session count as one broadcast, not
 		// two: broadcasts is "distinct sessions with >=1 active sub", not
 		// "subscription count". broadcasts_closed only bumps once the session's
@@ -2144,8 +2159,9 @@ mod tests {
 		drop(bs);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn distinct_sessions_count_as_separate_broadcasts() {
+		kio::time::pause();
 		// The viewer-count invariant: two different sessions subscribing to the
 		// same broadcast bump broadcasts to 2 (each is a distinct viewer).
 		let (stats, _origin) = test_stats(Some("sjc"));
@@ -2170,8 +2186,9 @@ mod tests {
 		assert_eq!(raw().broadcasts_closed, 2, "both viewers gone");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn session_counts_by_root() {
+		kio::time::pause();
 		// session() counts connected sessions per auth root, independent of any
 		// broadcast: open bumps `sessions`, drop bumps `sessions_closed`.
 		let (stats, _origin) = test_stats(Some("sjc"));
@@ -2193,15 +2210,16 @@ mod tests {
 		assert_eq!(snap("globex"), Some((1, 1)));
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn session_track_surfaces_by_root() {
+		kio::time::pause();
 		let (stats, origin) = test_stats(Some("sjc"));
 		let mut consumer = origin.consume().announced();
 		let _a = stats.tier(Tier::default()).session("acme");
 		let _b = stats.tier(Tier::default()).session("acme");
 		let _c = stats.tier(Tier::new("internal")).session("peer");
 
-		tokio::time::advance(Duration::from_millis(1100)).await;
+		kio::time::advance(Duration::from_millis(1100)).await;
 
 		let crate::announce::Update { broadcast, .. } = consumer.next().await.expect("announce");
 		let broadcast = broadcast.expect("active");
@@ -2231,8 +2249,9 @@ mod tests {
 		assert_eq!(snap.sessions, 1);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn session_root_dropped_when_empty() {
+		kio::time::pause();
 		// Once the last session under a root disconnects, the root leaves the
 		// map on the next tick (its final snapshot already emitted).
 		let (stats, _origin) = test_stats(Some("sjc"));
@@ -2252,8 +2271,9 @@ mod tests {
 		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn unused_slots_dont_surface() {
+		kio::time::pause();
 		// A broadcast that only sees default-tier publisher traffic must NOT
 		// surface on its sibling default-tier subscriber track. Regression for
 		// the "None != Some(default)" first-tick change-detection bug: without

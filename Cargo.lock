@@ -4462,6 +4462,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wasm-bindgen-test",
+ "wasmtimer",
  "web-async",
  "web-transport-trait",
 ]

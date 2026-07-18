@@ -122,8 +122,7 @@ impl Session {
 /// driver cancels the protocol work without closing the session. It resolves when
 /// the session ends, and keeps returning that same result if polled again.
 ///
-/// On native, driving requires a tokio runtime with a time driver (timers go
-/// through `web_async::time`); see the crate-level Async docs.
+/// Native timers are runtime-free, so the driver can run on any executor.
 pub struct Driver {
 	protocol: MaybeSendBox<'static, Result<(), Error>>,
 	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
@@ -305,7 +304,7 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 		let bitrate = self.session.stats().estimated_send_rate();
 		self.producer.set(bitrate)?;
 		self.mode = SendBandwidthMode::Polling {
-			sleep: web_async::time::sleep(Self::POLL_INTERVAL).maybe_boxed(),
+			sleep: crate::time::sleep(Self::POLL_INTERVAL).maybe_boxed(),
 		};
 		Ok(())
 	}
