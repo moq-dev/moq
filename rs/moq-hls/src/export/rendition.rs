@@ -177,10 +177,9 @@ impl Rendition {
 	/// drains what's left and then ends, and stop the timeline watcher (releasing its standing
 	/// source subscription).
 	///
-	/// Called when the catalog drops or replaces the rendition, and when the owning
-	/// `Broadcaster` goes away. Dropping alone isn't enough: a cursor holds an `Arc<Self>`, so
-	/// it would keep this rendition -- and its subscription -- alive while parking forever on a
-	/// timeline that never ends.
+	/// Called when the catalog drops or replaces the rendition. The media track may continue
+	/// through a replacement, so the old watcher has no clean end to await; a cursor's
+	/// `Arc<Self>` would otherwise keep it subscribed and parked forever.
 	pub(crate) fn close(&self) {
 		self.live.close();
 		self.watcher.abort();

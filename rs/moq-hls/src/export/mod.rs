@@ -291,14 +291,12 @@ mod tests {
 		registration.set(config);
 		drop(reserved);
 
-		// Two closed GOPs, then finish cleanly so the timeline ends and group 1 becomes the
-		// final segment.
+		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
+		// publisher finishes.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
-		media.finish().unwrap();
-		catalog.finish().unwrap();
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
@@ -310,6 +308,11 @@ mod tests {
 
 		// The recorder drops the broadcaster before finalizing its uploads.
 		drop(broadcaster);
+
+		// Finish the source after teardown, forcing the broadcaster's drop to land before the
+		// rendition watcher's clean-end path.
+		media.finish().unwrap();
+		catalog.finish().unwrap();
 
 		let mut groups = Vec::new();
 		while let Some(segment) = tokio::time::timeout(Duration::from_secs(5), segments.next())
