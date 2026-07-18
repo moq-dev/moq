@@ -36,13 +36,15 @@ impl<T> Queue<T> {
 		}))
 	}
 
-	/// Enqueue a message. Silently dropped once the queue is closed, matching a
-	/// write to a stream whose reader already stopped it.
-	fn push(&self, item: T) {
+	/// Enqueue a message. Returns false once the queue is closed (the message is
+	/// dropped), matching a write to a stream whose reader is gone.
+	fn push(&self, item: T) -> bool {
 		let mut state = self.0.lock();
-		if !state.closed {
-			state.messages.push_back(item);
+		if state.closed {
+			return false;
 		}
+		state.messages.push_back(item);
+		true
 	}
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
@@ -94,8 +96,9 @@ impl<T> Default for Queue<T> {
 struct QueueWriter<T>(Queue<T>);
 
 impl<T> QueueWriter<T> {
+	/// Enqueue a message, dropped silently if the reader already closed its side.
 	fn push(&self, item: T) {
-		self.0.push(item);
+		let _ = self.0.push(item);
 	}
 }
 
@@ -198,6 +201,14 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 	}
 }
 
+impl Drop for VirtualRecvStream {
+	fn drop(&mut self) {
+		// The reader is gone: close the queue so routed follow-ups are discarded
+		// instead of buffering forever while the map entry lingers.
+		self.rx.close();
+	}
+}
+
 /// A virtual send stream that forwards writes to the shared control stream writer.
 ///
 /// For streams created by `open_bi` (outgoing requests), this also parses
@@ -292,10 +303,12 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.push(buf);
+				if !self.control_tx.push(buf) {
+					return Err(crate::Error::Closed);
+				}
 			}
-		} else {
-			self.control_tx.push(Bytes::copy_from_slice(buf));
+		} else if !self.control_tx.push(Bytes::copy_from_slice(buf)) {
+			return Err(crate::Error::Closed);
 		}
 
 		Ok(len)
@@ -309,10 +322,12 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 				let mut pending = self.pending.take().unwrap();
 				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.push(buf);
+				if !self.control_tx.push(buf) {
+					return Err(crate::Error::Closed);
+				}
 			}
-		} else {
-			self.control_tx.push(chunk);
+		} else if !self.control_tx.push(chunk) {
+			return Err(crate::Error::Closed);
 		}
 
 		Ok(())
@@ -325,7 +340,7 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		if let Some(pending) = self.pending.take()
 			&& !pending.buf.is_empty()
 		{
-			self.control_tx.push(pending.buf.freeze());
+			let _ = self.control_tx.push(pending.buf.freeze());
 		}
 		Ok(())
 	}
@@ -500,18 +515,28 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
 	) -> Result<(), Error> {
-		let mut read = std::pin::pin!(self.run_read(reader));
-		let mut write = std::pin::pin!(self.run_write(writer));
-		kio::wait(|waiter| {
-			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
-				return Poll::Ready(res);
-			}
-			if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
-				return Poll::Ready(res);
-			}
-			Poll::Pending
-		})
-		.await
+		let res = {
+			let mut read = std::pin::pin!(self.run_read(reader));
+			let mut write = std::pin::pin!(self.run_write(writer));
+			kio::wait(|waiter| {
+				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
+					return Poll::Ready(res);
+				}
+				if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
+					return Poll::Ready(res);
+				}
+				Poll::Pending
+			})
+			.await
+		};
+
+		// The control stream is dead, so the mux is too: fail future virtual
+		// writes fast and end accept_bi instead of buffering into a queue nobody
+		// will ever drain.
+		self.shared.control.close();
+		self.shared.incoming.close();
+
+		res
 	}
 
 	/// Writer task: drains the queue and writes to the control stream.
@@ -547,7 +572,9 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let recv = VirtualRecvStream::new(raw, follow.clone());
 					let send = VirtualSendStream::new(self.shared.control.clone());
 					self.shared.streams.lock().unwrap().insert(request_id, follow.writer());
-					self.shared.incoming.push((send, recv));
+					if !self.shared.incoming.push((send, recv)) {
+						return Err(Error::Closed);
+					}
 				}
 				Route::Response(request_id) => {
 					if let Some(tx) = self.shared.streams.lock().unwrap().get(&request_id) {
@@ -783,18 +810,21 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 		match self.version {
 			// v16: SubscribeNamespace uses real bidi streams, so race both sources.
 			Version::Draft16 => {
+				// Native first: real bidi streams are rare and transport-paced, so
+				// they can't starve the queue, while a control-message flood could
+				// starve a native SubscribeNamespace under queue-first order.
 				let mut accept = std::pin::pin!(self.inner.accept_bi());
 				kio::wait(|waiter| {
-					if let Poll::Ready(result) = self.shared.incoming.poll_pop(waiter) {
-						return Poll::Ready(match result {
-							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-							None => Err(crate::Error::Closed),
-						});
-					}
 					if let Poll::Ready(result) = waiter.poll_future(accept.as_mut()) {
 						return Poll::Ready(match result {
 							Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
 							Err(_) => Err(crate::Error::Closed),
+						});
+					}
+					if let Poll::Ready(result) = self.shared.incoming.poll_pop(waiter) {
+						return Poll::Ready(match result {
+							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+							None => Err(crate::Error::Closed),
 						});
 					}
 					Poll::Pending
@@ -1247,6 +1277,26 @@ mod tests {
 		let mut buf = [0u8; 1];
 		let n = stream.read(&mut buf).await.unwrap().unwrap();
 		assert_eq!(&buf[..n], b"d");
+	}
+
+	#[tokio::test]
+	async fn test_virtual_send_stream_errors_once_control_closes() {
+		// The adapter closes the control queue when its run() exits; writes must
+		// fail fast instead of buffering into a queue nobody drains.
+		let control = Queue::new();
+		let mut stream = VirtualSendStream::new(control.clone());
+		control.close();
+		assert!(matches!(stream.write(b"hello").await, Err(Error::Closed)));
+	}
+
+	#[test]
+	fn test_recv_stream_drop_discards_followups() {
+		// Dropping the reader closes the queue, so late routed messages are
+		// discarded instead of accumulating while the map entry lingers.
+		let follow = Queue::new();
+		let stream = VirtualRecvStream::new(Bytes::new(), follow.clone());
+		drop(stream);
+		assert!(!follow.push(Bytes::from_static(b"late")));
 	}
 
 	#[tokio::test]

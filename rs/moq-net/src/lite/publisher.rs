@@ -999,15 +999,18 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					while let Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
 
+					// Control first: SUBSCRIBE_UPDATE/FIN messages are rare, so they can't
+					// starve the data path, while a deep group backlog polled first could
+					// defer an unsubscribe or priority change indefinitely.
+					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
+						return Poll::Ready(Event::Update(upd));
+					}
 					// One cursor drives the whole subscription: poll the cap-aware next group and,
 					// when enabled, the next best-effort datagram. Groups are polled first so a
 					// datagram burst can't starve them; datagrams flow whenever no group is ready
 					// (including while groups are paused above the cap).
 					if let Poll::Ready(res) = poll_recv_next(&mut track, datagrams, emit_boundary, waiter) {
 						return Poll::Ready(Event::Recv(res));
-					}
-					if let Poll::Ready(upd) = waiter.poll_future(update.as_mut()) {
-						return Poll::Ready(Event::Update(upd));
 					}
 					Poll::Pending
 				})
