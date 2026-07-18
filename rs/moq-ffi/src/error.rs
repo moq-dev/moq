@@ -68,7 +68,6 @@ pub enum MoqError {
 	#[error("unsupported")]
 	Unsupported,
 
-
 	#[error("log: {0}")]
 	Log(String),
 }
