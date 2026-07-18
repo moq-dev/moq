@@ -1,9 +1,9 @@
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, Stream};
 use qmux::tungstenite;
 use std::{
-	future::Future,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
+	task::{Context, Poll},
 };
 
 use axum::{
@@ -70,14 +70,7 @@ pub(crate) async fn serve_ws(
 
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
-		let socket = socket
-			.map(axum_to_tungstenite)
-			// TODO Figure out how to avoid swallowing errors.
-			.sink_map_err(|err| {
-				tracing::warn!(%err, "WebSocket error");
-				tungstenite::Error::ConnectionClosed
-			})
-			.with(tungstenite_to_axum);
+		let socket = WebSocketAdapter::new(socket);
 		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats).await;
 	}))
 }
@@ -153,6 +146,59 @@ fn supported_subprotocols() -> Vec<String> {
 
 // https://github.com/tokio-rs/axum/discussions/848#discussioncomment-11443587
 
+struct WebSocketAdapter<T> {
+	inner: T,
+}
+
+impl<T> WebSocketAdapter<T> {
+	fn new(inner: T) -> Self {
+		Self { inner }
+	}
+}
+
+impl<T> Stream for WebSocketAdapter<T>
+where
+	T: Stream<Item = Result<axum::extract::ws::Message, axum::Error>> + Unpin,
+{
+	type Item = Result<tungstenite::Message, tungstenite::Error>;
+
+	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+		Pin::new(&mut self.inner)
+			.poll_next(cx)
+			.map(|message| message.map(axum_to_tungstenite))
+	}
+}
+
+impl<T> Sink<tungstenite::Message> for WebSocketAdapter<T>
+where
+	T: Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
+{
+	type Error = tungstenite::Error;
+
+	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_ready(cx).map_err(map_axum_error)
+	}
+
+	fn start_send(mut self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
+		Pin::new(&mut self.inner)
+			.start_send(tungstenite_to_axum(message))
+			.map_err(map_axum_error)
+	}
+
+	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_flush(cx).map_err(map_axum_error)
+	}
+
+	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		Pin::new(&mut self.inner).poll_close(cx).map_err(map_axum_error)
+	}
+}
+
+fn map_axum_error(err: axum::Error) -> tungstenite::Error {
+	tracing::warn!(%err, "WebSocket error");
+	tungstenite::Error::ConnectionClosed
+}
+
 #[allow(clippy::result_large_err)]
 fn axum_to_tungstenite(
 	message: Result<axum::extract::ws::Message, axum::Error>,
@@ -174,35 +220,72 @@ fn axum_to_tungstenite(
 	}
 }
 
-#[allow(clippy::result_large_err)]
-fn tungstenite_to_axum(
-	message: tungstenite::Message,
-) -> Pin<Box<dyn Future<Output = Result<axum::extract::ws::Message, tungstenite::Error>> + Send + Sync>> {
-	Box::pin(async move {
-		Ok(match message {
-			tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
-			tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
-			tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
-			tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
-			tungstenite::Message::Frame(_frame) => unreachable!(),
-			tungstenite::Message::Close(close) => {
-				axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
-					code: c.code.into(),
-					reason: c.reason.to_string().into(),
-				}))
-			}
-		})
-	})
+fn tungstenite_to_axum(message: tungstenite::Message) -> axum::extract::ws::Message {
+	match message {
+		tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
+		tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
+		tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
+		tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
+		tungstenite::Message::Frame(_frame) => unreachable!(),
+		tungstenite::Message::Close(close) => {
+			axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
+				code: c.code.into(),
+				reason: c.reason.to_string().into(),
+			}))
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
-	use std::sync::Mutex;
+	use futures::SinkExt;
+	use std::{io, sync::Mutex};
 	use tokio::sync::oneshot;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;
+
+	struct DoubleErrorSocket;
+
+	impl Stream for DoubleErrorSocket {
+		type Item = Result<axum::extract::ws::Message, axum::Error>;
+
+		fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+			Poll::Pending
+		}
+	}
+
+	impl Sink<axum::extract::ws::Message> for DoubleErrorSocket {
+		type Error = axum::Error;
+
+		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn start_send(self: Pin<&mut Self>, _message: axum::extract::ws::Message) -> Result<(), Self::Error> {
+			Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe)))
+		}
+
+		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe))).into()
+		}
+	}
+
+	#[tokio::test]
+	async fn websocket_adapter_maps_close_error_after_send_error() {
+		let mut socket = WebSocketAdapter::new(DoubleErrorSocket);
+
+		let send = socket.send(tungstenite::Message::Binary(Vec::new().into())).await;
+		assert!(matches!(send, Err(tungstenite::Error::ConnectionClosed)));
+
+		let close = socket.close().await;
+		assert!(matches!(close, Err(tungstenite::Error::ConnectionClosed)));
+	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
 	/// of truth that `supported_subprotocols` and `qmux::Client::with_protocols`
@@ -288,10 +371,7 @@ mod tests {
 					let ws = ws.protocols(supported_subprotocols());
 					ws.on_upgrade(move |socket| async move {
 						let alpn = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
-						let socket = socket
-							.map(axum_to_tungstenite)
-							.sink_map_err(|_| tungstenite::Error::ConnectionClosed)
-							.with(tungstenite_to_axum);
+						let socket = WebSocketAdapter::new(socket);
 
 						let upgraded = qmux::ws::Upgraded::new(socket);
 						let upgraded = match alpn.as_deref() {
