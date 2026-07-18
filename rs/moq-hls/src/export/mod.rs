@@ -210,6 +210,13 @@ mod tests {
 		}
 	}
 
+	// Let the origin's spawned attach task run so a created broadcast is routable.
+	async fn settle() {
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
 	// catalog (which records the timeline), the Broadcaster renders playlists from the
 	// timeline alone, and a segment request fetches and transmuxes exactly its groups.
@@ -219,10 +226,7 @@ mod tests {
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
-		// Let the origin's spawned attach task run so the broadcast is routable.
-		for _ in 0..10 {
-			tokio::task::yield_now().await;
-		}
+		settle().await;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -287,7 +291,10 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -379,10 +386,7 @@ mod tests {
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
-		// Let the origin's spawned attach task run so the broadcast is routable.
-		for _ in 0..10 {
-			tokio::task::yield_now().await;
-		}
+		settle().await;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -438,10 +442,7 @@ mod tests {
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
-		// Let the origin's spawned attach task run so the broadcast is routable.
-		for _ in 0..10 {
-			tokio::task::yield_now().await;
-		}
+		settle().await;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
