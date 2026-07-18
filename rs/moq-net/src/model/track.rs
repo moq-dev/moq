@@ -2242,19 +2242,6 @@ impl Subscriber {
 mod test {
 	use super::*;
 
-	/// Whether a group is still in the cache, for the pool eviction tests.
-	///
-	/// Production code never guesses at cache residency: it asks for a past group
-	/// with [`Consumer::fetch_group`], which a [`Dynamic`] serves on demand whether
-	/// or not it is still cached. So this probe lives with the tests that need it
-	/// rather than on the public API.
-	fn cached_group(consumer: &Consumer, sequence: u64) -> Option<group::Consumer> {
-		match &consumer.inner {
-			ConsumerKind::Plain(state) => state.read().cached_group(sequence),
-			ConsumerKind::Spliced(_) => unreachable!("the cache tests use plain tracks"),
-		}
-	}
-
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
 	fn track_producer(name: impl Into<Arc<str>>, info: impl Into<Option<Info>>) -> Producer {
