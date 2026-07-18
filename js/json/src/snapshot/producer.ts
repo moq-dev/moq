@@ -13,6 +13,9 @@ const MAX_DELTA_FRAMES = 256;
 const DEFAULT_DELTA_RATIO = 8;
 
 export interface Config<T> {
+	/** Track to write directly, or unset to retain values for subscribers attached with {@link Producer.serve}. */
+	track?: Moq.Track;
+
 	// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
 	//
 	// `0` disables deltas: every change is published as a new snapshot group.
@@ -42,24 +45,12 @@ export interface Config<T> {
 	compression?: boolean;
 }
 
-function isTrack(value: unknown): value is Moq.Track {
-	// Package graphs may contain multiple compatible @moq/net instances, so Track identity is structural.
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"appendGroup" in value &&
-		typeof value.appendGroup === "function" &&
-		"close" in value &&
-		typeof value.close === "function"
-	);
-}
-
 /**
  * Publishes a JSON value as snapshots and deltas, chosen automatically.
  *
- * Construct it two ways:
+ * Configure it in one of two modes:
  *
- * - **With a track** (`new Producer(track, config)`): writes directly to that one track.
+ * - **With a track** (`new Producer({ track, ...config })`): writes directly to that one track.
  * - **Without a track** (`new Producer(config)`): retains the value and fans it out to any number of
  *   subscription tracks attached with {@link serve}, seeding late joiners with the current value.
  *   This backs the hang catalog and is how an application publishes its own custom tracks.
@@ -89,16 +80,11 @@ export class Producer<T> {
 	#outputs?: Set<Producer<T>>;
 	#value?: T;
 
-	/** Create a track-less, fan-out producer; attach subscribers with {@link serve}. */
-	constructor(config?: Config<T>);
-	/** Create a producer that writes directly to `track`. */
-	constructor(track: Moq.Track, config?: Config<T>);
-	constructor(trackOrConfig?: Moq.Track | Config<T>, config: Config<T> = {}) {
-		if (isTrack(trackOrConfig)) {
-			this.#track = trackOrConfig;
-			this.#config = config;
-		} else {
-			this.#config = trackOrConfig ?? {};
+	/** Create a direct producer when `config.track` is set, or a fan-out producer otherwise. */
+	constructor(config: Config<T> = {}) {
+		this.#config = config;
+		this.#track = config.track;
+		if (!this.#track) {
 			this.#outputs = new Set();
 			this.#value = this.#config.initial;
 		}
@@ -199,7 +185,7 @@ export class Producer<T> {
 
 		const config =
 			opts?.compression === undefined ? this.#config : { ...this.#config, compression: opts.compression };
-		const output = new Producer<T>(track, config);
+		const output = new Producer<T>({ ...config, track });
 		if (this.#value !== undefined) output.update(this.#value);
 
 		this.#outputs.add(output);

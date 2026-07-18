@@ -16,9 +16,10 @@
  */
 
 import "./highlight";
+import * as Json from "@moq/json";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
-import { type Audio, Json, type Net, Signals } from "@moq/publish";
+import { type Audio, type Net, Signals } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
 import { formatBitrate, formatFps, graph } from "./viz";

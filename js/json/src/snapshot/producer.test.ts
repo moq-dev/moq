@@ -102,7 +102,7 @@ test("serve() can override compression per subscriber", async () => {
 });
 
 test("serve() throws on a track-bound producer", () => {
-	const producer = new Producer<Record<string, unknown>>(new Track("meta.json"));
+	const producer = new Producer<Record<string, unknown>>({ track: new Track("meta.json") });
 	const effect = new Effect();
 	expect(() => producer.serve(new Track("other"), effect)).toThrow();
 	effect.close();

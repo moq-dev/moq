@@ -135,8 +135,8 @@ broadcast.name.set("bob.hang");
 Beyond audio and video, you can publish arbitrary application tracks within the
 same broadcast (no separate broadcast needed). `publishTrack(name, serve)` runs
 `serve(track, effect)` for each subscriber; it rejects the built-in track names
-(catalog/audio/video). Encode the payload yourself with the re-exported
-`@moq/json`: a track-less `Json.Snapshot.Producer` is the same fan-out producer the catalog
+(catalog/audio/video). Encode the payload yourself with `@moq/json`: a track-less
+`Json.Snapshot.Producer` is the same fan-out producer the catalog
 uses, seeding late joiners with the latest value.
 
 `publishTrack` does not touch the catalog; advertise the track by writing your own
@@ -145,7 +145,7 @@ is a loose object, so any key passes through). This lets an app support somethin
 like an `scte35` section with no hang-specific support:
 
 ```typescript
-import { Json } from "@moq/publish";
+import * as Json from "@moq/json";
 
 const scte35 = new Json.Snapshot.Producer<{ splices: number[] }>({ initial: { splices: [] } });
 broadcast.publishTrack("scte35.json", (track, effect) => scte35.serve(track, effect));

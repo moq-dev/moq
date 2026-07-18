@@ -280,7 +280,7 @@ export class Game {
 				if (!req) break;
 
 				if (req.track.name === "command") {
-					const producer = new Json.Snapshot.Producer<Record<string, unknown>>(req.track);
+					const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track: req.track });
 					effect.cleanup(() => producer.finish());
 					effect.run(this.#runCommandTrack.bind(this, req.track, producer));
 				}
