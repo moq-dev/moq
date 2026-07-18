@@ -319,7 +319,13 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_broadcaster_releases_its_renditions() {
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		// Let the origin's spawned attach task run so the broadcast is routable.
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -365,7 +371,13 @@ mod tests {
 	#[tokio::test]
 	async fn record_cursors_yield_renditions_and_segments() {
 		let origin = moq_net::Origin::random().produce();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
+			.expect("publish allowed");
+		// Let the origin's spawned attach task run so the broadcast is routable.
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
@@ -413,11 +425,13 @@ mod tests {
 		assert_eq!(second.group, 1);
 		assert!(!second.discontinuity, "consecutive segments are continuous");
 
-		// Drop the publisher (an abrupt disconnect). The cursor drains the segments it already
-		// saw and ends; the still-open live-edge group is NOT finalized, since a reset can't
-		// vouch that its media is complete. (Clean-end finalization of the live edge is covered
-		// by segments::tests::next_after_walks_finalized_segments.)
-		drop((catalog, media, registration, broadcast));
+		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
+		// segments it already saw and ends; the still-open live-edge group is NOT finalized,
+		// since a reset can't vouch that its media is complete), while finishing the broadcast
+		// ends it promptly instead of lingering for a reconnect. (Clean-end finalization of the
+		// live edge is covered by segments::tests::next_after_walks_finalized_segments.)
+		drop((catalog, media, registration));
+		broadcast.finish();
 
 		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
