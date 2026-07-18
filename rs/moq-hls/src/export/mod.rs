@@ -6,19 +6,27 @@
 //! media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
 //! groups that segment covers from the relay cache and transmuxes them to CMAF. Renditions
 //! whose catalog entry advertises no timeline can't be served this way and are skipped.
+//!
+//! The same machinery serves two kinds of consumer:
+//!
+//! * the HTTP serve path (pull): [`Broadcaster::rendition`] / [`Broadcaster::master_playlist`]
+//!   and the crate-internal `Rendition::playlist` / `Rendition::segment`, rendered/fetched per
+//!   request (that pull surface is gated behind the `server` feature); and
+//! * a recorder (push): the [`renditions::Consumer`] and [`segments::Consumer`] cursors, which
+//!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
+//!   storage.
 
 mod master;
 mod playlist;
 mod rendition;
-mod timeline;
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Weak};
+pub mod renditions;
+pub mod segments;
+
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_mux::catalog::hang::Catalog;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
-use tokio::sync::watch;
 
 pub use playlist::{Segment, Snapshot, render_media};
 pub use rendition::{Kind, Rendition};
@@ -49,16 +57,15 @@ impl Default for Config {
 
 /// All renditions of one broadcast, kept in sync with its catalog.
 pub struct Broadcaster {
+	// Read only by the serve path's `is_closed`/`closed` (server-gated); a recording consumer
+	// observes close through its `renditions()` cursor ending instead.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	broadcast: moq_net::broadcast::Consumer,
-	/// Keyed by `(kind, name)` so a video and an audio rendition can share a name
-	/// without one silently evicting the other.
-	renditions: Mutex<BTreeMap<(Kind, String), Arc<Rendition>>>,
-	/// Current rendition count, bumped on every catalog sync so handlers can wait
-	/// for the catalog to populate before rendering a playlist.
-	ready: watch::Sender<usize>,
-	/// Aborts the catalog watcher when the broadcaster is dropped (and, with it,
-	/// its renditions, whose own `Drop` aborts their timeline watchers). Set once,
-	/// right after construction.
+	/// The current rendition set, reconciled from the catalog by the watcher task.
+	renditions: renditions::Producer,
+	/// Aborts the catalog watcher when the broadcaster is dropped; `Drop` then retires the
+	/// renditions themselves (see [`renditions::Producer::clear`]). Set once, right after
+	/// construction.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -66,24 +73,27 @@ impl Broadcaster {
 	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
 	pub async fn new(source: moq_mux::Source, config: Config) -> Result<Arc<Self>, moq_mux::Error> {
 		let broadcast = source.broadcast().await?;
-		let (ready, _) = watch::channel(0);
+		let renditions = renditions::Producer::new();
 		let broadcaster = Arc::new(Self {
 			broadcast: broadcast.clone(),
-			renditions: Mutex::new(BTreeMap::new()),
-			ready,
+			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
 		});
-		// The watcher holds a Weak so it can't keep the Broadcaster alive; the
-		// Broadcaster owns the watcher's handle and aborts it on Drop.
-		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, Arc::downgrade(&broadcaster)));
+		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
+		// standing catalog subscription stops when nobody's serving from this broadcaster.
+		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, renditions));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		Ok(broadcaster)
 	}
 
+	/// Whether the source broadcast has closed (ended or dropped).
+	#[cfg(feature = "server")]
 	pub(crate) fn is_closed(&self) -> bool {
 		self.broadcast.is_closed()
 	}
 
+	/// Resolve once the source broadcast closes, so the server can evict a dead broadcaster.
+	#[cfg(feature = "server")]
 	pub(crate) async fn closed(&self) {
 		self.broadcast.closed().await;
 	}
@@ -91,31 +101,27 @@ impl Broadcaster {
 	/// Look up a rendition by kind and name. Video and audio are separate axes, so a
 	/// video and an audio rendition may share a name without colliding.
 	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
-		self.renditions.lock().unwrap().get(&(kind, name.to_string())).cloned()
+		self.renditions.get(kind, name)
 	}
 
-	/// Wait until at least one rendition has been discovered, or `timeout` elapses.
-	pub async fn wait_ready(&self, timeout: Duration) {
-		let mut rx = self.ready.subscribe();
-		if *rx.borrow() > 0 {
-			return;
-		}
-		let _ = tokio::time::timeout(timeout, async {
-			while rx.changed().await.is_ok() {
-				if *rx.borrow() > 0 {
-					break;
-				}
-			}
-		})
-		.await;
+	/// A cursor over rendition add/remove events, for a consumer that mirrors or records the
+	/// whole broadcast. It replays the current renditions, then yields changes, and returns
+	/// `None` once the source closes.
+	pub fn renditions(&self) -> renditions::Consumer {
+		self.renditions.subscribe()
+	}
+
+	/// Resolve once at least one rendition has been discovered. How long to wait is the
+	/// caller's policy: wrap this in a timeout (or select against it) as needed.
+	pub async fn ready(&self) {
+		self.renditions.ready().await;
 	}
 
 	/// Render the multivariant (master) playlist from the current renditions.
 	pub fn master_playlist(&self) -> String {
-		let renditions = self.renditions.lock().unwrap();
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
-		for rendition in renditions.values() {
+		for rendition in self.renditions.snapshot() {
 			match rendition.kind {
 				Kind::Video => video.push(master::VideoVariant {
 					name: rendition.name.clone(),
@@ -134,54 +140,10 @@ impl Broadcaster {
 		master::render_master(&video, &audio)
 	}
 
-	/// Whether the current catalog contains no servable renditions.
+	/// Whether the current catalog contains no servable renditions (serve path).
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) fn is_empty(&self) -> bool {
-		self.renditions.lock().unwrap().is_empty()
-	}
-
-	/// Reconcile renditions with a complete catalog snapshot. Removed or reconfigured
-	/// renditions are dropped before replacements become visible, which also aborts
-	/// their timeline watchers and releases their subscriptions.
-	fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
-		let mut renditions = self.renditions.lock().unwrap();
-		renditions.retain(|(kind, name), rendition| match kind {
-			Kind::Video => catalog
-				.video
-				.renditions
-				.get(name)
-				.is_some_and(|config| rendition.matches_video(config)),
-			Kind::Audio => catalog
-				.audio
-				.renditions
-				.get(name)
-				.is_some_and(|config| rendition.matches_audio(config)),
-		});
-
-		for (name, video) in &catalog.video.renditions {
-			let key = (Kind::Video, name.clone());
-			if renditions.contains_key(&key) {
-				continue;
-			}
-			match Rendition::video(name.clone(), video, source, config.window) {
-				Some(rendition) => {
-					renditions.insert(key, Arc::new(rendition));
-				}
-				None => tracing::warn!(%name, "skipping video rendition without a timeline track"),
-			}
-		}
-		for (name, audio) in &catalog.audio.renditions {
-			let key = (Kind::Audio, name.clone());
-			if renditions.contains_key(&key) {
-				continue;
-			}
-			match Rendition::audio(name.clone(), audio, source, config.window) {
-				Some(rendition) => {
-					renditions.insert(key, Arc::new(rendition));
-				}
-				None => tracing::warn!(%name, "skipping audio rendition without a timeline track"),
-			}
-		}
-		let _ = self.ready.send(renditions.len());
+		self.renditions.is_empty()
 	}
 }
 
@@ -190,6 +152,11 @@ impl Drop for Broadcaster {
 		if let Some(watcher) = self.watcher.lock().unwrap().take() {
 			watcher.abort();
 		}
+		// The rendition map lives in shared state, so unlike an owned map it does NOT free its
+		// renditions when this handle goes away: a surviving `renditions::Consumer` would pin
+		// every `Rendition`, and with it the timeline watcher and source subscription it holds.
+		// Drop them here so teardown can't leak a standing subscription.
+		self.renditions.clear();
 	}
 }
 
@@ -197,7 +164,7 @@ async fn watch_catalog(
 	source: moq_mux::Source,
 	broadcast: moq_net::broadcast::Consumer,
 	config: Config,
-	broadcaster: Weak<Broadcaster>,
+	renditions: renditions::Producer,
 ) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
@@ -206,7 +173,10 @@ async fn watch_catalog(
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 				tokio::select! {
 					_ = tokio::time::sleep(CATALOG_RETRY) => {}
-					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => return,
+					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
+						renditions.close();
+						return;
+					}
 				}
 			}
 		}
@@ -214,11 +184,7 @@ async fn watch_catalog(
 
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => match broadcaster.upgrade() {
-				Some(broadcaster) => broadcaster.sync(&source, &config, &catalog),
-				// The Broadcaster was dropped; nothing left to sync into.
-				None => break,
-			},
+			Ok(Some(catalog)) => renditions.sync(&source, &config, &catalog),
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
@@ -226,6 +192,9 @@ async fn watch_catalog(
 			}
 		}
 	}
+
+	// The source is done (or errored): let recording cursors finish.
+	renditions.close();
 }
 
 #[cfg(test)]
@@ -239,17 +208,6 @@ mod tests {
 			keyframe,
 			duration: None,
 		}
-	}
-
-	async fn wait_playable(rendition: &Rendition) {
-		let mut rx = rendition.updated();
-		tokio::time::timeout(Duration::from_secs(5), async {
-			while !rendition.playable() {
-				rx.changed().await.expect("rendition watcher alive");
-			}
-		})
-		.await
-		.expect("rendition never became playable");
 	}
 
 	// The whole fetch-on-demand path in process: a broadcast publishes media through the
@@ -285,11 +243,11 @@ mod tests {
 
 		let source = moq_mux::Source::new(origin.consume(), "live");
 		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
-		broadcaster.wait_ready(Duration::from_secs(5)).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
 			.expect("rendition discovered from the catalog");
-		wait_playable(&rendition).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let master = broadcaster.master_playlist();
 		assert!(master.contains("video/video0/media.m3u8"), "master lists the rendition");
@@ -321,38 +279,159 @@ mod tests {
 		drop((media, registration, broadcast));
 	}
 
+	// A rendition the catalog drops must end its segment cursors. The cursor holds an
+	// `Arc<Rendition>`, so without an explicit close the rendition (and its timeline
+	// subscription) would stay alive and the cursor would park at the live edge forever.
 	#[tokio::test]
-	async fn reconciles_removed_and_reconfigured_renditions() {
+	async fn removing_a_rendition_ends_its_segment_cursor() {
 		let origin = moq_net::Origin::random().produce();
 		let broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_live(true))
 			.expect("publish allowed");
 		let source = moq_mux::Source::new(origin.consume(), "live");
-		let (ready, _) = watch::channel(0);
-		let broadcaster = Broadcaster {
-			broadcast: broadcast.consume(),
-			renditions: Mutex::new(BTreeMap::new()),
-			ready,
-			watcher: Mutex::new(None),
-		};
 
+		// Drive the producer directly so the catalog can be reconciled synchronously.
+		let renditions = renditions::Producer::new();
 		let mut media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		media.timeline = Some(hang::catalog::Timeline::new("video.timeline"));
-		let mut first = Catalog::default();
-		first.video.renditions.insert("video".to_string(), media.clone());
-		broadcaster.sync(&source, &Config::default(), &first);
-		let original = broadcaster.rendition(Kind::Video, "video").expect("initial rendition");
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.video.renditions.insert("video".to_string(), media);
+		renditions.sync(&source, &Config::default(), &catalog);
 
-		media.bitrate = Some(3_000_000);
-		let mut changed = Catalog::default();
-		changed.video.renditions.insert("video".to_string(), media);
-		broadcaster.sync(&source, &Config::default(), &changed);
-		let replacement = broadcaster
-			.rendition(Kind::Video, "video")
-			.expect("replacement rendition");
-		assert!(!Arc::ptr_eq(&original, &replacement));
+		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
+		let mut segments = rendition.segments();
 
-		broadcaster.sync(&source, &Config::default(), &Catalog::default());
-		assert!(broadcaster.is_empty());
+		// The catalog drops the rendition: its cursor must run dry rather than park.
+		renditions.sync(&source, &Config::default(), &moq_mux::catalog::hang::Catalog::default());
+		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
+			.await
+			.expect("a removed rendition's cursor ends instead of parking")
+			.unwrap();
+		assert!(ended.is_none(), "no segments remained to drain");
+
+		drop((broadcast, rendition));
+	}
+
+	// Dropping the broadcaster must release its renditions even when a cursor (and an
+	// `Arc<Rendition>` it was handed) outlives it. The map lives in shared state, so without an
+	// explicit teardown those would pin every rendition's timeline watcher -- and the standing
+	// source subscription it holds -- for as long as the consumer lived.
+	#[tokio::test]
+	async fn dropping_the_broadcaster_releases_its_renditions() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0");
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		registration.set(config);
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+
+		let mut renditions = broadcaster.renditions();
+		let added = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+			.await
+			.expect("a rendition is discovered");
+		let Some(renditions::Event::Added(_rendition)) = added else {
+			panic!("expected an Added event");
+		};
+
+		// The cursor and the handed-out rendition both outlive the broadcaster.
+		drop(broadcaster);
+
+		let next = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+			.await
+			.expect("the cursor resolves after the broadcaster drops");
+		assert!(
+			matches!(next, Some(renditions::Event::Removed { .. })),
+			"dropping the broadcaster releases its renditions to a live cursor"
+		);
+
+		drop((catalog, media, registration, broadcast));
+	}
+
+	// The record path: the renditions cursor yields the video rendition, its segment cursor
+	// yields each finalized segment WITH its media, and closing the publisher drains the final
+	// segment and then ends both cursors.
+	#[tokio::test]
+	async fn record_cursors_yield_renditions_and_segments() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0");
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		registration.set(config);
+		drop(reserved);
+
+		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+		media.write(frame(4_000_000, true)).unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+
+		let mut renditions = broadcaster.renditions();
+		let rendition = match tokio::time::timeout(Duration::from_secs(5), renditions.next())
+			.await
+			.expect("a rendition is discovered")
+		{
+			Some(renditions::Event::Added(rendition)) => rendition,
+			other => panic!("expected an Added event, got {:?}", other.is_some()),
+		};
+		assert_eq!(rendition.kind, Kind::Video);
+		assert_eq!(rendition.name, "video0");
+
+		let mut segments = rendition.segments();
+		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
+
+		let first = tokio::time::timeout(Duration::from_secs(5), segments.next())
+			.await
+			.expect("first segment finalizes")
+			.unwrap()
+			.expect("a segment, not end");
+		assert_eq!(first.group, 0);
+		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
+		assert_eq!(first.duration, 2.0);
+		assert!(!first.discontinuity, "a clean start is not a discontinuity");
+
+		let second = segments.next().await.unwrap().expect("second segment");
+		assert_eq!(second.group, 1);
+		assert!(!second.discontinuity, "consecutive segments are continuous");
+
+		// Drop the publisher (an abrupt disconnect). The cursor drains the segments it already
+		// saw and ends; the still-open live-edge group is NOT finalized, since a reset can't
+		// vouch that its media is complete. (Clean-end finalization of the live edge is covered
+		// by segments::tests::next_after_walks_finalized_segments.)
+		drop((catalog, media, registration, broadcast));
+
+		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
+			.await
+			.expect("segment cursor resolves after the source is lost")
+			.unwrap();
+		assert!(
+			end.is_none(),
+			"an abrupt end does not finalize the open live-edge group"
+		);
+
+		// The renditions cursor also ends once the source closes.
+		let ended = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+			.await
+			.expect("renditions cursor resolves");
+		assert!(ended.is_none(), "renditions cursor ends when the broadcast closes");
 	}
 }

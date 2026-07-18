@@ -8,7 +8,7 @@ use hang::catalog::{AudioConfig, MOQ_EPOCH_UNIX_MILLIS, Timeline, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 
 use super::playlist::{Segment, Snapshot};
-use super::timeline::Live;
+use super::segments;
 use crate::Result;
 
 /// Fallback advertised bitrates when the catalog doesn't carry one.
@@ -80,10 +80,11 @@ pub struct Rendition {
 	/// The catalog timeline section: the timeline track's name, timescale, and wall anchor.
 	section: Timeline,
 	/// The timeline window shared with the watcher task.
-	live: Arc<Live>,
+	live: Arc<segments::Producer>,
 	/// The largest `EXT-X-TARGETDURATION` advertised so far, in seconds. Latched monotonically:
 	/// HLS forbids a live playlist's target duration from changing, so it never shrinks even
-	/// after a long segment evicts from the window.
+	/// after a long segment evicts from the window. Read only by the serve path's `playlist`.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	target_duration: std::sync::atomic::AtomicU64,
 	/// The init segment, built on first request.
 	init: tokio::sync::Mutex<Option<Bytes>>,
@@ -109,7 +110,7 @@ impl Rendition {
 		window: Duration,
 	) -> Option<Self> {
 		let section = config.timeline.clone()?;
-		let live = Arc::new(Live::new());
+		let live = Arc::new(segments::Producer::new());
 		let watcher = spawn_watcher(
 			source.clone(),
 			config.broadcast.clone(),
@@ -142,7 +143,7 @@ impl Rendition {
 		window: Duration,
 	) -> Option<Self> {
 		let section = config.timeline.clone()?;
-		let live = Arc::new(Live::new());
+		let live = Arc::new(segments::Producer::new());
 		let watcher = spawn_watcher(
 			source.clone(),
 			config.broadcast.clone(),
@@ -166,13 +167,35 @@ impl Rendition {
 		})
 	}
 
-	/// Subscribe to timeline-window changes, for waiting until a playlist is renderable.
-	pub(crate) fn updated(&self) -> tokio::sync::watch::Receiver<u64> {
-		self.live.subscribe()
+	/// A cursor over this rendition's finalized segments, with their media, in timeline order.
+	/// For a recorder mirroring the broadcast; see [`segments::Consumer`].
+	pub fn segments(self: &Arc<Self>) -> segments::Consumer {
+		self.live.subscribe(self.clone())
+	}
+
+	/// Retire this rendition: close its segment timeline so every [`segments::Consumer`] over it
+	/// drains what's left and then ends, and stop the timeline watcher (releasing its standing
+	/// source subscription).
+	///
+	/// Called when the catalog drops or replaces the rendition, and when the owning
+	/// `Broadcaster` goes away. Dropping alone isn't enough: a cursor holds an `Arc<Self>`, so
+	/// it would keep this rendition -- and its subscription -- alive while parking forever on a
+	/// timeline that never ends.
+	pub(crate) fn close(&self) {
+		self.live.close();
+		self.watcher.abort();
+	}
+
+	/// Resolve once the playlist is renderable ([`is_playable`](Self::is_playable)). Bounding
+	/// the wait is the caller's policy (the serve path wraps this in its own timeout).
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn playable(&self) {
+		kio::wait(|waiter| self.live.poll_playable(waiter)).await;
 	}
 
 	/// Render the media playlist from the current timeline window.
-	pub fn playlist(&self) -> Snapshot {
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) fn playlist(&self) -> Snapshot {
 		let window = self.live.window();
 
 		// EXT-X-TARGETDURATION must be >= every segment's duration and, per the HLS spec, must not
@@ -206,13 +229,13 @@ impl Rendition {
 
 	/// Whether the playlist has anything to serve yet (at least one complete segment, or the
 	/// broadcast already ended).
-	pub(crate) fn playable(&self) -> bool {
-		let window = self.live.window();
-		window.ended || !window.segments.is_empty()
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) fn is_playable(&self) -> bool {
+		self.live.is_playable()
 	}
 
 	/// The wall-clock time of a media timestamp, when the timeline advertises an anchor.
-	fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
+	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
 		let wall = self.section.wall?;
 		let timescale = moq_net::Timescale::new(self.section.timescale as u64).ok()?;
 		let units = wall as u128 + pts.as_scale(timescale);
@@ -238,7 +261,7 @@ impl Rendition {
 	///
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest complete segment's group first.
-	pub async fn init(&self) -> Result<Option<Bytes>> {
+	pub(crate) async fn init(&self) -> Result<Option<Bytes>> {
 		let mut cache = self.init.lock().await;
 		if let Some(bytes) = cache.as_ref() {
 			return Ok(Some(bytes.clone()));
@@ -279,7 +302,7 @@ impl Rendition {
 	/// Fetches every group the segment covers (audio timelines skip groups, so a segment may span
 	/// several) and encodes them as a single CMAF fragment. `None` when the segment isn't in the
 	/// playlist window or its groups already left the relay cache.
-	pub async fn segment(&self, sequence: u64) -> Result<Option<Bytes>> {
+	pub(crate) async fn segment(&self, sequence: u64) -> Result<Option<Bytes>> {
 		let Some((start, end)) = self.live.segment_groups(sequence) else {
 			return Ok(None);
 		};
@@ -389,7 +412,7 @@ fn spawn_watcher(
 	source: moq_mux::Source,
 	broadcast: Option<moq_net::PathRelativeOwned>,
 	section: Timeline,
-	live: Arc<Live>,
+	live: Arc<segments::Producer>,
 	window: Duration,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
@@ -397,13 +420,16 @@ fn spawn_watcher(
 			// The timeline finished cleanly: the publisher is done, so its media groups are
 			// finalized and the last record can become a servable (ENDLIST) segment.
 			Ok(()) => live.end(),
-			// A transient error (subscription reset, relay hiccup): leave the window live rather
-			// than ending it. Ending it while the media track is still live would turn the last
-			// record into an open-ended segment whose FETCH would park on a still-open group.
+			// A transient error (subscription reset, relay hiccup): don't mark the window ended,
+			// which would turn the last record into an open-ended segment whose FETCH could park
+			// on a still-open group. The serve path keeps serving the frozen window.
 			Err(err) => {
 				tracing::warn!(track = %section.track, %err, "timeline watcher error; leaving the playlist live")
 			}
 		}
+		// The timeline stream is over either way: close so a recording cursor terminates instead
+		// of parking forever (the serve path still reads the last window).
+		live.close();
 	})
 }
 
@@ -411,7 +437,7 @@ async fn watch(
 	source: moq_mux::Source,
 	broadcast: Option<moq_net::PathRelativeOwned>,
 	section: &Timeline,
-	live: &Live,
+	live: &segments::Producer,
 	window: Duration,
 ) -> Result<()> {
 	let broadcast = source.resolve(broadcast.as_ref()).await?;
