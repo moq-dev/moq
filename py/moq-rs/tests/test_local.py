@@ -217,7 +217,7 @@ def test_finish_closes_producer():
 
 async def test_announced_broadcast():
     origin = moq.OriginProducer()
-    broadcast = origin.create_broadcast("test/broadcast")
+    _broadcast = origin.create_broadcast("test/broadcast")
 
     consumer = origin.consume()
 
@@ -703,11 +703,8 @@ async def test_default_iteration_is_sequence_order():
     broadcast = origin.create_broadcast("track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    sequenced = origin.consume()
-    arrived = origin.consume()
-
-    seq_consumer = await (await anext(sequenced.announced())).broadcast.subscribe_track("ordering")
-    arr_consumer = await (await anext(arrived.announced())).broadcast.subscribe_track("ordering")
+    seq_consumer = raw.consume()
+    arr_consumer = raw.consume()
 
     for sequence in (5, 3):
         group = raw.create_group(sequence)

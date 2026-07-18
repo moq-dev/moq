@@ -208,9 +208,9 @@ async def test_route_changed_observes_update():
         broadcast = server.create_broadcast("routed")
         # The first hop identifies the original publisher; keeping it stable
         # across the update below makes the restart an in-place route change
-        # rather than a broadcast replacement. live=True keeps the broadcast
+        # rather than a broadcast replacement. announce=True keeps the broadcast
         # announced across the route update.
-        broadcast.set_route(moq.Route(hops=[42], cost=0, live=True))
+        broadcast.set_route(moq.Route(hops=[42], cost=0, announce=True))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -234,7 +234,7 @@ async def test_route_changed_observes_update():
                     # The publisher advertises a longer chain behind the same first
                     # hop; the shared cursor observes the update rather than
                     # replaying the old route.
-                    broadcast.set_route(moq.Route(hops=[42, 77], cost=0, live=True))
+                    broadcast.set_route(moq.Route(hops=[42, 77], cost=0, announce=True))
                     updated = await asyncio.wait_for(announcement.broadcast.route_changed(), timeout=5.0)
                     assert updated is not None
                     assert 77 in updated.hops
