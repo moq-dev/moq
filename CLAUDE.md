@@ -82,7 +82,7 @@ This root file holds only cross-cutting rules that apply everywhere (writing sty
 - **Public API symbols are the exception: document every exported symbol.** Each `pub` Rust item and each exported JS/TS symbol (function, class, interface, type, const, enum, plus their notable public members) gets a doc comment (`///` / `/** */`), even when it looks self-explanatory. These render on the published docs (JSR builds API docs from the `.d.ts`; docs.rs from `///`), so a missing doc is a hole a consumer hits, not a self-evident line of code. Add a module-level doc to every entrypoint too (a `/** ... @module */` block at the top of each JS entrypoint file; a `//!` block on each Rust module root). Keep these one line where possible and say what a *consumer* needs (units, ownership, lifecycle, what it wraps), not throat-clearing.
 - Write the way you'd say it out loud, not the way a doc generator would. One short line is almost always enough. Skip throat-clearing like "This function is responsible for...".
 - Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
-- Never tag code comments, doc comments, or `/doc` pages with AI attribution: source markers rot. Attribution for commits and PR prose lives in [CONTRIBUTING.md](CONTRIBUTING.md).
+- Never tag code comments, doc comments, or `/doc` pages with AI attribution: source markers rot. The opposite rule holds on GitHub, where every LLM-authored PR body, issue, review, or comment ends with a `(Written by <model>)` marker. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Deprecation
 
@@ -116,6 +116,8 @@ A change isn't done when it works; it's done when it's the shape you'd want to m
 Before exposing a new public type, function, or field, stop and ask: how will consumers actually call this, and what are we likely to add later? Default to the smallest surface that does the job. A simpler long-term API is worth a refactor now: reshaping today is cheaper than living with a confusing surface forever, so don't preserve an awkward shape just to avoid churn. Prefer one insulated high-level entry point (plain config in, plain result out) over exposing every building block.
 
 Favor composable building blocks over one-off functions. A handful of orthogonal primitives that snap together beats a pile of bespoke `do_the_specific_thing()` helpers that each cover one caller and invite misuse when a caller's needs drift slightly. Each building block should do one thing and be hard to hold wrong.
+
+**Avoid callback parameters.** Don't shape an API around a user-supplied hook (`on_close`, `with_cleanup(f)`). A callback hides when it runs and under which lock, drags `Send + Sync + 'static` bounds through the signature, and smuggles caller policy into a primitive that should stay dumb. Keep the caller in control instead: return the event and let the caller loop over it, encode cleanup in the `Drop` of a value the caller owns, or keep the policy in the caller's own type.
 
 **Let the type system do the heavy lifting; make misuse unrepresentable rather than merely documented.** A compile error beats a runtime check beats a doc-comment warning. Encode the rules in types so the wrong call simply doesn't compile:
 

@@ -64,9 +64,10 @@ pub enum MoqError {
 	#[error("not found")]
 	NotFound,
 
-	/// The negotiated protocol does not support the requested operation.
+	/// The requested operation is not supported.
 	#[error("unsupported")]
 	Unsupported,
+
 
 	#[error("log: {0}")]
 	Log(String),

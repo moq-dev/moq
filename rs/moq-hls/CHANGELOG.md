@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.2.0...moq-hls-v0.3.0) - 2026-07-16
+
+### Fixed
+
+- *(moq-hls)* release track subscriptions when an export pauses ([#2298](https://github.com/moq-dev/moq/pull/2298))
+
+### Other
+
+- *(moq-hls)* reshape import around per-track ownership, fix HLS conformance ([#2299](https://github.com/moq-dev/moq/pull/2299))
+
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.1.0...moq-hls-v0.2.0) - 2026-07-15
 
 ### Fixed

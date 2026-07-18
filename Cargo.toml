@@ -68,9 +68,9 @@ rust-version = "1.85"
 flate2 = "1.1"
 hang = { version = "0.19", path = "rs/hang" }
 kio = { version = "0.4", path = "rs/kio" }
-moq-audio = { version = "0.0.8", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.9", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.0", path = "rs/moq-flate" }
-moq-hls = { version = "0.2.0", path = "rs/moq-hls", default-features = false }
+moq-hls = { version = "0.3.0", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.2.0", path = "rs/moq-json" }
 moq-loc = { version = "0.1", path = "rs/moq-loc" }
 moq-msf = { version = "0.3", path = "rs/moq-msf" }
@@ -81,7 +81,7 @@ moq-net = { version = "0.1", path = "rs/moq-net" }
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
 moq-nvenc = { version = "0.0.1", path = "rs/moq-nvenc" }
-moq-rtc = { version = "0.1.4", path = "rs/moq-rtc" }
+moq-rtc = { version = "0.1.5", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.1.3", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.1.2", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.0", path = "rs/moq-stats" }
@@ -94,7 +94,7 @@ moq-transcode = { version = "0.0.1", path = "rs/moq-transcode", default-features
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 moq-vaapi = "0.0.2"
 moq-video = { version = "0.0.6", path = "rs/moq-video", default-features = false }
-qmux = { version = "0.3", default-features = false }
+qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }

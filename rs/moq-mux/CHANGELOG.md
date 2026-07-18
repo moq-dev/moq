@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.4...moq-mux-v0.7.5) - 2026-07-16
+
+### Added
+
+- *(moq-mux)* cut(end) as the group boundary ([#2270](https://github.com/moq-dev/moq/pull/2270))
+
+### Fixed
+
+- *(moq-hls)* honor byte ranges and map changes ([#2271](https://github.com/moq-dev/moq/pull/2271))
+
 ## [0.7.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.3...moq-mux-v0.7.4) - 2026-07-12
 
 ### Other
