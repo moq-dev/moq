@@ -7,8 +7,8 @@ use std::{
 };
 
 use axum::{
-	extract::{Extension, Host, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
-	http::{StatusCode, Uri},
+	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
+	http::{HeaderMap, StatusCode, Uri, header::HOST},
 	response::Response,
 };
 use moq_net::{OriginConsumer, OriginProducer, StatsHandle, Tier};
@@ -17,8 +17,8 @@ use crate::{Auth, AuthParams, WebState, web::MtlsPeer, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-	Host(host): Host,
 	OriginalUri(uri): OriginalUri,
+	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
@@ -34,7 +34,12 @@ pub(crate) async fn serve_ws(
 	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
 	let ws = ws.protocols(supported_subprotocols());
 
-	let params = request_auth_params(&state.auth, &host, &uri)?;
+	let host = uri
+		.authority()
+		.map(|authority| authority.as_str())
+		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
+		.ok_or(StatusCode::BAD_REQUEST)?;
+	let params = request_auth_params(&state.auth, host, &uri)?;
 	let token = if mtls.is_some() {
 		state.auth.verify_mtls(&params.path).await?
 	} else {
@@ -302,12 +307,12 @@ mod tests {
 
 	#[tokio::test]
 	async fn websocket_auth_applies_subdomain_routing() {
-		let auth = Auth::new(AuthConfig {
-			domains: vec!["cdn.moq.pro".to_string()],
-			..Default::default()
-		})
-		.await
-		.expect("build auth");
+		let config: AuthConfig = serde_json::from_value(serde_json::json!({
+			"domains": ["cdn.moq.pro"],
+			"public": "viewer"
+		}))
+		.expect("parse auth config");
+		let auth = Auth::new(config).await.expect("build auth");
 		let uri: Uri = "/bbb.hang?jwt=token".parse().expect("parse URI");
 
 		let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
