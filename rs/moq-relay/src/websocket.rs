@@ -76,7 +76,8 @@ pub(crate) async fn serve_ws(
 /// Apply the same host + path authentication routing to WebSocket fallback that
 /// native WebTransport applies to its request URL.
 fn request_auth_params(auth: &Auth, host: &str, uri: &Uri) -> Result<AuthParams, StatusCode> {
-	let url = url::Url::parse(&format!("https://{host}{uri}")).map_err(|_| StatusCode::BAD_REQUEST)?;
+	let path = uri.path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
+	let url = url::Url::parse(&format!("https://{host}{path}")).map_err(|_| StatusCode::BAD_REQUEST)?;
 	Ok(auth.params_from_url(&url))
 }
 
@@ -313,12 +314,13 @@ mod tests {
 		}))
 		.expect("parse auth config");
 		let auth = Auth::new(config).await.expect("build auth");
-		let uri: Uri = "/bbb.hang?jwt=token".parse().expect("parse URI");
+		for uri in ["/bbb.hang?jwt=token", "https://demo.cdn.moq.pro/bbb.hang?jwt=token"] {
+			let uri: Uri = uri.parse().expect("parse URI");
+			let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
 
-		let params = request_auth_params(&auth, "demo.cdn.moq.pro", &uri).expect("build auth params");
-
-		assert_eq!(params.path, "/demo/bbb.hang");
-		assert_eq!(params.jwt.as_deref(), Some("token"));
+			assert_eq!(params.path, "/demo/bbb.hang");
+			assert_eq!(params.jwt.as_deref(), Some("token"));
+		}
 	}
 
 	#[test]
