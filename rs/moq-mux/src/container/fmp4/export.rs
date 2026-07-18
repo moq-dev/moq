@@ -493,6 +493,11 @@ fn extract_init(
 			mp4_atom::Any::Moov(moov) => {
 				for mut trak in moov.trak {
 					trak.tkhd.track_id = track_id;
+					// Drop the source edit list. CMAF carries timing via tfdt +
+					// composition offsets, so an edit list is redundant here, and a
+					// browser applying an empty-edit media_time would shift the track
+					// off the others (a black screen in Media Source Extensions).
+					trak.edts = None;
 					traks.push(trak);
 				}
 				if let Some(mvex) = moov.mvex {
@@ -736,5 +741,36 @@ mod tests {
 		assert_eq!(frames[1].duration, Some(ts(33_000)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.099);
+	}
+
+	// A source init whose trak carries an edit list must come out of extract_init with
+	// the edit list dropped: CMAF carries timing via tfdt + composition offsets, and a
+	// browser applying an edit list shifts the track off the others (a black screen).
+	#[test]
+	fn extract_init_strips_edit_lists() {
+		use mp4_atom::Encode;
+
+		let trak = mp4_atom::Trak {
+			edts: Some(mp4_atom::Edts {
+				elst: Some(mp4_atom::Elst {
+					entries: vec![mp4_atom::ElstEntry::default()],
+				}),
+			}),
+			..Default::default()
+		};
+		let moov = mp4_atom::Moov {
+			trak: vec![trak],
+			..Default::default()
+		};
+		let mut init = Vec::new();
+		moov.encode(&mut init).unwrap();
+
+		let mut traks = Vec::new();
+		let mut trexs = Vec::new();
+		let mut ftyp = None;
+		extract_init(&Bytes::from(init), 1, &mut ftyp, &mut traks, &mut trexs).unwrap();
+
+		assert_eq!(traks.len(), 1);
+		assert!(traks[0].edts.is_none(), "CMAF init must not carry an edit list");
 	}
 }
