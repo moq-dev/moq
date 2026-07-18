@@ -37,7 +37,7 @@ const MAX_DELTA_FRAMES: usize = 256;
 /// Configuration for a [`Producer`].
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
-/// options stay additive): `let mut config = ProducerConfig::default(); config.delta_ratio = 0;`.
+/// options stay additive), or chain the `with_*` setters.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProducerConfig {
@@ -65,6 +65,20 @@ pub struct ProducerConfig {
 	pub compression: bool,
 }
 
+impl ProducerConfig {
+	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
+		self.delta_ratio = delta_ratio;
+		self
+	}
+
+	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
+}
+
 impl Default for ProducerConfig {
 	fn default() -> Self {
 		Self {
@@ -77,13 +91,21 @@ impl Default for ProducerConfig {
 /// Configuration for a [`Consumer`].
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive).
+/// stay additive), or chain the `with_*` setters.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ConsumerConfig {
 	/// Whether the track's frames are DEFLATE-compressed. Must match the producer's
 	/// [`ProducerConfig::compression`]. Defaults to `false`.
 	pub compression: bool,
+}
+
+impl ConsumerConfig {
+	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
 }
 
 /// Publishes a JSON value over a track, choosing snapshots and deltas automatically.

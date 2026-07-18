@@ -147,7 +147,7 @@ impl Producer {
 			};
 		};
 
-		let registry = Registry::new(prefix.clone());
+		let registry = Registry::new(moq_net::stats::Config::new().with_exclude(prefix.clone()));
 		let keepalive = Arc::new(Keepalive);
 		let task = Task {
 			registry: registry.clone(),
@@ -325,10 +325,8 @@ impl<T: Serialize> TrackPair<T> {
 		let plain_track = broadcast.create_track(name, None)?;
 		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
 
-		let mut plain_config = moq_json::snapshot::ProducerConfig::default();
-		plain_config.delta_ratio = 0;
-		let mut compressed_config = moq_json::snapshot::ProducerConfig::default();
-		compressed_config.compression = true;
+		let plain_config = moq_json::snapshot::ProducerConfig::default().with_delta_ratio(0);
+		let compressed_config = moq_json::snapshot::ProducerConfig::default().with_compression(true);
 
 		Ok(Self {
 			plain: moq_json::snapshot::Producer::new(plain_track, plain_config),

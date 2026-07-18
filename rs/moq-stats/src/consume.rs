@@ -5,10 +5,8 @@ use moq_net::stats::{Role, Tier};
 
 use crate::{Result, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
 
-/// Configuration for a [`Consumer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`,
-/// so new options stay additive).
+/// Configuration for a [`Consumer`]. Construct with [`ConsumerConfig::new`]
+/// and chain the `with_*` setters.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct ConsumerConfig {
@@ -16,6 +14,19 @@ pub struct ConsumerConfig {
 	/// Same data for a fraction of the bytes, but requires a producer that
 	/// publishes them. Defaults to `false`.
 	pub compression: bool,
+}
+
+impl ConsumerConfig {
+	/// A config with default settings: the plain `.json` tracks.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Read the compressed `.json.z` tracks instead of the plain `.json` ones.
+	pub fn with_compression(mut self, compression: bool) -> Self {
+		self.compression = compression;
+		self
+	}
 }
 
 /// Reads one published stats broadcast (a `<prefix>/node/<node>` announce),
@@ -57,8 +68,7 @@ impl Consumer {
 
 	async fn subscribe<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<moq_json::snapshot::Consumer<T>> {
 		let track = self.broadcast.track(name)?.subscribe(None).await?;
-		let mut config = moq_json::snapshot::ConsumerConfig::default();
-		config.compression = self.config.compression;
+		let config = moq_json::snapshot::ConsumerConfig::default().with_compression(self.config.compression);
 		Ok(moq_json::snapshot::Consumer::new(track, config))
 	}
 }
@@ -139,10 +149,8 @@ mod tests {
 		drive_tick().await;
 
 		let broadcast = announced(&origin).await;
-		let plain = Consumer::new(broadcast.consume(), ConsumerConfig::default());
-		let mut config = ConsumerConfig::default();
-		config.compression = true;
-		let compressed = Consumer::new(broadcast.consume(), config);
+		let plain = Consumer::new(broadcast.consume(), ConsumerConfig::new());
+		let compressed = Consumer::new(broadcast.consume(), ConsumerConfig::new().with_compression(true));
 
 		let mut plain_traffic = plain.traffic(&tier, Role::Publisher).await.expect("subscribe plain");
 		let mut z_traffic = compressed

@@ -220,7 +220,7 @@ mod tests {
 	fn metrics_render_exposition() {
 		use moq_net::stats::{Registry, Tier};
 
-		let stats = Registry::new(None);
+		let stats = Registry::new(Default::default());
 
 		let track = stats
 			.tier(Tier::default())

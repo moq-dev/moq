@@ -82,10 +82,11 @@
 //!
 //! # Cycles
 //!
-//! A [`Registry`] built with an exclude prefix returns empty handles (whose
-//! bumps no-op) for any path under that prefix. The `moq-stats` publisher
-//! excludes its own top-level prefix this way, breaking the feedback loop
-//! where serving a stats broadcast would itself generate more stats traffic.
+//! A [`Registry`] built with excluded prefixes ([`Config::exclude`]) returns
+//! empty handles (whose bumps no-op) for any path under one of them. The
+//! `moq-stats` publisher excludes its own top-level prefix this way, breaking
+//! the feedback loop where serving a stats broadcast would itself generate
+//! more stats traffic.
 
 use std::{
 	collections::HashMap,
@@ -471,15 +472,44 @@ pub struct SessionEntry {
 	pub presence: Presence,
 }
 
+/// Settings for a [`Registry`]. Construct with [`Config::new`] and chain the
+/// `with_*` setters, then hand it to [`Registry::new`].
+///
+/// Every field here is about *collection*; the publishing knobs (origin,
+/// interval, node, ...) live on the `moq-stats` producer config.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct Config {
+	/// Path prefixes whose broadcasts are not tracked: a matching path gets an
+	/// empty handle whose bumps no-op. A publisher excludes its own stats
+	/// prefix this way, breaking the stats-of-stats feedback loop. Empty (the
+	/// default) tracks everything.
+	pub exclude: Vec<PathOwned>,
+}
+
+impl Config {
+	/// A config with default settings: no excluded prefixes.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Add a path prefix to exclude from tracking. May be chained to exclude
+	/// several prefixes.
+	pub fn with_exclude(mut self, prefix: impl Into<PathOwned>) -> Self {
+		self.exclude.push(prefix.into());
+		self
+	}
+}
+
 /// Counter collection registry. Cheap to clone (`Arc` inside for the shared
 /// state). One instance per relay; sessions get tier-scoped handles via
 /// [`Registry::tier`]. The `moq-stats` crate drains it with
 /// [`Registry::report`] to publish the counters as MoQ broadcasts.
 #[derive(Clone)]
 pub struct Registry {
-	/// Paths under this prefix get empty handles (bumps no-op), breaking the
-	/// stats-of-stats feedback loop. `None` tracks everything.
-	exclude: Option<PathOwned>,
+	/// Paths under these prefixes get empty handles (bumps no-op); see
+	/// [`Config::exclude`].
+	exclude: Vec<PathOwned>,
 	/// `None` for a disabled registry: bumps are dropped and nothing is tracked.
 	shared: Option<Arc<Shared>>,
 }
@@ -529,12 +559,11 @@ struct TierCounters {
 }
 
 impl Registry {
-	/// Build an enabled registry. Paths under `exclude` get empty handles whose
-	/// bumps no-op; a publisher passes its own stats prefix here so serving a
-	/// stats broadcast doesn't generate more stats.
-	pub fn new(exclude: impl Into<Option<PathOwned>>) -> Self {
+	/// Build an enabled registry from `config`.
+	pub fn new(config: Config) -> Self {
+		let Config { exclude } = config;
 		Self {
-			exclude: exclude.into(),
+			exclude,
 			shared: Some(Arc::new(Shared {
 				entries: Lock::default(),
 				sessions: Default::default(),
@@ -545,14 +574,14 @@ impl Registry {
 	/// Build a no-op registry: every handle is empty and all bumps are dropped.
 	pub fn disabled() -> Self {
 		Self {
-			exclude: None,
+			exclude: Vec::new(),
 			shared: None,
 		}
 	}
 
-	/// The exclude prefix, if any. See [`Registry::new`].
-	pub fn exclude(&self) -> Option<&PathOwned> {
-		self.exclude.as_ref()
+	/// The excluded path prefixes. See [`Config::exclude`].
+	pub fn exclude(&self) -> &[PathOwned] {
+		&self.exclude
 	}
 
 	/// The shared state, panicking for a disabled registry. Tests build enabled
@@ -575,12 +604,10 @@ impl Registry {
 		// A disabled registry never allocates state.
 		let shared = self.shared.as_ref()?;
 		let path = path.as_path();
-		// Skip our own stats broadcasts (and any sibling category under the
-		// same prefix) so serving a stats broadcast doesn't generate more
-		// stats.
-		if let Some(exclude) = &self.exclude
-			&& path.has_prefix(exclude)
-		{
+		// Skip excluded prefixes (our own stats broadcasts and any sibling
+		// category under the same prefix) so serving a stats broadcast doesn't
+		// generate more stats.
+		if self.exclude.iter().any(|prefix| path.has_prefix(prefix)) {
 			return None;
 		}
 		let owned = path.to_owned();
@@ -1165,7 +1192,7 @@ mod tests {
 	}
 
 	fn test_stats() -> Registry {
-		Registry::new(PathOwned::from(".stats"))
+		Registry::new(Config::new().with_exclude(".stats"))
 	}
 
 	#[test]
