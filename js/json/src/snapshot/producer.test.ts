@@ -31,6 +31,24 @@ test("a track-less producer seeds subscribers and fans out edits", async () => {
 	effect.close();
 });
 
+test("a producer serves tracks from another compatible package instance", async () => {
+	const source = new Producer<{ ready: boolean }>({ initial: { ready: true } });
+	const track = new Track("catalog.json");
+	// Separate package instances have distinct constructors but the same public track surface.
+	const foreignTrack = {
+		appendGroup: track.appendGroup.bind(track),
+		close: track.close.bind(track),
+	} as unknown as Track;
+	const effect = new Effect();
+
+	expect(foreignTrack).not.toBeInstanceOf(Track);
+	source.serve(foreignTrack, effect);
+	expect(track.state.groups.peek()).toHaveLength(1);
+	expect(await new Consumer<{ ready: boolean }>(track).next()).toEqual({ ready: true });
+
+	effect.close();
+});
+
 test("a reconnecting subscriber is seeded with the full current value", async () => {
 	const source = new Producer<Record<string, unknown>>({ initial: {} });
 	source.mutate((v) => {

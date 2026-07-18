@@ -1,5 +1,5 @@
 import { Encoder } from "@moq/flate";
-import * as Moq from "@moq/net";
+import type * as Moq from "@moq/net";
 import type { Effect } from "@moq/signals";
 import type * as z from "zod/mini";
 
@@ -42,6 +42,18 @@ export interface Config<T> {
 	compression?: boolean;
 }
 
+function isTrack(value: unknown): value is Moq.Track {
+	// Package graphs may contain multiple compatible @moq/net instances, so Track identity is structural.
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"appendGroup" in value &&
+		typeof value.appendGroup === "function" &&
+		"close" in value &&
+		typeof value.close === "function"
+	);
+}
+
 /**
  * Publishes a JSON value as snapshots and deltas, chosen automatically.
  *
@@ -82,7 +94,7 @@ export class Producer<T> {
 	/** Create a producer that writes directly to `track`. */
 	constructor(track: Moq.Track, config?: Config<T>);
 	constructor(trackOrConfig?: Moq.Track | Config<T>, config: Config<T> = {}) {
-		if (trackOrConfig instanceof Moq.Track) {
+		if (isTrack(trackOrConfig)) {
 			this.#track = trackOrConfig;
 			this.#config = config;
 		} else {
