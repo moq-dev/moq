@@ -237,6 +237,7 @@ export class Effect {
 	#closed: PromiseWithResolvers<void>;
 
 	#abort: AbortController = new AbortController();
+	#abortUsed = false;
 
 	/** If a function is provided, it runs immediately and reruns whenever a tracked signal changes. */
 	constructor(fn?: (effect: Effect) => void) {
@@ -277,6 +278,7 @@ export class Effect {
 		this.#stopped.resolve();
 		this.#abort.abort();
 		this.#abort = new AbortController();
+		this.#abortUsed = false;
 
 		this.#stopped = Promise.withResolvers();
 
@@ -327,7 +329,8 @@ export class Effect {
 				this.#dispose !== undefined &&
 				this.#unwatch.length === 0 &&
 				this.#dispose.length === 0 &&
-				this.#async.length === 0
+				this.#async.length === 0 &&
+				!this.#abortUsed
 			) {
 				console.warn("Effect did not subscribe to any signals; it will never rerun.", this.#stack);
 			}
@@ -598,10 +601,11 @@ export class Effect {
 		}
 
 		// Merge the abort signal so the listener is auto-removed on rerun/close.
+		const effectSignal = this.abort;
 		const signal =
 			typeof options !== "boolean" && options?.signal
-				? AbortSignal.any([this.#abort.signal, options.signal])
-				: this.#abort.signal;
+				? AbortSignal.any([effectSignal, options.signal])
+				: effectSignal;
 		const merged: AddEventListenerOptions =
 			typeof options === "boolean" ? { capture: options, signal } : { ...options, signal };
 
@@ -657,6 +661,7 @@ export class Effect {
 
 	/** An AbortSignal that fires when the current run is torn down. */
 	get abort(): AbortSignal {
+		this.#abortUsed = true;
 		return this.#abort.signal;
 	}
 

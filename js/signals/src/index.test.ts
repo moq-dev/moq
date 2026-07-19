@@ -1,5 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Computed, Effect, Signal } from "./index.ts";
+
+const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
 
 // Flush pending microtasks. Signal notifications and effect/computed reruns are
 // coalesced onto microtasks, so a chain of A -> B -> effect needs several flushes.
@@ -125,6 +127,65 @@ describe("Effect", () => {
 		effect.close();
 
 		expect(log).toEqual(["run 0", "cleanup 0", "run 1", "cleanup 1"]);
+	});
+
+	test("event-only effects do not warn and remove listeners on close", async () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const target = new EventTarget();
+		let events = 0;
+		const effect = new Effect((e) => e.event(target, "ping", () => events++));
+
+		try {
+			await settle();
+			expect(warn).not.toHaveBeenCalledWith(NO_SUBSCRIPTION_WARNING, expect.anything());
+
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(1);
+
+			effect.close();
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(1);
+		} finally {
+			effect.close();
+			warn.mockRestore();
+		}
+	});
+
+	test("abort-only effects do not warn and abort scoped work on close", async () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const target = new EventTarget();
+		let events = 0;
+		const effect = new Effect((e) => {
+			target.addEventListener("ping", () => events++, { signal: e.abort });
+		});
+
+		try {
+			await settle();
+			expect(warn).not.toHaveBeenCalledWith(NO_SUBSCRIPTION_WARNING, expect.anything());
+
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(1);
+
+			effect.close();
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(1);
+		} finally {
+			effect.close();
+			warn.mockRestore();
+		}
+	});
+
+	test("empty effects still warn", async () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		const effect = new Effect(() => {});
+
+		try {
+			await settle();
+			expect(warn).toHaveBeenCalledWith(NO_SUBSCRIPTION_WARNING, expect.anything());
+		} finally {
+			effect.close();
+			warn.mockRestore();
+		}
 	});
 });
 
