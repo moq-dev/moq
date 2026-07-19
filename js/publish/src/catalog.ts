@@ -1,7 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import type { Effect } from "@moq/signals";
+import { type Effect, type Getter, Signal } from "@moq/signals";
 
 /**
  * A stable catalog producer that fans out to on-demand subscription tracks.
@@ -15,12 +15,17 @@ import type { Effect } from "@moq/signals";
 export class CatalogProducer {
 	#value: Catalog.Root = {};
 	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
+	#ready = new Signal(false);
+
+	/** Whether the catalog contains at least one section and the broadcast can be announced. */
+	readonly ready: Getter<boolean> = this.#ready;
 
 	/** Edit the catalog in place; the result is published to all current subscribers. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
 		this.#value = value;
+		this.#ready.set(Object.keys(value).length > 0);
 		for (const output of this.#outputs) output.update(value);
 	}
 

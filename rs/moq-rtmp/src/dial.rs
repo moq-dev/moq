@@ -436,12 +436,11 @@ async fn client_handshake<S: Stream>(stream: &mut S) -> anyhow::Result<Vec<u8>> 
 }
 
 /// An active pull: the moq-mux FLV importer publishing into the origin. Mirrors the
-/// server's publisher; a deliberate [`Self::finish`] unannounces immediately,
-/// while dropping it lets the origin linger briefly for a reconnect.
+/// server's publisher; finishing or dropping it unannounces immediately.
 struct Publisher {
 	importer: FlvImport,
 	// A clone of the importer's producer, so a deliberate end can finish() the
-	// broadcast (prompt unannounce) even though the importer owns it.
+	// broadcast even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
 }
 

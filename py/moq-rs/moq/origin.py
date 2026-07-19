@@ -174,8 +174,7 @@ class OriginProducer:
 
         The broadcast starts live: the origin announces the path so subscribers can
         discover it, becoming visible shortly after this returns. Toggle
-        discoverability with :meth:`BroadcastProducer.set_announce`; ``finish()``
-        unpublishes immediately, while dropping the producer without finishing
-        lingers briefly so a replacement publisher can take over.
+        discoverability with :meth:`BroadcastProducer.set_announce`. Finishing or
+        dropping the producer unpublishes immediately.
         """
         return BroadcastProducer._from_inner(self._inner.create_broadcast(path))

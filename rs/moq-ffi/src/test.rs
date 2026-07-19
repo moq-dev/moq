@@ -1031,7 +1031,7 @@ async fn announced_broadcast() {
 	assert_eq!(announcement.path(), "test/broadcast");
 	let _catalog = announcement.broadcast().subscribe_catalog().await.unwrap();
 	// Finish so the origin tears the broadcast down immediately (the canonical
-	// end for a publisher; dropping without finish is the failure-linger path).
+	// end for a publisher; dropping without finish also unannounces immediately).
 	_broadcast.finish().unwrap();
 }
 

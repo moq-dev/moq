@@ -71,7 +71,7 @@ a real bundler (the examples below).
 - `invisible` - Disable video capture (boolean)
 - `simulcast` - Also publish a lower-resolution `video/sd` rendition (a fraction of the source resolution) alongside `video/hd` (boolean)
 - `preview` - What the preview renders: `"source"` (default), `"encoded"`, or `"none"` to disable it (see [Preview element](#preview-element))
-- `announce` - When to publish the broadcast: `"source"` (default, hold off until a `source` is selected), `"always"` (announce as soon as the element connects), or `"never"`. The JS property takes the same string values (`el.announce = "always"`)
+- `announce` - Whether to publish the broadcast: `"catalog"` (default, announce while the catalog contains media or application metadata) or `"never"`. The JS property takes the same string values (`el.announce = "never"`)
 
 ## Preview element
 

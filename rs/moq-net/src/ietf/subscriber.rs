@@ -67,9 +67,8 @@ struct TrackState {
 }
 
 struct BroadcastState {
-	// The source feeding this broadcast into our origin: finish() on a
-	// deliberate unannounce detaches immediately, dropping (a dying session)
-	// aborts it so the origin lingers for a reconnect.
+	// The source feeding this broadcast into our origin. A deliberate unannounce
+	// or a dying session detaches and unannounces it immediately.
 	producer: crate::model::broadcast::SourceGuard,
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.

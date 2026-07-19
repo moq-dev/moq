@@ -128,20 +128,9 @@ struct BroadcastState {
 	route: Route,
 	route_epoch: u64,
 
-	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
-	// tell a deliberate shutdown apart from a producer dropped by accident, and so
-	// the origin can tell a graceful end (unpublish immediately) from a failure
-	// (linger for a reconnect).
-	close: Option<Close>,
-}
-
-/// How a broadcast was deliberately ended.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Close {
-	/// A clean end: the content is over.
-	Finish,
-	/// An abnormal end: the producer is going away (e.g. its session died).
-	Abort,
+	// Set by an explicit `Producer::finish()` so `Drop` can tell a deliberate
+	// shutdown from a producer dropped by accident.
+	finished: bool,
 }
 
 /// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
@@ -359,16 +348,7 @@ impl Producer {
 	/// gone, so a clone that outlives this call keeps it alive until it too is
 	/// dropped or finished.
 	pub fn finish(self) {
-		self.state.lock().close.get_or_insert(Close::Finish);
-	}
-
-	/// Mark the broadcast as deliberately ending abnormally, without the
-	/// dropped-without-finish warning. Unlike [`Self::finish`], an origin treats the
-	/// closure as a failure: the published path lingers briefly so a reconnecting
-	/// session can replace this broadcast without consumers noticing. Used by
-	/// sessions tearing down announced broadcasts when the connection dies.
-	pub(crate) fn abort(&self) {
-		self.state.lock().close.get_or_insert(Close::Abort);
+		self.state.lock().finished = true;
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -387,7 +367,7 @@ impl Drop for Producer {
 		if !self.alive.is_last() {
 			return;
 		}
-		if self.state.read().close.is_none() {
+		if !self.state.read().finished {
 			tracing::warn!(
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
 			);
@@ -408,12 +388,11 @@ impl Producer {
 
 /// A session-owned handle to a source broadcast created via
 /// [`crate::origin::Producer::create_broadcast`]: [`Self::finish`] ends it
-/// deliberately (the origin unannounces immediately), while dropping the guard
-/// marks the source aborted (the origin lingers for a reconnect, and the
-/// dropped-without-finish warning stays quiet). Shared by the lite and IETF
-/// subscribers so the drop-vs-finish contract lives in one place.
+/// deliberately. Dropping the guard finishes it too, so a session disappearing
+/// unannounces immediately without triggering the dropped-without-finish warning.
+/// Shared by the lite and IETF subscribers so this contract lives in one place.
 pub(crate) struct SourceGuard {
-	// `Option` so `finish` can consume the producer while `Drop` aborts it.
+	// `Option` so `finish` or `Drop` can consume the producer exactly once.
 	producer: Option<Producer>,
 }
 
@@ -447,8 +426,8 @@ impl SourceGuard {
 
 impl Drop for SourceGuard {
 	fn drop(&mut self) {
-		if let Some(producer) = &self.producer {
-			producer.abort();
+		if let Some(producer) = self.producer.take() {
+			producer.finish();
 		}
 	}
 }
@@ -500,14 +479,14 @@ impl Dynamic {
 	/// release its handle.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
 		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.requests.has_queued() || state.close.is_some() {
+			if state.requests.has_queued() || state.finished {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
 			}
 		}));
 
-		if state.close.is_some() && !state.requests.has_queued() {
+		if state.finished && !state.requests.has_queued() {
 			return Poll::Ready(Err(Error::Closed));
 		}
 
@@ -681,7 +660,7 @@ impl Consumer {
 
 		// A deliberately-ended broadcast serves nothing new; existing tracks above
 		// stay readable so consumers can drain the cache.
-		if state.close.is_some() {
+		if state.finished {
 			return Err(Error::NotFound);
 		}
 
@@ -715,19 +694,12 @@ impl Consumer {
 		self.alive.is_closed()
 	}
 
-	/// Whether the broadcast was ended deliberately with [`Producer::finish`], as
-	/// opposed to aborted or dropped. The origin uses this to unpublish a closed
-	/// broadcast immediately instead of lingering for a reconnect.
-	pub(crate) fn is_finished(&self) -> bool {
-		self.state.read().close == Some(Close::Finish)
-	}
-
-	/// Whether the broadcast is on its way out: deliberately ended (finish/abort
-	/// marked, even while handles remain) or already fully closed. The origin's
+	/// Whether the broadcast is on its way out: deliberately finished (even while
+	/// handles remain) or already fully closed. The origin's
 	/// dispatcher treats a rejection from such a source as imminent detach rather
 	/// than a strike.
 	pub(crate) fn is_closing(&self) -> bool {
-		self.is_closed() || self.state.read().close.is_some()
+		self.is_closed() || self.state.read().finished
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.

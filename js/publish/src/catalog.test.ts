@@ -5,6 +5,21 @@ import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
 
+test("catalog readiness follows whether any section is published", () => {
+	const catalog = new CatalogProducer();
+	expect(catalog.ready.peek()).toBe(false);
+
+	catalog.mutate((c) => {
+		c.video = { renditions: {} };
+	});
+	expect(catalog.ready.peek()).toBe(true);
+
+	catalog.mutate((c) => {
+		delete c.video;
+	});
+	expect(catalog.ready.peek()).toBe(false);
+});
+
 test("catalog producer seeds subscribers and fans out edits", async () => {
 	const catalog = new CatalogProducer();
 

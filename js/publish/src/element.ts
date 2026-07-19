@@ -22,11 +22,10 @@ export type SourceType = "camera" | "screen" | "file";
 /**
  * When to announce the broadcast.
  *
- * `always` announces immediately, `never` never announces, and `source` waits until media is
- * actually being captured (a live audio/video track, i.e. permission granted). Defaults to
- * `source` so we don't announce an empty broadcast with no audio/video.
+ * `catalog` announces while the catalog contains media or application metadata, and `never`
+ * disables publishing. Defaults to `catalog` so offline broadcasts are not advertised.
  */
-export type AnnounceMode = "always" | "source" | "never";
+export type AnnounceMode = "catalog" | "never";
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
@@ -49,10 +48,10 @@ function parseSource(value: string | null): SourceType | undefined {
 }
 
 function parseAnnounce(value: string | null): AnnounceMode {
-	if (value === null) return "source";
-	if (value === "source" || value === "always" || value === "never") return value;
-	console.warn(`moq-publish: invalid announce="${value}", expected "source", "always", or "never"`);
-	return "source";
+	if (value === null) return "catalog";
+	if (value === "catalog" || value === "never") return value;
+	console.warn(`moq-publish: invalid announce="${value}", expected "catalog" or "never"`);
+	return "catalog";
 }
 
 function parsePreview(value: string | null): Preview.Mode {
@@ -79,8 +78,8 @@ export default class MoqPublish extends HTMLElement {
 		invisible: new Signal(false),
 		// What a <canvas> preview renders: the raw capture, or a decoded copy of the encoded video.
 		preview: new Signal<Preview.Mode>("source"),
-		// When to announce/publish the broadcast: always, never, or only once a source is selected.
-		announce: new Signal<AnnounceMode>("source"),
+		// Whether to announce once the catalog is ready, or never publish.
+		announce: new Signal<AnnounceMode>("catalog"),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -126,7 +125,7 @@ export default class MoqPublish extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Whether to actually publish the broadcast: connected to the DOM and allowed by the `announce` mode.
+	// Whether publishing is enabled: connected to the DOM and allowed by the `announce` mode.
 	#publishEnabled = new Signal(false);
 
 	/**
@@ -164,13 +163,7 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run((effect) => {
 			const enabled = effect.get(this.#enabled);
 			const announce = effect.get(this.controls.announce);
-			// "source" waits until media is actually being captured -- a live audio or
-			// video track exists -- not merely a source *type* selected. Otherwise we'd
-			// announce an empty broadcast while the getUserMedia/getDisplayMedia
-			// permission prompt is still pending (or after the user denies it).
-			const hasMedia = effect.get(this.#videoSource) !== undefined || effect.get(this.#audioSource) !== undefined;
-			const announcing = announce === "always" || (announce === "source" && hasMedia);
-			this.#publishEnabled.set(enabled && announcing);
+			this.#publishEnabled.set(enabled && announce === "catalog");
 		});
 
 		// Track the connection's send bandwidth estimate, the encoder's bitrate cap.

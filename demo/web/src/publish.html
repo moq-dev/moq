@@ -20,8 +20,8 @@
 		<!-- Left: preview + player chrome. -->
 		<section>
 			<!--
-				announce="source": only advertise the broadcast once a source is picked,
-				so the watch inspector shows no phantom tile while idle.
+				announce="catalog": only advertise the broadcast while its catalog has
+				media or application metadata, so the watch inspector has no offline tile.
 
 				The preview renders into the <canvas>. With "Encoded preview" off it shows
 				the raw capture (preview="source"); on, it decodes a copy of the *encoded*
@@ -29,7 +29,7 @@
 				cost of an extra encode + decode.
 			-->
 			<moq-publish-ui>
-				<moq-publish id="publish" name="me.hang" announce="source">
+				<moq-publish id="publish" name="me.hang" announce="catalog">
 					<canvas style="width: 100%; height: auto; border-radius: 4px;"></canvas>
 				</moq-publish>
 			</moq-publish-ui>

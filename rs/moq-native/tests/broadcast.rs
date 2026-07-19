@@ -637,8 +637,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	assert_eq!(path.as_str(), "second");
 	assert!(broadcast.is_some(), "expected live announce");
 
-	// Unannounce: retracted by announce id on the wire. A deliberate finish
-	// unannounces immediately (a bare drop would linger for a reconnect).
+	// Unannounce: retracted by announce id on the wire immediately after finish.
 	second.finish();
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");

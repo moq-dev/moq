@@ -9,7 +9,7 @@ import { type Kind, Rendition } from "./rendition";
 export type BroadcastInput = {
 	connection: Getter<Moq.Connection.Established | undefined>;
 
-	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
+	// Whether publishing is enabled. The broadcast is announced only while the catalog is ready.
 	enabled: Getter<boolean>;
 
 	// The broadcast name.
@@ -117,14 +117,13 @@ export class Broadcast {
 	// Keep the base catalog sections in sync with the registered renditions, leaving extension sections
 	// alone. A section with zero defined configs is deleted.
 	#runCatalog(effect: Effect) {
-		const enabled = effect.get(this.in.enabled);
 		const renditions = effect.get(this.#renditions);
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
 
 		for (const rendition of Object.values(renditions)) {
-			const config = enabled ? effect.get(rendition.config) : undefined;
+			const config = effect.get(rendition.config);
 			if (config === undefined) continue;
 
 			if (rendition.kind === "video") {
@@ -159,9 +158,11 @@ export class Broadcast {
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.in.enabled, this.in.connection]);
-		if (!values) return;
-		const [_enabled, connection] = values;
+		if (!effect.get(this.in.enabled)) return;
+		if (!effect.get(this.catalog.ready)) return;
+
+		const connection = effect.get(this.in.connection);
+		if (!connection) return;
 
 		const name = effect.get(this.in.name);
 		if (Catalog.detectFormat(name) === undefined) {

@@ -109,12 +109,13 @@ test("rendition.close() unregisters the name and drops it from the catalog", asy
 
 test("serving a subscription hands the producer to the rendition and clears it when the track closes", async () => {
 	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	const rendition = broadcast.video("video");
+	rendition.config.set(videoConfig);
 	await settle();
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 
-	const rendition = broadcast.video("video");
 	const subscriber = net.subscribe("video");
 	await settle();
 
@@ -129,6 +130,25 @@ test("serving a subscription hands the producer to the rendition and clears it w
 	expect(rendition.track.peek()).toBeUndefined();
 
 	subscriber.close();
+	broadcast.close();
+});
+
+test("publishes only while the catalog is ready", async () => {
+	const broadcast = new Broadcast({ enabled: true, connection: stubConnection(), name: Path.from("test.hang") });
+	const rendition = broadcast.video("video");
+	await settle();
+	expect(broadcast.net.peek()).toBeUndefined();
+
+	rendition.config.set(videoConfig);
+	await settle();
+	const live = broadcast.net.peek();
+	expect(live).toBeDefined();
+
+	rendition.config.set(undefined);
+	await settle();
+	expect(broadcast.net.peek()).toBeUndefined();
+	expect(live?.closed.peek()).toBe(null);
+
 	broadcast.close();
 });
 
