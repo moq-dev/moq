@@ -307,10 +307,9 @@ impl Presence {
 ///
 /// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
 /// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
-/// prefixes every track with its label, so `Tier::new("internal")` records on
-/// `internal/publisher.json`. The label is an arbitrary path, so business logic
-/// can bucket by anything (`"internal"`, `"region/sjc"`, ...); an empty label is
-/// the default tier.
+/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
+/// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
+/// logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Tier(PathOwned);
 
@@ -340,8 +339,8 @@ impl Tier {
 		}
 	}
 
-	/// The tier label as used in metrics: empty (`""`) for the default/external
-	/// (customer) tier, otherwise the label (e.g. `"internal"`). Mirrors the
+	/// The tier label as used in metrics: empty (`""`) for the default tier,
+	/// otherwise the label (e.g. `"region/sjc"`). Mirrors the
 	/// wire convention, where the default tier is unprefixed and named
 	/// tiers are `<label>/`-prefixed.
 	pub fn as_str(&self) -> &str {
@@ -350,14 +349,9 @@ impl Tier {
 }
 
 impl fmt::Display for Tier {
-	/// The label, or `external` for the default (unprefixed) tier. For logs only;
-	/// the wire uses the empty-prefix track names.
+	/// The label, empty for the default unprefixed tier.
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		if self.0.is_empty() {
-			f.write_str("external")
-		} else {
-			fmt::Display::fmt(&self.0, f)
-		}
+		fmt::Display::fmt(&self.0, f)
 	}
 }
 
@@ -1170,6 +1164,14 @@ mod tests {
 
 	use super::*;
 
+	#[test]
+	fn default_tier_has_empty_label() {
+		let tier = Tier::default();
+		assert_eq!(tier.as_str(), "");
+		assert_eq!(tier.to_string(), "");
+		assert_eq!(tier.track_name("publisher.json"), "publisher.json");
+	}
+
 	/// Counters for `(path, tier)`, creating the tier slot if absent.
 	fn tier_counters(stats: &Registry, path: &str, tier: &Tier) -> Arc<TierCounters> {
 		stats
@@ -1223,45 +1225,45 @@ mod tests {
 	}
 
 	#[test]
-	fn external_and_internal_tiers_are_independent() {
+	fn default_and_named_tiers_are_independent() {
 		let stats = test_stats();
-		let ext = stats.tier(Tier::default());
-		let int = stats.tier(Tier::new("internal"));
+		let default = stats.tier(Tier::default());
+		let regional = stats.tier(Tier::new("region/sjc"));
 
-		let ext_track = ext.broadcast("demo/bbb").publisher().track("video");
-		ext_track.bytes(100);
-		let int_track = int.broadcast("demo/bbb").subscriber().track("audio");
-		int_track.bytes(7);
+		let default_track = default.broadcast("demo/bbb").publisher().track("video");
+		default_track.bytes(100);
+		let regional_track = regional.broadcast("demo/bbb").subscriber().track("audio");
+		regional_track.bytes(7);
 
-		let ext_c = tier_counters(&stats, "demo/bbb", &Tier::default());
-		let int_c = tier_counters(&stats, "demo/bbb", &Tier::new("internal"));
-		assert_eq!(ext_c.publisher.bytes.load(Relaxed), 100);
-		assert_eq!(ext_c.subscriber.bytes.load(Relaxed), 0);
-		assert_eq!(int_c.publisher.bytes.load(Relaxed), 0);
-		assert_eq!(int_c.subscriber.bytes.load(Relaxed), 7);
+		let default_counters = tier_counters(&stats, "demo/bbb", &Tier::default());
+		let regional_counters = tier_counters(&stats, "demo/bbb", &Tier::new("region/sjc"));
+		assert_eq!(default_counters.publisher.bytes.load(Relaxed), 100);
+		assert_eq!(default_counters.subscriber.bytes.load(Relaxed), 0);
+		assert_eq!(regional_counters.publisher.bytes.load(Relaxed), 0);
+		assert_eq!(regional_counters.subscriber.bytes.load(Relaxed), 7);
 	}
 
 	#[test]
 	fn snapshot_rolls_up_by_tier_role_and_sessions() {
 		let stats = test_stats();
-		let ext = stats.tier(Tier::default());
-		let int = stats.tier(Tier::new("internal"));
+		let default = stats.tier(Tier::default());
+		let regional = stats.tier(Tier::new("region/sjc"));
 
-		// External egress across two broadcasts; the snapshot sums them.
-		let pub_a = ext.broadcast("demo/aaa").publisher().track("video");
+		// Default-tier egress across two broadcasts; the snapshot sums them.
+		let pub_a = default.broadcast("demo/aaa").publisher().track("video");
 		pub_a.bytes(100);
 		pub_a.frame();
 		pub_a.group();
-		let pub_b = ext.broadcast("demo/bbb").publisher().track("video");
+		let pub_b = default.broadcast("demo/bbb").publisher().track("video");
 		pub_b.bytes(50);
-		// Internal ingress on a different tier/role stays isolated.
-		let sub_a = int.broadcast("demo/aaa").subscriber().track("audio");
+		// Regional ingress on a different tier/role stays isolated.
+		let sub_a = regional.broadcast("demo/aaa").subscriber().track("audio");
 		sub_a.bytes(7);
 
 		// Hold session guards so `sessions_closed` stays zero.
-		let _s1 = ext.session("acme");
-		let _s2 = ext.session("acme");
-		let _s3 = int.session("peer");
+		let _s1 = default.session("acme");
+		let _s2 = default.session("acme");
+		let _s3 = regional.session("peer");
 
 		let snap = stats.snapshot();
 
@@ -1273,15 +1275,18 @@ mod tests {
 				.expect("row present")
 		};
 
-		let ext_pub = slot(Tier::default(), Role::Publisher);
-		assert_eq!(ext_pub.bytes, 150, "external egress bytes sum across broadcasts");
-		assert_eq!(ext_pub.frames, 1);
-		assert_eq!(ext_pub.groups, 1);
+		let default_publisher = slot(Tier::default(), Role::Publisher);
+		assert_eq!(
+			default_publisher.bytes, 150,
+			"default egress bytes sum across broadcasts"
+		);
+		assert_eq!(default_publisher.frames, 1);
+		assert_eq!(default_publisher.groups, 1);
 
-		let int_sub = slot(Tier::new("internal"), Role::Subscriber);
-		assert_eq!(int_sub.bytes, 7, "internal ingress isolated by tier/role");
+		let regional_subscriber = slot(Tier::new("region/sjc"), Role::Subscriber);
+		assert_eq!(regional_subscriber.bytes, 7, "regional ingress isolated by tier/role");
 		assert_eq!(slot(Tier::default(), Role::Subscriber).bytes, 0);
-		assert_eq!(slot(Tier::new("internal"), Role::Publisher).bytes, 0);
+		assert_eq!(slot(Tier::new("region/sjc"), Role::Publisher).bytes, 0);
 
 		let sessions = |tier| {
 			snap.sessions()
@@ -1290,10 +1295,10 @@ mod tests {
 				.map(|(_, s)| s)
 				.expect("tier present")
 		};
-		let ext_sessions = sessions(Tier::default());
-		assert_eq!(ext_sessions.sessions, 2, "two external sessions under one root");
-		assert_eq!(ext_sessions.sessions_closed, 0, "guards still held");
-		assert_eq!(sessions(Tier::new("internal")).sessions, 1);
+		let default_sessions = sessions(Tier::default());
+		assert_eq!(default_sessions.sessions, 2, "two default-tier sessions under one root");
+		assert_eq!(default_sessions.sessions_closed, 0, "guards still held");
+		assert_eq!(sessions(Tier::new("region/sjc")).sessions, 1);
 	}
 
 	#[test]

@@ -210,12 +210,15 @@ mod tests {
 
 	#[test]
 	fn track_names() {
-		let ext = Tier::default();
-		let int = Tier::new("internal");
-		assert_eq!(traffic_track(&ext, Role::Publisher, false), "publisher.json");
-		assert_eq!(traffic_track(&ext, Role::Subscriber, true), "subscriber.json.z");
-		assert_eq!(traffic_track(&int, Role::Publisher, false), "internal/publisher.json");
-		assert_eq!(sessions_track(&ext, false), "sessions.json");
-		assert_eq!(sessions_track(&int, true), "internal/sessions.json.z");
+		let default = Tier::default();
+		let regional = Tier::new("region/sjc");
+		assert_eq!(traffic_track(&default, Role::Publisher, false), "publisher.json");
+		assert_eq!(traffic_track(&default, Role::Subscriber, true), "subscriber.json.z");
+		assert_eq!(
+			traffic_track(&regional, Role::Publisher, false),
+			"region/sjc/publisher.json"
+		);
+		assert_eq!(sessions_track(&default, false), "sessions.json");
+		assert_eq!(sessions_track(&regional, true), "region/sjc/sessions.json.z");
 	}
 }

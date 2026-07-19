@@ -317,8 +317,7 @@ pub struct ClusterConfig {
 	pub token: Option<PathBuf>,
 
 	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
-	/// stats under. Default `internal`. An empty value selects the default
-	/// (unprefixed) tier.
+	/// stats under. Defaults to the unprefixed tier.
 	#[arg(id = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
 	pub tier: Option<String>,
 }
@@ -349,8 +348,8 @@ pub struct Cluster {
 
 	/// Stats registry. One instance per relay; sessions pick a billing tier via
 	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
-	/// (default tier for JWT/public, `internal` for mTLS / cluster peers, or any label
-	/// the auth API returns) so traffic classes land in separate counter sets. Defaults
+	/// (the default tier unless configured otherwise, or any label the auth API
+	/// returns) so traffic classes land in separate counter sets. Defaults
 	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
 	pub stats: moq_net::stats::Registry,
 }
@@ -427,10 +426,10 @@ impl Cluster {
 		self
 	}
 
-	/// Billing tier cluster-peer traffic records under (`--cluster-tier`,
-	/// default `internal`). An empty label is the default (unprefixed) tier.
+	/// Billing tier cluster-peer traffic records under (`--cluster-tier`).
+	/// An absent or empty label selects the default unprefixed tier.
 	fn cluster_tier(&self) -> Tier {
-		crate::trusted_tier(self.config.tier.clone())
+		crate::configured_tier(self.config.tier.clone())
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's subscribe permissions.
@@ -879,7 +878,7 @@ impl Cluster {
 			.clone()
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
-		// Cluster-to-cluster traffic is internal by definition.
+		// Cluster dials use their configured stats tier.
 		let cs = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
@@ -964,6 +963,19 @@ where
 mod tests {
 	use super::*;
 	use crate::Config;
+
+	#[test]
+	fn cluster_tier_defaults_to_unprefixed() {
+		let cluster = Cluster::new(ClusterConfig::default()).expect("cluster");
+		assert_eq!(cluster.cluster_tier(), Tier::default());
+
+		let cluster = Cluster::new(ClusterConfig {
+			tier: Some("region/sjc".to_string()),
+			..Default::default()
+		})
+		.expect("cluster");
+		assert_eq!(cluster.cluster_tier(), Tier::new("region/sjc"));
+	}
 
 	/// Stand-in dial task: never makes progress, exposes an AbortHandle.
 	fn placeholder_handle() -> AbortHandle {

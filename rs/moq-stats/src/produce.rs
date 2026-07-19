@@ -735,7 +735,7 @@ mod tests {
 		let (producer, origin) = test_producer(Some("sjc"));
 		let _a = producer.registry().tier(Tier::default()).session("acme");
 		let _b = producer.registry().tier(Tier::default()).session("acme");
-		let _c = producer.registry().tier(Tier::new("internal")).session("peer");
+		let _c = producer.registry().tier(Tier::new("region/sjc")).session("peer");
 
 		drive_tick().await;
 
@@ -746,13 +746,13 @@ mod tests {
 		assert_eq!(snap.sessions_closed, 0);
 		assert!(
 			!frame.contains_key("peer"),
-			"internal session must not appear on the external track"
+			"regional session must not appear on the default track"
 		);
 
-		let snap = *read_session_frame(&broadcast, "internal/sessions.json")
+		let snap = *read_session_frame(&broadcast, "region/sjc/sessions.json")
 			.await
 			.get("peer")
-			.expect("internal entry");
+			.expect("regional entry");
 		assert_eq!(snap.sessions, 1);
 	}
 
@@ -787,10 +787,10 @@ mod tests {
 			assert!(broadcast.track(name).is_ok(), "{name} must exist");
 		}
 
-		// The internal tier never saw traffic, so its tracks were never created.
+		// The regional tier never saw traffic, so its tracks were never created.
 		// The announced broadcast is an origin-owned splice, so `track()` always
 		// hands back a logical track; only the subscription reveals absence.
-		for name in ["internal/publisher.json", "internal/publisher.json.z"] {
+		for name in ["region/sjc/publisher.json", "region/sjc/publisher.json.z"] {
 			let track = broadcast.track(name).expect("logical track");
 			assert!(
 				track.subscribe(None).await.is_err(),

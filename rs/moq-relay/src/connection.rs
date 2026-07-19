@@ -83,9 +83,8 @@ impl Connection {
 			_ => unreachable!("authorized above guarantees at least one origin"),
 		}
 
-		// Record this session's stats under its billing tier (chosen by the auth
-		// API; mTLS peers and cluster nodes default to `internal`). The aggregator
-		// is shared; the tier picks which counter set the bumps land in.
+		// Record this session's stats under its billing tier. The aggregator is
+		// shared; the tier picks which counter set the bumps land in.
 		let stats = self.cluster.stats.tier(token.tier.clone());
 
 		// Count this session against its auth root for the whole connection,
@@ -169,7 +168,7 @@ impl Connection {
 					// Scope the grant to the canonical root. An mTLS publisher dialing a
 					// vanity alias lands on the same tree a JWT would; cluster peers dial
 					// "/", which the API resolves (typically to an unscoped root). The API
-					// also returns the billing tier (defaulting to internal for trusted peers).
+					// also returns the billing tier.
 					let mut token = self.auth.verify_mtls(&params.path, Some(transport)).await?;
 					// Close the session when the client certificate expires, mirroring
 					// the JWT `exp` handling. Validated once at the TLS handshake otherwise.

@@ -228,7 +228,7 @@ a session track:
 |-----------------------------|---------------------------------------------|
 | `publisher.json`            | default-tier egress                         |
 | `subscriber.json`           | default-tier ingress                        |
-| `<tier>/publisher.json`    | named-tier egress (e.g. `internal/publisher.json`) |
+| `<tier>/publisher.json`    | named-tier egress (e.g. `region/sjc/publisher.json`) |
 | `<tier>/subscriber.json`   | named-tier ingress                          |
 | `sessions.json`             | default-tier connected sessions, keyed by root |
 | `<tier>/sessions.json`     | named-tier connected sessions, keyed by root |
@@ -243,14 +243,12 @@ as raw JSON frames; the plain `.json` tracks remain one full JSON object per
 frame.
 
 The default-tier tracks always exist (emitting `{}` while idle). A named tier's
-tracks are created the first time traffic routes to that label, so cluster
-fan-out shows up under `internal/*` (the default trusted-peer label) and never in
-the default-tier numbers.
+tracks are created the first time traffic routes to that label.
 
-Trusted (non-JWT/public) traffic defaults to the `internal` tier, configurable
-per source: `--cluster-tier` (relay-to-relay dials) and `--auth-mtls-tier`
-(mTLS peers, when the auth API doesn't return a `tier`). Set either to a
-different label, or to `""` to record on the default unprefixed tier.
+All traffic records on the default unprefixed tier unless configured otherwise.
+Use `--cluster-tier` for relay-to-relay dials, `--auth-mtls-tier` for mTLS peers
+when the auth API does not return a `tier`, or the auth API's `tier` field to
+select a named tier.
 
 Each per-broadcast frame is a JSON object mapping broadcast path to a
 cumulative counter snapshot. An entry surfaces on any tick where the

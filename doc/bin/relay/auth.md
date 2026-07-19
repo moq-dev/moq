@@ -161,7 +161,7 @@ Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true&tran
 - `alias` — the canonical full root to scope this connection to: the path with its first segment (a stable id, current vanity, or recently-changed vanity) resolved to the project's canonical id, the rest of the path preserved (e.g. `demo/room/cam` → `x7k2qp/room/cam`). The relay uses it verbatim, so the server owns the entire mapping. Absent → the request path is used unchanged.
 - `public` — `{ "subscribe": [...], "publish": [...] }` anonymous access prefixes (relative to the root), used when there is no JWT. Absent → no public access.
 - `key` — the verifying JWK (a JSON object, deserialized directly) for the requested `kid`. Absent → key-not-found, and the JWT is rejected.
-- `tier` — the billing tier label this connection's stats record under (an arbitrary string, e.g. `internal`, `local`, `region/sjc`). The relay forwards `mtls=true` and lets the API decide; absent defaults to `--auth-mtls-tier` (itself defaulting to `internal`) for mTLS peers and the default (unprefixed) tier for JWT/public connections. So the API can bucket a first-party token to `internal`, or a cert-verified connection back to the default tier. An empty label selects the default tier. See [Stats](/bin/relay/config#stats) for how tier labels map to track names. For backward compatibility the relay still accepts the older boolean `internal` field (`true` → the `internal` tier, `false` → the default tier) when `tier` is absent.
+- `tier`: the billing tier label this connection's stats record under (an arbitrary string, e.g. `local` or `region/sjc`). Absent or empty selects the default unprefixed tier. See [Stats](/bin/relay/config#stats) for how tier labels map to track names.
 
 This lets a project stay reachable by both its stable id and its current/old vanity path, all mapping to the same broadcast tree: with the API resolving `demo` → `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` scope to `/x7k2qp/foo`.
 
@@ -222,10 +222,10 @@ certificate chaining to that CA is granted **full publish and subscribe access
 within the connection URL path**. The URL path scopes the grant exactly like a
 JWT's `root` claim, so a peer dialing `/demo` can only publish and subscribe
 under `demo/`. A peer dialing `/` (as cluster nodes do) gets an empty root and
-unscoped, cluster-wide access. The session records on the `internal` billing
-tier by default, configurable via `--auth-mtls-tier` (the auth API's `tier` field
-overrides per-connection); this only selects the stats tier used for billing and
-grants no extra permissions.
+unscoped, cluster-wide access. The session records on the default unprefixed
+billing tier unless `--auth-mtls-tier` or the auth API's `tier` field selects a
+named tier; this only selects the stats tier used for billing and grants no extra
+permissions.
 
 This is primarily intended for relay-to-relay (clustering) authentication, as a
 simpler alternative to distributing long-lived JWTs.

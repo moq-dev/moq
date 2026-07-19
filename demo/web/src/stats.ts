@@ -7,20 +7,10 @@
  * works for a single relay and for a cluster alike, then aggregate each node and
  * let you drill into one.
  *
- * The relay splits its stats by billing tier, an arbitrary label chosen by
- * business logic. The default tier is unprefixed; a named tier prefixes its
- * tracks with its label. This dashboard reads the two well-known tiers: the
- * default tier (external clients: JWT/public) and `internal` (mTLS /
- * cluster-connect peers), so cluster fan-out (e.g. the hub relaying between
- * nodes) shows up only in the `internal/*` tracks, never in the default numbers.
- *
  * Per-node tracks we read:
- *   publisher.json            default-tier egress  (relay -> downstream viewers)
- *   subscriber.json           default-tier ingress (upstream publishers -> relay)
- *   sessions.json             default-tier sessions by auth root
- *   internal/publisher.json   internal egress  (relay -> downstream cluster peers)
- *   internal/subscriber.json  internal ingress (upstream cluster peers -> relay)
- *   internal/sessions.json    internal sessions by auth root
+ *   publisher.json   egress  (relay -> downstream viewers)
+ *   subscriber.json  ingress (upstream publishers -> relay)
+ *   sessions.json    sessions by auth root
  *
  * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
  * "active" = open - closed. The relay only includes currently-live entries, so
@@ -71,16 +61,13 @@ interface NodeStats {
 	egress: BroadcastFrame; // publisher.json
 	ingress: BroadcastFrame; // subscriber.json
 	sessions: SessionFrame; // sessions.json
-	internalEgress: BroadcastFrame; // internal/publisher.json
-	internalIngress: BroadcastFrame; // internal/subscriber.json
-	internalSessions: SessionFrame; // internal/sessions.json
 }
 
 const active = (open?: number, closed?: number) => (open ?? 0) - (closed ?? 0);
 
-// Broadcasts whose path starts with "." are internal (e.g. the `.stats` feed
+// Broadcasts whose path starts with "." are system broadcasts (e.g. the `.stats` feed
 // this dashboard itself reads). We exclude them from the user-facing counters.
-const isInternal = (path: string) => path.startsWith(".");
+const isSystem = (path: string) => path.startsWith(".");
 
 // ---- State ----------------------------------------------------------------
 
@@ -141,9 +128,6 @@ function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established,
 			egress: {},
 			ingress: {},
 			sessions: {},
-			internalEgress: {},
-			internalIngress: {},
-			internalSessions: {},
 		};
 	});
 
@@ -168,40 +152,29 @@ function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established,
 	sub("publisher.json", "egress");
 	sub("subscriber.json", "ingress");
 	sub("sessions.json", "sessions");
-	sub("internal/publisher.json", "internalEgress");
-	sub("internal/subscriber.json", "internalIngress");
-	sub("internal/sessions.json", "internalSessions");
 }
 
 // ---- Aggregation ----------------------------------------------------------
 
-// Aggregate one ingress/egress pair (either the external or the internal tier).
-// `.`-prefixed system broadcasts (the `.stats` feed itself) are excluded either
-// way; we only count real content, including its cluster fan-out.
-function aggregatePair(ingress: BroadcastFrame, egress: BroadcastFrame) {
+// Aggregate ingress/egress while excluding `.`-prefixed system broadcasts such
+// as the `.stats` feed itself.
+function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 	let broadcasters = 0; // active broadcasts being published (ingress)
 	let viewers = 0; // active downstream consumers (egress)
 	let ingressBytes = 0;
 	let egressBytes = 0;
 
 	for (const [path, s] of Object.entries(ingress)) {
-		if (isInternal(path)) continue;
+		if (isSystem(path)) continue;
 		if (active(s.announced, s.announced_closed) > 0) broadcasters++;
 		ingressBytes += s.bytes ?? 0;
 	}
 	for (const [path, s] of Object.entries(egress)) {
-		if (isInternal(path)) continue;
+		if (isSystem(path)) continue;
 		egressBytes += s.bytes ?? 0;
 		viewers += active(s.broadcasts, s.broadcasts_closed);
 	}
 	return { broadcasters, viewers, ingressBytes, egressBytes };
-}
-
-function aggregate(stats: NodeStats) {
-	return {
-		external: aggregatePair(stats.ingress, stats.egress),
-		internal: aggregatePair(stats.internalIngress, stats.internalEgress),
-	};
 }
 
 const countSessions = (f: SessionFrame) =>
@@ -214,10 +187,8 @@ const countSessions = (f: SessionFrame) =>
 // cluster-wide aggregate.
 interface Sample {
 	t: number;
-	egress: number; // cumulative external egress bytes
-	ingress: number; // cumulative external ingress bytes
-	clusterOut: number; // cumulative internal egress bytes
-	clusterIn: number; // cumulative internal ingress bytes
+	egress: number; // cumulative egress bytes
+	ingress: number; // cumulative ingress bytes
 	broadcasters: number;
 	viewers: number;
 	sessions: number;
@@ -229,15 +200,13 @@ const history = new Map<string, Sample[]>();
 const clock = new Signals.Signal(0);
 
 function sampleNode(t: number, stats: NodeStats): Sample {
-	const a = aggregate(stats);
+	const totals = aggregate(stats.ingress, stats.egress);
 	return {
 		t,
-		egress: a.external.egressBytes,
-		ingress: a.external.ingressBytes,
-		clusterOut: a.internal.egressBytes,
-		clusterIn: a.internal.ingressBytes,
-		broadcasters: a.external.broadcasters,
-		viewers: a.external.viewers,
+		egress: totals.egressBytes,
+		ingress: totals.ingressBytes,
+		broadcasters: totals.broadcasters,
+		viewers: totals.viewers,
 		sessions: countSessions(stats.sessions),
 	};
 }
@@ -274,8 +243,6 @@ sampler.run((effect) => {
 			t,
 			egress: 0,
 			ingress: 0,
-			clusterOut: 0,
-			clusterIn: 0,
 			broadcasters: 0,
 			viewers: 0,
 			sessions: 0,
@@ -285,8 +252,6 @@ sampler.run((effect) => {
 			pushSample(node, s);
 			agg.egress += s.egress;
 			agg.ingress += s.ingress;
-			agg.clusterOut += s.clusterOut;
-			agg.clusterIn += s.clusterIn;
 			agg.broadcasters += s.broadcasters;
 			agg.viewers += s.viewers;
 			agg.sessions += s.sessions;
@@ -388,16 +353,13 @@ ui.run((effect) => {
 	const cluster = history.get("") ?? [];
 	const egress = rateSeries(cluster, "egress");
 	const ingress = rateSeries(cluster, "ingress");
-	const peer = rateSeries(cluster, "clusterOut");
 
 	renderChart($("chart-throughput"), [
 		{ values: egress, color: "#34d399" }, // emerald-400
 		{ values: ingress, color: "#38bdf8" }, // sky-400
-		{ values: peer, color: "#a78bfa" }, // violet-400
 	]);
 	$("legend-egress").textContent = formatRate(egress[egress.length - 1] ?? 0);
 	$("legend-ingress").textContent = formatRate(ingress[ingress.length - 1] ?? 0);
-	$("legend-cluster").textContent = formatRate(peer[peer.length - 1] ?? 0);
 });
 
 // Node cards: one per node with a live egress sparkline. Click to drill in.
@@ -435,29 +397,25 @@ ui.run((effect) => {
 	$("node-title").textContent = node;
 
 	const samples = history.get(node) ?? [];
-	renderChart($("chart-node-external"), [
+	renderChart($("chart-node-throughput"), [
 		{ values: rateSeries(samples, "egress"), color: "#34d399" },
 		{ values: rateSeries(samples, "ingress"), color: "#38bdf8" },
 	]);
-	renderChart($("chart-node-cluster"), [
-		{ values: rateSeries(samples, "clusterOut"), color: "#a78bfa" },
-		{ values: rateSeries(samples, "clusterIn"), color: "#e879f9" }, // fuchsia-400
-	]);
 
-	// Broadcasters: what this node ingests (from upstream publishers / cluster peers).
+	// Broadcasters: what this node ingests from upstream publishers.
 	const ingressRows = (frame: BroadcastFrame) =>
 		Object.keys(frame)
-			.filter((p) => !isInternal(p))
+			.filter((p) => !isSystem(p))
 			.sort()
 			.map((path) => {
 				const i = frame[path] ?? {};
 				return { key: path, cells: [path, formatBytes(i.bytes ?? 0), String(i.frames ?? 0)] };
 			});
 
-	// Viewers: what this node serves downstream (to subscribers / cluster peers).
+	// Viewers: what this node serves to downstream subscribers.
 	const egressRows = (frame: BroadcastFrame) =>
 		Object.keys(frame)
-			.filter((p) => !isInternal(p))
+			.filter((p) => !isSystem(p))
 			.sort()
 			.map((path) => {
 				const e = frame[path] ?? {};
@@ -474,17 +432,9 @@ ui.run((effect) => {
 
 	renderTable($("node-publishers"), ["broadcast", "ingress", "frames"], ingressRows(stats.ingress));
 	renderTable($("node-subscribers"), ["broadcast", "viewers", "egress", "frames"], egressRows(stats.egress));
-	renderTable($("node-internal-publishers"), ["broadcast", "ingress", "frames"], ingressRows(stats.internalIngress));
-	renderTable(
-		$("node-internal-subscribers"),
-		["broadcast", "peers", "egress", "frames"],
-		egressRows(stats.internalEgress),
-	);
 
 	const sessions = countSessions(stats.sessions);
-	const internalSessions = countSessions(stats.internalSessions);
 	$("node-sessions").textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
-	$("node-internal-sessions").textContent = `${internalSessions} cluster`;
 });
 
 // Raw frames for everyone who wants the numbers behind the charts.

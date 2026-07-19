@@ -231,12 +231,12 @@ mod tests {
 		let _session = stats.tier(Tier::default()).session("acme");
 
 		// A second, named tier renders its own labeled rows.
-		let internal = stats
-			.tier(Tier::new("internal"))
+		let regional = stats
+			.tier(Tier::new("region/sjc"))
 			.broadcast("demo/x")
 			.subscriber()
 			.track("audio");
-		internal.bytes(56);
+		regional.bytes(56);
 
 		let body = render_metrics(&stats.snapshot());
 
@@ -249,7 +249,7 @@ mod tests {
 			"default-tier egress bytes (empty tier label):\n{body}"
 		);
 		assert!(
-			body.contains("moq_relay_bytes_total{tier=\"internal\",role=\"subscriber\"} 56"),
+			body.contains("moq_relay_bytes_total{tier=\"region/sjc\",role=\"subscriber\"} 56"),
 			"named tier gets its own row:\n{body}"
 		);
 		assert!(

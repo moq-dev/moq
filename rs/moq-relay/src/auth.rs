@@ -393,14 +393,9 @@ pub struct AuthConfig {
 	///   no public access.
 	/// - `key`: the verifying JWK (a JSON object, deserialized directly) for the
 	///   requested `kid`. Absent -> key-not-found (the JWT is rejected).
-	/// - `tier`: the billing tier label (e.g. `internal`, `region/sjc`). The relay
-	///   forwards `mtls=true` and lets the API decide. Absent defaults per
-	///   connection: `internal` for mTLS peers (trusted), the default (unprefixed)
-	///   tier for JWT/public. So the API can bucket a first-party token to
-	///   `internal`, or a cert-verified connection back to the default tier. An
-	///   empty label selects the default tier. The legacy `internal: bool` field
-	///   is still accepted (`true` -> `internal`, `false` -> default tier) when
-	///   `tier` is absent.
+	/// - `tier`: the billing tier label (e.g. `region/sjc`). The relay forwards
+	///   `mtls=true` and lets the API decide. Absent or empty selects the default
+	///   unprefixed tier for every connection.
 	///
 	/// FAILS CLOSED: any network error, non-2xx status, or parse error rejects
 	/// the connection. Unlike the standalone flags, the verifying key itself
@@ -413,9 +408,8 @@ pub struct AuthConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub auth_api: Option<String>,
 
-	/// Default billing tier label for mTLS peers when the auth API doesn't
-	/// return one (or no `--auth-api` is configured). Default `internal`. An
-	/// empty value selects the default (unprefixed) tier.
+	/// Billing tier label for mTLS peers when the auth API doesn't return one
+	/// (or no `--auth-api` is configured). Defaults to the unprefixed tier.
 	#[arg(long = "auth-mtls-tier", env = "MOQ_AUTH_MTLS_TIER")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub mtls_tier: Option<String>,
@@ -557,36 +551,19 @@ struct AuthApiResponse {
 	/// moq-token's serde); absent -> not found.
 	#[serde(default)]
 	key: Option<Key>,
-	/// Billing tier label for this connection (e.g. `internal`, `region/sjc`).
+	/// Billing tier label for this connection (e.g. `region/sjc`).
 	/// The relay sends `mtls=true` when the peer presented a verified client
-	/// cert and lets the API decide. Absent defaults per path: `internal` for
-	/// mTLS peers (trusted), the default (unprefixed) tier otherwise. An empty
-	/// label is the default tier.
+	/// cert and lets the API decide. Absent or empty selects the default
+	/// unprefixed tier.
 	#[serde(default)]
 	tier: Option<String>,
-	/// Legacy boolean form of `tier`, kept for backward compatibility with auth
-	/// APIs written against the original contract. `true` maps to the `internal`
-	/// tier, `false` to the default (unprefixed) tier. Ignored when `tier` is
-	/// also present.
-	#[serde(default)]
-	internal: Option<bool>,
 }
 
 impl AuthApiResponse {
-	/// Billing tier this response selects, honoring the legacy `internal: bool`
-	/// field when the newer `tier` label is absent. `None` leaves the choice to
-	/// the relay's per-connection default.
+	/// Billing tier this response selects. `None` leaves the choice to the
+	/// relay's per-connection default.
 	fn tier(&self) -> Option<Tier> {
-		if let Some(label) = &self.tier {
-			return Some(Tier::new(label.clone()));
-		}
-		self.internal.map(|internal| {
-			if internal {
-				Tier::new("internal")
-			} else {
-				Tier::default()
-			}
-		})
+		self.tier.clone().map(Tier::new)
 	}
 }
 
@@ -648,9 +625,8 @@ pub struct AuthToken {
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
 	/// Billing tier this session's stats record under. Chosen by business logic
-	/// (the auth API's `tier` field), defaulting to `internal` for trusted mTLS
-	/// peers and the default tier otherwise, so cluster peers can be billed
-	/// separately from end-user traffic.
+	/// through configuration or the auth API's `tier` field; defaults to the
+	/// unprefixed tier.
 	pub tier: Tier,
 	/// When the credential backing this session expires, if it has an expiry.
 	///
@@ -664,7 +640,7 @@ impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full publish and subscribe access
 	/// within `root`. The billing tier is left at the default; the caller (mTLS
-	/// handshake, internal listener, or cluster dial) sets it from config. The cert's trust chain
+	/// handshake or cluster dial) sets it from config. The cert's trust chain
 	/// (verified against the configured CA) is the only credential we require;
 	/// nothing else in the cert is inspected.
 	///
@@ -765,8 +741,7 @@ pub struct Auth {
 	/// key/public sources. See [`AuthConfig::auth_api`].
 	auth_api: Option<(url::Url, ClientWithMiddleware)>,
 	/// Billing tier recorded for an mTLS peer when the auth API doesn't return a
-	/// tier (or none is configured). See [`AuthConfig::mtls_tier`]; default
-	/// `internal`, set via [`Auth::with_mtls_tier`].
+	/// tier (or none is configured). See [`AuthConfig::mtls_tier`].
 	mtls_tier: Tier,
 }
 
@@ -919,16 +894,16 @@ impl Auth {
 			public,
 			domains: Arc::from(domains.into_boxed_slice()),
 			auth_api,
-			mtls_tier: crate::trusted_tier(config.mtls_tier),
+			mtls_tier: crate::configured_tier(config.mtls_tier),
 		})
 	}
 
-	/// Override the mTLS fallback billing tier (default `internal`). For the
+	/// Override the mTLS fallback billing tier. For the
 	/// mTLS-only stub built via [`Auth::default`], where there is no
 	/// [`AuthConfig`] to carry `--auth-mtls-tier`. An empty label selects the
 	/// default (unprefixed) tier.
 	pub fn with_mtls_tier(mut self, tier: Option<String>) -> Self {
-		self.mtls_tier = crate::trusted_tier(tier);
+		self.mtls_tier = crate::configured_tier(tier);
 		self
 	}
 
@@ -956,8 +931,8 @@ impl Auth {
 	/// credential), so this only fetches the alias + tier.
 	///
 	/// Fails OPEN only when there is no auth API configured: the cert is the
-	/// credential and there is nothing to resolve, so the path is used unchanged
-	/// at the internal tier. Otherwise the API is the source of truth for every
+	/// credential and there is nothing to resolve, so the path and configured
+	/// tier are used unchanged. Otherwise the API is the source of truth for every
 	/// connection, including the root (`/`), so it can alias and tier root peers
 	/// too. An API error therefore FAILS CLOSED (returns `Err`) rather than
 	/// accepting the connection with the path unresolved. Accepting it would route
@@ -1043,8 +1018,8 @@ impl Auth {
 		)
 		.await?;
 		// Resolve the tier before consuming `resp`'s other fields below.
-		// Non-mTLS connections default to the unprefixed tier; the API may bucket
-		// specific ones (e.g. a first-party dashboard token to `internal`).
+		// Connections default to the unprefixed tier; the API may bucket specific
+		// ones under a named tier.
 		let tier = resp.tier().unwrap_or_default();
 		// The API resolves the connection path's leading segment (a vanity name or
 		// pid) to the project's canonical pid. Broadcasts anchor here on the
@@ -3117,14 +3092,14 @@ api = "https://api.example.com/access"
 			.and(query_param("root", "demo"))
 			.respond_with(
 				ResponseTemplate::new(200)
-					.set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":[""]},"tier":"internal"}"#),
+					.set_body_string(r#"{"alias":"x7k2qp","public":{"subscribe":[""]},"tier":"region/sjc"}"#),
 			)
 			.mount(&server)
 			.await;
 
 		let auth = auth_with_api(&server).await;
 		let verified = auth.verify(&AuthParams::new("/demo")).await?;
-		assert_eq!(verified.tier, Tier::new("internal"));
+		assert_eq!(verified.tier, Tier::new("region/sjc"));
 		Ok(())
 	}
 
@@ -3140,7 +3115,7 @@ api = "https://api.example.com/access"
 			.and(query_param("root", "customer/live"))
 			.and(query_param("transport", "unix"))
 			.respond_with(
-				ResponseTemplate::new(200).set_body_string(r#"{"public":{"subscribe":[""]},"tier":"legacy"}"#),
+				ResponseTemplate::new(200).set_body_string(r#"{"public":{"subscribe":[""]},"tier":"gateway"}"#),
 			)
 			.mount(&server)
 			.await;
@@ -3152,41 +3127,18 @@ api = "https://api.example.com/access"
 			..Default::default()
 		};
 		let verified = auth.verify(&params).await?;
-		assert_eq!(verified.tier, Tier::new("legacy"));
-		Ok(())
-	}
-
-	#[tokio::test]
-	async fn auth_api_legacy_internal_bool_maps_to_tier() -> anyhow::Result<()> {
-		// Backward compatibility: an auth API written against the original
-		// contract returns `internal: bool`, not `tier`. `true` -> `internal`.
-		let server = MockServer::start().await;
-		Mock::given(method("GET"))
-			.and(path_matcher("/auth"))
-			.and(query_param("root", "demo"))
-			.respond_with(
-				ResponseTemplate::new(200).set_body_string(r#"{"public":{"subscribe":[""]},"internal":true}"#),
-			)
-			.mount(&server)
-			.await;
-
-		let auth = auth_with_api(&server).await;
-		let verified = auth.verify(&AuthParams::new("/demo")).await?;
-		assert_eq!(verified.tier, Tier::new("internal"));
+		assert_eq!(verified.tier, Tier::new("gateway"));
 		Ok(())
 	}
 
 	#[test]
-	fn auth_api_response_tier_precedence() {
-		// New `tier` label wins over the legacy `internal` bool when both are present.
-		let both: AuthApiResponse = serde_json::from_str(r#"{"tier":"region/sjc","internal":true}"#).unwrap();
-		assert_eq!(both.tier(), Some(Tier::new("region/sjc")));
+	fn auth_api_response_tier() {
+		let named: AuthApiResponse = serde_json::from_str(r#"{"tier":"region/sjc"}"#).unwrap();
+		assert_eq!(named.tier(), Some(Tier::new("region/sjc")));
 
-		// Legacy `internal: false` demotes to the default (unprefixed) tier.
-		let legacy_false: AuthApiResponse = serde_json::from_str(r#"{"internal":false}"#).unwrap();
-		assert_eq!(legacy_false.tier(), Some(Tier::default()));
+		let default: AuthApiResponse = serde_json::from_str(r#"{"tier":""}"#).unwrap();
+		assert_eq!(default.tier(), Some(Tier::default()));
 
-		// Neither field present: the relay applies its per-connection default.
 		let neither: AuthApiResponse = serde_json::from_str(r#"{}"#).unwrap();
 		assert_eq!(neither.tier(), None);
 	}
@@ -3260,8 +3212,8 @@ api = "https://api.example.com/access"
 
 	#[tokio::test]
 	async fn auth_api_mtls_resolves_alias_and_tier() -> anyhow::Result<()> {
-		// mTLS peers get the canonical root + tier; absent `tier` defaults to
-		// `internal` (trusted peer).
+		// mTLS peers get the canonical root + tier; absent `tier` uses the
+		// configured default.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth"))
@@ -3273,27 +3225,26 @@ api = "https://api.example.com/access"
 		let auth = auth_with_api(&server).await;
 		assert_eq!(
 			auth.resolve_mtls("/demo/room", None).await?,
-			("x7k2qp/room".to_string(), Tier::new("internal"))
+			("x7k2qp/room".to_string(), Tier::default())
 		);
 		Ok(())
 	}
 
 	#[tokio::test]
 	async fn auth_api_mtls_tier_override_default() -> anyhow::Result<()> {
-		// The API can move a cert-verified connection to the default (unprefixed)
-		// tier by returning an empty label.
+		// The API can move a cert-verified connection to a named tier.
 		let server = MockServer::start().await;
 		Mock::given(method("GET"))
 			.and(path_matcher("/auth"))
 			.and(query_param("root", "demo"))
-			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","tier":""}"#))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"alias":"x7k2qp","tier":"region"}"#))
 			.mount(&server)
 			.await;
 
 		let auth = auth_with_api(&server).await;
 		assert_eq!(
 			auth.resolve_mtls("/demo", None).await?,
-			("x7k2qp".to_string(), Tier::default())
+			("x7k2qp".to_string(), Tier::new("region"))
 		);
 		Ok(())
 	}
@@ -3321,7 +3272,7 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn auth_api_mtls_no_api_fails_open() -> anyhow::Result<()> {
 		// With no auth API configured the cert is the only credential: use the path
-		// unchanged at the internal tier. This is the sole fail-open case. (A public
+		// and configured tier unchanged. This is the sole fail-open case. (A public
 		// path just makes the config valid; mTLS resolution ignores it.)
 		let auth = Auth::new(AuthConfig {
 			public: simple_public("anon"),
@@ -3330,12 +3281,9 @@ api = "https://api.example.com/access"
 		.await?;
 		assert_eq!(
 			auth.resolve_mtls("/demo", None).await?,
-			("/demo".to_string(), Tier::new("internal"))
+			("/demo".to_string(), Tier::default())
 		);
-		assert_eq!(
-			auth.resolve_mtls("/", None).await?,
-			("/".to_string(), Tier::new("internal"))
-		);
+		assert_eq!(auth.resolve_mtls("/", None).await?, ("/".to_string(), Tier::default()));
 		Ok(())
 	}
 
