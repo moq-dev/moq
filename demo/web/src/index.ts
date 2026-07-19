@@ -142,12 +142,14 @@ function createTile(name: string): WatchTile {
 		watch.muted = !isActive;
 	});
 
-	// Show the speaker badge on the active tile, but only when it actually has
-	// an audio track to play.
+	// Show the speaker badge only while the active tile is downloading audio.
 	effects.run((effect) => {
 		const isActive = effect.get(active) === name;
-		const hasAudio = !!effect.get(watch.broadcast.out.catalog)?.audio;
-		audioBadge.hidden = !(isActive && hasAudio);
+		const downloading =
+			effect.get(watch.audio.in.enabled) &&
+			!!effect.get(watch.audio.source.out.track) &&
+			!!effect.get(watch.broadcast.out.active);
+		audioBadge.hidden = !(isActive && downloading);
 	});
 
 	return {
@@ -292,12 +294,11 @@ ui.run((effect) => {
 	else setPill("bcast-status", "bcast-text", "Offline", "bad");
 });
 
-// Video section: only shown when the active catalog has a video section. Inlines
-// the video track config from the catalog plus live decode stats.
+// Video section: catalog presence decides whether the card exists, but the
+// details come from the selected source and only appear while video is downloaded.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? effect.get(watch.broadcast.out.catalog) : undefined;
-	const video = catalog?.video;
+	const video = watch ? effect.get(watch.video.source.out.catalog) : undefined;
 	const section = $("video-section");
 	if (!watch || !video) {
 		section.hidden = true;
@@ -305,32 +306,42 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
+	const downloading =
+		effect.get(watch.video.in.enabled) &&
+		!!effect.get(watch.video.source.out.track) &&
+		!!effect.get(watch.broadcast.out.active);
+	$("video-state").hidden = downloading;
+	if (!downloading) {
+		renderRows($("video-info"), []);
+		return;
+	}
+
 	const stalled = effect.get(watch.video.out.stalled);
 	const live = effect.get(watch.broadcast.out.status) === "live";
-	const r = Object.values(video.renditions)[0];
+	const config = effect.get(watch.video.source.out.config);
+	const display = effect.get(watch.video.out.display);
 
 	const resolution =
-		r?.codedWidth && r?.codedHeight
-			? `${r.codedWidth}×${r.codedHeight}`
-			: video.display
-				? `${video.display.width}×${video.display.height}`
+		config?.codedWidth && config?.codedHeight
+			? `${config.codedWidth}×${config.codedHeight}`
+			: display
+				? `${display.width}×${display.height}`
 				: undefined;
 
 	renderRows($("video-info"), [
-		["codec", r?.codec],
+		["codec", config?.codec],
 		["resolution", resolution],
-		["framerate", r?.framerate ? `${r.framerate} fps` : undefined],
-		["bitrate", r?.bitrate ? `${Math.round(r.bitrate / 1000)} kbps` : undefined],
+		["framerate", config?.framerate ? `${config.framerate} fps` : undefined],
 		// A stall is mid-stream starvation, not "offline" - only surface it when live.
 		["stalled", live && stalled ? "⚠️ recovering" : undefined],
 	]);
 });
 
-// Audio section: only shown when the active catalog has an audio section.
+// Audio section follows the same policy: the selected source describes what is
+// active, while the muted state replaces those details when audio is not pulled.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const catalog = watch ? effect.get(watch.broadcast.out.catalog) : undefined;
-	const audio = catalog?.audio;
+	const audio = watch ? effect.get(watch.audio.source.out.catalog) : undefined;
 	const section = $("audio-section");
 	if (!watch || !audio) {
 		section.hidden = true;
@@ -338,12 +349,22 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
-	const a = Object.values(audio.renditions)[0];
+	const downloading =
+		effect.get(watch.audio.in.enabled) &&
+		!!effect.get(watch.audio.source.out.track) &&
+		!!effect.get(watch.broadcast.out.active);
+	$("audio-state").hidden = downloading;
+	if (!downloading) {
+		renderRows($("audio-info"), []);
+		return;
+	}
+
+	const config = effect.get(watch.audio.source.out.config);
+	const sampleRate = effect.get(watch.audio.out.sampleRate);
 	renderRows($("audio-info"), [
-		["codec", a?.codec],
-		["sample rate", a?.sampleRate ? `${a.sampleRate} Hz` : undefined],
-		["channels", a?.numberOfChannels ? String(a.numberOfChannels) : undefined],
-		["bitrate", a?.bitrate ? `${Math.round(a.bitrate / 1000)} kbps` : undefined],
+		["codec", config?.codec],
+		["sample rate", sampleRate ? `${sampleRate} Hz` : undefined],
+		["channels", config?.numberOfChannels ? String(config.numberOfChannels) : undefined],
 	]);
 });
 
@@ -453,20 +474,23 @@ ui.run((effect) => {
 
 const viz = new Signals.Effect();
 
-// Video bitrate is video-only; the Network "Throughput" graph is video + audio.
-const bitrateGraph = graph(viz, "Bitrate", { color: "#a855f7", format: formatBitrate });
+// Each media card reports measured bitrate. Network throughput is their sum.
+const videoBitrateGraph = graph(viz, "Bitrate", { color: "#a855f7", format: formatBitrate });
 const fpsGraph = graph(viz, "Frame rate", { color: "#facc15", format: formatFps });
-$("video-graphs").append(bitrateGraph.el, fpsGraph.el);
+$("video-graphs").append(videoBitrateGraph.el, fpsGraph.el);
+
+const audioBitrateGraph = graph(viz, "Bitrate", { color: "#fb7185", format: formatBitrate });
+$("audio-graphs").append(audioBitrateGraph.el);
 
 const throughputGraph = graph(viz, "Throughput", { color: "#34d399", format: formatBitrate });
 const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
 $("network-graphs").append(throughputGraph.el, rttGraph.el);
 
-const allGraphs = [bitrateGraph, fpsGraph, throughputGraph, rttGraph];
+const allGraphs = [videoBitrateGraph, audioBitrateGraph, fpsGraph, throughputGraph, rttGraph];
 
 // Sample the active tile's byte/frame counters and push per-second rates.
 let prevWatch: MoqWatch | undefined;
-let prev = { frames: 0, videoBytes: 0, totalBytes: 0, when: performance.now() };
+let prev = { frames: 0, videoBytes: 0, audioBytes: 0, when: performance.now() };
 viz.interval(() => {
 	const watch = activeWatch.peek();
 	const now = performance.now();
@@ -475,7 +499,14 @@ viz.interval(() => {
 	// isn't a huge spike from the counter difference.
 	if (watch !== prevWatch || !watch) {
 		prevWatch = watch;
-		prev = { frames: 0, videoBytes: 0, totalBytes: 0, when: now };
+		const video = watch?.video.out.stats.peek();
+		const audio = watch?.audio.out.stats.peek();
+		prev = {
+			frames: video?.frameCount ?? 0,
+			videoBytes: video?.bytesReceived ?? 0,
+			audioBytes: audio?.bytesReceived ?? 0,
+			when: now,
+		};
 		for (const g of allGraphs) g.push(undefined);
 		return;
 	}
@@ -483,20 +514,23 @@ viz.interval(() => {
 	const v = watch.video.out.stats.peek();
 	const a = watch.audio.out.stats.peek();
 	const videoBytes = v?.bytesReceived ?? 0;
-	const totalBytes = videoBytes + (a?.bytesReceived ?? 0);
+	const audioBytes = a?.bytesReceived ?? 0;
 	const frames = v?.frameCount ?? 0;
 	const elapsed = now - prev.when;
 
 	const perSec = (delta: number) => (delta >= 0 ? (delta * 1000) / elapsed : undefined);
-	let bitrate: number | undefined;
+	let videoBitrate: number | undefined;
+	let audioBitrate: number | undefined;
 	let throughput: number | undefined;
 	let fps: number | undefined;
-	if (elapsed > 0 && prev.totalBytes > 0) {
-		bitrate = perSec((videoBytes - prev.videoBytes) * 8);
-		throughput = perSec((totalBytes - prev.totalBytes) * 8);
+	if (elapsed > 0) {
+		videoBitrate = perSec((videoBytes - prev.videoBytes) * 8);
+		audioBitrate = perSec((audioBytes - prev.audioBytes) * 8);
+		throughput = perSec((videoBytes - prev.videoBytes + audioBytes - prev.audioBytes) * 8);
 		fps = perSec(frames - prev.frames);
 	}
-	bitrateGraph.push(bitrate);
+	videoBitrateGraph.push(videoBitrate);
+	audioBitrateGraph.push(audioBitrate);
 	fpsGraph.push(fps);
 	throughputGraph.push(throughput);
 
@@ -504,7 +538,7 @@ viz.interval(() => {
 	const rtt = conn?.rtt?.peek() as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 
-	prev = { frames, videoBytes, totalBytes, when: now };
+	prev = { frames, videoBytes, audioBytes, when: now };
 }, 250);
 
 // Rebuild the buffer visualization whenever the active tile changes; it binds to
