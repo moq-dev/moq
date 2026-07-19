@@ -37,6 +37,18 @@ const $ = <T extends HTMLElement>(id: string): T => {
 	return el as T;
 };
 
+function isDownloading(
+	effect: Signals.Effect,
+	watch: MoqWatch,
+	decoder: MoqWatch["video"] | MoqWatch["audio"],
+): boolean {
+	return (
+		effect.get(decoder.in.enabled) &&
+		!!effect.get(decoder.source.out.track) &&
+		!!effect.get(watch.broadcast.out.active)
+	);
+}
+
 // Build a branded path from a user-typed prefix, tolerating a trailing slash
 // (we show "demo/" in the UI but the path is "demo").
 const prefixPath = (raw: string): Net.Path.Valid => Net.Path.from(raw.trim().replace(/\/+$/, ""));
@@ -145,11 +157,7 @@ function createTile(name: string): WatchTile {
 	// Show the speaker badge only while the active tile is downloading audio.
 	effects.run((effect) => {
 		const isActive = effect.get(active) === name;
-		const downloading =
-			effect.get(watch.audio.in.enabled) &&
-			!!effect.get(watch.audio.source.out.track) &&
-			!!effect.get(watch.broadcast.out.active);
-		audioBadge.hidden = !(isActive && downloading);
+		audioBadge.hidden = !(isActive && isDownloading(effect, watch, watch.audio));
 	});
 
 	return {
@@ -306,10 +314,7 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
-	const downloading =
-		effect.get(watch.video.in.enabled) &&
-		!!effect.get(watch.video.source.out.track) &&
-		!!effect.get(watch.broadcast.out.active);
+	const downloading = isDownloading(effect, watch, watch.video);
 	$("video-state").hidden = downloading;
 	if (!downloading) {
 		renderRows($("video-info"), []);
@@ -349,10 +354,7 @@ ui.run((effect) => {
 	}
 	section.hidden = false;
 
-	const downloading =
-		effect.get(watch.audio.in.enabled) &&
-		!!effect.get(watch.audio.source.out.track) &&
-		!!effect.get(watch.broadcast.out.active);
+	const downloading = isDownloading(effect, watch, watch.audio);
 	$("audio-state").hidden = downloading;
 	if (!downloading) {
 		renderRows($("audio-info"), []);
