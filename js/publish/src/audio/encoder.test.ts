@@ -1,5 +1,6 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { StreamTrack } from "./types";
 
 // The encoder pulls the capture processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
@@ -15,38 +16,71 @@ async function settle(times = 5): Promise<void> {
 // Models the WebAudio surface `#runSource` touches. The key detail is `AudioContext.close()`: on
 // Firefox and Safari it does NOT synchronously flip `.state` to "closed" (it stays "suspended"), which
 // is exactly the browser behavior the old `context.state === "closed"` guard failed to account for.
-function installFakeWebAudio() {
-	// Never resolves during the test, so the spawned worklet load stays pending until teardown.
-	const addModule = () => new Promise<void>(() => {});
+function installFakeWebAudio(props: { loaded?: boolean } = {}) {
+	const addModule = props.loaded ? () => Promise.resolve() : () => new Promise<void>(() => {});
 	let audioWorkletNodes = 0;
+	const sampleRates: Array<number | undefined> = [];
 
 	class FakeAudioContext {
 		state: AudioContextState = "suspended";
 		audioWorklet = { addModule };
-		constructor(_options?: AudioContextOptions) {}
+		sampleRate: number;
+		currentTime = 0;
+		constructor(options?: AudioContextOptions) {
+			sampleRates.push(options?.sampleRate);
+			this.sampleRate = options?.sampleRate ?? 44_100;
+		}
 		close(): Promise<void> {
 			// Firefox/Safari behavior: stays "suspended", never "closed".
 			return Promise.resolve();
 		}
 	}
 
-	class FakeMediaStream {
-		constructor(_tracks?: unknown) {}
-	}
+	class FakeMediaStream {}
 
 	class FakeGraphNode {
 		channelCount = 2;
-		constructor(_context?: unknown, _options?: unknown) {}
+		context: FakeAudioContext;
+		gain = {
+			cancelScheduledValues: () => {},
+			exponentialRampToValueAtTime: () => {},
+			setValueAtTime: () => {},
+		};
+		constructor(context: FakeAudioContext) {
+			this.context = context;
+		}
 		connect(): void {}
 		disconnect(): void {}
 	}
 
+	class FakePort extends EventTarget {
+		#started = false;
+
+		start(): void {
+			if (this.#started) return;
+			this.#started = true;
+			queueMicrotask(() => {
+				this.dispatchEvent(
+					new MessageEvent("message", {
+						data: { timestamp: 0, channels: [new Float32Array(128)] },
+					}),
+				);
+			});
+		}
+	}
+
 	class FakeAudioWorkletNode {
-		constructor(_context: unknown, _name: string) {
+		context: FakeAudioContext;
+		port = new FakePort();
+		constructor(context: FakeAudioContext, _name: string) {
 			audioWorkletNodes++;
+			this.context = context;
+			if (props.loaded) return;
 			// The real constructor throws when the module registration was abandoned mid-load.
 			throw new DOMException("Unknown AudioWorklet name 'capture'", "InvalidStateError");
 		}
+		connect(): void {}
+		disconnect(): void {}
 	}
 
 	const globals: Record<string, unknown> = {
@@ -67,6 +101,9 @@ function installFakeWebAudio() {
 		get audioWorkletNodes() {
 			return audioWorkletNodes;
 		},
+		get sampleRates() {
+			return sampleRates;
+		},
 		[Symbol.dispose]() {
 			for (const [name, original] of originals) {
 				if (original) Object.defineProperty(globalThis, name, original);
@@ -76,13 +113,74 @@ function installFakeWebAudio() {
 	};
 }
 
-function fakeSource() {
+function fakeSource(sampleRate: number | undefined = 48_000): StreamTrack {
 	return {
 		kind: "audio",
-		getSettings: () => ({ deviceId: "", groupId: "", sampleRate: 48_000 }),
+		getSettings: () => ({ deviceId: "", groupId: "", sampleRate }),
 		getConstraints: () => ({}),
-	} as unknown as MediaStreamTrack;
+	} as unknown as StreamTrack;
 }
+
+test("normalizes a 44.1kHz Opus source to 48kHz before capture", async () => {
+	using webaudio = installFakeWebAudio({ loaded: true });
+	const encoder = new Encoder("audio", {
+		enabled: true,
+		source: fakeSource(44_100),
+		codec: "opus",
+	});
+
+	await settle();
+	expect(webaudio.sampleRates).toEqual([48_000]);
+	expect(Number(encoder.out.catalog.peek()?.sampleRate)).toBe(48_000);
+
+	encoder.close();
+	await settle();
+});
+
+test("preserves native Opus capture rates", async () => {
+	using webaudio = installFakeWebAudio();
+	const encoder = new Encoder("audio", {
+		enabled: true,
+		source: fakeSource(16_000),
+		codec: "opus",
+	});
+
+	await settle();
+	expect(webaudio.sampleRates).toEqual([16_000]);
+
+	encoder.close();
+	await settle();
+});
+
+test("defaults Opus capture to 48kHz when the source has no rate", async () => {
+	using webaudio = installFakeWebAudio();
+	const encoder = new Encoder("audio", {
+		enabled: true,
+		source: fakeSource(undefined),
+		codec: "opus",
+	});
+
+	await settle();
+	expect(webaudio.sampleRates).toEqual([48_000]);
+
+	encoder.close();
+	await settle();
+});
+
+test("does not normalize AAC capture rates", async () => {
+	using webaudio = installFakeWebAudio();
+	const encoder = new Encoder("audio", {
+		enabled: true,
+		source: fakeSource(44_100),
+		codec: "aac",
+	});
+
+	await settle();
+	expect(webaudio.sampleRates).toEqual([44_100]);
+
+	encoder.close();
+	await settle();
+});
 
 // Regression: when the current run of #runSource is torn down while `audioWorklet.addModule` is still
 // pending, no AudioWorkletNode may be constructed for that abandoned run. The old guard keyed off

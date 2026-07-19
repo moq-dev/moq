@@ -118,7 +118,7 @@ export class Encoder {
 	muted: Signal<boolean>;
 	/** Linear gain applied before encoding, where 1 is unity. */
 	volume: Signal<number>;
-	/** Override the capture sample rate in Hz. Defaults to the track's own rate. */
+	/** Override the capture sample rate in Hz. Opus normalizes this to a supported output rate. */
 	sampleRate: Signal<number | undefined>;
 	/** Override the captured channel count. Defaults to the track's requested count. */
 	channelCount: Signal<number | undefined>;
@@ -195,7 +195,10 @@ export class Encoder {
 
 		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
-		const sampleRate = overrideSampleRate ?? settings.sampleRate;
+		const requestedSampleRate = overrideSampleRate ?? settings.sampleRate;
+		const codec = normalizeCodec(effect.get(this.codec));
+		const sampleRate =
+			codec.mime === "opus" ? Util.Opus.normalizeSampleRate(requestedSampleRate) : requestedSampleRate;
 
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
@@ -365,11 +368,23 @@ export class Encoder {
 				const kind: Kind = source ? normalizeSource(source).kind : "auto";
 				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
 				const framer = createFramer(config);
+				let failed = false;
 
 				const encoder = new AudioEncoder({
-					output: (frame) => {
+					output: (frame, metadata) => {
 						if (frame.type !== "key") {
 							throw new Error("only key frames are supported");
+						}
+
+						const outputSampleRate = metadata?.decoderConfig?.sampleRate;
+						if (outputSampleRate !== undefined && outputSampleRate !== config.sampleRate) {
+							failed = true;
+							const error = new Error(
+								`audio encoder output rate ${outputSampleRate} does not match catalog rate ${config.sampleRate}`,
+							);
+							console.error("encoder error", error);
+							track.close(error);
+							return;
 						}
 
 						this.#out.stats.update((stats) => ({
@@ -395,6 +410,8 @@ export class Encoder {
 				encoder.configure(encoderConfig);
 
 				effect.event(worklet.port, "message", (event: Event) => {
+					if (failed) return;
+
 					const captured = (event as MessageEvent<Capture.AudioFrame>).data;
 					const channelCount = captured.channels.length;
 					if (!channelCount) return;

@@ -8,6 +8,8 @@ import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
+import { audioDecoderConfig, audioDecoderSampleRate } from "./config";
+import { decodeAudioChunk } from "./decode";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -123,10 +125,10 @@ export class Decoder {
 		const config = effect.get(this.source.out.config);
 		if (!config) return;
 
-		// Pre-build the graph at the catalog rate so warm-up starts before the first frame arrives. The
-		// decoder's actual output rate is the source of truth (see #emit); if it differs, #emit sets
+		// Pre-build the graph at the effective decoder rate so warm-up starts before the first frame arrives.
+		// The decoder's actual output rate is the source of truth (see #emit); if it differs, #emit sets
 		// #decodedSampleRate, which re-runs this effect and rebuilds the graph at the real rate.
-		const sampleRate = effect.get(this.#decodedSampleRate) ?? config.sampleRate;
+		const sampleRate = effect.get(this.#decodedSampleRate) ?? audioDecoderSampleRate(config);
 		const channelCount = config.numberOfChannels;
 
 		// Expose the rate the graph actually runs at.
@@ -277,7 +279,10 @@ export class Decoder {
 					}
 					this.#emit(data);
 				},
-				error: (error) => console.error(error),
+				error: (error) => {
+					console.error(error);
+					consumer.close();
+				},
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -290,10 +295,7 @@ export class Decoder {
 					: config.description
 						? Util.Hex.toBytes(config.description)
 						: undefined;
-			decoder.configure({
-				...config,
-				description,
-			});
+			decoder.configure(audioDecoderConfig(config, description));
 
 			for (;;) {
 				const next = await consumer.next();
@@ -323,7 +325,7 @@ export class Decoder {
 					timestamp: frame.timestamp,
 				});
 
-				decoder.decode(chunk);
+				if (!decodeAudioChunk(decoder, chunk)) break;
 			}
 		});
 	}
@@ -361,19 +363,17 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error(error),
+				error: (error) => {
+					console.error(error);
+					consumer.close();
+				},
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
 			});
 
 			// Configure decoder with description from catalog
-			decoder.configure({
-				codec: config.codec,
-				sampleRate: config.sampleRate,
-				numberOfChannels: config.numberOfChannels,
-				description,
-			});
+			decoder.configure(audioDecoderConfig(config, description));
 
 			for (;;) {
 				const next = await consumer.next();
@@ -396,14 +396,12 @@ export class Decoder {
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
 				await this.#ring?.wait(frame.timestamp);
 
-				if (decoder.state === "closed") break;
-				decoder.decode(
-					new EncodedAudioChunk({
-						type: frame.keyframe ? "key" : "delta",
-						data: frame.payload,
-						timestamp: frame.timestamp,
-					}),
-				);
+				const chunk = new EncodedAudioChunk({
+					type: frame.keyframe ? "key" : "delta",
+					data: frame.payload,
+					timestamp: frame.timestamp,
+				});
+				if (!decodeAudioChunk(decoder, chunk)) break;
 			}
 		});
 	}
@@ -528,9 +526,6 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			}
 		}
 	}
-	const res = await AudioDecoder.isConfigSupported({
-		...config,
-		description,
-	});
+	const res = await AudioDecoder.isConfigSupported(audioDecoderConfig(config, description));
 	return res.supported ?? false;
 }
