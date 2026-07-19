@@ -11,6 +11,6 @@
 	},
 	"devDependencies": {
 		"vitepress": "^1.6.4",
-		"wrangler": "^4.107.1"
+		"wrangler": "^4.110.0"
 	}
 }
