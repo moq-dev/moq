@@ -144,7 +144,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		console.warn(url.toString(), "connected via WebSocket");
 		websocketWon.add(url.toString());
 	} else {
-		console.log(url.toString(), "connected via WebTransport");
+		console.debug(url.toString(), "connected via WebTransport");
 	}
 
 	// Get the negotiated protocol. qmux Session exposes it directly;
