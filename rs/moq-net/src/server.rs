@@ -413,7 +413,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					path: None,
 					role: None,
 					// The dialing side prices the link; we charge what its SETUP declared.
-					link_cost: None,
+					cost: None,
 				};
 				let start = lite::start(
 					session.clone(),
@@ -654,7 +654,7 @@ mod tests {
 			probe: lite::ProbeLevel::None,
 			path: path.map(str::to_string),
 			role,
-			link_cost: None,
+			cost: None,
 		}
 		.encode(&mut buf, v)
 		.unwrap();

@@ -1006,17 +1006,22 @@ impl FrontState {
 	}
 
 	/// Re-pick the active source after the table changed. Serve tasks watch
-	/// `active` and re-splice on their own.
+	/// `active` and re-splice on their own, so a cheaper route takes over
+	/// seamlessly at a group boundary.
 	///
-	/// `carrying` is whether the front currently has live demand (the spliced
-	/// broadcast is active). While it does, a strictly cheaper announced route may
-	/// only displace an announced incumbent when [`Self::handover_allowed`] says
-	/// so. This is the symmetry break for the simultaneous-activation race: two
-	/// nodes that each pulled the broadcast before seeing the other both advertise
-	/// zero cost, so each sees the other as cheaper than its own source. Without
-	/// the gate both re-parent at once and the broadcast is left with no upstream
-	/// at all; with it, exactly one moves (make-before-break via the usual splice)
-	/// and the other keeps its source.
+	/// The one exception is the simultaneous-activation race: two nodes that
+	/// each pulled the broadcast before seeing the other both advertise zero
+	/// cost, so each sees the other as cheaper than its own source, and
+	/// re-parenting onto each other at once leaves the broadcast with no
+	/// upstream at all. That hazard only exists when both sides are actively
+	/// carrying, so the gate is scoped to exactly that: while `carrying` (the
+	/// front has live demand), a cheaper route whose announcing relay is itself
+	/// carrying (it advertised zero from a chain of two or more hops; a chain of
+	/// one is the original publisher, which can never adopt a route to its own
+	/// broadcast) displaces an announced incumbent only when
+	/// [`Self::handover_allowed`] says so. Every other cheaper route, e.g. a
+	/// forwarder path or an upstream that repriced itself down, is taken
+	/// immediately.
 	fn reselect(&mut self, carrying: bool) {
 		let best = self.best_route();
 		if carrying
@@ -1026,9 +1031,11 @@ impl FrontState {
 			&& let Some(incumbent) = self.routes.iter().find(|r| r.id == cur_id)
 			&& incumbent.route.announce
 			&& candidate.route.cost < incumbent.route.cost
+			&& candidate.route.advertised == 0
+			&& candidate.route.hops.len() >= 2
 			&& !self.handover_allowed(&candidate.route)
 		{
-			// We lost the key comparison: stay put and let the peer come to us.
+			// We won the key comparison: keep our source and let the peer come to us.
 			return;
 		}
 		self.active = best;
@@ -2357,6 +2364,37 @@ mod tests {
 		assert!(
 			a_moved != b_moved,
 			"exactly one side must re-parent (a: {a_moved}, b: {b_moved})"
+		);
+	}
+
+	/// The gate is scoped to warm siblings: a cheaper route via a relay that is
+	/// not itself carrying (advertised nonzero), or directly from the original
+	/// publisher (single-hop chain), is taken immediately even while carrying
+	/// and even when we would lose the key comparison.
+	#[test]
+	fn test_carrying_switches_to_benign_routes() {
+		let peer = Origin::new(3).unwrap();
+		let lost = origin_keyed("test", peer, false);
+
+		// A cheaper forwarder path: the relay advertised its accumulated cost.
+		let mut forwarder = sibling_route(peer).with_cost(4);
+		forwarder.advertised = 4;
+		let mut state = front_state(lost, vec![upstream_route(10), forwarder]);
+		state.reselect(true);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"a cheaper forwarder path must win while carrying"
+		);
+
+		// Directly from the original publisher: single-hop chain, advertised zero.
+		let direct = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+		let mut state = front_state(lost, vec![upstream_route(10), direct]);
+		state.reselect(true);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"a direct publisher route must win while carrying"
 		);
 	}
 

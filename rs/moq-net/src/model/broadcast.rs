@@ -55,21 +55,27 @@ pub struct Route {
 	/// and as the selection tie-break.
 	pub hops: OriginList,
 
-	/// The marginal cost of pulling the broadcast via this route: lower wins, with
-	/// ties broken by hop length and then a deterministic hash.
+	/// The cost of pulling the broadcast via this route, accumulated per link:
+	/// lower wins, with ties broken by hop length and then a deterministic hash.
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,
-	/// like a cold transcoder). Each link adds its own configured price as the
-	/// announcement crosses it, so a route over a metered backbone ranks worse
-	/// than an equal-length one within a datacenter. A node actively carrying the
-	/// broadcast re-announces zero instead of the accumulated value: its ingress
-	/// is already paid for, so peers should pull the copy that exists rather than
-	/// open a second one all the way back.
+	/// like a cold transcoder), and each link adds its own configured price as
+	/// the announcement crosses it, so a route over a metered backbone ranks
+	/// worse than an equal-length one within a datacenter. The accumulation
+	/// restarts at zero at any node actively carrying the broadcast: those
+	/// upstream legs already exist and are not re-paid by one more subscriber,
+	/// so the sum is the cost of the transfers a subscription would newly cause.
 	///
 	/// Carried on the wire from lite-06; older peers always report zero, leaving
 	/// the hop-count tie-break as the effective metric exactly as before.
 	pub cost: u64,
+
+	/// The cost as the announcing peer advertised it, before this link's charge
+	/// was added to [`Self::cost`]. Local bookkeeping, never forwarded: zero on a
+	/// chain of two or more hops means the announcing relay is actively carrying
+	/// the broadcast, which is what the origin's handover gate keys on.
+	pub(crate) advertised: u64,
 
 	/// Whether the broadcast should be announced: advertised to consumers via
 	/// [`crate::origin::Consumer::announced`] while this is the best route. A

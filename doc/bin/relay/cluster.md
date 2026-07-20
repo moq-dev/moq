@@ -37,13 +37,13 @@ Pick the shape that matches your traffic. Linear chains are great for fanout; sm
 
 Hop counting treats every link the same, but links rarely cost the same: traffic between two relays in one datacenter is free, while a metered backbone bills per byte. On `moq-lite-06` (still work-in-progress and opt-in via `--version`), announcements carry a route cost so relays can route by price instead of distance.
 
-Price a link by adding `?link_cost=N` to the peer URL:
+Price a link by adding `?cost=N` to the peer URL:
 
 ```toml
 [cluster]
 connect = [
-  "https://sibling.same-dc.example/?link_cost=0",
-  "https://us-east.example.com/?link_cost=10",
+  "https://sibling.same-dc.example/?cost=0",
+  "https://us-east.example.com/?cost=10",
 ]
 ```
 

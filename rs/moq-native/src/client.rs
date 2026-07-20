@@ -254,9 +254,9 @@ impl Client {
 		self
 	}
 
-	/// Price the links this client dials; see [`moq_net::Client::with_link_cost`].
-	pub fn with_link_cost(mut self, cost: u64) -> Self {
-		self.moq = self.moq.with_link_cost(cost);
+	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_cost(cost);
 		self
 	}
 

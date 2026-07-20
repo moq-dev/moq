@@ -600,7 +600,7 @@ The following Setup Parameters are defined:
 |------|-----------|-------------|
 | 0x3  | Role      | Role (i)    |
 |------|-----------|-------------|
-| 0x4  | Link Cost | Cost (i)    |
+| 0x4  | Cost      | Cost (i)    |
 |------|-----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
@@ -655,8 +655,8 @@ The Role Parameter is a hint that only ever narrows the session: a server MUST s
 
 Like the [Path Parameter](#path-parameter), the Role Parameter is meaningful only from client to server. A server MUST NOT send a Role Parameter; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it; it applies only to this hop.
 
-### Link Cost Parameter {#link-cost-parameter}
-The Link Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection before forwarding or acting on it (see [ANNOUNCE_START](#announce-start)).
+### Cost Parameter {#cost-parameter}
+The Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection before forwarding or acting on it (see [ANNOUNCE_START](#announce-start)).
 
 The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
 An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path, matching the behavior of versions that predate the parameter.
@@ -664,7 +664,7 @@ A deployment prices links to reflect its economics: 0 for a link within a datace
 A value of 0 is meaningful and distinct from omitting the parameter.
 
 Only the client sends it: the price lives in the dialing side's configuration, and the server reads it from the client's SETUP so both ends charge the same link the same amount.
-A server MUST NOT send a Link Cost Parameter.
+A server MUST NOT send a Cost Parameter.
 Like the [Path Parameter](#path-parameter), it is per-hop setup metadata: a relay MUST NOT forward it.
 
 
@@ -759,14 +759,15 @@ A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g.
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
 The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
-When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Link Cost Parameter](#link-cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
 This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
 
 Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
-An actively-carrying relay SHOULD therefore apply a deterministic tie-break before re-parenting onto a strictly cheaper advertisement, such as comparing a stable hash of the broadcast path and each endpoint's Hop ID, so that exactly one side moves.
+An actively-carrying relay SHOULD therefore apply a deterministic tie-break before re-parenting onto a strictly cheaper advertisement from another actively-carrying relay (one that advertised a Route Cost of 0 from a path of two or more hops; a single-hop path is the original publisher, which can never adopt a route to its own broadcast), such as comparing a stable hash of the broadcast path and each endpoint's Hop ID, so that exactly one side moves.
+Cheaper advertisements from anything else, e.g. a forwarding relay or a repriced upstream, carry no such hazard and SHOULD be adopted immediately.
 Hop-based loop detection (dropping any advertisement whose reconstructed path contains the receiver's own Hop ID) remains the authority on loop freedom; the tie-break only prevents the transient double-switch.
 
 
@@ -1166,6 +1167,8 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_RESTART; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
+- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
+- Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
