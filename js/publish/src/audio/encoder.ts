@@ -101,6 +101,9 @@ type EncoderOutput = {
 // channel count (which can differ from the requested count on some platforms, e.g. Safari/macOS).
 type Captured = { sampleRate: number; channelCount: number };
 
+// Which codec is in use, ignoring its tuning knobs.
+type CodecMime = OpusConfig["mime"] | AacConfig["mime"];
+
 /**
  * A single audio rendition encoder.
  *
@@ -128,6 +131,11 @@ export class Encoder {
 	// Observed capture format. #out.catalog is derived from this plus the codec, so the
 	// worklet handlers only ever write here, never read-modify-write the catalog.
 	#captured = new Signal<Captured | undefined>(undefined);
+
+	// Only the mime picks the capture sample rate, so the capture graph tracks this rather than the
+	// whole codec signal. Otherwise changing an encode-only knob (bitrate, complexity) would rebuild
+	// the AudioContext, drop #worklet, and close the track we're publishing.
+	#codecMime: Signal<CodecMime>;
 
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
@@ -157,6 +165,11 @@ export class Encoder {
 		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
+		this.#codecMime = new Signal(normalizeCodec(this.codec.peek()).mime);
+
+		this.#signals.run((effect) => {
+			this.#codecMime.set(normalizeCodec(effect.get(this.codec)).mime);
+		});
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
@@ -195,7 +208,12 @@ export class Encoder {
 
 		const settings = source.track.getSettings();
 		const overrideSampleRate = effect.get(this.sampleRate);
-		const sampleRate = overrideSampleRate ?? settings.sampleRate;
+		const mime = effect.get(this.#codecMime);
+		const sampleRate = pickSampleRate(mime, overrideSampleRate ?? settings.sampleRate);
+
+		if (overrideSampleRate !== undefined && sampleRate !== overrideSampleRate) {
+			console.warn(`${mime} does not support ${overrideSampleRate}Hz, capturing at ${sampleRate}Hz`);
+		}
 
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
@@ -277,6 +295,13 @@ export class Encoder {
 	}
 
 	#createConfig(captured: Captured, codec: OpusConfig | AacConfig): Catalog.AudioConfig {
+		// The catalog carries the rate the context actually realized, not the one we asked for. They
+		// only diverge if the browser ignored the request, which would put us right back to
+		// advertising a rate the codec can't decode, so make that visible instead of silent.
+		if (codec.mime === "opus" && !Util.Opus.supportsRate(captured.sampleRate)) {
+			console.warn(`capturing at ${captured.sampleRate}Hz, which opus cannot decode`);
+		}
+
 		const sampleRate = Catalog.u53(captured.sampleRate);
 		const numberOfChannels = Catalog.u53(captured.channelCount);
 
@@ -464,6 +489,28 @@ function createFramer(config: Catalog.AudioConfig): Framer {
 		channels: config.numberOfChannels,
 		size: { duration },
 	});
+}
+
+// Pick the rate to run the capture AudioContext at, given what the source reports (or the caller
+// asked for). Codecs only encode at a discrete set of rates, so snap to one they actually support.
+//
+// This has to happen at the AudioContext rather than just in the catalog. A context running at
+// 44100 hands 44100 AudioData to an encoder that resamples to 48000 behind our back, and we then
+// advertise 44100: a rate no Opus decoder can honor, which Safari rejects outright. Snapping here
+// keeps one rate across the capture graph, the encoder config, and the catalog.
+function pickSampleRate(mime: CodecMime, requested: number | undefined): number | undefined {
+	// Treat a nonsense rate as unknown. It would otherwise snap to the codec's floor (7350Hz for AAC)
+	// instead of throwing NotSupportedError at the AudioContext where it's obvious.
+	const rate = requested !== undefined && Number.isFinite(requested) && requested > 0 ? requested : undefined;
+
+	if (mime === "opus") {
+		// An unknown rate (captureStream reports none) would let the AudioContext fall back to the
+		// machine's output rate, which is 44100 on most Macs. Ask for full-band Opus instead.
+		return Util.Opus.pickRate(rate ?? Util.Opus.DEFAULT_SAMPLE_RATE);
+	}
+
+	// The AAC table includes 44100, so an unknown rate can safely fall through to the context default.
+	return rate !== undefined ? Util.Aac.pickRate(rate) : undefined;
 }
 
 // Resolve the bare codec shorthands to their full config object so callers can read fields uniformly.

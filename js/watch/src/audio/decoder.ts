@@ -277,7 +277,7 @@ export class Decoder {
 					}
 					this.#emit(data);
 				},
-				error: (error) => console.error(error),
+				error: (error) => console.error("audio decoder error", error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -323,6 +323,9 @@ export class Decoder {
 					timestamp: frame.timestamp,
 				});
 
+				// A fatal decode error closes the decoder, so decoding again throws InvalidStateError out
+				// of this loop. Stop instead: the error callback already reported the real failure.
+				if (decoder.state === "closed") break;
 				decoder.decode(chunk);
 			}
 		});
@@ -361,7 +364,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error(error),
+				error: (error) => console.error("audio decoder error", error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -510,6 +513,13 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
+	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
+	// play these streams fine, so rejecting would silence them for a publisher they handle today.
+	if (config.codec === "opus" && !Util.Opus.supportsRate(config.sampleRate)) {
+		console.warn(`audio: opus advertised at ${config.sampleRate}Hz, which some browsers cannot decode`);
+	}
+
 	// Opus in CMAF uses raw packets; dOps is not a valid OGG Identification Header.
 	let description: Uint8Array | undefined;
 	if (config.codec !== "opus") {

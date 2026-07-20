@@ -36,7 +36,7 @@ impl Resampler {
 
 		let params = SincInterpolationParameters {
 			sinc_len: 128,
-			f_cutoff: 0.95,
+			f_cutoff: Some(0.95),
 			interpolation: SincInterpolationType::Linear,
 			oversampling_factor: 128,
 			window: WindowFunction::BlackmanHarris2,
