@@ -26,7 +26,7 @@ pub(crate) struct Catalog {
 
 impl Catalog {
 	/// Snapshot the timeline for the rendition named `name`, and hold `hint` for every publish.
-	pub(crate) fn new<E: CatalogExt>(reserved: &Reserved<E>, name: &str, hint: VideoHint) -> Self {
+	pub(crate) fn new(reserved: &Reserved<impl CatalogExt>, name: &str, hint: VideoHint) -> Self {
 		Self {
 			timeline: reserved.producer().timeline(name).section(),
 			hint,
@@ -49,9 +49,9 @@ impl Catalog {
 	/// Overlay the hint and timeline onto `config` and publish it to `rendition`, unless it matches
 	/// the last publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration.
-	pub(crate) fn publish<E: CatalogExt>(
+	pub(crate) fn publish(
 		&mut self,
-		rendition: &mut VideoTrack<E>,
+		rendition: &mut VideoTrack<impl CatalogExt>,
 		mut config: hang::catalog::VideoConfig,
 	) {
 		self.hint.apply(&mut config);
