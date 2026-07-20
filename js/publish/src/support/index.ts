@@ -5,6 +5,7 @@
  * @module
  */
 import * as Util from "@moq/hang/util";
+import { Connection } from "@moq/net";
 
 export type Level = "full" | "partial" | "none";
 
@@ -92,9 +93,8 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 
 export async function isSupported(): Promise<Full> {
 	return {
-		// Firefox's WebTransport drops server-initiated bidi streams, so we force the
-		// WebSocket fallback. Report "partial" to surface the degraded path in UI.
-		webtransport: typeof WebTransport !== "undefined" ? (Util.Hacks.isFirefox ? "partial" : "full") : "partial",
+		// Report "partial" when @moq/net forces the WebSocket fallback.
+		webtransport: Connection.isWebTransportSupported() ? "full" : "partial",
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
