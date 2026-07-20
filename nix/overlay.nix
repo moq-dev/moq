@@ -55,7 +55,18 @@ let
   };
 
   moqCliArgs = crateInfo ../rs/moq-cli/Cargo.toml // {
-    src = craneLib.cleanCargoSource ../.;
+    # moq-cli's tests `include_bytes!` a fixture that lives in ANOTHER crate
+    # (rs/moq-mux/src/container/ts/test_data/bbb.ts, since #1879 moved the TS
+    # verbatim coverage there). craneLib.cleanCargoSource's default filter keeps
+    # only Cargo/Rust sources, so the fixture never reaches the sandbox and the
+    # checkPhase fails to compile the test binary. Keep the test data so the
+    # tests still run here rather than switching this package to doCheck = false.
+    src = final.lib.cleanSourceWith {
+      src = ../.;
+      name = "source";
+      filter =
+        path: type: (final.lib.hasInfix "/test_data/" path) || (craneLib.filterCargoSources path type);
+    };
     cargoExtraArgs = "-p moq-cli";
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
