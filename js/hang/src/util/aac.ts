@@ -39,7 +39,7 @@ export function supportsRate(rate: number): boolean {
  * accept the table rates, so capture at one of those instead of relying on the escape form.
  */
 export function pickRate(rate: number): number {
-	return SAMPLE_RATES.find((r) => r >= rate) ?? 96_000;
+	return SAMPLE_RATES.find((r) => r >= rate) ?? SAMPLE_RATES[SAMPLE_RATES.length - 1];
 }
 
 const AAC_LC = 2; // audioObjectType for AAC-LC

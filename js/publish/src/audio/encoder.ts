@@ -11,7 +11,6 @@ const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
 const OPUS_FRAME_DURATION_MS = 20;
-const OPUS_DEFAULT_SAMPLE_RATE = 48_000;
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 
@@ -427,7 +426,7 @@ function pickSampleRate(mime: CodecMime, requested: number | undefined): number 
 	if (mime === "opus") {
 		// An unknown rate (captureStream reports none) would let the AudioContext fall back to the
 		// machine's output rate, which is 44100 on most Macs. Ask for full-band Opus instead.
-		return Util.Opus.pickRate(rate ?? OPUS_DEFAULT_SAMPLE_RATE);
+		return Util.Opus.pickRate(rate ?? Util.Opus.DEFAULT_SAMPLE_RATE);
 	}
 
 	// The AAC table includes 44100, so an unknown rate can safely fall through to the context default.

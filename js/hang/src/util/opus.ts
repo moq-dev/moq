@@ -6,12 +6,15 @@
 // 44100 is never a valid decoder config. Chrome hides this by ignoring the configured rate; Safari
 // trusts it and fails every decode.
 
+/** Full-band Opus: its highest rate, and the one to use when the source rate is unknown. */
+export const DEFAULT_SAMPLE_RATE = 48_000;
+
 /**
  * The sample rates Opus can encode and decode at, ascending.
  *
  * Frozen because `pickRate` and `supportsRate` read this same array.
  */
-export const SAMPLE_RATES: readonly number[] = Object.freeze([8_000, 12_000, 16_000, 24_000, 48_000]);
+export const SAMPLE_RATES: readonly number[] = Object.freeze([8_000, 12_000, 16_000, 24_000, DEFAULT_SAMPLE_RATE]);
 
 /** Whether Opus can be configured at this sample rate. */
 export function supportsRate(rate: number): boolean {
@@ -24,5 +27,5 @@ export function supportsRate(rate: number): boolean {
  * source actually had.
  */
 export function pickRate(rate: number): number {
-	return SAMPLE_RATES.find((r) => r >= rate) ?? 48_000;
+	return SAMPLE_RATES.find((r) => r >= rate) ?? DEFAULT_SAMPLE_RATE;
 }
