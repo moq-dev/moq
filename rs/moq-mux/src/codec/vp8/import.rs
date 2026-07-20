@@ -17,15 +17,7 @@ pub struct Import<E: CatalogExt = ()> {
 	// This importer's catalog rendition, published on the first key frame.
 	rendition: crate::catalog::VideoTrack<E>,
 
-	// The resolved config, used to detect resolution changes.
-	config: Option<hang::catalog::VideoConfig>,
-
-	// Overlaid onto every config we publish, so a hinted field counts as supplied and is never
-	// overwritten by the rendition's detector.
-	hint: crate::catalog::VideoHint,
-	/// This rendition's timeline section, advertised on every config we publish (the generic
-	/// set() no longer does). Snapshotted at construction; the timeline track is 1:1 by name.
-	timeline: hang::catalog::Timeline,
+	catalog: crate::codec::video::Catalog,
 }
 
 impl<E: CatalogExt> Import<E> {
@@ -40,17 +32,15 @@ impl<E: CatalogExt> Import<E> {
 		hint: crate::catalog::VideoHint,
 	) -> Self {
 		let rendition = reserved.video(track.name());
-		let timeline = reserved.producer().timeline(track.name()).section();
+		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint);
 		let mut import = Self {
 			track: reserved
 				.producer()
 				.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-			config: None,
-			hint,
-			timeline,
+			catalog,
 		};
-		if let Some(config) = import.hint.to_config() {
+		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config);
 		}
 		import
@@ -83,15 +73,8 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks to reject a
 	/// reconfiguration.
-	fn apply_config(&mut self, mut config: hang::catalog::VideoConfig) {
-		self.hint.apply(&mut config);
-		config.timeline = Some(self.timeline.clone());
-		if self.config.as_ref() == Some(&config) {
-			return;
-		}
-		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone());
-		self.config = Some(config);
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+		self.catalog.publish(&mut self.rendition, config);
 	}
 
 	/// Decode a single VP8 frame.

@@ -29,13 +29,7 @@ use crate::container::Frame;
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::VideoTrack<E>,
-	config: Option<hang::catalog::VideoConfig>,
-	/// Overlaid onto every config we publish, so a hinted field counts as supplied and is never
-	/// overwritten by the rendition's detector.
-	hint: crate::catalog::VideoHint,
-	/// This rendition's timeline section, advertised on every config we publish (the generic
-	/// set() no longer does). Snapshotted at construction; the timeline track is 1:1 by name.
-	timeline: hang::catalog::Timeline,
+	catalog: crate::codec::video::Catalog,
 	last_seq: Option<Bytes>,
 }
 
@@ -51,18 +45,16 @@ impl<E: CatalogExt> Import<E> {
 		hint: crate::catalog::VideoHint,
 	) -> Self {
 		let rendition = reserved.video(track.name());
-		let timeline = reserved.producer().timeline(track.name()).section();
+		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint);
 		let mut import = Self {
 			track: reserved
 				.producer()
 				.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
-			config: None,
-			hint,
-			timeline,
+			catalog,
 			last_seq: None,
 		};
-		if let Some(config) = import.hint.to_config() {
+		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config);
 		}
 		import
@@ -180,15 +172,8 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks
 	/// to reject a reconfiguration.
-	fn apply_config(&mut self, mut config: hang::catalog::VideoConfig) {
-		self.hint.apply(&mut config);
-		config.timeline = Some(self.timeline.clone());
-		if self.config.as_ref() == Some(&config) {
-			return;
-		}
-		tracing::debug!(name = ?self.track.name(), ?config, "starting track");
-		self.rendition.set(config.clone());
-		self.config = Some(config);
+	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+		self.catalog.publish(&mut self.rendition, config);
 	}
 
 	/// Resolve the config from a sequence-header OBU, falling back to a minimal
@@ -205,7 +190,7 @@ impl<E: CatalogExt> Import<E> {
 
 		match SequenceHeaderObu::parse(header, &mut &seq_obu[payload_offset..]) {
 			Ok(seq_header) => self.init(&seq_header),
-			Err(_) if self.config.is_none() => {
+			Err(_) if !self.catalog.configured() => {
 				tracing::debug!("sequence header parse failed, using minimal config");
 				self.init_minimal();
 			}
@@ -257,7 +242,7 @@ impl<E: CatalogExt> Import<E> {
 			}
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
-			if frame.keyframe && self.config.is_none() {
+			if frame.keyframe && !self.catalog.configured() {
 				return Err(Error::MissingSequenceHeader.into());
 			}
 
