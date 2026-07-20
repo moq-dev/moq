@@ -11,16 +11,17 @@ use web_async::spawn;
 
 use crate::{COMPRESSED_SUFFIX, SessionsFrame, TrafficFrame, sessions_track, traffic_track};
 
-/// Settings for a [`Producer`]. Construct with [`Config::new`] and chain the
-/// `with_*` setters (e.g. `Config::new().with_origin(origin).with_prefix(".foo")`),
-/// then hand it to [`Producer::new`].
+/// Settings for a [`Producer`]. Construct with [`ProducerConfig::new`] and chain
+/// the `with_*` setters (e.g.
+/// `ProducerConfig::new().with_origin(origin).with_prefix(".foo")`), then hand it
+/// to [`Producer::new`].
 ///
 /// With no origin set the resulting producer is a no-op: its registry is
-/// disabled (bumps are dropped) and no task spawns. Call [`Config::with_origin`]
-/// to publish.
+/// disabled (bumps are dropped) and no task spawns. Call
+/// [`ProducerConfig::with_origin`] to publish.
 #[derive(Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct ProducerConfig {
 	/// Origin the stats broadcasts are created on.
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
@@ -47,7 +48,7 @@ pub struct Config {
 	pub depth: usize,
 }
 
-impl Config {
+impl ProducerConfig {
 	/// A config with default settings: no origin (no-op), `.stats` prefix, 1s
 	/// interval, and no node suffix. Call [`Self::with_origin`] to actually
 	/// publish.
@@ -93,7 +94,7 @@ impl Config {
 	}
 }
 
-impl Default for Config {
+impl Default for ProducerConfig {
 	fn default() -> Self {
 		Self::new()
 	}
@@ -126,8 +127,8 @@ impl Producer {
 	/// [`Producer`] clone is dropped. With no origin the producer is a no-op
 	/// (its registry is disabled, nothing is published) and no task spawns, so
 	/// it's safe to build outside an async runtime.
-	pub fn new(config: Config) -> Self {
-		let Config {
+	pub fn new(config: ProducerConfig) -> Self {
+		let ProducerConfig {
 			origin,
 			prefix,
 			node,
@@ -558,7 +559,7 @@ mod tests {
 	fn test_producer(node: Option<&str>) -> (Producer, origin::Producer) {
 		let origin = Origin::random().produce();
 		let producer = Producer::new(
-			Config::new()
+			ProducerConfig::new()
 				.with_origin(origin.clone())
 				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
 		);

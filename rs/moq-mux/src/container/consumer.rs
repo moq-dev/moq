@@ -578,7 +578,8 @@ impl GroupBuffer {
 			if !ready!(self.buffer_once(waiter, format)?) {
 				return Poll::Ready(Ok(false));
 			}
-			// poll_read returned Some(vec![]) — loop and try again
+			// poll_read returned Some(vec![]): a wire frame decoded to no media
+			// frames, so loop and try again.
 		}
 	}
 

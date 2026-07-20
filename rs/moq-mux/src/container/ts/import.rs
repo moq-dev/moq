@@ -40,7 +40,7 @@ use moq_net::Timestamp;
 /// by a program-level 'CUEI' registration descriptor, and other private sections)
 /// are intercepted before the reader and reassembled. With a base `Catalog<()>`
 /// they're logged and dropped instead.
-pub struct Import<E: catalog::Catalog = ()> {
+pub struct Import<E: catalog::Carrier = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 
@@ -105,7 +105,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	media_unwrap: PtsUnwrap,
 }
 
-impl<E: catalog::Catalog> Import<E> {
+impl<E: catalog::Carrier> Import<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let feed = Feed::default();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed
@@ -631,7 +631,7 @@ fn to_descriptors(descriptors: &[mpeg2ts::ts::Descriptor]) -> Vec<catalog::Descr
 /// Create a verbatim track and record it in the `mpegts` catalog section as a
 /// [`Track`](catalog::Track) with a `verbatim` carriage record. Shared by the
 /// section- and PES-framed paths.
-fn register_verbatim<E: catalog::Catalog>(
+fn register_verbatim<E: catalog::Carrier>(
 	broadcast: &mut moq_net::broadcast::Producer,
 	catalog: &mut crate::catalog::Producer<E>,
 	pid: u16,
@@ -664,7 +664,7 @@ fn register_verbatim<E: catalog::Catalog>(
 }
 
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
-fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
+fn unregister_verbatim<E: catalog::Carrier>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
 	if let Some(mpegts) = catalog.lock().mpegts_mut() {
 		mpegts.tracks.remove(name);
 	}
@@ -677,13 +677,13 @@ fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Produc
 /// intercepted before the mpeg2ts reader (which would PES-parse it and abort).
 /// The byte-level reassembly lives in [`SectionReassembler`]; this type owns the
 /// track and catalog entry and stamps each section with the media clock.
-struct SectionStream<E: catalog::Catalog> {
+struct SectionStream<E: catalog::Carrier> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: crate::catalog::Producer<E>,
 	reassembler: SectionReassembler,
 }
 
-impl<E: catalog::Catalog> SectionStream<E> {
+impl<E: catalog::Carrier> SectionStream<E> {
 	fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		mut catalog: crate::catalog::Producer<E>,
@@ -746,7 +746,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	}
 }
 
-impl<E: catalog::Catalog> Drop for SectionStream<E> {
+impl<E: catalog::Carrier> Drop for SectionStream<E> {
 	fn drop(&mut self) {
 		let name = self.track.name().to_string();
 		unregister_verbatim(&mut self.catalog, &name);
@@ -759,7 +759,7 @@ impl<E: catalog::Catalog> Drop for SectionStream<E> {
 ///
 /// Unlike [`SectionStream`], these ride the normal PES reassembly path, so this
 /// type only stamps each PES payload with its (unwrapped) PTS and writes it.
-struct VerbatimStream<E: catalog::Catalog> {
+struct VerbatimStream<E: catalog::Carrier> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	catalog: crate::catalog::Producer<E>,
 	unwrap: PtsUnwrap,
@@ -767,7 +767,7 @@ struct VerbatimStream<E: catalog::Catalog> {
 	stream_id_recorded: bool,
 }
 
-impl<E: catalog::Catalog> VerbatimStream<E> {
+impl<E: catalog::Carrier> VerbatimStream<E> {
 	fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		mut catalog: crate::catalog::Producer<E>,
@@ -833,7 +833,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 }
 
-impl<E: catalog::Catalog> Drop for VerbatimStream<E> {
+impl<E: catalog::Carrier> Drop for VerbatimStream<E> {
 	fn drop(&mut self) {
 		let name = self.track.name().to_string();
 		unregister_verbatim(&mut self.catalog, &name);
@@ -992,7 +992,7 @@ impl SectionReassembler {
 }
 
 /// One elementary stream's codec importer plus PTS-unwrap state.
-enum Stream<E: catalog::Catalog = ()> {
+enum Stream<E: catalog::Carrier = ()> {
 	H264 {
 		split: h264::Split,
 		import: Box<h264::Import<E>>,
@@ -1014,7 +1014,7 @@ enum Stream<E: catalog::Catalog = ()> {
 	Ignored,
 }
 
-impl<E: catalog::Catalog> Stream<E> {
+impl<E: catalog::Carrier> Stream<E> {
 	fn write(&mut self, pending: Pending, burst: Option<u64>) -> anyhow::Result<()> {
 		match self {
 			Stream::H264 { split, import, unwrap } => {

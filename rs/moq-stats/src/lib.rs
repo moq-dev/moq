@@ -52,7 +52,7 @@ mod consume;
 mod produce;
 
 pub use consume::{Consumer, ConsumerConfig, SessionsConsumer, TrafficConsumer};
-pub use produce::{Config, Producer};
+pub use produce::{Producer, ProducerConfig};
 
 use std::collections::BTreeMap;
 
@@ -71,9 +71,9 @@ pub type SessionsFrame = BTreeMap<String, Presence>;
 /// Suffix appended to a plain track name for its compressed sibling.
 pub const COMPRESSED_SUFFIX: &str = ".z";
 
-/// The traffic track name for a tier and role: `publisher.json` on the default
-/// tier, `<tier>/subscriber.json` on a named one, plus [`COMPRESSED_SUFFIX`]
-/// when `compressed`.
+/// The traffic track name for a tier and role: `<role>.json` at the prefix root
+/// on the default tier (`publisher.json` / `subscriber.json`), `<tier>/<role>.json`
+/// on a named one, plus [`COMPRESSED_SUFFIX`] when `compressed`.
 pub fn traffic_track(tier: &Tier, role: Role, compressed: bool) -> String {
 	let mut name = tier.track_name(&format!("{}.json", role.as_str()));
 	if compressed {

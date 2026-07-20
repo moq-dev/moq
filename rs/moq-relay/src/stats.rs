@@ -69,7 +69,7 @@ pub struct StatsConfig {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::Config::depth`].
+	/// stats. See [`moq_stats::ProducerConfig::depth`].
 	#[arg(long = "stats-depth", env = "MOQ_STATS_DEPTH")]
 	pub depth: Option<usize>,
 }
@@ -84,14 +84,14 @@ impl StatsConfig {
 	/// stops when the last clone drops).
 	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
 		if !self.enabled.unwrap_or(false) {
-			return moq_stats::Producer::new(moq_stats::Config::new());
+			return moq_stats::Producer::new(moq_stats::ProducerConfig::new());
 		}
 		let prefix = self.prefix.clone().unwrap_or_else(|| ".stats".to_string());
 		let interval = Duration::from_secs(self.interval.unwrap_or(1).max(1));
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth.unwrap_or(0);
 		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, "stats publishing enabled");
-		let config = moq_stats::Config::new()
+		let config = moq_stats::ProducerConfig::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
 			.with_interval(interval)

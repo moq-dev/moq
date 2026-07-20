@@ -129,7 +129,12 @@ pub struct VideoConfig {
 	///
 	/// This allows you to stretch/shrink pixels of the video.
 	/// If not provided, the display aspect ratio is 1:1
+	///
+	/// The `displayRatio*` aliases decode catalogs from publishers predating the
+	/// rename to `displayAspect*`; the current name is what we emit.
+	#[serde(alias = "displayRatioWidth")]
 	pub display_aspect_width: Option<u32>,
+	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
 	// TODO color space
@@ -221,5 +226,19 @@ mod test {
 		assert_eq!(encoded["displayAspectHeight"], 3);
 		assert!(encoded.get("displayRatioWidth").is_none());
 		assert!(encoded.get("displayRatioHeight").is_none());
+	}
+
+	#[test]
+	fn decodes_legacy_display_ratio_keys() {
+		// A catalog serialized by a pre-0.20 publisher used displayRatio*; the
+		// alias keeps the aspect ratio from being silently dropped.
+		let json = serde_json::json!({
+			"codec": "avc1.640028",
+			"displayRatioWidth": 16,
+			"displayRatioHeight": 9,
+		});
+		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode legacy keys");
+		assert_eq!(config.display_aspect_width, Some(16));
+		assert_eq!(config.display_aspect_height, Some(9));
 	}
 }

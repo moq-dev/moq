@@ -105,14 +105,14 @@ mod tests {
 
 	use moq_net::{Consume, Origin, PathOwned, announce, origin};
 
-	use crate::{Config, Producer, Tier};
+	use crate::{Producer, ProducerConfig, Tier};
 
 	use super::*;
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = Origin::random().produce();
 		let producer = Producer::new(
-			Config::new()
+			ProducerConfig::new()
 				.with_origin(origin.clone())
 				.with_node(PathOwned::from("sjc")),
 		);

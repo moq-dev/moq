@@ -148,7 +148,7 @@ impl CatalogExt for Ext {}
 ///
 /// Implement this for an application extension to compose MPEG-TS carriage with
 /// additional sections.
-pub trait Catalog: CatalogExt {
+pub trait Carrier: CatalogExt {
 	/// The section to record MPEG-TS details into, or `None` for an extension that
 	/// doesn't carry them.
 	///
@@ -158,7 +158,7 @@ pub trait Catalog: CatalogExt {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts>;
 }
 
-impl Catalog for () {
+impl Carrier for () {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		None
 	}
@@ -166,13 +166,13 @@ impl Catalog for () {
 
 // The untyped passthrough carries no typed mpegts section (a TS importer driving an `Extra`
 // catalog records verbatim streams as raw JSON sections, not the typed `Mpegts` view).
-impl Catalog for crate::catalog::hang::Extra {
+impl Carrier for crate::catalog::hang::Extra {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		None
 	}
 }
 
-impl Catalog for Ext {
+impl Carrier for Ext {
 	fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
 		Some(&mut self.mpegts)
 	}

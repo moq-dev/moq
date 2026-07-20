@@ -53,7 +53,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// The leading PAT/PMT rides on the first frame (so it inherits a real
 /// timestamp), and is re-emitted at video keyframes and periodically for
 /// mid-stream tune-in. Returns `None` when the broadcast ends.
-pub struct Export<E: catalog::Catalog = ()> {
+pub struct Export<E: catalog::Carrier = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
 	latency: Duration,
@@ -179,7 +179,7 @@ impl Export<catalog::Ext> {
 	}
 }
 
-impl<E: catalog::Catalog> Export<E> {
+impl<E: catalog::Carrier> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {

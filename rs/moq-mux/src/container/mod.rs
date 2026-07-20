@@ -94,16 +94,24 @@ pub trait Container {
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error>;
 
 	/// Poll the next moq-lite frame from `group` and decode it into media
-	/// frames. Returns `Ok(None)` when the group has ended. A single call
-	/// may produce multiple media frames (e.g. all samples in a CMAF
-	/// fragment).
+	/// frames. A single call may produce multiple media frames (e.g. all samples
+	/// in a CMAF fragment).
+	///
+	/// Only `Ok(None)` signals the end of the group. `Ok(Some(batch))` may carry
+	/// an empty `batch`: a wire frame was consumed but decoded to no media frames
+	/// (e.g. a CMAF fragment with zero samples). That is not end-of-group; poll
+	/// again for the next batch. Callers accumulating frames must not treat an
+	/// empty batch as completion.
 	fn poll_read(
 		&self,
 		group: &mut moq_net::group::Consumer,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
 
-	/// Async wrapper around [`Self::poll_read`].
+	/// Async wrapper around [`Self::poll_read`]. Carries the same contract: only
+	/// `Ok(None)` ends the group, and `Ok(Some(batch))` may hand back an empty
+	/// `batch` (poll again for more), so a caller loop must key completion off
+	/// `None`, not an empty batch.
 	fn read(
 		&self,
 		group: &mut moq_net::group::Consumer,
