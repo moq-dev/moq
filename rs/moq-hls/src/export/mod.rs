@@ -233,6 +233,7 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
+		config.timeline = Some(catalog.timeline("video0").section());
 		registration.set(config);
 		drop(reserved);
 
@@ -301,6 +302,7 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
+		config.timeline = Some(catalog.timeline("video0").section());
 		registration.set(config);
 		drop(reserved);
 
@@ -393,6 +395,7 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
+		config.timeline = Some(catalog.timeline("video0").section());
 		registration.set(config);
 		drop(reserved);
 
@@ -449,6 +452,7 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
+		config.timeline = Some(catalog.timeline("video0").section());
 		registration.set(config);
 		drop(reserved);
 
