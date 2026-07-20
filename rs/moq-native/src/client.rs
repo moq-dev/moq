@@ -458,20 +458,23 @@ impl Client {
 	}
 }
 
-/// The resource path to advertise in the lite-05 SETUP, derived from the dial URL.
+/// The resource path to advertise in the SETUP, derived from the dial URL.
 ///
 /// When `path_is_address` (Unix sockets, whose URL path is the socket file), the
 /// resource path rides in the `?path=` query; otherwise the URL path is it.
 #[cfg(any(feature = "tcp", feature = "uds"))]
 fn setup_path(url: &Url, path_is_address: bool) -> Option<String> {
-	if path_is_address {
+	let path = if path_is_address {
 		url.query_pairs()
 			.find(|(k, _)| k == "path")
 			.map(|(_, v)| v.into_owned())
 	} else {
-		let path = url.path();
-		(!path.is_empty()).then(|| path.to_string())
-	}
+		Some(url.path().to_string())
+	};
+
+	// An empty path means the same as omitting the parameter, so send neither. A peer
+	// on published lite-05 rejects an empty value outright, and `?path=` yields one.
+	path.filter(|path| !path.is_empty())
 }
 
 #[cfg(feature = "websocket")]
@@ -544,6 +547,26 @@ where
 mod tests {
 	use super::*;
 	use clap::Parser;
+
+	#[cfg(any(feature = "tcp", feature = "uds"))]
+	#[test]
+	fn setup_path_omits_an_empty_path() {
+		// An empty path and an absent one both mean the server's default, so we send
+		// neither. A peer on published lite-05 rejects an empty value outright.
+		let cases = [
+			("unix:///run/moq.sock?path=/room", true, Some("/room")),
+			("unix:///run/moq.sock?path=", true, None),
+			("unix:///run/moq.sock", true, None),
+			("tcp://localhost:4443/room", false, Some("/room")),
+			("tcp://localhost:4443", false, None),
+		];
+
+		for (url, path_is_address, want) in cases {
+			let url = Url::parse(url).unwrap();
+			let got = setup_path(&url, path_is_address);
+			assert_eq!(got.as_deref(), want, "{url}");
+		}
+	}
 
 	#[test]
 	fn test_toml_disable_verify_survives_update_from() {

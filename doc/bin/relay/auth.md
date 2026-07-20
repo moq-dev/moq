@@ -318,8 +318,8 @@ moq --client-connect "unix:///run/moq/internal.sock/?jwt=$TOKEN" --broadcast my-
 Stream transports are native-only: browsers can't open raw TCP or Unix sockets,
 so the JS client doesn't support them. The plain-stream path has no TLS ALPN, so
 the MoQ version is negotiated in-band via qmux and the exact version is agreed up
-front (the listener offers moq-lite-05, the only version that carries a request
-path in-band, so a JWT/path can ride the SETUP).
+front. The negotiated version carries the request path in its SETUP (moq-lite-05
+and the moq-transport drafts both do), so a JWT/path can ride it.
 
 ## Example Configurations
 
