@@ -351,9 +351,10 @@ impl Producer {
 		self.state.lock().closing = true;
 	}
 
-	/// Mark the broadcast as deliberately ending abnormally, without the
-	/// dropped-without-finish warning. Used by sessions tearing down announced
-	/// broadcasts when the connection dies.
+	/// Mark the broadcast as deliberately ended, without the
+	/// dropped-without-finish warning. Same effect as [`Self::finish`], but takes
+	/// `&self` for callers that can't consume the producer. Used by sessions
+	/// tearing down announced broadcasts when the connection dies.
 	pub(crate) fn abort(&self) {
 		self.state.lock().closing = true;
 	}

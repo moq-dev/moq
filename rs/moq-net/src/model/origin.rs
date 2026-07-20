@@ -822,10 +822,10 @@ impl Producer {
 	/// [`broadcast::Producer::dynamic`] handler before awaiting, so the first
 	/// consumer finds them.
 	///
-	/// End the broadcast with [`broadcast::Producer::finish`]. Either way, a
-	/// source detaching unannounces the path if it was the last one: a
-	/// replacement splices in without consumers noticing only if it attaches
-	/// before the last source detaches.
+	/// End the broadcast with [`broadcast::Producer::finish`]; dropping it
+	/// without finishing also works, but logs a warning. Either way the path
+	/// unannounces once the last source detaches, so a replacement splices in
+	/// without consumers noticing only if it attaches before that happens.
 	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope) /
