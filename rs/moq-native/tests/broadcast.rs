@@ -5,7 +5,8 @@
 //! The client connects, receives the announcement, subscribes to the track,
 //! and verifies it receives the correct payload.
 //!
-//! This covers raw QUIC (moqt://) and WebTransport (https://) transports,
+//! This covers raw QUIC (`moqt://` for IETF, `moql://` for lite) and
+//! WebTransport (`https://`) transports,
 //! exercising every protocol version the library supports.
 
 use moq_native::moq_net::{self, Origin, Track};
@@ -115,24 +116,24 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("server task failed");
 }
 
-// ── Raw QUIC (moqt://) – same version on both sides ─────────────────
+// ── Raw QUIC, same version on both sides ────────────────────────────
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_01() {
-	broadcast_test("moqt", Some("moq-lite-01"), Some("moq-lite-01")).await;
+	broadcast_test("moql", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_02() {
-	broadcast_test("moqt", Some("moq-lite-02"), Some("moq-lite-02")).await;
+	broadcast_test("moql", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_03() {
-	broadcast_test("moqt", Some("moq-lite-03"), Some("moq-lite-03")).await;
+	broadcast_test("moql", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
 #[tracing_test::traced_test]
@@ -176,19 +177,19 @@ async fn broadcast_moq_transport_19() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_01() {
-	broadcast_test("moqt", Some("moq-lite-01"), None).await;
+	broadcast_test("moql", Some("moq-lite-01"), None).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_02() {
-	broadcast_test("moqt", Some("moq-lite-02"), None).await;
+	broadcast_test("moql", Some("moq-lite-02"), None).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_03() {
-	broadcast_test("moqt", Some("moq-lite-03"), None).await;
+	broadcast_test("moql", Some("moq-lite-03"), None).await;
 }
 
 #[tracing_test::traced_test]
@@ -232,19 +233,19 @@ async fn broadcast_negotiate_server_all_client_transport_19() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_01() {
-	broadcast_test("moqt", None, Some("moq-lite-01")).await;
+	broadcast_test("moql", None, Some("moq-lite-01")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_02() {
-	broadcast_test("moqt", None, Some("moq-lite-02")).await;
+	broadcast_test("moql", None, Some("moq-lite-02")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_03() {
-	broadcast_test("moqt", None, Some("moq-lite-03")).await;
+	broadcast_test("moql", None, Some("moq-lite-03")).await;
 }
 
 #[tracing_test::traced_test]

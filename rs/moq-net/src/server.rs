@@ -67,13 +67,13 @@ impl Server {
 	/// serve, and call [`ok`](Request::ok) or [`close`](Request::close). Starting the
 	/// session is deferred to `ok()`, so origins set on the `Request` take effect.
 	///
-	/// The path is surfaced for moq-lite-05; it is `None` on versions with no in-band
-	/// request path (lite 01-04, and the IETF drafts in this build).
+	/// The path is surfaced for IETF moq-transport and moq-lite-05; it is `None` on
+	/// moq-lite-01 through 04.
 	pub async fn accept_request<S: web_transport_trait::Session>(&self, session: S) -> Result<Request<S>, Error> {
 		// Regimes without an in-band path defer to `ok()` without surfacing one.
-		let deferred = |handshake| Request {
+		let deferred = |path, handshake| Request {
 			server: self.clone(),
-			path: None,
+			path,
 			handshake,
 		};
 
@@ -82,28 +82,43 @@ impl Server {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft19))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::IetfModern {
-					session,
-					version: ietf::Version::Draft19,
-				}));
+				let (parameters, setup) = ietf::accept_setup(&session, ietf::Version::Draft19).await?;
+				return Ok(deferred(
+					ietf_path(&parameters)?,
+					Handshake::IetfModern {
+						session,
+						version: ietf::Version::Draft19,
+						setup,
+					},
+				));
 			}
 			Some(ALPN_18) => {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft18))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::IetfModern {
-					session,
-					version: ietf::Version::Draft18,
-				}));
+				let (parameters, setup) = ietf::accept_setup(&session, ietf::Version::Draft18).await?;
+				return Ok(deferred(
+					ietf_path(&parameters)?,
+					Handshake::IetfModern {
+						session,
+						version: ietf::Version::Draft18,
+						setup,
+					},
+				));
 			}
 			Some(ALPN_17) => {
 				self.versions
 					.select(Version::Ietf(ietf::Version::Draft17))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::IetfModern {
-					session,
-					version: ietf::Version::Draft17,
-				}));
+				let (parameters, setup) = ietf::accept_setup(&session, ietf::Version::Draft17).await?;
+				return Ok(deferred(
+					ietf_path(&parameters)?,
+					Handshake::IetfModern {
+						session,
+						version: ietf::Version::Draft17,
+						setup,
+					},
+				));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -144,19 +159,25 @@ impl Server {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::LiteBare {
-					session,
-					version: lite::Version::Lite04,
-				}));
+				return Ok(deferred(
+					None,
+					Handshake::LiteBare {
+						session,
+						version: lite::Version::Lite04,
+					},
+				));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
 					.select(Version::Lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
-				return Ok(deferred(Handshake::LiteBare {
-					session,
-					version: lite::Version::Lite03,
-				}));
+				return Ok(deferred(
+					None,
+					Handshake::LiteBare {
+						session,
+						version: lite::Version::Lite03,
+					},
+				));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -179,23 +200,42 @@ impl Server {
 
 		// Pull the max request ID out now (IETF only) so `ok()` doesn't re-decode the
 		// consumed parameters.
-		let request_id_max = match version {
+		let (request_id_max, path) = match version {
 			Version::Ietf(v) => {
 				let params = ietf::Parameters::decode(&mut client.parameters, v)?;
-				params
-					.get_varint(ietf::ParameterVarInt::MaxRequestId)
-					.map(ietf::RequestId)
+				(
+					params
+						.get_varint(ietf::ParameterVarInt::MaxRequestId)
+						.map(ietf::RequestId),
+					ietf_path(&params)?,
+				)
 			}
-			Version::Lite(_) => None,
+			Version::Lite(_) => (None, None),
 		};
 
-		Ok(deferred(Handshake::Legacy {
-			session,
-			stream,
-			version,
-			request_id_max,
-		}))
+		Ok(deferred(
+			path,
+			Handshake::Legacy {
+				session,
+				stream,
+				version,
+				request_id_max,
+			},
+		))
 	}
+}
+
+fn ietf_path(parameters: &ietf::Parameters) -> Result<Option<String>, Error> {
+	let Some(path) = parameters.get_bytes(ietf::ParameterBytes::Path) else {
+		return Ok(None);
+	};
+
+	let path = std::str::from_utf8(path).map_err(|_| Error::ProtocolViolation)?;
+	if !path.is_empty() && !path.starts_with('/') && !path.starts_with('?') {
+		return Err(Error::ProtocolViolation);
+	}
+
+	Ok(Some(path.to_string()))
 }
 
 /// A paused server-side handshake.
@@ -213,8 +253,12 @@ pub struct Request<S: web_transport_trait::Session> {
 /// The handshake state captured at the pause point. Every variant defers its session
 /// start to [`Request::ok`] so origins set on the `Request` still apply.
 enum Handshake<S: web_transport_trait::Session> {
-	/// Modern IETF (17/18): SETUP is exchanged in the background by the session.
-	IetfModern { session: S, version: ietf::Version },
+	/// Modern IETF (17+): the client's SETUP has already been read.
+	IetfModern {
+		session: S,
+		version: ietf::Version,
+		setup: crate::coding::Reader<S::RecvStream, Version>,
+	},
 	/// moq-lite 03/04: no Setup stream.
 	LiteBare { session: S, version: lite::Version },
 	/// moq-lite 05+: the client's Setup stream has already been read.
@@ -232,7 +276,8 @@ enum Handshake<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Request<S> {
 	/// The request path the client advertised in its SETUP, if any.
 	///
-	/// Populated for moq-lite-05; `None` on versions without an in-band request path.
+	/// Populated for IETF moq-transport and moq-lite-05; `None` on versions without
+	/// an in-band request path.
 	/// See the note on [`Server::accept_request`].
 	pub fn path(&self) -> Option<&str> {
 		self.path.as_deref()
@@ -268,12 +313,18 @@ impl<S: web_transport_trait::Session> Request<S> {
 		}
 
 		let (session, mut stream, version, request_id_max) = match self.handshake {
-			Handshake::IetfModern { session, version } => {
+			Handshake::IetfModern {
+				session,
+				version,
+				setup,
+			} => {
 				ietf::start(
 					session.clone(),
 					None,
+					Some(setup),
 					None,
 					false,
+					None,
 					server.publish,
 					server.consume,
 					server.stats,
@@ -351,8 +402,10 @@ impl<S: web_transport_trait::Session> Request<S> {
 				ietf::start(
 					session.clone(),
 					Some(stream),
+					None,
 					request_id_max,
 					false,
+					None,
 					server.publish,
 					server.consume,
 					server.stats,
@@ -518,6 +571,21 @@ mod tests {
 		buf
 	}
 
+	fn ietf_setup(version: ietf::Version, path: Option<&str>) -> Vec<u8> {
+		let mut parameters = ietf::Parameters::default();
+		if let Some(path) = path {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.as_bytes().to_vec());
+		}
+
+		let mut buf = Vec::new();
+		setup::Setup {
+			parameters: parameters.encode_bytes(version).unwrap(),
+		}
+		.encode(&mut buf, Version::Ietf(version))
+		.unwrap();
+		buf
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_path() {
 		let session = FakeSession::new(ALPN_LITE_05_WIP, [lite05_setup(Some("/team/room"))]);
@@ -551,5 +619,21 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(request.path(), Some("/team/room"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_reads_modern_ietf_path() {
+		for version in [ietf::Version::Draft17, ietf::Version::Draft18, ietf::Version::Draft19] {
+			let session = FakeSession::new(
+				Version::Ietf(version).alpn(),
+				[ietf_setup(version, Some("/anon?jwt=token"))],
+			);
+			let request = Server::new()
+				.with_versions(Version::Ietf(version).into())
+				.accept_request(session)
+				.await
+				.unwrap();
+			assert_eq!(request.path(), Some("/anon?jwt=token"), "{version}");
+		}
 	}
 }

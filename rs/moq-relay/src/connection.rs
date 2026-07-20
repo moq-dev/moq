@@ -122,13 +122,13 @@ impl Connection {
 	///
 	/// Every transport goes through the same authenticator; only the source of
 	/// the path + JWT differs:
-	/// - URL-bearing transports (QUIC, WebSocket) take it from the request URL,
-	///   and a valid mTLS client certificate (QUIC only) stands in for a JWT,
+	/// - URL-bearing WebTransport requests take it from the request URL, and a
+	///   valid mTLS client certificate stands in for a JWT,
 	///   granting full access within the URL path's root.
-	/// - Stream transports (`tcp`/`unix`) take the path + `?jwt=` from the
-	///   moq-lite-05 SETUP. A no-JWT connection resolves anonymous/public access
-	///   for its path exactly like a tokenless QUIC client (`--auth-public`).
-	///   Unix peer-credential gating happens earlier, in the listener.
+	/// - URL-less transports (raw QUIC, `tcp`, and `unix`) take the path + `?jwt=`
+	///   from SETUP. A no-JWT connection resolves anonymous/public access for its
+	///   path exactly like a tokenless WebTransport client (`--auth-public`). Unix
+	///   peer-credential gating happens earlier, in the listener.
 	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
 		let params = match self.request.url() {
 			// URL-bearing transports: mTLS (QUIC only) can stand in for a JWT.
@@ -148,7 +148,7 @@ impl Connection {
 				}
 				params
 			}
-			// URL-less stream transports: path + `?jwt=` ride the SETUP.
+			// URL-less transports: path + `?jwt=` ride the SETUP.
 			None => AuthParams::from_path(self.request.path().unwrap_or("")),
 		};
 

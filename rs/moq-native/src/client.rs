@@ -314,14 +314,15 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	fn connect_client(&self, url: &Url) -> moq_net::Client {
+	fn connect_client(&self, url: &Url, versions: &moq_net::Versions) -> moq_net::Client {
+		let client = self.moq.clone().with_versions(versions.clone());
 		if transport_carries_path(url) {
-			return self.moq.clone();
+			return client;
 		}
 
 		match request_path(url) {
-			Some(path) => self.moq.clone().with_path(path),
-			None => self.moq.clone(),
+			Some(path) => client.with_path(path),
+			None => client,
 		}
 	}
 
@@ -335,15 +336,20 @@ impl Client {
 		feature = "uds"
 	))]
 	async fn connect_inner(&self, url: Url) -> crate::Result<moq_net::Session> {
+		let versions = scheme_versions(&self.versions, &url);
+		if versions.iter().next().is_none() {
+			return Err(moq_net::Error::Version.into());
+		}
+
 		// Advertise the request path in the moq SETUP for transports that carry no
 		// request URI of their own; WebTransport and WebSocket already convey it.
-		let moq = self.connect_client(&url);
+		let moq = self.connect_client(&url, &versions);
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
+			let session = crate::tcp::connect(url, &versions.alpns()).await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -351,7 +357,7 @@ impl Client {
 		// authenticate us by uid/gid via SO_PEERCRED.
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
-			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
+			let session = crate::unix::connect(url, &versions.alpns()).await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -367,11 +373,11 @@ impl Client {
 		if let Some(noq) = self.noq.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { noq.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_handle = async { noq.connect(&tls, quic_url, &versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, &versions, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -385,11 +391,11 @@ impl Client {
 		if let Some(quinn) = self.quinn.as_ref() {
 			let tls = self.tls.clone();
 			let quic_url = url.clone();
-			let quic_handle = async { quinn.connect(&tls, quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_handle = async { quinn.connect(&tls, quic_url, &versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, &versions, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -402,11 +408,11 @@ impl Client {
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_ref() {
 			let quic_url = url.clone();
-			let quic_handle = async { quiche.connect(quic_url, &self.versions).await.map_err(Error::from) };
+			let quic_handle = async { quiche.connect(quic_url, &versions).await.map_err(Error::from) };
 
 			#[cfg(feature = "websocket")]
 			{
-				return self.race_moq_connect(&moq, url, quic_handle).await;
+				return self.race_moq_connect(&moq, &versions, url, quic_handle).await;
 			}
 
 			#[cfg(not(feature = "websocket"))]
@@ -418,7 +424,7 @@ impl Client {
 
 		#[cfg(feature = "websocket")]
 		{
-			let alpns = self.versions.alpns();
+			let alpns = versions.alpns();
 			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
 			return Ok(moq.connect(session).await?);
 		}
@@ -428,12 +434,18 @@ impl Client {
 	}
 
 	#[cfg(feature = "websocket")]
-	async fn race_moq_connect<Q, S>(&self, moq: &moq_net::Client, url: Url, quic: Q) -> crate::Result<moq_net::Session>
+	async fn race_moq_connect<Q, S>(
+		&self,
+		moq: &moq_net::Client,
+		versions: &moq_net::Versions,
+		url: Url,
+		quic: Q,
+	) -> crate::Result<moq_net::Session>
 	where
 		Q: Future<Output = crate::Result<S>>,
 		S: web_transport_trait::Session,
 	{
-		let alpns = self.versions.alpns();
+		let alpns = versions.alpns();
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
 		let websocket = async move {
@@ -447,6 +459,25 @@ impl Client {
 			TransportRace::WebSocket(websocket) => Ok(moq.connect(websocket).await?),
 		}
 	}
+}
+
+/// Restrict raw QUIC to the protocol family named by its URL scheme.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn scheme_versions(base: &moq_net::Versions, url: &Url) -> moq_net::Versions {
+	let versions = base.iter().copied().filter(|version| match url.scheme() {
+		"moqt" => version.is_ietf(),
+		"moql" => version.is_lite(),
+		_ => true,
+	});
+	moq_net::Versions::from(versions.collect::<Vec<_>>())
 }
 
 /// Whether the transport for this URL always conveys the request path itself.
@@ -485,13 +516,32 @@ fn transport_carries_path(url: &Url) -> bool {
 	feature = "uds"
 ))]
 fn request_path(url: &Url) -> Option<String> {
-	if let Some((_, path)) = url.query_pairs().find(|(key, _)| key == "path") {
-		return Some(path.into_owned());
+	let override_path = url
+		.query_pairs()
+		.find(|(key, _)| key == "path")
+		.map(|(_, path)| path.into_owned());
+
+	let mut path = match override_path {
+		Some(path) => path,
+		None if url.scheme() == "unix" => return None,
+		None => url.path().to_string(),
+	};
+
+	let query = if url.query_pairs().any(|(key, _)| key == "path") {
+		let mut query = url::form_urlencoded::Serializer::new(String::new());
+		for (key, value) in url.query_pairs().filter(|(key, _)| key != "path") {
+			query.append_pair(&key, &value);
+		}
+		query.finish()
+	} else {
+		url.query().unwrap_or_default().to_string()
+	};
+
+	if !query.is_empty() {
+		path.push('?');
+		path.push_str(&query);
 	}
-	match url.scheme() {
-		"unix" => None,
-		_ => Some(url.path().to_string()),
-	}
+	Some(path)
 }
 
 #[cfg(feature = "websocket")]
@@ -623,11 +673,37 @@ mod tests {
 		let uds = Url::parse("unix:///run/s.sock?path=/anycast").unwrap();
 		assert_eq!(uds.path(), "/run/s.sock");
 		assert_eq!(request_path(&uds).as_deref(), Some("/anycast"));
-		// ?path= overrides the URL path on any scheme.
+		// ?path= overrides the URL path on any scheme; other query parameters still
+		// ride with it because they are part of the IETF PATH option.
 		assert_eq!(
-			request_path(&Url::parse("tcp://h:1/ignored?path=/win").unwrap()).as_deref(),
-			Some("/win")
+			request_path(&Url::parse("tcp://h:1/ignored?path=/win&jwt=a%20b").unwrap()).as_deref(),
+			Some("/win?jwt=a+b")
 		);
+		assert_eq!(
+			request_path(&Url::parse("moqt://h/anon?jwt=a%20b").unwrap()).as_deref(),
+			Some("/anon?jwt=a%20b")
+		);
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn raw_quic_scheme_selects_protocol_family() {
+		let versions = moq_net::Versions::all();
+		let ietf = scheme_versions(&versions, &Url::parse("moqt://host/anon").unwrap());
+		assert!(ietf.iter().all(moq_net::Version::is_ietf));
+		assert!(ietf.iter().next().is_some());
+
+		let lite = scheme_versions(&versions, &Url::parse("moql://host/anon").unwrap());
+		assert!(lite.iter().all(moq_net::Version::is_lite));
+		assert!(lite.iter().next().is_some());
 	}
 
 	#[test]

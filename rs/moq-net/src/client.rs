@@ -51,13 +51,13 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in the SETUP (moq-lite-05).
+	/// Set the request path to advertise in the SETUP.
 	///
 	/// Required on transports that carry no request URI (native QUIC, qmux over
 	/// TCP/TLS/UDS) so the server learns which path the client wants. Omit it on
-	/// bindings that already carry a URI (WebTransport). Ignored by versions with no
-	/// Setup stream (moq-lite-01 through 04). The value is normalized to an absolute
-	/// path (empty becomes `/`, a leading `/` is prepended).
+	/// bindings that already carry a URI (WebTransport). Supported by IETF
+	/// moq-transport and moq-lite-05; ignored by moq-lite-01 through 04. The value is
+	/// normalized to an absolute path (empty becomes `/`, a leading `/` is prepended).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		let path = path.into();
 		self.path = Some(if path.is_empty() {
@@ -90,7 +90,9 @@ impl Client {
 					session.clone(),
 					None,
 					None,
+					None,
 					true,
+					self.path.clone(),
 					self.publish.clone(),
 					self.consume.clone(),
 					self.stats.clone(),
@@ -111,7 +113,9 @@ impl Client {
 					session.clone(),
 					None,
 					None,
+					None,
 					true,
+					self.path.clone(),
 					self.publish.clone(),
 					self.consume.clone(),
 					self.stats.clone(),
@@ -132,7 +136,9 @@ impl Client {
 					session.clone(),
 					None,
 					None,
+					None,
 					true,
+					self.path.clone(),
 					self.publish.clone(),
 					self.consume.clone(),
 					self.stats.clone(),
@@ -231,6 +237,9 @@ impl Client {
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
 
 		let mut parameters = ietf::Parameters::default();
+		if let Some(path) = &self.path {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.as_bytes().to_vec());
+		}
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
@@ -275,8 +284,10 @@ impl Client {
 				ietf::start(
 					session.clone(),
 					Some(stream),
+					None,
 					request_id_max,
 					true,
+					None,
 					self.publish.clone(),
 					self.consume.clone(),
 					self.stats.clone(),
@@ -523,5 +534,36 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn no_alpn_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(None).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn legacy_ietf_setup_includes_path() {
+		for ietf_version in [ietf::Version::Draft14, ietf::Version::Draft15, ietf::Version::Draft16] {
+			let version = Version::Ietf(ietf_version);
+			let mut response = Vec::new();
+			setup::Server {
+				version: version.into(),
+				parameters: ietf::Parameters::default().encode_bytes(ietf_version).unwrap(),
+			}
+			.encode(&mut response, version)
+			.unwrap();
+
+			let fake = FakeSession::new(Some(version.alpn()), response);
+			Client::new()
+				.with_versions(version.into())
+				.with_path("/anon?jwt=token")
+				.connect(fake.clone())
+				.await
+				.unwrap();
+
+			let mut bytes = Bytes::from(fake.control_writes());
+			let mut setup = setup::Client::decode(&mut bytes, version).unwrap();
+			let parameters = ietf::Parameters::decode(&mut setup.parameters, ietf_version).unwrap();
+			assert_eq!(
+				parameters.get_bytes(ietf::ParameterBytes::Path),
+				Some(b"/anon?jwt=token".as_ref()),
+				"{ietf_version}"
+			);
+		}
 	}
 }

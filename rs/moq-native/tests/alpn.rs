@@ -9,7 +9,7 @@
 //! request instead of TLS ALPN, but serves the same purpose.
 
 /// Spin up a server and client both restricted to the given version,
-/// and verify the handshake completes over raw QUIC (moqt:// URL).
+/// and verify the handshake completes over the matching raw QUIC scheme.
 async fn connect_with_version(version: &str) {
 	let version: moq_native::moq_net::Version = version.parse().expect("invalid version");
 
@@ -33,8 +33,9 @@ async fn connect_with_version(version: &str) {
 
 	let client = client_config.init().expect("failed to init client");
 
-	// Use raw QUIC URL so ALPN negotiation is direct (no WebTransport framing).
-	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+	// Use raw QUIC so ALPN negotiation is direct (no WebTransport framing).
+	let scheme = if version.is_lite() { "moql" } else { "moqt" };
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
 
 	// Run server accept and client connect concurrently.
 	let server_handle = tokio::spawn(async move {

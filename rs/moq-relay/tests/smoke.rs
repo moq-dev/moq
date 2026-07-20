@@ -407,6 +407,74 @@ async fn spawn_stream_relay(config: moq_native::ServerConfig) -> tokio::task::Jo
 	})
 }
 
+/// Stand up a raw-QUIC relay that grants anonymous access only below `/anon`.
+async fn spawn_ietf_quic_relay() -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	let mut server = server_config.init().expect("server init");
+	let port = server.local_addr().expect("local addr").port();
+
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec!["anon".to_string()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public = Some(public);
+	let auth = auth_config
+		.init(&moq_native::tls::Client::default())
+		.await
+		.expect("auth init");
+	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+
+	let handle = tokio::spawn(async move {
+		let mut id = 0;
+		while let Some(request) = server.accept().await {
+			let connection = Connection {
+				id,
+				request,
+				cluster: cluster.clone(),
+				auth: auth.clone(),
+			};
+			id += 1;
+			tokio::spawn(async move {
+				let _ = connection.run().await;
+			});
+		}
+	});
+
+	(port, handle)
+}
+
+/// A raw-QUIC IETF client must stay connected when `/anon` is granted publicly.
+/// This fails if relay authorization runs before the server reads PATH from SETUP.
+#[tokio::test]
+async fn ietf_raw_quic_uses_path_for_anonymous_auth() {
+	let (port, relay) = spawn_ietf_quic_relay().await;
+
+	let mut config = moq_native::ClientConfig::default();
+	config.tls.disable_verify = Some(true);
+	config.bind = "127.0.0.1:0".parse().unwrap();
+	let origin = Origin::random().produce();
+	let session = config
+		.init()
+		.expect("client init")
+		.with_consume(origin)
+		.connect(format!("moqt://localhost:{port}/anon").parse().unwrap())
+		.await
+		.expect("client connect");
+
+	assert!(
+		tokio::time::timeout(Duration::from_millis(500), session.closed())
+			.await
+			.is_err(),
+		"relay rejected the anonymous IETF session"
+	);
+
+	drop(session);
+	relay.abort();
+}
+
 /// Stand up the relay listening only on a plain-TCP qmux `--server-bind` on a
 /// free loopback port, with fully public auth (no-JWT => whole root). Returns
 /// the port and an abort handle.

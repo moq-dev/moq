@@ -1,6 +1,6 @@
 use crate::{
 	Error, OriginConsumer, OriginProducer, StatsHandle,
-	coding::{Encode, Reader, Stream, Writer},
+	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
 };
@@ -13,8 +13,10 @@ use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlSt
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Option<Stream<S, Version>>,
+	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 	request_id_max: Option<RequestId>,
 	client: bool,
+	path: Option<String>,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
@@ -40,7 +42,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				tokio::select! {
 					Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
-					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version, None) => Err(err),
 					Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = publisher.run() => Err(err),
 					Err(err) = async {
@@ -69,7 +71,7 @@ pub fn start<S: web_transport_trait::Session>(
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version).await {
+						if let Err(err) = run_setup(session, version, path).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -83,7 +85,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut sub_ns = subscriber.clone();
 
 				tokio::select! {
-					Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
+					Err(err) = run_unis(session.clone(), subscriber.clone(), version, peer_setup) => Err(err),
 					Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = publisher.run() => Err(err),
 					Err(err) = async {
@@ -120,13 +122,20 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version) -> Result<(), Error> {
+async fn run_setup<S: web_transport_trait::Session>(
+	session: S,
+	version: Version,
+	path: Option<String>,
+) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	let send = session.open_uni().await.map_err(Error::from_transport)?;
 	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version);
 
 	let mut parameters = ietf::Parameters::default();
+	if let Some(path) = path {
+		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
+	}
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 	let parameters = parameters.encode_bytes(version)?;
 
@@ -139,6 +148,33 @@ async fn run_setup<S: web_transport_trait::Session>(session: S, version: Version
 	Ok(())
 }
 
+/// Read the peer's draft-17+ SETUP before the session starts.
+///
+/// The returned reader remains positioned after SETUP so the session can continue
+/// monitoring the same control stream for GOAWAY.
+pub(crate) async fn accept_setup<S: web_transport_trait::Session>(
+	session: &S,
+	version: Version,
+) -> Result<(ietf::Parameters, Reader<S::RecvStream, crate::Version>), Error> {
+	let outer_version = crate::Version::Ietf(version);
+
+	loop {
+		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
+		let mut reader = Reader::new(recv, outer_version);
+		let kind: u64 = reader.decode_peek().await?;
+
+		if kind != setup::SETUP_V17 {
+			// Nothing may be served before the request path has been authorized.
+			reader.abort(&Error::Cancel);
+			continue;
+		}
+
+		let mut setup = reader.decode::<setup::Setup>().await?;
+		let parameters = ietf::Parameters::decode(&mut setup.parameters, version)?;
+		return Ok((parameters, reader));
+	}
+}
+
 /// Accept incoming uni streams and dispatch each to a handler.
 ///
 /// For v17, this also handles the SETUP stream (0x2F00) and GOAWAY.
@@ -147,8 +183,17 @@ async fn run_unis<S: web_transport_trait::Session>(
 	session: S,
 	subscriber: Subscriber<S>,
 	version: Version,
+	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
+
+	if let Some(reader) = peer_setup {
+		web_async::spawn(async move {
+			if let Err(err) = run_goaway(reader.with_version(version), version).await {
+				tracing::warn!(%err, "goaway error");
+			}
+		});
+	}
 
 	loop {
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;

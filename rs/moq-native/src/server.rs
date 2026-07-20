@@ -521,9 +521,25 @@ impl Server {
 						let alpns = versions.alpns();
 						self.accept.push(async move {
 							let noq = super::noq::NoqRequest::accept(_conn, alpns).await?;
+							let url = noq.url().cloned();
+							let identity = noq.peer_identity();
+							if url.is_some() {
+								return Ok(Request {
+									server,
+									transport: "quic",
+									url,
+									identity,
+									kind: RequestKind::NoqPending(Box::new(noq)),
+								});
+							}
+							let session = noq.ok().await.map_err(crate::noq::Error::Server)?;
+							let request = server.accept_request(session).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Noq(Box::new(noq)),
+								transport: "quic",
+								url,
+								identity,
+								kind: RequestKind::Noq(Box::new(request)),
 							})
 						}.boxed());
 					}
@@ -534,9 +550,25 @@ impl Server {
 						let alpns = versions.alpns();
 						self.accept.push(async move {
 							let quinn = super::quinn::QuinnRequest::accept(_conn, alpns).await?;
+							let url = quinn.url().cloned();
+							let identity = quinn.peer_identity();
+							if url.is_some() {
+								return Ok(Request {
+									server,
+									transport: "quic",
+									url,
+									identity,
+									kind: RequestKind::QuinnPending(Box::new(quinn)),
+								});
+							}
+							let session = quinn.ok().await.map_err(crate::quinn::Error::Server)?;
+							let request = server.accept_request(session).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Quinn(Box::new(quinn)),
+								transport: "quic",
+								url,
+								identity,
+								kind: RequestKind::Quinn(Box::new(request)),
 							})
 						}.boxed());
 					}
@@ -547,9 +579,24 @@ impl Server {
 						let alpns = versions.alpns();
 						self.accept.push(async move {
 							let quiche = super::quiche::QuicheRequest::accept(_conn, alpns).await?;
+							let url = quiche.url().cloned();
+							if url.is_some() {
+								return Ok(Request {
+									server,
+									transport: "quic",
+									url,
+									identity: None,
+									kind: RequestKind::QuichePending(Box::new(quiche)),
+								});
+							}
+							let session = quiche.ok().await.map_err(crate::quiche::Error::Accept)?;
+							let request = server.accept_request(session).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Quiche(Box::new(quiche)),
+								transport: "quic",
+								url,
+								identity: None,
+								kind: RequestKind::Quiche(Box::new(request)),
 							})
 						}.boxed());
 					}
@@ -558,9 +605,24 @@ impl Server {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
 						let iroh = super::iroh::Request::accept(_conn).await?;
+						let url = iroh.url().cloned();
+						if url.is_some() {
+							return Ok(Request {
+								server,
+								transport: "iroh",
+								url,
+								identity: None,
+								kind: RequestKind::IrohPending(Box::new(iroh)),
+							});
+						}
+						let session = iroh.ok().await.map_err(crate::iroh::Error::Server)?;
+						let request = server.accept_request(session).await?;
 						Ok(Request {
 							server,
-							kind: RequestKind::Iroh(Box::new(iroh)),
+							transport: "iroh",
+							url,
+							identity: None,
+							kind: RequestKind::Iroh(Box::new(request)),
 						})
 					}.boxed());
 				}
@@ -570,6 +632,9 @@ impl Server {
 						Ok(session) => {
 							return Some(Request {
 								server,
+								transport: "websocket",
+								url: None,
+								identity: None,
 								kind: RequestKind::WebSocket(Box::new(session)),
 							});
 						}
@@ -655,10 +720,10 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 
 /// The version set offered on stream (`tcp://`/`unix://`) listeners.
 ///
-/// A URL-less transport carries the request path in the moq-lite-05 SETUP, the
-/// only version that expresses one, so it is offered on top of the configured
-/// versions even though it's work-in-progress (and thus absent from the default
-/// ALPN set). Older versions still work for clients that need no path.
+/// A URL-less transport carries the request path in SETUP. Configured IETF
+/// versions already support it; moq-lite-05 is offered on top of the configured
+/// versions even though it is work-in-progress and absent from the default ALPN
+/// set. Older lite versions still work for clients that need no path.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 	let mut versions: Vec<moq_net::Version> = base.iter().copied().collect();
@@ -828,7 +893,10 @@ fn spawn_stream_request(
 			Ok(request) => {
 				let request = Request {
 					server: moq_net::Server::new(),
-					kind: RequestKind::Stream(Box::new(StreamRequest { request, transport })),
+					transport,
+					url: None,
+					identity: None,
+					kind: RequestKind::Qmux(Box::new(request)),
 				};
 				let _ = tx.send(request).await;
 			}
@@ -837,278 +905,277 @@ fn spawn_stream_request(
 	});
 }
 
-/// A stream (`tcp://`/`unix://`) request: the moq SETUP has already been read so
-/// its in-band path is available for authorization before accepting.
-#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-pub(crate) struct StreamRequest {
-	request: moq_net::Request<qmux::Session>,
-	transport: &'static str,
-}
-
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(Box<crate::noq::NoqRequest>),
+	Noq(Box<moq_net::Request<web_transport_noq::Session>>),
+	#[cfg(feature = "noq")]
+	NoqPending(Box<crate::noq::NoqRequest>),
 	#[cfg(feature = "quinn")]
-	Quinn(Box<crate::quinn::QuinnRequest>),
+	Quinn(Box<moq_net::Request<web_transport_quinn::Session>>),
+	#[cfg(feature = "quinn")]
+	QuinnPending(Box<crate::quinn::QuinnRequest>),
 	#[cfg(feature = "quiche")]
-	Quiche(Box<crate::quiche::QuicheRequest>),
+	Quiche(Box<moq_net::Request<web_transport_quiche::Connection>>),
+	#[cfg(feature = "quiche")]
+	QuichePending(Box<crate::quiche::QuicheRequest>),
 	#[cfg(feature = "iroh")]
-	Iroh(Box<crate::iroh::Request>),
+	Iroh(Box<moq_net::Request<web_transport_iroh::Session>>),
+	#[cfg(feature = "iroh")]
+	IrohPending(Box<crate::iroh::Request>),
 	#[cfg(feature = "websocket")]
 	WebSocket(Box<qmux::Session>),
-	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-	Stream(Box<StreamRequest>),
+	#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+	Qmux(Box<moq_net::Request<qmux::Session>>),
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
 ///
-/// [Self::with_publish] and [Self::with_consume] will configure what will be published and consumed from the session respectively.
-/// Otherwise, the Server's configuration is used by default.
+/// URL-less transports have already completed their transport handshake and
+/// exposed SETUP before this value is returned. URL-bearing WebTransport
+/// requests remain pending so [`Self::close`] can reject them with an HTTP status.
+/// [`Self::with_publish`] and [`Self::with_consume`] override the server defaults.
 pub struct Request {
 	server: moq_net::Server,
+	transport: &'static str,
+	url: Option<Url>,
+	identity: Option<crate::tls::PeerIdentity>,
 	kind: RequestKind,
 }
 
+macro_rules! request_ref {
+	($self:expr, $request:ident => $body:expr) => {
+		match &$self.kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq($request) => $body,
+			#[cfg(feature = "noq")]
+			RequestKind::NoqPending(_) => None,
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn($request) => $body,
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnPending(_) => None,
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche($request) => $body,
+			#[cfg(feature = "quiche")]
+			RequestKind::QuichePending(_) => None,
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh($request) => $body,
+			#[cfg(feature = "iroh")]
+			RequestKind::IrohPending(_) => None,
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => None,
+			#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Qmux($request) => $body,
+		}
+	};
+}
+
+macro_rules! request_configure {
+	($server:expr, $kind:expr, $request:ident => $body:expr, $configure:ident($value:expr)) => {
+		match $kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq($request) => ($server, RequestKind::Noq(Box::new($body))),
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn($request) => ($server, RequestKind::Quinn(Box::new($body))),
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche($request) => ($server, RequestKind::Quiche(Box::new($body))),
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh($request) => ($server, RequestKind::Iroh(Box::new($body))),
+			#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Qmux($request) => ($server, RequestKind::Qmux(Box::new($body))),
+			kind => ($server.$configure($value), kind),
+		}
+	};
+}
+
 impl Request {
-	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, _code: u16) -> crate::Result<()> {
+	/// Reject the session with an HTTP-style status code.
+	///
+	/// URL-bearing WebTransport requests are rejected before acceptance. Raw
+	/// transports have already been accepted so their SETUP path can be read; for
+	/// those, 401 and 403 map to MoQ Unauthorized and other values map to app codes.
+	pub async fn close(self, code: u16) -> crate::Result<()> {
+		let err = match code {
+			401 | 403 => moq_net::Error::Unauthorized,
+			other => moq_net::Error::App(other),
+		};
 		match self.kind {
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(request) => {
+			RequestKind::Noq(request) => request.close(err),
+			#[cfg(feature = "noq")]
+			RequestKind::NoqPending(request) => {
 				let status =
-					web_transport_noq::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+					web_transport_noq::http::StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await.map_err(crate::noq::Error::Server)?;
-				Ok(())
 			}
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(request) => {
+			RequestKind::Quinn(request) => request.close(err),
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnPending(request) => {
 				let status =
-					web_transport_quinn::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+					web_transport_quinn::http::StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await.map_err(crate::quinn::Error::Server)?;
-				Ok(())
 			}
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(request) => {
+			RequestKind::Quiche(request) => request.close(err),
+			#[cfg(feature = "quiche")]
+			RequestKind::QuichePending(request) => {
 				let status =
-					web_transport_quiche::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+					web_transport_quiche::http::StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode)?;
 				request.reject(status).await.map_err(crate::quiche::Error::Reject)?;
-				Ok(())
 			}
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(request) => {
+			RequestKind::Iroh(request) => request.close(err),
+			#[cfg(feature = "iroh")]
+			RequestKind::IrohPending(request) => {
 				let status =
-					web_transport_iroh::http::StatusCode::from_u16(_code).map_err(|_| Error::InvalidStatusCode)?;
+					web_transport_iroh::http::StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode)?;
 				request.close(status).await.map_err(crate::iroh::Error::Server)?;
-				Ok(())
 			}
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_session) => {
-				// WebSocket doesn't support HTTP status codes; just drop to close.
-				Ok(())
-			}
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(stream) => {
-				// A raw stream has no HTTP status; convey auth failures as the moq
-				// Unauthorized code, anything else as an app code.
-				let err = match _code {
-					401 | 403 => moq_net::Error::Unauthorized,
-					other => moq_net::Error::App(other),
-				};
-				stream.request.close(err);
-				Ok(())
-			}
+			RequestKind::WebSocket(_) => {}
+			#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Qmux(request) => request.close(err),
 		}
+		Ok(())
 	}
 
 	/// Publish the given origin to the session.
 	pub fn with_publish(self, publish: impl Into<Option<moq_net::OriginConsumer>>) -> Self {
-		let Request { server, kind } = self;
-		match kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(stream) => {
-				let StreamRequest { request, transport } = *stream;
-				Request {
-					server,
-					kind: RequestKind::Stream(Box::new(StreamRequest {
-						request: request.with_publish(publish),
-						transport,
-					})),
-				}
-			}
-			kind => Request {
-				server: server.with_publish(publish),
-				kind,
-			},
+		let Request {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let (server, kind) = request_configure!(
+			server,
+			kind,
+			request => request.with_publish(publish),
+			with_publish(publish)
+		);
+		Self {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
 		}
 	}
 
 	/// Consume the given origin from the session.
 	pub fn with_consume(self, consume: impl Into<Option<moq_net::OriginProducer>>) -> Self {
-		let Request { server, kind } = self;
-		match kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(stream) => {
-				let StreamRequest { request, transport } = *stream;
-				Request {
-					server,
-					kind: RequestKind::Stream(Box::new(StreamRequest {
-						request: request.with_consume(consume),
-						transport,
-					})),
-				}
-			}
-			kind => Request {
-				server: server.with_consume(consume),
-				kind,
-			},
+		let Request {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let (server, kind) = request_configure!(
+			server,
+			kind,
+			request => request.with_consume(consume),
+			with_consume(consume)
+		);
+		Self {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
 		}
 	}
 
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to this session.
 	pub fn with_stats(self, stats: moq_net::StatsHandle) -> Self {
-		let Request { server, kind } = self;
-		match kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(stream) => {
-				let StreamRequest { request, transport } = *stream;
-				Request {
-					server,
-					kind: RequestKind::Stream(Box::new(StreamRequest {
-						request: request.with_stats(stats),
-						transport,
-					})),
-				}
-			}
-			kind => Request {
-				server: server.with_stats(stats),
-				kind,
-			},
+		let Request {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let (server, kind) = request_configure!(
+			server,
+			kind,
+			request => request.with_stats(stats),
+			with_stats(stats)
+		);
+		Self {
+			server,
+			transport,
+			url,
+			identity,
+			kind,
 		}
 	}
 
-	/// Accept the session, performing rest of the MoQ handshake.
+	/// Accept the session, starting the MoQ session tasks.
 	pub async fn ok(self) -> crate::Result<Session> {
 		match self.kind {
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(request) => Ok(self
+			RequestKind::Noq(request) => Ok(request.ok().await?),
+			#[cfg(feature = "noq")]
+			RequestKind::NoqPending(request) => Ok(self
 				.server
 				.accept(request.ok().await.map_err(crate::noq::Error::Server)?)
 				.await?),
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(request) => Ok(self
+			RequestKind::Quinn(request) => Ok(request.ok().await?),
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnPending(request) => Ok(self
 				.server
 				.accept(request.ok().await.map_err(crate::quinn::Error::Server)?)
 				.await?),
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(request) => {
-				let conn = request.ok().await.map_err(crate::quiche::Error::Accept)?;
-				Ok(self.server.accept(conn).await?)
+			RequestKind::Quiche(request) => Ok(request.ok().await?),
+			#[cfg(feature = "quiche")]
+			RequestKind::QuichePending(request) => {
+				let session = request.ok().await.map_err(crate::quiche::Error::Accept)?;
+				Ok(self.server.accept(session).await?)
 			}
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(request) => Ok(self
+			RequestKind::Iroh(request) => Ok(request.ok().await?),
+			#[cfg(feature = "iroh")]
+			RequestKind::IrohPending(request) => Ok(self
 				.server
 				.accept(request.ok().await.map_err(crate::iroh::Error::Server)?)
 				.await?),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(session) => Ok(self.server.accept(*session).await?),
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(stream) => Ok(stream.request.ok().await?),
+			#[cfg(any(feature = "websocket", feature = "tcp", all(feature = "uds", unix)))]
+			RequestKind::Qmux(request) => Ok(request.ok().await?),
 		}
 	}
 
 	/// Returns the transport type as a string (e.g. "quic", "tcp", "unix").
 	pub fn transport(&self) -> &'static str {
-		match self.kind {
-			#[cfg(feature = "noq")]
-			RequestKind::Noq(_) => "quic",
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(_) => "quic",
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => "quic",
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => "iroh",
-			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => "websocket",
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(ref stream) => stream.transport,
-		}
+		self.transport
 	}
 
 	/// Returns the URL provided by the client, for transports that carry one.
 	///
-	/// Stream transports (`tcp`/`unix`) are URL-less; use [`Self::path`] for their
-	/// in-band request path.
+	/// Raw QUIC, WebSocket, TCP, and Unix requests expose no URL here; use
+	/// [`Self::path`] for an in-band request path when the protocol provides one.
 	pub fn url(&self) -> Option<&Url> {
-		#[cfg(not(any(
-			feature = "noq",
-			feature = "quinn",
-			feature = "quiche",
-			feature = "iroh",
-			feature = "tcp",
-			all(feature = "uds", unix)
-		)))]
-		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
-
-		#[allow(unreachable_code)]
-		match self.kind {
-			#[cfg(feature = "noq")]
-			RequestKind::Noq(ref request) => request.url(),
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.url(),
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(ref request) => request.url(),
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(ref request) => request.url(),
-			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => None,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(_) => None,
-		}
+		self.url.as_ref()
 	}
 
-	/// The in-band request path for stream transports (the moq-lite-05 SETUP
-	/// path), or `None` for URL-bearing transports (use [`Self::url`] there).
+	/// Returns the request path from SETUP, falling back to a transport URL path.
 	pub fn path(&self) -> Option<&str> {
-		match self.kind {
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(ref stream) => stream.request.path(),
-			#[allow(unreachable_patterns)]
-			_ => None,
-		}
+		request_ref!(self, request => request.path()).or(self.url.as_ref().map(Url::path))
 	}
 
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Server::root`] during the handshake.
 	///
-	/// Only the Quinn and noq backends support mTLS; other backends always
-	/// return `None`. Use it to grant elevated access or to close the session
-	/// once the certificate expires (see [`crate::tls::PeerIdentity::expiry`]).
+	/// Only the Quinn and noq backends support mTLS; other backends return `None`.
+	/// Use it to grant elevated access or to close the session once the certificate
+	/// expires (see [`crate::tls::PeerIdentity::expiry`]).
 	pub fn peer_identity(&self) -> Option<crate::tls::PeerIdentity> {
-		match self.kind {
-			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(ref request) => request.peer_identity(),
-			#[cfg(feature = "noq")]
-			RequestKind::Noq(ref request) => request.peer_identity(),
-			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => None,
-			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => None,
-			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => None,
-			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-			RequestKind::Stream(_) => None,
-			#[cfg(not(any(
-				feature = "noq",
-				feature = "quinn",
-				feature = "quiche",
-				feature = "iroh",
-				feature = "websocket",
-				feature = "tcp",
-				all(feature = "uds", unix)
-			)))]
-			_ => None,
-		}
+		self.identity.clone()
 	}
 
 	/// Whether the peer presented a valid client certificate during the handshake.

@@ -147,6 +147,56 @@ async fn connect_test(config: ConnectTest<'_>) {
 		.expect("server task failed");
 }
 
+/// Verify a raw QUIC client's IETF PATH option is available before the server
+/// accepts or rejects the paused MoQ request.
+#[cfg(any(feature = "quinn", feature = "noq"))]
+async fn ietf_path_test(backend: moq_native::QuicBackend) {
+	let version: moq_native::moq_net::Version = "moq-transport-19".parse().unwrap();
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("127.0.0.1:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.backend = Some(backend.clone());
+	server_config.version = vec![version];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.backend = Some(backend);
+	client_config.bind = "127.0.0.1:0".parse().unwrap();
+	client_config.version = vec![version];
+	let client = client_config.init().expect("failed to init client");
+	let url = format!("moqt://localhost:{}/anon?jwt=test-token", addr.port())
+		.parse()
+		.unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		assert_eq!(request.url(), None, "raw QUIC must not synthesize a request URL");
+		assert_eq!(request.path(), Some("/anon?jwt=test-token"));
+		request.close(403).await.unwrap();
+	});
+
+	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+	server_handle.await.expect("server task panicked");
+}
+
+#[cfg(feature = "quinn")]
+#[tokio::test]
+async fn quinn_raw_quic_ietf_path() {
+	ietf_path_test(moq_native::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "noq")]
+#[tokio::test]
+async fn noq_raw_quic_ietf_path() {
+	ietf_path_test(moq_native::QuicBackend::Noq).await;
+}
+
 /// Generate a CA, a server cert + key, and a client cert + key (all PEM, the
 /// leaf certs signed by the CA) written to a tempdir. Returns the dir plus the
 /// five paths so the caller can wire them into the TLS configs.
