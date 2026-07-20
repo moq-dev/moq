@@ -234,7 +234,7 @@ async fn forward(
 				Ok(state) => {
 					let connection = match state {
 						moq_native::Status::Connected => ConnectionStatus::Connected,
-						moq_native::Status::Disconnected => ConnectionStatus::Disconnected,
+						_ => ConnectionStatus::Disconnected,
 					};
 					status.set(connection, reconnect.version().map(|v| v.to_string()));
 					match state {
