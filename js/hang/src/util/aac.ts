@@ -15,6 +15,30 @@ const SAMPLE_RATE_INDEX: Record<number, number> = {
 	7350: 12,
 };
 
+// The table's rates, ascending. Derived from the index table above so the two can't drift.
+const SAMPLE_RATES_ASC = Object.keys(SAMPLE_RATE_INDEX)
+	.map(Number)
+	.sort((a, b) => a - b);
+
+/** The sample rates the AAC sampling frequency table lists, ascending. */
+export const SAMPLE_RATES: readonly number[] = SAMPLE_RATES_ASC;
+
+/** Whether the sample rate is one the AAC sampling frequency table lists. */
+export function supportsRate(rate: number): boolean {
+	return SAMPLE_RATE_INDEX[rate] !== undefined;
+}
+
+/**
+ * Snap an arbitrary sample rate up to the nearest rate in the AAC sampling frequency table, falling
+ * back to the highest (96 kHz) for anything above it.
+ *
+ * `audioSpecificConfig` can describe an off-table rate via its escape form, but encoders only
+ * accept the table rates, so capture at one of those instead of relying on the escape form.
+ */
+export function pickRate(rate: number): number {
+	return SAMPLE_RATES_ASC.find((r) => r >= rate) ?? 96_000;
+}
+
 const AAC_LC = 2; // audioObjectType for AAC-LC
 
 // Map a channel count to its AAC channelConfiguration (ISO 14496-3 Table 1.19). Configs 1..=6 are

@@ -1,5 +1,33 @@
 import { describe, expect, it } from "bun:test";
-import { audioSpecificConfig } from "./aac";
+import { audioSpecificConfig, pickRate, SAMPLE_RATES, supportsRate } from "./aac";
+
+describe("pickRate", () => {
+	// 44.1kHz is in the AAC table, unlike Opus, so it must survive untouched.
+	it("leaves the table rates alone", () => {
+		for (const rate of SAMPLE_RATES) {
+			expect(pickRate(rate)).toBe(rate);
+		}
+	});
+
+	it("snaps an off-table rate up to the next one", () => {
+		expect(pickRate(44101)).toBe(48000);
+		expect(pickRate(20000)).toBe(22050);
+	});
+
+	it("falls back to the highest rate above the table", () => {
+		expect(pickRate(192000)).toBe(96000);
+	});
+});
+
+describe("supportsRate", () => {
+	it("accepts 44.1kHz", () => {
+		expect(supportsRate(44100)).toBe(true);
+	});
+
+	it("rejects an off-table rate", () => {
+		expect(supportsRate(44101)).toBe(false);
+	});
+});
 
 describe("audioSpecificConfig", () => {
 	// Well-known AAC-LC AudioSpecificConfig values.

@@ -19,11 +19,14 @@ function installFakeWebAudio() {
 	// Never resolves during the test, so the spawned worklet load stays pending until teardown.
 	const addModule = () => new Promise<void>(() => {});
 	let audioWorkletNodes = 0;
+	const requestedRates: (number | undefined)[] = [];
 
 	class FakeAudioContext {
 		state: AudioContextState = "suspended";
 		audioWorklet = { addModule };
-		constructor(_options?: AudioContextOptions) {}
+		constructor(options?: AudioContextOptions) {
+			requestedRates.push(options?.sampleRate);
+		}
 		close(): Promise<void> {
 			// Firefox/Safari behavior: stays "suspended", never "closed".
 			return Promise.resolve();
@@ -67,6 +70,9 @@ function installFakeWebAudio() {
 		get audioWorkletNodes() {
 			return audioWorkletNodes;
 		},
+		get requestedRates() {
+			return requestedRates;
+		},
 		[Symbol.dispose]() {
 			for (const [name, original] of originals) {
 				if (original) Object.defineProperty(globalThis, name, original);
@@ -76,10 +82,10 @@ function installFakeWebAudio() {
 	};
 }
 
-function fakeSource() {
+function fakeSource(sampleRate: number | undefined = 48_000) {
 	return {
 		kind: "audio",
-		getSettings: () => ({ deviceId: "", groupId: "", sampleRate: 48_000 }),
+		getSettings: () => ({ deviceId: "", groupId: "", sampleRate }),
 		getConstraints: () => ({}),
 	} as unknown as MediaStreamTrack;
 }
@@ -106,4 +112,43 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 
 	expect(webaudio.audioWorkletNodes).toBe(0);
 	expect(error).not.toHaveBeenCalled();
+});
+
+// Regression: a Bluetooth mic on macOS reports 44100 after an A2DP flip. Capturing at that rate means
+// the encoder silently resamples to 48000 while the catalog advertises 44100, which no Opus decoder can
+// honor: Safari's AudioDecoder fails every decode with InternalAudioDecoderCocoa.
+async function requestedRate(sampleRate: number | undefined, codec?: "opus" | "aac") {
+	using webaudio = installFakeWebAudio();
+
+	const encoder = new Encoder({
+		enabled: true,
+		source: new Signal(fakeSource(sampleRate)) as never,
+		...(codec ? { codec } : {}),
+	});
+	await settle();
+	encoder.close();
+	await settle();
+
+	return webaudio.requestedRates.at(-1);
+}
+
+test("snaps the capture rate to one Opus supports", async () => {
+	expect(await requestedRate(44_100)).toBe(48_000);
+	expect(await requestedRate(22_050)).toBe(24_000);
+});
+
+test("leaves an Opus-native capture rate alone", async () => {
+	expect(await requestedRate(16_000)).toBe(16_000);
+	expect(await requestedRate(48_000)).toBe(48_000);
+});
+
+// captureStream() tracks report no rate, which would otherwise let the AudioContext fall back to the
+// machine's output rate (44100 on most Macs).
+test("requests full-band Opus when the source reports no rate", async () => {
+	expect(await requestedRate(undefined)).toBe(48_000);
+});
+
+// 44100 is in the AAC sampling frequency table, so it must survive untouched.
+test("leaves an AAC-native capture rate alone", async () => {
+	expect(await requestedRate(44_100, "aac")).toBe(44_100);
 });
