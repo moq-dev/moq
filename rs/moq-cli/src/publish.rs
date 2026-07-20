@@ -136,7 +136,7 @@ enum PublishDecoder {
 	Fmp4(Box<fmp4::Import>),
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so it uses the `mpegts` catalog extension rather than the media-only `()`.
-	Ts(Box<ts::Import<ts::catalog::Ext>>),
+	Ts(Box<ts::Import<ts::Ext>>),
 	Flv(Box<flv::Import>),
 }
 
@@ -225,7 +225,7 @@ impl Publish {
 		if let PublishFormat::Ts = format {
 			let catalog = moq_mux::catalog::Producer::with_catalog(
 				&mut broadcast,
-				moq_mux::catalog::hang::Catalog::<ts::catalog::Ext>::default(),
+				moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
 			)?;
 			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
 			return Ok(Self {
@@ -436,7 +436,7 @@ mod tests {
 	use bytes::BytesMut;
 	use moq_mux::catalog::CatalogFormat;
 	use moq_mux::catalog::hang::{Catalog, Container};
-	use moq_mux::container::ts::{Export, Import, catalog as tscat};
+	use moq_mux::container::ts::{self as tscat, Export, Import};
 	use moq_mux::container::{Consumer, Frame, Producer};
 	use moq_net::Timestamp;
 
