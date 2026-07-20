@@ -18,6 +18,8 @@ mod consumer;
 pub(crate) mod jitter;
 mod producer;
 mod source;
+#[cfg(test)]
+pub(crate) mod test_util;
 
 pub mod flv;
 pub mod fmp4;

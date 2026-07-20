@@ -461,10 +461,10 @@ impl<S: Stream> Export<S> {
 	/// *previous* cluster; the new frame becomes the first block of a new
 	/// open cluster).
 	fn feed_frame(&mut self, name: &str, frame: Frame) -> Result<Option<Bytes>> {
-		let track = self.tracks.get(name).ok_or(Error::MissingTrack)?;
+		let track = self.tracks.get_mut(name).ok_or(Error::MissingTrack)?;
 		let track_number = track.track_number;
-		let kind = track.kind;
-		let payload = &frame.payload;
+		let is_video = track.kind == TrackKind::Video;
+		let keyframe = frame.keyframe;
 
 		// MKV's wire scale is ms (TIMESTAMP_SCALE_NS = 1_000_000). Re-express the
 		// frame's timestamp directly at MILLI rather than going through micros.
@@ -474,9 +474,21 @@ impl<S: Stream> Export<S> {
 			.try_into()
 			.map_err(|_| Error::TimestampU64)?;
 
-		let is_video = kind == TrackKind::Video;
-		let keyframe = frame.keyframe;
+		// A zero cap means one cluster per frame. Emit immediately instead of
+		// holding the frame until its successor rolls the cluster.
+		if self.fragment_duration == Some(Duration::ZERO) {
+			// A reconfiguration can leave a cluster open. Roll it out first and
+			// retry this frame on the next poll.
+			if let Some(open) = self.cluster.take() {
+				track.pending = Some(frame);
+				return Ok(Some(open.finish()));
+			}
+			let mut cluster = ClusterBuilder::new(frame_ticks);
+			cluster.append(track_number, frame_ticks, keyframe, &frame.payload, is_video)?;
+			return Ok(Some(cluster.finish()));
+		}
 
+		let payload = &frame.payload;
 		let roll_over = match &self.cluster {
 			None => true,
 			Some(cluster) => {
@@ -485,12 +497,9 @@ impl<S: Stream> Export<S> {
 				// frames in it — otherwise audio that arrived before the first
 				// keyframe would split into its own (un-renderable) cluster.
 				let gop_boundary = is_video && keyframe && cluster.has_video;
-				// Optional time-based cap. Some(ZERO) means per-frame.
-				let too_long = match self.fragment_duration {
-					Some(d) if d.is_zero() => !cluster.body.is_empty(),
-					Some(d) => frame_ticks.saturating_sub(cluster.start_ticks) >= d.as_millis() as u64,
-					None => false,
-				};
+				let too_long = self
+					.fragment_duration
+					.is_some_and(|d| frame_ticks.saturating_sub(cluster.start_ticks) >= d.as_millis() as u64);
 				overflow || gop_boundary || too_long
 			}
 		};
