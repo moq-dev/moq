@@ -74,10 +74,10 @@ int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
-int32_t moq_consume_frame_close(uint32_t frame);
+int32_t moq_consume_frame_free(uint32_t frame);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
-int32_t moq_consume_track_frame_close(uint32_t frame);
+int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_close(uint32_t track);
 ```
 

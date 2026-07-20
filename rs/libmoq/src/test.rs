@@ -431,7 +431,7 @@ fn catalog_section_roundtrip() {
 	let catalog_id = id(catalog_cb.recv());
 
 	// Both sections come back; iterate by index to find each by name.
-	let count = moq_catalog_section_count(catalog_id);
+	let count = moq_consume_catalog_section_count(catalog_id);
 	assert_eq!(count, 2, "expected two sections, got {count}");
 
 	let mut found_a = false;
@@ -443,7 +443,10 @@ fn catalog_section_roundtrip() {
 			json: std::ptr::null(),
 			json_len: 0,
 		};
-		assert_eq!(unsafe { moq_catalog_section_at(catalog_id, index, &mut section) }, 0);
+		assert_eq!(
+			unsafe { moq_consume_catalog_section_at(catalog_id, index, &mut section) },
+			0
+		);
 		let name = unsafe { std::slice::from_raw_parts(section.name.cast::<u8>(), section.name_len) };
 		let json = unsafe { std::slice::from_raw_parts(section.json.cast::<u8>(), section.json_len) };
 		match name {
@@ -466,7 +469,7 @@ fn catalog_section_roundtrip() {
 		len: 0,
 	};
 	assert_eq!(
-		unsafe { moq_catalog_get_section(catalog_id, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) },
+		unsafe { moq_consume_catalog_section(catalog_id, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) },
 		0
 	);
 	let got = unsafe { std::slice::from_raw_parts(value.data.cast::<u8>(), value.len) };
@@ -475,8 +478,9 @@ fn catalog_section_roundtrip() {
 	// A missing section fails.
 	let missing = b"nope";
 	assert!(
-		unsafe { moq_catalog_get_section(catalog_id, missing.as_ptr() as *const c_char, missing.len(), &mut value) }
-			< 0,
+		unsafe {
+			moq_consume_catalog_section(catalog_id, missing.as_ptr() as *const c_char, missing.len(), &mut value)
+		} < 0,
 		"missing section should fail"
 	);
 
@@ -487,12 +491,13 @@ fn catalog_section_roundtrip() {
 	);
 	let catalog_id2 = id(catalog_cb.recv());
 	assert_eq!(
-		moq_catalog_section_count(catalog_id2),
+		moq_consume_catalog_section_count(catalog_id2),
 		1,
 		"one section should remain after remove"
 	);
 	assert!(
-		unsafe { moq_catalog_get_section(catalog_id2, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) } < 0,
+		unsafe { moq_consume_catalog_section(catalog_id2, name_a.as_ptr() as *const c_char, name_a.len(), &mut value) }
+			< 0,
 		"removed section should be gone"
 	);
 
@@ -635,7 +640,7 @@ fn raw_track_publish_consume() {
 	assert_eq!(received, payload);
 	assert_eq!(frame.timestamp_us, timestamp_us);
 	assert!(!frame.keyframe, "raw frames have no keyframe flag");
-	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	// Multi-frame group via the explicit group API.
 	let group = id(moq_publish_track_group(track));
@@ -660,7 +665,7 @@ fn raw_track_publish_consume() {
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		assert_eq!(received, expected);
 		assert_eq!(frame.timestamp_us, timestamp_us);
-		assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_track_close(consumer), 0);
@@ -724,7 +729,7 @@ fn raw_track_datagram_publish_consume() {
 	assert_eq!(received, payload);
 	assert_eq!(datagram.timestamp_us, 120_000);
 	assert_eq!(datagram.sequence, sequence);
-	assert_eq!(moq_consume_datagram_close(dg_id), 0);
+	assert_eq!(moq_consume_datagram_free(dg_id), 0);
 
 	assert_eq!(moq_consume_datagrams_close(consumer), 0);
 	// The task delivers one final terminal callback after close; drain it
@@ -830,7 +835,7 @@ fn raw_track_subscription_options_and_update() {
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"one");
 	assert_eq!(frame.timestamp_us, 20_000);
-	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	let update = moq_subscription {
 		group_end: 2,
@@ -849,7 +854,7 @@ fn raw_track_subscription_options_and_update() {
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, b"two");
 	assert_eq!(frame.timestamp_us, 40_000);
-	assert_eq!(moq_consume_track_frame_close(frame_id), 0);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	assert_eq!(moq_consume_track_close(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -909,7 +914,7 @@ fn json_snapshot_publish_consume() {
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
 			serde_json::from_str::<serde_json::Value>(expected).unwrap()
 		);
-		assert_eq!(moq_consume_json_value_close(value_id), 0);
+		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
 	assert_eq!(moq_consume_json_close(consumer), 0);
@@ -972,7 +977,7 @@ fn json_stream_publish_consume() {
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
 			serde_json::from_str::<serde_json::Value>(expected).unwrap()
 		);
-		assert_eq!(moq_consume_json_value_close(value_id), 0);
+		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
 	assert_eq!(moq_consume_json_close(consumer), 0);
@@ -991,7 +996,7 @@ fn close_invalid_or_zero_ids() {
 	assert!(moq_session_close(9999) < 0);
 	assert!(moq_publish_finish(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
-	assert!(moq_consume_frame_close(9999) < 0);
+	assert!(moq_consume_frame_free(9999) < 0);
 
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
@@ -1091,8 +1096,8 @@ fn double_close_all_resource_types() {
 	);
 	let frame_id = id(frame_cb.recv());
 
-	assert_eq!(moq_consume_frame_close(frame_id), 0);
-	assert!(moq_consume_frame_close(frame_id) < 0);
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert!(moq_consume_frame_free(frame_id) < 0);
 
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
@@ -1281,7 +1286,7 @@ fn local_publish_consume() {
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
 
-	assert_eq!(moq_consume_frame_close(frame_id), 0);
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -1473,7 +1478,7 @@ fn video_publish_consume() {
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
-	assert_eq!(moq_consume_frame_close(frame_id), 0);
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
 	assert_eq!(moq_consume_video_close(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "video close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -1637,7 +1642,7 @@ fn multiple_frames_ordering() {
 		let expected = format!("frame-{i}");
 		assert_eq!(received, expected.as_bytes(), "frame {i} has wrong payload");
 
-		assert_eq!(moq_consume_frame_close(frame_id), 0);
+		assert_eq!(moq_consume_frame_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_audio_close(track), 0);

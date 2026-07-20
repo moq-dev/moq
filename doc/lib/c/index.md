@@ -202,7 +202,7 @@ moq_publish_json_snapshot_update(json, value, strlen(value));
 
 // Subscribe: on_value fires with a value ID for each update; read it, then release it.
 int32_t task = moq_consume_json_snapshot(consume, "status", strlen("status"), &config, on_value, user_data);
-// In on_value: struct moq_json_value v; moq_consume_json_value(id, &v); ... moq_consume_json_value_close(id);
+// In on_value: struct moq_json_value v; moq_consume_json_value(id, &v); ... moq_consume_json_value_free(id);
 ```
 
 `compression` must match on the producer and subscriber. The consumer callback follows the same lifetime contract as every other (see above): release `user_data` on the terminal `<= 0` call.

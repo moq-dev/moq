@@ -98,7 +98,7 @@ The catalog is a JSON document published through the merge-patch snapshot helper
   A base consumer ignores them; an extension reads its own section and treats its absence as "not present".
   In TypeScript, build an extended schema with `z.extend(Catalog.RootSchema, { scte35: ... })`.
   In Rust, either flatten the catalog into your own struct with `#[serde(flatten)]` for typed access, or read sections untyped from an `Extra` catalog, which keeps unknown keys as raw JSON (`catalog.section("scte35")`). The `()` default drops sections it doesn't model.
-  The FFI bindings always use the untyped form, one JSON string per section keyed by name (`catalog.sections["scte35"]` in Python, `moq_catalog_get_section()` / `moq_catalog_section_at()` in C).
+  The FFI bindings always use the untyped form, one JSON string per section keyed by name (`catalog.sections["scte35"]` in Python, `moq_consume_catalog_section()` / `moq_consume_catalog_section_at()` in C).
 - **Writing**: the catalog producer holds one shared document.
   Each owner edits only its own keys and publishes: `producer.mutate(c => { c.scte35 = ... })` in TypeScript; the `Deref`/`DerefMut` lock guard from `producer.lock()` for a typed Rust extension, or `producer.set_section("scte35", value)` for an untyped one; `broadcast.set_catalog_section("scte35", value)` in Python; `moq_publish_catalog_section()` in C.
   Every edit starts from the latest value, so the base media sections and any extension sections compose instead of clobbering one another.

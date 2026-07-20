@@ -45,7 +45,7 @@ static void on_frame(void *ud, int32_t frame) {
         pthread_cond_signal(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
-    moq_consume_frame_close((uint32_t)frame);
+    moq_consume_frame_free((uint32_t)frame);
 }
 
 // Delivers the broadcast handle once it's announced, then once more with a

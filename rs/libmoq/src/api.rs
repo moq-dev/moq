@@ -907,8 +907,8 @@ pub unsafe extern "C" fn moq_publish_audio_remove(broadcast: u32, name: *const c
 
 /// Set (or replace) a top-level application catalog section by name.
 ///
-/// This is the producer counterpart to [moq_catalog_get_section] /
-/// [moq_catalog_section_at]: it writes an arbitrary top-level JSON key into the
+/// This is the producer counterpart to [moq_consume_catalog_section] /
+/// [moq_consume_catalog_section_at]: it writes an arbitrary top-level JSON key into the
 /// catalog of a broadcast created with [moq_origin_publish], beyond the
 /// `video`/`audio` keys owned by the media pipeline. Calling it again with the
 /// same name replaces the section. The updated catalog is published to
@@ -1354,12 +1354,12 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// Number of untyped application catalog sections in a catalog snapshot.
 ///
 /// These are the top-level catalog keys beyond `video`/`audio`, carried through
-/// verbatim. Iterate them by index with [moq_catalog_section_at], or look one up
-/// directly by name with [moq_catalog_get_section].
+/// verbatim. Iterate them by index with [moq_consume_catalog_section_at], or look one up
+/// directly by name with [moq_consume_catalog_section].
 ///
 /// Returns the count (>= 0) on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_catalog_section_count(catalog: u32) -> i32 {
+pub extern "C" fn moq_consume_catalog_section_count(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_section_count(catalog)
@@ -1369,7 +1369,7 @@ pub extern "C" fn moq_catalog_section_count(catalog: u32) -> i32 {
 /// Query an application catalog section by index, keyed by name.
 ///
 /// Fills `dst` with the section's name and JSON value at `index`, in the range
-/// `[0, moq_catalog_section_count)`. Both pointers borrow the snapshot's storage
+/// `[0, moq_consume_catalog_section_count)`. Both pointers borrow the snapshot's storage
 /// and stay valid until it is freed with [moq_consume_catalog_free].
 ///
 /// Returns a zero on success, or a negative code on failure (e.g. `index` out of
@@ -1379,7 +1379,7 @@ pub extern "C" fn moq_catalog_section_count(catalog: u32) -> i32 {
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_section] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_catalog_section_at(catalog: u32, index: u32, dst: *mut moq_section) -> i32 {
+pub unsafe extern "C" fn moq_consume_catalog_section_at(catalog: u32, index: u32, dst: *mut moq_section) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
@@ -1402,7 +1402,7 @@ pub unsafe extern "C" fn moq_catalog_section_at(catalog: u32, index: u32, dst: *
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_string] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_catalog_get_section(
+pub unsafe extern "C" fn moq_consume_catalog_section(
 	catalog: u32,
 	name: *const c_char,
 	name_len: usize,
@@ -1509,7 +1509,7 @@ pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 /// Read the payload of a frame as a single contiguous slice.
 ///
 /// Frames are not chunked; the entire payload is delivered through `dst.payload` /
-/// `dst.payload_size` in one call. The pointer is valid until [`moq_consume_frame_close`]
+/// `dst.payload_size` in one call. The pointer is valid until [`moq_consume_frame_free`]
 /// is called for this frame.
 ///
 /// Returns a zero on success, or a negative code on failure.
@@ -1525,11 +1525,11 @@ pub unsafe extern "C" fn moq_consume_frame(frame: u32, dst: *mut moq_frame) -> i
 	})
 }
 
-/// Close a frame and clean up its resources.
+/// Free a decoded frame delivered via a [moq_consume_video] or [moq_consume_audio] callback.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_frame_close(frame: u32) -> i32 {
+pub extern "C" fn moq_consume_frame_free(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		State::lock().consume.frame_close(frame)
@@ -1556,7 +1556,7 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 /// `on_frame` is never called again and `user_data` is never touched again, so
 /// release `user_data` there. The terminal callback fires even after
 /// [moq_consume_track_close]. Read each frame with [moq_consume_track_frame] and
-/// release it with [moq_consume_track_frame_close]. Pass NULL for `subscription`
+/// release it with [moq_consume_track_frame_free]. Pass NULL for `subscription`
 /// to use moq-net defaults.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
@@ -1603,7 +1603,7 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 /// Read a raw frame's payload delivered via the [moq_consume_track] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_frame_close]. `dst.timestamp_us` is the
+/// frame is released with [moq_consume_frame_free]. `dst.timestamp_us` is the
 /// frame presentation timestamp in microseconds. `dst.keyframe` is reported as
 /// false because raw tracks do not parse codec metadata.
 ///
@@ -1620,11 +1620,11 @@ pub unsafe extern "C" fn moq_consume_track_frame(frame: u32, dst: *mut moq_frame
 	})
 }
 
-/// Close a raw frame and clean up its resources.
+/// Free a raw frame delivered via the [moq_consume_track] callback, releasing its payload.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_track_frame_close(frame: u32) -> i32 {
+pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		State::lock().consume.raw_frame_close(frame)
@@ -1637,7 +1637,7 @@ pub extern "C" fn moq_consume_track_frame_close(frame: u32) -> i32 {
 /// Does NOT free `user_data`; the [moq_consume_track] `on_frame` callback still
 /// fires once more with a terminal `0` (or a negative error), which is where
 /// `user_data` should be released. Frames already delivered via the callback
-/// remain valid until released with [moq_consume_track_frame_close].
+/// remain valid until released with [moq_consume_track_frame_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 	ffi::enter(move || {
@@ -1654,7 +1654,7 @@ pub extern "C" fn moq_consume_track_close(track: u32) -> i32 {
 /// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
 /// touched again, so release `user_data` there. The terminal callback fires even after
 /// [moq_consume_datagrams_close]. Read each datagram with [moq_consume_datagram] and release
-/// it with [moq_consume_datagram_close]. Datagrams arrive only over datagram-capable
+/// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
 /// transports and lite-05 or newer moq-lite; there is no stream fallback.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
@@ -1681,7 +1681,7 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 /// Read a datagram delivered via the [moq_consume_datagrams] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
-/// [moq_consume_datagram_close]), plus `dst.timestamp_us` and `dst.sequence`.
+/// [moq_consume_datagram_free]), plus `dst.timestamp_us` and `dst.sequence`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1696,11 +1696,11 @@ pub unsafe extern "C" fn moq_consume_datagram(datagram: u32, dst: *mut moq_datag
 	})
 }
 
-/// Close a datagram and clean up its resources.
+/// Free a datagram delivered via the [moq_consume_datagrams] callback, releasing its payload.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_datagram_close(datagram: u32) -> i32 {
+pub extern "C" fn moq_consume_datagram_free(datagram: u32) -> i32 {
 	ffi::enter(move || {
 		let datagram = ffi::parse_id(datagram)?;
 		State::lock().consume.datagram_close(datagram)
@@ -1712,7 +1712,7 @@ pub extern "C" fn moq_consume_datagram_close(datagram: u32) -> i32 {
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
 /// `user_data`; the [moq_consume_datagrams] `on_datagram` callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be released. Datagrams
-/// already delivered via the callback remain valid until released with [moq_consume_datagram_close].
+/// already delivered via the callback remain valid until released with [moq_consume_datagram_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
 	ffi::enter(move || {
@@ -1727,7 +1727,7 @@ pub extern "C" fn moq_consume_datagrams_close(task: u32) -> i32 {
 /// falls behind collapses the backlog and only sees the newest. It is called exactly once more
 /// with a terminal `0` (track ended / closed) or a negative error, after which `user_data` is
 /// never touched again, so release it there. Read each value with [moq_consume_json_value] and
-/// release it with [moq_consume_json_value_close]. Pass the same compression the producer used.
+/// release it with [moq_consume_json_value_free]. Pass the same compression the producer used.
 ///
 /// Returns a non-zero handle to the task on success, or a negative code on failure.
 ///
@@ -1758,7 +1758,7 @@ pub unsafe extern "C" fn moq_consume_json_snapshot(
 ///
 /// `on_value` is called with a positive value ID for each record, in order, then once more with
 /// a terminal `0` or negative error where `user_data` should be released. Read each value with
-/// [moq_consume_json_value] and release it with [moq_consume_json_value_close].
+/// [moq_consume_json_value] and release it with [moq_consume_json_value_free].
 ///
 /// Returns a non-zero handle to the task on success, or a negative code on failure.
 ///
@@ -1787,7 +1787,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 /// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
 /// Fills `dst.json` / `dst.json_len`; the pointer is valid until the value is released with
-/// [moq_consume_json_value_close].
+/// [moq_consume_json_value_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -1806,7 +1806,7 @@ pub unsafe extern "C" fn moq_consume_json_value(value: u32, dst: *mut moq_json_v
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_json_value_close(value: u32) -> i32 {
+pub extern "C" fn moq_consume_json_value_free(value: u32) -> i32 {
 	ffi::enter(move || {
 		let value = ffi::parse_id(value)?;
 		State::lock().consume.json_value_close(value)
@@ -1818,7 +1818,7 @@ pub extern "C" fn moq_consume_json_value_close(value: u32) -> i32 {
 /// Returns immediately: zero on success, or a negative code if already closed. Does NOT free
 /// `user_data`; the `on_value` callback still fires once more with a terminal `0` (or a negative
 /// error), which is where `user_data` should be released. Values already delivered remain valid
-/// until released with [moq_consume_json_value_close].
+/// until released with [moq_consume_json_value_free].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_json_close(task: u32) -> i32 {
 	ffi::enter(move || {

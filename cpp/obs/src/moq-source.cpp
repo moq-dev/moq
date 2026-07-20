@@ -539,7 +539,7 @@ static void on_video_frame(void *user_data, int32_t frame_id)
 	if (ctx->shutting_down.load() || ctx->consume < 0) {
 		// Shutting down or disconnected: drop the frame.
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 	pthread_mutex_unlock(&ctx->mutex);
@@ -1020,7 +1020,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 {
 	// Fast path: check atomic flag before taking lock
 	if (ctx->shutting_down.load()) {
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1029,7 +1029,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	// Double-check after acquiring lock (may have changed)
 	if (ctx->shutting_down.load()) {
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1037,7 +1037,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	// Note: sws_ctx and frame_buffer may be NULL on first frame - they're created dynamically
 	if (!ctx->codec_ctx) {
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1046,7 +1046,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	if (moq_consume_frame(frame_id, &frame_data) < 0) {
 		LOG_ERROR("Failed to get frame data");
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1058,7 +1058,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 				 ctx->frames_waiting_for_keyframe);
 		}
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1079,7 +1079,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1110,7 +1110,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			}
 		}
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1118,7 +1118,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1143,7 +1143,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 		}
 		av_frame_free(&frame);
 		pthread_mutex_unlock(&ctx->mutex);
-		moq_consume_frame_close(frame_id);
+		moq_consume_frame_free(frame_id);
 		return;
 	}
 
@@ -1173,7 +1173,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			LOG_ERROR("Invalid decoded frame dimensions: %dx%d", frame->width, frame->height);
 			av_frame_free(&frame);
 			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_close(frame_id);
+			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1182,7 +1182,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			LOG_ERROR("Invalid decoded frame pixel format: %d", decoded_pix_fmt);
 			av_frame_free(&frame);
 			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_close(frame_id);
+			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1203,7 +1203,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 								       : "unknown");
 			av_frame_free(&frame);
 			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_close(frame_id);
+			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1216,7 +1216,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 			sws_freeContext(new_sws_ctx);
 			av_frame_free(&frame);
 			pthread_mutex_unlock(&ctx->mutex);
-			moq_consume_frame_close(frame_id);
+			moq_consume_frame_free(frame_id);
 			return;
 		}
 
@@ -1252,7 +1252,7 @@ static void moq_source_decode_frame(struct moq_source *ctx, int32_t frame_id)
 
 	av_frame_free(&frame);
 	pthread_mutex_unlock(&ctx->mutex);
-	moq_consume_frame_close(frame_id);
+	moq_consume_frame_free(frame_id);
 }
 
 // Registration function
