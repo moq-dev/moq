@@ -350,11 +350,22 @@ struct OriginBroadcast {
 /// build-stable. Mixing the name in spreads equal routes across different
 /// upstreams rather than funneling onto one.
 fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
-	// FNV-1a, not the std hasher: its output is fixed across Rust versions and
-	// builds, which matters when nodes run mismatched binaries during a rolling
-	// deploy and still need to agree on the same route. SEED is a custom basis
-	// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
-	// the standard FNV-64 prime and should stay put.
+	(hops.len(), fnv_key(name, hops.iter().copied()))
+}
+
+/// FNV-1a over the broadcast name and a sequence of origin ids.
+///
+/// FNV-1a, not the std hasher: its output is fixed across Rust versions and
+/// builds, which matters when nodes run mismatched binaries during a rolling
+/// deploy and still need to agree on the same route. SEED is a custom basis
+/// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
+/// the standard FNV-64 prime and should stay put.
+///
+/// Two callers, two different id sequences: [`route_key`] hashes a route's hop
+/// chain to pick among *routes*, and [`FrontState::handover_allowed`] hashes a
+/// single relay's origin to pick among *relays*. Mixing the name in spreads
+/// equal candidates across different winners rather than funneling onto one.
+fn fnv_key(name: &Path, origins: impl IntoIterator<Item = Origin>) -> u64 {
 	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -362,18 +373,23 @@ fn route_key(name: &Path, hops: &OriginList) -> (usize, u64) {
 	for &byte in name.as_str().as_bytes() {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
-	for hop in hops {
-		for &byte in &hop.id().to_le_bytes() {
+	for origin in origins {
+		for &byte in &origin.id().to_le_bytes() {
 			hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 		}
 	}
 
-	(hops.len(), hash)
+	hash
 }
 
 /// Full ordering key for a [`broadcast::Route`]: announced routes first (an
-/// actively published source beats an offline one), then cost (the publisher's
-/// own preference), then the [`route_key`] hop ordering. Lower wins.
+/// actively published source beats an offline one), then the marginal cost of
+/// pulling via the route, then the [`route_key`] hop ordering. Lower wins.
+///
+/// Hop length stays the tie-break below cost, so peers that never carry a cost
+/// (pre-lite-06, or a plain local publish) rank exactly as they did before route
+/// cost existed, and equal-cost warm copies resolve to the closest one, which
+/// bounds same-datacenter chains to a single hop.
 fn route_order(name: &Path, route: &broadcast::Route) -> (bool, u64, usize, u64) {
 	let (len, hash) = route_key(name, &route.hops);
 	(!route.announce, route.cost, len, hash)
@@ -967,6 +983,8 @@ struct FrontRoute {
 struct FrontState {
 	/// Absolute path of the broadcast, mixed into the route tie-break hash.
 	path: PathOwned,
+	/// The local origin's identity, the other half of the handover key gate.
+	self_origin: Origin,
 	next_route: u64,
 	routes: Vec<FrontRoute>,
 	/// The source tracks are dispatched to. Backups park until promoted.
@@ -989,8 +1007,50 @@ impl FrontState {
 
 	/// Re-pick the active source after the table changed. Serve tasks watch
 	/// `active` and re-splice on their own.
-	fn reselect(&mut self) {
-		self.active = self.best_route();
+	///
+	/// `carrying` is whether the front currently has live demand (the spliced
+	/// broadcast is active). While it does, a strictly cheaper announced route may
+	/// only displace an announced incumbent when [`Self::handover_allowed`] says
+	/// so. This is the symmetry break for the simultaneous-activation race: two
+	/// nodes that each pulled the broadcast before seeing the other both advertise
+	/// zero cost, so each sees the other as cheaper than its own source. Without
+	/// the gate both re-parent at once and the broadcast is left with no upstream
+	/// at all; with it, exactly one moves (make-before-break via the usual splice)
+	/// and the other keeps its source.
+	fn reselect(&mut self, carrying: bool) {
+		let best = self.best_route();
+		if carrying
+			&& let (Some(best_id), Some(cur_id)) = (best, self.active)
+			&& best_id != cur_id
+			&& let Some(candidate) = self.routes.iter().find(|r| r.id == best_id)
+			&& let Some(incumbent) = self.routes.iter().find(|r| r.id == cur_id)
+			&& incumbent.route.announce
+			&& candidate.route.cost < incumbent.route.cost
+			&& !self.handover_allowed(&candidate.route)
+		{
+			// We lost the key comparison: stay put and let the peer come to us.
+			return;
+		}
+		self.active = best;
+	}
+
+	/// Whether re-parenting onto `route` is allowed while actively carrying: the
+	/// announcing peer (the chain's last hop) must hash strictly below our own
+	/// origin for this broadcast name.
+	///
+	/// Both sides compute the same two keys (the hash is build-stable and the
+	/// inputs are shared), so the comparison resolves the same way everywhere:
+	/// the lower-keyed node keeps its source, the higher-keyed one re-parents.
+	/// A strict total order has no cycles, so mutual pulls cannot happen. Mixing
+	/// the broadcast name in spreads ownership across a region's relays instead
+	/// of funneling every broadcast onto the lowest-keyed one. A route with no
+	/// hops is a local publish and always allowed.
+	fn handover_allowed(&self, route: &broadcast::Route) -> bool {
+		let name = self.path.as_path();
+		match route.hops.iter().last() {
+			Some(peer) => fnv_key(&name, [*peer]) < fnv_key(&name, [self.self_origin]),
+			None => true,
+		}
 	}
 
 	/// The active source's route, advertised on the front's broadcast. The caller
@@ -1040,12 +1100,13 @@ fn detach_source(
 	graceful: bool,
 ) {
 	let close = {
+		let carrying = broadcast.is_active();
 		let Ok(mut s) = state.write() else { return };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
 			return;
 		};
 		s.routes.remove(pos);
-		s.reselect();
+		s.reselect(carrying);
 		if graceful && s.routes.is_empty() && !s.closed {
 			// Deliberate end: close now. The front task observes `closed` and
 			// finishes the teardown (unpublish).
@@ -1092,6 +1153,7 @@ async fn run_source(
 		match source.route_changed().await {
 			Ok(route) => {
 				{
+					let carrying = broadcast.is_active();
 					let Ok(mut s) = state.write() else { return };
 					let Some(entry) = s.routes.iter_mut().find(|r| r.id == id) else {
 						return;
@@ -1100,7 +1162,7 @@ async fn run_source(
 						continue;
 					}
 					entry.route = route;
-					s.reselect();
+					s.reselect(carrying);
 				}
 				sync_front(&state, &broadcast, &leaf);
 			}
@@ -1131,6 +1193,7 @@ fn attach_source(
 	// down, or awaiting teardown) is replaced below instead.
 	if let Some(existing) = &leaf_guard.broadcast {
 		let mut joined = None;
+		let carrying = existing.broadcast.is_active();
 		if let Ok(mut s) = existing.state.write()
 			&& !s.closed
 		{
@@ -1141,7 +1204,7 @@ fn attach_source(
 				route: route.clone(),
 				source: source.clone(),
 			});
-			s.reselect();
+			s.reselect(carrying);
 			joined = Some(id);
 		}
 		if let Some(id) = joined {
@@ -1159,6 +1222,7 @@ fn attach_source(
 	let _ = broadcast.clone().set_route(route.clone());
 	let state = kio::Producer::new(FrontState {
 		path: full.clone(),
+		self_origin: origin.id,
 		next_route: 1,
 		routes: vec![FrontRoute {
 			id: 0,
@@ -2195,6 +2259,125 @@ mod tests {
 		broadcast::Route::new().with_announce(true)
 	}
 
+	/// The first origin whose handover key for `name` sits above (`true`) or below
+	/// (`false`) the peer's, so tests exercising the carrying gate are
+	/// deterministic instead of hinging on a random id winning a hash comparison.
+	/// Starts searching above the small ids the tests use in hop chains, so the
+	/// result never collides with a hop (a looping chain trips a debug_assert).
+	fn origin_keyed(name: &str, peer: Origin, above: bool) -> Origin {
+		let name = Path::new(name);
+		let peer_key = fnv_key(&name, [peer]);
+		(100u64..)
+			.map(|id| Origin::new(id).unwrap())
+			.find(|origin| (fnv_key(&name, [*origin]) > peer_key) == above)
+			.unwrap()
+	}
+
+	/// A front table for reselect tests: routes get ids in order, the first is
+	/// the incumbent.
+	fn front_state(self_origin: Origin, routes: Vec<broadcast::Route>) -> FrontState {
+		let source = broadcast::Info::new().produce().consume();
+		FrontState {
+			path: Path::new("test").to_owned(),
+			self_origin,
+			next_route: routes.len() as u64,
+			routes: routes
+				.into_iter()
+				.enumerate()
+				.map(|(id, route)| FrontRoute {
+					id: id as u64,
+					route,
+					source: source.clone(),
+				})
+				.collect(),
+			active: Some(0),
+			closed: false,
+		}
+	}
+
+	/// A route as a warm sibling would announce it: zero cost, chain ending at
+	/// the announcing peer.
+	fn sibling_route(peer: Origin) -> broadcast::Route {
+		let hops = OriginList::try_from(vec![Origin::new(90).unwrap(), peer]).unwrap();
+		announce().with_hops(hops)
+	}
+
+	/// A route as the upstream announces it: priced, one hop.
+	fn upstream_route(cost: u64) -> broadcast::Route {
+		let hops = OriginList::try_from(vec![Origin::new(90).unwrap()]).unwrap();
+		announce().with_hops(hops).with_cost(cost)
+	}
+
+	/// While carrying, a strictly cheaper route from a peer that hashes above us
+	/// must not displace the incumbent; the same table re-parents freely once
+	/// idle, or when the peer hashes below us.
+	#[test]
+	fn test_carrying_gate_keys() {
+		let peer = Origin::new(3).unwrap();
+
+		// We lose the key comparison: stay put while carrying, migrate when idle.
+		let mut lost = front_state(
+			origin_keyed("test", peer, false),
+			vec![upstream_route(10), sibling_route(peer)],
+		);
+		lost.reselect(true);
+		assert_eq!(
+			lost.active,
+			Some(0),
+			"carrying front re-parented onto a higher-keyed peer"
+		);
+		lost.reselect(false);
+		assert_eq!(lost.active, Some(1), "idle front must take the cheaper route");
+
+		// We win the key comparison: re-parent even while carrying.
+		let mut won = front_state(
+			origin_keyed("test", peer, true),
+			vec![upstream_route(10), sibling_route(peer)],
+		);
+		won.reselect(true);
+		assert_eq!(won.active, Some(1), "carrying front must follow a lower-keyed peer");
+	}
+
+	/// The simultaneous-activation race: two relays that each pulled the same
+	/// broadcast independently see each other's zero-cost route. Exactly one of
+	/// them re-parents; the other keeps its upstream, so the broadcast is never
+	/// left without a source.
+	#[test]
+	fn test_carrying_gate_symmetric_race() {
+		let a = Origin::new(1).unwrap();
+		let b = Origin::new(2).unwrap();
+
+		let mut a_view = front_state(a, vec![upstream_route(10), sibling_route(b)]);
+		let mut b_view = front_state(b, vec![upstream_route(10), sibling_route(a)]);
+		a_view.reselect(true);
+		b_view.reselect(true);
+
+		let a_moved = a_view.active == Some(1);
+		let b_moved = b_view.active == Some(1);
+		assert!(
+			a_moved != b_moved,
+			"exactly one side must re-parent (a: {a_moved}, b: {b_moved})"
+		);
+	}
+
+	/// The gate only protects an announced incumbent: one that lost its announce
+	/// (the upstream retracted) is displaced regardless of the key comparison.
+	#[test]
+	fn test_carrying_gate_ignores_unannounced_incumbent() {
+		let peer = Origin::new(3).unwrap();
+		let unannounced = upstream_route(10).with_announce(false);
+		let mut state = front_state(
+			origin_keyed("test", peer, false),
+			vec![unannounced, sibling_route(peer)],
+		);
+		state.reselect(true);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"an unannounced incumbent must always be displaced"
+		);
+	}
+
 	/// Let the spawned origin tasks (source watchers, front dispatch) run. The
 	/// tests pause tokio time, so this advances the clock without reaching the
 	/// 5-second failure linger.
@@ -2461,7 +2644,10 @@ mod tests {
 	async fn test_route_cost_update() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		// The takeover happens while a subscriber is live (carrying), so the local
+		// origin must win the handover key comparison against B's announcing hop
+		// (origin 3); a random id would flake on the hash.
+		let origin = Info::new(origin_keyed("test", Origin::new(3).unwrap(), true)).produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 

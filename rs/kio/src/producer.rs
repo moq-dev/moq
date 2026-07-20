@@ -194,6 +194,14 @@ impl<T> Producer<T> {
 		Poll::Pending
 	}
 
+	/// Whether any consumer handle currently exists.
+	///
+	/// A point-in-time snapshot with no registration; use [`Self::poll_used`] /
+	/// [`Self::poll_unused`] to wait for the edge instead.
+	pub fn is_used(&self) -> bool {
+		self.counts.consumers.load(Ordering::Relaxed) > 0
+	}
+
 	/// Wait until at least one consumer exists.
 	///
 	/// Returns `Ok(())` when a consumer is created, or [`Closed`] if the channel closes first.

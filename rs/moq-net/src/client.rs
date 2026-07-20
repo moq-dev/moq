@@ -14,6 +14,7 @@ pub struct Client {
 	stats: stats::Handle,
 	versions: Versions,
 	setup_path: Option<String>,
+	link_cost: Option<u64>,
 }
 
 impl Client {
@@ -80,6 +81,22 @@ impl Client {
 	/// versions with no in-band request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
+		self
+	}
+
+	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+).
+	///
+	/// Every announcement crossing the connection adds this to its route cost, so
+	/// routing prefers cheap paths over short ones. Use `0` for a link that should
+	/// look free (a sibling in the same datacenter), and something large for one that
+	/// should be a last resort (a metered backbone). Defaults to
+	/// [`lite::DEFAULT_LINK_COST`], which makes the cost track the hop count and so
+	/// reproduces plain shortest-path routing.
+	///
+	/// The dialing side owns the price: it is declared in our SETUP so the server
+	/// charges the same link the same amount. A server never sets one.
+	pub fn with_link_cost(mut self, cost: u64) -> Self {
+		self.link_cost = Some(cost);
 		self
 	}
 
@@ -201,6 +218,7 @@ impl Client {
 					probe: lite::ProbeLevel::Report,
 					path: self.setup_path.clone(),
 					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
+					link_cost: self.link_cost,
 				};
 
 				let start = lite::start(

@@ -55,11 +55,20 @@ pub struct Route {
 	/// and as the selection tie-break.
 	pub hops: OriginList,
 
-	/// Preference among routes serving the same broadcast: lower wins, with ties
-	/// broken by hop length and then a deterministic hash. Lets a publisher
-	/// advertise how expensive it is to serve (e.g. a standby transcoder), and
-	/// change its mind as capacity shifts. Local for now: the wire only carries
-	/// hops, so a received route always has the default cost.
+	/// The marginal cost of pulling the broadcast via this route: lower wins, with
+	/// ties broken by hop length and then a deterministic hash.
+	///
+	/// The original publisher seeds it with its production cost (zero for a live
+	/// publish, something large for a standby that would have to start working,
+	/// like a cold transcoder). Each link adds its own configured price as the
+	/// announcement crosses it, so a route over a metered backbone ranks worse
+	/// than an equal-length one within a datacenter. A node actively carrying the
+	/// broadcast re-announces zero instead of the accumulated value: its ingress
+	/// is already paid for, so peers should pull the copy that exists rather than
+	/// open a second one all the way back.
+	///
+	/// Carried on the wire from lite-06; older peers always report zero, leaving
+	/// the hop-count tie-break as the effective metric exactly as before.
 	pub cost: u64,
 
 	/// Whether the broadcast should be announced: advertised to consumers via
@@ -165,6 +174,16 @@ impl BroadcastState {
 			None => Ok(()),
 		}
 	}
+
+	/// Live demand: a subscribed spliced track (route-fed broadcast), or a live
+	/// track producer / pending request (ordinary broadcast). See
+	/// [`Consumer::is_active`].
+	fn is_active(&self) -> bool {
+		if let Some(spliced) = &self.spliced {
+			return spliced.tracks.values().any(|track| track.is_used());
+		}
+		!self.requests.is_empty() || self.tracks.has_live()
+	}
 }
 
 /// Manages tracks within a broadcast.
@@ -227,6 +246,11 @@ impl Producer {
 
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// True while the broadcast has live demand. See [`Consumer::is_active`].
+	pub fn is_active(&self) -> bool {
+		self.state.read().is_active()
 	}
 
 	/// Remove a track from the lookup.
@@ -699,6 +723,21 @@ impl Consumer {
 		}
 
 		Ok(consumer)
+	}
+
+	/// True while the broadcast has live demand: a spliced (route-fed) broadcast
+	/// with a subscribed logical track, or an ordinary broadcast with a live
+	/// track producer or pending request.
+	///
+	/// This is the cache signal routing announces: an active broadcast's ingress
+	/// (or, for a local publisher, its production) is already paid for, so it
+	/// advertises zero marginal cost and peers pull the copy that exists. An idle
+	/// one advertises what a fresh fetch would cost. The transition back to idle
+	/// doesn't wake state watchers (dropping a consumer doesn't write the
+	/// broadcast state), so poll this on a coarse tick rather than waiting on an
+	/// edge; the tick doubles as hysteresis against viewer churn.
+	pub fn is_active(&self) -> bool {
+		self.state.read().is_active()
 	}
 
 	/// Block until the broadcast is closed (every producer dropped) and return the cause.

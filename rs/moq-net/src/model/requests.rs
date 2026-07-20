@@ -107,7 +107,6 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 	}
 
 	/// Returns `true` when nothing is pending, queued or handed out.
-	#[cfg(test)]
 	pub fn is_empty(&self) -> bool {
 		self.pending.is_empty()
 	}

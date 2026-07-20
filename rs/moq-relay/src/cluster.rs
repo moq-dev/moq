@@ -254,6 +254,13 @@ pub struct ClusterConfig {
 	/// `https://host/?jwt=TOKEN`; a bare host or `host:port` is deprecated but
 	/// still accepted (wrapped in `https://.../`). Accepts a comma-separated list
 	/// on the CLI or repeat the flag; in config files use a TOML array.
+	///
+	/// A `?link_cost=N` query param prices the link (moq-lite-06+): every
+	/// announcement crossing it adds `N` to its route cost, so routing prefers
+	/// cheap paths over short ones. Use `0` for a same-datacenter sibling and
+	/// something large for a metered backbone; an unpriced link costs 1, which
+	/// reproduces plain hop counting. The param is consumed by this relay, not
+	/// sent to the peer.
 	#[serde(alias = "connect")]
 	#[arg(
 		id = "cluster-connect",
@@ -829,6 +836,13 @@ impl Cluster {
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
 	async fn run_remote(self, remote: &str, token: String) -> anyhow::Result<()> {
 		let mut url = peer_url(remote)?;
+		// The link's price, declared by us as the dialing side and charged to
+		// every announcement crossing the connection (see
+		// `moq_net::Client::with_link_cost`). Carried as a `?link_cost=` query
+		// param on the peer URL so static lists, gossip, and connect-api feeds can
+		// each price their links: 0 for a same-datacenter sibling, higher for a
+		// metered backbone. Stripped here; the value rides SETUP, not the URL.
+		let link_cost = take_link_cost(&mut url)?;
 		// Apply the shared cluster token unless the URL already carries its own
 		// non-empty `?jwt=` (an inline token on a static `connect` peer wins; the
 		// shared token still covers discovered peers that have none). An empty
@@ -848,7 +862,7 @@ impl Cluster {
 
 		loop {
 			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url).await;
+			let result = self.run_remote_once(&url, link_cost).await;
 			let elapsed = started.elapsed();
 
 			match result {
@@ -867,7 +881,7 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remote_once(&self, url: &Url) -> anyhow::Result<()> {
+	async fn run_remote_once(&self, url: &Url, link_cost: Option<u64>) -> anyhow::Result<()> {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
@@ -879,16 +893,53 @@ impl Cluster {
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
 		// Cluster dials use their configured stats tier.
-		let cs = client
+		let mut client = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
-			.with_stats(self.stats.tier(self.cluster_tier()))
+			.with_stats(self.stats.tier(self.cluster_tier()));
+		if let Some(cost) = link_cost {
+			client = client.with_link_cost(cost);
+		}
+		let cs = client
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
 
 		Err(cs.closed().await.into())
 	}
+}
+
+/// Extract and remove the `link_cost` query param from a peer URL.
+///
+/// The param is dial-side configuration, not something the peer reads off the
+/// URL (it rides SETUP instead), so it is stripped before connecting. An
+/// unparseable value is an error rather than a silent default: a mispriced link
+/// skews routing for every broadcast crossing it.
+fn take_link_cost(url: &mut Url) -> anyhow::Result<Option<u64>> {
+	let Some(value) = url
+		.query_pairs()
+		.find_map(|(key, value)| (key == "link_cost").then(|| value.into_owned()))
+	else {
+		return Ok(None);
+	};
+	let cost: u64 = value
+		.parse()
+		.with_context(|| format!("invalid link_cost {value:?} on cluster peer URL"))?;
+
+	let remaining: Vec<(String, String)> = url
+		.query_pairs()
+		.filter(|(key, _)| key != "link_cost")
+		.map(|(key, value)| (key.into_owned(), value.into_owned()))
+		.collect();
+	url.set_query(None);
+	if !remaining.is_empty() {
+		let mut pairs = url.query_pairs_mut();
+		for (key, value) in &remaining {
+			pairs.append_pair(key, value);
+		}
+	}
+
+	Ok(Some(cost))
 }
 
 /// Whether a `--cluster-connect-api` source is an http(s) URL (otherwise it's
@@ -963,6 +1014,23 @@ where
 mod tests {
 	use super::*;
 	use crate::Config;
+
+	/// `?link_cost=` is read and stripped (it rides SETUP, not the URL), other
+	/// query params survive, and a garbage value is an error rather than a
+	/// silent default.
+	#[test]
+	fn link_cost_param_is_consumed() {
+		let mut url = Url::parse("https://peer.example/?jwt=abc&link_cost=0").unwrap();
+		assert_eq!(take_link_cost(&mut url).unwrap(), Some(0));
+		assert_eq!(url.as_str(), "https://peer.example/?jwt=abc");
+
+		let mut url = Url::parse("https://peer.example/").unwrap();
+		assert_eq!(take_link_cost(&mut url).unwrap(), None);
+		assert_eq!(url.as_str(), "https://peer.example/");
+
+		let mut url = Url::parse("https://peer.example/?link_cost=cheap").unwrap();
+		assert!(take_link_cost(&mut url).is_err());
+	}
 
 	#[test]
 	fn cluster_tier_defaults_to_unprefixed() {

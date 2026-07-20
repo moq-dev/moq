@@ -17,7 +17,7 @@ use crate::{
 	track::Subscription,
 };
 
-use super::{ConnectingProducer, Version};
+use super::{ConnectingProducer, RouteCost, Version};
 
 use web_async::Lock;
 
@@ -35,6 +35,10 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// What this session's link costs, when we are the side that dialed it and so
+	/// owns the price. `None` on an accepted session, which reads the dialer's
+	/// price out of its SETUP instead so both ends agree.
+	pub link_cost: Option<u64>,
 	/// Driver-owned scope for broadcast and track handlers.
 	pub tasks: Tasks,
 }
@@ -66,6 +70,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	/// Our own price for this link when we dialed it; `None` when we accepted and
+	/// the dialer's SETUP carries the price instead.
+	link_cost: Option<u64>,
 	tasks: Tasks,
 }
 
@@ -98,7 +105,28 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			link_cost: config.link_cost,
 			tasks: config.tasks,
+		}
+	}
+
+	/// What crossing this session's link costs, added to the route cost of every
+	/// announcement received over it.
+	///
+	/// The dialing side owns the price (it lives in its connect config) and declares
+	/// it in SETUP, so the accepting side reads it back out and both ends charge the
+	/// same amount for the same link. Falls back to [`super::DEFAULT_LINK_COST`] when
+	/// nobody priced it.
+	async fn resolve_link_cost(&self) -> u64 {
+		// Older versions carry no cost on the wire, so nothing is charged and their
+		// routes rank on hop count alone. Returning early also avoids blocking on a
+		// SETUP that versions without a Setup Stream never send.
+		if !self.version.has_route_cost() {
+			return 0;
+		}
+		match self.link_cost {
+			Some(cost) => cost,
+			None => self.peer_setup.link_cost().await.unwrap_or(super::DEFAULT_LINK_COST),
 		}
 	}
 
@@ -230,6 +258,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			(None, 0)
 		};
 
+		// What we charge every announcement arriving on this stream. Resolved once:
+		// it comes from the connect config or the peer's SETUP, neither of which
+		// changes for the life of the session.
+		let link_cost = self.resolve_link_cost().await;
+
 		let mut routes = HashMap::new();
 		// Per-broadcast subscriber-side stats guards. Dropping the guard records
 		// `subscriber.broadcasts_closed`. We only insert a guard when start_announce
@@ -267,7 +300,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					// Lite01/02 don't carry hop information; the broadcast starts with
 					// an empty chain.
-					if self.start_announce(path.clone(), crate::OriginList::new(), responder_origin, &mut routes)? {
+					if self.start_announce(
+						path.clone(),
+						crate::OriginList::new(),
+						RouteCost::default(),
+						responder_origin,
+						&mut routes,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 				}
@@ -299,7 +338,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
 			match announce {
-				lite::AnnounceBroadcast::Active { suffix, hops } => {
+				lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
 					let path = prefix.join(&suffix);
 					let abs = self.origin.absolute(&path).to_owned();
 					// Count the broadcast name length (not the encoded message size) for
@@ -320,7 +359,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 						// versions never defined restarts, so both fall through to start_announce, which
 						// rejects the duplicate (Error::Duplicate).
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut routes)? {
+						if self.restart_announce(
+							path.clone(),
+							hops,
+							cost.charged(link_cost),
+							responder_origin,
+							&mut routes,
+						)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -328,7 +373,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut routes)? {
+					} else if self.start_announce(
+						path.clone(),
+						hops,
+						cost.charged(link_cost),
+						responder_origin,
+						&mut routes,
+					)? {
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
 					}
 					// The first `initial_count` Active messages are the initial set; once
@@ -382,7 +433,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						stats_guards.remove(&abs);
 					}
 				}
-				lite::AnnounceBroadcast::Restart { id, hops } => {
+				lite::AnnounceBroadcast::Restart { id, hops, cost } => {
 					// Resolve the id; it stays live (the replacement reuses it). An unknown
 					// or retired id is a protocol violation.
 					let Some(path) = announced_by_id.get(&id).cloned() else {
@@ -393,7 +444,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						.broadcast(&abs)
 						.subscriber_announced_bytes(abs.as_str().len() as u64);
 					if routes.contains_key(&path) {
-						if self.restart_announce(path.clone(), hops, responder_origin, &mut routes)? {
+						if self.restart_announce(
+							path.clone(),
+							hops,
+							cost.charged(link_cost),
+							responder_origin,
+							&mut routes,
+						)? {
 							// Continuity: keep the existing stats guard if present.
 							stats_guards
 								.entry(abs.clone())
@@ -401,7 +458,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						} else {
 							stats_guards.remove(&abs);
 						}
-					} else if self.start_announce(path.clone(), hops, responder_origin, &mut routes)? {
+					} else if self.start_announce(
+						path.clone(),
+						hops,
+						cost.charged(link_cost),
+						responder_origin,
+						&mut routes,
+					)? {
 						// The original announce was dropped locally (e.g. a reflected loop);
 						// the replacement may be routable, so treat it as a fresh start.
 						stats_guards.insert(abs.clone(), self.stats.broadcast(&abs).subscriber());
@@ -489,6 +552,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// The route cost off the wire, plus this link's price. Zero before
+		// lite-06, leaving the hop chain as the only routing input as before.
+		cost: RouteCost,
 		// Lite05+: the announce sender's origin id (from AnnounceOk). The sender no
 		// longer stamps itself onto the chain, so we append it here to reconstruct
 		// the full `[src...sender]` chain Lite04 stored. None for older versions,
@@ -551,7 +617,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let route = crate::broadcast::Route::new().with_hops(hops).with_announce(true);
+		let route = crate::broadcast::Route::new()
+			.with_hops(hops)
+			.with_cost(cost.0)
+			.with_announce(true);
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
@@ -579,6 +648,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		path: PathOwned,
 		mut hops: crate::OriginList,
+		// The route cost off the wire, plus this link's price. See `start_announce`.
+		cost: RouteCost,
 		// Lite05+: the announce sender's origin id (from AnnounceOk), appended here to
 		// rebuild the full chain since the sender no longer stamps itself. None for older
 		// versions. See `start_announce`.
@@ -601,7 +672,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let metadata = crate::broadcast::Route::new().with_hops(hops).with_announce(true);
+		let metadata = crate::broadcast::Route::new()
+			.with_hops(hops)
+			.with_cost(cost.0)
+			.with_announce(true);
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {

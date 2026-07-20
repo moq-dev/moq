@@ -23,7 +23,16 @@ use super::Version;
 struct WatchedRoute {
 	consumer: crate::broadcast::Consumer,
 	path: crate::PathOwned,
-	sent: Option<OriginList>,
+	sent: Option<SentRoute>,
+}
+
+/// What the peer currently holds for a path: the forwarded hop chain plus, on
+/// lite-06+, the route cost. A fresh route that differs in either is worth a wire
+/// message; one that matches is not.
+#[derive(Clone, PartialEq, Eq)]
+struct SentRoute {
+	hops: OriginList,
+	cost: lite::RouteCost,
 }
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
@@ -289,7 +298,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, OriginList)> = Vec::new();
+				let mut initial: Vec<(crate::PathOwned, SentRoute)> = Vec::new();
 				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
 					let suffix = path
 						.strip_prefix(&prefix)
@@ -299,7 +308,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match broadcast {
 						Some(broadcast) => {
-							let hops = broadcast.route().hops;
+							let route = broadcast.route();
+							let hops = route.hops.clone();
+							let cost = Self::outgoing_cost(version, &broadcast, &route);
 							// Watch even the announces we filter below: a later route update
 							// can cross the forwarding filter in either direction.
 							watched.insert(
@@ -322,7 +333,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let guard = stats.broadcast(&absolute).publisher();
 							stats_guards.entry(absolute.clone()).or_insert(guard);
 							initial.retain(|(s, _)| s != &suffix);
-							initial.push((suffix, hops));
+							initial.push((suffix, SentRoute { hops, cost }));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
@@ -342,17 +353,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 				let mut buf = bytes::BytesMut::new();
 				ok.encode(&mut buf, version)?;
-				for (suffix, hops) in &initial {
+				for (suffix, route) in &initial {
 					if version.has_announce_id() {
 						announce_ids.insert(suffix.clone(), next_announce_id);
 						next_announce_id += 1;
 					}
 					if let Some(entry) = watched.get_mut(suffix) {
-						entry.sent = Some(hops.clone());
+						entry.sent = Some(route.clone());
 					}
 					lite::AnnounceBroadcast::Active {
 						suffix: suffix.as_path(),
-						hops: hops.clone(),
+						hops: route.hops.clone(),
+						cost: route.cost,
 					}
 					.encode(&mut buf, version)?;
 				}
@@ -372,19 +384,40 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		// One announce-loop turn: either an (un)announce from the origin or a route
-		// change on an already-announced broadcast. Resolved outside the select so
-		// the handlers below can freely mutate the maps its futures borrow.
+		// One announce-loop turn: either an (un)announce from the origin, a route
+		// change on an already-announced broadcast, or the periodic cost recheck.
+		// Resolved outside the select so the handlers below can freely mutate the
+		// maps its futures borrow.
 		enum Op {
 			Announce(Option<crate::announce::Update>),
 			Route(crate::PathOwned, Result<crate::broadcast::Route, Error>),
+			Recheck,
 		}
+
+		// How often to re-evaluate the advertised cost of every watched broadcast.
+		// The cost depends on liveness (`is_active`), which is not part of the
+		// route: going active wakes this loop anyway (minting the track writes the
+		// broadcast state), but the last consumer dropping does not, so decay back
+		// to the cold cost rides this tick. The period is deliberately coarse: it
+		// doubles as hysteresis, keeping a briefly-idle broadcast advertising zero
+		// so viewer churn doesn't flap the mesh's routing.
+		const COST_RECHECK: Duration = Duration::from_secs(5);
+		let mut recheck = version
+			.has_route_cost()
+			.then(|| web_async::time::interval(COST_RECHECK));
 
 		// Send updates as they arrive. Closure wins the race so a dead peer can't
 		// stall on a busy announce feed.
 		loop {
 			let op = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
+				// Pending forever when the version carries no cost on the wire.
+				let mut tick = std::pin::pin!(async {
+					match recheck.as_mut() {
+						Some(interval) => interval.tick().await,
+						None => std::future::pending().await,
+					}
+				});
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Err(res));
@@ -398,6 +431,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						if let Poll::Ready(res) = entry.consumer.poll_route_changed(waiter) {
 							return Poll::Ready(Ok(Op::Route(suffix.clone(), res)));
 						}
+						// The advertised cost drifts without a route change when
+						// liveness flips; reuse the route path to re-send it.
+						if version.has_route_cost()
+							&& let Some(sent) = &entry.sent
+						{
+							let route = entry.consumer.route();
+							if Self::outgoing_cost(version, &entry.consumer, &route) != sent.cost {
+								return Poll::Ready(Ok(Op::Route(suffix.clone(), Ok(route))));
+							}
+						}
+					}
+					if waiter.poll_future(tick.as_mut()).is_ready() {
+						return Poll::Ready(Ok(Op::Recheck));
 					}
 					Poll::Pending
 				})
@@ -440,6 +486,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							else {
 								continue;
 							};
+							let cost = Self::outgoing_cost(version, &active, &route);
 							tracing::debug!(broadcast = %absolute, "announce");
 							let bs = stats.broadcast(&absolute);
 							// Count the broadcast name length, not the encoded message size, so
@@ -453,11 +500,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								next_announce_id += 1;
 							}
 							if let Some(entry) = watched.get_mut(&suffix) {
-								entry.sent = Some(hops.clone());
+								entry.sent = Some(SentRoute {
+									hops: hops.clone(),
+									cost,
+								});
 							}
 							stream
 								.writer
-								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+								.encode(&lite::AnnounceBroadcast::Active { suffix, hops, cost })
 								.await?;
 						}
 						None => {
@@ -504,15 +554,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						continue;
 					};
 					let absolute = origin.absolute(&entry.path).to_owned();
-					let hops = Self::prepare_active_hops(&route.hops, self_origin, exclude_hop, version, &absolute);
+					let cost = Self::outgoing_cost(version, &entry.consumer, &route);
+					let hops = Self::prepare_active_hops(&route.hops, self_origin, exclude_hop, version, &absolute)
+						.map(|hops| SentRoute { hops, cost });
 					let sent = entry.sent.clone();
 					match (hops, sent) {
-						// The forwarded chain is unchanged (e.g. only the cost moved,
-						// which doesn't ride the wire yet): nothing to send.
-						(Some(hops), Some(sent)) if hops == sent => {}
-						// The chain changed (an upstream failover): restart, so the
-						// peer updates its route in place instead of re-resolving.
-						(Some(hops), Some(_)) => {
+						// Neither the forwarded chain nor the cost moved: nothing to send.
+						(Some(route), Some(sent)) if route == sent => {}
+						// The chain or the cost changed (an upstream failover, a repriced
+						// link, or a broadcast going hot): restart, so the peer updates its
+						// route in place instead of re-resolving.
+						(Some(route), Some(_)) => {
 							tracing::debug!(broadcast = %absolute, "reannounce");
 							if version.has_announce_id() {
 								// The id exists for every live advertisement; a panic here would
@@ -526,25 +578,33 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								stats
 									.broadcast(&absolute)
 									.publisher_announced_bytes(absolute.as_str().len() as u64);
-								entry.sent = Some(hops.clone());
+								entry.sent = Some(route.clone());
 								stream
 									.writer
-									.encode(&lite::AnnounceBroadcast::Restart { id, hops })
+									.encode(&lite::AnnounceBroadcast::Restart {
+										id,
+										hops: route.hops,
+										cost: route.cost,
+									})
 									.await?;
 							} else {
 								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
 								stats
 									.broadcast(&absolute)
 									.publisher_announced_bytes(absolute.as_str().len() as u64);
-								entry.sent = Some(hops.clone());
+								entry.sent = Some(route.clone());
 								stream
 									.writer
-									.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+									.encode(&lite::AnnounceBroadcast::Active {
+										suffix,
+										hops: route.hops,
+										cost: route.cost,
+									})
 									.await?;
 							}
 						}
 						// Previously filtered, now forwardable: a fresh announce.
-						(Some(hops), None) => {
+						(Some(route), None) => {
 							tracing::debug!(broadcast = %absolute, "announce");
 							let bs = stats.broadcast(&absolute);
 							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
@@ -553,10 +613,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								announce_ids.insert(suffix.clone(), next_announce_id);
 								next_announce_id += 1;
 							}
-							entry.sent = Some(hops.clone());
+							entry.sent = Some(route.clone());
 							stream
 								.writer
-								.encode(&lite::AnnounceBroadcast::Active { suffix, hops })
+								.encode(&lite::AnnounceBroadcast::Active {
+									suffix,
+									hops: route.hops,
+									cost: route.cost,
+								})
 								.await?;
 						}
 						// The new chain must not be forwarded (it now loops through the
@@ -586,7 +650,37 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						(None, None) => {}
 					}
 				}
+				// The tick's only job is waking the loop: the next poll pass runs
+				// the cost drift scan and surfaces any change as `Op::Route`.
+				Op::Recheck => {}
 			}
+		}
+	}
+
+	/// The cost to advertise for a route, alongside its outgoing hop chain.
+	///
+	/// While we are actively carrying the broadcast the cost is zero: our ingress
+	/// is already paid for (or, for a local standby publisher, the work is already
+	/// running), so one more subscriber only pays the link to reach us. Otherwise
+	/// we forward the accumulated route cost unchanged, which for a standby
+	/// publisher is its production cost and for a pure forwarder is the price of
+	/// the fetch a subscription would trigger.
+	///
+	/// The receiving side adds its own link price on top, so we never account for
+	/// the link we are sending over. Pre-lite-06 peers get nothing (the field isn't
+	/// on their wire), leaving hop count as the metric exactly as before.
+	fn outgoing_cost(
+		version: Version,
+		consumer: &crate::broadcast::Consumer,
+		route: &crate::broadcast::Route,
+	) -> lite::RouteCost {
+		if !version.has_route_cost() {
+			return lite::RouteCost::default();
+		}
+
+		match consumer.is_active() {
+			true => lite::RouteCost(0),
+			false => lite::RouteCost(route.cost),
 		}
 	}
 

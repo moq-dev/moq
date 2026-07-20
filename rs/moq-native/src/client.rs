@@ -254,6 +254,12 @@ impl Client {
 		self
 	}
 
+	/// Price the links this client dials; see [`moq_net::Client::with_link_cost`].
+	pub fn with_link_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_link_cost(cost);
+		self
+	}
+
 	/// Start a background reconnect loop that connects to the given URL,
 	/// waits for the session to close, then reconnects with exponential backoff.
 	///

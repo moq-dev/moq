@@ -245,6 +245,14 @@ impl Producer {
 			state: self.state.consume(),
 		}
 	}
+
+	/// Whether any read handle for the logical track currently exists.
+	///
+	/// This is the demand signal: a spliced track with no consumers is cached
+	/// state nobody is watching.
+	pub fn is_used(&self) -> bool {
+		self.state.is_used()
+	}
 }
 
 /// A cheap, cloneable read handle for a spliced logical track.
