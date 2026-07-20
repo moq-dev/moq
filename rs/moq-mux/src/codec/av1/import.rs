@@ -33,6 +33,9 @@ pub struct Import<E: CatalogExt = ()> {
 	/// Overlaid onto every config we publish, so a hinted field counts as supplied and is never
 	/// overwritten by the rendition's detector.
 	hint: crate::catalog::VideoHint,
+	/// This rendition's timeline section, advertised on every config we publish (the generic
+	/// set() no longer does). Snapshotted at construction; the timeline track is 1:1 by name.
+	timeline: hang::catalog::Timeline,
 	last_seq: Option<Bytes>,
 }
 
@@ -48,6 +51,7 @@ impl<E: CatalogExt> Import<E> {
 		hint: crate::catalog::VideoHint,
 	) -> Self {
 		let rendition = reserved.video(track.name());
+		let timeline = reserved.producer().timeline(track.name()).section();
 		let mut import = Self {
 			track: reserved
 				.producer()
@@ -55,6 +59,7 @@ impl<E: CatalogExt> Import<E> {
 			rendition,
 			config: None,
 			hint,
+			timeline,
 			last_seq: None,
 		};
 		if let Some(config) = import.hint.to_config() {
@@ -177,6 +182,7 @@ impl<E: CatalogExt> Import<E> {
 	/// to reject a reconfiguration.
 	fn apply_config(&mut self, mut config: hang::catalog::VideoConfig) {
 		self.hint.apply(&mut config);
+		config.timeline = Some(self.timeline.clone());
 		if self.config.as_ref() == Some(&config) {
 			return;
 		}

@@ -199,46 +199,38 @@ impl<E: CatalogExt> Producer<E> {
 		emit(&mut self.hang, &mut self.hangz, &mut self.msf_track, &catalog);
 	}
 
-	/// Build the media [`container::Producer`](crate::container::Producer) for the rendition named by
-	/// `track`, with its timeline recorder wired in.
+	/// Build the media [`container::Producer`](crate::container::Producer) for `track`, recording its
+	/// group opens into the `<name>.timeline.z` timeline named after it.
 	///
-	/// The timeline is bound to this exact track, so a rendition records only into its own
-	/// `<name>.timeline.z` track (timelines are 1:1 with media tracks and can't be shared). This is
-	/// how a media track gets a timeline: build it here rather than attaching one by hand.
+	/// This is the 1:1 default. To share a timeline across aligned renditions, build the producer
+	/// yourself and wire the shared timeline's recorder:
+	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared).recorder())`,
+	/// and advertise `catalog.timeline(shared).section()` on each of their configs.
 	pub fn media_producer<C: crate::container::Container>(
 		&self,
 		track: moq_net::track::Producer,
 		container: C,
 	) -> crate::container::Producer<C> {
-		let recorder = self.timeline_recorder(track.name());
+		let recorder = self.timeline(track.name()).recorder();
 		crate::container::Producer::new(track, container).with_recorder(recorder)
 	}
 
-	/// The catalog [`Timeline`](hang::catalog::Timeline) section for media rendition `name`, to
-	/// advertise on the rendition's config (creating the timeline track on first use).
+	/// The [`timeline::Producer`](crate::timeline::Producer) named `name`, creating its
+	/// `<name>.timeline.z` track on first use and returning the same shared handle thereafter.
 	///
-	/// [`VideoTrack::set`](super::VideoTrack::set) / [`AudioTrack::set`](super::AudioTrack::set) do
-	/// this automatically; callers that build a rendition config by hand attach it themselves.
-	pub fn timeline_section(&self, name: &str) -> hang::catalog::Timeline {
-		self.with_timeline(name, |timeline| timeline.section())
-	}
-
-	/// Mint the media track's timeline [`Recorder`](crate::timeline::Recorder) for rendition `name`,
-	/// creating its track on first use. Used by [`media_producer`](Self::media_producer) to wire one
-	/// recorder per media track.
-	pub(crate) fn timeline_recorder(&self, name: &str) -> crate::timeline::Recorder {
-		self.with_timeline(name, |timeline| timeline.recorder())
-	}
-
-	/// Run `f` against the timeline producer for rendition `name`, memoized by name (creating its
-	/// track on first use). Panics only if the broadcast can't mint the track (a duplicate name),
-	/// which the `<name>.timeline.z` convention avoids.
-	fn with_timeline<R>(&self, name: &str, f: impl FnOnce(&mut crate::timeline::Producer) -> R) -> R {
+	/// Advertise it on a rendition by setting `config.timeline = Some(timeline.section())`, and
+	/// record group opens through its [`recorder`](crate::timeline::Producer::recorder). Two
+	/// renditions naming the same timeline share it: an aligned transcode ladder records the source
+	/// and has the rungs only advertise the same section.
+	pub fn timeline(&self, name: &str) -> crate::timeline::Producer {
 		let mut timelines = self.timelines.lock().unwrap();
-		let timeline = timelines.entry(name.to_string()).or_insert_with(|| {
-			crate::timeline::Producer::new(&mut self.broadcast.clone(), name).expect("failed to create timeline track")
-		});
-		f(timeline)
+		timelines
+			.entry(name.to_string())
+			.or_insert_with(|| {
+				crate::timeline::Producer::new(&mut self.broadcast.clone(), name)
+					.expect("failed to create timeline track")
+			})
+			.clone()
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.

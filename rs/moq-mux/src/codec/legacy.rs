@@ -137,6 +137,8 @@ impl<E: CatalogExt> Import<E> {
 
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
+		// Advertise this rendition's timeline before publishing (the generic set() no longer does).
+		audio_config.timeline = Some(reserved.producer().timeline(track.name()).section());
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio_config);
 

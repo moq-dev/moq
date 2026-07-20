@@ -74,11 +74,12 @@ impl<C: Container> Producer<C> {
 	/// Record each group open (sequence + keyframe timestamp) through `recorder`, so consumers can
 	/// index the media without downloading it.
 	///
-	/// Not public: a timeline is 1:1 with its media track (the record carries no track id), and the
-	/// [`Recorder`](crate::timeline::Recorder) is move-only, so it's bound to this exact track and
-	/// can't be shared. The catalog owns that binding, via
-	/// [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer).
-	pub(crate) fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
+	/// Mint the recorder from a [`timeline::Producer`](crate::timeline::Producer) (see
+	/// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline)). The record carries no
+	/// track id, so wire one recorder per timeline; a set of aligned renditions shares a timeline by
+	/// recording only the source and advertising the same section on the rest.
+	/// [`media_producer`](crate::catalog::Producer::media_producer) wires the 1:1 default for you.
+	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
 	}

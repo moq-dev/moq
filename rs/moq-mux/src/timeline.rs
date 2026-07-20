@@ -6,17 +6,20 @@
 //! from a few bytes per group without subscribing to media, the primitive a playlist server
 //! (HLS/DASH), a seek bar, or a recorder index needs.
 //!
-//! One timeline track per media track (audio and video groups have different durations, so a
-//! single broadcast-wide timeline can't describe both). The write side splits by role:
+//! A timeline can be shared: audio and video groups have different durations so they need separate
+//! timelines, but an aligned set of renditions (a transcode ladder whose rungs mirror the source's
+//! group boundaries) can point at one. The write side splits by role:
 //!
 //! - [`Producer`] owns the track and its catalog metadata: the [`section`](Producer::section)
-//!   advertised in the rendition's config and the [`set_wall`](Producer::set_wall) anchor. The
-//!   [`catalog::Producer`](crate::catalog::Producer) creates and owns one per rendition; it is not
-//!   `Clone`, so a timeline is bound to its one media track.
-//! - `Recorder` is the move-only handle the media track records group opens through, minted 1:1
-//!   by the catalog into the rendition's [`container::Producer`](crate::container::Producer) (see
-//!   [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer)). Being
-//!   move-only, it can't be shared with a second track, and it owns its throttle cursor outright.
+//!   advertised in a rendition's config and the [`set_wall`](Producer::set_wall) anchor. Get one
+//!   from [`catalog::Producer::timeline`](crate::catalog::Producer::timeline); it is `Clone`, and
+//!   every clone shares the one track, so N renditions advertising the same timeline share it.
+//! - [`Recorder`] is the move-only handle a media track records group opens through, wired into a
+//!   rendition's [`container::Producer`](crate::container::Producer) via
+//!   [`with_recorder`](crate::container::Producer::with_recorder) (or, for the 1:1 default,
+//!   [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer)). Recording is
+//!   what fills a shared timeline, so wire exactly one recorder into it (the source), and let the
+//!   other renditions only advertise.
 //!
 //! On the read side, [`Consumer::subscribe`] reads a timeline straight from its
 //! [`hang::catalog::Timeline`] section (so the track name and timescale come from the catalog and
@@ -31,6 +34,7 @@
 //! are thinned out. A consumer that lands between two records extrapolates the group number
 //! (sequences are contiguous) or fetches to fill the gap.
 
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::SystemTime;
 
@@ -43,18 +47,22 @@ use moq_net::{Timescale, Timestamp};
 /// media time.
 pub const DEFAULT_GRANULARITY: Timestamp = Timestamp::new_const(1, Timescale::SECOND);
 
-/// Owns one media track's timeline: its catalog [`section`](Self::section) and wall anchor, and the
-/// `Recorder` its group opens are recorded through.
+/// A media timeline: its catalog [`section`](Self::section) and wall anchor, and the [`Recorder`]
+/// its group opens are recorded through.
 ///
-/// Generic over the record extension `E` (defaulting to `()`; see [`RecordExt`]). Owned 1:1 by the
-/// catalog and deliberately not `Clone`, so a timeline is bound to its one media track.
+/// Generic over the record extension `E` (defaulting to `()`; see [`RecordExt`]). `Clone`, and every
+/// clone shares the one track and its wall anchor, so a set of aligned renditions can advertise one
+/// timeline. Get one from [`catalog::Producer::timeline`](crate::catalog::Producer::timeline), which
+/// keeps ownership and closes the track when the catalog finishes.
+#[derive(Clone)]
 pub struct Producer<E: RecordExt = ()> {
 	inner: moq_json::stream::Producer<Record<E>>,
 	track: String,
 	timescale: Timescale,
 	granularity: Timestamp,
 	// The wall-clock time of pts 0, in timescale units since the moq epoch, advertised in section().
-	wall: Option<u64>,
+	// Shared across clones so a set_wall on one is seen by every rendition advertising this timeline.
+	wall: Arc<Mutex<Option<u64>>>,
 }
 
 impl<E: RecordExt> Producer<E> {
@@ -73,7 +81,7 @@ impl<E: RecordExt> Producer<E> {
 			track,
 			timescale: Timescale::new(Timeline::default_timescale() as u64).expect("default timescale is nonzero"),
 			granularity: DEFAULT_GRANULARITY,
-			wall: None,
+			wall: Arc::new(Mutex::new(None)),
 		})
 	}
 
@@ -88,7 +96,7 @@ impl<E: RecordExt> Producer<E> {
 	pub fn section(&self) -> Timeline {
 		let mut section = Timeline::new(&self.track);
 		section.timescale = self.timescale.as_u64() as u32;
-		section.wall = self.wall;
+		section.wall = *self.wall.lock().unwrap();
 		section
 	}
 
@@ -109,14 +117,15 @@ impl<E: RecordExt> Producer<E> {
 		let pts_units = pts.as_scale(self.timescale);
 		let moq_millis = unix_millis.saturating_sub(hang::catalog::MOQ_EPOCH_UNIX_MILLIS as u128);
 		let moq_units = moq_millis * scale / 1000;
-		self.wall = Some(moq_units.saturating_sub(pts_units) as u64);
+		*self.wall.lock().unwrap() = Some(moq_units.saturating_sub(pts_units) as u64);
 	}
 
-	/// Mint the [`Recorder`] the media track records its group opens through.
+	/// Mint a [`Recorder`] to record group opens into this timeline.
 	///
-	/// Internal: the catalog wires exactly one into the rendition's container producer, which is how
-	/// a timeline stays 1:1 with its media track.
-	pub(crate) fn recorder(&self) -> Recorder<E> {
+	/// Wire it into a media track's [`container::Producer`](crate::container::Producer) with
+	/// [`with_recorder`](crate::container::Producer::with_recorder). A recorder owns its own throttle
+	/// cursor, so wire exactly one per timeline (a shared timeline is filled by its source alone).
+	pub fn recorder(&self) -> Recorder<E> {
 		Recorder {
 			inner: self.inner.clone(),
 			timescale: self.timescale,
@@ -137,11 +146,10 @@ impl<E: RecordExt> Producer<E> {
 
 /// Records a media track's group opens into its timeline, throttled to a granularity.
 ///
-/// Move-only (not `Clone`): exactly one recorder exists per media track, so it owns its throttle
-/// cursor outright (no shared state to diverge) and can't be handed to a second track. Minted by
-/// [`Producer::recorder`] and held by the rendition's
+/// Move-only (not `Clone`): it owns its throttle cursor, so wire exactly one per timeline. Minted by
+/// [`Producer::recorder`] and held by a rendition's
 /// [`container::Producer`](crate::container::Producer).
-pub(crate) struct Recorder<E: RecordExt = ()> {
+pub struct Recorder<E: RecordExt = ()> {
 	inner: moq_json::stream::Producer<Record<E>>,
 	timescale: Timescale,
 	granularity: Timestamp,

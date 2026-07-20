@@ -133,7 +133,7 @@ impl<E: CatalogExt> Producer<E> {
 
 		let mut catalog_mut = catalog.clone();
 		let mut config = encoder.catalog();
-		config.timeline = Some(catalog.timeline_section(&name));
+		config.timeline = Some(catalog.timeline(&name).section());
 		catalog_mut.lock().audio.insert(&name, config)?;
 
 		Ok(Self {

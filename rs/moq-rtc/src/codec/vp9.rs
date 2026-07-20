@@ -31,7 +31,7 @@ impl Bridge {
 		let name = self.track.track().name().to_string();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VP9::default());
 		config.container = hang::catalog::Container::Legacy;
-		config.timeline = Some(self.catalog.timeline_section(&name));
+		config.timeline = Some(self.catalog.timeline(&name).section());
 		self.catalog.lock().video.renditions.insert(name, config);
 		self.announced = true;
 	}
