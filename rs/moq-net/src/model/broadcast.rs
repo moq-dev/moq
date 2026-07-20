@@ -181,14 +181,35 @@ impl BroadcastState {
 		}
 	}
 
-	/// Live demand: a subscribed spliced track (route-fed broadcast), or a live
-	/// track producer / pending request (ordinary broadcast). See
-	/// [`Consumer::is_active`].
-	fn is_active(&self) -> bool {
+	/// Live demand: a subscribed spliced track (route-fed broadcast), or a
+	/// pending request / consumed track (ordinary broadcast). See [`Demand`].
+	fn is_used(&self) -> bool {
 		if let Some(spliced) = &self.spliced {
 			return spliced.tracks.values().any(|track| track.is_used());
 		}
-		!self.requests.is_empty() || self.tracks.has_live()
+		!self.requests.is_empty() || self.tracks.iter().any(|track| track.is_used())
+	}
+
+	/// Park `waiter` on every per-track channel feeding [`Self::is_used`]: the
+	/// consumer counts live on those channels, and their flips don't write this
+	/// state, so a watcher registered here alone would miss the edge. `want`
+	/// picks the direction; each channel only arms while its side is unmet.
+	fn register_demand(&self, waiter: &kio::Waiter, want: bool) {
+		if let Some(spliced) = &self.spliced {
+			for track in spliced.tracks.values() {
+				match want {
+					true => track.poll_used(waiter),
+					false => track.poll_unused(waiter),
+				}
+			}
+			return;
+		}
+		for track in self.tracks.iter() {
+			match want {
+				true => track.poll_used(waiter),
+				false => track.poll_unused(waiter),
+			}
+		}
 	}
 }
 
@@ -254,9 +275,12 @@ impl Producer {
 		&self.info
 	}
 
-	/// True while the broadcast has live demand. See [`Consumer::is_active`].
-	pub fn is_active(&self) -> bool {
-		self.state.read().is_active()
+	/// A watch-only handle to the broadcast's demand. See [`Demand`].
+	pub fn demand(&self) -> Demand {
+		Demand {
+			alive: self.alive.consume().weak(),
+			state: self.state.clone(),
+		}
 	}
 
 	/// Remove a track from the lookup.
@@ -731,19 +755,12 @@ impl Consumer {
 		Ok(consumer)
 	}
 
-	/// True while the broadcast has live demand: a spliced (route-fed) broadcast
-	/// with a subscribed logical track, or an ordinary broadcast with a live
-	/// track producer or pending request.
-	///
-	/// This is the cache signal routing announces: an active broadcast's ingress
-	/// (or, for a local publisher, its production) is already paid for, so it
-	/// advertises zero marginal cost and peers pull the copy that exists. An idle
-	/// one advertises what a fresh fetch would cost. The transition back to idle
-	/// doesn't wake state watchers (dropping a consumer doesn't write the
-	/// broadcast state), so poll this on a coarse tick rather than waiting on an
-	/// edge; the tick doubles as hysteresis against viewer churn.
-	pub fn is_active(&self) -> bool {
-		self.state.read().is_active()
+	/// A watch-only handle to the broadcast's demand. See [`Demand`].
+	pub(crate) fn demand(&self) -> Demand {
+		Demand {
+			alive: self.alive.weak(),
+			state: self.state.clone(),
+		}
 	}
 
 	/// Block until the broadcast is closed (every producer dropped) and return the cause.
@@ -837,6 +854,78 @@ impl super::WeakEntry for WeakConsumer {
 	}
 }
 
+/// A cloneable, watch-only handle to a broadcast's subscriber demand.
+///
+/// Obtained from [`Producer::demand`]; the broadcast-level sibling of
+/// [`track::Demand`](crate::track::Demand). Demand means live interest in the
+/// broadcast's content: a subscribed spliced track on a route-fed broadcast, or
+/// a pending track request / a consumed track on an ordinary one. A publisher
+/// uses it to run expensive work only while someone is watching, and routing
+/// uses it to advertise a warm copy at zero cost.
+///
+/// It's a weak handle: it neither keeps the broadcast alive nor counts as
+/// demand itself. Once every producer is gone, [`used`](Self::used) /
+/// [`unused`](Self::unused) return [`Error::Dropped`].
+#[derive(Clone)]
+pub struct Demand {
+	alive: kio::ConsumerWeak<()>,
+	state: kio::Shared<BroadcastState>,
+}
+
+impl Demand {
+	/// Whether the broadcast has live demand right now.
+	///
+	/// A point-in-time snapshot with no registration; use [`Self::used`] /
+	/// [`Self::unused`] (or their `poll_*` forms) to wait for the edge.
+	pub fn is_used(&self) -> bool {
+		self.state.read().is_used()
+	}
+
+	/// Block until the broadcast has demand. Resolves immediately if it already
+	/// does; returns [`Error::Dropped`] once every producer is gone.
+	pub async fn used(&self) -> Result<(), Error> {
+		kio::wait(|waiter| self.poll_used(waiter)).await
+	}
+
+	/// Block until the broadcast has no demand. Resolves immediately if it has
+	/// none; returns [`Error::Dropped`] once every producer is gone.
+	pub async fn unused(&self) -> Result<(), Error> {
+		kio::wait(|waiter| self.poll_unused(waiter)).await
+	}
+
+	/// Poll-based variant of [`Self::used`].
+	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.poll_demand(waiter, true)
+	}
+
+	/// Poll-based variant of [`Self::unused`].
+	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.poll_demand(waiter, false)
+	}
+
+	fn poll_demand(&self, waiter: &kio::Waiter, want: bool) -> Poll<Result<(), Error>> {
+		// Closure is checked first, matching `track::Demand`: a dead broadcast
+		// reports Dropped rather than pretending to answer.
+		if self.alive.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Err(Error::Dropped));
+		}
+		let ready = self.state.poll(waiter, |state| {
+			// The consumer counts live on the per-track channels, whose flips
+			// don't write this state: park on those channels too so the edge
+			// wakes us, then recompute here.
+			state.register_demand(waiter, want);
+			match state.is_used() == want {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		});
+		match ready {
+			Poll::Ready(_) => Poll::Ready(Ok(())),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
 #[cfg(test)]
 impl Consumer {
 	pub fn assert_not_closed(&self) {
@@ -851,6 +940,74 @@ impl Consumer {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// Await with a timeout so a missed demand wake fails the test instead of
+	/// hanging it (time is paused, so the timeout fires instantly when idle).
+	async fn expect<T>(fut: impl Future<Output = T>) -> T {
+		tokio::time::timeout(std::time::Duration::from_secs(1), fut)
+			.await
+			.expect("timed out waiting for a demand edge")
+	}
+
+	/// Demand on an ordinary broadcast tracks subscriber interest, not
+	/// production: a live track producer alone is unused, a consumed track is
+	/// used, and both edges wake parked waiters.
+	#[tokio::test]
+	async fn demand_ordinary() {
+		tokio::time::pause();
+
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		let demand = producer.demand();
+
+		// No demand yet; `unused` resolves immediately.
+		assert!(!demand.is_used());
+		demand.unused().await.unwrap();
+
+		// Producing alone is not demand.
+		let _track = producer.create_track("a", None).unwrap();
+		assert!(!demand.is_used());
+
+		// A consumer appearing wakes a parked `used`.
+		let (used, handle) = tokio::join!(expect(demand.used()), async { consumer.track("a").unwrap() });
+		used.unwrap();
+		assert!(demand.is_used());
+
+		// The last consumer dropping wakes a parked `unused`.
+		let (unused, ()) = tokio::join!(expect(demand.unused()), async { drop(handle) });
+		unused.unwrap();
+		assert!(!demand.is_used());
+
+		// Every producer gone: both edges report the closure.
+		producer.finish();
+		assert!(matches!(demand.used().await, Err(Error::Dropped)));
+		assert!(matches!(demand.unused().await, Err(Error::Dropped)));
+	}
+
+	/// Demand on a spliced (route-fed) broadcast follows the logical tracks'
+	/// consumers, which is what flips a relay's advertised cost.
+	#[tokio::test]
+	async fn demand_spliced() {
+		tokio::time::pause();
+
+		let producer = Producer::new_spliced(Info::new());
+		let consumer = producer.consume();
+		let demand = producer.demand();
+
+		assert!(!demand.is_used());
+		let track = consumer.track("video").unwrap();
+		assert!(demand.is_used());
+
+		// Dropping the only consumer wakes a parked `unused`, even though the
+		// logical track itself stays cached in the broadcast.
+		let (unused, ()) = tokio::join!(expect(demand.unused()), async { drop(track) });
+		unused.unwrap();
+		assert!(!demand.is_used());
+
+		// A repeat consumer for the cached track counts again.
+		let _track = consumer.track("video").unwrap();
+		assert!(demand.is_used());
+	}
 
 	/// Subscribe and assert the result hasn't resolved yet (it stays pending until
 	/// a publisher accepts). Returns the pending subscription to resolve after accepting.

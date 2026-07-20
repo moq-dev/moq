@@ -124,13 +124,10 @@ where
 		self.map.contains_key(key)
 	}
 
-	/// True if any cached handle is still live (its channel hasn't closed).
-	///
-	/// O(entries), so call it off the hot path: the relay probes it on a coarse
-	/// tick to decide whether a broadcast is still actively flowing. Closed
-	/// entries that GC hasn't reclaimed yet are correctly ignored.
-	pub fn has_live(&self) -> bool {
-		self.map.values().any(|v| !v.is_closed())
+	/// Iterate the cached handles, including closed entries GC hasn't reclaimed
+	/// yet (callers filter on liveness themselves).
+	pub fn iter(&self) -> impl Iterator<Item = &V> {
+		self.map.values()
 	}
 
 	/// Probe a bounded, rotating window of the ring, reclaiming dead entries.

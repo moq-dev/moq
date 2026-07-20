@@ -253,6 +253,18 @@ impl Producer {
 	pub fn is_used(&self) -> bool {
 		self.state.is_used()
 	}
+
+	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
+	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
+		let _ = self.state.poll_used(waiter);
+	}
+
+	/// Park `waiter` for the last consumer going away; a no-op once none remain.
+	/// Feeds [`crate::broadcast::Demand`].
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) {
+		let _ = self.state.poll_unused(waiter);
+	}
 }
 
 /// A cheap, cloneable read handle for a spliced logical track.

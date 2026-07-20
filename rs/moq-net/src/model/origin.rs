@@ -1107,7 +1107,7 @@ fn detach_source(
 	graceful: bool,
 ) {
 	let close = {
-		let carrying = broadcast.is_active();
+		let carrying = broadcast.demand().is_used();
 		let Ok(mut s) = state.write() else { return };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
 			return;
@@ -1160,7 +1160,7 @@ async fn run_source(
 		match source.route_changed().await {
 			Ok(route) => {
 				{
-					let carrying = broadcast.is_active();
+					let carrying = broadcast.demand().is_used();
 					let Ok(mut s) = state.write() else { return };
 					let Some(entry) = s.routes.iter_mut().find(|r| r.id == id) else {
 						return;
@@ -1200,7 +1200,7 @@ fn attach_source(
 	// down, or awaiting teardown) is replaced below instead.
 	if let Some(existing) = &leaf_guard.broadcast {
 		let mut joined = None;
-		let carrying = existing.broadcast.is_active();
+		let carrying = existing.broadcast.demand().is_used();
 		if let Ok(mut s) = existing.state.write()
 			&& !s.closed
 		{
