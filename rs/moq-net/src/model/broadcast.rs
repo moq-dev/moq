@@ -1,3 +1,12 @@
+//! A broadcast is a named collection of tracks, split into a [Producer] and [Consumer] handle.
+//!
+//! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
+//! producer either serves a track it already has or is handed a [`track::Request`] to
+//! fill. Both handles are refcounted clones of one broadcast, which closes when the
+//! last producer drops.
+//!
+//! [Info] is the static metadata; [Route] is the dynamic path the broadcast takes to
+//! reach an origin, including whether it is announced to subscribers.
 use crate::track;
 use std::{
 	collections::{HashMap, VecDeque},
@@ -73,8 +82,23 @@ pub struct Route {
 
 impl Route {
 	/// An unannounced direct route: no hops, best cost.
+	///
+	/// The broadcast is reachable only by its exact path, so subscribers must already
+	/// know it exists. Use [`announced`](Self::announced) to advertise it instead.
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// An announced direct route: no hops, best cost.
+	///
+	/// The broadcast is advertised to subscribers via
+	/// [`crate::origin::Consumer::announced`] while this is the best route, on top of
+	/// staying reachable by exact path. Use [`new`](Self::new) to keep it unadvertised.
+	pub fn announced() -> Self {
+		Self {
+			announce: true,
+			..Self::default()
+		}
 	}
 
 	/// Append a hop to the chain, oldest first.
@@ -225,6 +249,7 @@ impl Producer {
 		}
 	}
 
+	/// The broadcast's static metadata, fixed when it was created.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -396,6 +421,7 @@ impl Drop for Producer {
 }
 
 #[cfg(test)]
+#[allow(missing_docs)] // test-only assertion helpers
 impl Producer {
 	pub fn assert_create_track(
 		&mut self,
@@ -489,6 +515,7 @@ impl Dynamic {
 		Self { info, alive, state }
 	}
 
+	/// The broadcast's static metadata, fixed when it was created.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -570,6 +597,7 @@ impl Drop for Dynamic {
 use futures::FutureExt;
 
 #[cfg(test)]
+#[allow(missing_docs)] // test-only assertion helpers
 impl Dynamic {
 	pub fn assert_request(&mut self) -> track::Request {
 		self.requested_track()
@@ -609,6 +637,7 @@ impl Clone for Consumer {
 }
 
 impl Consumer {
+	/// The broadcast's static metadata, fixed when it was created.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -793,6 +822,7 @@ impl super::WeakEntry for WeakConsumer {
 }
 
 #[cfg(test)]
+#[allow(missing_docs)] // test-only assertion helpers
 impl Consumer {
 	pub fn assert_not_closed(&self) {
 		assert!(self.closed().now_or_never().is_none(), "should not be closed");

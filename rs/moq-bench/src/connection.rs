@@ -147,6 +147,7 @@ pub async fn run(ctx: Connection) {
 						stats.connections.fetch_sub(1, Ordering::Relaxed);
 					}
 				}
+				Ok(_) => {}
 				Err(err) => {
 					tracing::warn!(connection, %err, "connection gave up");
 					break;

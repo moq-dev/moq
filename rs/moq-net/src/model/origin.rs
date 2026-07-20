@@ -2125,6 +2125,7 @@ impl Drop for AnnounceConsumer {
 use futures::FutureExt;
 
 #[cfg(test)]
+#[allow(missing_docs)] // test-only assertion helpers
 impl AnnounceConsumer {
 	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &broadcast::Consumer) {
 		let expected = expected.as_path();

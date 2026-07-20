@@ -252,18 +252,6 @@ impl Server {
 		self
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
-		self.with_publisher(publish)
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
-		self.with_subscriber(subscribe)
-	}
-
 	/// Attach a tier-scoped [`moq_net::stats::Handle`] to all sessions accepted by this server.
 	pub fn with_stats(mut self, stats: moq_net::stats::Handle) -> Self {
 		self.moq = self.moq.with_stats(stats);
@@ -942,18 +930,6 @@ impl Request {
 			identity,
 			kind,
 		}
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: moq_net::origin::Consumer) -> Self {
-		self.with_publisher(publish)
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: moq_net::origin::Producer) -> Self {
-		self.with_subscriber(subscribe)
 	}
 
 	/// Attach a tier-scoped [`moq_net::stats::Handle`] to this session.

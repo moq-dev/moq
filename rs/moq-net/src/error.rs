@@ -4,9 +4,11 @@ use crate::coding;
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
+	/// The underlying QUIC/WebTransport connection failed; carries the backend's message.
 	#[error("transport: {0}")]
 	Transport(String),
 
+	/// A message off the wire could not be parsed.
 	#[error(transparent)]
 	Decode(#[from] coding::DecodeError),
 
@@ -25,6 +27,7 @@ pub enum Error {
 	#[error("unexpected stream type")]
 	UnexpectedStream,
 
+	/// An integer was too large for the QUIC varint range.
 	#[error(transparent)]
 	BoundsExceeded(#[from] coding::BoundsExceeded),
 
@@ -33,6 +36,7 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
+	/// Nobody is reading any more, so the producer stopped. Not a failure.
 	// Cancel is returned when there are no more readers.
 	#[error("cancelled")]
 	Cancel,
@@ -55,6 +59,7 @@ pub enum Error {
 	#[error("app code={0}")]
 	App(u16),
 
+	/// The requested broadcast or track does not exist at the peer.
 	#[error("not found")]
 	NotFound,
 
@@ -63,27 +68,35 @@ pub enum Error {
 	#[error("unroutable")]
 	Unroutable,
 
+	/// A frame's payload length disagreed with its declared size.
 	#[error("wrong frame size")]
 	WrongSize,
 
+	/// The peer broke a protocol rule; the session is unusable.
 	#[error("protocol violation")]
 	ProtocolViolation,
 
+	/// The peer's token does not grant the requested path or operation.
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// A valid message arrived in a state where it is not allowed.
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
+	/// The peer asked for a feature this endpoint does not implement.
 	#[error("unsupported")]
 	Unsupported,
 
+	/// A message could not be serialized for the negotiated version.
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
+	/// A message carried more parameters than this endpoint accepts.
 	#[error("too many parameters")]
 	TooManyParameters,
 
+	/// The peer acted against the [`Role`](crate::Role) it advertised at SETUP.
 	#[error("invalid role")]
 	InvalidRole,
 
@@ -92,9 +105,11 @@ pub enum Error {
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
 
+	/// The producer was dropped without finishing, so the content is incomplete.
 	#[error("dropped")]
 	Dropped,
 
+	/// The handle was already closed by this side.
 	#[error("closed")]
 	Closed,
 
@@ -179,6 +194,7 @@ impl web_transport_trait::Error for Error {
 	}
 }
 
+/// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]

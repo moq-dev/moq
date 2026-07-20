@@ -76,11 +76,25 @@ Follow the root `poll_*` conventions: collapse `Poll::Pending => Poll::Pending` 
 
 ## Version matching
 
-`moq_net::Version` is `#[non_exhaustive]`, splitting `Lite(lite::Version)` and `Ietf(ietf::Version)` (`version.rs`). When matching on a `Version` (or the inner draft enums), default to the **newest** draft so future versions fall forward; list older versions explicitly:
+`moq_net::Version` is `#[non_exhaustive]`, splitting `Lite(lite::Version)` and `Ietf(ietf::Version)` (`version.rs`). The inner `lite::Version` / `ietf::Version` payloads are crate-private, so outside `moq-net` you branch on the accessors rather than on variants: `is_lite()` / `is_ietf()` for the protocol family, and `alpn()` / `code()` for the specific draft.
+
+```rust
+// Outside the crate: family first, then the ALPN string for a specific draft.
+if version.is_lite() {
+    // moq-lite behavior
+} else {
+    match version.alpn() {
+        "moqt-15" | "moqt-16" => { /* old behavior */ }
+        _ => { /* newest / draft-17+ behavior */ }
+    }
+}
+```
+
+Inside `moq-net`, match the inner draft enums directly. Either way, default to the **newest** draft so future versions fall forward, and list older versions explicitly:
 
 ```rust
 match version {
-    Version::Draft14 | Version::Draft15 | Version::Draft16 => { /* old behavior */ }
+    ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => { /* old behavior */ }
     _ => { /* newest / draft-17+ behavior */ }
 }
 ```

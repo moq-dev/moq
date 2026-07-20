@@ -7,8 +7,8 @@
 //!
 //! Backed by `kio`: each in-flight step holds a [`ConnectingProducer`], and the
 //! session is connected once they've all been dropped (which closes the channel).
-//! A step drops its producer when it finishes — or, on an early error, when it goes
-//! out of scope — so a failed step can't hang `connect()`. Exposes both a synchronous
+//! A step drops its producer when it finishes (or, on an early error, when it goes
+//! out of scope), so a failed step can't hang `connect()`. Exposes both a synchronous
 //! poll API and an async one; prefer `kio` over `tokio` primitives for new async state
 //! so we keep both available.
 

@@ -1,4 +1,4 @@
-/// Track Properties — relay-visible metadata attached to tracks.
+/// Track Properties: relay-visible metadata attached to tracks.
 ///
 /// Draft-17 adds Track Properties to SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
 /// They appear after the message parameters as a sequence of Key-Value-Pairs
@@ -22,7 +22,7 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 ///
 /// Track Properties use the same Key-Value-Pair encoding as parameters:
 /// delta-encoded types, even = varint value, odd = length-prefixed bytes.
-/// They have no count prefix — read until the buffer is empty.
+/// They have no count prefix. Read until the buffer is empty.
 ///
 /// Only call this for draft-17+; older drafts don't have Track Properties.
 pub fn skip<R: Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {

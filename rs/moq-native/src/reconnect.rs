@@ -11,6 +11,7 @@ use crate::{Client, Error};
 /// Exponential backoff configuration for reconnection attempts.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Backoff {
 	/// Initial delay before first reconnect attempt.
 	#[arg(
@@ -66,6 +67,7 @@ impl Default for Backoff {
 
 /// A connection lifecycle transition reported by [`Reconnect::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
 	/// A session connected (the first connect, or a reconnect after a drop).
 	Connected,
@@ -436,7 +438,7 @@ mod tests {
 		assert_eq!(out_rx.peek(), Some(9_000));
 
 		// Closing the source is what retires the arm, so we stop polling a dead one.
-		src.close(moq_net::Error::Cancel).unwrap();
+		src.abort(moq_net::Error::Cancel).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
 		assert!(bw.is_none());
 	}

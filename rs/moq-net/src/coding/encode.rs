@@ -8,16 +8,22 @@ use super::BoundsExceeded;
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum EncodeError {
+	/// An integer was too large for the QUIC varint range.
 	#[error("bounds exceeded")]
 	BoundsExceeded,
+	/// The payload exceeds the maximum size the wire format can express.
 	#[error("too large")]
 	TooLarge,
+	/// The destination buffer had no room for the value.
 	#[error("short buffer")]
 	Short,
+	/// The message cannot be encoded from the current session state.
 	#[error("invalid state")]
 	InvalidState,
+	/// A repeated field exceeded the count the wire format permits.
 	#[error("too many")]
 	TooMany,
+	/// The field does not exist in the negotiated protocol version.
 	#[error("unsupported version")]
 	Version,
 }

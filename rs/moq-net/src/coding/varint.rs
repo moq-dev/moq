@@ -35,10 +35,12 @@ impl VarInt {
 		Self(x as u64)
 	}
 
+	/// Construct from a `u64`, or `None` if it exceeds [`Self::MAX`].
 	pub const fn from_u64(x: u64) -> Option<Self> {
 		if x <= Self::MAX.0 { Some(Self(x)) } else { None }
 	}
 
+	/// Construct from a `u128`, or `None` if it exceeds [`Self::MAX`].
 	pub const fn from_u128(x: u128) -> Option<Self> {
 		if x <= Self::MAX.0 as u128 {
 			Some(Self(x as u64))
@@ -278,11 +280,11 @@ impl VarInt {
 
 		match ones {
 			0 => {
-				// 0xxxxxxx — 7 bits
+				// 0xxxxxxx: 7 bits
 				Ok(Self(u64::from(b)))
 			}
 			1 => {
-				// 10xxxxxx + 1 byte — 14 bits
+				// 10xxxxxx + 1 byte: 14 bits
 				if !r.has_remaining() {
 					return Err(DecodeError::Short);
 				}
@@ -291,7 +293,7 @@ impl VarInt {
 				Ok(Self((hi << 8) | lo))
 			}
 			2 => {
-				// 110xxxxx + 2 bytes — 21 bits
+				// 110xxxxx + 2 bytes: 21 bits
 				if r.remaining() < 2 {
 					return Err(DecodeError::Short);
 				}
@@ -301,7 +303,7 @@ impl VarInt {
 				Ok(Self((hi << 16) | u64::from(u16::from_be_bytes(buf))))
 			}
 			3 => {
-				// 1110xxxx + 3 bytes — 28 bits
+				// 1110xxxx + 3 bytes: 28 bits
 				if r.remaining() < 3 {
 					return Err(DecodeError::Short);
 				}
@@ -313,7 +315,7 @@ impl VarInt {
 				))
 			}
 			4 => {
-				// 11110xxx + 4 bytes — 35 bits
+				// 11110xxx + 4 bytes: 35 bits
 				if r.remaining() < 4 {
 					return Err(DecodeError::Short);
 				}
@@ -323,7 +325,7 @@ impl VarInt {
 				Ok(Self((hi << 32) | u64::from(u32::from_be_bytes(buf))))
 			}
 			5 => {
-				// 111110xx + 5 bytes — 42 bits
+				// 111110xx + 5 bytes: 42 bits
 				if r.remaining() < 5 {
 					return Err(DecodeError::Short);
 				}
@@ -351,7 +353,7 @@ impl VarInt {
 				Ok(Self((hi << 48) | u64::from_be_bytes(buf)))
 			}
 			7 => {
-				// 11111110 + 7 bytes — 56 bits
+				// 11111110 + 7 bytes: 56 bits
 				if r.remaining() < 7 {
 					return Err(DecodeError::Short);
 				}
@@ -361,7 +363,7 @@ impl VarInt {
 				Ok(Self(u64::from_be_bytes(buf)))
 			}
 			8 => {
-				// 11111111 + 8 bytes — 64 bits
+				// 11111111 + 8 bytes: 64 bits
 				if r.remaining() < 8 {
 					return Err(DecodeError::Short);
 				}
@@ -383,27 +385,27 @@ impl VarInt {
 		let remaining = w.remaining_mut();
 
 		if x < (1 << 7) {
-			// 0xxxxxxx — 1 byte
+			// 0xxxxxxx: 1 byte
 			if remaining < 1 {
 				return Err(EncodeError::Short);
 			}
 			w.put_u8(x as u8);
 		} else if x < (1 << 14) {
-			// 10xxxxxx — 2 bytes
+			// 10xxxxxx: 2 bytes
 			if remaining < 2 {
 				return Err(EncodeError::Short);
 			}
 			w.put_u8(0x80 | (x >> 8) as u8);
 			w.put_u8(x as u8);
 		} else if x < (1 << 21) {
-			// 110xxxxx — 3 bytes
+			// 110xxxxx: 3 bytes
 			if remaining < 3 {
 				return Err(EncodeError::Short);
 			}
 			w.put_u8(0xC0 | (x >> 16) as u8);
 			w.put_u16(x as u16);
 		} else if x < (1 << 28) {
-			// 1110xxxx — 4 bytes
+			// 1110xxxx: 4 bytes
 			if remaining < 4 {
 				return Err(EncodeError::Short);
 			}
@@ -411,14 +413,14 @@ impl VarInt {
 			w.put_u8((x >> 16) as u8);
 			w.put_u16(x as u16);
 		} else if x < (1 << 35) {
-			// 11110xxx — 5 bytes
+			// 11110xxx: 5 bytes
 			if remaining < 5 {
 				return Err(EncodeError::Short);
 			}
 			w.put_u8(0xF0 | (x >> 32) as u8);
 			w.put_u32(x as u32);
 		} else if x < (1 << 42) {
-			// 111110xx — 6 bytes
+			// 111110xx: 6 bytes
 			if remaining < 6 {
 				return Err(EncodeError::Short);
 			}
@@ -426,7 +428,7 @@ impl VarInt {
 			w.put_u8((x >> 32) as u8);
 			w.put_u32(x as u32);
 		} else if x < (1 << 56) {
-			// 11111110 — 8 bytes (skips 7)
+			// 11111110: 8 bytes (skips 7)
 			if remaining < 8 {
 				return Err(EncodeError::Short);
 			}
@@ -436,7 +438,7 @@ impl VarInt {
 			w.put_u16((x >> 32) as u16);
 			w.put_u32(x as u32);
 		} else {
-			// 11111111 — 9 bytes
+			// 11111111: 9 bytes
 			if remaining < 9 {
 				return Err(EncodeError::Short);
 			}
@@ -572,7 +574,7 @@ mod tests {
 			(&[0x25], 37),
 			(&[0x80, 0x25], 37),
 			(&[0xbb, 0xbd], 15_293),
-			// Example 4 (0xdd7f3e7d = 494,878,333) is omitted — the spec has a bug.
+			// Example 4 (0xdd7f3e7d = 494,878,333) is omitted. The spec has a bug.
 			// See https://github.com/moq-wg/moq-transport/pull/1521
 			(&[0xfa, 0xa1, 0xa0, 0xe4, 0x03, 0xd8], 2_893_212_287_960),
 			(

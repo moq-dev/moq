@@ -746,7 +746,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::CloseStream(id))
 				}
-				// v14/v15: namespace-keyed — decode namespace and look up request_id
+				// v14/v15: namespace-keyed, so decode namespace and look up request_id
 				Version::Draft14 | Version::Draft15 => {
 					let id = self.lookup_namespace_request_id(body)?;
 					Ok(Route::CloseStream(id))
@@ -960,7 +960,7 @@ mod tests {
 			streams: Mutex::new(HashMap::new()),
 			namespaces: Mutex::new(HashMap::new()),
 		});
-		// We need a dummy inner session — but classify doesn't use it.
+		// We need a dummy inner session, but classify doesn't use it.
 		// Use a struct that satisfies the trait bound. We can't easily construct one,
 		// so we'll test via a free function wrapper instead.
 

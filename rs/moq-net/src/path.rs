@@ -12,6 +12,7 @@ pub type PathOwned = Path<'static>;
 /// When providing a String/str, any leading/trailing slashes are trimmed and multiple consecutive slashes are collapsed.
 /// When already a Path, normalization is skipped and the underlying buffer is reused without copying.
 pub trait AsPath {
+	/// Borrow `self` as a [`Path`], normalizing slashes only when needed.
 	fn as_path(&self) -> Path<'_>;
 }
 
@@ -176,6 +177,10 @@ impl<'a> Path<'a> {
 		s.as_bytes().get(prefix.len()) == Some(&b'/')
 	}
 
+	/// The remainder after removing `prefix`, or `None` if it isn't a prefix.
+	///
+	/// Only whole segments match: `a/bc` is not prefixed by `a/b`. An empty prefix
+	/// returns the whole path.
 	pub fn strip_prefix(&'a self, prefix: impl AsPath) -> Option<Path<'a>> {
 		let prefix = prefix.as_path();
 
@@ -233,6 +238,7 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	/// The normalized path as a string, with no leading or trailing slash.
 	pub fn as_str(&self) -> &str {
 		match &self.0 {
 			Repr::Borrowed(s) => s,
@@ -240,18 +246,22 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	/// The empty path, which prefixes every other path.
 	pub fn empty() -> Path<'static> {
 		Path(Repr::Borrowed(""))
 	}
 
+	/// Returns `true` if this is the empty path.
 	pub fn is_empty(&self) -> bool {
 		self.as_str().is_empty()
 	}
 
+	/// The length in bytes, not segments.
 	pub fn len(&self) -> usize {
 		self.as_str().len()
 	}
 
+	/// Clone into a `'static` path, sharing the existing buffer when there is one.
 	pub fn to_owned(&self) -> PathOwned {
 		match &self.0 {
 			Repr::Borrowed("") => Path::empty(),
@@ -266,6 +276,7 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	/// Consume into a `'static` path, reusing the existing buffer when there is one.
 	pub fn into_owned(self) -> PathOwned {
 		match self.0 {
 			Repr::Borrowed("") => Path::empty(),
@@ -656,14 +667,17 @@ impl PathPrefixes {
 		Self { paths: result }
 	}
 
+	/// Returns `true` if the set contains no prefixes, so it matches nothing.
 	pub fn is_empty(&self) -> bool {
 		self.paths.is_empty()
 	}
 
+	/// The number of prefixes, after redundant ones were collapsed.
 	pub fn len(&self) -> usize {
 		self.paths.len()
 	}
 
+	/// Iterate the prefixes in the set.
 	pub fn iter(&self) -> std::slice::Iter<'_, PathOwned> {
 		self.paths.iter()
 	}

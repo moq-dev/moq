@@ -13,48 +13,63 @@ pub trait Decode<V>: Sized {
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum DecodeError {
+	/// The buffer ran out mid-value. Retry once more bytes arrive.
 	#[error("short buffer")]
 	Short,
 
+	/// The value claims more bytes than the enclosing message allows.
 	#[error("long buffer")]
 	Long,
 
+	/// A string field was not valid UTF-8.
 	#[error("invalid string")]
 	InvalidString(#[from] FromUtf8Error),
 
+	/// The message type ID is unknown for the negotiated version.
 	#[error("invalid message: {0:?}")]
 	InvalidMessage(u64),
 
+	/// A SUBSCRIBE start/end location is malformed or out of order.
 	#[error("invalid subscribe location")]
 	InvalidSubscribeLocation,
 
+	/// A field held a value outside its permitted range.
 	#[error("invalid value")]
 	InvalidValue,
 
+	/// A repeated field exceeded the count this implementation accepts.
 	#[error("too many")]
 	TooMany,
 
+	/// An integer was too large for the QUIC varint range.
 	#[error("bounds exceeded")]
 	BoundsExceeded,
 
+	/// More data followed where the message was required to end.
 	#[error("expected end")]
 	ExpectedEnd,
 
+	/// The stream ended where a payload was required.
 	#[error("expected data")]
 	ExpectedData,
 
+	/// A parameter or field appeared more than once.
 	#[error("duplicate")]
 	Duplicate,
 
+	/// A required parameter or field was absent.
 	#[error("missing")]
 	Missing,
 
+	/// The value is well-formed but this implementation does not handle it.
 	#[error("unsupported")]
 	Unsupported,
 
+	/// Bytes remained after the value was fully decoded.
 	#[error("trailing bytes")]
 	TrailingBytes,
 
+	/// The field does not exist in the negotiated protocol version.
 	#[error("unsupported version")]
 	Version,
 }

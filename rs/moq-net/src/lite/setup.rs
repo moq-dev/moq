@@ -60,6 +60,7 @@ impl ProbeLevel {
 /// parameter. `Option<Role>` mirrors that: `None` is the default, and it's also what
 /// a client that predates the parameter decodes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Role {
 	/// The client will publish tracks (ingest); the server must consume.
 	Publisher,

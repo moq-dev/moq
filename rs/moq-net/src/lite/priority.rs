@@ -724,7 +724,7 @@ mod tests {
 
 		// Lower top's track below every filler. Without the swap, top would land
 		// in vec at the tail while f1 stays in overflow despite having higher
-		// priority — breaking the "every overflow item < every vec item" invariant.
+		// priority, breaking the "every overflow item < every vec item" invariant.
 		top.set_track(0);
 
 		assert!(fillers[0].current() < u8::MAX, "f1 should be promoted back into vec");

@@ -48,7 +48,7 @@ impl Producer {
 	}
 
 	/// Close the producer with an error, notifying all consumers.
-	pub fn close(&self, err: Error) -> Result<()> {
+	pub fn abort(&self, err: Error) -> Result<()> {
 		let mut state = self.modify()?;
 		state.abort = Some(err);
 		state.close();
@@ -69,7 +69,7 @@ impl Producer {
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.state.poll_unused(waiter).map(|used| match used {
 			Some(()) => Ok(()),
-			None => Err(self.abort()),
+			None => Err(self.close_error()),
 		})
 	}
 
@@ -82,7 +82,7 @@ impl Producer {
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.state.poll_used(waiter).map(|used| match used {
 			Some(()) => Ok(()),
-			None => Err(self.abort()),
+			None => Err(self.close_error()),
 		})
 	}
 
@@ -93,7 +93,7 @@ impl Producer {
 	}
 
 	/// The close error, once the channel is closed.
-	fn abort(&self) -> Error {
+	fn close_error(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
@@ -183,7 +183,7 @@ mod tests {
 		assert_eq!(consumer.changed().await.unwrap(), None);
 
 		// Gone for good.
-		producer.close(Error::Cancel).unwrap();
+		producer.abort(Error::Cancel).unwrap();
 		assert!(consumer.changed().await.is_err());
 		// And it stays terminal rather than flapping back to a value.
 		assert!(consumer.changed().await.is_err());

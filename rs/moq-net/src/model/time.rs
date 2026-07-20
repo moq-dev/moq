@@ -28,7 +28,8 @@ impl Timescale {
 		Some(n) => Self(n),
 		None => unreachable!(),
 	};
-	/// 1,000,000 units per second (`1_000_000`). Common default for media tracks.
+	/// 1,000,000 units per second (`1_000_000`). Widely used by container formats;
+	/// this crate's own default is [`Self::MILLI`].
 	pub const MICRO: Self = match NonZero::new(1_000_000) {
 		Some(n) => Self(n),
 		None => unreachable!(),

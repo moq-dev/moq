@@ -66,7 +66,6 @@ impl<T> Consumer<T> {
 	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Closed>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<R> + Unpin,
-		R: Unpin,
 	{
 		// The `Ref` is dropped here inside the closure, releasing the lock before the
 		// caller ever sees the result.

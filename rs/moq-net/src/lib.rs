@@ -69,6 +69,8 @@
 //! model-layer methods (tracks, groups, frames, origins) never touch a timer and
 //! run on any executor.
 
+#![warn(missing_docs)]
+
 mod client;
 mod coding;
 mod error;

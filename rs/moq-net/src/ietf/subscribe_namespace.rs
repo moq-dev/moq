@@ -121,7 +121,7 @@ impl Message for SubscribeNamespaceLegacy<'_> {
 	}
 }
 
-/// SubscribeNamespaceOk message (0x12) — v14 only
+/// SubscribeNamespaceOk message (0x12): v14 only
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceOk {
 	pub request_id: RequestId,
@@ -141,7 +141,7 @@ impl Message for SubscribeNamespaceOk {
 	}
 }
 
-/// SubscribeNamespaceError message (0x13) — v14 only
+/// SubscribeNamespaceError message (0x13): v14 only
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceError<'a> {
 	pub request_id: RequestId,
@@ -172,7 +172,7 @@ impl Message for SubscribeNamespaceError<'_> {
 	}
 }
 
-/// UnsubscribeNamespace message (0x14) — v14/v15 only (v16 uses stream close)
+/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close)
 #[derive(Clone, Debug)]
 pub struct UnsubscribeNamespace {
 	pub request_id: RequestId,
@@ -192,7 +192,7 @@ impl Message for UnsubscribeNamespace {
 	}
 }
 
-/// NAMESPACE message (0x08) — v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+/// NAMESPACE message (0x08): v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
 /// Indicates a namespace suffix matching the subscribed prefix is active.
 #[derive(Clone, Debug)]
 pub struct Namespace<'a> {
@@ -213,7 +213,7 @@ impl Message for Namespace<'_> {
 	}
 }
 
-/// PUBLISH_BLOCKED message (0x0F) — draft-17 only
+/// PUBLISH_BLOCKED message (0x0F): draft-17 only
 /// Indicates a track within a namespace is blocked from publishing.
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // Will be used in Phase 3 bidi stream handling
@@ -242,7 +242,7 @@ impl Message for PublishBlocked<'_> {
 	}
 }
 
-/// NAMESPACE_DONE message (0x0E) — v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+/// NAMESPACE_DONE message (0x0E): v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
 /// Indicates a namespace suffix matching the subscribed prefix is no longer active.
 #[derive(Clone, Debug)]
 pub struct NamespaceDone<'a> {

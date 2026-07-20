@@ -240,6 +240,7 @@ async fn forward(
 					match state {
 						moq_native::Status::Connected => gst::info!(CAT, "session connected"),
 						moq_native::Status::Disconnected => gst::warning!(CAT, "session disconnected, reconnecting"),
+						_ => {}
 					}
 					notify(&element, &["status", "connected", "moq-version"]);
 				}

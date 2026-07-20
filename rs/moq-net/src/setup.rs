@@ -12,7 +12,7 @@ const SERVER_SETUP: u8 = 0x21;
 /// Draft-17 unified SETUP message type (varint 0x2F00)
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
-/// Draft-17+ unified SETUP message — same encoding for both client and server.
+/// Draft-17+ unified SETUP message, with the same encoding for both client and server.
 #[derive(Debug, Clone)]
 pub struct Setup {
 	pub parameters: Bytes,

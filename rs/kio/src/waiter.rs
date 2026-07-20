@@ -1,10 +1,9 @@
 use std::{
-	cell::OnceCell,
 	fmt,
 	future::Future,
 	marker::PhantomData,
 	pin::Pin,
-	sync::{Arc, Weak},
+	sync::{Arc, OnceLock, Weak},
 	task::{Context, Poll, Waker},
 };
 
@@ -27,7 +26,7 @@ pub struct Waiter {
 	// The shared handle downgraded into every list this waiter registers with. Created on the
 	// first `register` (a poll that never parks never allocates it), then reused so multiple
 	// lists in one poll share a single allocation whose `Weak`s die together when the waiter drops.
-	shared: OnceCell<Arc<Waker>>,
+	shared: OnceLock<Arc<Waker>>,
 }
 
 impl Waiter {
@@ -35,7 +34,7 @@ impl Waiter {
 	pub fn new(waker: Waker) -> Self {
 		Self {
 			waker,
-			shared: OnceCell::new(),
+			shared: OnceLock::new(),
 		}
 	}
 
@@ -102,8 +101,8 @@ impl WaiterList {
 			if self.entries[self.cursor].strong_count() == 0 {
 				// Reuse the dead slot in place. Each Waiter owns a
 				// unique Arc<Waker>, so strong_count == 0 uniquely
-				// identifies a slot whose owner has been dropped —
-				// no will_wake / pointer comparison needed.
+				// identifies a slot whose owner has been dropped.
+				// No will_wake / pointer comparison needed.
 				self.entries[self.cursor] = new_weak;
 				return;
 			}
@@ -202,6 +201,17 @@ mod tests {
 		let mut boxed: Pin<Box<dyn Future<Output = u8>>> = Box::pin(std::future::ready(9u8));
 		assert_eq!(waiter.poll_future(boxed.as_mut()), Poll::Ready(9));
 	}
+
+	// `Waiter` is shared behind `&self` across threads, so the lazily allocated
+	// `shared` handle must use a thread-safe cell. A `!Sync` waiter silently
+	// infects `Pending` and `Shared`, and through them every moq-net consumer.
+	const fn assert_sync<T: Sync>() {}
+
+	const _: () = {
+		assert_sync::<Waiter>();
+		assert_sync::<crate::Pending<crate::Consumer<u32>>>();
+		assert_sync::<crate::Shared<u32>>();
+	};
 
 	#[test]
 	fn wait_output_need_not_be_unpin() {

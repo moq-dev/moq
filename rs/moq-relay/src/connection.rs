@@ -62,7 +62,9 @@ impl Connection {
 		let authorized = match role {
 			Some(moq_net::Role::Publisher) => publish.is_some(),
 			Some(moq_net::Role::Subscriber) => subscribe.is_some(),
-			None => publish.is_some() || subscribe.is_some(),
+			// Bidirectional or an unrecognized future role: require the token to grant
+			// something, and let the per-direction checks apply once it's used.
+			None | Some(_) => publish.is_some() || subscribe.is_some(),
 		};
 		if !authorized {
 			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
@@ -102,7 +104,8 @@ impl Connection {
 		let (publish, subscribe) = match role {
 			Some(moq_net::Role::Publisher) => (publish, None),
 			Some(moq_net::Role::Subscriber) => (None, subscribe),
-			None => (publish, subscribe),
+			// Bidirectional or an unrecognized future role: keep whatever the token grants.
+			None | Some(_) => (publish, subscribe),
 		};
 
 		// Accept the connection.

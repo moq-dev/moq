@@ -51,7 +51,9 @@ pub(crate) const ALPN_19: &str = "moqt-19";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Version {
+	/// A `moq-lite` draft, the simplified protocol this project specifies.
 	Lite(lite::Version),
+	/// An IETF `moq-transport` draft.
 	Ietf(ietf::Version),
 }
 
@@ -288,10 +290,12 @@ impl Versions {
 		self.0.contains(&version).then_some(version)
 	}
 
+	/// Returns `true` if the set includes this version.
 	pub fn contains(&self, version: &Version) -> bool {
 		self.0.contains(version)
 	}
 
+	/// Iterate the set in preference order, most preferred first.
 	pub fn iter(&self) -> impl Iterator<Item = &Version> {
 		self.0.iter()
 	}

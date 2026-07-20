@@ -16,6 +16,7 @@ pub struct Server {
 }
 
 impl Server {
+	/// A server that neither publishes nor subscribes until configured.
 	pub fn new() -> Self {
 		Default::default()
 	}
@@ -36,18 +37,6 @@ impl Server {
 		self
 	}
 
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_publisher`")]
-	pub fn with_publish(self, publish: origin::Consumer) -> Self {
-		self.with_publisher(publish)
-	}
-
-	#[doc(hidden)]
-	#[deprecated(note = "renamed to `with_subscriber`")]
-	pub fn with_consume(self, subscribe: origin::Producer) -> Self {
-		self.with_subscriber(subscribe)
-	}
-
 	/// Attach a tier-scoped [`stats::Handle`]. Per-broadcast and per-subscription
 	/// counters will be bumped through this handle for the lifetime of the session.
 	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
@@ -61,6 +50,8 @@ impl Server {
 		self.with_publisher(&origin).with_subscriber(origin)
 	}
 
+	/// Restrict which protocol versions to accept, in preference order.
+	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
 		self
