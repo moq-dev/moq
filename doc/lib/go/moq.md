@@ -145,7 +145,7 @@ if moq.IsAuthError(err) {
 
 ## Publishing lifetime
 
-A broadcast stays live only while you hold its `BroadcastProducer`. Once the producer is garbage-collected the broadcast is treated as a failure: the path lingers briefly for a replacement publisher, then subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
+A broadcast stays live only while you hold its `BroadcastProducer`. Once the producer is garbage-collected the path unannounces and subscribers get a reset mid-stream. This bites when the producer goes out of scope while a background goroutine is still writing to its tracks.
 
 Keep a reference for as long as you are publishing, then close it explicitly when done:
 

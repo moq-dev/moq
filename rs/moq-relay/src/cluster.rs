@@ -603,8 +603,8 @@ impl Cluster {
 
 		while tasks.join_next().await.is_some() {}
 
-		// Deliberate shutdown: finish the registration so it unannounces
-		// immediately instead of lingering for a reconnect.
+		// Deliberate shutdown: finish the registration rather than dropping it, so
+		// there is no dropped-without-finish warning.
 		if let Some(registration) = self_registration {
 			registration.finish();
 		}

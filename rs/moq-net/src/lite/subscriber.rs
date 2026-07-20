@@ -352,8 +352,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `routes` has no entry; that's expected, not an error.
-					// A deliberate unannounce detaches gracefully: if this was the
-					// broadcast's last route it closes now, without the reconnect linger.
+					// A deliberate unannounce, so finish() rather than drop; the origin
+					// unannounces if this was the broadcast's last route.
 					if let Some(entry) = routes.remove(&path) {
 						entry.finish();
 						stats_guards.remove(&abs);
@@ -375,8 +375,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// The matching Active may have been silently dropped by
 					// start_announce as a reflected loop, in which case
 					// `routes` has no entry; that's expected, not an error.
-					// A deliberate unannounce detaches gracefully: if this was the
-					// broadcast's last route it closes now, without the reconnect linger.
+					// A deliberate unannounce, so finish() rather than drop; the origin
+					// unannounces if this was the broadcast's last route.
 					if let Some(entry) = routes.remove(&path) {
 						entry.finish();
 						stats_guards.remove(&abs);

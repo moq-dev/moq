@@ -20,9 +20,8 @@ use crate::Result;
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// A deliberate [`Self::finish`] ends the broadcast and unannounces the path
-/// immediately; dropping the publisher instead lets the origin linger briefly
-/// so a reconnecting sender can resume.
+/// Either [`Self::finish`] or dropping the publisher ends the broadcast and
+/// unannounces the path, the former without the dropped-without-finish warning.
 pub struct Publisher {
 	importer: ts::Import,
 	// A clone of the importer's producer, so a deliberate end can finish() the

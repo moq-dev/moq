@@ -1160,9 +1160,8 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 
 /// An active publish: the moq-mux FLV importer, which owns the origin-created
 /// [`BroadcastProducer`](moq_net::broadcast::Producer) it publishes into.
-/// Dropping it closes the broadcast; the origin lingers briefly before
-/// unannouncing so a reconnecting encoder can resume, while [`Self::finish`]
-/// unannounces immediately.
+/// Either [`Self::finish`] or dropping it closes the broadcast and unannounces
+/// the path, the former without the dropped-without-finish warning.
 struct Publisher {
 	importer: FlvImport,
 	// A clone of the importer's producer, so a deliberate end can finish() the

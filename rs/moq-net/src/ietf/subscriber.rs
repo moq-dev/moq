@@ -68,8 +68,8 @@ struct TrackState {
 
 struct BroadcastState {
 	// The source feeding this broadcast into our origin: finish() on a
-	// deliberate unannounce detaches immediately, dropping (a dying session)
-	// aborts it so the origin lingers for a reconnect.
+	// deliberate unannounce, dropping (a dying session) aborts it. Either way
+	// the origin unannounces once the last source detaches.
 	producer: crate::model::broadcast::SourceGuard,
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
@@ -608,8 +608,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
-					// A deliberate unannounce: finish the source so the origin
-					// detaches it immediately instead of lingering.
+					// A deliberate unannounce, so finish() rather than drop.
 					entry.remove().producer.finish();
 				}
 			}

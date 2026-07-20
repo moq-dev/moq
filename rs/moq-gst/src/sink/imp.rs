@@ -349,9 +349,8 @@ impl MoqSink {
 		if let Err(err) = state.finalize_all() {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
-		// Finish the broadcast (a deliberate end, so the origin unannounces it
-		// immediately instead of lingering for a reconnect) before reaping the
-		// session task.
+		// Finish the broadcast (a deliberate end, so no dropped-without-finish
+		// warning) before reaping the session task.
 		state.broadcast.finish();
 		state.session.stop();
 	}

@@ -309,8 +309,8 @@ impl Task {
 				});
 			}
 
-			// Deliberate unpublish: finish evicted broadcasts so the origin
-			// drops them immediately instead of lingering for a reconnect.
+			// Deliberate unpublish: finish evicted broadcasts rather than dropping
+			// them, so there is no dropped-without-finish warning.
 			let evicted: Vec<PathOwned> = groups
 				.keys()
 				.filter(|group| !active.contains(*group))
