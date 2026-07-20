@@ -35,4 +35,4 @@ pub use format::*;
 pub use producer::{Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;
-pub use tracks::{Audio, AudioTrack, Kind, Rendition, Reserved, Video, VideoHint, VideoTrack};
+pub use tracks::{AudioTrack, Estimate, Rendition, RenditionConfig, Reserved, VideoHint, VideoTrack};

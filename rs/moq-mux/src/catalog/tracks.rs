@@ -7,52 +7,104 @@ use super::Producer;
 use super::hang::{Catalog, CatalogExt};
 use crate::container::jitter::Metrics;
 
-mod sealed {
-	pub trait Sealed {}
-}
-
-/// The media kind of a reserved rendition, selecting its config type and catalog slot.
+/// The catalog fields a [`Rendition`] can measure from the frames fed to it.
 ///
-/// Implemented only by [`Video`] and [`Audio`]; used as the `K` in
-/// [`Rendition`] and [`Reserved::init`].
-pub trait Kind: sealed::Sealed + 'static {
-	/// The catalog config type carried by this kind ([`VideoConfig`](hang::catalog::VideoConfig)
-	/// or [`AudioConfig`](hang::catalog::AudioConfig)).
-	type Config;
-	/// The caller-provided overlay for this kind: [`VideoHint`] for video, `()` for audio (which takes
-	/// a complete [`AudioConfig`](hang::catalog::AudioConfig) instead).
-	type Hint: Clone + Default;
-
-	#[doc(hidden)]
-	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config);
-	#[doc(hidden)]
-	fn with_mut<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, f: impl FnOnce(&mut Self::Config));
-	#[doc(hidden)]
-	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str);
-
-	/// The config's detected-jitter field, so [`Rendition`] can update it generically.
-	#[doc(hidden)]
-	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration>;
-	/// The config's bitrate field, so [`Rendition`] can update it generically.
-	#[doc(hidden)]
-	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64>;
-
-	/// The config's timeline field, so [`Rendition`] can advertise the timeline track generically.
-	#[doc(hidden)]
-	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline>;
-
-	/// Fill a detected config's absent optional fields from a caller-provided hint.
-	#[doc(hidden)]
-	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint);
+/// An absent field is one to measure: whatever the config already carries when it reaches
+/// [`Rendition::set`] is authoritative and left alone, and the rest is detected and kept current.
+#[derive(Clone, Default, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Estimate {
+	/// The maximum jitter before the next frame is emitted.
+	pub jitter: Option<Duration>,
+	/// The maximum bitrate in bits per second.
+	pub bitrate: Option<u64>,
 }
 
-/// Video rendition marker for [`Rendition`] / [`Reserved::init`].
-pub enum Video {}
-/// Audio rendition marker for [`Rendition`] / [`Reserved::init`].
-pub enum Audio {}
+impl Estimate {
+	/// Set the jitter (or clear it with `None`).
+	pub fn with_jitter(mut self, jitter: impl Into<Option<Duration>>) -> Self {
+		self.jitter = jitter.into();
+		self
+	}
 
-impl sealed::Sealed for Video {}
-impl sealed::Sealed for Audio {}
+	/// Set the bitrate in bits per second (or clear it with `None`).
+	pub fn with_bitrate(mut self, bitrate: impl Into<Option<u64>>) -> Self {
+		self.bitrate = bitrate.into();
+		self
+	}
+}
+
+/// A catalog config that can be published as a named rendition.
+///
+/// Implement it on your own config type to get the full [`Rendition`] lifecycle for a custom
+/// track: reservation gating, timeline advertising, removal on drop, and optional jitter/bitrate
+/// detection. [`VideoConfig`](hang::catalog::VideoConfig) and
+/// [`AudioConfig`](hang::catalog::AudioConfig) implement it for every extension; a custom config
+/// implements it for the one [`CatalogExt`] that holds it:
+///
+/// ```
+/// # use moq_mux::catalog::{Estimate, RenditionConfig};
+/// # use moq_mux::catalog::hang::{Catalog, CatalogExt};
+/// # use serde::{Deserialize, Serialize};
+/// # use std::collections::BTreeMap;
+/// #[derive(Serialize, Deserialize, Clone, Default)]
+/// struct MyExt {
+///     telemetry: BTreeMap<String, Telemetry>,
+/// }
+/// impl CatalogExt for MyExt {}
+///
+/// #[derive(Serialize, Deserialize, Clone, Default)]
+/// struct Telemetry {
+///     schema: String,
+///     bitrate: Option<u64>,
+/// }
+///
+/// impl RenditionConfig<MyExt> for Telemetry {
+///     fn insert(self, catalog: &mut Catalog<MyExt>, name: &str) {
+///         catalog.telemetry.insert(name.to_string(), self);
+///     }
+///     fn get_mut<'a>(catalog: &'a mut Catalog<MyExt>, name: &str) -> Option<&'a mut Self> {
+///         catalog.telemetry.get_mut(name)
+///     }
+///     fn remove(catalog: &mut Catalog<MyExt>, name: &str) {
+///         catalog.telemetry.remove(name);
+///     }
+///
+///     // Opt into bitrate detection; jitter is left undetected.
+///     fn estimate(&self) -> Estimate {
+///         Estimate::default().with_bitrate(self.bitrate)
+///     }
+///     fn set_estimate(&mut self, estimate: Estimate) {
+///         self.bitrate = estimate.bitrate;
+///     }
+/// }
+/// ```
+///
+/// Note that `insert` takes the whole [`Catalog`], not just the extension, so the built-in media
+/// configs use the same trait. Writing to `catalog.video` / `catalog.audio` from a custom config
+/// fights the media pipeline for those sections; stay in your own.
+pub trait RenditionConfig<E: CatalogExt>: Sized + 'static {
+	/// Insert or replace this config under `name`.
+	fn insert(self, catalog: &mut Catalog<E>, name: &str);
+
+	/// Borrow the config stored under `name`, if it's present.
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self>;
+
+	/// Remove the config stored under `name`.
+	fn remove(catalog: &mut Catalog<E>, name: &str);
+
+	/// Advertise the rendition's timeline track, so a consumer can index its groups without
+	/// downloading media. Defaults to not advertising one.
+	fn set_timeline(&mut self, _timeline: hang::catalog::Timeline) {}
+
+	/// The config's current [`Estimate`] fields. Defaults to none, disabling detection.
+	fn estimate(&self) -> Estimate {
+		Estimate::default()
+	}
+
+	/// Replace the config's [`Estimate`] fields. Defaults to discarding them.
+	fn set_estimate(&mut self, _estimate: Estimate) {}
+}
 
 /// Caller-provided catalog fields for a video track: a starting point for what the importer detects.
 ///
@@ -62,8 +114,9 @@ impl sealed::Sealed for Audio {}
 /// decoder config then arrives in band). Use it for fields the stream can't reveal (bitrate) or to
 /// skip that wait.
 ///
-/// Audio has no equivalent: an audio importer can't resolve its config from frames, so it takes a
-/// complete [`AudioConfig`](hang::catalog::AudioConfig) up front instead of a hint.
+/// Video importers take one because they build the [`VideoConfig`](hang::catalog::VideoConfig)
+/// themselves, out of the bitstream, so the caller never holds the config to set these on. An audio
+/// importer publishes a complete config from its init bytes, so audio has no equivalent.
 #[derive(Clone, Default, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct VideoHint {
@@ -99,7 +152,9 @@ impl VideoHint {
 	/// Fill a detected video config's absent optional fields from these hints.
 	///
 	/// Only the gaps: a value the stream detects (e.g. the dimensions from an SPS) is left untouched,
-	/// so a resolution change updates the catalog instead of conflicting with the hint.
+	/// so a resolution change updates the catalog instead of conflicting with the hint. An importer
+	/// calls this on every config it publishes, before handing it to [`Rendition::set`], so a hinted
+	/// field counts as supplied and is never overwritten by detection.
 	pub fn apply(&self, config: &mut hang::catalog::VideoConfig) {
 		fill(&mut config.coded_width, self.coded_width);
 		fill(&mut config.coded_height, self.coded_height);
@@ -122,66 +177,52 @@ impl VideoHint {
 	}
 }
 
-impl Kind for Video {
-	type Config = hang::catalog::VideoConfig;
-	type Hint = VideoHint;
-
-	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
-		catalog.video.renditions.insert(name.to_string(), config);
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::VideoConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.video.renditions.insert(name.to_string(), self);
 	}
-	fn with_mut<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, f: impl FnOnce(&mut Self::Config)) {
-		if let Some(config) = catalog.video.renditions.get_mut(name) {
-			f(config);
-		}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.video.renditions.get_mut(name)
 	}
-	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str) {
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.video.renditions.remove(name);
 	}
 
-	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration> {
-		&mut config.jitter
-	}
-	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
-		&mut config.bitrate
-	}
-	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline> {
-		&mut config.timeline
+	fn set_timeline(&mut self, timeline: hang::catalog::Timeline) {
+		self.timeline = Some(timeline);
 	}
 
-	fn apply_hint(config: &mut Self::Config, hint: &Self::Hint) {
-		hint.apply(config);
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
 	}
 }
 
-impl Kind for Audio {
-	type Config = hang::catalog::AudioConfig;
-	// Audio has no hint: importers publish a complete `AudioConfig` (see the crate docs on why audio
-	// is eager while video is lazy), so there's nothing to overlay.
-	type Hint = ();
-
-	fn insert<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, config: Self::Config) {
-		catalog.audio.renditions.insert(name.to_string(), config);
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.audio.renditions.insert(name.to_string(), self);
 	}
-	fn with_mut<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str, f: impl FnOnce(&mut Self::Config)) {
-		if let Some(config) = catalog.audio.renditions.get_mut(name) {
-			f(config);
-		}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.audio.renditions.get_mut(name)
 	}
-	fn remove<E: CatalogExt>(catalog: &mut Catalog<E>, name: &str) {
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
 		catalog.audio.renditions.remove(name);
 	}
 
-	fn jitter_mut(config: &mut Self::Config) -> &mut Option<Duration> {
-		&mut config.jitter
-	}
-	fn bitrate_mut(config: &mut Self::Config) -> &mut Option<u64> {
-		&mut config.bitrate
-	}
-	fn timeline_mut(config: &mut Self::Config) -> &mut Option<hang::catalog::Timeline> {
-		&mut config.timeline
+	fn set_timeline(&mut self, timeline: hang::catalog::Timeline) {
+		self.timeline = Some(timeline);
 	}
 
-	fn apply_hint(_config: &mut Self::Config, _hint: &Self::Hint) {}
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter).with_bitrate(self.bitrate)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+		self.bitrate = estimate.bitrate;
+	}
 }
 
 /// A clonable reservation context handed to importers so they declare their tracks up front.
@@ -202,31 +243,23 @@ impl<E: CatalogExt> Reserved<E> {
 		Self { catalog }
 	}
 
-	/// Reserve a rendition of kind `K` under `name`, returning a guard to fill it in.
+	/// Reserve a rendition of config type `C` under `name`, returning a guard to fill it in.
 	///
 	/// The guard holds its own `Reserved` clone, so the catalog stays withheld until the returned
 	/// [`Rendition`] is [`set`](Rendition::set) (or dropped). Prefer [`video`](Self::video) /
-	/// [`audio`](Self::audio) at call sites.
-	pub fn init<K: Kind>(&self, name: impl Into<String>) -> Rendition<E, K> {
-		Rendition::new(self.clone(), name, K::Hint::default())
+	/// [`audio`](Self::audio) for the built-in media configs.
+	pub fn init<C: RenditionConfig<E>>(&self, name: impl Into<String>) -> Rendition<E, C> {
+		Rendition::new(self.clone(), name)
 	}
 
-	/// Reserve a video rendition seeded with caller-provided catalog fields.
-	///
-	/// The `hint` is carried on the returned [`Rendition`]: every [`set`](Rendition::set) fills the
-	/// gaps it declares (a detected value wins). See [`VideoHint`].
-	pub fn video_with_hint(&self, name: impl Into<String>, hint: VideoHint) -> Rendition<E, Video> {
-		Rendition::new(self.clone(), name, hint)
+	/// Reserve a video rendition; shorthand for [`init`](Self::init).
+	pub fn video(&self, name: impl Into<String>) -> VideoTrack<E> {
+		self.init(name)
 	}
 
-	/// Reserve a video rendition; shorthand for [`init::<Video>`](Self::init).
-	pub fn video(&self, name: impl Into<String>) -> Rendition<E, Video> {
-		self.init::<Video>(name)
-	}
-
-	/// Reserve an audio rendition; shorthand for [`init::<Audio>`](Self::init).
-	pub fn audio(&self, name: impl Into<String>) -> Rendition<E, Audio> {
-		self.init::<Audio>(name)
+	/// Reserve an audio rendition; shorthand for [`init`](Self::init).
+	pub fn audio(&self, name: impl Into<String>) -> AudioTrack<E> {
+		self.init(name)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -259,13 +292,13 @@ impl<E: CatalogExt> Drop for Reserved<E> {
 	}
 }
 
-/// A reserved rendition of kind `K`, retired from the catalog on drop.
+/// A reserved rendition of config type `C`, retired from the catalog on drop.
 ///
 /// Made via [`Reserved::init`] (or [`video`](Reserved::video) / [`audio`](Reserved::audio)). Fill
 /// it in with [`set`](Self::set) and refine it in place with [`update`](Self::update). Until it's
 /// set (or dropped) it holds a [`Reserved`] clone, so an unresolved rendition keeps the initial
 /// catalog publish gated. On drop the rendition is removed from the shared catalog.
-pub struct Rendition<E: CatalogExt, K: Kind> {
+pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 	catalog: Producer<E>,
 	name: String,
 	/// The reservation this rendition holds until its config is set (or it's dropped unfulfilled).
@@ -276,32 +309,27 @@ pub struct Rendition<E: CatalogExt, K: Kind> {
 	present: bool,
 	/// Detects jitter and bitrate from the frames fed in, keeping the config's fields current.
 	metrics: Metrics,
-	/// Auto-fill `jitter` from the detector only while the config hasn't provided it.
-	detect_jitter: bool,
-	/// Auto-fill `bitrate` from the detector only while the config hasn't provided it.
-	detect_bitrate: bool,
-	/// Caller-provided fields, validated against and overlaid onto every [`set`](Self::set).
-	hint: K::Hint,
-	_kind: PhantomData<fn() -> K>,
+	/// The fields the config carried at [`set`](Self::set): authoritative, never overwritten by
+	/// detection. Whatever is absent here is what the detector fills.
+	supplied: Estimate,
+	_config: PhantomData<fn() -> C>,
 }
 
 /// A single video track's catalog rendition. See [`Rendition`].
-pub type VideoTrack<E = ()> = Rendition<E, Video>;
+pub type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 /// A single audio track's catalog rendition. See [`Rendition`].
-pub type AudioTrack<E = ()> = Rendition<E, Audio>;
+pub type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
 
-impl<E: CatalogExt, K: Kind> Rendition<E, K> {
-	fn new(reserved: Reserved<E>, name: impl Into<String>, hint: K::Hint) -> Self {
+impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
+	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {
 		Self {
 			catalog: reserved.catalog.clone(),
 			gate: Some(reserved),
 			name: name.into(),
 			present: false,
 			metrics: Metrics::new(),
-			detect_jitter: true,
-			detect_bitrate: true,
-			hint,
-			_kind: PhantomData,
+			supplied: Estimate::default(),
+			_config: PhantomData,
 		}
 	}
 
@@ -317,97 +345,90 @@ impl<E: CatalogExt, K: Kind> Rendition<E, K> {
 
 	/// Insert or replace the rendition, fulfilling the reservation and publishing the catalog.
 	///
-	/// The rendition's hint (a [`VideoHint`] from [`Reserved::video_with_hint`], or nothing for audio)
-	/// fills any gap `config` leaves first, so a value the stream detected wins over the hint. A field
-	/// then present (`jitter` or `bitrate`,
-	/// whether from the caller or the hint) is authoritative and left alone; only an absent field is
-	/// auto-detected. Any metrics accumulated before the rendition existed (a dirty start or a B-frame
-	/// reorder) are seeded into the fields being detected.
+	/// Whatever [`Estimate`] fields `config` already carries are authoritative and left alone; the
+	/// rest are auto-detected, seeded with any metrics accumulated before the rendition existed (a
+	/// dirty start or a B-frame reorder) and kept current as frames arrive. A caller who wants to
+	/// pre-empt detection sets the field on the config, or (for a config an importer builds out of
+	/// the bitstream) hands the importer a hint like [`VideoHint`].
 	///
 	/// Also advertises the rendition's timeline track in the config, so a consumer can index its groups
 	/// without downloading media (see [`Producer::timeline_section`](crate::catalog::Producer::timeline_section)).
-	pub fn set(&mut self, mut config: K::Config) {
-		K::apply_hint(&mut config, &self.hint);
-		self.detect_jitter = K::jitter_mut(&mut config).is_none();
-		self.detect_bitrate = K::bitrate_mut(&mut config).is_none();
-
-		if self.detect_jitter
-			&& let Some(jitter) = self.metrics.jitter()
-		{
-			*K::jitter_mut(&mut config) = Some(jitter);
-		}
-		if self.detect_bitrate
-			&& let Some(bitrate) = self.metrics.bitrate()
-		{
-			*K::bitrate_mut(&mut config) = Some(bitrate);
-		}
-
-		*K::timeline_mut(&mut config) = Some(self.catalog.timeline_section(&self.name));
+	pub fn set(&mut self, mut config: C) {
+		self.supplied = config.estimate();
+		config.set_estimate(self.resolved());
+		config.set_timeline(self.catalog.timeline_section(&self.name));
 
 		// Write the config first (still withheld, since we're holding our reservation), then release
 		// the reservation. If this was the last one, the release flushes a complete snapshot.
 		{
 			let mut guard = self.catalog.lock();
-			K::insert(&mut guard, &self.name, config);
+			config.insert(&mut guard, &self.name);
 		}
 		self.present = true;
 		self.gate = None;
 	}
 
+	/// The supplied fields, with anything absent filled from the detector.
+	fn resolved(&self) -> Estimate {
+		let mut estimate = self.supplied.clone();
+		if estimate.jitter.is_none() {
+			estimate.jitter = self.metrics.jitter();
+		}
+		if estimate.bitrate.is_none() {
+			estimate.bitrate = self.metrics.bitrate();
+		}
+		estimate
+	}
+
+	/// Republish the estimate after the detector moved a field nothing supplied.
+	fn refresh(&mut self) {
+		let estimate = self.resolved();
+		self.update(|config| config.set_estimate(estimate));
+	}
+
 	/// Refine the rendition in place (e.g. a synthesized description), publishing if present.
-	pub fn update(&mut self, f: impl FnOnce(&mut K::Config)) {
+	pub fn update(&mut self, f: impl FnOnce(&mut C)) {
 		if !self.present {
 			return;
 		}
 		let mut guard = self.catalog.lock();
-		K::with_mut(&mut guard, &self.name, f);
+		if let Some(config) = C::get_mut(&mut guard, &self.name) {
+			f(config);
+		}
 	}
 
 	/// Record one frame (presentation timestamp + encoded size), auto-filling the jitter if the
 	/// config didn't provide it and the detected value changed.
 	pub fn record_frame(&mut self, ts: Timestamp, bytes: usize) {
-		if let Some(jitter) = self.metrics.record_frame(ts, bytes)
-			&& self.detect_jitter
-		{
-			self.update(|config| *K::jitter_mut(config) = Some(jitter));
+		if self.metrics.record_frame(ts, bytes).is_some() && self.supplied.jitter.is_none() {
+			self.refresh();
 		}
 	}
 
 	/// Record a frame's reorder delay (`PTS - DTS`), auto-filling the jitter as for
 	/// [`record_frame`](Self::record_frame).
 	pub fn record_reorder(&mut self, reorder: Timestamp) {
-		if let Some(jitter) = self.metrics.record_reorder(reorder)
-			&& self.detect_jitter
-		{
-			self.update(|config| *K::jitter_mut(config) = Some(jitter));
+		if self.metrics.record_reorder(reorder).is_some() && self.supplied.jitter.is_none() {
+			self.refresh();
 		}
 	}
 
 	/// Close the current group (`next` is its end timestamp when known), auto-filling the bitrate
 	/// if the config didn't provide it and the detected maximum rose.
 	pub fn record_group_end(&mut self, next: Option<Timestamp>) {
-		if let Some(bitrate) = self.metrics.finish_group(next)
-			&& self.detect_bitrate
-		{
-			self.update(|config| raise_bitrate(K::bitrate_mut(config), bitrate));
+		if self.metrics.finish_group(next).is_some() && self.supplied.bitrate.is_none() {
+			self.refresh();
 		}
 	}
 }
 
-/// Raise a catalog `bitrate` field, never lowering a previously detected value.
-fn raise_bitrate(field: &mut Option<u64>, bitrate: u64) {
-	if field.is_none_or(|current| bitrate > current) {
-		*field = Some(bitrate);
-	}
-}
-
-impl<E: CatalogExt, K: Kind> Drop for Rendition<E, K> {
+impl<E: CatalogExt, C: RenditionConfig<E>> Drop for Rendition<E, C> {
 	fn drop(&mut self) {
 		if self.present {
 			// Removing mutates the catalog, so the guard publishes it (immediately if live, else it
 			// accumulates until the gate opens).
 			let mut guard = self.catalog.lock();
-			K::remove(&mut guard, &self.name);
+			C::remove(&mut guard, &self.name);
 		}
 		// Our reservation (`gate`) drops here. If still held (never set), its release flushes any
 		// staged change; if already released by `set`, this is a no-op.
@@ -418,11 +439,7 @@ impl<E: CatalogExt, K: Kind> Drop for Rendition<E, K> {
 mod tests {
 	use super::*;
 
-	fn video_track() -> (
-		moq_net::broadcast::Producer,
-		super::super::Producer,
-		Rendition<(), Video>,
-	) {
+	fn video_track() -> (moq_net::broadcast::Producer, super::super::Producer, VideoTrack) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
 		let reserved = catalog.reserve();
@@ -445,7 +462,7 @@ mod tests {
 	}
 
 	/// Feed ~40ms 100 kB frames (one per group) over more than the bitrate window.
-	fn feed(rendition: &mut Rendition<(), Video>) {
+	fn feed<E: CatalogExt, C: RenditionConfig<E>>(rendition: &mut Rendition<E, C>) {
 		for i in 0..60u64 {
 			let t = ts(i * 40_000);
 			rendition.record_group_end(Some(t));
@@ -480,5 +497,173 @@ mod tests {
 			Some(Duration::from_millis(50)),
 			"a provided jitter must not be overwritten"
 		);
+	}
+
+	/// A hint is applied by the importer before `set`, so a hinted field is indistinguishable from
+	/// one the stream revealed: supplied, and never overwritten by detection.
+	#[test]
+	fn hinted_fields_count_as_supplied() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+
+		let hint = VideoHint {
+			bitrate: Some(456),
+			..Default::default()
+		};
+		let mut config = config(None, None);
+		hint.apply(&mut config);
+
+		rendition.set(config);
+		feed(&mut rendition);
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.video.renditions.get("v").unwrap();
+		assert_eq!(config.bitrate, Some(456), "a hinted bitrate must not be overwritten");
+		assert!(config.jitter.is_some(), "the unhinted jitter should still be detected");
+	}
+
+	/// A detected value the stream later reveals wins: `set` recaptures what the new config carries.
+	#[test]
+	fn resetting_recaptures_supplied() {
+		let (_broadcast, catalog, mut rendition) = video_track();
+		rendition.set(config(None, None));
+		feed(&mut rendition);
+		assert!(catalog.snapshot().video.renditions.get("v").unwrap().bitrate.is_some());
+
+		rendition.set(config(Some(789), None));
+		feed(&mut rendition);
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.video.renditions.get("v").unwrap();
+		assert_eq!(config.bitrate, Some(789), "the re-set bitrate is now authoritative");
+	}
+
+	mod custom {
+		use std::collections::BTreeMap;
+
+		use serde::{Deserialize, Serialize};
+
+		use super::*;
+
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct TelemetryExt {
+			#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+			telemetry: BTreeMap<String, Telemetry>,
+		}
+
+		impl CatalogExt for TelemetryExt {}
+
+		#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
+		struct Telemetry {
+			schema: String,
+			#[serde(default, skip_serializing_if = "Option::is_none")]
+			bitrate: Option<u64>,
+			#[serde(default, skip_serializing_if = "Option::is_none")]
+			timeline: Option<hang::catalog::Timeline>,
+		}
+
+		impl RenditionConfig<TelemetryExt> for Telemetry {
+			fn insert(self, catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.telemetry.insert(name.to_string(), self);
+			}
+			fn get_mut<'a>(catalog: &'a mut Catalog<TelemetryExt>, name: &str) -> Option<&'a mut Self> {
+				catalog.telemetry.get_mut(name)
+			}
+			fn remove(catalog: &mut Catalog<TelemetryExt>, name: &str) {
+				catalog.telemetry.remove(name);
+			}
+
+			fn set_timeline(&mut self, timeline: hang::catalog::Timeline) {
+				self.timeline = Some(timeline);
+			}
+
+			// Opts into bitrate detection only; jitter is left undetected.
+			fn estimate(&self) -> Estimate {
+				Estimate::default().with_bitrate(self.bitrate)
+			}
+			fn set_estimate(&mut self, estimate: Estimate) {
+				self.bitrate = estimate.bitrate;
+			}
+		}
+
+		fn telemetry(bitrate: Option<u64>) -> Telemetry {
+			Telemetry {
+				schema: "gps/v1".to_string(),
+				bitrate,
+				timeline: None,
+			}
+		}
+
+		fn produce() -> (moq_net::broadcast::Producer, crate::catalog::Producer<TelemetryExt>) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::with_catalog(&mut broadcast, Catalog::default()).unwrap();
+			(broadcast, catalog)
+		}
+
+		/// A custom kind gets the same detection, timeline wiring, and drop-removal as video/audio.
+		#[test]
+		fn detects_and_advertises() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+			let mut rendition = reserved.init::<Telemetry>("gps");
+			drop(reserved);
+
+			rendition.set(telemetry(None));
+			feed(&mut rendition);
+
+			let snapshot = catalog.snapshot();
+			let config = snapshot.telemetry.get("gps").unwrap();
+			assert!(config.bitrate.is_some(), "absent bitrate should be auto-detected");
+			assert!(config.timeline.is_some(), "the timeline track should be advertised");
+
+			drop(rendition);
+			assert!(
+				!catalog.snapshot().telemetry.contains_key("gps"),
+				"the rendition should be removed on drop"
+			);
+		}
+
+		/// A field the config supplies is authoritative even though the kind opts into detection.
+		#[test]
+		fn keeps_supplied_bitrate() {
+			let (_broadcast, catalog) = produce();
+			let reserved = catalog.reserve();
+			let mut rendition = reserved.init::<Telemetry>("gps");
+			drop(reserved);
+
+			rendition.set(telemetry(Some(4_200)));
+			feed(&mut rendition);
+
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.telemetry.get("gps").unwrap().bitrate, Some(4_200));
+		}
+
+		/// Custom and media renditions share one reservation gate, so the first snapshot carries both.
+		#[test]
+		fn gates_with_media_tracks() {
+			let (_broadcast, catalog) = produce();
+			let mut consumer = catalog.consume().unwrap();
+
+			let reserved = catalog.reserve();
+			let mut video = reserved.video("v");
+			let mut gps = reserved.init::<Telemetry>("gps");
+			drop(reserved);
+
+			let waiter = kio::Waiter::noop();
+			video.set(config(None, None));
+			assert!(
+				matches!(consumer.poll_next(&waiter), std::task::Poll::Pending),
+				"the catalog stays withheld while the telemetry rendition is unresolved"
+			);
+
+			gps.set(telemetry(None));
+
+			let mut latest = None;
+			while let std::task::Poll::Ready(Ok(Some(catalog))) = consumer.poll_next(&waiter) {
+				latest = Some(catalog);
+			}
+			let published = latest.expect("catalog published");
+			assert!(published.video.renditions.contains_key("v"));
+			assert!(published.telemetry.contains_key("gps"));
+		}
 	}
 }

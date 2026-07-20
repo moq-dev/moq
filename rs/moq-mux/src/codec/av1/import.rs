@@ -30,6 +30,9 @@ pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::VideoTrack<E>,
 	config: Option<hang::catalog::VideoConfig>,
+	/// Overlaid onto every config we publish, so a hinted field counts as supplied and is never
+	/// overwritten by the rendition's detector.
+	hint: crate::catalog::VideoHint,
 	last_seq: Option<Bytes>,
 }
 
@@ -44,18 +47,18 @@ impl<E: CatalogExt> Import<E> {
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
 	) -> Self {
-		let rendition = reserved.video_with_hint(track.name(), hint.clone());
+		let rendition = reserved.video(track.name());
 		let mut import = Self {
 			track: reserved
 				.producer()
 				.media_producer(track, crate::catalog::hang::Container::Legacy),
 			rendition,
 			config: None,
+			hint,
 			last_seq: None,
 		};
-		if let Some(config) = hint.to_config() {
-			import.rendition.set(config.clone());
-			import.config = Some(config);
+		if let Some(config) = import.hint.to_config() {
+			import.apply_config(config);
 		}
 		import
 	}
@@ -172,7 +175,8 @@ impl<E: CatalogExt> Import<E> {
 	///
 	/// A changed config just re-mirrors the rendition; there are no fixed tracks
 	/// to reject a reconfiguration.
-	fn apply_config(&mut self, config: hang::catalog::VideoConfig) {
+	fn apply_config(&mut self, mut config: hang::catalog::VideoConfig) {
+		self.hint.apply(&mut config);
 		if self.config.as_ref() == Some(&config) {
 			return;
 		}
