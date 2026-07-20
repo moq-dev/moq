@@ -34,7 +34,7 @@ moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # We only use the sinc resampler (Async::new_sinc), so skip the default
 # fft_resampler feature and its RustFFT/realfft dependencies.
-rubato = { version = "3.0", default-features = false }
+rubato = { version = "4.0", default-features = false }
 thiserror = "2"
 # Only the `capture` feature needs an async runtime (spawn_blocking + select for
 # the on-demand gate).

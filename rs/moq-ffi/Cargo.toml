@@ -41,4 +41,4 @@ url = "2"
 uniffi = { version = "0.32", features = ["build"] }
 
 [dev-dependencies]
-pollster = "0.4"
+pollster = "1.0"
