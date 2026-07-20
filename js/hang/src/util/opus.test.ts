@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { pickRate, SAMPLE_RATES, supportsRate } from "./opus";
 
 describe("pickRate", () => {
-	// Matches the rate_picker_snaps_up test in rs/moq-audio/src/opus.rs.
+	// Matches the pick_opus_rate tests in rs/moq-audio/src/codec.rs.
 	it("snaps 44.1kHz up to 48kHz", () => {
 		expect(pickRate(44100)).toBe(48000);
 	});

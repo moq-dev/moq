@@ -6,6 +6,7 @@ import { Signal } from "@moq/signals";
 mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
 
 const { Encoder } = await import("./encoder.ts");
+type Codec = import("./encoder.ts").Codec;
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 async function settle(times = 5): Promise<void> {
@@ -151,4 +152,33 @@ test("requests full-band Opus when the source reports no rate", async () => {
 // 44100 is in the AAC sampling frequency table, so it must survive untouched.
 test("leaves an AAC-native capture rate alone", async () => {
 	expect(await requestedRate(44_100, "aac")).toBe(44_100);
+});
+
+// Regression: only the codec's mime picks the capture rate, so tweaking an encode-only knob must not
+// tear down the microphone. Subscribing #runSource to the whole codec signal rebuilt the AudioContext
+// on every change, which dropped #worklet and closed the track being published. The demo writes this
+// signal from live bitrate/complexity sliders, so it fired on every slider tick.
+test("does not rebuild the capture graph when an encode-only knob changes", async () => {
+	using webaudio = installFakeWebAudio();
+
+	const codec = new Signal<Codec>({ mime: "opus", bitrate: 32_000 });
+	const encoder = new Encoder({
+		enabled: true,
+		source: new Signal(fakeSource()) as never,
+		codec,
+	});
+	await settle();
+	expect(webaudio.requestedRates.length).toBe(1);
+
+	codec.set({ mime: "opus", bitrate: 64_000 });
+	await settle();
+	expect(webaudio.requestedRates.length).toBe(1);
+
+	// A real codec switch still has to rebuild: AAC captures at rates Opus can't.
+	codec.set({ mime: "aac" });
+	await settle();
+	expect(webaudio.requestedRates.length).toBe(2);
+
+	encoder.close();
+	await settle();
 });

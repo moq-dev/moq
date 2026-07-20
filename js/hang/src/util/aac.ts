@@ -15,13 +15,16 @@ const SAMPLE_RATE_INDEX: Record<number, number> = {
 	7350: 12,
 };
 
-// The table's rates, ascending. Derived from the index table above so the two can't drift.
-const SAMPLE_RATES_ASC = Object.keys(SAMPLE_RATE_INDEX)
-	.map(Number)
-	.sort((a, b) => a - b);
-
-/** The sample rates the AAC sampling frequency table lists, ascending. */
-export const SAMPLE_RATES: readonly number[] = SAMPLE_RATES_ASC;
+/**
+ * The sample rates the AAC sampling frequency table lists, ascending.
+ *
+ * Derived from the index table above so the two can't drift, and frozen because `pickRate` reads it.
+ */
+export const SAMPLE_RATES: readonly number[] = Object.freeze(
+	Object.keys(SAMPLE_RATE_INDEX)
+		.map(Number)
+		.sort((a, b) => a - b),
+);
 
 /** Whether the sample rate is one the AAC sampling frequency table lists. */
 export function supportsRate(rate: number): boolean {
@@ -36,7 +39,7 @@ export function supportsRate(rate: number): boolean {
  * accept the table rates, so capture at one of those instead of relying on the escape form.
  */
 export function pickRate(rate: number): number {
-	return SAMPLE_RATES_ASC.find((r) => r >= rate) ?? 96_000;
+	return SAMPLE_RATES.find((r) => r >= rate) ?? 96_000;
 }
 
 const AAC_LC = 2; // audioObjectType for AAC-LC
