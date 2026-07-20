@@ -134,6 +134,8 @@ test("SETUP decode is rejected before draft-05", async () => {
 	await expect(Setup.decode(new Reader(undefined, framed), Version.DRAFT_04)).rejects.toThrow();
 });
 
-test("empty path is rejected on decode", async () => {
-	await expect(decodeParam(PARAM_PATH, new Uint8Array())).rejects.toThrow();
+test("empty path decodes as the root", async () => {
+	// Valid on the wire and equivalent to omitting the parameter.
+	const got = await decodeParam(PARAM_PATH, new Uint8Array());
+	expect(got.path).toBe("");
 });

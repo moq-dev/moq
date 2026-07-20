@@ -996,10 +996,17 @@ impl Request {
 	///
 	/// Taken from the SETUP for the URL-less stream bindings (and moq-transport, which
 	/// carries it in-band), and from the dial [`url`](Self::url) for WebTransport/QUIC.
-	/// `None` only when neither carries one.
-	pub fn path(&self) -> Option<&str> {
+	/// Empty only when neither carries one.
+	pub fn path(&self) -> &str {
+		// An empty SETUP path means the client advertised none, so fall back to the
+		// dial URL. URI-carrying bindings are the ones that must not send a path at
+		// all, so this never discards a path the client meant us to use.
 		let setup = request_ref!(self, r => r.path());
-		setup.or(self.url.as_ref().map(Url::path))
+		if setup.is_empty() {
+			self.url.as_ref().map(Url::path).unwrap_or("")
+		} else {
+			setup
+		}
 	}
 
 	/// The single direction the client advertised in its SETUP, or `None` for a

@@ -69,13 +69,15 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in the SETUP (moq-lite-05 and moq-transport
-	/// 14-18).
+	/// Set the request path to advertise in the SETUP (moq-lite-05 and every
+	/// moq-transport draft we speak).
 	///
-	/// Required on transports that carry no request URI (native QUIC, qmux over
-	/// TCP/TLS) so the server learns which path the client wants; omit it on bindings
-	/// that already carry a URI (WebTransport). Ignored by versions with no in-band
-	/// request path (lite 01-04).
+	/// Only for transports that carry no request URI of their own (native QUIC, qmux
+	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
+	/// Bindings that already carry a URI (WebTransport, qmux over WebSocket) convey
+	/// the path there and MUST NOT send this; a server is entitled to treat it as a
+	/// protocol violation. An empty path is equivalent to omitting it. Ignored by
+	/// versions with no in-band request path (lite 01-04).
 	pub fn with_path(mut self, path: impl Into<String>) -> Self {
 		self.setup_path = Some(path.into());
 		self

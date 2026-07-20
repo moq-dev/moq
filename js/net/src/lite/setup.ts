@@ -181,8 +181,9 @@ export class Setup {
 
 	/**
 	 * The request path, for transports that carry no request URI (native QUIC, qmux over
-	 * TCP/TLS). Sent only by the client; a server never sends one and a relay never forwards
-	 * it. `undefined` on URI-carrying bindings such as WebTransport.
+	 * TCP/TLS, unix sockets). Sent only by the client; a server never sends one and a relay
+	 * never forwards it. `undefined` on URI-carrying bindings such as WebTransport, where
+	 * sending one is a protocol violation. An empty string means the same as `undefined`.
 	 */
 	path?: string;
 
@@ -227,14 +228,10 @@ export class Setup {
 		const probeCode = params.getVarint(PARAM_PROBE);
 		const probe = probeCode === undefined ? ProbeLevel.None : probeFromCode(probeCode);
 
+		// An empty path is valid and means the same as omitting the parameter, so a
+		// client that wants the root doesn't have to special-case it.
 		const pathBytes = params.getBytes(PARAM_PATH);
-		let path: string | undefined;
-		if (pathBytes !== undefined) {
-			path = new TextDecoder().decode(pathBytes);
-			if (path.length === 0) {
-				throw new Error("empty path parameter");
-			}
-		}
+		const path = pathBytes === undefined ? undefined : new TextDecoder().decode(pathBytes);
 
 		const roleCode = params.getVarint(PARAM_ROLE);
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);

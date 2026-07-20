@@ -125,8 +125,10 @@ pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
 	/// The request path, for transports that carry no request URI (native QUIC,
-	/// qmux over TCP/TLS). Sent only by the client; a server never sends one and a
-	/// relay never forwards it. `None` on URI-carrying bindings.
+	/// qmux over TCP/TLS, unix sockets). Sent only by the client; a server never
+	/// sends one and a relay never forwards it. `None` on URI-carrying bindings,
+	/// where it would be a protocol violation. An empty path means the same thing
+	/// as `None`; both are on the wire so a client need not special-case the root.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -146,13 +148,11 @@ impl Message for Setup {
 			.map(ProbeLevel::from_code)
 			.unwrap_or_default();
 		let path = match params.get_bytes(PARAM_PATH) {
-			Some(bytes) => {
-				let s = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidValue)?;
-				if s.is_empty() {
-					return Err(DecodeError::InvalidValue);
-				}
-				Some(s.to_string())
-			}
+			Some(bytes) => Some(
+				std::str::from_utf8(bytes)
+					.map_err(|_| DecodeError::InvalidValue)?
+					.to_string(),
+			),
 			None => None,
 		};
 		let role = params.get_varint(PARAM_ROLE)?.and_then(Role::from_code);
@@ -254,6 +254,17 @@ mod tests {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
 			role: None,
+		};
+		assert_eq!(round_trip(&msg), msg);
+	}
+
+	#[test]
+	fn empty_path_round_trips() {
+		// An empty path is valid and distinct from absent only on the wire; both mean
+		// the root, so a client doesn't have to special-case it.
+		let msg = Setup {
+			path: Some(String::new()),
+			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
 	}

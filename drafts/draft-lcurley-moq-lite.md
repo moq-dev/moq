@@ -621,15 +621,17 @@ The Path Parameter carries the request path the client wishes to reach, equivale
 A server uses it to route the session to the correct origin, relay, or virtual host before any broadcasts are exchanged; its interpretation is otherwise application-defined and opaque to moq-lite.
 Unlike the capability-style Setup Parameters, it is per-hop setup metadata that rides along in SETUP because that is the first client-to-server message of the session.
 
-The Parameter Value is a non-empty UTF-8 string that begins with `/` and uses the path syntax of a URI [RFC3986].
+The Parameter Value is a UTF-8 string using the path syntax of a URI [RFC3986]; a non-empty value begins with `/`.
+The value MAY be empty, which is equivalent to omitting the parameter: both mean the client requests the server's default path.
+A client that wants the default therefore need not special-case the parameter, and a server MUST treat the two forms identically.
 
 This parameter exists for bindings that have no request URI of their own: the native QUIC binding (binding 1 in [Transports](#transports)) and the Qmux-over-TCP/TLS binding (binding 3), both of which negotiate only an ALPN token.
 The remaining bindings convey the path in their own handshake.
 
-- A client using a binding without a request URI (binding 1 or 3) MUST send exactly one Path Parameter in its SETUP.
+- A client using a binding without a request URI (binding 1 or 3) SHOULD send one Path Parameter in its SETUP. Omitting it requests the server's default path.
 - The Path Parameter MUST NOT be sent on a binding that carries a request URI. The WebTransport (binding 2) and Qmux-over-WebSocket (binding 4) bindings convey the path in their handshake URI (the CONNECT request path and the WebSocket request URI, respectively). A server that receives a Path Parameter on either of these bindings MUST close the session with a PROTOCOL_VIOLATION.
 - A server MUST NOT send a Path Parameter. SETUP is bidirectional, but the path is meaningful only from client to server; a client that receives a Path Parameter MUST close the session with a PROTOCOL_VIOLATION.
-- A server that receives a Path that is empty or is not a valid URI path MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
+- A server that receives a Path that is not a valid URI path MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
 
 A relay MUST NOT forward the Path Parameter; like other per-hop setup metadata it applies only to this hop (see [Session](#session)).
 
