@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["hls", "ll-hls", "moq", "media", "cmaf"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 [features]
 default = ["server"]
 server = ["dep:axum"]

@@ -13,7 +13,6 @@ publish = true
 [lib]
 name = "gstmoq"
 crate-type = ["cdylib", "rlib"]
-doctest = false
 
 [dependencies]
 

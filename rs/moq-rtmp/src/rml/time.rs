@@ -13,7 +13,7 @@
 //!
 //! Basic arithmetic and comparison support:
 //!
-//! ```
+//! ```ignore
 //! use rml_rtmp::time::RtmpTimestamp;
 //!
 //! let time1 = RtmpTimestamp::new(10);
@@ -31,7 +31,7 @@
 //!
 //! Value Wrapping support:
 //!
-//! ```
+//! ```ignore
 //! use rml_rtmp::time::RtmpTimestamp;
 //!
 //! let time1 = RtmpTimestamp::new(10000);
@@ -44,7 +44,7 @@
 //!
 //! For ease of use, a `RtmpTimestamp` can be directly compared to u32s:
 //!
-//! ```
+//! ```ignore
 //! use rml_rtmp::time::RtmpTimestamp;
 //!
 //! let time = RtmpTimestamp::new(50);

@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["deflate", "compression", "streaming", "live"]
 categories = ["compression"]
 
-[lib]
-doctest = false
-
 [dependencies]
 bytes = "1"
 flate2 = { workspace = true }

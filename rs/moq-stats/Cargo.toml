@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "stats", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 [dependencies]
 moq-json = { workspace = true }
 moq-net = { workspace = true }

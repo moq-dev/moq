@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "json", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 [dependencies]
 bytes = "1"
 json-patch = "4"

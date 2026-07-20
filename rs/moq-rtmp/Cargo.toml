@@ -15,9 +15,6 @@ rust-version.workspace = true
 keywords = ["rtmp", "moq", "media", "live", "flv"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 [features]
 default = ["tls"]
 # RTMPS (RTMP over TLS): the `Conn::Tls` variant, `Server::with_tls`,

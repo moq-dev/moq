@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["srt", "moq", "media", "live", "mpeg-ts"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 # Pure library: the SRT <-> MoQ gateway. The CLI lives in `moq-cli` (the `srt`
 # subcommand); a relay can also embed `moq_srt::run` / `Server` against its own
 # origin.

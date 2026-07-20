@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["webrtc", "whip", "whep", "moq", "media"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[lib]
-doctest = false
-
 # Pure library: the WHIP/WHEP <-> MoQ gateway (axum routers + WHEP/WHIP client).
 # The CLI lives in `moq-cli` (the `rtc` subcommand); embedders mount the routers
 # / dial with `Client` against their own origin.

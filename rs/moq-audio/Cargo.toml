@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "audio"]
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
-[lib]
-doctest = false
-
 [features]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple

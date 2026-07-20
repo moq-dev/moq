@@ -9,9 +9,6 @@ version = "0.6.3"
 edition = "2024"
 rust-version.workspace = true
 
-[lib]
-doctest = false
-
 [features]
 jwks-loader = ["reqwest"]
 tokio = ["dep:tokio"]

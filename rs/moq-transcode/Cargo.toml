@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
-[lib]
-doctest = false
-
 [features]
 # Hardware codecs on by default, mirroring moq-video: NVDEC -> NVENC is the whole
 # point of a GPU transcode fleet. Disable for a slimmer self-compiled Linux build.

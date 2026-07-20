@@ -105,7 +105,7 @@ enum Stage {
 ///
 /// ## Examples
 ///
-/// ```
+/// ```ignore
 /// use rml_rtmp::handshake::{Handshake, PeerType, HandshakeProcessResult};
 ///
 /// let mut client = Handshake::new(PeerType::Client);

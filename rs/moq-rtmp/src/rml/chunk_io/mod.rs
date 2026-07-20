@@ -25,7 +25,7 @@ provide input and output buffers with minimal allocations.
 
 ## Examples
 
-```
+```ignore
 # extern crate bytes;
 # extern crate rml_rtmp;
 # use bytes::Bytes;

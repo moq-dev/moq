@@ -93,7 +93,7 @@ impl ChunkDeserializer {
 	///
 	/// ## Examples
 	///
-	/// ```
+	/// ```ignore
 	/// # extern crate bytes;
 	/// # extern crate rml_rtmp;
 	/// # use bytes::Bytes;
