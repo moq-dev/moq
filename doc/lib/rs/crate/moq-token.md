@@ -69,7 +69,14 @@ moq-token generate --algorithm RS256 --out private.jwk --public public.jwk
 
 # Asymmetric key pair (EdDSA)
 moq-token generate --algorithm EdDSA --out private.jwk --public public.jwk
+
+# Scoped key: may only ever sign tokens that publish below project/live
+# and subscribe below project/watch
+moq-token generate --root project --publish live --subscribe watch --out scoped.jwk
 ```
+
+A key's scope is fixed at generation and enforced when signing and when verifying,
+so widening it means generating a new key. A key without a scope is unrestricted.
 
 ### Sign a Token
 

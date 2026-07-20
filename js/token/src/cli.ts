@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
-import { authorize, type Claims } from "./claims.ts";
+import { authorize, type Claims, type Scope, ScopeSchema } from "./claims.ts";
 import { generate } from "./generate.ts";
 import type { Key, PublicKey } from "./key.ts";
 import { load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
@@ -21,10 +21,23 @@ program
 	.option("--id <id>", "Key ID (randomly generated if not provided)")
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.option("--base64", "Output as base64url instead of JSON", false)
+	.option("--root <root>", "Root path for the optional key scope", "")
+	.option("--publish <path...>", "Publish prefixes the key may grant")
+	.option("--subscribe <path...>", "Subscribe prefixes the key may grant")
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
-			const key = await generate(algorithm, options.id);
+			let key = await generate(algorithm, options.id);
+			if (options.publish || options.subscribe) {
+				// Parse rather than cast, so a useless scope fails here like it does
+				// in the Rust CLI instead of writing an unusable key to disk.
+				const scope: Scope = ScopeSchema.parse({
+					root: options.root,
+					...(options.publish && { put: options.publish }),
+					...(options.subscribe && { get: options.subscribe }),
+				});
+				key = { ...key, scope };
+			}
 
 			const encodeKey = (k: object): string => {
 				const json = JSON.stringify(k, null, 2);
