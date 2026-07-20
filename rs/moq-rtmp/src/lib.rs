@@ -59,6 +59,8 @@
 //! the vendored `rml` module (a fork of `rml_rtmp`), with no librtmp or ffmpeg
 //! dependency.
 
+#![warn(missing_docs)]
+
 use std::time::Duration;
 
 mod dial;

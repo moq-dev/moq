@@ -17,6 +17,8 @@
 //! crate owns the HLS manifest generation, the timeline-driven playlist
 //! window, and the HTTP surface.
 
+#![warn(missing_docs)]
+
 mod error;
 pub mod export;
 pub mod import;

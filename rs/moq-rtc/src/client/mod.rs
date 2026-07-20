@@ -5,8 +5,8 @@
 //! it to the remote URL. Once the answer arrives the same internal session
 //! driver takes over, so the per-codec bridges and UDP socket loop are shared.
 
-pub mod whep;
-pub mod whip;
+mod whep;
+mod whip;
 
 use std::net::SocketAddr;
 
@@ -32,6 +32,10 @@ pub struct Client {
 }
 
 impl Client {
+	/// Build a dialer from the shared client [`Config`]. The underlying
+	/// [`reqwest::Client`] (with its connection pool and rustls config) is created
+	/// once here and reused across every [`subscribe`](Self::subscribe) /
+	/// [`publish`](Self::publish) call.
 	pub fn new(config: Config) -> Self {
 		Self {
 			config,

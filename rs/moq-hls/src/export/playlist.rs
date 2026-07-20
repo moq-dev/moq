@@ -13,7 +13,7 @@ const VERSION: u32 = 6;
 
 /// Everything a media playlist render needs; built by the crate-internal
 /// `Rendition::playlist`.
-pub struct Snapshot {
+pub(crate) struct Snapshot {
 	/// `EXT-X-TARGETDURATION`, in whole seconds.
 	pub target_duration: u64,
 	/// `EXT-X-MEDIA-SEQUENCE` of the first listed segment.
@@ -28,7 +28,7 @@ pub struct Snapshot {
 }
 
 /// One listed segment.
-pub struct Segment {
+pub(crate) struct Segment {
 	/// The starting group sequence; the URI is `seg/{group}.m4s`.
 	pub group: u64,
 	/// `EXTINF` duration in seconds.
@@ -36,7 +36,7 @@ pub struct Segment {
 }
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
-pub fn render_media(snapshot: &Snapshot) -> String {
+pub(crate) fn render_media(snapshot: &Snapshot) -> String {
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");

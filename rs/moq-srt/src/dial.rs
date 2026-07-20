@@ -38,11 +38,12 @@ pub async fn publish(
 	resource: &str,
 	latency: impl Into<Option<Duration>>,
 	origin: &origin::Consumer,
-	path: &str,
+	path: impl moq_net::AsPath,
 ) -> Result<()> {
+	let path = path.as_path();
 	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 	let socket = call(addr, resource, Mode::Publish, latency).await?;
-	serve_subscribe(origin, path, socket, latency).await
+	serve_subscribe(origin, path.as_str(), socket, latency).await
 }
 
 /// Dial `addr` and pull a remote stream into `origin`: connect as an SRT caller
@@ -57,10 +58,11 @@ pub async fn pull(
 	resource: &str,
 	latency: impl Into<Option<Duration>>,
 	origin: &origin::Producer,
-	path: &str,
+	path: impl moq_net::AsPath,
 ) -> Result<()> {
+	let path = path.as_path();
 	let socket = call(addr, resource, Mode::Request, latency).await?;
-	serve_publish(origin, path, socket).await
+	serve_publish(origin, path.as_str(), socket).await
 }
 
 /// Dial `addr` as an SRT caller for `resource`, sending the standard

@@ -212,10 +212,11 @@ impl Publish {
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
-	pub async fn accept(self, origin: &origin::Producer, path: &str) -> Result<()> {
+	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
+		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path, socket).await
+		serve_publish(origin, path.as_str(), socket).await
 	}
 
 	/// Reject the publish, sending the client a `Forbidden` rejection.
@@ -262,10 +263,11 @@ impl Subscribe {
 	/// Waits for the broadcast to be announced (so a caller may connect before the
 	/// publisher), cancelling cleanly if the caller disconnects first. This future
 	/// resolves when playback ends, so callers usually run it on its own task.
-	pub async fn accept(self, origin: &origin::Consumer, path: &str) -> Result<()> {
+	pub async fn accept(self, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
+		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT subscribe accepted");
-		serve_subscribe(origin, path, socket, self.0.latency).await
+		serve_subscribe(origin, path.as_str(), socket, self.0.latency).await
 	}
 
 	/// Reject the subscribe, sending the client a `Forbidden` rejection.

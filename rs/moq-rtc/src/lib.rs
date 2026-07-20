@@ -36,6 +36,8 @@
 //! parameter sets) and that's exactly what the importers want. AV1 uses the
 //! shared OBU splitter/importer. Opus, VP8, and VP9 pass through.
 
+#![warn(missing_docs)]
+
 pub mod client;
 pub mod server;
 
@@ -56,6 +58,19 @@ mod session;
 /// their own str0m dependency (and risking a version mismatch). A major str0m
 /// bump is therefore a breaking change for this crate.
 pub use str0m;
+
+/// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
+/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
+/// [`whip::router`] / [`whep::router`]) into their own app without adding their own
+/// axum dependency (and risking a version mismatch). A major axum bump is therefore
+/// a breaking change for this crate.
+pub use axum;
+
+/// Re-export of the URL type, so consumers can build the [`url::Url`] that
+/// [`Client::subscribe`] / [`Client::publish`] dial without adding their own url
+/// dependency (and risking a version mismatch). A major url bump is therefore a
+/// breaking change for this crate.
+pub use url;
 
 pub use client::Client;
 pub use error::*;

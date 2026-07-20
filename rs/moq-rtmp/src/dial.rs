@@ -239,7 +239,8 @@ impl<S: Stream> Client<S> {
 	///
 	/// This future resolves when the remote stream ends, so callers usually run it
 	/// on its own task.
-	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: &str) -> Result<()> {
+	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
+		let path = path.as_path();
 		let request = self
 			.session
 			.request_playback(stream_key.to_string())
@@ -249,7 +250,7 @@ impl<S: Stream> Client<S> {
 
 		tracing::info!(%stream_key, %path, "rtmp play accepted by remote");
 
-		let mut publisher = Publisher::new(origin, path)?;
+		let mut publisher = Publisher::new(origin, path.as_str())?;
 
 		let result = self.pull_media(&mut publisher).await;
 		match &result {

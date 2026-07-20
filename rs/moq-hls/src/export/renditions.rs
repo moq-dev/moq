@@ -21,11 +21,17 @@ use super::rendition::{Kind, Rendition};
 type Key = (Kind, String);
 
 /// A change to the rendition set, yielded by [`Consumer::next`].
+#[non_exhaustive]
 pub enum Event {
 	/// A rendition appeared (or was reconfigured: a `Removed` for the old one precedes it).
 	Added(Arc<Rendition>),
 	/// A rendition disappeared (removed from the catalog, or replaced by a reconfigure).
-	Removed { kind: Kind, name: String },
+	Removed {
+		/// Which axis (video or audio) the removed rendition was on.
+		kind: Kind,
+		/// The removed rendition's name.
+		name: String,
+	},
 }
 
 /// The producing side of a broadcast's rendition set.

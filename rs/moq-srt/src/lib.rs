@@ -36,6 +36,8 @@
 //! Pure Rust: SRT is provided by `srt-tokio`, with no libsrt or ffmpeg
 //! dependency.
 
+#![warn(missing_docs)]
+
 pub mod dial;
 mod error;
 mod listen;
