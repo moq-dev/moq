@@ -2,6 +2,73 @@ use crate::path;
 use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, TimestampSeconds, formats::PreferMany, serde_as};
 
+/// The immutable ceiling on what a key may grant, embedded in its JWK.
+///
+/// Paths in `publish` and `subscribe` are relative to `root`, matching token claim
+/// semantics. A key signs a token only when every path the token grants sits at or
+/// beneath one the scope allows, in the same role; see [`allows`](Self::allows).
+///
+/// The scope is fixed at key generation. Widening it means minting a new key, which
+/// is the point: a leaked scoped key can never be talked into signing more than it
+/// already could. A key with no scope at all is unrestricted, so keys minted before
+/// scopes existed keep working.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct Scope {
+	/// The root for the publish/subscribe prefixes below.
+	#[serde(default, skip_serializing_if = "String::is_empty")]
+	pub root: String,
+
+	/// Prefixes this key may grant to publishers.
+	#[serde(default, rename = "put", skip_serializing_if = "Vec::is_empty")]
+	pub publish: Vec<String>,
+
+	/// Prefixes this key may grant to subscribers.
+	#[serde(default, rename = "get", skip_serializing_if = "Vec::is_empty")]
+	pub subscribe: Vec<String>,
+}
+
+impl Scope {
+	/// Returns an error when the scope permits nothing, making the key unusable.
+	pub fn validate(&self) -> crate::Result<()> {
+		if self.publish.is_empty() && self.subscribe.is_empty() {
+			return Err(crate::Error::UselessScope);
+		}
+
+		Ok(())
+	}
+
+	/// Whether every path `claims` grants is covered by this scope, per role.
+	///
+	/// Both sides are resolved against their own root before comparing, so the same
+	/// grant expressed as `root: "demo"` + `put: ["room"]` or as `put: ["demo/room"]`
+	/// is treated identically. Matching is segment-aware, so a scope of `live` does
+	/// not cover `lively`, and the roles are checked independently: a publish-only
+	/// scope never authorizes a subscribe grant.
+	///
+	/// An empty prefix covers everything beneath the scope root, so a scope of
+	/// `root: "demo"` + `put: [""]` grants publish anywhere under `demo`.
+	pub fn allows(&self, claims: &Claims) -> bool {
+		covers(&self.root, &self.publish, &claims.root, &claims.publish)
+			&& covers(&self.root, &self.subscribe, &claims.root, &claims.subscribe)
+	}
+}
+
+/// Whether every `requested` path (relative to `claims_root`) sits beneath some
+/// `granted` prefix (relative to `scope_root`).
+///
+/// An empty `granted` denies everything, which is what makes a publish-only scope
+/// reject subscribe grants rather than ignoring them.
+fn covers(scope_root: &str, granted: &[String], claims_root: &str, requested: &[String]) -> bool {
+	let absolute = |root: &str, relative: &str| path::join(&path::normalize(root), &path::normalize(relative));
+
+	requested.iter().all(|request| {
+		let request = absolute(claims_root, request);
+		granted
+			.iter()
+			.any(|grant| path::has_prefix(&request, &absolute(scope_root, grant)))
+	})
+}
+
 /// The access a [`Claims`] grants at a specific path, with every prefix rebased so
 /// it is relative to that path.
 ///
@@ -187,6 +254,127 @@ mod tests {
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 		}
+	}
+
+	#[test]
+	fn scope_allows_contained_claims() {
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec!["live".into()],
+			subscribe: vec!["watch".into()],
+		};
+		let claims = Claims {
+			root: "project/live/room".into(),
+			publish: vec!["".into()],
+			subscribe: vec![],
+			..Default::default()
+		};
+		assert!(scope.allows(&claims));
+	}
+
+	#[test]
+	fn scope_rejects_sibling_and_role_escalation() {
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec!["live".into()],
+			subscribe: vec![],
+		};
+		let sibling = Claims {
+			root: "project/lively".into(),
+			publish: vec!["".into()],
+			..Default::default()
+		};
+		let role = Claims {
+			root: "project/live".into(),
+			subscribe: vec!["".into()],
+			..Default::default()
+		};
+		assert!(!scope.allows(&sibling));
+		assert!(!scope.allows(&role));
+	}
+
+	#[test]
+	fn scope_ignores_how_the_root_is_split() {
+		// The same grant, expressed three ways, must compare identically.
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec!["live".into()],
+			subscribe: vec![],
+		};
+
+		for claims in [
+			Claims {
+				root: "project".into(),
+				publish: vec!["live/room".into()],
+				..Default::default()
+			},
+			Claims {
+				root: String::new(),
+				publish: vec!["project/live/room".into()],
+				..Default::default()
+			},
+			Claims {
+				root: "/project/live/".into(),
+				publish: vec!["/room".into()],
+				..Default::default()
+			},
+		] {
+			assert!(scope.allows(&claims), "{claims:?}");
+		}
+	}
+
+	#[test]
+	fn scope_rejects_escaping_above_its_root() {
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec!["live".into()],
+			subscribe: vec![],
+		};
+
+		// A root above the scope's does not widen it, even though the empty prefix
+		// would grant everything within the scope.
+		let claims = Claims {
+			root: String::new(),
+			publish: vec!["".into()],
+			..Default::default()
+		};
+		assert!(!scope.allows(&claims));
+	}
+
+	#[test]
+	fn scope_empty_prefix_grants_everything_beneath_it() {
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec![String::new()],
+			subscribe: vec![],
+		};
+		let claims = Claims {
+			root: "project/anything/deep".into(),
+			publish: vec!["".into()],
+			..Default::default()
+		};
+		assert!(scope.allows(&claims));
+	}
+
+	#[test]
+	fn scope_requires_every_requested_path() {
+		// One allowed path does not carry an unallowed sibling along with it.
+		let scope = Scope {
+			root: "project".into(),
+			publish: vec!["live".into()],
+			subscribe: vec![],
+		};
+		let claims = Claims {
+			root: "project".into(),
+			publish: vec!["live/room".into(), "other".into()],
+			..Default::default()
+		};
+		assert!(!scope.allows(&claims));
+	}
+
+	#[test]
+	fn scope_without_grants_is_useless() {
+		assert!(matches!(Scope::default().validate(), Err(crate::Error::UselessScope)));
 	}
 
 	#[test]

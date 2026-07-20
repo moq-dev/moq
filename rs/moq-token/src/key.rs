@@ -160,6 +160,10 @@ pub struct Key {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub kid: Option<crate::KeyId>,
 
+	/// Optional immutable authorization limits for tokens signed by this key.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub scope: Option<crate::Scope>,
+
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
 	pub(crate) decode: OnceLock<DecodingKey>,
@@ -203,6 +207,7 @@ impl fmt::Debug for Key {
 			.field("algorithm", &self.algorithm)
 			.field("operations", &self.operations)
 			.field("kid", &self.kid)
+			.field("scope", &self.scope)
 			.finish()
 	}
 }
@@ -281,6 +286,7 @@ impl Key {
 			operations: [KeyOperation::Verify].into(),
 			key,
 			kid: self.kid.clone(),
+			scope: self.scope.clone(),
 			decode: Default::default(),
 			encode: Default::default(),
 		})
@@ -438,6 +444,7 @@ impl Key {
 		}
 
 		token.claims.validate()?;
+		self.validate_scope(&token.claims)?;
 
 		Ok(token.claims)
 	}
@@ -449,6 +456,7 @@ impl Key {
 		}
 
 		payload.validate()?;
+		self.validate_scope(payload)?;
 
 		let encode = self.to_encoding_key()?;
 
@@ -473,6 +481,23 @@ impl Key {
 	/// Generate a key pair for the given algorithm, returning the private and public keys.
 	pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Self> {
 		generate(algorithm, id)
+	}
+
+	/// Attach an immutable authorization scope to this key.
+	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
+		scope.validate()?;
+		self.scope = Some(scope);
+		Ok(self)
+	}
+
+	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+		if let Some(scope) = &self.scope {
+			scope.validate()?;
+			if !scope.allows(claims) {
+				return Err(crate::Error::ScopeExceeded);
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -542,6 +567,7 @@ mod tests {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
 			kid: Some(crate::KeyId::decode("test-key-1").unwrap()),
+			scope: None,
 			decode: Default::default(),
 			encode: Default::default(),
 		}
@@ -630,6 +656,35 @@ mod tests {
 
 		assert!(!token.is_empty());
 		assert_eq!(token.matches('.').count(), 2); // JWT format: header.payload.signature
+	}
+
+	#[test]
+	fn test_key_scope_enforced_when_signing_and_verifying() {
+		let unrestricted = create_test_key();
+		let scoped = unrestricted
+			.clone()
+			.with_scope(crate::Scope {
+				root: "test-path".into(),
+				publish: vec!["allowed".into()],
+				subscribe: vec![],
+			})
+			.unwrap();
+		let allowed = Claims {
+			root: "test-path".into(),
+			publish: vec!["allowed/room".into()],
+			..Default::default()
+		};
+		let denied = Claims {
+			root: "test-path".into(),
+			publish: vec!["other".into()],
+			..Default::default()
+		};
+
+		assert!(scoped.sign(&allowed).is_ok());
+		assert!(matches!(scoped.sign(&denied), Err(crate::Error::ScopeExceeded)));
+
+		let forged = unrestricted.sign(&denied).unwrap();
+		assert!(matches!(scoped.verify(&forged), Err(crate::Error::ScopeExceeded)));
 	}
 
 	#[test]

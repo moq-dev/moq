@@ -26,6 +26,7 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
 		algorithm,
 		key: key?,
+		scope: None,
 		decode: Default::default(),
 		encode: Default::default(),
 	})

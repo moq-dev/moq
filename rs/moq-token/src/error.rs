@@ -56,6 +56,12 @@ pub enum Error {
 	#[error("token grants no access to path `{0}`")]
 	NoAccess(String),
 
+	#[error("no publish or subscribe allowed; key scope is useless")]
+	UselessScope,
+
+	#[error("token capabilities exceed the key scope")]
+	ScopeExceeded,
+
 	#[error("invalid algorithm: {0}")]
 	InvalidAlgorithm(String),
 

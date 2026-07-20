@@ -112,6 +112,47 @@ describe("Rust-generated fixtures", () => {
 		expect(claims.put).toEqual(["stream1", "stream2"]);
 		expect(claims.get).toEqual(["feed1"]);
 	});
+
+	// cargo run --bin moq-token -- generate --root project --publish live --subscribe watch --out /tmp/scoped.jwk
+	const RUST_SCOPED_KEY = JSON.stringify({
+		alg: "HS256",
+		key_ops: ["verify", "sign"],
+		kty: "oct",
+		k: "pLDMYsYrp6vZLQbefVzHXN6P4wc1ADTLn4L7xzi1Qm4",
+		kid: "e396f70014db9fe9",
+		scope: { root: "project", put: ["live"], get: ["watch"] },
+	});
+
+	// cargo run --bin moq-token -- sign --key /tmp/scoped.jwk --root project --publish live/room --subscribe watch
+	const RUST_SCOPED_TOKEN =
+		"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImUzOTZmNzAwMTRkYjlmZTkifQ.eyJyb290IjoicHJvamVjdCIsInB1dCI6WyJsaXZlL3Jvb20iXSwiZ2V0IjpbIndhdGNoIl19.24Mxox6iQeFniEppRb1gWOO7iOTIsYlQRAjnOq6A2vk";
+
+	test("load a Rust key's scope", () => {
+		const key = load(RUST_SCOPED_KEY);
+		expect(key.scope).toEqual({ root: "project", put: ["live"], get: ["watch"] });
+	});
+
+	test("verify a Rust token signed within its key scope", async () => {
+		const key = load(RUST_SCOPED_KEY);
+		const claims = await verify(key, RUST_SCOPED_TOKEN);
+		expect(claims.put).toEqual(["live/room"]);
+		expect(claims.get).toEqual(["watch"]);
+	});
+
+	test("JS enforces the same scope Rust does", async () => {
+		const key = load(RUST_SCOPED_KEY);
+
+		// Rust rejects this exact pair with "token capabilities exceed the key scope":
+		// cargo run --bin moq-token -- sign --key /tmp/scoped.jwk --root project --publish other
+		await expect(sign(key, { root: "project", put: ["other"] })).rejects.toThrow("exceed the key scope");
+
+		// ...and accepts the grants Rust signed into RUST_SCOPED_TOKEN. The encoding
+		// is not compared: JS orders the header differently and stamps `iat`.
+		const token = await sign(key, { root: "project", put: ["live/room"], get: ["watch"] });
+		const claims = await verify(key, token);
+		expect(claims.put).toEqual(["live/room"]);
+		expect(claims.get).toEqual(["watch"]);
+	});
 });
 
 describe("Rust-generated JWK Set", () => {

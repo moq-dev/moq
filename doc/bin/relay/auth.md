@@ -47,6 +47,38 @@ moq-token generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 
 A random key ID is generated if `--id` is not specified.
 
+### Scope a Key
+
+Keys can embed immutable publish and subscribe limits. Every token signed or
+verified with a scoped key must stay within those limits. Rotate the key if its
+scope needs to change.
+
+```bash
+# This key may publish below project/live and subscribe below project/watch.
+moq-token generate \
+  --root project \
+  --publish live \
+  --subscribe watch \
+  --out private.jwk \
+  --public public.jwk
+```
+
+The scope is stored in both halves of an asymmetric JWK:
+
+```json
+{
+  "scope": {
+    "root": "project",
+    "put": ["live"],
+    "get": ["watch"]
+  }
+}
+```
+
+Existing JWKs without `scope` remain unrestricted for backwards compatibility.
+The library rejects the entire token when any requested role or path exceeds the
+key scope; it never silently intersects permissions.
+
 ### Configure the Relay
 
 Single key (simplest):
@@ -120,6 +152,8 @@ The JWT payload contains these claims:
 | `exp` | Expiration time (Unix timestamp) |
 | `iat` | Issued-at time (Unix timestamp) |
 
+`get` is named that way because `sub` is a reserved JWT claim.
+
 The `exp` claim is enforced for the whole session, not just at connect time. The relay closes the connection once `exp` passes, so a client must reconnect with a fresh token to continue. The same applies to mTLS: the connection is closed when the client certificate's `notAfter` is reached.
 
 ### Path Matching
@@ -138,9 +172,9 @@ path boundaries, so `foo` grants `foo` and `foo/bar` but never `foobar`.
 
 | root | put | get | Can publish | Can subscribe |
 |------|-----|-----|-------------|---------------|
-| `demo` | `my-stream` | `""` | `demo/my-stream` | `demo/*` |
-| `rooms/123` | `alice` | `""` | `rooms/123/alice` | `rooms/123/*` |
-| `""` | `""` | `""` | Everything | Everything |
+| `demo` | `["my-stream"]` | `[""]` | `demo/my-stream` | `demo/*` |
+| `rooms/123` | `["alice"]` | `[""]` | `rooms/123/alice` | `rooms/123/*` |
+| `""` | `[""]` | `[""]` | Everything | Everything |
 
 ### Connection Path
 
@@ -164,6 +198,8 @@ Per connection the relay issues `GET <base>?root=<path>&kid=<kid>&mtls=true&tran
 - `tier`: the billing tier label this connection's stats record under (an arbitrary string, e.g. `local` or `region/sjc`). Absent or empty selects the default unprefixed tier. See [Stats](/bin/relay/config#stats) for how tier labels map to track names.
 
 This lets a project stay reachable by both its stable id and its current/old vanity path, all mapping to the same broadcast tree: with the API resolving `demo` → `x7k2qp`, both `cdn.moq.dev/demo/foo` and `cdn.moq.dev/x7k2qp/foo` scope to `/x7k2qp/foo`.
+
+The token root is still checked against the path the client dialed, not the alias. A [scoped key](#scope-a-key) is immutable, so its scope has to be anchored at whichever name the tokens it signs are rooted at: anchor it at the stable id and its tokens work on stable-id paths, anchor it at a vanity name and they stop working once that name changes. Reconciling the two is tracked separately.
 
 ```toml
 [auth]

@@ -149,6 +149,9 @@ cargo install moq-token-cli
 # Generate a key
 moq-token generate --out root.jwk
 
+# Generate a key that can only ever grant publish below rooms/123
+moq-token generate --root "rooms/123" --publish "" --out scoped.jwk
+
 # Sign a token
 moq-token sign --key root.jwk \
   --root "rooms/123" \

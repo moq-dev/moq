@@ -14,6 +14,29 @@ function list(claim: string | string[] | undefined): string[] {
 }
 
 /**
+ * The immutable ceiling on what a key may grant, embedded in its JWK.
+ *
+ * `root` is optional on the wire to match the Rust `moq-token` crate, which omits it
+ * when the scope sits at the top level.
+ */
+export const ScopeSchema = z
+	.object({
+		/** The root that `put` and `get` are relative to. Defaults to the empty string. */
+		root: z._default(z.string(), ""),
+		/** Prefixes this key may grant to publishers, relative to `root`. */
+		put: z.optional(z.array(z.string())),
+		/** Prefixes this key may grant to subscribers, relative to `root`. */
+		get: z.optional(z.array(z.string())),
+	})
+	.check(
+		z.refine((data) => (data.put?.length ?? 0) > 0 || (data.get?.length ?? 0) > 0, {
+			message: "Either put or get must contain at least one prefix",
+		}),
+	);
+
+export type Scope = z.infer<typeof ScopeSchema>;
+
+/**
  * The JWT claims structure for moq-token.
  *
  * `root` is optional on the wire: a token scoped to the top-level path omits it, so
@@ -125,4 +148,39 @@ export function authorize(claims: Claims, path: string): Permissions {
 	}
 
 	return permissions;
+}
+
+/**
+ * Whether every path `claims` grants is covered by `scope`, per role.
+ *
+ * Both sides are resolved against their own root before comparing, so the same
+ * grant expressed as `root: "demo"` + `put: ["room"]` or as `put: ["demo/room"]` is
+ * treated identically. Matching is segment-aware, so a scope of `live` does not
+ * cover `lively`, and the roles are checked independently: a publish-only scope
+ * never authorizes a subscribe grant.
+ *
+ * Must stay in lockstep with `Scope::allows` in the Rust `moq-token` crate, which
+ * checks the same keys.
+ */
+export function scopeAllows(scope: Scope, claims: Claims): boolean {
+	return (
+		covers(scope.root, scope.put ?? [], claims.root, list(claims.put)) &&
+		covers(scope.root, scope.get ?? [], claims.root, list(claims.get))
+	);
+}
+
+/**
+ * Whether every `requested` path (relative to `claimsRoot`) sits beneath some
+ * `granted` prefix (relative to `scopeRoot`).
+ *
+ * An empty `granted` denies everything, which is what makes a publish-only scope
+ * reject subscribe grants rather than ignoring them.
+ */
+function covers(scopeRoot: string, granted: string[], claimsRoot: string, requested: string[]): boolean {
+	const absolute = (root: string, relative: string) => Path.join(Path.normalize(root), Path.normalize(relative));
+
+	return requested.every((request) => {
+		const path = absolute(claimsRoot, request);
+		return granted.some((grant) => Path.hasPrefix(path, absolute(scopeRoot, grant)));
+	});
 }

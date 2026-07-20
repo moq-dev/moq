@@ -43,6 +43,18 @@ enum Commands {
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
 		#[arg(long, conflicts_with = "public")]
 		public_dir: Option<PathBuf>,
+
+		/// Root path for the optional key scope.
+		#[arg(long, default_value = "")]
+		root: String,
+
+		/// Publish prefixes the key may grant (repeatable).
+		#[arg(long)]
+		publish: Vec<String>,
+
+		/// Subscribe prefixes the key may grant (repeatable).
+		#[arg(long)]
+		subscribe: Vec<String>,
 	},
 
 	/// Sign a token, writing it to stdout.
@@ -127,13 +139,23 @@ fn main() -> anyhow::Result<()> {
 			out_dir,
 			public,
 			public_dir,
+			root,
+			publish,
+			subscribe,
 		} => {
 			let id = match id {
 				Some(id) => moq_token::KeyId::decode(&id)?,
 				None => moq_token::KeyId::random(),
 			};
 
-			let key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+			let mut key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+			if !publish.is_empty() || !subscribe.is_empty() {
+				key = key.with_scope(moq_token::Scope {
+					root,
+					publish,
+					subscribe,
+				})?;
+			}
 
 			let public_to_stdout = public.as_deref().is_some_and(is_dash);
 			let private_to_stdout = out_dir.is_none() && out.as_deref().is_none_or(is_dash);

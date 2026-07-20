@@ -650,3 +650,34 @@ test("verify - claims validation during verification", async () => {
 	const verifiedClaims = await verify(key, token);
 	expect(verifiedClaims.root).toBe("test-path");
 });
+
+test("key scope is enforced when signing and verifying", async () => {
+	const unrestricted = load(encodeJwk(testKey));
+	const scoped: Key = {
+		...unrestricted,
+		scope: { root: "project", put: ["live"] },
+	};
+	const allowed: Claims = { root: "project", put: ["live/room"] };
+	const denied: Claims = { root: "project", put: ["other"] };
+
+	await expect(sign(scoped, allowed)).resolves.toBeString();
+	await expect(sign(scoped, denied)).rejects.toThrow("exceed the key scope");
+
+	// A token signed by an unscoped copy of the key must still be rejected on the
+	// way in, so a scope can't be stripped by re-signing elsewhere.
+	const forged = await sign(unrestricted, denied);
+	await expect(verify(scoped, forged)).rejects.toThrow("exceed the key scope");
+});
+
+test("key scope treats absolute and rooted grants alike", async () => {
+	const scoped: Key = { ...load(encodeJwk(testKey)), scope: { root: "project", put: ["live"] } };
+
+	await expect(sign(scoped, { root: "", put: ["project/live/room"] })).resolves.toBeString();
+	await expect(sign(scoped, { root: "/project/live/", put: ["/room"] })).resolves.toBeString();
+	// Segment-aware: "live" must not cover "lively".
+	await expect(sign(scoped, { root: "project", put: ["lively"] })).rejects.toThrow("exceed the key scope");
+	// A root above the scope does not widen it.
+	await expect(sign(scoped, { root: "", put: [""] })).rejects.toThrow("exceed the key scope");
+	// Roles are independent: a publish-only scope grants no subscribe.
+	await expect(sign(scoped, { root: "project", get: ["live"] })).rejects.toThrow("exceed the key scope");
+});

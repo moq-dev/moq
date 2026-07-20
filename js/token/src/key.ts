@@ -2,7 +2,7 @@ import * as base64 from "@hexagon/base64";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema } from "./claims.ts";
+import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
 
 /**
  * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
@@ -39,6 +39,7 @@ const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).check(z.minLength(1)),
 	kid: z.optional(KeyIdSchema),
+	scope: z.optional(ScopeSchema),
 });
 
 const OctKeySchema = z.extend(BaseKeySchema, {
@@ -204,6 +205,7 @@ export async function sign(key: Key, claims: Claims): Promise<string> {
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
+	ensureClaimsWithinScope(key, claims);
 
 	const joseKey = await importJoseKey(key);
 	const jwt = await new jose.SignJWT(claims)
@@ -230,10 +232,22 @@ export async function verify(key: PublicKey | SymmetricKey, token: string): Prom
 		algorithms: [key.alg],
 	});
 
+	let claims: Claims;
 	try {
-		return ClaimsSchema.parse(payload);
+		claims = ClaimsSchema.parse(payload);
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
+	}
+
+	// Re-check on the way in, so a scope cannot be stripped by re-signing elsewhere.
+	ensureClaimsWithinScope(key, claims);
+
+	return claims;
+}
+
+function ensureClaimsWithinScope(key: PublicKey | SymmetricKey | Key, claims: Claims): void {
+	if (key.scope && !scopeAllows(key.scope, claims)) {
+		throw new Error("Token capabilities exceed the key scope");
 	}
 }
 
