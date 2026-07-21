@@ -134,6 +134,10 @@ export class Reload {
 		effect.set(this.status, "connecting", "disconnected");
 
 		effect.spawn(async () => {
+			// Set once the session is live, so #retry can tell a healthy session that
+			// later dropped from a connect failure or a peer that flaps immediately.
+			let connected: DOMHighResTimeStamp | undefined;
+
 			try {
 				const pending = connect(url, {
 					websocket: this.websocket,
@@ -152,48 +156,61 @@ export class Reload {
 
 				effect.set(this.status, "connected", "disconnected");
 
-				// Reset the exponential backoff and timeout on success.
-				this.#delay = this.delay.initial;
-				this.#retryStart = undefined;
+				connected = performance.now();
 
-				const connected = performance.now();
+				// A cancelled effect resolves undefined, so the sentinel tells the session
+				// closing apart from this run being torn down.
 				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
 				if (!closed) return;
 
-				// The peer closed the session: tear down and reconnect. A session that
-				// died within the initial delay escalates through the backoff instead.
 				console.warn("connection closed, reconnecting");
-				if (performance.now() - connected < this.delay.initial) {
-					throw new Error("connection closed immediately");
-				}
-				this.#tick.update((prev) => prev + 1);
+				this.#retry(effect, connected);
 			} catch (err) {
 				console.warn("connection error:", err);
-
-				// Any session is dead now: report disconnected during the backoff
-				// rather than when the retry reruns the effect.
-				this.established.set(undefined);
-				this.status.set("disconnected");
-
-				// Track retry start for timeout.
-				this.#retryStart ??= performance.now();
-
-				const timeout = this.delay.timeout ?? 300000;
-				if (timeout > 0) {
-					const elapsed = performance.now() - this.#retryStart;
-					if (elapsed >= timeout) {
-						console.warn("reconnect timed out");
-						this.#closedReject(err instanceof Error ? err : new Error(String(err)));
-						return;
-					}
-				}
-
-				const tick = this.#tick.peek() + 1;
-				effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
-
-				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+				this.#retry(effect, connected, err);
 			}
 		});
+	}
+
+	/**
+	 * Schedule the next connect attempt after the current backoff, or give up when the
+	 * retry window has expired. `connected` is when the dead session was established, if
+	 * it ever was, and `cause` the error that killed it, if it died with one.
+	 */
+	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
+		// Any session is dead now: report disconnected during the backoff rather than
+		// when the retry reruns the effect.
+		this.established.set(undefined);
+		this.status.set("disconnected");
+
+		// A session that outlived the initial delay was healthy, so clear the backoff and
+		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
+		// shorter is a peer that accepts and immediately severs, which has to keep
+		// escalating or we hammer it forever at the initial delay.
+		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
+			this.#delay = this.delay.initial;
+			this.#retryStart = undefined;
+		}
+
+		// Track retry start for timeout.
+		this.#retryStart ??= performance.now();
+
+		const timeout = this.delay.timeout ?? 300000;
+		if (timeout > 0) {
+			const elapsed = performance.now() - this.#retryStart;
+			if (elapsed >= timeout) {
+				console.warn("reconnect timed out");
+				// A graceful close has no error, so report the timeout itself.
+				if (cause === undefined) this.#closedReject(new Error("reconnect timed out"));
+				else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
+				return;
+			}
+		}
+
+		const tick = this.#tick.peek() + 1;
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
+
+		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
 	}
 
 	/**
