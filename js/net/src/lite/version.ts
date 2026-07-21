@@ -74,6 +74,24 @@ export function hasAnnounceId(version: Version): boolean {
 	}
 }
 
+/** Whether announcements carry a route cost varint alongside the hop chain: the
+ * marginal cost of pulling the broadcast via this route, accumulated per link.
+ * Added in lite-06. Older versions carry nothing, so a received route stays at
+ * zero and routing falls back to the hop-count tie-break. */
+export function hasRouteCost(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

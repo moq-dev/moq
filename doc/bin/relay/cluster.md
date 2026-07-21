@@ -33,6 +33,24 @@ A publisher on `eu-west` reaches a viewer on `us-west` through `us-east`. If a s
 
 Pick the shape that matches your traffic. Linear chains are great for fanout; small N-way meshes are fine when latency matters more than dedup; mixed shapes work too.
 
+## Link costs
+
+Hop counting treats every link the same, but links rarely cost the same: traffic between two relays in one datacenter is free, while a metered backbone bills per byte. On `moq-lite-06` (still work-in-progress and opt-in via `--version`), announcements carry a route cost so relays can route by price instead of distance.
+
+Price a link by adding `?cost=N` to the peer URL:
+
+```toml
+[cluster]
+connect = [
+  "https://sibling.same-dc.example/?cost=0",
+  "https://us-east.example.com/?cost=10",
+]
+```
+
+The dialing relay declares the price during setup and both ends charge it: every announcement crossing the link adds `N` to its cost. An unpriced link costs 1, which reproduces plain hop counting. The param is consumed locally; it is never sent as part of the URL.
+
+The cost a relay advertises is the *marginal* cost of pulling the broadcast through it. A relay actively carrying a broadcast (a subscriber is pulling it) re-announces it at cost 0: its upstream fetch is already paid for, so a sibling should pull the warm copy over a free intra-DC link instead of opening a second metered fetch. When the last subscriber leaves, the cost decays back after a short grace period. Standby publishers (e.g. a transcoder pool) can seed a large cost so they are only selected when nothing cheaper exists, and the winner's cost drops to 0 once it starts working.
+
 ## Auto-discovery
 
 Listing every peer by hand can get tedious in larger clusters. Tell the relay its own URL with `cluster.node`, then enable gossip with `cluster.mesh`; connected peers will discover and dial it back automatically:

@@ -124,6 +124,12 @@ where
 		self.map.contains_key(key)
 	}
 
+	/// Iterate the cached handles, including closed entries GC hasn't reclaimed
+	/// yet (callers filter on liveness themselves).
+	pub fn iter(&self) -> impl Iterator<Item = &V> {
+		self.map.values()
+	}
+
 	/// Probe a bounded, rotating window of the ring, reclaiming dead entries.
 	fn gc(&mut self) {
 		for _ in 0..self.ring.len().min(GC_PROBE) {

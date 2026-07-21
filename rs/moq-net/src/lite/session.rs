@@ -123,6 +123,9 @@ pub fn start<S: web_transport_trait::Session>(
 	let peer_setup = peer_setup_slot;
 	let (tasks, task_set) = TaskSet::new();
 
+	// Read out before the setup task takes ownership below.
+	let our_cost = our_setup.cost;
+
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.
 	if version.has_setup_stream() {
@@ -147,6 +150,10 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 		peer_setup,
+		// The dialing side prices the link in its own SETUP, so that is also where the
+		// subscriber reads our price from. A server never sets one, leaving the
+		// subscriber to take the price out of the client's SETUP instead.
+		cost: our_cost,
 		tasks,
 	});
 

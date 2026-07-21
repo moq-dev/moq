@@ -1248,6 +1248,24 @@ impl TrackWeak {
 	pub(crate) fn name(&self) -> &Arc<str> {
 		&self.name
 	}
+
+	/// Whether anyone is consuming the track right now. A closed track doesn't
+	/// count even if consumers linger to drain its cache: no new work is owed.
+	pub(crate) fn is_used(&self) -> bool {
+		!self.state.is_closed() && self.state.is_used()
+	}
+
+	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
+	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
+		let _ = self.state.poll_used(waiter);
+	}
+
+	/// Park `waiter` for the last consumer (or the track) going away; a no-op
+	/// once none remain. Feeds [`crate::broadcast::Demand`].
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) {
+		let _ = self.state.poll_unused(waiter);
+	}
 }
 
 impl super::WeakEntry for TrackWeak {

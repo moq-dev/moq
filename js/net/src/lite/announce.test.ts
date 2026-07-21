@@ -43,14 +43,31 @@ test("AnnounceBroadcast round-trips on draft-05", async () => {
 
 test("AnnounceBroadcast round-trips on draft-06", async () => {
 	const hops = [OriginSchema.parse(7n)];
+	// An absent cost encodes as zero and decodes explicitly.
 	const gotActive = await roundTrip({ status: "active", suffix: Path.from("room/cam"), hops }, Version.DRAFT_06);
-	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops });
+	expect(gotActive).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 0n });
+
+	const gotCost = await roundTrip(
+		{ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n },
+		Version.DRAFT_06,
+	);
+	expect(gotCost).toEqual({ status: "active", suffix: Path.from("room/cam"), hops, cost: 12n });
 
 	const gotEnded = await roundTrip({ status: "endedId", id: 3n }, Version.DRAFT_06);
 	expect(gotEnded).toEqual({ status: "endedId", id: 3n });
 
-	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops }, Version.DRAFT_06);
-	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops });
+	const gotRestart = await roundTrip({ status: "restart", id: 3n, hops, cost: 12n }, Version.DRAFT_06);
+	expect(gotRestart).toEqual({ status: "restart", id: 3n, hops, cost: 12n });
+});
+
+test("AnnounceBroadcast drops the route cost before draft-06", async () => {
+	// Pre-lite-06 has no room for a cost on the wire, so one set locally is
+	// simply not sent, keeping mixed-version meshes ranking on hop count.
+	const got = await roundTrip(
+		{ status: "active", suffix: Path.from("room/cam"), hops: [], cost: 9n },
+		Version.DRAFT_05,
+	);
+	expect(got).toEqual({ status: "active", suffix: Path.from("room/cam"), hops: [] });
 });
 
 test("AnnounceBroadcast rejects cross-version forms", async () => {

@@ -13,9 +13,11 @@ pub enum Version {
 	Lite05,
 	/// Work-in-progress lite-06. Adds announce ids: each `active` ANNOUNCE_BROADCAST
 	/// implicitly assigns the next ordinal, and `ended`/`restart` reference that id
-	/// instead of repeating the path. Advertised over ALPN (`moq-lite-06`, no `-wip`
-	/// suffix on the wire) and the preferred version in the default sets. The wire
-	/// format is still WIP; finalizing is a pure rename to `Lite06` with no wire change.
+	/// instead of repeating the path. Also adds the route cost carried alongside the
+	/// hop chain, ranking above hop count in route selection. Advertised over ALPN
+	/// (`moq-lite-06`, no `-wip` suffix on the wire) and the preferred version in the
+	/// default sets. The wire format is still WIP; finalizing is a pure rename to
+	/// `Lite06` with no wire change.
 	Lite06Wip,
 }
 
@@ -75,6 +77,19 @@ impl Version {
 	/// reference that id instead of repeating the path. Added in lite-06.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_id(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether announcements carry the route cost: the marginal cost of pulling
+	/// the broadcast via this route, accumulated per link. Added in lite-06.
+	/// Older versions carry nothing, so a received route stays at zero and ranks
+	/// on hop count alone, exactly as before.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_route_cost(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 => false,

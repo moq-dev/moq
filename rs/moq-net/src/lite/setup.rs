@@ -11,6 +11,16 @@ const PARAM_PROBE: u64 = 0x1;
 const PARAM_PATH: u64 = 0x2;
 /// Setup Parameter id for the client's intended [`Role`] (client-only).
 const PARAM_ROLE: u64 = 0x3;
+/// Setup Parameter id for the link cost the dialer assigns to this connection.
+const PARAM_COST: u64 = 0x4;
+
+/// The cost of crossing a link that neither end priced.
+///
+/// One, so a mesh that configures no costs accumulates a route cost equal to the
+/// hop count and ranks routes exactly as pre-lite-06 shortest-path routing did. Pricing
+/// a link at 0 makes it free (a sibling in the same datacenter); pricing it higher
+/// makes it a last resort (a metered backbone).
+pub const DEFAULT_COST: u64 = 1;
 
 /// The probe capability an endpoint advertises in SETUP.
 ///
@@ -135,6 +145,11 @@ pub struct Setup {
 	/// session. `None` is sent as the absence of the parameter, which is also how a
 	/// client that predates the parameter decodes.
 	pub role: Option<Role>,
+	/// What crossing this link costs (lite-06+), added to the route cost of every
+	/// announcement forwarded over it. Sent only by the dialing side, since the link
+	/// cost lives in its connect config; the accepting side reads it here so both
+	/// ends price the same link identically. `None` means the default cost of 1.
+	pub cost: Option<u64>,
 }
 
 impl Message for Setup {
@@ -157,8 +172,14 @@ impl Message for Setup {
 			None => None,
 		};
 		let role = params.get_varint(PARAM_ROLE)?.and_then(Role::from_code);
+		let cost = params.get_varint(PARAM_COST)?;
 
-		Ok(Self { probe, path, role })
+		Ok(Self {
+			probe,
+			path,
+			role,
+			cost,
+		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -178,6 +199,9 @@ impl Message for Setup {
 		// directional role is encoded.
 		if let Some(role) = self.role {
 			params.set_varint(PARAM_ROLE, role.to_code());
+		}
+		if let Some(cost) = self.cost {
+			params.set_varint(PARAM_COST, cost);
 		}
 
 		params.encode(w, version)
@@ -199,11 +223,22 @@ impl PeerSetup {
 	}
 
 	/// Await the peer's advertised probe level, blocking until its SETUP arrives.
+	pub async fn probe_level(&self) -> ProbeLevel {
+		self.wait(|setup| setup.probe).await
+	}
+
+	/// Await the link cost the peer (the dialing side) declared in its SETUP.
+	/// `None` when it declared none, meaning the default cost of 1.
+	pub async fn cost(&self) -> Option<u64> {
+		self.wait(|setup| setup.cost).await
+	}
+
+	/// Await the peer's SETUP and read a field out of it.
 	///
 	/// The peer MUST send exactly one SETUP, so this resolves once that stream is read.
 	/// Waits forever if it never does; the caller is a session task, cancelled when the
 	/// driver drops.
-	pub async fn probe_level(&self) -> ProbeLevel {
+	async fn wait<T>(&self, f: impl FnOnce(&Setup) -> T) -> T {
 		let slot = self
 			.0
 			.wait(|setup| {
@@ -214,8 +249,7 @@ impl PeerSetup {
 				}
 			})
 			.await;
-		let setup = slot.as_ref().expect("waited for Some");
-		setup.probe
+		f(slot.as_ref().expect("waited for Some"))
 	}
 }
 
@@ -250,11 +284,25 @@ mod tests {
 	}
 
 	#[test]
+	fn cost_round_trip() {
+		// Zero is a meaningful price (a free same-datacenter link), so it must survive
+		// the round trip as `Some(0)` rather than collapsing into "unpriced".
+		for cost in [None, Some(0), Some(1), Some(7)] {
+			let msg = Setup {
+				cost,
+				..Default::default()
+			};
+			assert_eq!(round_trip(&msg), msg);
+		}
+	}
+
+	#[test]
 	fn path_round_trip() {
 		let msg = Setup {
 			probe: ProbeLevel::Report,
 			path: Some("/room/123".to_string()),
 			role: None,
+			cost: None,
 		};
 		assert_eq!(round_trip(&msg), msg);
 	}
