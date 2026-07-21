@@ -57,6 +57,10 @@ pub enum Error {
 	#[error("failed to resolve bind address")]
 	ResolveBind(#[source] std::io::Error),
 
+	/// noq ships BBRv3 only, so a congestion control selection cannot be honored.
+	#[error("the noq backend always uses BBRv3; drop --*-quic-congestion-control or use the quinn backend")]
+	CongestionControlUnsupported,
+
 	/// The URL has no host to connect to.
 	#[error("invalid DNS name")]
 	InvalidDnsName,
@@ -182,11 +186,17 @@ pub(crate) struct NoqClient {
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
+		let quic = config.quic.resolve();
+		// noq ships BBRv3 only; fail fast instead of silently running a different controller.
+		if quic.congestion_control.is_some() {
+			return Err(Error::CongestionControlUnsupported);
+		}
+
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, config.quic.resolve());
+		apply_transport(&mut transport, quic);
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -362,9 +372,15 @@ pub(crate) struct NoqServer {
 
 impl NoqServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
+		let quic = config.quic.resolve();
+		// noq ships BBRv3 only; fail fast instead of silently running a different controller.
+		if quic.congestion_control.is_some() {
+			return Err(Error::CongestionControlUnsupported);
+		}
+
 		let mut transport = noq::TransportConfig::default();
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, config.quic.resolve());
+		apply_transport(&mut transport, quic);
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();
@@ -587,5 +603,39 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 
 	fn cid_lifetime(&self) -> Option<Duration> {
 		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// noq always runs BBRv3, so a congestion control selection must fail at
+	/// init rather than silently running a different controller.
+	#[tokio::test]
+	async fn congestion_control_selection_is_rejected() {
+		let client_config = ClientConfig {
+			quic: crate::quic::Client {
+				congestion_control: Some(crate::quic::CongestionControl::Cubic),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		assert!(matches!(
+			NoqClient::new(&client_config),
+			Err(Error::CongestionControlUnsupported)
+		));
+
+		let server_config = ServerConfig {
+			quic: crate::quic::Server {
+				congestion_control: Some(crate::quic::CongestionControl::Bbr),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		assert!(matches!(
+			NoqServer::new(server_config),
+			Err(Error::CongestionControlUnsupported)
+		));
 	}
 }

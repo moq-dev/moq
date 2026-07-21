@@ -1,6 +1,7 @@
 //! The quinn QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
 use crate::client::ClientConfig;
+use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::server::ServerConfig;
@@ -29,6 +30,20 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: Resolved) {
 	// GSO is on by default; only the quinn/noq backends can turn it off.
 	if let Some(gso) = quic.gso {
 		transport.enable_segmentation_offload(gso);
+	}
+
+	// quinn defaults to CUBIC; this knob opts a connection into BBR or NewReno instead.
+	if let Some(algorithm) = quic.congestion_control {
+		transport.congestion_controller_factory(congestion_factory(algorithm));
+	}
+}
+
+/// The quinn controller factory for a congestion control choice.
+fn congestion_factory(algorithm: CongestionControl) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
+	match algorithm {
+		CongestionControl::Cubic => Arc::new(quinn::congestion::CubicConfig::default()),
+		CongestionControl::Bbr => Arc::new(quinn::congestion::BbrConfig::default()),
+		CongestionControl::NewReno => Arc::new(quinn::congestion::NewRenoConfig::default()),
 	}
 }
 
@@ -183,7 +198,6 @@ impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
-		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
@@ -361,8 +375,6 @@ pub(crate) struct QuinnServer {
 
 impl QuinnServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
-		// Enable BBR congestion control
-		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
 		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
@@ -586,5 +598,101 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 
 	fn cid_lifetime(&self) -> Option<Duration> {
 		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a controller from each variant's factory and downcast it to the
+	/// concrete quinn implementation it must map to.
+	#[test]
+	fn congestion_factory_maps_each_variant() {
+		let now = std::time::Instant::now();
+		let mtu = 1200;
+
+		let cubic = congestion_factory(CongestionControl::Cubic).build(now, mtu);
+		assert!(cubic.into_any().downcast::<quinn::congestion::Cubic>().is_ok());
+
+		let bbr = congestion_factory(CongestionControl::Bbr).build(now, mtu);
+		assert!(bbr.into_any().downcast::<quinn::congestion::Bbr>().is_ok());
+
+		let reno = congestion_factory(CongestionControl::NewReno).build(now, mtu);
+		assert!(reno.into_any().downcast::<quinn::congestion::NewReno>().is_ok());
+	}
+
+	/// Loopback regression test: a config selecting BBR must produce live
+	/// connections that actually run quinn's BBR controller, on both ends.
+	#[tokio::test]
+	async fn bbr_reaches_the_live_connection() {
+		let server_config = ServerConfig {
+			bind: Some("127.0.0.1:0".to_string()),
+			tls: crate::tls::Server {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			quic: crate::quic::Server {
+				congestion_control: Some(CongestionControl::Bbr),
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let server = QuinnServer::new(server_config).expect("server init");
+		let addr = server.local_addr().expect("local addr");
+
+		let accepted = tokio::spawn(async move {
+			let incoming = server.accept().await.expect("no incoming connection");
+			let conn = incoming.accept().expect("accept").await.expect("handshake");
+			conn.congestion_state()
+				.into_any()
+				.downcast::<quinn::congestion::Bbr>()
+				.is_ok()
+		});
+
+		// tls::Client has a private field, so it can't be built with a struct literal.
+		let mut tls_config = crate::tls::Client::default();
+		tls_config.disable_verify = Some(true);
+
+		let client_config = ClientConfig {
+			bind: "127.0.0.1:0".parse().unwrap(),
+			tls: tls_config,
+			quic: crate::quic::Client {
+				congestion_control: Some(CongestionControl::Bbr),
+				..Default::default()
+			},
+			..Default::default()
+		};
+
+		let tls = client_config.tls.build().expect("tls config");
+		let client = QuinnClient::new(&client_config).expect("client init");
+		// Dial the loopback IP directly so the system resolver is never involved.
+		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
+
+		// Bound the whole connect + accept + assert flow so a handshake
+		// regression fails fast instead of stalling CI.
+		tokio::time::timeout(Duration::from_secs(5), async move {
+			let session = client
+				.connect(&tls, url, &moq_net::Versions::default())
+				.await
+				.expect("connect failed");
+
+			// web_transport_quinn::Session derefs to the quinn connection.
+			assert!(
+				session
+					.congestion_state()
+					.into_any()
+					.downcast::<quinn::congestion::Bbr>()
+					.is_ok(),
+				"client connection is not running BBR"
+			);
+			assert!(
+				accepted.await.expect("server task panicked"),
+				"server connection is not running BBR"
+			);
+		})
+		.await
+		.expect("test timed out");
 	}
 }

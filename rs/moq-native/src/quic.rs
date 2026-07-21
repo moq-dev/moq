@@ -41,6 +41,22 @@ impl std::str::FromStr for ServerId {
 	}
 }
 
+/// The congestion control algorithm for a QUIC connection.
+///
+/// Honored by the quinn backend only; noq, quiche, and iroh reject a
+/// selection at init (noq always uses BBRv3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CongestionControl {
+	/// CUBIC (RFC 8312), quinn's default: loss-based, throughput-oriented.
+	Cubic,
+	/// BBR: tracks delivery rate instead of reacting to loss, better suited to interactive media.
+	Bbr,
+	/// NewReno (RFC 6582): the classic conservative loss-based controller.
+	NewReno,
+}
+
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
@@ -116,6 +132,18 @@ pub struct Client {
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub mtu_discovery: Option<bool>,
+
+	/// Congestion control algorithm. Unset means the backend's default (CUBIC on quinn).
+	/// Only the quinn backend can select one; setting it fails at init on noq, quiche, and iroh
+	/// (noq always uses BBRv3).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-quic-congestion-control",
+		long = "client-quic-congestion-control",
+		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+		value_enum
+	)]
+	pub congestion_control: Option<CongestionControl>,
 }
 
 impl Client {
@@ -127,6 +155,7 @@ impl Client {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.congestion_control,
 		)
 	}
 }
@@ -197,6 +226,18 @@ pub struct Server {
 	)]
 	pub mtu_discovery: Option<bool>,
 
+	/// Congestion control algorithm. Unset means the backend's default (CUBIC on quinn).
+	/// Only the quinn backend can select one; setting it fails at init on noq and quiche
+	/// (noq always uses BBRv3).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "server-quic-congestion-control",
+		long = "server-quic-congestion-control",
+		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
+		value_enum
+	)]
+	pub congestion_control: Option<CongestionControl>,
+
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
 	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
@@ -248,6 +289,7 @@ impl Server {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.congestion_control,
 		)
 	}
 }
@@ -269,6 +311,9 @@ pub(crate) struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
+	/// Congestion control override, or `None` to leave the backend default (CUBIC on quinn).
+	/// Only quinn honors a selection; the other backends reject `Some` at init.
+	pub congestion_control: Option<CongestionControl>,
 }
 
 impl Resolved {
@@ -278,6 +323,7 @@ impl Resolved {
 		idle_timeout: Option<Duration>,
 		keep_alive: Option<Duration>,
 		mtu_discovery: Option<bool>,
+		congestion_control: Option<CongestionControl>,
 	) -> Self {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
@@ -293,6 +339,7 @@ impl Resolved {
 			idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
 			keep_alive,
 			mtu_discovery: mtu_discovery.unwrap_or(false),
+			congestion_control,
 		}
 	}
 
@@ -397,10 +444,27 @@ mod tests {
 			max_streams = 7000
 			gso = false
 			preferred_v4 = "192.0.2.1:443"
+			congestion_control = "new-reno"
 		"#;
 		let quic: Server = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
+		assert_eq!(quic.congestion_control, Some(CongestionControl::NewReno));
+	}
+
+	#[test]
+	fn congestion_control_flags_parse() {
+		let both = parse(&[
+			"--client-quic-congestion-control",
+			"bbr",
+			"--server-quic-congestion-control",
+			"new-reno",
+		]);
+		assert_eq!(both.client.congestion_control, Some(CongestionControl::Bbr));
+		assert_eq!(both.server.congestion_control, Some(CongestionControl::NewReno));
+
+		// Unset stays None, which leaves the backend's own default (CUBIC on quinn).
+		assert_eq!(Client::default().resolve().congestion_control, None);
 	}
 }

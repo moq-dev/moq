@@ -67,6 +67,12 @@ pub enum Error {
 	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 
+	/// quiche offers no congestion controller selection.
+	#[error(
+		"the quiche backend cannot select a congestion controller; drop --*-quic-congestion-control or use the quinn backend"
+	)]
+	CongestionControlUnsupported,
+
 	/// The handshake completed without negotiating an ALPN, so there is no protocol to speak.
 	#[error("missing ALPN")]
 	MissingAlpn,
@@ -176,6 +182,11 @@ impl QuicheClient {
 		// quiche probes GSO from the socket and has no knob to force it off.
 		if quic.gso_disabled() {
 			return Err(Error::GsoUnsupported);
+		}
+
+		// quiche has no congestion controller selection knob.
+		if quic.congestion_control.is_some() {
+			return Err(Error::CongestionControlUnsupported);
 		}
 
 		Ok(Self {
@@ -382,6 +393,11 @@ impl QuicheServer {
 			return Err(Error::GsoUnsupported);
 		}
 
+		// quiche has no congestion controller selection knob.
+		if quic.congestion_control.is_some() {
+			return Err(Error::CongestionControlUnsupported);
+		}
+
 		let listen =
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
 
@@ -546,5 +562,39 @@ pub(crate) async fn accept(
 			Ok((session, None, None))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// quiche has no congestion controller selection knob, so a selection must
+	/// fail at init rather than being silently ignored.
+	#[test]
+	fn congestion_control_selection_is_rejected() {
+		let client_config = ClientConfig {
+			quic: crate::quic::Client {
+				congestion_control: Some(crate::quic::CongestionControl::Bbr),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		assert!(matches!(
+			QuicheClient::new(&client_config),
+			Err(Error::CongestionControlUnsupported)
+		));
+
+		let server_config = ServerConfig {
+			quic: crate::quic::Server {
+				congestion_control: Some(crate::quic::CongestionControl::NewReno),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		assert!(matches!(
+			QuicheServer::new(server_config),
+			Err(Error::CongestionControlUnsupported)
+		));
 	}
 }

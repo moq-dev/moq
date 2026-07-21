@@ -89,6 +89,12 @@ pub enum Error {
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
 	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
+
+	/// iroh exposes no congestion controller knob.
+	#[error(
+		"the iroh backend cannot select a congestion controller; drop --client-quic-congestion-control or use the quinn backend"
+	)]
+	CongestionControlUnsupported,
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -144,8 +150,9 @@ impl EndpointConfig {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
-	/// discovery); it has no keep-alive knob and cannot disable GSO, so `gso = false`
-	/// fails with [`Error::GsoUnsupported`].
+	/// discovery); it has no keep-alive knob, cannot disable GSO (`gso = false`
+	/// fails with [`Error::GsoUnsupported`]), and cannot select a congestion
+	/// controller (`congestion_control` fails with [`Error::CongestionControlUnsupported`]).
 	pub async fn bind(self, quic: &crate::quic::Client) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -154,6 +161,10 @@ impl EndpointConfig {
 		let quic = quic.resolve();
 		if quic.gso_disabled() {
 			return Err(Error::GsoUnsupported);
+		}
+
+		if quic.congestion_control.is_some() {
+			return Err(Error::CongestionControlUnsupported);
 		}
 
 		// If the secret matches the expected format (hex encoded), use it directly.
@@ -314,4 +325,27 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 	)
 	.parse()?;
 	Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// iroh has no congestion controller knob, so a selection must fail at
+	/// bind rather than being silently ignored.
+	#[tokio::test]
+	async fn congestion_control_selection_is_rejected() {
+		let config = EndpointConfig {
+			enabled: Some(true),
+			..Default::default()
+		};
+		let quic = crate::quic::Client {
+			congestion_control: Some(crate::quic::CongestionControl::Bbr),
+			..Default::default()
+		};
+		assert!(matches!(
+			config.bind(&quic).await,
+			Err(Error::CongestionControlUnsupported)
+		));
+	}
 }
