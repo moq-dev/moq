@@ -513,8 +513,7 @@ mod test {
 		let mut catalog = Producer::new(&mut broadcast).unwrap();
 
 		// Finished tracks can't take another group, so the publish behind the guard fails.
-		// The producer is a shared handle, so finish a clone and keep this one to publish through.
-		catalog.clone().finish().unwrap();
+		catalog.finish().unwrap();
 
 		let mut guard = catalog.lock();
 		guard

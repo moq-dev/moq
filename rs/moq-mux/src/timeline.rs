@@ -294,7 +294,7 @@ mod test {
 	#[tokio::test]
 	async fn records_group_opens_in_milliseconds() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		let mut timeline = Producer::new(&mut broadcast, "video0").unwrap();
 		assert_eq!(timeline.track, "video0.timeline.z");
 
 		let track = broadcast.create_track("video0", None).unwrap();
@@ -305,7 +305,7 @@ mod test {
 		media.write(frame(2_000_000, false)).unwrap(); // extends group 0
 		media.write(frame(4_000_000, true)).unwrap(); // group 1 @ 4_000_000us
 		media.finish().unwrap();
-		timeline.clone().finish().unwrap();
+		timeline.finish().unwrap();
 
 		// Entry pts is a real Timestamp (decoded from the ms-timescale record).
 		assert_eq!(drain(&broadcast, &timeline).await, vec![entry(0, 0), entry(1, 4_000)]);
@@ -314,7 +314,7 @@ mod test {
 	#[tokio::test]
 	async fn granularity_throttles_records() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&mut broadcast, "audio0").unwrap();
+		let mut timeline = Producer::new(&mut broadcast, "audio0").unwrap();
 		let mut recorder = timeline.recorder();
 
 		// Default granularity is 1s. Group opens 300ms apart, all within a second of the first, then
@@ -323,7 +323,7 @@ mod test {
 			recorder.record(seq, Timestamp::from_millis(ms).unwrap()).unwrap();
 		}
 		drop(recorder);
-		timeline.clone().finish().unwrap();
+		timeline.finish().unwrap();
 
 		assert_eq!(drain(&broadcast, &timeline).await, vec![entry(0, 0), entry(4, 1200)]);
 	}
@@ -353,8 +353,8 @@ mod test {
 	#[tokio::test]
 	async fn rejects_an_invalid_timescale() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
-		timeline.clone().finish().unwrap();
+		let mut timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		timeline.finish().unwrap();
 
 		// A timescale of 0 can't be honored, and quietly reading the track at milliseconds would
 		// report timestamps the publisher never meant.
@@ -393,12 +393,12 @@ mod test {
 	#[tokio::test]
 	async fn consumer_decodes_pts_from_the_section() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		let mut timeline = Producer::new(&mut broadcast, "video0").unwrap();
 		timeline
 			.recorder()
 			.record(3, Timestamp::from_micros(7_000).unwrap())
 			.unwrap();
-		timeline.clone().finish().unwrap();
+		timeline.finish().unwrap();
 
 		// The reader takes the track name + timescale from the section, and yields a real Timestamp.
 		// The pts is decoded at the timeline's (millisecond) timescale, so compare the instant rather
