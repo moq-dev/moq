@@ -75,7 +75,9 @@ struct Fmp4Track {
 	// Indexes this track's group opens into its `<name>.timeline.z` timeline, advertised in the
 	// rendition's config. Passthrough writes groups by hand (no `container::Producer`), so the
 	// recorder is fed directly at each keyframe rather than through `with_recorder`.
-	recorder: crate::timeline::Recorder,
+	// `None` once recording has failed, matching `container::Producer`: the timeline is an
+	// optional sidecar, so losing it must not take the media down with it.
+	recorder: Option<crate::timeline::Recorder>,
 
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
@@ -261,7 +263,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					track,
 					group: None,
-					recorder: timeline.recorder(),
+					recorder: Some(timeline.recorder()),
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
@@ -765,8 +767,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			// A keyframe fragment just opened a new group; index it in the track's timeline (throttled
 			// to the recorder's granularity) so a playlist/seek/VOD reader can map time to group.
+			// The timeline is an optional sidecar (consumers extrapolate across gaps), so a recording
+			// failure must NOT abort the passthrough. Drop the recorder and carry on.
 			if contains_keyframe {
-				track.recorder.record(g.sequence(), timestamp)?;
+				let timeline_err = match track.recorder.as_mut() {
+					Some(recorder) => recorder.record(g.sequence, timestamp).err(),
+					None => None,
+				};
+				if let Some(err) = timeline_err {
+					tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
+					track.recorder = None;
+				}
 			}
 
 			// A keyframe fragment starts a new group: close the previous one for the bitrate
