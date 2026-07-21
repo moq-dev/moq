@@ -4,6 +4,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import type { Stats } from "./stats.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -52,6 +53,14 @@ export class Reload {
 
 	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
+
+	/**
+	 * Live transport statistics of the current connection, spanning reconnects.
+	 *
+	 * Undefined while disconnected: the counters belong to a single connection, so
+	 * they reset rather than accumulate across a reconnect. See {@link Established.stats}.
+	 */
+	readonly stats: Getter<Stats | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -113,6 +122,11 @@ export class Reload {
 				if (!document.hidden) this.#suspended.set(false);
 			});
 		}
+
+		this.stats = this.#signals.computed((effect) => {
+			const connection = effect.get(this.established);
+			return connection && effect.get(connection.stats);
+		});
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.

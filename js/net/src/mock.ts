@@ -25,7 +25,8 @@ function newStream(): TransformStream<Uint8Array, Uint8Array> {
 	);
 }
 
-class MockTransport implements WebTransport {
+/** A fake {@link WebTransport} backed by TransformStreams, paired with a peer. */
+export class MockTransport implements WebTransport {
 	readonly protocol: string;
 	readonly ready: Promise<undefined>;
 	readonly closed: Promise<WebTransportCloseInfo>;
@@ -268,13 +269,14 @@ export interface MockTransportOptions {
 export function createMockTransportPair(
 	protocol = "",
 	options?: MockTransportOptions,
-): { client: WebTransport; server: WebTransport } {
+): { client: MockTransport; server: MockTransport } {
 	const datagrams = options?.datagrams ?? true;
 	const client = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
 	const server = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
 	if (options?.stats) {
-		client.stats = options.stats;
-		server.stats = options.stats;
+		// Copy per side so a test advancing one transport's counters doesn't move the other's.
+		client.stats = { ...options.stats };
+		server.stats = { ...options.stats };
 	}
 	client.setPeer(server);
 	server.setPeer(client);
