@@ -2607,6 +2607,10 @@ mod tests {
 		assert_eq!(entry.publisher.fetches, 1, "one fetch");
 		assert_eq!(entry.publisher.subscriptions, 1, "fetch does not bump subscriptions");
 		assert_eq!(entry.publisher.broadcasts, 1, "fetch does not bump the viewer refcount");
+		// `fetches` is egress-only for the same structural reason as `broadcasts`:
+		// only a `track::Consumer` can fetch, and the ingress scope never reaches one
+		// (`broadcast::Producer::consume` hands out an untagged consumer).
+		assert_eq!(entry.subscriber.fetches, 0, "ingress cannot fetch");
 	}
 
 	/// `Subscriber::read_frame` collapses a group to its first frame. The paths it

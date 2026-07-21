@@ -449,7 +449,9 @@ ui.run((effect) => {
 			.filter((p) => !isSystem(p))
 			.sort();
 
-	// Broadcasters: what this node ingests from upstream publishers.
+	// Broadcasters: what this node ingests from upstream publishers. No `fetches`
+	// column: only a consumer can fetch, so the counter is egress-only. The KPI
+	// total still sums both sides in case that ever changes.
 	const ingressRows = (frame: BroadcastFrame) =>
 		paths(frame).map((path) => {
 			const i = frame[path] ?? {};
