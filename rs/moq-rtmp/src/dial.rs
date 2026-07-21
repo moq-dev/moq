@@ -475,7 +475,7 @@ impl Publisher {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
-		self.broadcast.clone().finish();
+		self.broadcast.finish();
 		Ok(())
 	}
 

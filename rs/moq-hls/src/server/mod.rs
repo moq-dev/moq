@@ -198,7 +198,7 @@ mod tests {
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = moq_net::Origin::random().produce();
-		let producer = origin
+		let mut producer = origin
 			.create_broadcast("gone", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
@@ -240,7 +240,7 @@ mod tests {
 		let origin = moq_net::Origin::random().produce();
 		let server = Server::new(origin.consume(), Config::default());
 		let old = closed_broadcaster().await;
-		let new_producer = origin
+		let mut new_producer = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;

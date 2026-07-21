@@ -590,7 +590,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	let pub_origin = Origin::random().produce();
 
 	// Announced before the client connects, so it rides the initial set.
-	let first = pub_origin
+	let mut first = pub_origin
 		.create_broadcast("first", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
 
@@ -630,7 +630,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	assert!(broadcast.is_some(), "expected initial announce");
 
 	// A live announce after the initial set.
-	let second = pub_origin
+	let mut second = pub_origin
 		.create_broadcast("second", moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;

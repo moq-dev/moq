@@ -1205,7 +1205,7 @@ impl Publisher {
 	/// the broadcast so the origin unannounces it immediately.
 	fn finish(&mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
-		self.broadcast.clone().finish();
+		self.broadcast.finish();
 		Ok(())
 	}
 

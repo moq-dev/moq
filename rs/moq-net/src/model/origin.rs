@@ -1297,7 +1297,7 @@ fn attach_source(
 /// until the last source detaches, then unpublishes the broadcast.
 async fn run_front(
 	state: kio::Producer<FrontState>,
-	broadcast: broadcast::Producer,
+	mut broadcast: broadcast::Producer,
 	node: Lock<OriginNode>,
 	rest: PathOwned,
 ) {
@@ -2777,7 +2777,7 @@ mod tests {
 		consumer1.assert_next_wait();
 
 		// Publish the first broadcast; it becomes visible asynchronously.
-		let broadcast1 = origin.create_broadcast("test1", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test1", announce()).unwrap();
 		settle().await;
 
 		consumer1.assert_next_some("test1");
@@ -2788,7 +2788,7 @@ mod tests {
 		let mut consumer2 = origin.consume().announced();
 
 		// Publish the second broadcast.
-		let broadcast2 = origin.create_broadcast("test2", announce()).unwrap();
+		let mut broadcast2 = origin.create_broadcast("test2", announce()).unwrap();
 		settle().await;
 
 		consumer1.assert_next_some("test2");
@@ -2832,9 +2832,9 @@ mod tests {
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
-		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
-		let broadcast3 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast2 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast3 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		assert!(consumer.get_broadcast("test").is_some());
 
@@ -3187,7 +3187,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let source = origin
+		let mut source = origin
 			.create_broadcast("test", announce().with_hops(hops.clone()))
 			.unwrap();
 		settle().await;
@@ -3323,7 +3323,7 @@ mod tests {
 
 		// An announced source with a worse cost still wins: the path announces
 		// and advertises its route.
-		let announced_source = origin.create_broadcast("test", announce().with_cost(10)).unwrap();
+		let mut announced_source = origin.create_broadcast("test", announce().with_cost(10)).unwrap();
 		settle().await;
 		announced.assert_next_some("test");
 		let face = consumer.get_broadcast("test").unwrap();
@@ -3368,8 +3368,8 @@ mod tests {
 
 		let origin = Origin::random().produce();
 
-		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
-		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		assert!(origin.consume().get_broadcast("test").is_some());
 
@@ -4060,7 +4060,7 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap().announced();
 
-		let b = origin.create_broadcast("some_prefix/test", announce()).unwrap();
+		let mut b = origin.create_broadcast("some_prefix/test", announce()).unwrap();
 		settle().await;
 		consumer.assert_next_some("test");
 
@@ -4320,7 +4320,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
 
-		let broadcast = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast.finish();
 
@@ -4338,7 +4338,7 @@ mod tests {
 		let origin = Origin::random().produce();
 		let mut announced = origin.consume().announced();
 
-		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast1.finish();
 		settle().await;
@@ -4356,7 +4356,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let mut announced = origin.consume().announced();
@@ -4382,7 +4382,7 @@ mod tests {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
-		let broadcast1 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast1 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 
 		let mut announced = origin.consume().announced();
@@ -4391,7 +4391,7 @@ mod tests {
 		broadcast1.finish();
 		settle().await;
 
-		let broadcast2 = origin.create_broadcast("test", announce()).unwrap();
+		let mut broadcast2 = origin.create_broadcast("test", announce()).unwrap();
 		settle().await;
 		broadcast2.finish();
 		settle().await;
@@ -4412,7 +4412,7 @@ mod tests {
 		let mut announced = origin.consume().announced();
 
 		for _ in 0..1000 {
-			let broadcast = origin.create_broadcast("test", announce()).unwrap();
+			let mut broadcast = origin.create_broadcast("test", announce()).unwrap();
 			settle().await;
 			broadcast.finish();
 		}

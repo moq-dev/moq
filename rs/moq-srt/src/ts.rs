@@ -57,7 +57,7 @@ impl Publisher {
 	/// the broadcast so the origin unannounces it immediately.
 	pub fn finish(&mut self) -> Result<()> {
 		self.importer.finish()?;
-		self.broadcast.clone().finish();
+		self.broadcast.finish();
 		Ok(())
 	}
 
