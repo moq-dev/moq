@@ -2609,6 +2609,60 @@ mod tests {
 		assert_eq!(entry.publisher.broadcasts, 1, "fetch does not bump the viewer refcount");
 	}
 
+	/// `Subscriber::read_frame` collapses a group to its first frame. The paths it
+	/// delegates to (plain and spliced) build their own *unmetered* group consumers,
+	/// so the wrapper is the only place that can attribute the read: exactly one
+	/// group, one frame, and the payload bytes, counted once each.
+	#[tokio::test]
+	async fn test_stats_read_frame_counts_once() {
+		use crate::Timestamp;
+		use crate::stats::{Config, Registry, Tier};
+		use bytes::Bytes;
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let broadcast = announced.next().await.unwrap().broadcast.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		// A single-frame group, read back through the collapsing helper.
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
+			.unwrap();
+
+		let frame = sub.read_frame().await.unwrap().expect("frame");
+		assert_eq!(frame.payload.len(), 5);
+		settle().await;
+
+		let report = registry.report();
+		let entry = report
+			.traffic
+			.iter()
+			.find(|e| e.path.as_str() == "demo")
+			.expect("demo tracked");
+		assert_eq!(entry.publisher.groups, 1, "one group, counted once");
+		assert_eq!(entry.publisher.frames, 1, "one frame, counted once");
+		assert_eq!(
+			entry.publisher.bytes, 5,
+			"payload counted once, not zero and not doubled"
+		);
+	}
+
 	#[test]
 	fn origin_rejects_reserved_ids() {
 		assert!(Origin::new(0).is_err());
