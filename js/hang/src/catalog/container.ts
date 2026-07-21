@@ -8,9 +8,17 @@ const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
  *
  * Kept intact so reparsing and republishing a catalog round-trips the rendition instead of
  * corrupting it. Such a rendition must be ignored rather than decoded.
+ *
+ * Recognized kinds are rejected here so they can only ever parse through their own strict
+ * schema. Without that, a malformed known container (`{"kind":"cmaf"}` with no `init`) would
+ * fall through to this arm, still report as CMAF, and hand decoders an undefined init segment.
  */
 export const UnknownContainerSchema = z.looseObject({
-	kind: z.string(),
+	kind: z.string().check(
+		z.refine((kind) => !KNOWN_KINDS.includes(kind), {
+			message: "recognized container kind must match its own schema",
+		}),
+	),
 });
 
 /**

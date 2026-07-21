@@ -146,6 +146,7 @@ pub struct RsaAdditionalPrime {
 /// usable on its own: convert it into a [`Key`] via `Key::try_from` to sign or verify anything.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
+#[non_exhaustive]
 pub struct Jwk {
 	/// The algorithm used by the key.
 	#[serde(rename = "alg")]
@@ -166,6 +167,22 @@ pub struct Jwk {
 	/// Optional authorization limits for tokens signed by this key.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub scope: Option<crate::Scope>,
+}
+
+impl Jwk {
+	/// A key that can both sign and verify, with no key ID or scope.
+	///
+	/// Set the remaining fields on the returned value. The struct is `#[non_exhaustive]`, so
+	/// building it this way keeps working as JWK parameters are added.
+	pub fn new(algorithm: Algorithm, key: KeyType) -> Self {
+		Self {
+			algorithm,
+			operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
+			key,
+			kid: None,
+			scope: None,
+		}
+	}
 }
 
 impl<'de> Deserialize<'de> for Jwk {

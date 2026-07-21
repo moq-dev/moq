@@ -45,3 +45,12 @@ test("catalog with an unknown container keeps its other renditions", () => {
 	// The unknown rendition survives a republish intact.
 	expect(parsed.video.renditions.future?.container).toEqual({ kind: "future", magic: 7 });
 });
+
+test("a malformed known container errors instead of degrading to passthrough", () => {
+	// `cmaf` without `init` fails its own schema. It must NOT fall through to the passthrough
+	// arm, which would still report kind "cmaf" and hand decoders an undefined init segment.
+	expect(() => ContainerSchema.parse({ kind: "cmaf" })).toThrow();
+
+	// A genuinely unrecognized kind still parses, so one future rendition can't fail the catalog.
+	expect(ContainerSchema.parse({ kind: "future", magic: 7 })).toEqual({ kind: "future", magic: 7 });
+});
