@@ -1286,6 +1286,40 @@ fn si_packet(pid: u16, section: &[u8]) -> Vec<u8> {
 	p
 }
 
+/// Split a complete section across several 188-byte TS packets on `pid`: a PUSI packet
+/// (pointer_field 0) carrying the head, then continuation packets (PUSI clear, continuity
+/// counter advancing) for the rest, the last padded with 0xff stuffing. Unlike `si_packet`
+/// this reaches the multi-packet reassembly path (PUSI + continuity across packets).
+fn si_packets_multi(pid: u16, section: &[u8]) -> Vec<u8> {
+	let mut out = Vec::new();
+	let mut cc = 0u8;
+	// First packet: PUSI set, pointer_field 0, then as much of the section as fits.
+	let mut first = vec![
+		0x47,
+		0x40 | ((pid >> 8) as u8 & 0x1f),
+		(pid & 0xff) as u8,
+		0x10 | cc,
+		0x00,
+	];
+	let head = section.len().min(188 - first.len());
+	first.extend_from_slice(&section[..head]);
+	first.resize(188, 0xff);
+	out.extend_from_slice(&first);
+
+	// Continuation packets: PUSI clear, continuity counter incremented per payload packet.
+	let mut pos = head;
+	while pos < section.len() {
+		cc = (cc + 1) & 0x0f;
+		let mut p = vec![0x47, (pid >> 8) as u8 & 0x1f, (pid & 0xff) as u8, 0x10 | cc];
+		let take = (section.len() - pos).min(188 - p.len());
+		p.extend_from_slice(&section[pos..pos + take]);
+		p.resize(188, 0xff);
+		out.extend_from_slice(&p);
+		pos += take;
+	}
+	out
+}
+
 /// Decode an SDT Actual section's first service: `(service_type, provider, name)` from the
 /// service_descriptor (tag 0x48). Enough to prove the service identity survived, no more.
 fn parse_sdt_service(sec: &[u8]) -> (u8, String, String) {
@@ -1395,6 +1429,35 @@ async fn service_layer_survives_roundtrip() {
 	assert_eq!(service2.pmt_pid, service.pmt_pid, "PMT PID survived");
 	assert_eq!(service2.sdt, service.sdt, "SDT survived byte-for-byte");
 	assert_eq!(service2.nit, service.nit, "NIT survived byte-for-byte");
+}
+
+/// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
+/// `si_packet` only covers a single-packet section; a real SDT with several services (or a
+/// NIT) spans packets, exercising the `SectionReassembler` PUSI + continuity path that
+/// feeds `service.sdt`. The body is arbitrary here (capture is verbatim, not parsed).
+#[test]
+fn multi_packet_si_section_is_captured() {
+	// 400-byte body forces the SDT Actual across three TS packets (183 + 184 + rest).
+	let body: Vec<u8> = (0..400u16).map(|i| i as u8).collect();
+	let sdt = make_section(0x42, &body);
+	let input = si_packets_multi(0x0011, &sdt);
+	assert!(input.len() > 188, "the SDT must span more than one TS packet");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&input[..])).unwrap();
+	import.finish().unwrap();
+
+	let service = catalog.snapshot().mpegts.service.clone().expect("a service record");
+	assert_eq!(
+		service.sdt.as_deref(),
+		Some(&sdt[..]),
+		"the multi-packet SDT was reassembled and captured byte-for-byte"
+	);
 }
 
 /// A raw Opus packet: a one-byte TOC (config 1 = SILK NB 20 ms, stereo, code 0) plus
