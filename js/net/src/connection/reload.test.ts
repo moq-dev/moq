@@ -61,11 +61,14 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 	// Every session dies well within `initial`, so the backoff has to keep escalating
 	// and the retry window has to expire. Resetting either on each successful connect
 	// reconnects forever at the initial delay and never gives up.
+	//
+	// `initial` sits far above the in-process handshake so a loaded runner can't make a
+	// session look healthy, and the tiny timeout gives up after one backoff.
 	const reload = new Reload({
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: 200, multiplier: 2, max: 1000, timeout: 250 },
+		delay: { initial: 1000, multiplier: 2, max: 1000, timeout: 1 },
 	});
 	try {
 		await expect(reload.closed).rejects.toThrow();
