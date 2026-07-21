@@ -72,6 +72,13 @@ struct Fmp4Track {
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
 
+	// Indexes this track's group opens into its `<name>.timeline.z` timeline, advertised in the
+	// rendition's config. Passthrough writes groups by hand (no `container::Producer`), so the
+	// recorder is fed directly at each keyframe rather than through `with_recorder`.
+	// `None` once recording has failed, matching `container::Producer`: the timeline is an
+	// optional sidecar, so losing it must not take the media down with it.
+	recorder: Option<crate::timeline::Recorder>,
+
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
 
@@ -229,16 +236,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				moq_net::track::Info::default().with_timescale(timescale),
 			)?;
 
+			// Each track indexes its own group opens: audio and video group boundaries differ, so a
+			// per-track timeline (the 1:1 default) is correct here, not a shared one.
+			let timeline = self.catalog.timeline(track.name());
+
 			let detect_bitrate = match kind {
 				TrackKind::Video => {
-					let config = self.init_video(trak, &moov)?;
+					let mut config = self.init_video(trak, &moov)?;
 					let detect = config.bitrate.is_none();
+					config.timeline = Some(timeline.section());
 					catalog.video.renditions.insert(track.name().to_string(), config);
 					detect
 				}
 				TrackKind::Audio => {
-					let config = self.init_audio(trak, &moov)?;
+					let mut config = self.init_audio(trak, &moov)?;
 					let detect = config.bitrate.is_none();
+					config.timeline = Some(timeline.section());
 					catalog.audio.renditions.insert(track.name().to_string(), config);
 					detect
 				}
@@ -250,6 +263,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					track,
 					group: None,
+					recorder: Some(timeline.recorder()),
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
@@ -750,6 +764,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// in the track's native timescale. The relay reads it off the wire; the
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
+
+			// A keyframe fragment just opened a new group; index it in the track's timeline (throttled
+			// to the recorder's granularity) so a playlist/seek/VOD reader can map time to group.
+			// The timeline is an optional sidecar (consumers extrapolate across gaps), so a recording
+			// failure must NOT abort the passthrough. Drop the recorder and carry on.
+			if contains_keyframe {
+				let timeline_err = match track.recorder.as_mut() {
+					Some(recorder) => recorder.record(g.sequence, timestamp).err(),
+					None => None,
+				};
+				if let Some(err) = timeline_err {
+					tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
+					track.recorder = None;
+				}
+			}
 
 			// A keyframe fragment starts a new group: close the previous one for the bitrate
 			// detector (used only when the descriptor didn't declare a bitrate).
