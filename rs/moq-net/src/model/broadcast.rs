@@ -7,7 +7,7 @@
 //!
 //! [Info] is the static metadata; [Route] is the dynamic path the broadcast takes to
 //! reach an origin, including whether it is announced to subscribers.
-use crate::track;
+use crate::{stats, track};
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
@@ -258,6 +258,11 @@ pub struct Producer {
 	// Track registry plus the dynamic request queue, mutated by producers and
 	// consumers alike under one lock.
 	state: kio::Shared<BroadcastState>,
+
+	// Ingress stats scope, set by a tagged `origin::Producer` at
+	// `create_broadcast`. Inherited by the tracks this producer creates. Empty
+	// (no-op) for an untagged broadcast.
+	stats: stats::Scope,
 }
 
 impl Producer {
@@ -267,7 +272,15 @@ impl Producer {
 			info: Arc::new(info),
 			alive: Default::default(),
 			state: Default::default(),
+			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Attach an ingress stats scope, inherited by the tracks created on this
+	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		self.stats = scope;
+		self
 	}
 
 	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
@@ -281,6 +294,9 @@ impl Producer {
 				spliced: Some(SplicedState::default()),
 				..Default::default()
 			}),
+			// The origin-owned spliced broadcast stays untagged: egress attribution is
+			// applied when a tagged `origin::Consumer` hands the consumer out.
+			stats: stats::Scope::default(),
 		}
 	}
 
@@ -313,7 +329,7 @@ impl Producer {
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
 		let info = info.into().unwrap_or_default();
-		let track = track::Producer::new(self.info.clone(), name, info);
+		let track = track::Producer::new(self.info.clone(), name, info).with_stats(self.stats.clone());
 		self.state.lock().insert_track(track.weak())?;
 		Ok(track)
 	}
@@ -326,7 +342,7 @@ impl Producer {
 	/// inspected the media, the same shape as a consumer-driven
 	/// [`Dynamic::requested_track`].
 	pub fn reserve_track(&mut self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
-		let request = track::Request::new(self.info.clone(), name);
+		let request = track::Request::new(self.info.clone(), name).with_stats(self.stats.clone());
 		self.state.lock().insert_track(request.weak())?;
 		Ok(request)
 	}
@@ -359,7 +375,12 @@ impl Producer {
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.info.clone(), self.alive.clone(), self.state.clone())
+		Dynamic::new(
+			self.info.clone(),
+			self.alive.clone(),
+			self.state.clone(),
+			self.stats.clone(),
+		)
 	}
 
 	/// Set the broadcast's [`Route`]: the hop chain and cost it advertises.
@@ -414,6 +435,7 @@ impl Producer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			stats: stats::Scope::default(),
 		}
 	}
 
@@ -533,6 +555,9 @@ pub struct Dynamic {
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
 	alive: kio::Producer<()>,
 	state: kio::Shared<BroadcastState>,
+	// Ingress stats scope, applied to the tracks this handler serves. Empty (no-op)
+	// for an untagged broadcast.
+	stats: stats::Scope,
 }
 
 impl Clone for Dynamic {
@@ -546,15 +571,21 @@ impl Clone for Dynamic {
 			info: self.info.clone(),
 			alive: self.alive.clone(),
 			state: self.state.clone(),
+			stats: self.stats.clone(),
 		}
 	}
 }
 
 impl Dynamic {
-	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>) -> Self {
+	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
 		state.lock().requests.add_handler();
 
-		Self { info, alive, state }
+		Self {
+			info,
+			alive,
+			state,
+			stats,
+		}
 	}
 
 	/// The broadcast's static metadata, fixed when it was created.
@@ -585,7 +616,8 @@ impl Dynamic {
 		// Cache the served track so concurrent lookups coalesce onto it. If a live track already
 		// holds the name (a publish raced the request), `insert` keeps it rather than shadowing it.
 		let _ = state.tracks.insert(name, pending.weak());
-		Poll::Ready(Ok(pending))
+		// Attribute the served track to this broadcast's ingress scope (no-op untagged).
+		Poll::Ready(Ok(pending.with_stats(self.stats.clone())))
 	}
 
 	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
@@ -600,6 +632,7 @@ impl Dynamic {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			stats: stats::Scope::default(),
 		}
 	}
 
@@ -663,6 +696,10 @@ pub struct Consumer {
 	// The route epoch last yielded by `route_changed`, so each consumer clone
 	// observes the current route first and every change after it exactly once.
 	route_seen: Option<u64>,
+	// Egress stats scope, set by a tagged `origin::Consumer` at the broadcast
+	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
+	// for an untagged broadcast.
+	stats: stats::Scope,
 }
 
 impl Clone for Consumer {
@@ -674,11 +711,19 @@ impl Clone for Consumer {
 			// Reset the cursor so the clone observes the current route first,
 			// even if the original already drained `route_changed`.
 			route_seen: None,
+			stats: self.stats.clone(),
 		}
 	}
 }
 
 impl Consumer {
+	/// Attach an egress stats scope, inherited by the tracks subscribed through this
+	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		self.stats = scope;
+		self
+	}
+
 	/// The broadcast's static metadata, fixed when it was created.
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -718,6 +763,12 @@ impl Consumer {
 
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
+		// Tag the resolved track with this broadcast's egress scope so its
+		// subscriptions, fetches, and groups are attributed to the same broadcast.
+		self.track_inner(name).map(|track| track.with_stats(self.stats.clone()))
+	}
+
+	fn track_inner(&self, name: &str) -> Result<track::Consumer, Error> {
 		// A closed broadcast (every producer and handler gone) serves nothing.
 		if self.is_closed() {
 			return Err(Error::Dropped);
@@ -850,6 +901,7 @@ impl WeakConsumer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			stats: stats::Scope::default(),
 		}
 	}
 }

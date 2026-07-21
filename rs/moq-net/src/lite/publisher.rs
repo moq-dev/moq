@@ -1,4 +1,4 @@
-use crate::{announce, frame, group, origin, stats, track};
+use crate::{announce, frame, group, origin, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use bytes::Buf;
@@ -45,22 +45,15 @@ struct SentRoute {
 
 pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	pub session: S,
-	/// The origin we read local broadcasts from.
+	/// The origin we read local broadcasts from. Traffic stats are attributed
+	/// through this handle: tag it with [`origin::Consumer::with_stats`] first.
 	pub origin: origin::Consumer,
-	/// Stats aggregator for this session's egress. Use [`stats::Handle::default`]
-	/// to opt out.
-	pub stats: stats::Handle,
 	pub version: Version,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: origin::Consumer,
-	stats: stats::Handle,
-	/// Per-session egress broadcast-subscription tracker. Each downstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts
-	/// the distinct sessions (viewers) watching each broadcast.
-	broadcasts: stats::SessionBroadcasts,
 	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
@@ -72,12 +65,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
 		let self_origin = *config.origin;
-		let broadcasts = config.stats.publisher_broadcasts();
 		Self {
 			session: config.session,
 			origin: config.origin,
-			stats: config.stats,
-			broadcasts,
 			self_origin,
 			priority: Default::default(),
 			version: config.version,
@@ -206,7 +196,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			&prefix,
 			self.self_origin,
 			exclude_hop,
-			self.stats.clone(),
 			self.version,
 		)
 		.await
@@ -238,16 +227,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// reflected announces (cluster loops) never hit the wire. Zero means
 		// the peer didn't set it (Lite03 or earlier), pass through.
 		exclude_hop: u64,
-		stats: stats::Handle,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
-
-		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
-		// The origin contract guarantees announce/unannounce toggles per path, so a
-		// new active announcement must always be for a path with no live guard.
-		let mut stats_guards: std::collections::HashMap<crate::PathOwned, stats::Publisher> =
-			std::collections::HashMap::new();
 
 		// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 		// per-stream ordinal, and `ended` references the id instead of repeating the
@@ -277,29 +259,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					if broadcast.is_some() {
 						tracing::debug!(broadcast = %absolute, "announce");
-						let guard = stats.broadcast(&absolute).publisher();
-						stats_guards.entry(absolute).or_insert(guard);
 						if !init.contains(&suffix) {
 							init.push(suffix);
 						}
 					} else {
 						// A potential race.
 						tracing::debug!(broadcast = %absolute, "unannounce");
-						stats_guards.remove(&absolute);
 						init.retain(|p| p != &suffix);
 					}
 				}
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
-
-				// AnnounceInit batches the initial active set into one message; attribute
-				// it per broadcast by name length so Lite01/02 isn't undercounted.
-				for absolute in stats_guards.keys() {
-					stats
-						.broadcast(absolute)
-						.publisher_announced_bytes(absolute.as_str().len() as u64);
-				}
 			}
 			_ if version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
@@ -341,15 +312,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								continue;
 							}
 							tracing::debug!(broadcast = %absolute, "announce");
-							let guard = stats.broadcast(&absolute).publisher();
-							stats_guards.entry(absolute.clone()).or_insert(guard);
 							initial.retain(|(s, _)| s != &suffix);
 							initial.push((suffix, SentRoute { hops, cost }));
 						}
 						None => {
 							// A potential race: a just-announced path already unannounced.
 							tracing::debug!(broadcast = %absolute, "unannounce");
-							stats_guards.remove(&absolute);
 							watched.remove(&suffix);
 							initial.retain(|(s, _)| s != &suffix);
 						}
@@ -381,14 +349,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 				let mut buf = buf.freeze();
 				stream.writer.write_all(&mut buf).await?;
-
-				// Count each initial announce by broadcast name length, mirroring the
-				// live loop below (the name, not the encoded message size).
-				for absolute in stats_guards.keys() {
-					stats
-						.broadcast(absolute)
-						.publisher_announced_bytes(absolute.as_str().len() as u64);
-				}
 			}
 			_ => {
 				// Lite03/Lite04: no announce init, no AnnounceOk.
@@ -537,12 +497,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							};
 							let cost = Self::outgoing_cost(version, &demand, &route);
 							tracing::debug!(broadcast = %absolute, "announce");
-							let bs = stats.broadcast(&absolute);
-							// Count the broadcast name length, not the encoded message size, so
-							// stats don't penalize the broadcast for hop/framing overhead.
-							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-							let prev = stats_guards.insert(absolute.clone(), bs.publisher());
-							debug_assert!(prev.is_none(), "origin announced a path that was already active");
 							if version.has_announce_id() {
 								let prev = announce_ids.insert(suffix.clone(), next_announce_id);
 								debug_assert!(prev.is_none(), "announce id still assigned for a new announce");
@@ -567,20 +521,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							// versions never populate `watched`, so they keep sending the
 							// Ended even for announces filtered above.
 							let retracted = watched.remove(&suffix).is_some_and(|entry| entry.sent.is_none());
-							stats_guards.remove(&absolute);
 							if version.has_announce_id() {
 								// Retract by id; nothing to send if the announce was filtered and
 								// the peer never saw it (an unknown id is a protocol violation).
 								if let Some(id) = announce_ids.remove(&suffix) {
-									stats
-										.broadcast(&absolute)
-										.publisher_announced_bytes(absolute.as_str().len() as u64);
 									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
 								}
 							} else if !retracted {
-								stats
-									.broadcast(&absolute)
-									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								// An ended announce doesn't need hops; the receiver matches on path only.
 								stream
 									.writer
@@ -627,9 +574,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									tracing::warn!(broadcast = %absolute, "restart without an announce id; skipping");
 									continue;
 								};
-								stats
-									.broadcast(&absolute)
-									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								entry.sent = Some(route.clone());
 								stream
 									.writer
@@ -641,9 +585,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									.await?;
 							} else {
 								// Lite05: a duplicate ANNOUNCE for a live path is the restart.
-								stats
-									.broadcast(&absolute)
-									.publisher_announced_bytes(absolute.as_str().len() as u64);
 								entry.sent = Some(route.clone());
 								stream
 									.writer
@@ -658,9 +599,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						// Previously filtered, now forwardable: a fresh announce.
 						(Some(route), None) => {
 							tracing::debug!(broadcast = %absolute, "announce");
-							let bs = stats.broadcast(&absolute);
-							bs.publisher_announced_bytes(absolute.as_str().len() as u64);
-							stats_guards.insert(absolute.clone(), bs.publisher());
 							if version.has_announce_id() {
 								announce_ids.insert(suffix.clone(), next_announce_id);
 								next_announce_id += 1;
@@ -680,10 +618,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						(None, Some(_)) => {
 							tracing::debug!(broadcast = %absolute, "unannounce (filtered route)");
 							entry.sent = None;
-							stats_guards.remove(&absolute);
-							stats
-								.broadcast(&absolute)
-								.publisher_announced_bytes(absolute.as_str().len() as u64);
 							if version.has_announce_id() {
 								if let Some(id) = announce_ids.remove(&suffix) {
 									stream.writer.encode(&lite::AnnounceBroadcast::EndedId { id }).await?;
@@ -837,19 +771,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// handler (or resolves to an error when there is none).
 		let broadcast = self.origin.request_broadcast(&subscribe.broadcast);
 
-		// Per-track subscription guard (bumps `subscriptions`). The per-(session,
-		// broadcast) `broadcasts` sentinel that counts viewers is taken inside
-		// `run_subscribe`, only once the subscription is validated and active, so
-		// a stale/invalid SUBSCRIBE isn't counted as a viewer.
-		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
-
+		// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
+		// the model, through the tagged `origin::Consumer` this broadcast is resolved
+		// from; the wire loop carries no counters.
 		if let Err(err) = Self::run_subscribe(
 			self.session.clone(),
 			&mut stream,
 			&subscribe,
 			broadcast,
 			self.priority.clone(),
-			(track_stats, self.broadcasts.clone(), absolute.clone()),
 			self.version,
 		)
 		.await
@@ -877,13 +807,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		broadcast: kio::Pending<origin::Requesting>,
 		priority: PriorityQueue,
-		// The track guard (bumps `subscriptions`), the per-session broadcast
-		// tracker, and the broadcast path. The `broadcasts` sentinel is taken
-		// below, after the subscription is validated, and held for its lifetime.
-		stats: (stats::PublisherTrack, stats::SessionBroadcasts, crate::PathOwned),
 		version: Version,
 	) -> Result<(), Error> {
-		let (track_stats, broadcasts, absolute) = stats;
 		let subscription = crate::track::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
@@ -911,10 +836,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			None
 		};
 
-		// Subscription is now active: count this session as a viewer of the
-		// broadcast. Dropping this guard (subscription end) releases it.
-		let _broadcast_sub = broadcasts.subscribe(&absolute);
-
 		// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties live
 		// in TRACK_INFO, and the resolved range arrives as SUBSCRIBE_START/END emitted
 		// from run_track. Older drafts still acknowledge with SUBSCRIBE_OK here.
@@ -940,7 +861,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			session,
 			id: subscribe.id,
 			track_name: Arc::from(track.name()),
-			track_stats: Arc::new(track_stats),
 			priority,
 			track_priority: track_priority_tx.consume(),
 			track_priority_seen: subscribe.priority,
@@ -987,9 +907,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
 		let broadcast = self.origin.request_broadcast(&fetch.broadcast);
-		let track_stats = self.stats.broadcast(&absolute).publisher_track(&track);
 
-		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, track_stats, self.version).await {
+		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, self.version).await {
 			match &err {
 				Error::Cancel | Error::Transport(_) => {
 					tracing::info!(broadcast = %absolute, %track, %group, "fetch cancelled")
@@ -1008,7 +927,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		fetch: &lite::Fetch<'_>,
 		broadcast: kio::Pending<origin::Requesting>,
-		track_stats: stats::PublisherTrack,
 		version: Version,
 	) -> Result<(), Error> {
 		let broadcast = broadcast.await?;
@@ -1030,16 +948,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			None
 		};
 
-		// Lite05+ FETCH responds with bare FRAME messages; the subscriber already has
-		// the timescale from TRACK_INFO and the group sequence from its request.
-		track_stats.group();
-
 		// Stream every frame in order. The delta-timestamp baseline resets to 0, so the
 		// first served frame's delta is its absolute timestamp (the subscriber decodes
 		// against the same baseline).
 		let mut prev_ts: u64 = 0;
 		while let Some(mut frame) = group.next_frame().await? {
-			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts, &track_stats).await?;
+			write_fetch_frame(&mut stream.writer, &mut frame, timescale, &mut prev_ts).await?;
 		}
 
 		stream.writer.finish()?;
@@ -1164,16 +1078,12 @@ async fn write_fetch_frame<W: web_transport_trait::SendStream>(
 	frame: &mut frame::Consumer,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
-	track_stats: &stats::PublisherTrack,
 ) -> Result<(), Error> {
 	encode_frame_timing(writer, frame, timescale, prev_ts).await?;
 
 	writer.encode(&frame.size).await?;
-	track_stats.frame();
 	while let Some(chunk) = frame.read_chunk().await? {
-		let n = chunk.len() as u64;
 		writer.write_chunk(chunk).await?;
-		track_stats.bytes(n);
 	}
 
 	Ok(())
@@ -1251,7 +1161,6 @@ struct Subscription<S: web_transport_trait::Session> {
 	session: S,
 	id: u64,
 	track_name: Arc<str>,
-	track_stats: Arc<stats::PublisherTrack>,
 	priority: PriorityQueue,
 	track_priority: kio::Consumer<u8>,
 	/// Last track priority observed by this clone, so a change only fires once.
@@ -1418,7 +1327,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
-		self.track_stats.group();
 
 		// Lite05+ delta-encodes per-frame timestamps within the group. The first
 		// frame's delta is absolute (against an implicit prev value of 0), every
@@ -1465,9 +1373,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			return;
 		}
 
-		if self.session.send_datagram(body).is_ok() {
-			self.track_stats.group();
-		}
+		let _ = self.session.send_datagram(body);
 	}
 
 	/// Send one frame: the size, then the payload streamed chunk-by-chunk so we
@@ -1482,7 +1388,6 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		encode_frame_timing(stream, &frame, self.timescale, prev_ts).await?;
 
 		stream.encode(&frame.size).await?;
-		self.track_stats.frame();
 
 		while let Some(chunk) = self.read_chunk(stream, priority, &mut frame).await? {
 			self.write_chunk(stream, priority, chunk).await?;
@@ -1589,20 +1494,17 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		self.track_priority_seen
 	}
 
-	/// Write a whole chunk, applying priority changes between partial writes,
-	/// then count the bytes sent.
+	/// Write a whole chunk, applying priority changes between partial writes.
 	async fn write_chunk(
 		&mut self,
 		stream: &mut Writer<S::SendStream, Version>,
 		priority: &mut PriorityHandle,
 		mut chunk: bytes::Bytes,
 	) -> Result<(), Error> {
-		let n = chunk.len() as u64;
 		while chunk.has_remaining() {
 			self.apply_priority(stream, priority);
 			stream.write(&mut chunk).await?;
 		}
-		self.track_stats.bytes(n);
 		Ok(())
 	}
 

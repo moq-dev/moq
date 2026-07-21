@@ -4588,6 +4588,7 @@ dependencies = [
 name = "moq-stats"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "moq-json",
  "moq-net",
  "serde",

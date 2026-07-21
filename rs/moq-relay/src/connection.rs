@@ -85,15 +85,12 @@ impl Connection {
 			_ => unreachable!("authorized above guarantees at least one origin"),
 		}
 
-		// Record this session's stats under its billing tier. The aggregator is
-		// shared; the tier picks which counter set the bumps land in.
-		let stats = self.cluster.stats.tier(token.tier.clone());
-
-		// Count this session against its auth root for the whole connection,
-		// independent of any data flow, so presence-based billing sees a client
-		// that connects to e.g. `/acme` even while idle. Dropped when
-		// the connection closes below.
-		let _session_stats = stats.session(&token.root);
+		// Build this session's stats context under its billing tier and auth root.
+		// The context carries the presence gauge (a client that merely connects to
+		// e.g. `/acme` is counted, even idle) and drives the model-layer counters
+		// once it tags the session's origin pair below. It closes when the last
+		// clone drops (the connection ends).
+		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.root);
 
 		// Wire only the direction(s) the client will actually use. The token scope
 		// (enforced above) caps what it *may* do; the role caps what it *will* do.

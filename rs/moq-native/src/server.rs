@@ -252,8 +252,9 @@ impl Server {
 		self
 	}
 
-	/// Attach a tier-scoped [`moq_net::stats::Handle`] to all sessions accepted by this server.
-	pub fn with_stats(mut self, stats: moq_net::stats::Handle) -> Self {
+	/// Attach a per-connection [`moq_net::stats::Session`] context to all sessions
+	/// accepted by this server.
+	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}
@@ -932,8 +933,8 @@ impl Request {
 		}
 	}
 
-	/// Attach a tier-scoped [`moq_net::stats::Handle`] to this session.
-	pub fn with_stats(self, stats: moq_net::stats::Handle) -> Self {
+	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
+	pub fn with_stats(self, stats: moq_net::stats::Session) -> Self {
 		let Request {
 			transport,
 			url,

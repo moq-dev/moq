@@ -61,9 +61,9 @@ pub fn start<S: web_transport_trait::Session>(
 	// We will publish any local broadcasts from this origin, when set.
 	publish: Option<origin::Consumer>,
 	// We will consume any remote broadcasts, inserting them into this origin, when set.
+	// Traffic stats are attributed through these origin handles: tag them with
+	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
 	subscribe: Option<origin::Producer>,
-	// Tier-scoped stats handle. Pass [`crate::stats::Handle::default`] to opt out.
-	stats: crate::stats::Handle,
 	// The version of the protocol to use.
 	version: Version,
 	// The capabilities (and optional request path) we advertise in our SETUP message.
@@ -140,14 +140,12 @@ pub fn start<S: web_transport_trait::Session>(
 	let publisher = Publisher::new(PublisherConfig {
 		session: session.clone(),
 		origin: publish,
-		stats: stats.clone(),
 		version,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
 		origin: subscribe,
 		recv_bandwidth: recv_bw_for_sub,
-		stats,
 		version,
 		peer_setup,
 		// The dialing side prices the link in its own SETUP, so that is also where the

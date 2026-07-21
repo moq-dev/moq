@@ -552,7 +552,8 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 mod tests {
 	use std::collections::BTreeMap;
 
-	use moq_net::{Origin, announce, track};
+	use moq_net::stats::{Registry, Tier};
+	use moq_net::{Origin, Timestamp, announce, broadcast, track};
 
 	use super::*;
 
@@ -564,6 +565,82 @@ mod tests {
 				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
 		);
 		(producer, origin)
+	}
+
+	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and the
+	/// announce (bumping the `_closed` counters).
+	#[allow(dead_code)]
+	struct Feed {
+		announced: announce::Consumer,
+		source: broadcast::Producer,
+		consumer: broadcast::Consumer,
+		sub: Option<track::Subscriber>,
+	}
+
+	/// Drive a tagged egress broadcast so `registry` records publisher-side traffic on
+	/// `path` under `tier`. The local publisher (ingress) is left untagged, so only the
+	/// egress (publisher) counters move, matching how a relay bills read-out traffic.
+	///
+	/// Announces the broadcast; if `subscribe`, opens one subscription and reads a group
+	/// of `frames` frames of `frame_size` bytes each (so `bytes`/`frames`/`groups` move).
+	async fn feed(
+		registry: &Registry,
+		tier: Tier,
+		path: &str,
+		subscribe: bool,
+		frames: usize,
+		frame_size: usize,
+	) -> Feed {
+		let ctx = registry.tier(tier).session("feed");
+		let origin = Origin::random().produce();
+		// Egress (publisher side) is tagged; the local publisher stays untagged.
+		let egress = origin.consume().with_stats(ctx);
+
+		let mut announced = egress.announced();
+		let mut source = origin
+			.create_broadcast(path, broadcast::Route::announced())
+			.expect("create_broadcast");
+		let mut producer = source.create_track("video", None).expect("create_track");
+
+		// Let the origin's source watcher attach and announce (paused time advances
+		// instantly and yields to the spawned tasks).
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
+
+		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
+		let consumer = broadcast.expect("active");
+
+		let sub = if subscribe {
+			let mut sub = consumer
+				.track("video")
+				.expect("track")
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+
+			if frames > 0 {
+				let mut group = producer.append_group().expect("group");
+				for _ in 0..frames {
+					group
+						.write_frame(Timestamp::ZERO, vec![0u8; frame_size])
+						.expect("write");
+				}
+				group.finish().expect("finish");
+
+				let mut group = sub.recv_group().await.expect("recv").expect("group");
+				while group.read_frame().await.expect("read").is_some() {}
+			}
+			Some(sub)
+		} else {
+			None
+		};
+
+		Feed {
+			announced,
+			source,
+			consumer,
+			sub,
+		}
 	}
 
 	/// Awaits the stats announce and returns its broadcast.
@@ -590,6 +667,19 @@ mod tests {
 		let mut track = subscribe(broadcast, name).await;
 		let frame = track.read_frame().await.expect("ok").expect("frame");
 		serde_json::from_slice(&frame.payload).expect("json parse")
+	}
+
+	/// Read the latest buffered traffic frame off a track. The producer emits an
+	/// immediate first (often empty) frame at time zero, so a test that records
+	/// traffic asynchronously reads the accumulated state rather than that stale one.
+	async fn read_last_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Traffic> {
+		use futures::FutureExt;
+		let mut track = subscribe(broadcast, name).await;
+		let mut last = track.read_frame().await.expect("ok").expect("frame");
+		while let Some(Ok(Some(frame))) = track.read_frame().now_or_never() {
+			last = frame;
+		}
+		serde_json::from_slice(&last.payload).expect("json parse")
 	}
 
 	async fn read_session_frame(broadcast: &moq_net::broadcast::Consumer, name: &str) -> BTreeMap<String, Presence> {
@@ -625,10 +715,8 @@ mod tests {
 		// broadcast is announced (the per-node aggregate).
 		let (producer, origin) = test_producer(Some("sjc/1"));
 
-		let bs1 = producer.registry().tier(Tier::default()).broadcast("foo/bar");
-		let _t1 = bs1.publisher().track("video");
-		let bs2 = producer.registry().tier(Tier::default()).broadcast("baz/qux");
-		let _t2 = bs2.publisher().track("video");
+		let _f1 = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
+		let _f2 = feed(producer.registry(), Tier::default(), "baz/qux", true, 1, 8).await;
 
 		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
 	}
@@ -636,28 +724,22 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let (producer, origin) = test_producer(None);
-		let bs = producer.registry().tier(Tier::default()).broadcast("foo/bar");
-		let _t = bs.publisher().track("video");
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 		assert_eq!(announced(&origin).await.0, ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn frame_emits_expected_counters() {
 		let (producer, origin) = test_producer(Some("sjc"));
-		let stats = producer.registry().tier(Tier::default());
-		let bs = stats.broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.bytes(42);
-		track.frame();
-		let sessions = stats.publisher_broadcasts();
-		let _sub = sessions.subscribe("foo/bar");
+		// One announced broadcast, one subscription, one 42-byte frame read out.
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
 
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_frame(&broadcast, "publisher.json").await;
+		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
-		assert_eq!(snap.announced, 1, "publisher() guard bumps announced");
+		assert_eq!(snap.announced, 1, "egress announce stream bumps announced");
 		assert_eq!(snap.broadcasts, 1, "one session subscribed");
 		assert_eq!(snap.subscriptions, 1);
 		assert_eq!(snap.bytes, 42);
@@ -667,31 +749,33 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn announced_bytes_surfaces_in_frame() {
 		let (producer, origin) = test_producer(Some("sjc"));
-		let bs = producer.registry().tier(Tier::default()).broadcast("foo/bar");
-		let _guard = bs.publisher();
-		bs.publisher_announced_bytes(123);
+		// Announce only: the guard records the broadcast-name length once on open.
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", false, 0, 0).await;
 
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_frame(&broadcast, "publisher.json").await;
+		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		assert_eq!(snap.announced, 1);
-		assert_eq!(snap.announced_bytes, 123);
+		assert_eq!(
+			snap.announced_bytes,
+			"foo/bar".len() as u64,
+			"name length recorded on announce"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn announced_decouples_from_broadcasts() {
-		// publisher() (announce) with no subscription should bump announced but
-		// NOT broadcasts (which only counts sessions with an active sub).
+		// An announce with no subscription should bump announced but NOT broadcasts
+		// (which only counts sessions with an active sub).
 		let (producer, origin) = test_producer(Some("sjc"));
-		let bs = producer.registry().tier(Tier::default()).broadcast("foo/bar");
-		let _guard = bs.publisher();
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", false, 0, 0).await;
 
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_frame(&broadcast, "publisher.json").await;
+		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		assert_eq!(snap.announced, 1);
 		assert_eq!(snap.broadcasts, 0, "no subscription, no broadcasts sentinel");
@@ -706,21 +790,16 @@ mod tests {
 		// change-driven inclusion surfaces the entry even though it's net-idle
 		// by drain time.
 		let (producer, origin) = test_producer(Some("sjc"));
-		let stats = producer.registry().tier(Tier::default());
-		let bs = stats.broadcast("foo/bar");
-		let sessions = stats.publisher_broadcasts();
 		{
-			let track = bs.publisher().track("video");
-			track.bytes(123);
-			track.frame();
-			let _sub = sessions.subscribe("foo/bar");
-			// track + sub dropped here, all within the first interval
+			// Subscribe, read one 123-byte frame, then drop everything within the
+			// first interval so the open and close both land before the drain.
+			let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 123).await;
 		}
 
 		drive_tick().await;
 
 		let (_, broadcast) = announced(&origin).await;
-		let frame = read_frame(&broadcast, "publisher.json").await;
+		let frame = read_last_frame(&broadcast, "publisher.json").await;
 		let snap = frame.get("foo/bar").expect("foo/bar entry");
 		// One session opened then closed a subscription within the drain.
 		assert_eq!(snap.subscriptions, 1);
@@ -763,9 +842,9 @@ mod tests {
 		// surface on its sibling default-tier subscriber track, and a tier
 		// with no traffic gets no tracks at all.
 		let (producer, origin) = test_producer(Some("sjc"));
-		let bs = producer.registry().tier(Tier::default()).broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.frame();
+		// Only the egress (publisher) side is tagged, so `foo/bar` gets publisher
+		// traffic and no subscriber traffic.
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 
 		drive_tick().await;
 		drive_tick().await;
@@ -774,7 +853,9 @@ mod tests {
 
 		// Default-tier publisher slot SHOULD include foo/bar.
 		assert!(
-			read_frame(&broadcast, "publisher.json").await.contains_key("foo/bar"),
+			read_last_frame(&broadcast, "publisher.json")
+				.await
+				.contains_key("foo/bar"),
 			"publisher.json must include the active foo/bar entry"
 		);
 

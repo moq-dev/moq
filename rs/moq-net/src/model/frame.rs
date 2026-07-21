@@ -13,7 +13,7 @@ use std::task::{Poll, ready};
 use bytes::Bytes;
 
 use crate::group::{self, GroupState};
-use crate::{Error, IntoBytes, Result, Timestamp};
+use crate::{Error, IntoBytes, Result, Timestamp, stats};
 
 /// A chunk of data with an upfront size and a presentation timestamp.
 ///
@@ -224,6 +224,9 @@ pub struct Producer<'a> {
 	info: Info,
 	// Set once the frame is committed (finished) or aborted, so Drop is a no-op.
 	done: bool,
+	// Ingress payload meter, inherited from the parent group. Counts each written
+	// chunk's bytes. Empty (no-op) for an untagged group.
+	stats: stats::Meter,
 }
 
 impl std::ops::Deref for Producer<'_> {
@@ -241,7 +244,14 @@ impl<'a> Producer<'a> {
 			buf,
 			info,
 			done: false,
+			stats: stats::Meter::default(),
 		}
+	}
+
+	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		self.stats = meter;
+		self
 	}
 
 	/// The parent group this frame belongs to.
@@ -262,6 +272,8 @@ impl<'a> Producer<'a> {
 		if len > self.remaining() {
 			return Err(Error::WrongSize);
 		}
+		// Ingress payload: count the chunk's bytes as they're written.
+		self.stats.bytes(len as u64);
 		// Fast path: a single whole-frame write keeps the caller's allocation.
 		if len == self.buf.capacity() && self.buf.written(Ordering::Acquire) == 0 {
 			match self.buf.try_set_bytes(chunk.into_bytes()) {
@@ -339,6 +351,10 @@ pub struct Consumer {
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
+	// Egress payload meter. Set only for frames read directly from the group (not
+	// from the prefetch batch, whose bytes were already counted at fill), so chunks
+	// bump `bytes` exactly once. Empty (no-op) otherwise.
+	stats: stats::Meter,
 }
 
 impl std::ops::Deref for Consumer {
@@ -356,7 +372,15 @@ impl Consumer {
 			info,
 			source,
 			read_idx: 0,
+			stats: stats::Meter::default(),
 		}
+	}
+
+	/// Attach an egress meter so read-out chunks bump `bytes`. Used only for frames
+	/// read directly from the group (whose bytes weren't counted at a batch fill).
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		self.stats = meter;
+		self
 	}
 
 	/// Poll for the next chunk of bytes since the last read.
@@ -370,6 +394,7 @@ impl Consumer {
 				}
 				let out = bytes.slice(self.read_idx..);
 				self.read_idx = bytes.len();
+				self.stats.bytes(out.len() as u64);
 				Poll::Ready(Ok(Some(out)))
 			}
 			Source::Partial(buf) => {
@@ -380,6 +405,7 @@ impl Consumer {
 					if written > self.read_idx {
 						let out = buf.slice(self.read_idx, written);
 						self.read_idx = written;
+						self.stats.bytes(out.len() as u64);
 						return Poll::Ready(Ok(Some(out)));
 					}
 					if written >= size {
@@ -415,6 +441,7 @@ impl Consumer {
 			Source::Complete(bytes) => {
 				let out = bytes.slice(self.read_idx..);
 				self.read_idx = bytes.len();
+				self.stats.bytes(out.len() as u64);
 				Poll::Ready(Ok(out))
 			}
 			Source::Partial(buf) => {
@@ -433,6 +460,7 @@ impl Consumer {
 				})?);
 				let out = buf.slice(read_idx, size);
 				self.read_idx = size;
+				self.stats.bytes(out.len() as u64);
 				Poll::Ready(Ok(out))
 			}
 		}

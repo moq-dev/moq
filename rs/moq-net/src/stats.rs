@@ -13,34 +13,44 @@
 //! tracked separately per (tier, auth root), counting presence regardless of
 //! whether any data flows.
 //!
+//! # Where counting happens
+//!
+//! Counting lives in the model layer, not the wire loops. A session tags its
+//! origin pair with a [`Session`] context ([`crate::Client::with_stats`] /
+//! [`crate::Server::with_stats`], which call `origin::{Consumer, Producer}`
+//! `with_stats`); every derived handle (broadcast, announce, track, group, frame)
+//! then attributes its reads (egress = publisher) and writes (ingress =
+//! subscriber) through that context. So any protocol that drives the model gets
+//! the full counter set for free, and an untagged handle pays nothing.
+//!
 //! Per-counter semantics:
 //!
-//! * `announced` / `announced_closed`: cumulative count of broadcast
-//!   announce/unannounce events on this `(tier, role)`. Bumped on every
-//!   `publisher()` / `subscriber()` guard creation and drop.
+//! * `announced` / `announced_closed`: cumulative broadcast announce/unannounce
+//!   events on this `(tier, role)`. Driven by the tagged announce stream on the
+//!   egress side, and by `create_broadcast` route transitions on the ingress
+//!   side.
 //! * `announced_bytes`: cumulative broadcast-name length summed over each
-//!   announce and unannounce of this broadcast (the name, not the encoded
-//!   message size, so hop/framing overhead isn't charged, and the count is
-//!   the same across protocol versions). Recorded keyed by path via
-//!   [`Broadcast::publisher_announced_bytes`] /
-//!   [`Broadcast::subscriber_announced_bytes`], independent of the
-//!   announce lifetime guard, so filtered/reflected/unmatched control flows
-//!   still count. Kept separate from the `bytes` payload counter.
-//! * `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
-//!   subscription sentinel. The first active subscription a peer session
-//!   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
-//!   `broadcasts_closed`. Summed across sessions, `broadcasts -
-//!   broadcasts_closed` is the number of distinct sessions currently
-//!   subscribed to the broadcast (i.e. viewers on the egress side). Driven
-//!   by [`SessionBroadcasts`]; use `announced` if you want all broadcasts
-//!   ever seen.
-//! * `subscriptions` / `subscriptions_closed`: cumulative count of
-//!   track-level subscription guards opened/dropped.
-//! * `bytes` / `frames` / `groups`: cumulative payload counters bumped from
-//!   the session loops (both lite and IETF).
+//!   model-visible announce and unannounce of this broadcast (the name, not the
+//!   encoded message size, so hop/framing overhead isn't charged, and the count
+//!   is the same across protocol versions). Kept separate from the `bytes`
+//!   payload counter.
+//! * `broadcasts` / `broadcasts_closed`: per-(broadcast, context) egress
+//!   subscription sentinel. The first active subscription a context opens for a
+//!   broadcast bumps `broadcasts`; the last it closes bumps `broadcasts_closed`.
+//!   Summed across contexts, `broadcasts - broadcasts_closed` is the number of
+//!   distinct sessions currently subscribed (viewers on the egress side).
+//! * `subscriptions` / `subscriptions_closed`: cumulative track-level
+//!   subscriptions opened/dropped (egress `track::Subscriber`, ingress
+//!   `track::Producer`).
+//! * `fetches`: cumulative one-shot group fetches served to a calling
+//!   context, counted once per coalesced fetch. Separate from
+//!   `subscriptions` and the viewer refcount; fetched payload still flows
+//!   into `bytes` / `frames` / `groups`.
+//! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
+//!   groups/frames are read (egress) or written (ingress) in the model.
 //! * `sessions` / `sessions_closed` ([`Presence`]): cumulative count of
 //!   sessions connected/disconnected under an auth root on this tier.
-//!   Driven by [`Handle::session`].
+//!   Driven by [`Handle::session`] (the [`Session`] context).
 //!
 //! Counters are strictly monotonic (only `fetch_add`); a counter going
 //! backwards across reads means the underlying entry was garbage collected
@@ -104,13 +114,13 @@ use crate::{AsPath, PathOwned};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
-/// Every field is bumped from a RAII guard: the open counters on construction
-/// and their `_closed` counterparts on drop. `broadcasts` / `broadcasts_closed`
-/// are the per-(broadcast, session) subscription sentinel driven by
-/// [`SessionBroadcasts`] (the first active subscription a session opens for the
-/// broadcast bumps `broadcasts`, the last to close bumps `broadcasts_closed`),
-/// so summed across sessions `broadcasts - broadcasts_closed` is the count of
-/// distinct sessions currently subscribed.
+/// Open counters bump when a model handle records activity; their `_closed`
+/// counterparts bump from the [`Scope`] / [`Subscription`] / [`Announce`] RAII
+/// guards on drop. `broadcasts` / `broadcasts_closed` are the per-(broadcast,
+/// context) egress subscription sentinel (the first active subscription a context
+/// opens for the broadcast bumps `broadcasts`, the last to close bumps
+/// `broadcasts_closed`), so summed across contexts `broadcasts -
+/// broadcasts_closed` is the count of distinct sessions currently subscribed.
 // Kept crate-private: the load/store orderings are load-bearing (see the
 // module-level "Snapshot atomicity" note), so external code only ever sees
 // the derived [`Traffic`] readout.
@@ -125,6 +135,10 @@ pub(crate) struct Counters {
 	announced_bytes: AtomicU64,
 	subscriptions: AtomicU64,
 	subscriptions_closed: AtomicU64,
+	// Cumulative one-shot group fetches served to a calling context. Counted once
+	// per coalesced fetch (requests served, not upstream work); does not touch
+	// `subscriptions` or the viewer refcount.
+	fetches: AtomicU64,
 	broadcasts: AtomicU64,
 	broadcasts_closed: AtomicU64,
 	bytes: AtomicU64,
@@ -147,6 +161,7 @@ impl Counters {
 		let announced = self.announced.load(Ordering::Relaxed);
 		let announced_bytes = self.announced_bytes.load(Ordering::Relaxed);
 		let subscriptions = self.subscriptions.load(Ordering::Relaxed);
+		let fetches = self.fetches.load(Ordering::Relaxed);
 		let broadcasts = self.broadcasts.load(Ordering::Relaxed);
 		let bytes = self.bytes.load(Ordering::Relaxed);
 		let frames = self.frames.load(Ordering::Relaxed);
@@ -159,6 +174,7 @@ impl Counters {
 			broadcasts_closed,
 			subscriptions,
 			subscriptions_closed,
+			fetches,
 			bytes,
 			frames,
 			groups,
@@ -217,6 +233,10 @@ pub struct Traffic {
 	pub subscriptions: u64,
 	/// Cumulative track-level subscriptions closed.
 	pub subscriptions_closed: u64,
+	/// Cumulative one-shot group fetches served. Counted once per coalesced fetch,
+	/// separate from `subscriptions` and the viewer refcount. Fetched payload still
+	/// flows into `bytes`/`frames`/`groups`.
+	pub fetches: u64,
 	/// Cumulative payload bytes.
 	pub bytes: u64,
 	/// Cumulative frames delivered.
@@ -235,6 +255,7 @@ impl Traffic {
 		self.broadcasts_closed += other.broadcasts_closed;
 		self.subscriptions += other.subscriptions;
 		self.subscriptions_closed += other.subscriptions_closed;
+		self.fetches += other.fetches;
 		self.bytes += other.bytes;
 		self.frames += other.frames;
 		self.groups += other.groups;
@@ -752,38 +773,13 @@ impl Handle {
 		&self.tier
 	}
 
-	/// Returns a per-broadcast handle scoped to this tier.
-	///
-	/// Paths under the registry's exclude prefix return an empty handle
-	/// whose bumps are no-ops. This keeps stats traffic from feeding back into
-	/// the registry.
-	pub fn broadcast(&self, path: impl AsPath) -> Broadcast {
-		Broadcast {
-			counters: self.stats.entry(path).map(|entry| entry.tier(&self.tier)),
-		}
-	}
-
-	/// Per-session egress (publisher) broadcast-subscription tracker. Construct
-	/// one per session and call [`SessionBroadcasts::subscribe`] for each
-	/// downstream subscription so `broadcasts - broadcasts_closed` counts the
-	/// distinct sessions watching each broadcast.
-	pub fn publisher_broadcasts(&self) -> SessionBroadcasts {
-		SessionBroadcasts::new(self.stats.clone(), self.tier.clone(), Side::Publisher)
-	}
-
-	/// Per-session ingress (subscriber) counterpart to
-	/// [`Self::publisher_broadcasts`].
-	pub fn subscriber_broadcasts(&self) -> SessionBroadcasts {
-		SessionBroadcasts::new(self.stats.clone(), self.tier.clone(), Side::Subscriber)
-	}
-
 	/// Record a connected session authenticated under `root` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
 	/// `sessions_closed`. Counts presence regardless of any data flow, so a
 	/// session that merely connects is still billable. Surfaced on the session
 	/// track for this tier, keyed by `root`.
 	pub fn session(&self, root: impl AsPath) -> Session {
-		Session::new(self.stats.session_counters(&self.tier, root))
+		Session::new(self.clone(), self.stats.session_counters(&self.tier, root))
 	}
 }
 
@@ -794,100 +790,12 @@ impl Default for Handle {
 	}
 }
 
-/// A per-broadcast, tier-scoped handle. Cheap to clone.
-///
-/// Open a broadcast-lifetime guard with [`Self::publisher`] / [`Self::subscriber`],
-/// or skip straight to a track guard with [`Self::publisher_track`] /
-/// [`Self::subscriber_track`] when the broadcast's lifetime is tracked
-/// elsewhere.
-#[derive(Clone)]
-pub struct Broadcast {
-	/// Resolved counters for this `(broadcast, tier)`, or `None` when the path
-	/// was under the registry's exclude prefix or stats are disabled.
-	counters: Option<Arc<TierCounters>>,
-}
-
-impl Broadcast {
-	/// True if this handle has no underlying entry (path was under the
-	/// registry's exclude prefix, or stats are disabled). All bumps through an
-	/// empty handle are no-ops.
-	pub fn is_empty(&self) -> bool {
-		self.counters.is_none()
-	}
-
-	/// Open a broadcast-lifetime guard for the publisher (egress) role.
-	/// Bumps `announced` on construction and `announced_closed` on drop.
-	/// (The `broadcasts` sentinel is driven separately by
-	/// [`SessionBroadcasts`]; see the module docs.)
-	pub fn publisher(&self) -> Publisher {
-		if let Some(counters) = &self.counters {
-			counters.publisher.announced.fetch_add(1, Ordering::Relaxed);
-		}
-		Publisher {
-			counters: self.counters.clone(),
-		}
-	}
-
-	/// Open a broadcast-lifetime guard for the subscriber (ingress) role.
-	/// Bumps `announced` on construction and `announced_closed` on drop.
-	/// (The `broadcasts` sentinel is driven separately by
-	/// [`SessionBroadcasts`]; see the module docs.)
-	pub fn subscriber(&self) -> Subscriber {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.announced.fetch_add(1, Ordering::Relaxed);
-		}
-		Subscriber {
-			counters: self.counters.clone(),
-		}
-	}
-
-	/// Open a publisher-track guard.
-	///
-	/// `_name` is unused; counters are per-broadcast only. The track name
-	/// parameter is kept for symmetry with the rest of moq-net so callers
-	/// don't have to thread an `Option<&str>` through subscribe sites.
-	pub fn publisher_track(&self, _name: &str) -> PublisherTrack {
-		if let Some(counters) = &self.counters {
-			counters.publisher.subscriptions.fetch_add(1, Ordering::Relaxed);
-		}
-		PublisherTrack {
-			counters: self.counters.clone(),
-		}
-	}
-
-	/// Record `n` announce-control bytes (the broadcast name length) for one
-	/// publisher-side announce/unannounce, independent of any lifetime guard.
-	/// Recording is keyed by broadcast path, so it still captures messages
-	/// whose matching guard was skipped, reflected, or already dropped (e.g.
-	/// an unannounce whose announce was filtered out). Bumps `announced_bytes`;
-	/// distinct from [`PublisherTrack::bytes`], which counts media payload.
-	pub fn publisher_announced_bytes(&self, n: u64) {
-		if let Some(counters) = &self.counters {
-			counters.publisher.announced_bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Subscriber-side counterpart to [`Self::publisher_announced_bytes`].
-	pub fn subscriber_announced_bytes(&self, n: u64) {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.announced_bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Subscriber-side counterpart to [`Self::publisher_track`].
-	pub fn subscriber_track(&self, _name: &str) -> SubscriberTrack {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.subscriptions.fetch_add(1, Ordering::Relaxed);
-		}
-		SubscriberTrack {
-			counters: self.counters.clone(),
-		}
-	}
-}
-
-/// Which side of a [`BroadcastEntry`] a [`SessionBroadcasts`] bumps.
-#[derive(Copy, Clone)]
+/// Which side of a [`TierCounters`] a bump lands on: publisher (egress) or
+/// subscriber (ingress). `Default` is `Publisher`, chosen only so an empty
+/// [`Meter`] / [`Scope`] has one; it never records because its counters are `None`.
+#[derive(Copy, Clone, Default)]
 enum Side {
+	#[default]
 	Publisher,
 	Subscriber,
 }
@@ -901,259 +809,324 @@ impl Side {
 	}
 }
 
-/// Per-session tracker that turns a peer session's per-broadcast subscription
-/// lifecycle into `broadcasts` / `broadcasts_closed` bumps.
+/// Per-connection stats context, created via [`Handle::session`].
 ///
-/// Hold one per session (and side). Call [`Self::subscribe`] for every
-/// subscription the session opens and keep the returned [`BroadcastSubscription`]
-/// alive for that subscription's lifetime. The guard refcounts subscriptions per
-/// broadcast for this session, so the session's *first* subscription to a
-/// broadcast bumps `broadcasts` and its *last* to drop bumps `broadcasts_closed`.
-/// Summed across sessions, `broadcasts - broadcasts_closed` is the number of
-/// distinct sessions currently subscribed to the broadcast (viewers on the
-/// egress side).
+/// Cheap to clone (an `Arc` inside): one context is shared by both origin handles
+/// of a session (its publish and subscribe halves) so presence and viewer counts
+/// are never double-attributed. It carries three things:
 ///
-/// Cheap to clone; clones share the same per-broadcast refcounts (so a single
-/// logical session that clones its handle still counts as one).
-#[derive(Clone)]
-pub struct SessionBroadcasts {
-	stats: Registry,
-	tier: Tier,
-	side: Side,
-	counts: Arc<Mutex<HashMap<PathOwned, u32>>>,
-}
-
-impl SessionBroadcasts {
-	fn new(stats: Registry, tier: Tier, side: Side) -> Self {
-		Self {
-			stats,
-			tier,
-			side,
-			counts: Arc::new(Mutex::new(HashMap::new())),
-		}
-	}
-
-	/// Register one active subscription to `path` for this session. Hold the
-	/// returned guard for the subscription's lifetime; dropping it releases the
-	/// subscription (bumping `broadcasts_closed` when it was the session's last
-	/// for that broadcast).
-	pub fn subscribe(&self, path: impl AsPath) -> BroadcastSubscription {
-		let path = path.as_path().to_owned();
-		let counters = self.stats.entry(&path).map(|entry| entry.tier(&self.tier));
-		let first = {
-			let mut counts = self.counts.lock().expect("stats refcount poisoned");
-			let n = counts.entry(path.clone()).or_insert(0);
-			let first = *n == 0;
-			*n += 1;
-			first
-		};
-		if first {
-			if let Some(counters) = &counters {
-				self.side.counters(counters).broadcasts.fetch_add(1, Ordering::Relaxed);
-			}
-		}
-		BroadcastSubscription {
-			counters,
-			side: self.side,
-			counts: self.counts.clone(),
-			path,
-		}
-	}
-}
-
-/// RAII guard for one of a session's per-broadcast subscriptions.
-/// See [`SessionBroadcasts::subscribe`].
-#[must_use = "drop the guard to release the subscription"]
-pub struct BroadcastSubscription {
-	counters: Option<Arc<TierCounters>>,
-	side: Side,
-	counts: Arc<Mutex<HashMap<PathOwned, u32>>>,
-	path: PathOwned,
-}
-
-impl Drop for BroadcastSubscription {
-	fn drop(&mut self) {
-		let last = {
-			let mut counts = self.counts.lock().expect("stats refcount poisoned");
-			match counts.get_mut(&self.path) {
-				Some(n) => {
-					*n -= 1;
-					if *n == 0 {
-						counts.remove(&self.path);
-						true
-					} else {
-						false
-					}
-				}
-				None => false,
-			}
-		};
-		if last {
-			if let Some(counters) = &self.counters {
-				// Release pairs with the readout's Acquire load of
-				// `broadcasts_closed`; see `Publisher::drop`.
-				self.side
-					.counters(counters)
-					.broadcasts_closed
-					.fetch_add(1, Ordering::Release);
-			}
-		}
-	}
-}
-
-/// RAII guard for a connected session, keyed by auth root and tier. Bumps
-/// `sessions` on construction and `sessions_closed` on drop. See
-/// [`Handle::session`].
-#[must_use = "drop the guard to record the session as closed"]
+/// * the tier + auth root, so any broadcast reached through a tagged origin handle
+///   resolves the right per-`(path, tier)` counters,
+/// * the presence gauge: `sessions` bumps when the context is created and
+///   `sessions_closed` when the last clone drops (a more honest close than a
+///   separately-held guard),
+/// * the egress viewer refcount map (first/last active subscription per broadcast),
+///   driving `broadcasts` / `broadcasts_closed`.
+///
+/// [`Session::default`] is the no-op context (disabled registry / untagged caller):
+/// every bump reached through it is silently dropped, so a handle can hold one
+/// unconditionally instead of threading an `Option`.
+#[derive(Clone, Default)]
 pub struct Session {
-	/// `None` for a disabled registry; bumps are then dropped.
-	counters: Option<Arc<SessionCounters>>,
+	/// `None` for the no-op context (disabled registry or a `default()` handle).
+	inner: Option<Arc<SessionInner>>,
+}
+
+/// The shared state behind a [`Session`]. Its `Drop` (on the last clone) records
+/// the session as closed.
+struct SessionInner {
+	/// Registry + tier, so derived model handles resolve `(path, tier)` counters.
+	handle: Handle,
+	/// The presence gauge for `(tier, root)`, or `None` for a disabled registry.
+	presence: Option<Arc<SessionCounters>>,
+	/// Egress viewer refcount, keyed by absolute broadcast path: the first active
+	/// subscription this context opens for a broadcast bumps `broadcasts`, the last
+	/// to close bumps `broadcasts_closed`.
+	viewers: Mutex<HashMap<PathOwned, u32>>,
 }
 
 impl Session {
-	fn new(counters: Option<Arc<SessionCounters>>) -> Self {
-		if let Some(counters) = &counters {
-			counters.sessions.fetch_add(1, Ordering::Relaxed);
+	fn new(handle: Handle, presence: Option<Arc<SessionCounters>>) -> Self {
+		if let Some(presence) = &presence {
+			presence.sessions.fetch_add(1, Ordering::Relaxed);
 		}
-		Self { counters }
+		Self {
+			inner: Some(Arc::new(SessionInner {
+				handle,
+				presence,
+				viewers: Mutex::new(HashMap::new()),
+			})),
+		}
+	}
+
+	/// Egress (publisher / reads) scope for a broadcast path. The path is the
+	/// absolute broadcast name; counters are resolved once here.
+	pub(crate) fn egress(&self, path: impl AsPath) -> Scope {
+		self.scope(path, Side::Publisher)
+	}
+
+	/// Ingress (subscriber / writes) scope for a broadcast path.
+	pub(crate) fn ingress(&self, path: impl AsPath) -> Scope {
+		self.scope(path, Side::Subscriber)
+	}
+
+	fn scope(&self, path: impl AsPath, side: Side) -> Scope {
+		let Some(inner) = &self.inner else {
+			return Scope::default();
+		};
+		let path = path.as_path().to_owned();
+		let counters = inner
+			.handle
+			.stats
+			.entry(&path)
+			.map(|entry| entry.tier(&inner.handle.tier));
+		Scope {
+			session: self.clone(),
+			counters,
+			side,
+			path,
+		}
+	}
+
+	/// Register one active egress subscription to `path`, returning `true` if it was
+	/// the first (so the caller bumps `broadcasts`).
+	fn viewer_open(&self, path: &PathOwned) -> bool {
+		let Some(inner) = &self.inner else { return false };
+		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		let n = viewers.entry(path.clone()).or_insert(0);
+		let first = *n == 0;
+		*n += 1;
+		first
+	}
+
+	/// Release one active egress subscription to `path`, returning `true` if it was
+	/// the last (so the caller bumps `broadcasts_closed`).
+	fn viewer_close(&self, path: &PathOwned) -> bool {
+		let Some(inner) = &self.inner else { return false };
+		let mut viewers = inner.viewers.lock().expect("stats viewers poisoned");
+		match viewers.get_mut(path) {
+			Some(n) => {
+				*n -= 1;
+				if *n == 0 {
+					viewers.remove(path);
+					true
+				} else {
+					false
+				}
+			}
+			None => false,
+		}
 	}
 }
 
-impl Drop for Session {
+impl Drop for SessionInner {
 	fn drop(&mut self) {
-		if let Some(counters) = &self.counters {
-			// Release pairs with the readout's Acquire load of
-			// `sessions_closed`; see `Publisher::drop`.
-			counters.sessions_closed.fetch_add(1, Ordering::Release);
+		if let Some(presence) = &self.presence {
+			// Release pairs with the readout's Acquire load of `sessions_closed`
+			// (see the module-level "Snapshot atomicity" note).
+			presence.sessions_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
 
-/// RAII broadcast guard for the publisher role. See [`Broadcast::publisher`].
-#[must_use = "drop the guard to record the broadcast as closed"]
-pub struct Publisher {
+// ---------------------------------------------------------------------------
+// Model-layer carriers
+//
+// These are what a tagged `origin::{Consumer, Producer}` threads down through the
+// derived handles (broadcast -> track -> group -> frame). A tagged origin resolves
+// the per-`(path, tier)` counters once into a [`Scope`]; child handles carry a
+// cheap [`Meter`] for the payload bumps. All of them are no-ops when empty (a
+// disabled registry, an excluded path, or an untagged caller), so an untagged
+// handle pays nothing.
+// ---------------------------------------------------------------------------
+
+/// Payload bump handle carried by the group and frame model handles. Cheap to
+/// clone (an `Option<Arc>` plus a `Side`); empty when the broadcast is untracked.
+#[derive(Clone, Default)]
+pub(crate) struct Meter {
 	counters: Option<Arc<TierCounters>>,
+	side: Side,
 }
 
-impl Publisher {
-	/// Open a track-subscription guard. Bumps `subscriptions` on construction
-	/// and `subscriptions_closed` on drop.
-	pub fn track(&self, name: &str) -> PublisherTrack {
-		Broadcast {
+impl Meter {
+	fn counters(&self) -> Option<&Counters> {
+		self.counters.as_ref().map(|c| self.side.counters(c))
+	}
+
+	/// Bump `groups` once (a group delivered/consumed on this side).
+	pub(crate) fn group(&self) {
+		if let Some(counters) = self.counters() {
+			counters.groups.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	/// Bump `frames` by `n`.
+	pub(crate) fn frames(&self, n: u64) {
+		if n == 0 {
+			return;
+		}
+		if let Some(counters) = self.counters() {
+			counters.frames.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Bump `bytes` by `n`.
+	pub(crate) fn bytes(&self, n: u64) {
+		if n == 0 {
+			return;
+		}
+		if let Some(counters) = self.counters() {
+			counters.bytes.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+}
+
+/// A per-`(broadcast, tier, side)` scope, carried by the broadcast and track model
+/// handles. Resolved once by a tagged origin at the broadcast handoff; hands out
+/// [`Meter`]s for the payload path and RAII guards for the subscription / announce
+/// lifecycle. Cheap to clone; empty (no-op) when the broadcast is untracked.
+#[derive(Clone, Default)]
+pub(crate) struct Scope {
+	/// The owning context, kept for the egress viewer refcount map.
+	session: Session,
+	/// Resolved counters for `(path, tier)`, or `None` when untracked.
+	counters: Option<Arc<TierCounters>>,
+	side: Side,
+	/// Absolute broadcast path, used to key the viewer refcount and as the
+	/// `announced_bytes` length.
+	path: PathOwned,
+}
+
+impl Scope {
+	fn counters(&self) -> Option<&Counters> {
+		self.counters.as_ref().map(|c| self.side.counters(c))
+	}
+
+	/// A payload [`Meter`] for a group/frame derived from this scope.
+	pub(crate) fn meter(&self) -> Meter {
+		Meter {
 			counters: self.counters.clone(),
-		}
-		.publisher_track(name)
-	}
-}
-
-impl Drop for Publisher {
-	fn drop(&mut self) {
-		if let Some(counters) = &self.counters {
-			// Release pairs with the readout's Acquire load of
-			// `announced_closed`, propagating the open-bump from this
-			// guard's construction to whichever thread observes the close.
-			counters.publisher.announced_closed.fetch_add(1, Ordering::Release);
+			side: self.side,
 		}
 	}
-}
 
-/// RAII broadcast guard for the subscriber role. See [`Broadcast::subscriber`].
-#[must_use = "drop the guard to record the broadcast as closed"]
-pub struct Subscriber {
-	counters: Option<Arc<TierCounters>>,
-}
-
-impl Subscriber {
-	/// Open a track-subscription guard. Mirrors [`Publisher::track`].
-	pub fn track(&self, name: &str) -> SubscriberTrack {
-		Broadcast {
+	/// Open a track-subscription guard: bumps `subscriptions` now and
+	/// `subscriptions_closed` on drop. On the egress (publisher) side it also drives
+	/// the context's viewer refcount (`broadcasts` / `broadcasts_closed`).
+	pub(crate) fn subscribe(&self) -> Subscription {
+		if let Some(counters) = self.counters() {
+			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
+		}
+		// Viewer refcount is egress-only: `broadcasts` counts distinct sessions
+		// watching a broadcast.
+		let viewer = if matches!(self.side, Side::Publisher) && self.counters.is_some() {
+			if self.session.viewer_open(&self.path)
+				&& let Some(counters) = self.counters()
+			{
+				counters.broadcasts.fetch_add(1, Ordering::Relaxed);
+			}
+			Some((self.session.clone(), self.path.clone()))
+		} else {
+			None
+		};
+		Subscription {
 			counters: self.counters.clone(),
+			side: self.side,
+			viewer,
 		}
-		.subscriber_track(name)
+	}
+
+	/// Bump the `fetches` counter once (a coalesced group fetch served).
+	pub(crate) fn fetch(&self) {
+		if let Some(counters) = self.counters() {
+			counters.fetches.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	/// Bump `subscriptions` once. The ingress (producer-lifetime) counterpart to
+	/// [`Self::subscribe`], which cannot use an RAII guard because the producer is
+	/// cloneable and closes only on the last clone drop. No viewer refcount (that is
+	/// egress-only). Pair with [`Self::close_subscription`].
+	pub(crate) fn open_subscription(&self) {
+		if let Some(counters) = self.counters() {
+			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	/// Bump `subscriptions_closed` once. See [`Self::open_subscription`].
+	pub(crate) fn close_subscription(&self) {
+		if let Some(counters) = self.counters() {
+			// Release pairs with the readout's Acquire load of `subscriptions_closed`.
+			counters.subscriptions_closed.fetch_add(1, Ordering::Release);
+		}
+	}
+
+	/// Open an announce guard: bumps `announced` and adds the path length to
+	/// `announced_bytes` now; on drop bumps `announced_closed` and adds the path
+	/// length again. Used for egress announce-stream events and ingress
+	/// route-transition (un)announces.
+	pub(crate) fn announce(&self) -> Announce {
+		let len = self.path.as_str().len() as u64;
+		if let Some(counters) = self.counters() {
+			counters.announced.fetch_add(1, Ordering::Relaxed);
+			counters.announced_bytes.fetch_add(len, Ordering::Relaxed);
+		}
+		Announce {
+			counters: self.counters.clone(),
+			side: self.side,
+			len,
+		}
 	}
 }
 
-impl Drop for Subscriber {
-	fn drop(&mut self) {
-		if let Some(counters) = &self.counters {
-			// See `Publisher::drop` for why this is Release.
-			counters.subscriber.announced_closed.fetch_add(1, Ordering::Release);
-		}
-	}
-}
-
-/// RAII subscription guard for the publisher role.
+/// RAII guard for a track subscription (either side). See [`Scope::subscribe`].
+/// [`Subscription::default`] is an empty no-op guard.
+#[derive(Default)]
 #[must_use = "drop the guard to record the subscription as closed"]
-pub struct PublisherTrack {
+pub(crate) struct Subscription {
 	counters: Option<Arc<TierCounters>>,
+	side: Side,
+	/// `Some((session, path))` on the egress side, to release the viewer refcount.
+	viewer: Option<(Session, PathOwned)>,
 }
 
-impl PublisherTrack {
-	/// Bumps `frames` once.
-	pub fn frame(&self) {
-		if let Some(counters) = &self.counters {
-			counters.publisher.frames.fetch_add(1, Ordering::Relaxed);
+impl Drop for Subscription {
+	fn drop(&mut self) {
+		if let Some((session, path)) = &self.viewer
+			&& session.viewer_close(path)
+			&& let Some(counters) = &self.counters
+		{
+			// Release pairs with the readout's Acquire load of `broadcasts_closed`.
+			self.side
+				.counters(counters)
+				.broadcasts_closed
+				.fetch_add(1, Ordering::Release);
 		}
-	}
-
-	/// Bumps `bytes` by `n`.
-	pub fn bytes(&self, n: u64) {
 		if let Some(counters) = &self.counters {
-			counters.publisher.bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `groups` once.
-	pub fn group(&self) {
-		if let Some(counters) = &self.counters {
-			counters.publisher.groups.fetch_add(1, Ordering::Relaxed);
+			// Release pairs with the readout's Acquire load of `subscriptions_closed`.
+			self.side
+				.counters(counters)
+				.subscriptions_closed
+				.fetch_add(1, Ordering::Release);
 		}
 	}
 }
 
-impl Drop for PublisherTrack {
+/// RAII guard for one announce lifetime. See [`Scope::announce`].
+#[must_use = "drop the guard to record the unannounce"]
+pub(crate) struct Announce {
+	counters: Option<Arc<TierCounters>>,
+	side: Side,
+	len: u64,
+}
+
+impl Drop for Announce {
 	fn drop(&mut self) {
 		if let Some(counters) = &self.counters {
-			// See `Publisher::drop` for why this is Release.
-			counters.publisher.subscriptions_closed.fetch_add(1, Ordering::Release);
-		}
-	}
-}
-
-/// RAII subscription guard for the subscriber role.
-#[must_use = "drop the guard to record the subscription as closed"]
-pub struct SubscriberTrack {
-	counters: Option<Arc<TierCounters>>,
-}
-
-impl SubscriberTrack {
-	/// Bumps `frames` once.
-	pub fn frame(&self) {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.frames.fetch_add(1, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `bytes` by `n`.
-	pub fn bytes(&self, n: u64) {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.bytes.fetch_add(n, Ordering::Relaxed);
-		}
-	}
-
-	/// Bumps `groups` once.
-	pub fn group(&self) {
-		if let Some(counters) = &self.counters {
-			counters.subscriber.groups.fetch_add(1, Ordering::Relaxed);
-		}
-	}
-}
-
-impl Drop for SubscriberTrack {
-	fn drop(&mut self) {
-		if let Some(counters) = &self.counters {
-			// See `Publisher::drop` for why this is Release.
-			counters.subscriber.subscriptions_closed.fetch_add(1, Ordering::Release);
+			let counters = self.side.counters(counters);
+			counters.announced_bytes.fetch_add(self.len, Ordering::Relaxed);
+			// Release pairs with the readout's Acquire load of `announced_closed`.
+			counters.announced_closed.fetch_add(1, Ordering::Release);
 		}
 	}
 }
@@ -1198,42 +1171,13 @@ mod tests {
 	}
 
 	#[test]
-	fn per_broadcast_counters_isolated() {
-		// Bumps on one broadcast must not leak into another.
-		let stats = test_stats();
-		let bs1 = stats.tier(Tier::default()).broadcast("demo/bbb");
-		let bs2 = stats.tier(Tier::default()).broadcast("demo/ccc");
-		let g1 = bs1.publisher().track("video");
-		g1.bytes(100);
-		let g2 = bs2.publisher().track("video");
-		g2.bytes(7);
-
-		assert_eq!(
-			tier_counters(&stats, "demo/bbb", &Tier::default())
-				.publisher
-				.bytes
-				.load(Relaxed),
-			100
-		);
-		assert_eq!(
-			tier_counters(&stats, "demo/ccc", &Tier::default())
-				.publisher
-				.bytes
-				.load(Relaxed),
-			7
-		);
-	}
-
-	#[test]
 	fn default_and_named_tiers_are_independent() {
 		let stats = test_stats();
-		let default = stats.tier(Tier::default());
-		let regional = stats.tier(Tier::new("region/sjc"));
+		let default = stats.tier(Tier::default()).session("root");
+		let regional = stats.tier(Tier::new("region/sjc")).session("root");
 
-		let default_track = default.broadcast("demo/bbb").publisher().track("video");
-		default_track.bytes(100);
-		let regional_track = regional.broadcast("demo/bbb").subscriber().track("audio");
-		regional_track.bytes(7);
+		default.egress("demo/bbb").meter().bytes(100);
+		regional.ingress("demo/bbb").meter().bytes(7);
 
 		let default_counters = tier_counters(&stats, "demo/bbb", &Tier::default());
 		let regional_counters = tier_counters(&stats, "demo/bbb", &Tier::new("region/sjc"));
@@ -1249,21 +1193,21 @@ mod tests {
 		let default = stats.tier(Tier::default());
 		let regional = stats.tier(Tier::new("region/sjc"));
 
-		// Default-tier egress across two broadcasts; the snapshot sums them.
-		let pub_a = default.broadcast("demo/aaa").publisher().track("video");
-		pub_a.bytes(100);
-		pub_a.frame();
-		pub_a.group();
-		let pub_b = default.broadcast("demo/bbb").publisher().track("video");
-		pub_b.bytes(50);
-		// Regional ingress on a different tier/role stays isolated.
-		let sub_a = regional.broadcast("demo/aaa").subscriber().track("audio");
-		sub_a.bytes(7);
-
-		// Hold session guards so `sessions_closed` stays zero.
-		let _s1 = default.session("acme");
+		// Two default-tier sessions under one root, one regional; presence sums them.
+		let s1 = default.session("acme");
 		let _s2 = default.session("acme");
-		let _s3 = regional.session("peer");
+		let s3 = regional.session("peer");
+
+		// Default-tier egress across two broadcasts; the snapshot sums them.
+		{
+			let m = s1.egress("demo/aaa").meter();
+			m.bytes(100);
+			m.frames(1);
+			m.group();
+		}
+		s1.egress("demo/bbb").meter().bytes(50);
+		// Regional ingress on a different tier/role stays isolated.
+		s3.ingress("demo/aaa").meter().bytes(7);
 
 		let snap = stats.snapshot();
 
@@ -1308,9 +1252,10 @@ mod tests {
 		// after the last guard drops (returning the final values that once).
 		let stats = test_stats();
 		let key = PathOwned::from("foo/bar");
-		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.bytes(42);
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.egress("foo/bar");
+		let sub = scope.subscribe();
+		scope.meter().bytes(42);
 
 		let report = stats.report();
 		let row = report
@@ -1320,14 +1265,14 @@ mod tests {
 			.expect("live entry present");
 		assert_eq!(row.publisher.bytes, 42);
 		assert_eq!(row.publisher.subscriptions, 1);
-		assert!(!row.publisher.is_idle(), "track guard still open");
+		assert!(!row.publisher.is_idle(), "subscription guard still open");
 		assert!(
 			stats.shared().entries.lock().contains_key(&key),
 			"live entry kept across drains"
 		);
 
-		drop(track);
-		drop(bs);
+		drop(sub);
+		drop(scope);
 
 		// The drain after the last guard drops still returns the final values,
 		// then prunes the entry.
@@ -1353,8 +1298,9 @@ mod tests {
 		// subscription could still begin at any moment.
 		let stats = test_stats();
 		let key = PathOwned::from("foo/bar");
-		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
-		let guard = bs.publisher();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.egress("foo/bar");
+		let guard = scope.announce();
 
 		for _ in 0..3 {
 			let report = stats.report();
@@ -1365,7 +1311,7 @@ mod tests {
 		}
 
 		drop(guard);
-		drop(bs);
+		drop(scope);
 		let report = stats.report();
 		let row = report.traffic.iter().find(|row| row.path == key).expect("final report");
 		assert!(row.publisher.is_idle());
@@ -1400,36 +1346,15 @@ mod tests {
 	}
 
 	#[test]
-	fn announced_bytes_recorded_per_side() {
-		// Path-keyed announce-byte recording is isolated per side, accumulates,
-		// works without holding a lifetime guard, and doesn't touch the payload
-		// `bytes` counter.
-		let stats = test_stats();
-		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
-		bs.publisher_announced_bytes(40);
-		bs.publisher_announced_bytes(2);
-		bs.subscriber_announced_bytes(7);
-
-		let counters = tier_counters(&stats, "foo/bar", &Tier::default());
-		let pub_ext = counters.publisher.snapshot();
-		let sub_ext = counters.subscriber.snapshot();
-		assert_eq!(pub_ext.announced_bytes, 42, "publisher announce bytes accumulate");
-		assert_eq!(pub_ext.bytes, 0, "announce bytes are not payload bytes");
-		assert_eq!(sub_ext.announced_bytes, 7, "subscriber side tracked independently");
-	}
-
-	#[test]
 	fn paths_under_exclude_are_no_op() {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the registry.
 		let stats = test_stats();
-		let bs = stats.tier(Tier::default()).broadcast(".stats/node/sjc");
-		assert!(bs.is_empty());
-		let p = bs.publisher();
-		let track = p.track("video");
-		track.bytes(100);
-		drop(track);
-		drop(p);
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.egress(".stats/node/sjc");
+		scope.meter().bytes(100);
+		let _guard = scope.announce();
+		let _sub = scope.subscribe();
 		assert!(stats.shared().entries.lock().is_empty());
 	}
 
@@ -1439,79 +1364,13 @@ mod tests {
 		// and bumps are dropped.
 		let stats = Registry::default();
 		assert!(stats.shared.is_none());
-		let bs = stats.tier(Tier::default()).broadcast("demo/bbb");
-		assert!(bs.is_empty());
-		let p = bs.publisher();
-		let track = p.track("video");
-		track.bytes(100);
-		drop(track);
-		drop(p);
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.egress("demo/bbb");
+		scope.meter().bytes(100);
+		let _guard = scope.announce();
+		let _sub = scope.subscribe();
 		assert!(stats.report().traffic.is_empty());
 		assert!(stats.snapshot().traffic().is_empty());
-	}
-
-	#[test]
-	fn multiple_subs_count_as_one_broadcast() {
-		// Two concurrent subs from the SAME session count as one broadcast, not
-		// two: broadcasts is "distinct sessions with >=1 active sub", not
-		// "subscription count". broadcasts_closed only bumps once the session's
-		// last sub for the broadcast closes.
-		let stats = test_stats();
-		let bs = stats.tier(Tier::default()).broadcast("foo/bar");
-		let sessions = stats.tier(Tier::default()).publisher_broadcasts();
-		let pub_guard = bs.publisher();
-		let t1 = pub_guard.track("video");
-		let t2 = pub_guard.track("audio");
-		let s1 = sessions.subscribe("foo/bar");
-		let s2 = sessions.subscribe("foo/bar");
-
-		let raw = || tier_counters(&stats, "foo/bar", &Tier::default()).publisher.snapshot();
-
-		let r = raw();
-		assert_eq!(r.subscriptions, 2, "two track subs");
-		assert_eq!(r.subscriptions_closed, 0, "neither dropped yet");
-		assert_eq!(r.broadcasts, 1, "one session => one broadcast");
-		assert_eq!(r.broadcasts_closed, 0);
-
-		drop(s1);
-		assert_eq!(raw().broadcasts_closed, 0, "session still has a sub open");
-
-		drop(s2);
-		drop(t1);
-		drop(t2);
-		let r = raw();
-		assert_eq!(r.subscriptions_closed, 2, "both track subs dropped");
-		assert_eq!(r.broadcasts, 1);
-		assert_eq!(r.broadcasts_closed, 1, "last sub closed => one broadcasts_closed");
-
-		drop(pub_guard);
-		drop(bs);
-	}
-
-	#[test]
-	fn distinct_sessions_count_as_separate_broadcasts() {
-		// The viewer-count invariant: two different sessions subscribing to the
-		// same broadcast bump broadcasts to 2 (each is a distinct viewer).
-		let stats = test_stats();
-		let viewer1 = stats.tier(Tier::default()).publisher_broadcasts();
-		let viewer2 = stats.tier(Tier::default()).publisher_broadcasts();
-
-		let raw = || tier_counters(&stats, "foo/bar", &Tier::default()).publisher.snapshot();
-
-		let s1 = viewer1.subscribe("foo/bar");
-		assert_eq!(raw().broadcasts, 1, "one viewer");
-		let s2 = viewer2.subscribe("foo/bar");
-		assert_eq!(raw().broadcasts, 2, "two distinct viewers");
-		assert_eq!(raw().broadcasts_closed, 0);
-
-		drop(s1);
-		let r = raw();
-		assert_eq!(r.broadcasts, 2, "broadcasts is cumulative");
-		assert_eq!(r.broadcasts_closed, 1, "one viewer left");
-		assert_eq!(r.active_broadcasts(), 1, "one remaining viewer");
-
-		drop(s2);
-		assert_eq!(raw().broadcasts_closed, 2, "both viewers gone");
 	}
 
 	#[test]
@@ -1585,6 +1444,180 @@ mod tests {
 			bcast_closed_pos < bcast_pos,
 			"broadcasts_closed must be loaded before broadcasts",
 		);
+	}
+
+	#[test]
+	fn context_presence_closes_on_last_clone() {
+		// The reshaped Session context bumps `sessions` once at creation and
+		// `sessions_closed` only when the last clone drops.
+		let stats = test_stats();
+		let snap =
+			|root: &str| session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions, p.sessions_closed));
+
+		let ctx = stats.tier(Tier::default()).session("acme");
+		assert_eq!(snap("acme"), Some((1, 0)));
+
+		let clone = ctx.clone();
+		// A clone shares the Arc: no extra `sessions`, and dropping one does nothing.
+		assert_eq!(snap("acme"), Some((1, 0)));
+		drop(ctx);
+		assert_eq!(snap("acme"), Some((1, 0)));
+		drop(clone);
+		assert_eq!(snap("acme"), Some((1, 1)));
+	}
+
+	#[test]
+	fn meter_bumps_the_right_side() {
+		// A payload meter records on its own side only.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+
+		let egress = ctx.egress("demo/bbb").meter();
+		egress.group();
+		egress.frames(3);
+		egress.bytes(100);
+
+		let ingress = ctx.ingress("demo/bbb").meter();
+		ingress.group();
+		ingress.frames(1);
+		ingress.bytes(7);
+
+		let counters = tier_counters(&stats, "demo/bbb", &Tier::default());
+		let pub_ = counters.publisher.snapshot();
+		let sub = counters.subscriber.snapshot();
+		assert_eq!((pub_.groups, pub_.frames, pub_.bytes), (1, 3, 100));
+		assert_eq!((sub.groups, sub.frames, sub.bytes), (1, 1, 7));
+	}
+
+	#[test]
+	fn egress_subscribe_drives_subscriptions_and_viewers() {
+		// An egress subscription bumps `subscriptions` and, being the context's first
+		// for the broadcast, `broadcasts`. Dropping closes both.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
+
+		let scope = ctx.egress("demo/bbb");
+		let s1 = scope.subscribe();
+		let s2 = scope.subscribe();
+		let r = raw();
+		assert_eq!(r.subscriptions, 2, "two track subs");
+		assert_eq!(r.broadcasts, 1, "one context => one viewer");
+		assert_eq!(r.broadcasts_closed, 0);
+
+		drop(s1);
+		assert_eq!(raw().broadcasts_closed, 0, "context still has a sub open");
+		drop(s2);
+		let r = raw();
+		assert_eq!(r.subscriptions_closed, 2);
+		assert_eq!(r.broadcasts_closed, 1, "last sub closed => one broadcasts_closed");
+	}
+
+	#[test]
+	fn distinct_contexts_are_distinct_viewers() {
+		// Two contexts (sessions) subscribing to the same broadcast are two viewers.
+		let stats = test_stats();
+		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
+
+		let v1 = stats.tier(Tier::default()).session("a").egress("demo/bbb").subscribe();
+		assert_eq!(raw().broadcasts, 1);
+		let v2 = stats.tier(Tier::default()).session("b").egress("demo/bbb").subscribe();
+		assert_eq!(raw().broadcasts, 2, "two distinct contexts => two viewers");
+
+		drop(v1);
+		assert_eq!(raw().active_broadcasts(), 1);
+		drop(v2);
+		assert_eq!(raw().broadcasts_closed, 2);
+	}
+
+	#[test]
+	fn ingress_subscription_has_no_viewer() {
+		// The ingress (producer-lifetime) subscription pair bumps subscriptions but
+		// never the viewer refcount.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.ingress("demo/bbb");
+		scope.open_subscription();
+		let sub = tier_counters(&stats, "demo/bbb", &Tier::default())
+			.subscriber
+			.snapshot();
+		assert_eq!(sub.subscriptions, 1);
+		assert_eq!(sub.broadcasts, 0, "ingress has no viewer refcount");
+		scope.close_subscription();
+		assert_eq!(
+			tier_counters(&stats, "demo/bbb", &Tier::default())
+				.subscriber
+				.snapshot()
+				.subscriptions_closed,
+			1
+		);
+	}
+
+	#[test]
+	fn fetch_counts_separately_from_subscriptions() {
+		// A fetch bumps `fetches`, not `subscriptions` or the viewer refcount.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let scope = ctx.egress("demo/bbb");
+		scope.fetch();
+		scope.fetch();
+		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
+		assert_eq!(r.fetches, 2);
+		assert_eq!(r.subscriptions, 0);
+		assert_eq!(r.broadcasts, 0);
+	}
+
+	#[test]
+	fn announce_guard_records_bytes_on_open_and_close() {
+		// The announce guard bumps `announced` + the path length on open, and
+		// `announced_closed` + the path length again on drop.
+		let stats = test_stats();
+		let ctx = stats.tier(Tier::default()).session("root");
+		let path_len = "demo/bbb".len() as u64;
+
+		let guard = ctx.egress("demo/bbb").announce();
+		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
+		assert_eq!(r.announced, 1);
+		assert_eq!(r.announced_closed, 0);
+		assert_eq!(r.announced_bytes, path_len);
+
+		drop(guard);
+		let r = tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
+		assert_eq!(r.announced_closed, 1);
+		assert_eq!(
+			r.announced_bytes,
+			path_len * 2,
+			"path length recorded on open and close"
+		);
+	}
+
+	#[test]
+	fn disabled_context_is_noop() {
+		// A default (disabled) context resolves empty scopes: every bump is dropped.
+		let ctx = Session::default();
+		let scope = ctx.egress("demo/bbb");
+		scope.meter().bytes(100);
+		let _guard = scope.announce();
+		let _sub = scope.subscribe();
+		scope.fetch();
+		// No registry to inspect; the point is that none of this panics or allocates.
+		assert!(ctx.inner.is_none());
+	}
+
+	#[test]
+	fn fetches_serde_roundtrips() {
+		// The new `fetches` field is additive: an older frame omits it (defaults to
+		// zero), and it survives a roundtrip.
+		let old: Traffic = serde_json::from_str(r#"{"bytes":5}"#).expect("older shape parses");
+		assert_eq!(old.fetches, 0);
+
+		let t = Traffic {
+			fetches: 9,
+			..Default::default()
+		};
+		let json = serde_json::to_string(&t).unwrap();
+		let back: Traffic = serde_json::from_str(&json).unwrap();
+		assert_eq!(back.fetches, 9);
 	}
 
 	#[test]

@@ -216,27 +216,53 @@ mod tests {
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
 	/// HELP/TYPE header per metric and a labeled line carrying the live counter
 	/// value, summed across broadcasts.
-	#[test]
-	fn metrics_render_exposition() {
+	#[tokio::test(start_paused = true)]
+	async fn metrics_render_exposition() {
 		use moq_net::stats::{Registry, Tier};
+		use moq_net::{Origin, Timestamp, broadcast};
 
 		let stats = Registry::new(Default::default());
 
-		let track = stats
-			.tier(Tier::default())
-			.broadcast("demo/x")
-			.publisher()
-			.track("video");
-		track.bytes(1234);
-		let _session = stats.tier(Tier::default()).session("acme");
+		// Default-tier egress: an untagged local publisher writes, a tagged egress
+		// consumer reads it out, so publisher `bytes` advance on the default tier.
+		let default_ctx = stats.tier(Tier::default()).session("acme");
+		let pub_origin = Origin::random().produce();
+		let egress = pub_origin.consume().with_stats(default_ctx.clone());
+		let mut announced = egress.announced();
+		let mut pub_source = pub_origin
+			.create_broadcast("demo/x", broadcast::Route::announced())
+			.unwrap();
+		let mut pub_track = pub_source.create_track("video", None).unwrap();
 
-		// A second, named tier renders its own labeled rows.
-		let regional = stats
-			.tier(Tier::new("region/sjc"))
-			.broadcast("demo/x")
-			.subscriber()
-			.track("audio");
-		regional.bytes(56);
+		// Named-tier ingress: a tagged ingress producer writes, so subscriber
+		// `bytes` advance on the regional tier.
+		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
+		let sub_origin = Origin::random().produce().with_stats(regional_ctx.clone());
+		let mut sub_source = sub_origin
+			.create_broadcast("demo/x", broadcast::Route::announced())
+			.unwrap();
+		let mut sub_track = sub_source.create_track("audio", None).unwrap();
+
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		// Read 1234 egress bytes out of the default-tier broadcast.
+		let bc = announced.next().await.unwrap().broadcast.unwrap();
+		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		{
+			let mut group = pub_track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 1234]).unwrap();
+			group.finish().unwrap();
+		}
+		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
+		while group.read_frame().await.unwrap().is_some() {}
+
+		// Write 56 ingress bytes into the regional-tier broadcast.
+		{
+			let mut group = sub_track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; 56]).unwrap();
+			group.finish().unwrap();
+		}
 
 		let body = render_metrics(&stats.snapshot());
 

@@ -12,7 +12,7 @@ use axum::{
 	response::Response,
 };
 use moq_net::origin;
-use moq_net::stats::Handle;
+use moq_net::stats::Session;
 
 use crate::{Auth, AuthParams, web::MtlsPeer, web::WebState, web::landing_response};
 
@@ -50,7 +50,7 @@ pub(crate) async fn serve_ws(
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	let stats = state.cluster.stats.tier(token.tier.clone());
+	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -85,7 +85,7 @@ async fn handle_socket<T>(
 	alpn: Option<String>,
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
-	stats: Handle,
+	stats: Session,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
