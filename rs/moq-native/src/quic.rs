@@ -41,20 +41,22 @@ impl std::str::FromStr for ServerId {
 	}
 }
 
-/// The congestion control algorithm for a QUIC connection.
+/// The congestion control family for a QUIC connection.
 ///
-/// Honored by the quinn backend only; noq, quiche, and iroh reject a
-/// selection at init (noq always uses BBRv3).
+/// This selects a family rather than a named algorithm because each backend ships a
+/// different generation: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh. A
+/// `Bbr` variant would promise more than any one backend delivers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CongestionControl {
-	/// CUBIC (RFC 8312), quinn's default: loss-based, throughput-oriented.
-	Cubic,
-	/// BBR: tracks delivery rate instead of reacting to loss, better suited to interactive media.
-	Bbr,
-	/// NewReno (RFC 6582): the classic conservative loss-based controller.
-	NewReno,
+	/// Loss-based (CUBIC): grows until it drops packets, so the send rate sawtooths.
+	/// Throughput-oriented, and the default on most stacks.
+	Loss,
+	/// Delay-based (BBR): tracks the measured delivery rate and RTT instead of waiting
+	/// for loss, which keeps queues short and the send rate steady enough for an encoder
+	/// to track.
+	Delay,
 }
 
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
@@ -133,9 +135,8 @@ pub struct Client {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control algorithm. Unset means the backend's default (CUBIC on quinn).
-	/// Only the quinn backend can select one; setting it fails at init on noq, quiche, and iroh
-	/// (noq always uses BBRv3).
+	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
+	/// quinn and quiche, BBRv3 on noq and iroh.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-quic-congestion-control",
@@ -226,9 +227,8 @@ pub struct Server {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control algorithm. Unset means the backend's default (CUBIC on quinn).
-	/// Only the quinn backend can select one; setting it fails at init on noq and quiche
-	/// (noq always uses BBRv3).
+	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
+	/// quinn and quiche, BBRv3 on noq.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "server-quic-congestion-control",
@@ -311,8 +311,7 @@ pub(crate) struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` to leave the backend default (CUBIC on quinn).
-	/// Only quinn honors a selection; the other backends reject `Some` at init.
+	/// Congestion control override, or `None` to leave the backend's own default.
 	pub congestion_control: Option<CongestionControl>,
 }
 
@@ -444,27 +443,27 @@ mod tests {
 			max_streams = 7000
 			gso = false
 			preferred_v4 = "192.0.2.1:443"
-			congestion_control = "new-reno"
+			congestion_control = "delay"
 		"#;
 		let quic: Server = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
-		assert_eq!(quic.congestion_control, Some(CongestionControl::NewReno));
+		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 	}
 
 	#[test]
 	fn congestion_control_flags_parse() {
 		let both = parse(&[
 			"--client-quic-congestion-control",
-			"bbr",
+			"delay",
 			"--server-quic-congestion-control",
-			"new-reno",
+			"loss",
 		]);
-		assert_eq!(both.client.congestion_control, Some(CongestionControl::Bbr));
-		assert_eq!(both.server.congestion_control, Some(CongestionControl::NewReno));
+		assert_eq!(both.client.congestion_control, Some(CongestionControl::Delay));
+		assert_eq!(both.server.congestion_control, Some(CongestionControl::Loss));
 
-		// Unset stays None, which leaves the backend's own default (CUBIC on quinn).
+		// Unset stays None, which leaves each backend's own default.
 		assert_eq!(Client::default().resolve().congestion_control, None);
 	}
 }

@@ -1,6 +1,7 @@
 //! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
 use crate::client::ClientConfig;
+use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::server::ServerConfig;
@@ -31,6 +32,19 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: Resolved) {
 	if let Some(gso) = quic.gso {
 		transport.enable_segmentation_offload(gso);
 	}
+
+	// Unlike quinn, this backend defaults to BBR rather than noq's own CUBIC.
+	transport.congestion_controller_factory(congestion_factory(
+		quic.congestion_control.unwrap_or(CongestionControl::Delay),
+	));
+}
+
+/// The noq controller factory for a congestion control family. noq's BBR is v3.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+	match family {
+		CongestionControl::Loss => Arc::new(noq::congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(noq::congestion::Bbr3Config::default()),
+	}
 }
 
 /// Errors specific to the noq QUIC backend.
@@ -56,10 +70,6 @@ pub enum Error {
 	/// The configured bind address could not be resolved.
 	#[error("failed to resolve bind address")]
 	ResolveBind(#[source] std::io::Error),
-
-	/// noq ships BBRv3 only, so a congestion control selection cannot be honored.
-	#[error("the noq backend always uses BBRv3; drop --*-quic-congestion-control or use the quinn backend")]
-	CongestionControlUnsupported,
 
 	/// The URL has no host to connect to.
 	#[error("invalid DNS name")]
@@ -186,17 +196,10 @@ pub(crate) struct NoqClient {
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		let quic = config.quic.resolve();
-		// noq ships BBRv3 only; fail fast instead of silently running a different controller.
-		if quic.congestion_control.is_some() {
-			return Err(Error::CongestionControlUnsupported);
-		}
-
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
-		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, quic);
+		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -372,15 +375,8 @@ pub(crate) struct NoqServer {
 
 impl NoqServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
-		let quic = config.quic.resolve();
-		// noq ships BBRv3 only; fail fast instead of silently running a different controller.
-		if quic.congestion_control.is_some() {
-			return Err(Error::CongestionControlUnsupported);
-		}
-
 		let mut transport = noq::TransportConfig::default();
-		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, quic);
+		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();
@@ -610,32 +606,17 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 
-	/// noq always runs BBRv3, so a congestion control selection must fail at
-	/// init rather than silently running a different controller.
-	#[tokio::test]
-	async fn congestion_control_selection_is_rejected() {
-		let client_config = ClientConfig {
-			quic: crate::quic::Client {
-				congestion_control: Some(crate::quic::CongestionControl::Cubic),
-				..Default::default()
-			},
-			..Default::default()
-		};
-		assert!(matches!(
-			NoqClient::new(&client_config),
-			Err(Error::CongestionControlUnsupported)
-		));
+	/// Build a controller from each family's factory and downcast it to the
+	/// concrete noq implementation it must map to.
+	#[test]
+	fn congestion_factory_maps_each_family() {
+		let now = std::time::Instant::now();
+		let mtu = 1200;
 
-		let server_config = ServerConfig {
-			quic: crate::quic::Server {
-				congestion_control: Some(crate::quic::CongestionControl::Bbr),
-				..Default::default()
-			},
-			..Default::default()
-		};
-		assert!(matches!(
-			NoqServer::new(server_config),
-			Err(Error::CongestionControlUnsupported)
-		));
+		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		assert!(loss.into_any().downcast::<noq::congestion::Cubic>().is_ok());
+
+		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		assert!(delay.into_any().downcast::<noq::congestion::Bbr3>().is_ok());
 	}
 }

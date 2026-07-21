@@ -32,18 +32,17 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
-	// quinn defaults to CUBIC; this knob opts a connection into BBR or NewReno instead.
-	if let Some(algorithm) = quic.congestion_control {
-		transport.congestion_controller_factory(congestion_factory(algorithm));
+	// quinn defaults to CUBIC, so an unset knob leaves the factory alone.
+	if let Some(family) = quic.congestion_control {
+		transport.congestion_controller_factory(congestion_factory(family));
 	}
 }
 
-/// The quinn controller factory for a congestion control choice.
-fn congestion_factory(algorithm: CongestionControl) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
-	match algorithm {
-		CongestionControl::Cubic => Arc::new(quinn::congestion::CubicConfig::default()),
-		CongestionControl::Bbr => Arc::new(quinn::congestion::BbrConfig::default()),
-		CongestionControl::NewReno => Arc::new(quinn::congestion::NewRenoConfig::default()),
+/// The quinn controller factory for a congestion control family. quinn's BBR is v1.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
+	match family {
+		CongestionControl::Loss => Arc::new(quinn::congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(quinn::congestion::BbrConfig::default()),
 	}
 }
 
@@ -605,27 +604,24 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 
-	/// Build a controller from each variant's factory and downcast it to the
+	/// Build a controller from each family's factory and downcast it to the
 	/// concrete quinn implementation it must map to.
 	#[test]
-	fn congestion_factory_maps_each_variant() {
+	fn congestion_factory_maps_each_family() {
 		let now = std::time::Instant::now();
 		let mtu = 1200;
 
-		let cubic = congestion_factory(CongestionControl::Cubic).build(now, mtu);
-		assert!(cubic.into_any().downcast::<quinn::congestion::Cubic>().is_ok());
+		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		assert!(loss.into_any().downcast::<quinn::congestion::Cubic>().is_ok());
 
-		let bbr = congestion_factory(CongestionControl::Bbr).build(now, mtu);
-		assert!(bbr.into_any().downcast::<quinn::congestion::Bbr>().is_ok());
-
-		let reno = congestion_factory(CongestionControl::NewReno).build(now, mtu);
-		assert!(reno.into_any().downcast::<quinn::congestion::NewReno>().is_ok());
+		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		assert!(delay.into_any().downcast::<quinn::congestion::Bbr>().is_ok());
 	}
 
 	/// Loopback regression test: a config selecting BBR must produce live
 	/// connections that actually run quinn's BBR controller, on both ends.
 	#[tokio::test]
-	async fn bbr_reaches_the_live_connection() {
+	async fn delay_reaches_the_live_connection() {
 		let server_config = ServerConfig {
 			bind: Some("127.0.0.1:0".to_string()),
 			tls: crate::tls::Server {
@@ -633,7 +629,7 @@ mod tests {
 				..Default::default()
 			},
 			quic: crate::quic::Server {
-				congestion_control: Some(CongestionControl::Bbr),
+				congestion_control: Some(CongestionControl::Delay),
 				..Default::default()
 			},
 			..Default::default()
@@ -659,7 +655,7 @@ mod tests {
 			bind: "127.0.0.1:0".parse().unwrap(),
 			tls: tls_config,
 			quic: crate::quic::Client {
-				congestion_control: Some(CongestionControl::Bbr),
+				congestion_control: Some(CongestionControl::Delay),
 				..Default::default()
 			},
 			..Default::default()

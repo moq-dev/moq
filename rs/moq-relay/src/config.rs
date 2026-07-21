@@ -261,7 +261,7 @@ preferred_v6 = "[2001:db8::1]:443"
 	/// Regression test for the clap+TOML clobber bug applied to the
 	/// `congestion_control` fields on the quic sections of
 	/// `moq-native::ServerConfig` / `ClientConfig`. The fields must stay
-	/// `Option<CongestionControl>` so a TOML-selected algorithm survives the
+	/// `Option<CongestionControl>` so a TOML-selected family survives the
 	/// CLI re-parse when no `--*-quic-congestion-control` flag is passed.
 	#[test]
 	fn cli_does_not_clobber_toml_congestion_control() {
@@ -275,10 +275,10 @@ preferred_v6 = "[2001:db8::1]:443"
 
 		let toml = r#"
 [server.quic]
-congestion_control = "bbr"
+congestion_control = "delay"
 
 [client.quic]
-congestion_control = "new-reno"
+congestion_control = "loss"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -290,12 +290,12 @@ congestion_control = "new-reno"
 
 		assert_eq!(
 			config.server.quic.congestion_control,
-			Some(moq_native::quic::CongestionControl::Bbr),
+			Some(moq_native::quic::CongestionControl::Delay),
 			"TOML's server.quic.congestion_control must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(
 			config.client.quic.congestion_control,
-			Some(moq_native::quic::CongestionControl::NewReno),
+			Some(moq_native::quic::CongestionControl::Loss),
 			"TOML's client.quic.congestion_control must not be clobbered by the CLI re-parse"
 		);
 	}
