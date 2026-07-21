@@ -328,6 +328,63 @@ async fn test_msf_catalog_roundtrip() {
 	assert!(matches!(audio.container, Container::Cmaf { .. }));
 }
 
+/// Passthrough writes groups by hand (no `container::Producer`), so the timeline recorder is fed
+/// directly. This guards that every rendition advertises a `<name>.timeline.z` section and that its
+/// group opens are actually recorded, the index the VOD/playlist export reads. Regression for the
+/// missing-timeline break that skipped VOD renditions.
+#[tokio::test]
+async fn import_populates_per_rendition_timeline() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+
+	let data = include_bytes!("test_data/bbb.mp4");
+	let buf = bytes::BytesMut::from(&data[..]);
+	// Trailing partial fragments may error; ignore.
+	let _ = fmp4.decode(&buf);
+	fmp4.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+
+	// Every rendition (one video + one audio) advertises a timeline named after its media track.
+	let mut sections = Vec::new();
+	for (name, config) in &snapshot.video.renditions {
+		let section = config
+			.timeline
+			.clone()
+			.unwrap_or_else(|| panic!("video {name} advertises no timeline"));
+		assert_eq!(section.track, format!("{name}.timeline.z"));
+		sections.push(section);
+	}
+	for (name, config) in &snapshot.audio.renditions {
+		let section = config
+			.timeline
+			.clone()
+			.unwrap_or_else(|| panic!("audio {name} advertises no timeline"));
+		assert_eq!(section.track, format!("{name}.timeline.z"));
+		sections.push(section);
+	}
+	assert_eq!(sections.len(), 2, "bbb has one video and one audio rendition");
+
+	// Subscribe while the producer is alive, then finish so each timeline group closes and the reader
+	// terminates rather than blocking; the first recorded group (sequence 0) must be present.
+	let mut timelines: Vec<crate::timeline::Consumer> = Vec::new();
+	for section in sections {
+		timelines.push(crate::timeline::Consumer::subscribe(&consumer, &section).await.unwrap());
+	}
+	catalog.finish().unwrap();
+
+	for mut timeline in timelines {
+		let first = timeline
+			.next()
+			.await
+			.unwrap()
+			.expect("a group open should be recorded in the timeline");
+		assert_eq!(first.group, 0, "the first recorded group is sequence 0");
+	}
+}
+
 // ---- Sample-duration handling in decode() ----
 
 fn scale() -> moq_net::Timescale {

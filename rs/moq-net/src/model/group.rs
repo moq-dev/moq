@@ -254,6 +254,12 @@ impl Producer {
 		self.info
 	}
 
+	/// This group's sequence number, as assigned at creation (explicitly, or by
+	/// [`track::Producer::append_group`](super::track::Producer::append_group) auto-incrementing).
+	pub fn sequence(&self) -> u64 {
+		self.info.sequence
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
