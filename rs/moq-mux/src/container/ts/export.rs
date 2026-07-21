@@ -63,6 +63,10 @@ pub struct Export<E: catalog::Catalog = ()> {
 	counters: HashMap<u16, ContinuityCounter>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
+	/// DVB service layer captured on import: transport/service identity (rebuilds a
+	/// consistent PAT/PMT) plus the SDT/NIT sections re-emitted verbatim. `None` for
+	/// a media-only source, so a minimal identity is synthesized instead.
+	service: Option<catalog::Service>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -136,6 +140,9 @@ struct Psi {
 	pat: Pat,
 	pmt: Pmt,
 	pcr_pid: u16,
+	/// PID the PMT rides on: the source's original (preserved from the service
+	/// record) or the synthesized [`PMT_PID`] for a media-only source.
+	pmt_pid: u16,
 }
 
 /// Per-frame PES descriptor (everything but the payload bytes).
@@ -192,6 +199,7 @@ impl<E: catalog::Catalog> Export<E> {
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
+			service: None,
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -331,6 +339,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
 		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
+		self.service = mpegts.service.clone();
 
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: BTreeMap<String, ()> = BTreeMap::new();
@@ -368,7 +377,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// PIDs, descriptors, and stream_ids across several catalog publishes, so this
 		// runs every snapshot until the PMT is built and the tracks below are
 		// *refreshed*, not latched from the first (partial) snapshot.
-		let mut used: Vec<u16> = vec![0x0000, PMT_PID, 0x1FFF];
+		let mut used: Vec<u16> = vec![0x0000, self.pmt_pid(), 0x1FFF];
 		let mut pids: BTreeMap<String, u16> = BTreeMap::new();
 		for name in active.keys() {
 			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
@@ -510,6 +519,16 @@ impl<E: catalog::Catalog> Export<E> {
 			.min()
 	}
 
+	/// PID the PMT rides on: the source's original (preserved in the service record),
+	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
+	fn pmt_pid(&self) -> u16 {
+		self.service
+			.as_ref()
+			.map(|s| s.pmt_pid)
+			.filter(|&pid| pid != 0)
+			.unwrap_or(PMT_PID)
+	}
+
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> anyhow::Result<()> {
 		// Order tracks by PID for a stable layout; first video track carries the PCR.
@@ -616,23 +635,39 @@ impl<E: catalog::Catalog> Export<E> {
 			Vec::new()
 		};
 
+		// Preserve the source's transport/service identity so the rebuilt PAT/PMT stay
+		// consistent with the carried SDT/NIT; synthesize a minimal identity otherwise.
+		let pmt_pid = self.pmt_pid();
+		let transport_stream_id = self.service.as_ref().map(|s| s.transport_stream_id).unwrap_or(1);
+		let service_id = self
+			.service
+			.as_ref()
+			.map(|s| s.service_id)
+			.filter(|&id| id != 0)
+			.unwrap_or(1);
+
 		let pat = Pat {
-			transport_stream_id: 1,
+			transport_stream_id,
 			version_number: VersionNumber::default(),
 			table: vec![ProgramAssociation {
-				program_num: 1,
-				program_map_pid: Pid::new(PMT_PID)?,
+				program_num: service_id,
+				program_map_pid: Pid::new(pmt_pid)?,
 			}],
 		};
 		let pmt = Pmt {
-			program_num: 1,
+			program_num: service_id,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
 			version_number: VersionNumber::default(),
 			program_info,
 			es_info,
 		};
 
-		self.psi = Some(Psi { pat, pmt, pcr_pid });
+		self.psi = Some(Psi {
+			pat,
+			pmt,
+			pcr_pid,
+			pmt_pid,
+		});
 		Ok(())
 	}
 
@@ -705,10 +740,23 @@ impl<E: catalog::Catalog> Export<E> {
 		let psi_due = psi_due(frame.timestamp, self.last_psi);
 		if (is_video && frame.keyframe) || psi_due {
 			let psi = self.psi.as_ref().context("PSI not built")?;
+			let pmt_pid = psi.pmt_pid;
 			let pat = TsPayload::Pat(psi.pat.clone());
 			let pmt = TsPayload::Pmt(psi.pmt.clone());
 			self.write_packet(&mut out, Pid::PAT, None, pat)?;
-			self.write_packet(&mut out, PMT_PID, None, pmt)?;
+			self.write_packet(&mut out, pmt_pid, None, pmt)?;
+
+			// Re-emit the DVB service layer (SDT, NIT) verbatim alongside the PSI, so the
+			// service name/provider/network survive. Regenerated tables (TDT/TOT) and EPG
+			// (EIT) are out of scope.
+			let sdt = self.service.as_ref().and_then(|s| s.sdt.clone());
+			let nit = self.service.as_ref().and_then(|s| s.nit.clone());
+			if let Some(sdt) = sdt {
+				self.write_section(&mut out, catalog::SDT_PID, &sdt)?;
+			}
+			if let Some(nit) = nit {
+				self.write_section(&mut out, catalog::NIT_PID, &nit)?;
+			}
 			self.last_psi = Some(frame.timestamp);
 		}
 

@@ -371,6 +371,12 @@ cues, teletext, DVB subtitles, ...) are carried verbatim too, one MoQ track per
 PID, described in the catalog `mpegts` section, and survive `import ts` /
 `export ts` end-to-end.
 
+The DVB service layer rides the same `mpegts` section: the transport/service
+identity (transport stream ID, service number, PMT PID) plus the SDT and NIT
+tables are captured on import and re-emitted on export, so the service name,
+provider, type, and network survive the round-trip. Regenerated tables (TDT/TOT)
+and EPG (EIT) are not carried.
+
 ### FLV
 
 ```bash

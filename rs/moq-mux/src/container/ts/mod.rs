@@ -9,6 +9,9 @@
 //! Elementary streams we don't decode (SCTE-35, teletext, DVB subtitles, private
 //! data, ...) are carried verbatim, one MoQ track per PID, described in the
 //! [`Mpegts`] catalog section. SCTE-35 is just one such stream (`stream_type` 0x86).
+//! The DVB service layer (transport/service identity plus the SDT/NIT tables) rides
+//! the same section as a [`Service`] record, so the service name, provider, and
+//! network survive the round-trip.
 
 mod adts;
 mod export;
@@ -19,7 +22,7 @@ mod import;
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Track, Verbatim};
+pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Service, Track, Verbatim};
 pub use export::*;
 pub use import::*;
 

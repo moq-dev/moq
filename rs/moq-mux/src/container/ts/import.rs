@@ -8,7 +8,10 @@
 //! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
 //! other private sections, which are not PES) are intercepted before the mpeg2ts
 //! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
-//! private-section path, and the 90 kHz -> microsecond PTS conversion.
+//! private-section path, and the 90 kHz -> microsecond PTS conversion. The DVB
+//! service layer (transport/service identity from the PAT, plus the SDT and NIT
+//! sections) is captured into the `mpegts` catalog [`Service`](catalog::Service)
+//! record so it survives the round-trip.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -97,6 +100,13 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Whether the PMT program-level descriptors have been recorded yet (set once;
 	/// PMT `program_info` is stable for the program's life).
 	program_recorded: bool,
+	/// Reassemblers for the standalone DVB SI PIDs (SDT 0x0011, NIT 0x0010), keyed
+	/// by PID. Intercepted before the reader (like SCTE-35 sections) so the service
+	/// layer survives the round-trip. Only populated with `mpegts` catalog support.
+	service_sections: HashMap<u16, SectionReassembler>,
+	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
+	/// the PAT into the catalog service record yet (set once; the PAT is stable).
+	service_recorded: bool,
 	/// Latest video PTS: the media clock used to timestamp private sections, which
 	/// carry no PES PTS of their own. Unwrapped independently of the video stream.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
@@ -133,6 +143,8 @@ impl<E: catalog::Catalog> Import<E> {
 			es_descriptors: HashMap::new(),
 			recorded_media: HashSet::new(),
 			program_recorded: false,
+			service_sections: HashMap::new(),
+			service_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 		}
@@ -193,6 +205,13 @@ impl<E: catalog::Catalog> Import<E> {
 			let pts = self.last_pts.unwrap_or(Timestamp::ZERO);
 			if let Some(section) = self.sections.get_mut(&pid) {
 				section.packet(&pkt, pts)?;
+				continue;
+			}
+			// Intercept the standalone DVB SI PIDs (SDT, NIT) before the routing gate
+			// below drops them: they carry the service layer, not media, and are not fed
+			// to the reader (which only routes the PAT/PMT/ES PIDs it learns).
+			if self.supports_mpegts && matches!(pid, catalog::SDT_PID | catalog::NIT_PID) {
+				self.service_section(pid, &pkt);
 				continue;
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
@@ -281,6 +300,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(TsPayload::Pat(pat)) => {
 				self.pmt_pids
 					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
+				self.record_service_identity(&pat);
 			}
 			_ => {}
 		}
@@ -563,6 +583,60 @@ impl<E: catalog::Catalog> Import<E> {
 			entry.descriptors = descriptors;
 		}
 		self.recorded_media.insert(pid);
+	}
+
+	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
+	/// PAT into the catalog service record, once. No-op without `mpegts` support.
+	fn record_service_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) {
+		if !self.supports_mpegts || self.service_recorded {
+			return;
+		}
+		// program_number 0 is the network PID association, not a service; skip it.
+		let Some(program) = pat.table.iter().find(|entry| entry.program_num != 0) else {
+			return;
+		};
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			let service = mpegts.service.get_or_insert_with(Default::default);
+			service.transport_stream_id = pat.transport_stream_id;
+			service.service_id = program.program_num;
+			service.pmt_pid = program.program_map_pid.as_u16();
+		}
+		self.service_recorded = true;
+	}
+
+	/// Feed one TS packet on a DVB SI PID (SDT or NIT) to its reassembler, recording
+	/// each completed Actual section verbatim into the catalog service record.
+	fn service_section(&mut self, pid: u16, pkt: &[u8]) {
+		let mut sections = Vec::new();
+		self.service_sections.entry(pid).or_default().push(pkt, &mut sections);
+		for section in sections {
+			self.record_service_section(pid, section);
+		}
+	}
+
+	/// Record one complete SI section verbatim: the first SDT Actual (table_id 0x42) or
+	/// NIT Actual (table_id 0x40) seen. Later sections (repeats, the `Other` variants,
+	/// BAT on the SDT PID) are ignored; a single-service SPTS needs only the first.
+	fn record_service_section(&mut self, pid: u16, section: Vec<u8>) {
+		let wanted = matches!(
+			(pid, section.first().copied()),
+			(catalog::SDT_PID, Some(catalog::SDT_ACTUAL_TABLE_ID))
+				| (catalog::NIT_PID, Some(catalog::NIT_ACTUAL_TABLE_ID))
+		);
+		if !wanted {
+			return;
+		}
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			let service = mpegts.service.get_or_insert_with(Default::default);
+			let slot = if pid == catalog::SDT_PID {
+				&mut service.sdt
+			} else {
+				&mut service.nit
+			};
+			if slot.is_none() {
+				*slot = Some(bytes::Bytes::from(section));
+			}
+		}
 	}
 
 	/// Close the current group on every track and reopen at `sequence`.
