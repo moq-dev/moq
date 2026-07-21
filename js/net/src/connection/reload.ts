@@ -4,6 +4,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import type { ConnectionStats } from "./stats.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -156,9 +157,24 @@ export class Reload {
 				this.#delay = this.delay.initial;
 				this.#retryStart = undefined;
 
-				await Promise.race([effect.cancel, connection.closed]);
+				const connected = performance.now();
+				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
+				if (!closed) return;
+
+				// The peer closed the session: tear down and reconnect. A session that
+				// died within the initial delay escalates through the backoff instead.
+				console.warn("connection closed, reconnecting");
+				if (performance.now() - connected < this.delay.initial) {
+					throw new Error("connection closed immediately");
+				}
+				this.#tick.update((prev) => prev + 1);
 			} catch (err) {
 				console.warn("connection error:", err);
+
+				// Any session is dead now: report disconnected during the backoff
+				// rather than when the retry reruns the effect.
+				this.established.set(undefined);
+				this.status.set("disconnected");
 
 				// Track retry start for timeout.
 				this.#retryStart ??= performance.now();
@@ -242,6 +258,11 @@ export class Reload {
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
+	}
+
+	/** Snapshot the live connection's transport statistics, or undefined while disconnected. */
+	async stats(): Promise<ConnectionStats | undefined> {
+		return this.established.peek()?.stats?.();
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */

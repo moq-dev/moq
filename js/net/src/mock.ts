@@ -4,6 +4,8 @@
  * Creates paired client/server transports connected via TransformStreams.
  */
 
+import type { TransportStats } from "./connection/stats.ts";
+
 // High watermark to prevent writes from blocking on backpressure.
 // Real WebTransport has kernel buffers; we simulate this with a large queue.
 const WRITABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
@@ -227,9 +229,11 @@ class MockTransport implements WebTransport {
 		}
 	}
 
-	// biome-ignore lint/suspicious/noExplicitAny: WebTransportStats type not available in all TS libs
-	async getStats(): Promise<any> {
-		return {};
+	/** The snapshot {@link getStats} resolves with (default empty). */
+	stats: TransportStats = {};
+
+	async getStats(): Promise<TransportStats> {
+		return this.stats;
 	}
 }
 
@@ -249,6 +253,9 @@ export interface MockTransportOptions {
 
 	/** Whether the incoming datagram readable stream is exposed. */
 	datagramReadable?: boolean;
+
+	/** The snapshot `getStats()` resolves with on both transports (default empty). */
+	stats?: TransportStats;
 }
 
 /**
@@ -265,6 +272,10 @@ export function createMockTransportPair(
 	const datagrams = options?.datagrams ?? true;
 	const client = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
 	const server = new MockTransport(protocol, datagrams, options?.datagramWritable, options?.datagramReadable);
+	if (options?.stats) {
+		client.stats = options.stats;
+		server.stats = options.stats;
+	}
 	client.setPeer(server);
 	server.setPeer(client);
 	return { client, server };

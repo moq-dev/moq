@@ -3,6 +3,7 @@ import type * as announce from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type ConnectionStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -21,7 +22,7 @@ import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
 import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts";
 
-const SEND_BW_POLL_INTERVAL = 100; // ms
+const STATS_POLL_INTERVAL = 100; // ms
 
 /**
  * Constructor options for {@link Connection}.
@@ -80,7 +81,7 @@ export class Connection implements Established {
 	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
 	readonly recvBandwidth?: Bandwidth;
 
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
+	/** Smoothed RTT in milliseconds, from the transport when it measures one, otherwise from PROBE (moq-lite-04+ only). */
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
 	/** Random per-connection origin id. Shared by Publisher (for outbound hop
@@ -95,6 +96,10 @@ export class Connection implements Established {
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
 	#peerRole = new Signal<Role | undefined>(undefined);
+
+	// PROBE's RTT estimate, kept separate from `rtt` so the stats poll can merge
+	// the two sources with the transport winning. Aliases `rtt` without getStats.
+	#probeRtt: Signal<Time.Milli | undefined>;
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -134,9 +139,10 @@ export class Connection implements Established {
 			this.recvBandwidth = createBandwidth();
 		}
 
-		// RTT can be populated by PROBE (Lite04+) or getStats() (when supported).
-		// TODO prefer getStats() when both are available.
+		// Fed by the stats poll, which merges the transport RTT (getStats) with
+		// PROBE (Lite04+). The transport wins whenever it measures one.
 		this.rtt = new Signal<Time.Milli | undefined>(undefined);
+		this.#probeRtt = hasGetStats ? new Signal<Time.Milli | undefined>(undefined) : this.rtt;
 
 		this.origin = randomOrigin();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
@@ -145,7 +151,7 @@ export class Connection implements Established {
 			this.#version,
 			this.origin,
 			this.recvBandwidth,
-			this.rtt,
+			this.#probeRtt,
 			this.#peerSetup,
 		);
 
@@ -175,7 +181,7 @@ export class Connection implements Established {
 		}
 
 		if (this.sendBandwidth) {
-			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
+			tasks.push(this.#runTransportStats(this.sendBandwidth));
 		}
 
 		if (this.recvBandwidth) {
@@ -317,27 +323,30 @@ export class Connection implements Established {
 		}
 	}
 
-	async #runSendBandwidth(bandwidth: Bandwidth): Promise<void> {
-		const quic = this.#quic as unknown as {
-			getStats: () => Promise<{ estimatedSendRate: number | null }>;
-		};
-
+	// Poll getStats() to feed the send bandwidth and RTT signals.
+	async #runTransportStats(bandwidth: Bandwidth): Promise<void> {
 		return new Promise<void>((resolve) => {
 			const id = setInterval(async () => {
-				try {
-					const stats = await quic.getStats();
-					bandwidth.set(stats.estimatedSendRate ?? undefined);
-				} catch {
-					clearInterval(id);
-					resolve();
-				}
-			}, SEND_BW_POLL_INTERVAL);
+				const stats = await transportStats(this.#quic);
+				bandwidth.set(stats?.estimatedSendRate);
+				this.rtt?.set(stats?.rtt ?? this.#probeRtt.peek());
+			}, STATS_POLL_INTERVAL);
 
 			void this.closed.then(() => {
 				clearInterval(id);
 				resolve();
 			});
 		});
+	}
+
+	/** Snapshot the connection's transport statistics. See {@link Established.stats}. */
+	async stats(): Promise<ConnectionStats> {
+		const transport = await transportStats(this.#quic);
+		return {
+			...transport,
+			rtt: transport?.rtt ?? this.#probeRtt.peek(),
+			estimatedRecvRate: this.recvBandwidth?.peek(),
+		};
 	}
 
 	get closed(): Promise<void> {
