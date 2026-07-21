@@ -1,5 +1,5 @@
 use crate::error::KeyError;
-use crate::{Algorithm, EllipticCurve, Key, KeyOperation, KeyType, RsaPublicKey};
+use crate::{Algorithm, EllipticCurve, Jwk, Key, KeyOperation, KeyType, RsaPublicKey};
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::KeyPair;
 use p256::elliptic_curve::array::typenum::Unsigned;
@@ -21,15 +21,14 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		Algorithm::EdDSA => generate_ed25519_key(),
 	};
 
-	Ok(Key {
+	Jwk {
 		kid: id,
 		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
 		algorithm,
 		key: key?,
 		scope: None,
-		decode: Default::default(),
-		encode: Default::default(),
-	})
+	}
+	.try_into()
 }
 
 fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyType> {

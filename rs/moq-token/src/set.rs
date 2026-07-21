@@ -77,12 +77,20 @@ impl KeySet {
 		})
 	}
 
+	/// Find the key with the given key ID.
 	pub fn find_key(&self, kid: &str) -> Option<Arc<Key>> {
-		self.keys.iter().find(|k| k.kid.as_deref() == Some(kid)).cloned()
+		self.keys
+			.iter()
+			.find(|k| k.kid().is_some_and(|k| k.encode() == kid))
+			.cloned()
 	}
 
+	/// Find the first key that supports the given operation.
 	pub fn find_supported_key(&self, operation: &KeyOperation) -> Option<Arc<Key>> {
-		self.keys.iter().find(|key| key.operations.contains(operation)).cloned()
+		self.keys
+			.iter()
+			.find(|key| key.operations().contains(operation))
+			.cloned()
 	}
 
 	/// Sign the claims with the first key in the set that supports signing.
@@ -166,7 +174,7 @@ mod tests {
 		assert!(set.is_ok());
 		let set = set.unwrap();
 		assert_eq!(set.keys.len(), 1);
-		assert_eq!(set.keys[0].kid.as_deref(), Some("1"));
+		assert_eq!(set.keys[0].kid().map(|k| k.encode()), Some("1"));
 		assert!(set.find_key("1").is_some());
 	}
 
@@ -220,7 +228,7 @@ mod tests {
 
 		let found = set.find_key("my-key");
 		assert!(found.is_some());
-		assert_eq!(found.unwrap().kid.as_deref(), Some("my-key"));
+		assert_eq!(found.unwrap().kid().map(|k| k.encode()), Some("my-key"));
 	}
 
 	#[test]
@@ -247,11 +255,8 @@ mod tests {
 
 	#[test]
 	fn test_find_supported_key() {
-		let mut sign_key = create_test_key(Some("sign"));
-		sign_key.operations = [KeyOperation::Sign].into();
-
-		let mut verify_key = create_test_key(Some("verify"));
-		verify_key.operations = [KeyOperation::Verify].into();
+		let sign_key = create_test_key(Some("sign")).with_operations([KeyOperation::Sign]);
+		let verify_key = create_test_key(Some("verify")).with_operations([KeyOperation::Verify]);
 
 		let set = KeySet {
 			keys: vec![Arc::new(sign_key), Arc::new(verify_key)],
@@ -259,11 +264,11 @@ mod tests {
 
 		let found_sign = set.find_supported_key(&KeyOperation::Sign);
 		assert!(found_sign.is_some());
-		assert_eq!(found_sign.unwrap().kid.as_deref(), Some("sign"));
+		assert_eq!(found_sign.unwrap().kid().map(|k| k.encode()), Some("sign"));
 
 		let found_verify = set.find_supported_key(&KeyOperation::Verify);
 		assert!(found_verify.is_some());
-		assert_eq!(found_verify.unwrap().kid.as_deref(), Some("verify"));
+		assert_eq!(found_verify.unwrap().kid().map(|k| k.encode()), Some("verify"));
 	}
 
 	#[test]
@@ -279,9 +284,9 @@ mod tests {
 		assert_eq!(public_set.keys.len(), 1);
 
 		let public_key = &public_set.keys[0];
-		assert_eq!(public_key.kid.as_deref(), Some("1"));
-		assert!(public_key.operations.contains(&KeyOperation::Verify));
-		assert!(!public_key.operations.contains(&KeyOperation::Sign));
+		assert_eq!(public_key.kid().map(|k| k.encode()), Some("1"));
+		assert!(public_key.operations().contains(&KeyOperation::Verify));
+		assert!(!public_key.operations().contains(&KeyOperation::Sign));
 	}
 
 	#[test]
@@ -309,8 +314,7 @@ mod tests {
 
 	#[test]
 	fn test_encode_no_signing_key() {
-		let mut key = create_test_key(Some("1"));
-		key.operations = [KeyOperation::Verify].into();
+		let key = create_test_key(Some("1")).with_operations([KeyOperation::Verify]);
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -413,7 +417,7 @@ mod tests {
 
 		let loaded = KeySet::from_file(&path).expect("failed to read from file");
 		assert_eq!(loaded.keys.len(), 1);
-		assert_eq!(loaded.keys[0].kid.as_deref(), Some("1"));
+		assert_eq!(loaded.keys[0].kid().map(|k| k.encode()), Some("1"));
 
 		// Clean up
 		let _ = std::fs::remove_file(path);
