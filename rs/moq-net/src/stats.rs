@@ -42,12 +42,17 @@
 //! * `subscriptions` / `subscriptions_closed`: cumulative track-level
 //!   subscriptions opened/dropped (egress `track::Subscriber`, ingress
 //!   `track::Producer`).
-//! * `fetches`: cumulative one-shot group fetches served to a calling
-//!   context, counted once per coalesced fetch. Separate from
-//!   `subscriptions` and the viewer refcount; fetched payload still flows
-//!   into `bytes` / `frames` / `groups`.
+//! * `fetches`: cumulative one-shot group fetches *requested* by a calling
+//!   context, counted once per coalesced fetch at request time. A fetch that
+//!   resolves to `NotFound` still counts. Separate from `subscriptions` and the
+//!   viewer refcount; fetched payload still flows into `bytes` / `frames` /
+//!   `groups`.
 //! * `bytes` / `frames` / `groups`: cumulative payload counters bumped as
 //!   groups/frames are read (egress) or written (ingress) in the model.
+//! * `datagrams`: cumulative single-frame groups carried over unreliable QUIC
+//!   datagrams. A datagram is metered as the group it stands in for, so it also
+//!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
+//!   those took the datagram path.
 //! * `sessions` / `sessions_closed` ([`Presence`]): cumulative count of
 //!   sessions connected/disconnected under an auth root on this tier.
 //!   Driven by [`Handle::session`] (the [`Session`] context).
@@ -135,15 +140,17 @@ pub(crate) struct Counters {
 	announced_bytes: AtomicU64,
 	subscriptions: AtomicU64,
 	subscriptions_closed: AtomicU64,
-	// Cumulative one-shot group fetches served to a calling context. Counted once
-	// per coalesced fetch (requests served, not upstream work); does not touch
-	// `subscriptions` or the viewer refcount.
+	// Cumulative one-shot group fetches requested by a calling context. Counted
+	// once per coalesced fetch, at request time rather than on resolution; does
+	// not touch `subscriptions` or the viewer refcount.
 	fetches: AtomicU64,
 	broadcasts: AtomicU64,
 	broadcasts_closed: AtomicU64,
 	bytes: AtomicU64,
 	frames: AtomicU64,
 	groups: AtomicU64,
+	// Subset of `groups` carried over an unreliable QUIC datagram.
+	datagrams: AtomicU64,
 }
 
 impl Counters {
@@ -166,6 +173,7 @@ impl Counters {
 		let bytes = self.bytes.load(Ordering::Relaxed);
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
+		let datagrams = self.datagrams.load(Ordering::Relaxed);
 		Traffic {
 			announced,
 			announced_closed,
@@ -178,6 +186,7 @@ impl Counters {
 			bytes,
 			frames,
 			groups,
+			datagrams,
 		}
 	}
 }
@@ -233,8 +242,9 @@ pub struct Traffic {
 	pub subscriptions: u64,
 	/// Cumulative track-level subscriptions closed.
 	pub subscriptions_closed: u64,
-	/// Cumulative one-shot group fetches served. Counted once per coalesced fetch,
-	/// separate from `subscriptions` and the viewer refcount. Fetched payload still
+	/// Cumulative one-shot group fetches requested. Counted once per coalesced fetch
+	/// when the fetch is issued, so one that resolves to `NotFound` still counts.
+	/// Separate from `subscriptions` and the viewer refcount. Fetched payload still
 	/// flows into `bytes`/`frames`/`groups`.
 	pub fetches: u64,
 	/// Cumulative payload bytes.
@@ -243,6 +253,10 @@ pub struct Traffic {
 	pub frames: u64,
 	/// Cumulative groups delivered.
 	pub groups: u64,
+	/// Cumulative single-frame groups delivered over an unreliable QUIC datagram.
+	/// A subset of `groups`: each one also counts there and its payload in
+	/// `frames` / `bytes`.
+	pub datagrams: u64,
 }
 
 impl Traffic {
@@ -259,6 +273,7 @@ impl Traffic {
 		self.bytes += other.bytes;
 		self.frames += other.frames;
 		self.groups += other.groups;
+		self.datagrams += other.datagrams;
 	}
 
 	/// True while the broadcast is announced (an announce guard is open).
@@ -967,6 +982,18 @@ impl Meter {
 		}
 		if let Some(counters) = self.counters() {
 			counters.frames.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Record one datagram of `n` payload bytes. A datagram stands in for the
+	/// single-frame group it replaces, so this bumps `groups`, `frames`, and
+	/// `bytes` alongside `datagrams`.
+	pub(crate) fn datagram(&self, n: u64) {
+		if let Some(counters) = self.counters() {
+			counters.datagrams.fetch_add(1, Ordering::Relaxed);
+			counters.groups.fetch_add(1, Ordering::Relaxed);
+			counters.frames.fetch_add(1, Ordering::Relaxed);
+			counters.bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 

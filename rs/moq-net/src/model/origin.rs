@@ -2663,6 +2663,55 @@ mod tests {
 		);
 	}
 
+	/// Datagrams bypass the group/frame handles entirely, so they're metered at the
+	/// producer (ingress write) and the subscriber (egress read). Each one counts as
+	/// the single-frame group it stands in for, plus the `datagrams` breakout.
+	#[tokio::test]
+	async fn test_stats_datagrams_counted_both_sides() {
+		use crate::Timestamp;
+		use crate::stats::{Config, Registry, Tier};
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let broadcast = announced.next().await.unwrap().broadcast.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		producer.append_datagram(Timestamp::ZERO, &b"hello"[..]).unwrap();
+		let datagram = sub.recv_datagram().await.unwrap().expect("datagram");
+		assert_eq!(&datagram.payload[..], b"hello");
+		settle().await;
+
+		let report = registry.report();
+		let entry = report
+			.traffic
+			.iter()
+			.find(|e| e.path.as_str() == "demo")
+			.expect("demo tracked");
+
+		for (side, traffic) in [("egress", &entry.publisher), ("ingress", &entry.subscriber)] {
+			assert_eq!(traffic.datagrams, 1, "{side}: one datagram");
+			assert_eq!(traffic.groups, 1, "{side}: counted as its single-frame group");
+			assert_eq!(traffic.frames, 1, "{side}: one frame");
+			assert_eq!(traffic.bytes, 5, "{side}: payload counted once");
+		}
+	}
+
 	#[test]
 	fn origin_rejects_reserved_ids() {
 		assert!(Origin::new(0).is_err());

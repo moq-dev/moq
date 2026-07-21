@@ -24,8 +24,9 @@
 		</div>
 	</header>
 
-	<!-- Cluster summary: six headline numbers, no prose. -->
-	<section id="overview" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+	<!-- Cluster summary: headline numbers, no prose. Rates are per-second; the rest
+	     are live gauges, except fetches/datagrams/announce which are cumulative. -->
+	<section id="overview" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
 		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
 			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Nodes</div>
 			<div id="kpi-nodes" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
@@ -39,6 +40,14 @@
 			<div id="kpi-viewers" class="text-2xl font-semibold tabular-nums mt-0.5 text-emerald-300">0</div>
 		</div>
 		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Tracks</div>
+			<div id="kpi-tracks" class="text-2xl font-semibold tabular-nums mt-0.5 text-emerald-300">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Sessions</div>
+			<div id="kpi-sessions" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
 			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Egress</div>
 			<div id="kpi-egress" class="text-2xl font-semibold tabular-nums mt-0.5 text-emerald-400">0</div>
 		</div>
@@ -47,8 +56,16 @@
 			<div id="kpi-ingress" class="text-2xl font-semibold tabular-nums mt-0.5 text-sky-400">0</div>
 		</div>
 		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
-			<div class="text-[11px] uppercase tracking-wide text-neutral-500">Sessions</div>
-			<div id="kpi-sessions" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500" title="One-shot group fetches requested">Fetches</div>
+			<div id="kpi-fetches" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500" title="Single-frame groups carried over unreliable QUIC datagrams">Datagrams</div>
+			<div id="kpi-datagrams" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
+		</div>
+		<div class="rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+			<div class="text-[11px] uppercase tracking-wide text-neutral-500" title="Broadcast-name bytes charged for announces and unannounces">Announce</div>
+			<div id="kpi-announce" class="text-2xl font-semibold tabular-nums mt-0.5">0</div>
 		</div>
 	</section>
 
@@ -97,6 +114,10 @@
 			<div>
 				<h3 class="text-xs font-semibold text-emerald-300 mb-1">Viewers <span class="text-neutral-500 font-normal">· served downstream</span></h3>
 				<div id="node-subscribers" class="overflow-x-auto text-neutral-500 text-sm">no viewers</div>
+			</div>
+			<div>
+				<h3 class="text-xs font-semibold text-neutral-300 mb-1">Sessions <span class="text-neutral-500 font-normal">· by auth root</span></h3>
+				<div id="node-session-roots" class="overflow-x-auto text-neutral-500 text-sm">no sessions</div>
 			</div>
 		</div>
 	</section>
