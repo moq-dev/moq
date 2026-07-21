@@ -74,6 +74,13 @@ export interface ConnectProps {
 	 * Defaults to true, except for relays known to lack it.
 	 */
 	discovery?: boolean;
+
+	/**
+	 * Aborts the connection attempt with the signal's reason. An already-aborted
+	 * signal rejects before anything opens, and aborting after the connection is
+	 * established has no effect. Use `AbortSignal.timeout(ms)` for a deadline.
+	 */
+	signal?: AbortSignal;
 }
 
 // Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would
@@ -93,17 +100,67 @@ const websocketWon = new Set<string>();
  * Establishes a connection to a MOQ server.
  *
  * @param url - The URL of the server to connect to
+ * @param props - Connection options
  * @returns A promise that resolves to a Connection instance
  */
-export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
+export function connect(url: URL, props?: ConnectProps): Promise<Established> {
+	const signal = props?.signal;
+	if (!signal) return connectInner(url, props);
+	return connectAbortable(url, props, signal);
+}
+
+async function connectAbortable(url: URL, props: ConnectProps, signal: AbortSignal): Promise<Established> {
+	signal.throwIfAborted();
+
+	const { promise: aborted, reject: rejectAborted } = Promise.withResolvers<never>();
+	// Avoid an unhandled rejection if the connection wins.
+	aborted.catch(() => {});
+	// Resolves on abort so every in-flight transport tears itself down.
+	const { promise: abort, resolve: resolveAbort } = Promise.withResolvers<void>();
+	const onAbort = () => {
+		resolveAbort();
+		rejectAborted(signal.reason);
+	};
+	signal.addEventListener("abort", onAbort);
+
+	const pending = connectInner(url, props, abort);
+	try {
+		const connection = await Promise.race([pending, aborted]);
+		// Reject if an abort closes the race winner before it can be returned.
+		if (signal.aborted) throw signal.reason;
+		return connection;
+	} catch (err) {
+		if (signal.aborted) {
+			// Close a connection that settles after the abort.
+			pending.then((connection) => connection.close()).catch(() => {});
+			throw signal.reason;
+		}
+		throw err;
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+function closeQuietly(session: WebTransport | Session) {
+	try {
+		session.close();
+	} catch {
+		// Already closed.
+	}
+}
+
+async function connectInner(url: URL, props?: ConnectProps, abort?: Promise<void>): Promise<Established> {
 	const discovery = props?.discovery ?? defaultDiscovery(url);
 
 	if (props?.transport) {
-		return connectTransport(url, props.transport, discovery);
+		const transport = props.transport;
+		void abort?.then(() => closeQuietly(transport));
+		return connectTransport(url, transport, discovery);
 	}
 
-	// Create a cancel promise to kill whichever is still connecting.
-	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
+	// Stop transports after one connects or the caller aborts.
+	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
+	const cancel = abort !== undefined ? Promise.race([raced, abort]) : raced;
 
 	const webtransport = isWebTransportSupported() ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
@@ -133,6 +190,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	done();
 
 	if (!session) throw new Error("no transport available");
+
+	// Abort the setup handshake without leaking the selected transport.
+	void abort?.then(() => closeQuietly(session));
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 	if (session instanceof Session) {

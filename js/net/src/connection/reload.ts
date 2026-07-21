@@ -24,8 +24,8 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
-/** Options for {@link Reload}: connect options plus reactive URL/enabled signals and backoff tuning. */
-export type ReloadProps = ConnectProps & {
+/** Connection and retry options for {@link Reload}. */
+export type ReloadProps = Omit<ConnectProps, "signal"> & {
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
@@ -133,17 +133,21 @@ export class Reload {
 
 		effect.set(this.status, "connecting", "disconnected");
 
+		// Capture this run's signal so a rerun cannot replace it during the attempt.
+		const signal = effect.abort;
+
 		effect.spawn(async () => {
 			try {
-				const pending = connect(url, {
+				const connection = await connect(url, {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					signal,
 				});
 
-				const connection = await Promise.race([effect.cancel, pending]);
-				if (!connection) {
-					pending.then((conn) => conn.close()).catch(() => {});
+				if (signal.aborted) {
+					// Close a connection that settles during teardown.
+					connection.close();
 					return;
 				}
 
@@ -158,6 +162,9 @@ export class Reload {
 
 				await Promise.race([effect.cancel, connection.closed]);
 			} catch (err) {
+				// Treat teardown as cancellation, not a connection failure.
+				if (signal.aborted) return;
+
 				console.warn("connection error:", err);
 
 				// Track retry start for timeout.
