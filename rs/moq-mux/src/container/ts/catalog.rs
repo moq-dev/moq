@@ -4,9 +4,10 @@
 //! back to MPEG-TS that doesn't belong in the codec-neutral media configs: one
 //! entry per track (its original PID and PMT descriptors), a `verbatim` carriage
 //! record for every elementary stream we don't decode (SCTE-35, teletext, DVB
-//! subtitles, private data, ...), and the program-level PMT descriptors. Demuxed
-//! media tracks keep their codec config in the base `video`/`audio` sections; only
-//! their MPEG-TS identity lands here.
+//! subtitles, private data, ...), the program-level PMT descriptors, and the DVB
+//! service layer ([`Service`]: transport/service identity plus the SDT/NIT tables).
+//! Demuxed media tracks keep their codec config in the base `video`/`audio`
+//! sections; only their MPEG-TS identity lands here.
 
 use std::collections::BTreeMap;
 
@@ -16,6 +17,15 @@ use serde_with::base64::Base64;
 use serde_with::serde_as;
 
 use crate::catalog::hang::CatalogExt;
+
+/// PID of the DVB Network Information Table (NIT).
+pub(super) const NIT_PID: u16 = 0x0010;
+/// PID of the DVB Service Description Table (SDT).
+pub(super) const SDT_PID: u16 = 0x0011;
+/// `table_id` of the NIT for the actual network (NIT Actual).
+pub(super) const NIT_ACTUAL_TABLE_ID: u8 = 0x40;
+/// `table_id` of the SDT for the actual transport stream (SDT Actual).
+pub(super) const SDT_ACTUAL_TABLE_ID: u8 = 0x42;
 
 /// The `mpegts` catalog section.
 ///
@@ -34,13 +44,57 @@ pub struct Mpegts {
 	/// re-emits these; the SCTE-35 'CUEI' registration is derived when absent.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub program_descriptors: Vec<Descriptor>,
+
+	/// The DVB service layer (transport/service identity plus the SDT/NIT tables).
+	/// Present only for a source that carries it (a TS input); omitted for media-only
+	/// broadcasts, so export then synthesizes a minimal identity.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub service: Option<Service>,
 }
 
 impl Mpegts {
 	/// True when the section carries nothing, so it's omitted from the catalog.
 	pub fn is_empty(&self) -> bool {
-		self.tracks.is_empty() && self.program_descriptors.is_empty()
+		self.tracks.is_empty() && self.program_descriptors.is_empty() && self.service.is_none()
 	}
+}
+
+/// The DVB service layer of a TS program.
+///
+/// Two kinds of data: the small structured identity export needs to rebuild a
+/// consistent PAT/PMT (the transport stream, service, and PMT PID), and the
+/// standalone SI tables ([`sdt`](Self::sdt), [`nit`](Self::nit)) carried verbatim
+/// so the service name, provider, type, original network, and network description
+/// survive the round-trip byte-for-byte. Regenerated tables (TDT/TOT) and EPG (EIT)
+/// are out of scope; they are live or dynamic, not static identity.
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Service {
+	/// Transport stream ID from the PAT, preserved so the rebuilt PAT stays
+	/// consistent with the carried SDT/NIT.
+	pub transport_stream_id: u16,
+
+	/// Program (service) number from the PAT. Re-emitted as the PAT program number
+	/// and the PMT `program_number`.
+	pub service_id: u16,
+
+	/// Original PMT PID from the PAT, preserved so PMT cross-references survive.
+	pub pmt_pid: u16,
+
+	/// SDT Actual section (`table_id` 0x42), carried verbatim and re-emitted on
+	/// PID 0x0011. Carries the service name, provider, type, and original network ID.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde_as(as = "Option<Base64>")]
+	pub sdt: Option<Bytes>,
+
+	/// NIT Actual section (`table_id` 0x40), carried verbatim and re-emitted on
+	/// PID 0x0010. Describes the originating delivery network, so it is preserved
+	/// rather than synthesized (an operator decision).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde_as(as = "Option<Base64>")]
+	pub nit: Option<Bytes>,
 }
 
 /// One track's MPEG-TS identity and signaling.
@@ -225,5 +279,29 @@ mod test {
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
 		assert_eq!(parsed.mpegts, mpegts, "mpegts section round-trips");
+	}
+
+	#[test]
+	fn service_roundtrip() {
+		let mpegts = Mpegts {
+			service: Some(Service {
+				transport_stream_id: 0x1234,
+				service_id: 1,
+				pmt_pid: 0x0064,
+				sdt: Some(Bytes::from_static(b"\x42\xf0\x25")),
+				nit: None,
+				..Default::default()
+			}),
+			..Default::default()
+		};
+		assert!(!mpegts.is_empty(), "a service record is not empty");
+
+		let json = serde_json::to_string(&Ext { mpegts: mpegts.clone() }).unwrap();
+		// The SDT section is base64; the absent NIT is omitted.
+		assert!(json.contains("\"sdt\""), "sdt present: {json}");
+		assert!(!json.contains("\"nit\""), "absent nit omitted: {json}");
+
+		let parsed: Ext = serde_json::from_str(&json).unwrap();
+		assert_eq!(parsed.mpegts, mpegts, "service section round-trips");
 	}
 }
