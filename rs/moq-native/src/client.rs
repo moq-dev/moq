@@ -236,8 +236,9 @@ impl Client {
 		self
 	}
 
-	/// Attach a tier-scoped [`moq_net::stats::Handle`] to all sessions opened by this client.
-	pub fn with_stats(mut self, stats: moq_net::stats::Handle) -> Self {
+	/// Attach a per-connection [`moq_net::stats::Session`] context to all sessions
+	/// opened by this client.
+	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
 		self.moq = self.moq.with_stats(stats);
 		self
 	}

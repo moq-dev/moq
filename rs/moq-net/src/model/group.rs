@@ -10,7 +10,7 @@
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::cache;
 use crate::frame::{self, Frame, FrameBuf};
-use crate::{Timescale, track};
+use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -220,6 +220,10 @@ pub struct Producer {
 	// timestamp into the track scale before it enters the stream. Threaded down by
 	// value from [`track::Producer::create_group`] / `append_group`.
 	track: track::Info,
+
+	// Ingress payload meter, set by a tagged [`track::Producer`] via
+	// [`Self::with_meter`]. Empty (no-op) for an untagged group.
+	stats: stats::Meter,
 }
 
 impl std::ops::Deref for Producer {
@@ -246,7 +250,20 @@ impl Producer {
 		let weak = state.weak();
 		let charge = track.broadcast.origin.pool.register(Box::new(move || evict(&weak)));
 		state.write().ok().expect("a new group is open").charge = charge;
-		Self { info, state, track }
+		Self {
+			info,
+			state,
+			track,
+			stats: stats::Meter::default(),
+		}
+	}
+
+	/// Attach an ingress payload meter, counting this as one delivered group.
+	/// Called by a tagged [`track::Producer`] when it creates the group.
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		meter.group();
+		self.stats = meter;
+		self
 	}
 
 	/// The group header.
@@ -290,6 +307,10 @@ impl Producer {
 		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
 		self.track.broadcast.origin.pool.evict();
+
+		// Ingress payload: one whole frame written.
+		self.stats.frames(1);
+		self.stats.bytes(size);
 		Ok(())
 	}
 
@@ -329,11 +350,16 @@ impl Producer {
 		drop(state);
 		self.track.broadcast.origin.pool.evict();
 
+		// Ingress payload: one frame opened; its bytes are counted per chunk as the
+		// frame::Producer writes them.
+		self.stats.frames(1);
+		let meter = self.stats.clone();
+
 		let info = frame::Info {
 			size: frame.size,
 			timestamp,
 		};
-		Ok(frame::Producer::new(self, buf, info))
+		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
 	}
 
 	/// Wake consumers parked on the group channel (called after a partial write).
@@ -404,6 +430,9 @@ impl Producer {
 			track: self.track.clone(),
 			index: 0,
 			prefetch: Prefetch::default(),
+			// Untagged: a tagged track attaches the egress meter via `with_meter`
+			// when it hands the consumer to a subscriber/fetch.
+			stats: stats::Meter::default(),
 		}
 	}
 
@@ -434,6 +463,7 @@ impl Clone for Producer {
 			info: self.info,
 			state: self.state.clone(),
 			track: self.track.clone(),
+			stats: self.stats.clone(),
 		}
 	}
 }
@@ -498,6 +528,17 @@ impl Prefetch {
 			self.len += 1;
 		}
 	}
+
+	/// `(frame count, total payload bytes)` of the buffered, not-yet-taken frames.
+	/// Read once per fill to bump the egress payload counters for the whole batch.
+	fn buffered(&self) -> (u64, u64) {
+		let mut bytes = 0u64;
+		for slot in &self.frames[self.pos..self.len] {
+			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
+			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
+		}
+		((self.len - self.pos) as u64, bytes)
+	}
 }
 
 impl Default for Prefetch {
@@ -537,6 +578,10 @@ pub struct Consumer {
 
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
 	prefetch: Prefetch,
+
+	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
+	// (no-op) for an untagged group.
+	stats: stats::Meter,
 }
 
 impl Clone for Consumer {
@@ -549,6 +594,9 @@ impl Clone for Consumer {
 			track: self.track.clone(),
 			index: self.index,
 			prefetch: Prefetch::default(),
+			// Inherit the meter without re-counting the group: the original already
+			// counted it when the track handed it out.
+			stats: self.stats.clone(),
 		}
 	}
 }
@@ -562,6 +610,14 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// Attach an egress payload meter, counting this as one delivered group.
+	/// Called by a tagged track when it hands the consumer to a subscriber or fetch.
+	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		meter.group();
+		self.stats = meter;
+		self
+	}
+
 	/// The parent track's timescale.
 	pub fn timescale(&self) -> Timescale {
 		self.track.timescale
@@ -589,6 +645,8 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
+		// Their bytes were already counted at the batch fill, so the frame::Consumer
+		// carries no meter.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
 			let info = frame::Info {
@@ -605,7 +663,12 @@ impl Consumer {
 		};
 
 		self.index += 1;
-		Poll::Ready(Ok(Some(frame::Consumer::new(self.state.clone(), info, source))))
+		// A direct read (not prefetched): count the frame here; the frame::Consumer
+		// counts its bytes per chunk as they're read out.
+		self.stats.frames(1);
+		Poll::Ready(Ok(Some(
+			frame::Consumer::new(self.state.clone(), info, source).with_meter(self.stats.clone()),
+		)))
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
@@ -653,6 +716,12 @@ impl Consumer {
 			Ok(Err(err)) => return Poll::Ready(Err(err)),
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
+
+		// A fresh batch was just filled (empty only on a clean end). Count the whole
+		// batch once here, under no lock, so the drained pops that follow stay free.
+		let (frames, bytes) = self.prefetch.buffered();
+		self.stats.frames(frames);
+		self.stats.bytes(bytes);
 
 		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
 			self.index += 1;

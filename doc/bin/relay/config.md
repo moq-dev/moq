@@ -263,12 +263,14 @@ counterpart no traffic can flow, so the entry is dropped:
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
+    "fetches": 3,
     "bytes": 12345, "frames": 678, "groups": 9
   },
   "anon/foo": {
     "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
+    "fetches": 0,
     "bytes": 234, "frames": 12, "groups": 1
   }
 }
@@ -280,10 +282,12 @@ Field semantics:
   announce/unannounce event on this `(tier, role)` slot, regardless of
   whether any subscription happened. Use this for "all known broadcasts".
 - `announced_bytes`: cumulative broadcast-name length summed over each
-  announce and unannounce of this broadcast. It counts the name, not the
-  encoded message size, so a broadcast isn't charged for hop chains or
+  model-visible announce and unannounce of this broadcast. It counts the name,
+  not the encoded message size, so a broadcast isn't charged for hop chains or
   framing overhead (and the count is the same across protocol versions).
-  Separate from `bytes`, which is media payload.
+  Separate from `bytes`, which is media payload. Announce control traffic that
+  never enters the model (auth-rejected or unmatched-prefix announcements) is
+  not counted.
 - `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
   subscription sentinel. The first active subscription a peer session
   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
@@ -292,9 +296,18 @@ Field semantics:
   subscribed to the broadcast (i.e. viewers on the egress side), which is
   typically what billing and UI want.
 - `subscriptions` / `subscriptions_closed`: cumulative count of
-  track-level subscription guards opened and dropped.
-- `bytes` / `frames` / `groups`: cumulative payload counters from the
-  session loops (both the `moq-lite` and IETF `moq-transport` paths).
+  track-level subscriptions opened and dropped.
+- `fetches`: cumulative one-shot group fetches served to a calling session,
+  counted once per coalesced fetch (requests served, not upstream work). It is
+  separate from `subscriptions` and the viewer sentinel; the fetched payload
+  still flows into `bytes` / `frames` / `groups`.
+- `bytes` / `frames` / `groups`: cumulative payload counters, bumped as
+  groups/frames are read out of the model on the egress side and written into
+  it on the ingress side. Egress bytes are counted when read out of the model
+  (into the QUIC send path), so bytes read but lost to a mid-group stream reset
+  still count. For a fan-out egress reader (e.g. an HLS/DASH muxer) this is
+  bytes read once per segment at the broadcast origin, not per downstream HTTP
+  client.
 
 The session tracks (`sessions.json` and any `<tier>/sessions.json`) instead map
 each auth root to a `{ sessions, sessions_closed }` snapshot. `sessions`

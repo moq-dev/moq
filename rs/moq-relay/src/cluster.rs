@@ -892,11 +892,12 @@ impl Cluster {
 			.clone()
 			.context("internal: cluster peer dial without an attached QUIC client")?;
 
-		// Cluster dials use their configured stats tier.
+		// Cluster dials use their configured stats tier. Cluster peers carry no auth
+		// root, so presence is keyed under the empty root within the cluster tier.
 		let mut client = client
 			.with_publisher(&self.origin)
 			.with_subscriber(self.origin.clone())
-			.with_stats(self.stats.tier(self.cluster_tier()));
+			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
 		}

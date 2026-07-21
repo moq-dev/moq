@@ -103,7 +103,7 @@ impl SessionsConsumer {
 mod tests {
 	use std::time::Duration;
 
-	use moq_net::{Consume, Origin, PathOwned, announce, origin};
+	use moq_net::{Consume, Origin, PathOwned, Timestamp, announce, broadcast, origin, track};
 
 	use crate::{Producer, ProducerConfig, Tier};
 
@@ -117,6 +117,55 @@ mod tests {
 				.with_node(PathOwned::from("sjc")),
 		);
 		(producer, origin)
+	}
+
+	/// A tagged egress feed into a producer's registry, holding the handles needed
+	/// to write more traffic incrementally. Presence is recorded under `root`.
+	struct Feed {
+		track: track::Producer,
+		sub: track::Subscriber,
+		_announced: announce::Consumer,
+		_source: broadcast::Producer,
+		_ctx: moq_net::stats::Session,
+	}
+
+	impl Feed {
+		/// Write one frame of `bytes` bytes into the broadcast and read it out on the
+		/// egress side, so the publisher `bytes`/`frames`/`groups` counters advance.
+		async fn write(&mut self, bytes: usize) {
+			let mut group = self.track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, vec![0u8; bytes]).unwrap();
+			group.finish().unwrap();
+			let mut group = self.sub.recv_group().await.unwrap().unwrap();
+			while group.read_frame().await.unwrap().is_some() {}
+		}
+	}
+
+	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
+		let ctx = producer.registry().tier(tier).session(root);
+		let feed_origin = Origin::random().produce();
+		let egress = feed_origin.consume().with_stats(ctx.clone());
+
+		let mut announced = egress.announced();
+		let mut source = feed_origin
+			.create_broadcast(path, broadcast::Route::announced())
+			.unwrap();
+		let track = source.create_track("video", None).unwrap();
+
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		tokio::time::sleep(Duration::from_millis(1)).await;
+
+		let announce::Update { broadcast, .. } = announced.next().await.expect("announce");
+		let consumer = broadcast.expect("active");
+		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+
+		Feed {
+			track,
+			sub,
+			_announced: announced,
+			_source: source,
+			_ctx: ctx,
+		}
 	}
 
 	async fn announced(origin: &origin::Producer) -> moq_net::broadcast::Consumer {
@@ -140,11 +189,8 @@ mod tests {
 		// track's delta path).
 		let (producer, origin) = test_producer();
 		let tier = Tier::default();
-		let stats = producer.registry().tier(tier.clone());
-		let bs = stats.broadcast("foo/bar");
-		let track = bs.publisher().track("video");
-		track.bytes(42);
-		let _session = stats.session("acme");
+		let mut fed = feed(&producer, tier.clone(), "acme", "foo/bar").await;
+		fed.write(42).await;
 
 		drive_tick().await;
 
@@ -164,7 +210,7 @@ mod tests {
 		assert_eq!(plain_frame.get("foo/bar").expect("entry").bytes, 42);
 
 		// A later drain updates both flavors; the compressed one rides a delta.
-		track.bytes(8);
+		fed.write(8).await;
 		drive_tick().await;
 		let plain_frame = plain_traffic.next().await.expect("read").expect("frame");
 		let z_frame = z_traffic.next().await.expect("read").expect("frame");

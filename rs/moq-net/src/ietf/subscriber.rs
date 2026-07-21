@@ -1,6 +1,5 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
-	sync::Arc,
 	task::Poll,
 	time::Duration,
 };
@@ -10,7 +9,7 @@ use crate::{
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
-	origin, stats, track,
+	origin, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
@@ -61,9 +60,6 @@ struct State {
 struct TrackState {
 	producer: track::Producer,
 	alias: Option<u64>,
-	/// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
-	/// Dropping on subscription end records `subscriptions_closed`.
-	stats: Arc<stats::SubscriberTrack>,
 }
 
 struct BroadcastState {
@@ -74,22 +70,14 @@ struct BroadcastState {
 
 	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
 	count: usize,
-
-	/// Subscriber-side announce guard (bumps `announced` / `announced_closed`),
-	/// held for as long as the broadcast is announced into our origin.
-	_stats: stats::Subscriber,
 }
 
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
+	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	stats: stats::Handle,
-	/// Per-session ingress broadcast-subscription tracker. Each upstream
-	/// subscription holds a guard so `broadcasts - broadcasts_closed` counts the
-	/// distinct upstream sessions feeding each broadcast.
-	broadcasts: stats::SessionBroadcasts,
 	// A random per-connection origin stamped into the hop chain of every
 	// broadcast. moq-transport never carries hop ids on the wire, so each
 	// upstream session needs a stable, unique identity in the hop list for two
@@ -120,21 +108,11 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(
-		session: S,
-		origin: origin::Producer,
-		control: Control,
-		stats: stats::Handle,
-		version: Version,
-		tasks: Tasks,
-	) -> Self {
-		let broadcasts = stats.subscriber_broadcasts();
+	pub fn new(session: S, origin: origin::Producer, control: Control, version: Version, tasks: Tasks) -> Self {
 		Self {
 			session,
 			origin,
 			control,
-			stats,
-			broadcasts,
 			session_origin: crate::Origin::random(),
 			state: Default::default(),
 			tasks,
@@ -356,9 +334,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// PUBLISH is the peer feeding us a broadcast, so count this session as
 			// an active upstream feed for the lifetime of the publish. The guard
 			// drops (releasing `broadcasts_closed`) when the stream closes below.
-			let abs = self.origin.absolute(&msg.track_namespace).to_owned();
-			let _broadcast_sub = self.broadcasts.subscribe(&abs);
-
 			// Wait for PublishDone or stream close
 			let _ = stream.reader.closed().await;
 		}
@@ -533,14 +508,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<broadcast::Producer, Error> {
-		let abs = self.origin.absolute(&path).to_owned();
-		// Count the broadcast name length per announce (not the encoded message
-		// size, so framing overhead isn't charged), keyed by path so it's
-		// independent of the lifetime guard below.
-		self.stats
-			.broadcast(&abs)
-			.subscriber_announced_bytes(abs.as_str().len() as u64);
-
+		// The ingress announce stats (announced / announced_bytes) are driven in the
+		// model by `create_broadcast`'s route transitions below.
 		let mut state = self.state.lock();
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
@@ -568,7 +537,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(BroadcastState {
 					producer: crate::model::broadcast::SourceGuard::new(broadcast.clone()),
 					count: 1,
-					_stats: self.stats.broadcast(&abs).subscriber(),
 				});
 
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
@@ -589,18 +557,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// `count_bytes` records the unannounce name length (mirroring the announce in
-	/// [`Self::start_announce`]). Pass `true` for a real unannounce / stream-close
-	/// control event and `false` for a local rollback (e.g. a failed OK write),
-	/// which is a teardown rather than an announce the peer ended.
-	fn stop_announce(&mut self, path: PathOwned, count_bytes: bool) -> Result<(), Error> {
-		if count_bytes {
-			let abs = self.origin.absolute(&path).to_owned();
-			self.stats
-				.broadcast(&abs)
-				.subscriber_announced_bytes(abs.as_str().len() as u64);
-		}
-
+	/// `_count_bytes` is retained for call-site clarity (a real unannounce vs a local
+	/// rollback), but the ingress announce stats are now driven in the model by the
+	/// source's route transitions and last-route detach, not here.
+	fn stop_announce(&mut self, path: PathOwned, _count_bytes: bool) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
@@ -633,16 +593,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		let abs = self.origin.absolute(&msg.track_namespace).to_owned();
-		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(&msg.track_name));
-
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
 					producer: track.clone(),
 					alias: Some(msg.track_alias),
-					stats: track_stats,
 				});
 			}
 			Entry::Occupied(_) => {
@@ -735,9 +691,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		let abs = self.origin.absolute(&broadcast_path).to_owned();
-		let track_stats = Arc::new(self.stats.broadcast(&abs).subscriber_track(track.name()));
-
 		// Register the request before writing SUBSCRIBE so SUBSCRIBE_OK can bind its alias.
 		{
 			let mut state = self.state.lock();
@@ -746,7 +699,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				TrackState {
 					producer: track.clone(),
 					alias: None,
-					stats: track_stats,
 				},
 			);
 		}
@@ -782,11 +734,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return;
 			}
 		};
-
-		// Upstream confirmed (SubscribeOk), so this session is now actively feeding
-		// the broadcast: take the `broadcasts` sentinel for the subscription's
-		// lifetime. It drops (releasing `broadcasts_closed`) when this fn returns.
-		let _broadcast_sub = self.broadcasts.subscribe(&abs);
 
 		// One event ends the subscription: the last consumer leaving, the broadcast
 		// dying, or the subscribe stream closing.
@@ -900,22 +847,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
 		})?;
 
-		let (mut producer, track, track_stats) = {
+		let (mut producer, track) = {
 			let mut state = self.state.lock();
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
 			let group_info = group::Info {
 				sequence: group.group_id,
 			};
+			// Stats (groups/frames/bytes) are counted in the model as the group is
+			// written, through the tagged `track::Producer`.
 			let producer = track.producer.create_group(group_info)?;
-			(producer, track.producer.clone(), track.stats.clone())
+			(producer, track.producer.clone())
 		};
 
-		// Bump groups counter for this incoming group on the subscriber side.
-		track_stats.group();
-
 		let res = {
-			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), track_stats.clone()));
+			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone()));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -949,7 +895,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: group::Producer,
-		track_stats: Arc<stats::SubscriberTrack>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -973,7 +918,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				if status == 0 {
 					let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 					let frame = producer.create_frame(frame::Info { size: 0, timestamp })?;
-					track_stats.frame();
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					break;
@@ -985,9 +929,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// `size` before allocating, so no pre-check is needed.
 				let timestamp = timestamp.unwrap_or_else(crate::Timestamp::now);
 				let mut frame = producer.create_frame(frame::Info { size, timestamp })?;
-				track_stats.frame();
 
-				if let Err(err) = self.run_frame(stream, &mut frame, &track_stats).await {
+				if let Err(err) = self.run_frame(stream, &mut frame).await {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
@@ -1003,12 +946,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut frame::Producer<'_>,
-		track_stats: &stats::SubscriberTrack,
 	) -> Result<(), Error> {
 		while frame.remaining() > 0 {
 			match stream.read_chunk(frame.remaining()).await? {
 				Some(chunk) if !chunk.is_empty() => {
-					track_stats.bytes(chunk.len() as u64);
 					frame.write(chunk)?;
 				}
 				_ => return Err(Error::WrongSize),

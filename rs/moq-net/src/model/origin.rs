@@ -1,4 +1,4 @@
-use crate::{broadcast, cache, track};
+use crate::{broadcast, cache, stats, track};
 use kio::Pollable;
 use std::{
 	collections::{BTreeMap, HashMap},
@@ -768,6 +768,11 @@ pub struct Producer {
 	// The cache pool inherited by broadcasts created under this origin (sessions
 	// mint their remote broadcasts with it). Unbounded by default.
 	pool: cache::Pool,
+
+	// Ingress stats context. Broadcasts created through this producer are attributed
+	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
+	// session tagged this handle via [`Self::with_stats`].
+	stats: stats::Session,
 }
 
 impl std::ops::Deref for Producer {
@@ -789,7 +794,16 @@ impl Producer {
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
 			pool: info.pool,
+			stats: stats::Session::default(),
 		}
+	}
+
+	/// Attach an ingress stats context: broadcasts created through this handle (and
+	/// any handle derived from it) are attributed to `session` on the subscriber
+	/// (ingress) side. Pass [`stats::Session::default`] to opt out.
+	pub fn with_stats(mut self, session: stats::Session) -> Self {
+		self.stats = session;
+		self
 	}
 
 	/// This origin's [`Info`] (identity + cache pool), the parent handle a broadcast
@@ -812,6 +826,7 @@ impl Producer {
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
+			stats: stats::Session::default(),
 		}
 	}
 
@@ -869,10 +884,17 @@ impl Producer {
 			return Err(BoundsExceeded.into());
 		}
 
-		let mut source = broadcast::Info { origin: self.info() }.produce();
+		// Resolve the ingress counters once, keyed by the absolute broadcast path.
+		// The source producer tags its tracks; run_source drives the announce guard
+		// off route transitions.
+		let ingress = self.stats.ingress(&full);
+
+		let mut source = broadcast::Info { origin: self.info() }
+			.produce()
+			.with_stats(ingress.clone());
 		source.set_route(route).expect("fresh producer");
 
-		web_async::spawn(run_source(self.info(), node, full, rest, source.consume()));
+		web_async::spawn(run_source(self.info(), node, full, rest, source.consume(), ingress));
 
 		Ok(source)
 	}
@@ -890,6 +912,7 @@ impl Producer {
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
+			stats: self.stats.clone(),
 		})
 	}
 
@@ -910,7 +933,15 @@ impl Producer {
 	/// Use [`Consumer::announced`] to register interest and start receiving
 	/// announcement events; the consumer itself does not allocate any channels.
 	pub fn consume(&self) -> Consumer {
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
+		// Untagged: a session tags the egress consumer separately via
+		// `origin::Consumer::with_stats` (ingress and egress are distinct sides).
+		Consumer::new(
+			self.info,
+			self.root.clone(),
+			self.nodes.clone(),
+			self.dynamic.clone(),
+			stats::Session::default(),
+		)
 	}
 
 	/// Handle to the announcement stream for this producer's subtree.
@@ -935,6 +966,7 @@ impl Producer {
 			nodes: self.nodes.root(&prefix)?,
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
+			stats: self.stats.clone(),
 		})
 	}
 
@@ -1121,6 +1153,7 @@ async fn run_source(
 	full: PathOwned,
 	rest: PathOwned,
 	mut source: broadcast::Consumer,
+	ingress: stats::Scope,
 ) {
 	// The first `route_changed` yields the current route immediately; nothing is
 	// visible to consumers until this attach, giving the creator a window to set
@@ -1129,6 +1162,12 @@ async fn run_source(
 		// Closed before ever attaching; nothing became visible.
 		return;
 	};
+
+	// Ingress announce guard: held while this source's route is announced. Opening
+	// bumps `announced` + `announced_bytes`; dropping (route offline, or the source
+	// closing below) bumps `announced_closed` + `announced_bytes`. Empty scope =
+	// no-op.
+	let mut announce = route.announce.then(|| ingress.announce());
 
 	let leaf = if rest.is_empty() {
 		node.clone()
@@ -1141,6 +1180,7 @@ async fn run_source(
 	loop {
 		match source.route_changed().await {
 			Ok(route) => {
+				let announced = route.announce;
 				{
 					let carrying = broadcast.demand().is_used();
 					let Ok(mut s) = state.write() else { return };
@@ -1152,6 +1192,12 @@ async fn run_source(
 					}
 					entry.route = route;
 					s.reselect(carrying);
+				}
+				// Toggle the ingress announce guard on a live/offline transition.
+				match (announced, announce.is_some()) {
+					(true, false) => announce = Some(ingress.announce()),
+					(false, true) => announce = None,
+					_ => {}
 				}
 				sync_front(&state, &broadcast, &leaf);
 			}
@@ -1663,6 +1709,9 @@ impl Drop for Request {
 /// handler drops before serving it.
 pub struct Requesting {
 	inner: RequestState,
+	// Egress scope applied to the resolved broadcast, so its reads are attributed.
+	// Empty (no-op) for an untagged consumer.
+	stats: stats::Scope,
 }
 
 enum RequestState {
@@ -1679,32 +1728,40 @@ impl Requesting {
 	fn ready(broadcast: broadcast::Consumer) -> Self {
 		Self {
 			inner: RequestState::Ready(broadcast),
+			stats: stats::Scope::default(),
 		}
 	}
 
 	fn failed(error: Error) -> Self {
 		Self {
 			inner: RequestState::Failed(error),
+			stats: stats::Scope::default(),
 		}
 	}
 
 	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
 		Self {
 			inner: RequestState::Pending(consumer),
+			stats: stats::Scope::default(),
 		}
+	}
+
+	fn with_stats(mut self, scope: stats::Scope) -> Self {
+		self.stats = scope;
+		self
 	}
 
 	/// Poll for the requested broadcast without blocking.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		match &self.inner {
-			RequestState::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone())),
+			RequestState::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone().with_stats(self.stats.clone()))),
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending(consumer) => Poll::Ready(
 				match ready!(consumer.poll(waiter, |state| match &state.resolved {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				})) {
-					Ok(result) => result,
+					Ok(result) => result.map(|broadcast| broadcast.with_stats(self.stats.clone())),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -1742,8 +1799,15 @@ impl<T, U: Consume<T>> Consume<T> for &U {
 impl Consume<Consumer> for Producer {
 	fn consume(&self) -> Consumer {
 		// Mirrors the inherent `Producer::consume`; inlined to avoid the
-		// inherent-vs-trait `consume` ambiguity.
-		Consumer::new(self.info, self.root.clone(), self.nodes.clone(), self.dynamic.clone())
+		// inherent-vs-trait `consume` ambiguity. Untagged: egress is tagged
+		// separately from ingress.
+		Consumer::new(
+			self.info,
+			self.root.clone(),
+			self.nodes.clone(),
+			self.dynamic.clone(),
+			stats::Session::default(),
+		)
 	}
 }
 
@@ -1795,6 +1859,11 @@ pub struct Consumer {
 	// Shared fallback request queue, fed to any `Dynamic` handler on the
 	// producer side. Used only by `request_broadcast`; announced lookups ignore it.
 	dynamic: kio::Shared<OriginDynamicState>,
+
+	// Egress stats context. Broadcasts handed out through this consumer (and any
+	// handle derived from them) are attributed to it (reads counted on the
+	// publisher/egress side). Empty (no-op) unless a session tagged this handle.
+	stats: stats::Session,
 }
 
 impl std::ops::Deref for Consumer {
@@ -1806,12 +1875,37 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	fn new(info: Origin, root: PathOwned, nodes: OriginNodes, dynamic: kio::Shared<OriginDynamicState>) -> Self {
+	fn new(
+		info: Origin,
+		root: PathOwned,
+		nodes: OriginNodes,
+		dynamic: kio::Shared<OriginDynamicState>,
+		stats: stats::Session,
+	) -> Self {
 		Self {
 			info,
 			nodes,
 			root,
 			dynamic,
+			stats,
+		}
+	}
+
+	/// Attach an egress stats context: broadcasts handed out through this handle (and
+	/// any handle derived from it) are attributed to `session` on the publisher
+	/// (egress) side. Pass [`stats::Session::default`] to opt out.
+	pub fn with_stats(mut self, session: stats::Session) -> Self {
+		self.stats = session;
+		self
+	}
+
+	/// A clone of this consumer with its stats context cleared, so an internal
+	/// lookup stream (e.g. [`Self::announced_broadcast`]) doesn't drive the egress
+	/// announce guards; the caller re-attributes the result itself.
+	fn untagged(&self) -> Self {
+		Self {
+			stats: stats::Session::default(),
+			..self.clone()
 		}
 	}
 
@@ -1825,6 +1919,7 @@ impl Consumer {
 			nodes: OriginNodes { nodes: Vec::new() },
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
+			stats: self.stats.clone(),
 		}
 	}
 
@@ -1835,7 +1930,7 @@ impl Consumer {
 	/// set as initial announcements. Drop the returned [`AnnounceConsumer`]
 	/// to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone())
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -1880,7 +1975,11 @@ impl Consumer {
 			return None;
 		}
 
-		let mut announced = consumer.announced();
+		// Use an untagged stream: this is a lookup, not egress announce forwarding, so
+		// it must not drive the announce guards. The matched result is attributed
+		// with the egress scope instead.
+		let mut announced = consumer.untagged().announced();
+		let scope = self.stats.egress(self.root.join(&path).to_owned());
 		loop {
 			let OriginAnnounce {
 				path: announced_path,
@@ -1889,7 +1988,7 @@ impl Consumer {
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced_path.as_path() == path {
 				if let Some(broadcast) = broadcast {
-					return Some(broadcast);
+					return Some(broadcast.with_stats(scope));
 				}
 			}
 		}
@@ -1907,6 +2006,7 @@ impl Consumer {
 			self.root.clone(),
 			self.nodes.select(&prefixes)?,
 			self.dynamic.clone(),
+			self.stats.clone(),
 		))
 	}
 
@@ -1931,14 +2031,16 @@ impl Consumer {
 	pub fn request_broadcast(&self, path: impl AsPath) -> kio::Pending<Requesting> {
 		let path = path.as_path();
 
+		// Key requests by absolute path so a scoped/rooted consumer and the handler
+		// (which may have a different root) agree on the same entry, and so the egress
+		// counters resolve against the same broadcast the ingress side wrote.
+		let absolute = self.root.join(&path).to_owned();
+		let scope = self.stats.egress(&absolute);
+
 		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
 		if let Some(broadcast) = self.get_broadcast(&path) {
-			return kio::Pending::new(Requesting::ready(broadcast));
+			return kio::Pending::new(Requesting::ready(broadcast).with_stats(scope));
 		}
-
-		// Key requests by absolute path so a scoped/rooted consumer and the handler
-		// (which may have a different root) agree on the same entry.
-		let absolute = self.root.join(&path).to_owned();
 
 		let mut state = self.dynamic.lock();
 
@@ -1946,7 +2048,7 @@ impl Consumer {
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
 		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			return kio::Pending::new(Requesting::ready(weak.consume()));
+			return kio::Pending::new(Requesting::ready(weak.consume()).with_stats(scope));
 		}
 
 		// Coalesce onto a pending request for the same path; otherwise register a new
@@ -1962,7 +2064,7 @@ impl Consumer {
 			consumer
 		};
 
-		kio::Pending::new(Requesting::pending(consumer))
+		kio::Pending::new(Requesting::pending(consumer).with_stats(scope))
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -1977,6 +2079,7 @@ impl Consumer {
 			self.root.join(&prefix).to_owned(),
 			self.nodes.root(&prefix)?,
 			self.dynamic.clone(),
+			self.stats.clone(),
 		))
 	}
 
@@ -2018,7 +2121,9 @@ impl AnnounceProducer {
 	/// as initial announcements. Drop the returned [`AnnounceConsumer`] to
 	/// unregister.
 	pub fn consume(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone())
+		// Untagged: `AnnounceProducer` is used for internal announce plumbing, not
+		// egress attribution (which flows through `origin::Consumer::announced`).
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default())
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -2039,10 +2144,19 @@ pub struct AnnounceConsumer {
 	// Pending updates queued for this cursor. Coalesced so a slow consumer
 	// can't accumulate redundant announce/unannounce pairs.
 	state: kio::Producer<OriginConsumerState>,
+
+	// Egress stats context (empty for an untagged stream). Announce events drive the
+	// per-broadcast announce guards below and tag the broadcasts handed out.
+	stats: stats::Session,
+
+	// Live egress announce guards, keyed by absolute broadcast path. An announce
+	// opens one (bumping `announced` + `announced_bytes`); the matching unannounce
+	// drops it (bumping `announced_closed` + `announced_bytes`).
+	guards: HashMap<PathOwned, stats::Announce>,
 }
 
 impl AnnounceConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
+	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -2054,7 +2168,38 @@ impl AnnounceConsumer {
 			node.lock().consume(id, notify);
 		}
 
-		Self { id, nodes, root, state }
+		Self {
+			id,
+			nodes,
+			root,
+			state,
+			stats,
+			guards: HashMap::new(),
+		}
+	}
+
+	/// Drive the egress announce guards and tag the broadcast for one update.
+	///
+	/// An announce opens a guard (keyed by absolute path) and tags the yielded
+	/// broadcast with the egress scope; an unannounce drops the guard. A no-op for
+	/// an untagged stream.
+	fn attribute(&mut self, update: OriginAnnounce) -> OriginAnnounce {
+		let OriginAnnounce { path, broadcast } = update;
+		let absolute = self.root.join(&path).to_owned();
+		match broadcast {
+			Some(broadcast) => {
+				let scope = self.stats.egress(&absolute);
+				self.guards.entry(absolute).or_insert_with(|| scope.announce());
+				OriginAnnounce {
+					path,
+					broadcast: Some(broadcast.with_stats(scope)),
+				}
+			}
+			None => {
+				self.guards.remove(&absolute);
+				OriginAnnounce { path, broadcast: None }
+			}
+		}
 	}
 
 	/// Returns the next (un)announced broadcast and its path relative to this
@@ -2073,18 +2218,21 @@ impl AnnounceConsumer {
 	/// cursor is closed, or `Poll::Pending` after registering `waiter` to be
 	/// notified when the next update arrives.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<OriginAnnounce>> {
-		let mut state = match ready!(self.state.poll(waiter, |state| {
-			if state.pending.is_empty() {
-				Poll::Pending
-			} else {
-				Poll::Ready(())
-			}
-		})) {
-			Ok(state) => state,
-			// Closed: discard the Ref so its MutexGuard doesn't escape this call.
-			Err(_) => return Poll::Ready(None),
+		let update = {
+			let mut state = match ready!(self.state.poll(waiter, |state| {
+				if state.pending.is_empty() {
+					Poll::Pending
+				} else {
+					Poll::Ready(())
+				}
+			})) {
+				Ok(state) => state,
+				// Closed: discard the Ref so its MutexGuard doesn't escape this call.
+				Err(_) => return Poll::Ready(None),
+			};
+			state.take().expect("predicate guaranteed an update")
 		};
-		Poll::Ready(Some(state.take().expect("predicate guaranteed an update")))
+		Poll::Ready(Some(self.attribute(update)))
 	}
 
 	/// Returns the next (un)announced broadcast without blocking.
@@ -2092,7 +2240,8 @@ impl AnnounceConsumer {
 	/// Returns None if there is no update available; NOT because the cursor is closed.
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<OriginAnnounce> {
-		self.state.write().ok()?.take()
+		let update = self.state.write().ok()?.take()?;
+		Some(self.attribute(update))
 	}
 
 	/// Returns true if the cursor is closed (no more updates will arrive).
@@ -2359,6 +2508,105 @@ mod tests {
 			.expect("source closed");
 		assert_eq!(request.name(), name, "unexpected track dispatched");
 		request.accept(None)
+	}
+
+	/// Tagging both origin handles with one context attributes the full model path:
+	/// ingress writes on the subscriber side, egress reads on the publisher side,
+	/// each counter landing exactly once (the model-layer silent-zero guard).
+	#[tokio::test]
+	async fn test_stats_tagged_end_to_end() {
+		use crate::Timestamp;
+		use crate::stats::{Config, Registry, Tier};
+		use bytes::Bytes;
+
+		tokio::time::pause();
+
+		let registry = Registry::new(Config::new());
+		let ctx = registry.tier(Tier::default()).session("acme");
+
+		let origin = Origin::random().produce();
+		let ingress = origin.clone().with_stats(ctx.clone());
+		let egress = origin.consume().with_stats(ctx.clone());
+
+		// Egress announce stream: this is the tagged stream that drives the egress
+		// announce guard.
+		let mut announced = egress.announced();
+
+		// Ingress publishes an announced broadcast.
+		let source = ingress.create_broadcast("demo", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		// Egress observes the announce and gets the tagged broadcast.
+		let update = announced.next().await.unwrap();
+		assert_eq!(update.path.as_str(), "demo");
+		let broadcast = update.broadcast.unwrap();
+
+		// Egress subscribes; the ingress side serves the track on demand.
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		// Ingress writes one group with two 5-byte frames.
+		let mut group = producer.append_group().unwrap();
+		group
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
+			.unwrap();
+		group
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"world"))
+			.unwrap();
+		group.finish().unwrap();
+
+		// Egress reads the group and both frames.
+		let mut group_c = sub.recv_group().await.unwrap().unwrap();
+		let mut frames = 0;
+		while let Some(frame) = group_c.read_frame().await.unwrap() {
+			assert_eq!(frame.payload.len(), 5);
+			frames += 1;
+		}
+		assert_eq!(frames, 2);
+		settle().await;
+
+		let report = registry.report();
+		let entry = report
+			.traffic
+			.iter()
+			.find(|e| e.path.as_str() == "demo")
+			.expect("demo tracked");
+		let path_len = "demo".len() as u64;
+
+		// Egress (publisher side): reads out of the model.
+		let egress = &entry.publisher;
+		assert_eq!(egress.announced, 1, "one egress announce");
+		assert_eq!(egress.announced_bytes, path_len);
+		assert_eq!(egress.subscriptions, 1, "one egress subscription");
+		assert_eq!(egress.broadcasts, 1, "one viewer");
+		assert_eq!(egress.groups, 1);
+		assert_eq!(egress.frames, 2);
+		assert_eq!(egress.bytes, 10);
+		assert_eq!(egress.fetches, 0);
+
+		// Ingress (subscriber side): writes into the model.
+		let ingress = &entry.subscriber;
+		assert_eq!(ingress.announced, 1, "one ingress announce");
+		assert_eq!(ingress.announced_bytes, path_len);
+		assert_eq!(ingress.subscriptions, 1, "one ingress track");
+		assert_eq!(ingress.broadcasts, 0, "ingress has no viewer refcount");
+		assert_eq!(ingress.groups, 1);
+		assert_eq!(ingress.frames, 2);
+		assert_eq!(ingress.bytes, 10);
+
+		// A fetch bumps only `fetches` on the egress side, plus the delivered group.
+		let fetched = broadcast.track("video").unwrap().fetch_group(0, None).await.unwrap();
+		let _ = fetched;
+		settle().await;
+		let report = registry.report();
+		let entry = report.traffic.iter().find(|e| e.path.as_str() == "demo").unwrap();
+		assert_eq!(entry.publisher.fetches, 1, "one fetch");
+		assert_eq!(entry.publisher.subscriptions, 1, "fetch does not bump subscriptions");
+		assert_eq!(entry.publisher.broadcasts, 1, "fetch does not bump the viewer refcount");
 	}
 
 	#[test]

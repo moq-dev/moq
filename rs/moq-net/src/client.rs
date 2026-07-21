@@ -11,7 +11,7 @@ use crate::{
 pub struct Client {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	stats: stats::Handle,
+	stats: stats::Session,
 	versions: Versions,
 	setup_path: Option<String>,
 	cost: Option<u64>,
@@ -38,10 +38,11 @@ impl Client {
 		self
 	}
 
-	/// Attach a tier-scoped [`stats::Handle`]. Per-broadcast and per-subscription
-	/// counters will be bumped through this handle for the lifetime of the session.
-	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
-	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
+	/// Attach a per-connection [`stats::Session`] context. The session's publish
+	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
+	/// traffic counters are attributed through the model for this session's lifetime.
+	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
+	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
 		self
 	}
@@ -99,6 +100,16 @@ impl Client {
 			tracing::warn!("not publishing or consuming anything");
 		}
 
+		// Tag the origin pair with the stats context: reads through the publish
+		// (egress) consumer and writes through the subscribe (ingress) producer are
+		// then attributed by the model. One shared context, so presence and viewer
+		// counts are never double-attributed across the two halves.
+		let publish = self.publish.clone().map(|origin| origin.with_stats(self.stats.clone()));
+		let subscribe = self
+			.subscribe
+			.clone()
+			.map(|origin| origin.with_stats(self.stats.clone()));
+
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
@@ -114,9 +125,8 @@ impl Client {
 					None,
 					None,
 					true,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					ietf::Version::Draft19,
 					self.setup_path.clone(),
 					None,
@@ -138,9 +148,8 @@ impl Client {
 					None,
 					None,
 					true,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					ietf::Version::Draft18,
 					self.setup_path.clone(),
 					None,
@@ -162,9 +171,8 @@ impl Client {
 					None,
 					None,
 					true,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					ietf::Version::Draft17,
 					self.setup_path.clone(),
 					None,
@@ -215,9 +223,8 @@ impl Client {
 				let start = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					version,
 					our_setup,
 					None,
@@ -239,9 +246,8 @@ impl Client {
 				let start = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					lite::Version::Lite04,
 					lite::Setup::default(),
 					None,
@@ -267,9 +273,8 @@ impl Client {
 				let start = lite::start(
 					session.clone(),
 					None,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					lite::Version::Lite03,
 					lite::Setup::default(),
 					None,
@@ -328,9 +333,8 @@ impl Client {
 				let start = lite::start(
 					session.clone(),
 					Some(stream),
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
@@ -354,9 +358,8 @@ impl Client {
 					Some(stream),
 					request_id_max,
 					true,
-					self.publish.clone(),
-					self.subscribe.clone(),
-					self.stats.clone(),
+					publish.clone(),
+					subscribe.clone(),
 					v,
 					None,
 					None,

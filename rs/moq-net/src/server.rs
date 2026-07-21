@@ -11,7 +11,7 @@ use crate::{
 pub struct Server {
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	stats: stats::Handle,
+	stats: stats::Session,
 	versions: Versions,
 }
 
@@ -37,10 +37,11 @@ impl Server {
 		self
 	}
 
-	/// Attach a tier-scoped [`stats::Handle`]. Per-broadcast and per-subscription
-	/// counters will be bumped through this handle for the lifetime of the session.
-	/// Pass [`stats::Handle::default`] (a no-op handle) to opt out.
-	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
+	/// Attach a per-connection [`stats::Session`] context. The session's publish
+	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
+	/// traffic counters are attributed through the model for this session's lifetime.
+	/// Pass [`stats::Session::default`] (a no-op context) to opt out.
+	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.stats = stats;
 		self
 	}
@@ -337,8 +338,9 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self
 	}
 
-	/// Set the tier-scoped stats handle. Overrides any value from the [`Server`] builder.
-	pub fn with_stats(mut self, stats: stats::Handle) -> Self {
+	/// Set the per-connection [`stats::Session`] context. Overrides any value from the
+	/// [`Server`] builder.
+	pub fn with_stats(mut self, stats: stats::Session) -> Self {
 		self.inner_mut().server.stats = stats;
 		self
 	}
@@ -351,6 +353,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 	/// its protocol work.
 	pub async fn ok(mut self) -> Result<(Session, Driver), Error> {
 		let RequestInner { server, handshake } = self.inner.take().expect("request already responded");
+
+		// Tag the origin pair with the stats context so the model attributes reads
+		// (egress) and writes (ingress) for this session. One shared context across
+		// both halves keeps presence and viewer counts from double-attributing.
+		let publish = server.publish.map(|origin| origin.with_stats(server.stats.clone()));
+		let subscribe = server.subscribe.map(|origin| origin.with_stats(server.stats.clone()));
 
 		let (session, mut stream, version, request_id_max) = match handshake {
 			Handshake::IetfModern {
@@ -365,9 +373,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 					None,
 					None,
 					false,
-					server.publish,
-					server.subscribe,
-					server.stats,
+					publish,
+					subscribe,
 					version,
 					None,
 					Some(peer_setup),
@@ -379,9 +386,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let start = lite::start(
 					session.clone(),
 					None,
-					server.publish,
-					server.subscribe,
-					server.stats,
+					publish,
+					subscribe,
 					version,
 					lite::Setup::default(),
 					None,
@@ -409,9 +415,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let start = lite::start(
 					session.clone(),
 					None,
-					server.publish,
-					server.subscribe,
-					server.stats,
+					publish,
+					subscribe,
 					version,
 					our_setup,
 					Some(client_setup),
@@ -455,9 +460,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 				let start = lite::start(
 					session.clone(),
 					Some(stream),
-					server.publish,
-					server.subscribe,
-					server.stats,
+					publish,
+					subscribe,
 					v,
 					lite::Setup::default(),
 					None,
@@ -472,9 +476,8 @@ impl<S: web_transport_trait::Session> Request<S> {
 					Some(stream),
 					request_id_max,
 					false,
-					server.publish,
-					server.subscribe,
-					server.stats,
+					publish,
+					subscribe,
 					v,
 					None,
 					None,

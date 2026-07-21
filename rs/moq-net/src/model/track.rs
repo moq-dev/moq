@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::{Error, Result, Timescale, Timestamp, coding};
-use crate::{broadcast, cache, frame, group};
+use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
 
@@ -609,6 +609,10 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
+	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
+	// one subscription on tag and closed when the last producer clone drops. Empty
+	// (no-op) for an untagged broadcast.
+	stats: stats::Scope,
 }
 
 impl Producer {
@@ -635,7 +639,17 @@ impl Producer {
 			}),
 			broadcast,
 			prev_subscription: None,
+			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Attach the parent broadcast's ingress stats scope, counting this track as one
+	/// ingress subscription (closed when the last producer clone drops). Called by a
+	/// tagged [`broadcast::Producer`] when it creates the track.
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		scope.open_subscription();
+		self.stats = scope;
+		self
 	}
 
 	/// The track's name, unique within its broadcast.
@@ -668,7 +682,7 @@ impl Producer {
 				.unwrap_or(Err(Error::Duplicate));
 		}
 
-		let group = group::Producer::new(group, track);
+		let group = group::Producer::new(group, track).with_meter(self.stats.meter());
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.pin_latest(&group);
@@ -694,7 +708,7 @@ impl Producer {
 		let track = info.clone();
 		let latency_max = info.latency_max;
 
-		let group = group::Producer::new(group::Info { sequence }, track);
+		let group = group::Producer::new(group::Info { sequence }, track).with_meter(self.stats.meter());
 
 		let now = web_async::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -940,6 +954,9 @@ impl Producer {
 				next_sequence: 0,
 				end_sequence: None,
 			}),
+			// A producer-side (in-process) subscribe is not egress: stay untagged.
+			stats: stats::Scope::default(),
+			_stats_sub: stats::Subscription::default(),
 		}
 	}
 
@@ -1149,6 +1166,8 @@ impl Drop for Producer {
 		if !self.state.is_last() {
 			return;
 		}
+		// The last ingress producer closing the track ends its subscription.
+		self.stats.close_subscription();
 		if let Ok(mut state) = self.state.write()
 			&& state.final_sequence.is_none()
 		{
@@ -1334,6 +1353,9 @@ impl Demand {
 pub struct Consumer {
 	name: Arc<str>,
 	inner: ConsumerKind,
+	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
+	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
+	stats: stats::Scope,
 }
 
 #[derive(Clone)]
@@ -1347,6 +1369,7 @@ impl Consumer {
 		Self {
 			name,
 			inner: ConsumerKind::Plain(state),
+			stats: stats::Scope::default(),
 		}
 	}
 
@@ -1355,7 +1378,15 @@ impl Consumer {
 		Self {
 			name,
 			inner: ConsumerKind::Spliced(resume),
+			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Attach an egress stats scope, inherited by the subscriptions, fetches, and
+	/// groups derived from this handle. Called by a tagged [`broadcast::Consumer`].
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		self.stats = scope;
+		self
 	}
 
 	/// The track name this handle is bound to.
@@ -1386,6 +1417,7 @@ impl Consumer {
 			name: self.name.clone(),
 			inner,
 			subscription,
+			stats: self.stats.clone(),
 		})
 	}
 
@@ -1416,6 +1448,11 @@ impl Consumer {
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
 
+		// One fetch per calling context, counted here (coalesced upstream work is
+		// still one request served). Independent of `subscriptions` and the viewer
+		// refcount.
+		self.stats.fetch();
+
 		let state = match &self.inner {
 			ConsumerKind::Plain(state) => state,
 			// Spliced: routed to the newest segment's (plain) track, waiting for a
@@ -1423,6 +1460,7 @@ impl Consumer {
 			ConsumerKind::Spliced(resume) => {
 				return kio::Pending::new(Fetching {
 					inner: FetchingKind::Spliced(resume.fetch_group(sequence, options)),
+					stats: self.stats.clone(),
 				});
 			}
 		};
@@ -1467,6 +1505,7 @@ impl Consumer {
 				sequence,
 				result,
 			},
+			stats: self.stats.clone(),
 		})
 	}
 
@@ -1523,6 +1562,7 @@ pub struct Subscribing {
 	name: Arc<str>,
 	inner: SubscribingKind,
 	subscription: kio::Producer<Subscription>,
+	stats: stats::Scope,
 }
 
 enum SubscribingKind {
@@ -1552,6 +1592,8 @@ impl Subscribing {
 						next_sequence: 0,
 						end_sequence: None,
 					}),
+					stats: self.stats.clone(),
+					_stats_sub: self.stats.subscribe(),
 				}))
 			}
 			SubscribingKind::Spliced(resume) => {
@@ -1563,6 +1605,8 @@ impl Subscribing {
 					name: self.name.clone(),
 					info,
 					inner: SubscriberKind::Spliced(Box::new(resume.subscribe_shared(self.subscription.clone()))),
+					stats: self.stats.clone(),
+					_stats_sub: self.stats.subscribe(),
 				}))
 			}
 		}
@@ -1708,6 +1752,9 @@ impl Drop for GroupRequest {
 /// or produced after a wire FETCH), or [`Error::NotFound`] if it can never exist.
 pub struct Fetching {
 	inner: FetchingKind,
+	// Egress stats scope, so the resolved group carries a payload meter (and counts
+	// as one delivered group). Empty (no-op) for an untagged track.
+	stats: stats::Scope,
 }
 
 enum FetchingKind {
@@ -1733,13 +1780,18 @@ impl kio::Pollable for Fetching {
 				sequence,
 				result,
 			} => (state, fetch, *sequence, result.as_ref()),
-			FetchingKind::Spliced(spliced) => return kio::Pollable::poll(&**spliced, waiter),
+			FetchingKind::Spliced(spliced) => {
+				// A fetched group is metered here (once), at the tagged handle: the
+				// spliced source track it comes from is the origin's own, untagged.
+				return kio::Pollable::poll(&**spliced, waiter)
+					.map(|res| res.map(|group| group.with_meter(self.stats.meter())));
+			}
 		};
 
 		// Track side: the cached group, the abort error, or past-final. The outer
 		// error is the channel closing without any of those.
 		match state.poll(waiter, |state| state.poll_fetch_cached(sequence)) {
-			Poll::Ready(Ok(res)) => return Poll::Ready(res),
+			Poll::Ready(Ok(res)) => return Poll::Ready(res.map(|group| group.with_meter(self.stats.meter()))),
 			Poll::Ready(Err(closed)) => {
 				return Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped)));
 			}
@@ -1798,6 +1850,12 @@ pub struct Subscriber {
 	name: Arc<str>,
 	info: Info,
 	inner: SubscriberKind,
+	// Egress stats scope, used to meter the groups this subscriber reads. Empty
+	// (no-op) for an untagged track.
+	stats: stats::Scope,
+	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
+	// while held, closing them on drop. Empty (no-op) for an untagged track.
+	_stats_sub: stats::Subscription,
 }
 
 enum SubscriberKind {
@@ -1948,10 +2006,12 @@ impl Subscriber {
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		match &mut self.inner {
+		let meter = self.stats.meter();
+		let res = match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll_recv_group(waiter),
 			SubscriberKind::Spliced(spliced) => spliced.poll_recv_group(waiter),
-		}
+		};
+		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
 	}
 
 	/// Receive the next group in arrival order.
@@ -1999,10 +2059,12 @@ impl Subscriber {
 	/// Honors the cap set by [`Self::end_at`]: groups with sequence past the cap are left
 	/// in the producer's cache and become eligible again if the cap is raised or removed.
 	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		match &mut self.inner {
+		let meter = self.stats.meter();
+		let res = match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll_next_group(waiter),
 			SubscriberKind::Spliced(spliced) => spliced.poll_next_group(waiter),
-		}
+		};
+		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
 	}
 
 	/// Return the next group with a higher sequence number than any previously returned.
@@ -2018,10 +2080,19 @@ impl Subscriber {
 	/// (timestamp and payload), skipping the rest of the group. Intended for
 	/// single-frame groups (see [`Producer::write_frame`]).
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
-		match &mut self.inner {
+		let meter = self.stats.meter();
+		let res = match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll_read_frame(waiter),
 			SubscriberKind::Spliced(spliced) => spliced.poll_read_frame(waiter),
+		};
+		// This helper collapses a group to its first frame: count the group, the one
+		// frame, and the bytes actually read.
+		if let Poll::Ready(Ok(Some(frame))) = &res {
+			meter.group();
+			meter.frames(1);
+			meter.bytes(frame.payload.len() as u64);
 		}
+		res
 	}
 
 	/// Read a single full frame (timestamp and payload) from the next group in
@@ -2147,6 +2218,10 @@ pub struct Request {
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
 	_dynamic: Dynamic,
+
+	// Ingress stats scope, threaded into the accepted [`Producer`]. Empty (no-op)
+	// unless this request was reserved on a tagged broadcast.
+	stats: stats::Scope,
 }
 
 impl Request {
@@ -2163,7 +2238,15 @@ impl Request {
 			state,
 			prev_subscription: None,
 			_dynamic: dynamic,
+			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Attach an ingress stats scope, applied to the [`Producer`] on accept. Set by
+	/// a tagged [`broadcast::Producer::reserve_track`].
+	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+		self.stats = scope;
+		self
 	}
 
 	/// The requested track name.
@@ -2203,11 +2286,15 @@ impl Request {
 		if let Ok(mut state) = self.state.write() {
 			state.info = Some(info);
 		}
+		// Accepting the request creates the track producer: count it as one ingress
+		// subscription (closed on the last producer drop). No-op when untagged.
+		self.stats.open_subscription();
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,
 			state: self.state,
 			prev_subscription: None,
+			stats: self.stats,
 		}
 	}
 
