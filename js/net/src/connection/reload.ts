@@ -156,9 +156,24 @@ export class Reload {
 				this.#delay = this.delay.initial;
 				this.#retryStart = undefined;
 
-				await Promise.race([effect.cancel, connection.closed]);
+				const connected = performance.now();
+				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
+				if (!closed) return;
+
+				// The peer closed the session: tear down and reconnect. A session that
+				// died within the initial delay escalates through the backoff instead.
+				console.warn("connection closed, reconnecting");
+				if (performance.now() - connected < this.delay.initial) {
+					throw new Error("connection closed immediately");
+				}
+				this.#tick.update((prev) => prev + 1);
 			} catch (err) {
 				console.warn("connection error:", err);
+
+				// Any session is dead now: report disconnected during the backoff
+				// rather than when the retry reruns the effect.
+				this.established.set(undefined);
+				this.status.set("disconnected");
 
 				// Track retry start for timeout.
 				this.#retryStart ??= performance.now();
