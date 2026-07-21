@@ -1353,7 +1353,10 @@ async fn service_layer_survives_roundtrip() {
 	let nit = make_section(0x40, &[0x12, 0x34, 0xff, 0x01]);
 
 	// Prepend a synthetic NIT Actual packet (0x0010); prepend keeps bbb's alignment.
+	// Twice, because real SI repeats every few seconds: the repetition must collapse
+	// into the same single section rather than accumulating a duplicate.
 	let mut input = si_packet(0x0010, &nit);
+	input.extend_from_slice(&si_packet(0x0010, &nit));
 	input.extend_from_slice(&data[..]);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1365,20 +1368,31 @@ async fn service_layer_survives_roundtrip() {
 	import.decode(&BytesMut::from(&input[..])).unwrap();
 	import.finish().unwrap();
 
-	let service = catalog.snapshot().mpegts.service.clone().expect("a service record");
-	assert_eq!(service.transport_stream_id, 1, "TSID captured from the PAT");
-	assert_eq!(service.service_id, 1, "service number captured from the PAT");
-	assert_eq!(service.pmt_pid, 0x1000, "original PMT PID captured from the PAT");
-	let sdt = service.sdt.clone().expect("the source SDT was captured");
+	let snapshot = catalog.snapshot();
+	let program = snapshot.mpegts.program.clone().expect("a program record");
+	assert_eq!(program.transport_stream_id, 1, "TSID captured from the PAT");
+	assert_eq!(program.program_number, 1, "program number captured from the PAT");
+	assert_eq!(program.pmt_pid, 0x1000, "original PMT PID captured from the PAT");
+	let si = snapshot.mpegts.si.clone();
+	let entry = |pid: u16| si.get(&pid).expect("an SI entry for the PID");
+
+	assert_eq!(entry(0x0011).sections.len(), 1, "bbb.ts carries one SDT section");
+	let sdt = entry(0x0011).sections[0].clone();
 	assert_eq!(sdt.first(), Some(&0x42), "SDT Actual (table_id 0x42)");
+	assert_eq!(
+		entry(0x0011).interval,
+		Some(std::time::Duration::from_secs(2)),
+		"the DVB SDT interval was filled in"
+	);
 	let (service_type, provider, name) = parse_sdt_service(&sdt);
 	assert_eq!(
 		(service_type, provider.as_str(), name.as_str()),
 		(0x01, "FFmpeg", "Service01")
 	);
 	assert_eq!(
-		service.nit.as_deref(),
-		Some(&make_section(0x40, &[0x12, 0x34, 0xff, 0x01])[..])
+		entry(0x0010).sections,
+		vec![Bytes::from(make_section(0x40, &[0x12, 0x34, 0xff, 0x01]))],
+		"the repeated NIT deduped to one section"
 	);
 
 	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
@@ -1415,20 +1429,22 @@ async fn service_layer_survives_roundtrip() {
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
 
-	let service2 = catalog2
-		.snapshot()
+	let snapshot2 = catalog2.snapshot();
+	let program2 = snapshot2
 		.mpegts
-		.service
+		.program
 		.clone()
-		.expect("a service record after round-trip");
+		.expect("a program record after round-trip");
 	assert_eq!(
-		service2.transport_stream_id, service.transport_stream_id,
+		program2.transport_stream_id, program.transport_stream_id,
 		"TSID survived"
 	);
-	assert_eq!(service2.service_id, service.service_id, "service number survived");
-	assert_eq!(service2.pmt_pid, service.pmt_pid, "PMT PID survived");
-	assert_eq!(service2.sdt, service.sdt, "SDT survived byte-for-byte");
-	assert_eq!(service2.nit, service.nit, "NIT survived byte-for-byte");
+	assert_eq!(
+		program2.program_number, program.program_number,
+		"program number survived"
+	);
+	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
+	assert_eq!(snapshot2.mpegts.si, si, "every SI PID survived byte-for-byte");
 }
 
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
@@ -1452,10 +1468,10 @@ fn multi_packet_si_section_is_captured() {
 	import.decode(&BytesMut::from(&input[..])).unwrap();
 	import.finish().unwrap();
 
-	let service = catalog.snapshot().mpegts.service.clone().expect("a service record");
+	let si = catalog.snapshot().mpegts.si.clone();
 	assert_eq!(
-		service.sdt.as_deref(),
-		Some(&sdt[..]),
+		si.get(&0x0011).expect("an SDT entry").sections,
+		vec![Bytes::from(sdt)],
 		"the multi-packet SDT was reassembled and captured byte-for-byte"
 	);
 }

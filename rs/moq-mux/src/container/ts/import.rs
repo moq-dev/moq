@@ -8,12 +8,12 @@
 //! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
 //! other private sections, which are not PES) are intercepted before the mpeg2ts
 //! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
-//! private-section path, and the 90 kHz -> microsecond PTS conversion. The DVB
-//! service layer (transport/service identity from the PAT, plus the SDT and NIT
-//! sections) is captured into the `mpegts` catalog [`Service`](catalog::Service)
-//! record so it survives the round-trip.
+//! private-section path, and the 90 kHz -> microsecond PTS conversion. The service
+//! layer is captured into the `mpegts` catalog too: the identity parsed from the PAT
+//! as a [`Program`](catalog::Program) record, and the standalone SI PIDs as opaque
+//! [`Si`](catalog::Si) sections, so both survive the round-trip.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -100,13 +100,17 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Whether the PMT program-level descriptors have been recorded yet (set once;
 	/// PMT `program_info` is stable for the program's life).
 	program_recorded: bool,
-	/// Reassemblers for the standalone DVB SI PIDs (SDT 0x0011, NIT 0x0010), keyed
-	/// by PID. Intercepted before the reader (like SCTE-35 sections) so the service
-	/// layer survives the round-trip. Only populated with `mpegts` catalog support.
-	service_sections: HashMap<u16, SectionReassembler>,
+	/// Reassemblers for the standalone SI PIDs ([`catalog::SI_PIDS`]), keyed by PID.
+	/// Intercepted before the reader (like SCTE-35 sections) so the service layer
+	/// survives the round-trip. Only populated with `mpegts` catalog support.
+	si_sections: HashMap<u16, SectionReassembler>,
+	/// The SI sections currently published, keyed by PID. Kept alongside the catalog
+	/// so a repetition can be recognized without taking the catalog's write lock,
+	/// which would mark it modified and republish it every couple of seconds.
+	si: BTreeMap<u16, catalog::Si>,
 	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
 	/// the PAT into the catalog service record yet (set once; the PAT is stable).
-	service_recorded: bool,
+	identity_recorded: bool,
 	/// Latest video PTS: the media clock used to timestamp private sections, which
 	/// carry no PES PTS of their own. Unwrapped independently of the video stream.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
@@ -143,8 +147,9 @@ impl<E: catalog::Catalog> Import<E> {
 			es_descriptors: HashMap::new(),
 			recorded_media: HashSet::new(),
 			program_recorded: false,
-			service_sections: HashMap::new(),
-			service_recorded: false,
+			si_sections: HashMap::new(),
+			si: BTreeMap::new(),
+			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 		}
@@ -207,11 +212,11 @@ impl<E: catalog::Catalog> Import<E> {
 				section.packet(&pkt, pts)?;
 				continue;
 			}
-			// Intercept the standalone DVB SI PIDs (SDT, NIT) before the routing gate
-			// below drops them: they carry the service layer, not media, and are not fed
-			// to the reader (which only routes the PAT/PMT/ES PIDs it learns).
-			if self.supports_mpegts && matches!(pid, catalog::SDT_PID | catalog::NIT_PID) {
-				self.service_section(pid, &pkt);
+			// Intercept the standalone SI PIDs before the routing gate below drops them:
+			// they carry the service layer, not media, and are not fed to the reader
+			// (which only routes the PAT/PMT/ES PIDs it learns).
+			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
+				self.si_section(pid, &pkt);
 				continue;
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
@@ -300,7 +305,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(TsPayload::Pat(pat)) => {
 				self.pmt_pids
 					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
-				self.record_service_identity(&pat);
+				self.record_program_identity(&pat);
 			}
 			_ => {}
 		}
@@ -587,55 +592,59 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
 	/// PAT into the catalog service record, once. No-op without `mpegts` support.
-	fn record_service_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) {
-		if !self.supports_mpegts || self.service_recorded {
+	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) {
+		if !self.supports_mpegts || self.identity_recorded {
 			return;
 		}
 		// program_number 0 is the network PID association, not a service; skip it.
-		let Some(program) = pat.table.iter().find(|entry| entry.program_num != 0) else {
+		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
 			return;
 		};
 		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
-			let service = mpegts.service.get_or_insert_with(Default::default);
-			service.transport_stream_id = pat.transport_stream_id;
-			service.service_id = program.program_num;
-			service.pmt_pid = program.program_map_pid.as_u16();
+			let program = mpegts.program.get_or_insert_with(Default::default);
+			program.transport_stream_id = pat.transport_stream_id;
+			program.program_number = entry.program_num;
+			program.pmt_pid = entry.program_map_pid.as_u16();
 		}
-		self.service_recorded = true;
+		self.identity_recorded = true;
 	}
 
-	/// Feed one TS packet on a DVB SI PID (SDT or NIT) to its reassembler, recording
-	/// each completed Actual section verbatim into the catalog service record.
-	fn service_section(&mut self, pid: u16, pkt: &[u8]) {
+	/// Feed one TS packet on a standalone SI PID to its reassembler, recording each
+	/// completed section verbatim into that PID's catalog entry.
+	///
+	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
+	/// the BAT, an SDT can describe several services across several sections, and a
+	/// table we don't recognize is exactly as worth preserving as one we do. The
+	/// catalog holds a *set* per PID, so these coexist instead of overwriting each
+	/// other, and a plain repetition (SI repeats every couple of seconds) leaves the
+	/// set untouched rather than republishing the catalog.
+	fn si_section(&mut self, pid: u16, pkt: &[u8]) {
 		let mut sections = Vec::new();
-		self.service_sections.entry(pid).or_default().push(pkt, &mut sections);
-		for section in sections {
-			self.record_service_section(pid, section);
-		}
-	}
-
-	/// Record one complete SI section verbatim: the first SDT Actual (table_id 0x42) or
-	/// NIT Actual (table_id 0x40) seen. Later sections (repeats, the `Other` variants,
-	/// BAT on the SDT PID) are ignored; a single-service SPTS needs only the first.
-	fn record_service_section(&mut self, pid: u16, section: Vec<u8>) {
-		let wanted = matches!(
-			(pid, section.first().copied()),
-			(catalog::SDT_PID, Some(catalog::SDT_ACTUAL_TABLE_ID))
-				| (catalog::NIT_PID, Some(catalog::NIT_ACTUAL_TABLE_ID))
-		);
-		if !wanted {
+		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
+		if sections.is_empty() {
 			return;
 		}
-		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
-			let service = mpegts.service.get_or_insert_with(Default::default);
-			let slot = if pid == catalog::SDT_PID {
-				&mut service.sdt
-			} else {
-				&mut service.nit
-			};
-			if slot.is_none() {
-				*slot = Some(bytes::Bytes::from(section));
+
+		// Apply to the local copy first and bail on a repetition. Taking the catalog's
+		// write lock marks it modified even when the value is unchanged, so doing this
+		// the other way round would republish the catalog on every SI cycle.
+		let updated = {
+			let si = self.si.entry(pid).or_insert_with(|| catalog::Si {
+				interval: catalog::SI_PIDS.iter().find(|(p, _)| *p == pid).map(|(_, i)| *i),
+				..Default::default()
+			});
+			let mut changed = false;
+			for section in sections {
+				changed |= si.upsert(bytes::Bytes::from(section));
 			}
+			changed.then(|| si.clone())
+		};
+		let Some(updated) = updated else {
+			return;
+		};
+
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			mpegts.si.insert(pid, updated);
 		}
 	}
 

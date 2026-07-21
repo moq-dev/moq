@@ -371,11 +371,13 @@ cues, teletext, DVB subtitles, ...) are carried verbatim too, one MoQ track per
 PID, described in the catalog `mpegts` section, and survive `import ts` /
 `export ts` end-to-end.
 
-The DVB service layer rides the same `mpegts` section: the transport/service
-identity (transport stream ID, service number, PMT PID) plus the SDT and NIT
-tables are captured on import and re-emitted on export, so the service name,
-provider, type, and network survive the round-trip. Regenerated tables (TDT/TOT)
-and EPG (EIT) are not carried.
+The service layer rides the same `mpegts` section. The program identity
+(transport stream ID, service number, PMT PID) is captured from the PAT and used to
+rebuild a matching PAT/PMT, while the standalone SI tables (SDT, NIT) are carried as
+opaque sections and re-emitted byte-for-byte on their original PIDs, each at its own
+repetition interval. So the service name, provider, type, and network survive the
+round-trip without being parsed. Regenerated tables (TDT/TOT) and EPG (EIT) are not
+captured: they are live or bulky rather than static identity.
 
 ### FLV
 
