@@ -54,10 +54,9 @@ pub enum KeyMaterial {
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.4>
 	#[serde(rename = "oct")]
 	OCT {
-		/// The secret key as base64url (unpadded).
+		/// The secret key as base64url (unpadded). Must be at least 32 bytes once decoded.
 		#[serde(
 			rename = "k",
-			default,
 			serialize_with = "serialize_base64url",
 			deserialize_with = "deserialize_base64url"
 		)]
@@ -154,8 +153,9 @@ pub struct Jwk {
 	#[serde(rename = "alg")]
 	pub algorithm: Algorithm,
 
-	/// The operations that the key can perform.
-	#[serde(rename = "key_ops")]
+	/// The permitted operations, defaulting to sign and verify when `key_ops` is absent
+	/// (optional per RFC 7517 section 4.3).
+	#[serde(rename = "key_ops", default = "sign_verify")]
 	pub operations: HashSet<KeyOperation>,
 
 	/// The key material. Defaults to [`KeyMaterial::OCT`] when `kty` is absent.
@@ -171,6 +171,13 @@ pub struct Jwk {
 	pub scope: Option<crate::Scope>,
 }
 
+fn sign_verify() -> HashSet<KeyOperation> {
+	[KeyOperation::Sign, KeyOperation::Verify].into()
+}
+
+/// Matches the minimum `js/token` enforces, so a key that loads in one loads in the other.
+const MIN_OCT_SECRET_BYTES: usize = 32;
+
 impl Jwk {
 	/// A key that can both sign and verify, with no key ID or scope.
 	///
@@ -179,7 +186,7 @@ impl Jwk {
 	pub fn new(algorithm: Algorithm, material: KeyMaterial) -> Self {
 		Self {
 			algorithm,
-			operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
+			operations: sign_verify(),
 			material,
 			kid: None,
 			scope: None,
@@ -194,6 +201,12 @@ impl Jwk {
 	pub fn import(self) -> crate::Result<Key> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
+		}
+
+		if let KeyMaterial::OCT { secret } = &self.material
+			&& secret.len() < MIN_OCT_SECRET_BYTES
+		{
+			return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
 		}
 
 		Ok(Key {
@@ -398,6 +411,18 @@ impl Key {
 			decode: Default::default(),
 			encode: Default::default(),
 		})
+	}
+
+	/// Whether the key carries the private material signing actually needs.
+	///
+	/// `key_ops` says what a key is *permitted* to do, which a public JWK can still advertise.
+	pub(crate) fn has_signing_material(&self) -> bool {
+		match &self.material {
+			KeyMaterial::OCT { .. } => true,
+			KeyMaterial::EC { d, .. } => d.is_some(),
+			KeyMaterial::OKP { d, .. } => d.is_some(),
+			KeyMaterial::RSA { private, .. } => private.is_some(),
+		}
 	}
 
 	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
@@ -738,6 +763,67 @@ mod tests {
 		assert!(loaded.operations.contains(&KeyOperation::Sign));
 		assert!(loaded.operations.contains(&KeyOperation::Verify));
 		assert!(matches!(loaded.material, KeyMaterial::OCT { .. }));
+	}
+
+	#[test]
+	fn test_key_without_key_ops_defaults_sign_verify() {
+		let json = r#"{"kty":"oct","alg":"HS256","k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68","kid":"no-ops"}"#;
+		let key = Key::from_str(json).unwrap();
+
+		assert_eq!(key.operations, sign_verify());
+
+		let claims = create_test_claims();
+		let token = key.sign(&claims).unwrap();
+		let verified = key.verify(&token).unwrap();
+		assert_eq!(verified.root, claims.root);
+	}
+
+	#[test]
+	fn test_key_without_key_ops_round_trip() {
+		let json = r#"{"kty":"oct","alg":"HS256","k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68"}"#;
+		let key = Key::from_str(json).unwrap();
+
+		let serialized = serde_json::to_string(&key).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+		let ops = parsed["key_ops"].as_array().unwrap();
+		assert_eq!(ops.len(), 2);
+
+		let reloaded = Key::from_str(&serialized).unwrap();
+		assert_eq!(reloaded.operations, sign_verify());
+		assert_eq!(reloaded.algorithm, key.algorithm);
+	}
+
+	// Defaulting key_ops must not let a weak or truncated file parse into a working key.
+	#[test]
+	fn test_key_oct_secret_required_and_min_length() {
+		// Missing k entirely, the truncated-file case.
+		assert!(Key::from_str(r#"{"kty":"oct","alg":"HS256"}"#).is_err());
+		assert!(Key::from_str(r#"{"kty":"oct","alg":"HS256","k":""}"#).is_err());
+
+		// 16-byte secret, below the 32-byte minimum.
+		assert!(Key::from_str(r#"{"kty":"oct","alg":"HS256","k":"AAAAAAAAAAAAAAAAAAAAAA"}"#).is_err());
+
+		// A short secret is rejected however the Jwk was built, not just when deserialized.
+		let short = Jwk::new(Algorithm::HS256, KeyMaterial::OCT { secret: vec![0; 16] });
+		assert!(short.import().is_err());
+
+		// Exactly 32 bytes.
+		let key =
+			Key::from_str(r#"{"kty":"oct","alg":"HS256","k":"Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68"}"#).unwrap();
+		let KeyMaterial::OCT { ref secret } = key.material else {
+			panic!("Expected OCT key");
+		};
+		assert_eq!(secret.len(), 32);
+	}
+
+	#[test]
+	fn test_key_without_key_ops_to_public() {
+		let json = r#"{"kty":"OKP","alg":"EdDSA","crv":"Ed25519","x":"UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4","d":"lm-L_PV3ksuQ-KrFBgFMDJqAZC3_Z6Z5UC4ZQY5OoDQ","kid":"defaulted"}"#;
+		let key = Key::from_str(json).unwrap();
+		assert_eq!(key.operations, sign_verify());
+
+		let public = key.to_public().unwrap();
+		assert_eq!(public.operations, [KeyOperation::Verify].into());
 	}
 
 	#[test]

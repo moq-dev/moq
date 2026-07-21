@@ -17,6 +17,9 @@ pub enum KeyError {
 	#[error("missing private key")]
 	MissingPrivateKey,
 
+	#[error("oct key secret must be at least {0} bytes")]
+	SecretTooShort(usize),
+
 	#[error("OCT key cannot be converted to public key")]
 	NoPublicKey,
 

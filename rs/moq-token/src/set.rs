@@ -85,9 +85,14 @@ impl KeySet {
 			.cloned()
 	}
 
-	/// Find the first key that supports the given operation.
+	/// Find the first key that permits the operation and carries any key material it needs.
 	pub fn find_supported_key(&self, operation: &KeyOperation) -> Option<Arc<Key>> {
-		self.keys.iter().find(|key| key.operations.contains(operation)).cloned()
+		self.keys
+			.iter()
+			.find(|key| {
+				key.operations.contains(operation) && (*operation != KeyOperation::Sign || key.has_signing_material())
+			})
+			.cloned()
 	}
 
 	/// Sign the claims with the first key in the set that supports signing.
@@ -266,6 +271,23 @@ mod tests {
 		let found_verify = set.find_supported_key(&KeyOperation::Verify);
 		assert!(found_verify.is_some());
 		assert_eq!(found_verify.unwrap().kid.as_ref().map(|k| k.encode()), Some("verify"));
+	}
+
+	#[test]
+	fn test_sign_skips_public_only_key() {
+		let private = create_test_key(Some("active"));
+		let public = create_test_key(Some("old"))
+			.to_public()
+			.unwrap()
+			.with_operations([KeyOperation::Sign, KeyOperation::Verify]);
+
+		let set = KeySet {
+			keys: vec![Arc::new(public), Arc::new(private)],
+		};
+
+		let token = set.sign(&create_test_claims()).unwrap();
+		let header = jsonwebtoken::decode_header(&token).unwrap();
+		assert_eq!(header.kid.as_deref(), Some("active"));
 	}
 
 	#[test]
