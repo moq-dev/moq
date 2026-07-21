@@ -11,6 +11,8 @@ use hang::catalog::{AudioCodec, VideoCodec};
 use webm_iterable::WebmIterator;
 use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
 
+use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
+
 #[tokio::test(start_paused = true)]
 async fn export_header_roundtrip_vp9_opus() {
 	// Build a tiny synthetic WebM with one VP9 video track and one Opus audio track.
@@ -383,36 +385,26 @@ async fn export_emits_blocks_for_each_frame() {
 
 #[tokio::test(start_paused = true)]
 async fn export_rejects_cmaf_track() {
-	// Manually construct a broadcast whose catalog advertises a Cmaf-container
-	// video track. The exporter should bail.
+	// A catalog advertising a Cmaf-container video track: the exporter should bail.
 	use hang::catalog::{Container, H264, VideoConfig};
 
-	let broadcast = moq_net::broadcast::Info::new();
-	let mut producer = broadcast.produce();
-	let consumer = producer.consume();
-
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer
-		.create_track(producer.unique_name(".avc1"), hang::container::track_info())
-		.unwrap();
-	let mut config = VideoConfig::new(H264 {
-		profile: 0x64,
-		constraints: 0,
-		level: 0x1f,
-		inline: false,
+	let live = Live::new(".avc1", |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		config.coded_width = Some(640);
+		config.coded_height = Some(480);
+		config.description = Some(Bytes::from(vec![0u8; 8]));
+		config.container = Container::Cmaf {
+			init: Bytes::from(vec![0u8; 32]),
+		};
+		catalog.lock().video.renditions.insert(name, config);
 	});
-	config.coded_width = Some(640);
-	config.coded_height = Some(480);
-	config.description = Some(Bytes::from(vec![0u8; 8]));
-	config.container = Container::Cmaf {
-		init: Bytes::from(vec![0u8; 32]),
-	};
-	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream);
+	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
 	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
@@ -423,81 +415,25 @@ async fn export_rejects_cmaf_track() {
 
 #[tokio::test(start_paused = true)]
 async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
-	// Avc3-shape source: H264 { inline: true }, description = None, frames in
-	// Annex-B with inline SPS+PPS before keyframes. The exporter must
-	// (a) defer the header until SPS+PPS arrive, (b) emit avcC in CodecPrivate,
-	// (c) length-prefix the sample bytes in each SimpleBlock.
-	use hang::catalog::{Container, H264, VideoConfig};
-	use moq_net::Timestamp;
+	// Avc3-shape source: frames in Annex-B with inline SPS+PPS before keyframes.
+	// The exporter must (a) defer the header until SPS+PPS arrive, (b) emit avcC
+	// in CodecPrivate, (c) length-prefix the sample bytes in each SimpleBlock.
 
-	let broadcast = moq_net::broadcast::Info::new();
-	let mut producer = broadcast.produce();
-	let consumer = producer.consume();
+	// P-slice (0x61) behind an Annex-B start code.
+	const PSLICE_ANNEXB: &[u8] = &[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34];
+	let pslice = &PSLICE_ANNEXB[4..];
 
-	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer
-		.create_track(producer.unique_name(".avc3"), hang::container::track_info())
-		.unwrap();
-	let mut config = VideoConfig::new(H264 {
-		profile: 0x42,
-		constraints: 0xc0,
-		level: 0x1f,
-		inline: true,
-	});
-	config.coded_width = Some(320);
-	config.coded_height = Some(240);
-	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	live.track.write(raw_frame(33_000, PSLICE_ANNEXB, false)).unwrap();
+	live.track.finish().unwrap();
+	live.catalog.finish().unwrap();
 
-	// Annex-B start code.
-	const SC: &[u8] = &[0, 0, 0, 1];
-	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
-	let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
-	let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
-	let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
-
-	let mut keyframe_payload = bytes::BytesMut::new();
-	for nal in [sps, pps, idr] {
-		keyframe_payload.extend_from_slice(SC);
-		keyframe_payload.extend_from_slice(nal);
-	}
-	let keyframe_payload = keyframe_payload.freeze();
-
-	let mut pslice_payload = bytes::BytesMut::new();
-	pslice_payload.extend_from_slice(SC);
-	pslice_payload.extend_from_slice(pslice);
-	let pslice_payload = pslice_payload.freeze();
-
-	// Publish frames via the container::Producer.
-	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
-	track_producer
-		.write(crate::container::Frame {
-			timestamp: Timestamp::from_micros(0).unwrap(),
-			payload: keyframe_payload,
-			keyframe: true,
-			duration: None,
-		})
-		.unwrap();
-	track_producer
-		.write(crate::container::Frame {
-			timestamp: Timestamp::from_micros(33_000).unwrap(),
-			payload: pslice_payload,
-			keyframe: false,
-			duration: None,
-		})
-		.unwrap();
-	track_producer.finish().unwrap();
-	let mut catalog = catalog;
-	catalog.finish().unwrap();
-
-	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
-		.await
-		.expect("catalog consumer");
-	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer), catalog_stream)
+	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	let mut exported: Vec<u8> = Vec::new();
 
-	let mut held_producer = Some(producer);
+	let mut live = Some(live);
 	for _ in 0..32 {
 		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
@@ -505,13 +441,12 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
-				held_producer = None;
+				// Drop the producers to close the broadcast so the exporter can EOS.
+				live = None;
 			}
 		}
 	}
-	drop(held_producer);
-	drop(catalog);
-	drop(track_producer);
+	drop(live);
 	drop(exporter);
 
 	// Parse the exported MKV and inspect the Tracks element and SimpleBlocks.
@@ -558,19 +493,19 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// numPPS=1, PPS_len(u16), PPS.
 	let avcc = codec_private.expect("avcC in CodecPrivate");
 	assert_eq!(avcc[0], 1, "configurationVersion");
-	assert_eq!(avcc[1], sps[1], "AVCProfileIndication");
-	assert_eq!(avcc[2], sps[2], "profile_compatibility");
-	assert_eq!(avcc[3], sps[3], "AVCLevelIndication");
+	assert_eq!(avcc[1], SPS[1], "AVCProfileIndication");
+	assert_eq!(avcc[2], SPS[2], "profile_compatibility");
+	assert_eq!(avcc[3], SPS[3], "AVCLevelIndication");
 	assert_eq!(avcc[4] & 0x03, 3, "lengthSizeMinusOne");
 
 	// SPS should be embedded after the 5+1=6 byte header.
 	let sps_len = u16::from_be_bytes([avcc[6], avcc[7]]) as usize;
-	assert_eq!(sps_len, sps.len());
-	assert_eq!(&avcc[8..8 + sps_len], sps);
+	assert_eq!(sps_len, SPS.len());
+	assert_eq!(&avcc[8..8 + sps_len], SPS);
 
 	// PPS follows: 1 byte numPPS + 2 byte length + PPS bytes.
 	let pps_offset = 8 + sps_len + 3;
-	assert_eq!(&avcc[pps_offset..pps_offset + pps.len()], pps);
+	assert_eq!(&avcc[pps_offset..pps_offset + PPS.len()], PPS);
 
 	// Both frames should be length-prefixed (no Annex-B start codes).
 	assert_eq!(sample_payloads.len(), 2, "expected 2 sample blocks");
@@ -579,8 +514,8 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 	// IDR makes it through as length-prefixed.
 	let first = &sample_payloads[0];
 	let idr_len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
-	assert_eq!(idr_len, idr.len(), "IDR length prefix");
-	assert_eq!(&first[4..4 + idr_len], idr, "IDR payload");
+	assert_eq!(idr_len, IDR.len(), "IDR length prefix");
+	assert_eq!(&first[4..4 + idr_len], IDR, "IDR payload");
 
 	// Second frame: P-slice, length-prefixed.
 	let second = &sample_payloads[1];
@@ -665,6 +600,61 @@ async fn export_fragment_duration_batches_blocks() {
 
 	assert_eq!(block_count, 5, "all blocks should be emitted");
 	assert_eq!(cluster_count, 1, "all blocks should batch into one cluster");
+}
+
+#[tokio::test(start_paused = true)]
+async fn zero_fragment_duration_emits_without_successor() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+
+	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	let header = chunk_now(&mut exporter).await;
+	let cluster = chunk_now(&mut exporter).await;
+	assert_eq!(count_blocks(&header, &cluster), 1, "the cluster carries the live frame");
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconfigured_zero_duration_drains_open_cluster() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	live.track.write(video_frame(33_000, false)).unwrap();
+
+	// Default per-GOP clustering: both frames land in one open cluster.
+	let mut exporter = crate::container::mkv::Export::new(live.source(), live.catalog_stream().await);
+	let header = chunk_now(&mut exporter).await;
+	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
+		.await
+		.expect_err("the GOP cluster must stay open while the producer is live");
+
+	let mut exporter = exporter.with_fragment_duration(std::time::Duration::ZERO);
+	live.track.write(video_frame(66_000, false)).unwrap();
+
+	let leftover = chunk_now(&mut exporter).await;
+	let per_frame = chunk_now(&mut exporter).await;
+	assert_eq!(count_blocks(&header, &leftover), 2, "the open GOP cluster rolls first");
+	assert_eq!(
+		count_blocks(&header, &per_frame),
+		1,
+		"the live frame gets its own cluster"
+	);
+}
+
+/// The next chunk, required to be ready without another frame arriving.
+async fn chunk_now(exporter: &mut crate::container::mkv::Export<crate::catalog::Consumer>) -> Bytes {
+	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
+		.await
+		.expect("waited for a successor frame")
+		.expect("exporter failed")
+		.expect("expected a chunk")
+}
+
+/// SimpleBlock count of one cluster, parsed behind the file header.
+fn count_blocks(header: &[u8], cluster: &[u8]) -> usize {
+	let mut cursor = Cursor::new([header, cluster].concat());
+	WebmIterator::new(&mut cursor, &[])
+		.filter(|tag| matches!(tag, Ok(MatroskaSpec::SimpleBlock(_))))
+		.count()
 }
 
 /// Build a small WebM with VP9 video + Opus audio and several frames per track.

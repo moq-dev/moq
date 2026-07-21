@@ -3,7 +3,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hang::catalog::{Catalog, Container, VideoConfig};
+use hang::catalog::{AudioCodec, Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use crate::Result;
@@ -86,6 +86,9 @@ struct Fmp4Track {
 
 	/// True if this track is video. Video tracks roll fragments on keyframes.
 	is_video: bool,
+
+	/// True for Opus audio, whose packets carry their duration in the TOC byte.
+	opus: bool,
 
 	/// Fallback duration for a trailing frame that carries no per-sample duration
 	/// (Legacy / LOC sources). Derived from the catalog framerate / sample rate.
@@ -243,11 +246,28 @@ impl<S: Stream> Export<S> {
 
 		if let Some(name) = chosen {
 			let frag = self.fragment_duration;
-			let has_video_track = self.tracks.values().any(|t| t.is_video);
+			// One fragment per frame: a zero cap, or the audio-only default where
+			// no keyframe will ever roll the fragment. These never depend on the
+			// successor, so emit immediately instead of buffering the frame until
+			// the next one flushes it.
+			let has_video = self.tracks.values().any(|t| t.is_video);
+			let per_frame = frag == Some(Duration::ZERO) || (frag.is_none() && !has_video);
 			let track = self.tracks.get_mut(&name).unwrap();
 			let frame = track.pending.take().unwrap();
-			let flush_before = should_flush(track, &frame, frag, has_video_track);
-			if flush_before {
+			if per_frame {
+				// A catalog change can leave buffered frames behind. Drain them
+				// first and retry this frame on the next poll.
+				if !track.buffer.is_empty() {
+					let frames = std::mem::take(&mut track.buffer);
+					let fragment = emit_fragment(track, frames, Some(&frame))?;
+					track.pending = Some(frame);
+					return Poll::Ready(Ok(Some(fragment)));
+				}
+				track.buffer_independent = frame.keyframe;
+				let fragment = emit_fragment(track, vec![frame], None)?;
+				return Poll::Ready(Ok(Some(fragment)));
+			}
+			if should_flush(track, &frame, frag) {
 				let frames = std::mem::take(&mut track.buffer);
 				let fragment = emit_fragment(track, frames, Some(&frame))?;
 				// The flushed run is done; the incoming frame opens the next buffer.
@@ -330,6 +350,7 @@ impl<S: Stream> Export<S> {
 					buffer: Vec::new(),
 					buffer_independent: false,
 					is_video: true,
+					opus: false,
 					default_frame: Duration::from_secs_f64(1.0 / framerate),
 					finished: false,
 					track_id: next_track_id,
@@ -354,6 +375,7 @@ impl<S: Stream> Export<S> {
 					buffer: Vec::new(),
 					buffer_independent: false,
 					is_video: false,
+					opus: matches!(config.codec, AudioCodec::Opus),
 					// Fallback for a duration-less trailing sample (~1024 samples/frame).
 					default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 					finished: false,
@@ -514,45 +536,29 @@ pub(crate) fn extract_init(
 	Ok(())
 }
 
-/// Should we flush `track.buffer` *before* appending the incoming `frame`?
-///
-/// Triggers:
-/// - Video keyframe and buffer non-empty (one fragment per GOP)
-/// - Optional duration cap exceeded
-/// - Per-frame mode (`Some(ZERO)`)
-/// - Audio in an audio-only broadcast under default `None` mode (otherwise
-///   the buffer would never flush — no keyframe boundary and no time cap)
-fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>, has_video_track: bool) -> bool {
+/// Should we flush `track.buffer` before appending the incoming `frame`?
+/// Triggers on a video keyframe (one fragment per GOP) or the duration cap.
+/// Per-frame modes never buffer and are handled before this check.
+fn should_flush(track: &Fmp4Track, frame: &Frame, fragment_duration: Option<Duration>) -> bool {
 	if track.buffer.is_empty() {
 		return false;
 	}
 	if track.is_video && frame.keyframe {
 		return true;
 	}
-	match fragment_duration {
-		Some(d) if d.is_zero() => true,
-		Some(d) => {
-			// Frames within a track are in *decode* order; B-frames have
-			// non-monotonic PTS, so the span of the buffer is min..max of all
-			// PTS, not just first..incoming.
-			let mut min = Duration::from(frame.timestamp);
-			let mut max = min;
-			for f in &track.buffer {
-				let pts = Duration::from(f.timestamp);
-				if pts < min {
-					min = pts;
-				}
-				if pts > max {
-					max = pts;
-				}
-			}
-			max.saturating_sub(min) >= d
-		}
-		// No video keyframe will ever arrive to roll the fragment, so for
-		// audio-only broadcasts in `None` mode we fall back to per-frame
-		// fragments (matches the pre-batching default).
-		None => !track.is_video && !has_video_track,
+	let Some(cap) = fragment_duration else {
+		return false;
+	};
+	// Frames within a track are in *decode* order; B-frames have non-monotonic
+	// PTS, so the span of the buffer is min..max of all PTS.
+	let mut min = Duration::from(frame.timestamp);
+	let mut max = min;
+	for f in &track.buffer {
+		let pts = Duration::from(f.timestamp);
+		min = min.min(pts);
+		max = max.max(pts);
 	}
+	max.saturating_sub(min) >= cap
 }
 
 /// Encode a buffered run of samples as a single CMAF moof+mdat fragment.
@@ -572,7 +578,17 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
-fn emit_fragment(track: &mut Fmp4Track, frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
+fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Option<&Frame>) -> Result<Fragment> {
+	// Opus packets carry their duration in the TOC byte (at 48 kHz), so
+	// duration-less frames get their real duration instead of the fallback.
+	if track.opus {
+		for frame in &mut frames {
+			if frame.duration.is_none() {
+				frame.duration = crate::codec::opus::packet_samples(&frame.payload)
+					.and_then(|samples| Timestamp::from_scale(samples as u64, 48_000).ok());
+			}
+		}
+	}
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
