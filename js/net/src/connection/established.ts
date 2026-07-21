@@ -4,6 +4,7 @@ import type { Bandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
 import type * as Time from "../time.ts";
+import type { ConnectionStats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
 /** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
@@ -23,7 +24,7 @@ export interface Established {
 	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
 	readonly recvBandwidth?: Bandwidth;
 
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
+	/** Smoothed RTT in milliseconds, from the transport when it measures one, otherwise from PROBE (moq-lite-04+ only). */
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
 	/**
@@ -41,6 +42,13 @@ export interface Established {
 
 	/** Consume the broadcast at the given path. */
 	consume(path: Path.Valid): broadcast.Consumer;
+
+	/**
+	 * Snapshot the connection's transport statistics, a cheap read of the counters
+	 * in {@link ConnectionStats}. Optional so existing implementations of this
+	 * interface stay source-compatible. Both built-in connections provide it.
+	 */
+	stats?(): Promise<ConnectionStats>;
 
 	/** Close the session. */
 	close(): void;
