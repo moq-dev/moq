@@ -273,17 +273,26 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let track = self
 			.broadcast
 			.create_track(self.broadcast.unique_name(suffix), hang::container::track_info())?;
+		let name = track.name().to_string();
+
+		// Build the media producer before publishing the rendition. It is fallible (its
+		// timeline track can collide), and a rendition published for a track we then fail
+		// to produce would be advertised to consumers but never served.
+		let media = self
+			.catalog
+			.media_producer(track, crate::catalog::hang::Container::Legacy)?;
+
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
 
 		match kind {
 			TrackKind::Video => {
 				let config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
-				catalog.video.renditions.insert(track.name().to_string(), config);
+				catalog.video.renditions.insert(name, config);
 			}
 			TrackKind::Audio => {
 				let config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
-				catalog.audio.renditions.insert(track.name().to_string(), config);
+				catalog.audio.renditions.insert(name, config);
 			}
 		}
 
@@ -293,9 +302,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track_number,
 			MkvTrack {
 				kind,
-				track: self
-					.catalog
-					.media_producer(track, crate::catalog::hang::Container::Legacy)?,
+				track: media,
 				group: None,
 				last_emitted_ticks: None,
 			},

@@ -185,6 +185,7 @@ Check the `container` field for each rendition:
 
 - **`legacy`** — Each frame is a varint timestamp (microseconds) followed by the codec payload. This is the common case.
 - **`cmaf`** — Each frame is a `moof` + `mdat` pair (fragmented MP4). Used for HLS compatibility.
+- **`loc`** — Low Overhead Container: each frame is a small property block followed by the codec payload.
 
 `OrderedConsumer` decodes legacy timestamps for you automatically.
 

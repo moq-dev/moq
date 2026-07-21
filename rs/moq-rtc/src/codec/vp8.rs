@@ -35,7 +35,12 @@ impl Bridge {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
 		config.timeline = Some(self.rendition.catalog.timeline(&name)?.section());
-		self.rendition.catalog.lock().video.renditions.insert(name, config);
+		// Publish explicitly rather than through the guard's drop, which only warns:
+		// marking the rendition announced when the catalog never took it would leave the
+		// media track advertised nowhere, and `announced` latches so we'd never retry.
+		let mut guard = self.rendition.catalog.lock();
+		guard.video.renditions.insert(name, config);
+		guard.commit()?;
 		self.announced = true;
 		Ok(())
 	}

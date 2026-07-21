@@ -644,6 +644,13 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
 	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
+	let name = track.name().to_string();
+
+	// Build the media producer before advertising the track. It is fallible (its
+	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
+	// entry on drop only exists once this function returns successfully, so an entry
+	// published first would be stranded.
+	let media = catalog.media_producer(track, crate::catalog::hang::Container::Legacy)?;
 
 	let mut guard = catalog.lock();
 	let Some(mpegts) = guard.mpegts_mut() else {
@@ -652,7 +659,7 @@ fn register_verbatim<E: catalog::Catalog>(
 		anyhow::bail!("catalog extension no longer carries an mpegts section");
 	};
 	mpegts.tracks.insert(
-		track.name().to_string(),
+		name,
 		catalog::Track {
 			pid,
 			descriptors,
@@ -661,7 +668,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	);
 	drop(guard);
 
-	Ok(catalog.media_producer(track, crate::catalog::hang::Container::Legacy)?)
+	Ok(media)
 }
 
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
@@ -1940,8 +1947,8 @@ mod test {
 			"upgrade advertises the cue track"
 		);
 
-		// Finishing drops the importer, which clears its verbatim entries from the catalog, so
-		// read the track name first.
+		// The importer clears its verbatim entries from the catalog when it drops, so read the
+		// track name while it is still registered.
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		import.finish().unwrap();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
