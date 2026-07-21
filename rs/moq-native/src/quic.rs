@@ -10,6 +10,7 @@
 //! every backend honors every knob, see the field docs.
 
 use std::net;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
@@ -116,9 +117,31 @@ pub struct Client {
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub mtu_discovery: Option<bool>,
+
+	/// Write qlog traces into this directory. See [`Server::qlog`].
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-quic-qlog", long = "client-quic-qlog", env = "MOQ_CLIENT_QUIC_QLOG")]
+	pub qlog: Option<PathBuf>,
+}
+
+/// Reject a qlog directory that this build can't honor.
+///
+/// Erroring beats silently ignoring the flag: the operator asked for traces and would
+/// otherwise go looking for files that were never going to appear. Checked once when
+/// the client/server is built, so the backends can assume the directory is usable.
+fn validate_qlog(qlog: Option<&PathBuf>) -> crate::Result<()> {
+	match qlog {
+		Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
+		_ => Ok(()),
+	}
 }
 
 impl Client {
+	/// Reject knobs this build can't honor. Called when the client is built.
+	pub(crate) fn validate(&self) -> crate::Result<()> {
+		validate_qlog(self.qlog.as_ref())
+	}
+
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
 	pub(crate) fn resolve(&self) -> Resolved {
 		Resolved::new(
@@ -127,6 +150,7 @@ impl Client {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.qlog.clone(),
 		)
 	}
 }
@@ -237,9 +261,25 @@ pub struct Server {
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic_lb_nonce: Option<usize>,
+
+	/// Write qlog traces into this directory, which must already exist.
+	///
+	/// The layout is backend-specific: quiche and noq write one file per connection,
+	/// while quinn writes one file per endpoint and tags each event with the qlog
+	/// `group_id` of the connection it belongs to.
+	///
+	/// Requires the `qlog` feature; setting it errors at init otherwise.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[arg(id = "server-quic-qlog", long = "server-quic-qlog", env = "MOQ_SERVER_QUIC_QLOG")]
+	pub qlog: Option<PathBuf>,
 }
 
 impl Server {
+	/// Reject knobs this build can't honor. Called when the server is built.
+	pub(crate) fn validate(&self) -> crate::Result<()> {
+		validate_qlog(self.qlog.as_ref())
+	}
+
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
 	pub(crate) fn resolve(&self) -> Resolved {
 		Resolved::new(
@@ -248,6 +288,7 @@ impl Server {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.qlog.clone(),
 		)
 	}
 }
@@ -257,7 +298,7 @@ impl Server {
 ///
 /// Internal: the backends consume it and [`crate::iroh::EndpointConfig::bind`]
 /// resolves it from a [`Client`], so it never appears in the public surface.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Resolved {
 	/// Max concurrent streams (bidi and uni).
 	pub max_streams: u64,
@@ -269,6 +310,8 @@ pub(crate) struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
+	/// Directory to write qlog traces into, or `None` to not capture them.
+	pub qlog: Option<PathBuf>,
 }
 
 impl Resolved {
@@ -278,6 +321,7 @@ impl Resolved {
 		idle_timeout: Option<Duration>,
 		keep_alive: Option<Duration>,
 		mtu_discovery: Option<bool>,
+		qlog: Option<PathBuf>,
 	) -> Self {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
 		// the connection warm, defaulting to 5s.
@@ -293,7 +337,17 @@ impl Resolved {
 			idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
 			keep_alive,
 			mtu_discovery: mtu_discovery.unwrap_or(false),
+			qlog,
 		}
+	}
+
+	/// The directory to write qlog traces into, if any.
+	///
+	/// Only meaningful once [`Client::validate`] / [`Server::validate`] has passed; a
+	/// build without the `qlog` feature never gets here with a directory set.
+	#[cfg_attr(not(any(feature = "quinn", feature = "noq", feature = "quiche")), allow(dead_code))]
+	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
+		self.qlog.as_deref()
 	}
 
 	/// Whether the config asks to turn GSO off, which not every backend can honor.
@@ -392,15 +446,49 @@ mod tests {
 	}
 
 	#[test]
+	fn qlog_flags_are_distinct_per_role() {
+		let both = parse(&["--client-quic-qlog", "/tmp/client", "--server-quic-qlog", "/tmp/server"]);
+		assert_eq!(both.client.qlog.as_deref(), Some(std::path::Path::new("/tmp/client")));
+		assert_eq!(both.server.qlog.as_deref(), Some(std::path::Path::new("/tmp/server")));
+
+		assert_eq!(
+			both.client.resolve().qlog_dir(),
+			Some(std::path::Path::new("/tmp/client"))
+		);
+		assert_eq!(Client::default().resolve().qlog_dir(), None);
+	}
+
+	/// A build that can't capture must reject the flag rather than ignore it, so an
+	/// operator isn't left waiting on trace files that will never appear.
+	#[test]
+	fn qlog_requires_the_feature() {
+		let unset = Client::default().validate();
+		assert!(unset.is_ok(), "no directory configured is always fine");
+
+		let set = Client {
+			qlog: Some("/tmp/qlog".into()),
+			..Default::default()
+		};
+
+		if cfg!(feature = "qlog") {
+			assert!(set.validate().is_ok());
+		} else {
+			assert!(matches!(set.validate(), Err(crate::Error::QlogUnsupported)));
+		}
+	}
+
+	#[test]
 	fn toml_round_trips() {
 		let toml = r#"
 			max_streams = 7000
 			gso = false
 			preferred_v4 = "192.0.2.1:443"
+			qlog = "/tmp/qlog"
 		"#;
 		let quic: Server = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
+		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
 }

@@ -14,8 +14,31 @@ use web_transport_noq::noq;
 
 pub use web_transport_noq;
 
+/// Attach a qlog factory writing into the configured directory, if any.
+///
+/// noq's factory opens one file per connection, named after its initial destination
+/// connection ID, so nothing needs to be unique per endpoint here.
+fn apply_qlog(transport: &mut noq::TransportConfig, quic: &Resolved, role: &str) -> Result<()> {
+	// `Client::validate` already rejected a directory this build can't honor, so the
+	// block below is only reached where capture actually works.
+	let Some(dir) = quic.qlog_dir() else {
+		return Ok(());
+	};
+
+	#[cfg(feature = "qlog")]
+	{
+		transport.qlog_from_path(dir, &format!("moq-{role}"));
+		tracing::info!(dir = %dir.display(), "writing qlog");
+	}
+
+	#[cfg(not(feature = "qlog"))]
+	let _ = (transport, dir, role);
+
+	Ok(())
+}
+
 /// Apply the resolved quic knobs to a noq transport config.
-fn apply_transport(transport: &mut noq::TransportConfig, quic: Resolved) {
+fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 	transport.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
 	transport.keep_alive_interval(quic.keep_alive);
 
@@ -186,7 +209,9 @@ impl NoqClient {
 
 		let mut transport = noq::TransportConfig::default();
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, config.quic.resolve());
+		let quic = config.quic.resolve();
+		apply_transport(&mut transport, &quic);
+		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -364,7 +389,9 @@ impl NoqServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
 		let mut transport = noq::TransportConfig::default();
 		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
-		apply_transport(&mut transport, config.quic.resolve());
+		let quic = config.quic.resolve();
+		apply_transport(&mut transport, &quic);
+		apply_qlog(&mut transport, &quic, "server")?;
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();

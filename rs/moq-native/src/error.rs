@@ -32,6 +32,10 @@ pub enum Error {
 	#[error("{0}")]
 	NoBackend(&'static str),
 
+	/// A qlog directory was configured but this build can't capture traces.
+	#[error("qlog capture requires the 'qlog' feature")]
+	QlogUnsupported,
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,

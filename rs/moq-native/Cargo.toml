@@ -19,6 +19,12 @@ noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki",
 quiche = ["dep:web-transport-quiche", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki", "dep:rustls-native-certs"]
 # Filesystem watcher for hot-reloading on-disk TLS certs/keys; the QUIC backends imply it.
 watch = ["dep:notify"]
+# Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default: quinn and noq pull in
+# the qlog crate and its serde_json encoder, which a production build has no use for.
+# quiche compiles its qlog support in unconditionally, so this is empty for a
+# quiche-only build; it still gates the flag there, so one feature means one thing
+# across every backend.
+qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
 # The QUIC backends pull in their crypto provider from these features (default-features
 # are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
