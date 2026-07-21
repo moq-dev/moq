@@ -332,7 +332,7 @@ export class Decoder {
 	}
 
 	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
-		if (config.container.kind !== "cmaf") return; // just to help typescript
+		if (!Catalog.isCmafContainer(config.container)) return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
@@ -513,6 +513,11 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	if (!Catalog.containerSupported(config.container)) {
+		console.warn(`audio: ignoring rendition with unknown container: ${config.container.kind}`);
+		return false;
+	}
+
 	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
 	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
 	// play these streams fine, so rejecting would silence them for a publisher they handle today.
@@ -525,7 +530,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (config.codec !== "opus") {
 		if (config.description) {
 			description = Util.Hex.toBytes(config.description);
-		} else if (config.container.kind === "cmaf") {
+		} else if (Catalog.isCmafContainer(config.container)) {
 			try {
 				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 			} catch (err) {

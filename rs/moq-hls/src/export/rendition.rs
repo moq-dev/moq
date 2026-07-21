@@ -444,7 +444,7 @@ async fn watch(
 	let _ = live.broadcast.set(broadcast.clone());
 
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, section).await?;
-	while let Some(entry) = timeline.next().await.map_err(moq_mux::Error::from)? {
+	while let Some(entry) = timeline.next().await? {
 		live.push(entry, window);
 	}
 	Ok(())

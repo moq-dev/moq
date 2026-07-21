@@ -58,14 +58,14 @@ impl Producer {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
-					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default()),
+					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?,
 				}
 			}
 			Codec::H265 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1")?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
-					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), Default::default()),
+					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), Default::default())?,
 				}
 			}
 		};
@@ -119,8 +119,8 @@ impl Producer {
 	/// see the real cause rather than [`moq_net::Error::Dropped`].
 	///
 	/// Consumes the producer, like [`finish`](Self::finish).
-	pub fn abort(mut self, err: moq_net::Error) {
-		match &mut self.codecs {
+	pub fn abort(self, err: moq_net::Error) {
+		match self.codecs {
 			Codecs::H264 { import, .. } => import.abort(err),
 			Codecs::H265 { import, .. } => import.abort(err),
 		}

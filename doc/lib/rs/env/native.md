@@ -188,6 +188,8 @@ Check the `container` field for each rendition:
 
 `OrderedConsumer` decodes legacy timestamps for you automatically.
 
+Anything else decodes as `Container::Unknown`, which preserves the original JSON so you can republish the catalog unchanged. Skip those renditions: their frames can't be parsed.
+
 ## Next Steps
 
 - [hang format](/concept/layer/hang) — Catalog schema and container details

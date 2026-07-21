@@ -105,7 +105,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 			},
 			err = rung.broadcast.closed() => {
 				// The source went away while idle; end the rung with it.
-				producer.abort(err)?;
+				producer.clone().abort(err)?;
 				return Ok(());
 			}
 		}
@@ -126,7 +126,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 			let item = tokio::select! {
 				item = listener.recv() => item,
 				_ = demand.unused() => {
-					if let Some(mut output) = current.take() {
+					if let Some(output) = current.take() {
 						// Signal downstream that the group is incomplete.
 						output.abort(moq_net::Error::Cancel)?;
 					}
@@ -136,7 +136,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 
 			match item {
 				Some(Item::Group(sequence)) => {
-					if let Some(mut output) = current.take() {
+					if let Some(output) = current.take() {
 						// A group boundary without an end: treat as incomplete.
 						output.abort(moq_net::Error::Cancel)?;
 					}
@@ -186,13 +186,13 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 				Some(Item::Lagged) => {
 					// Fell behind the feed: abandon the group and resume at the
 					// next boundary rather than stalling other rungs.
-					if let Some(mut output) = current.take() {
+					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
 				}
 				Some(Item::Finished) => {
 					// The source track ended: the derivative ends with it.
-					if let Some(mut output) = current.take() {
+					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
 					producer.finish()?;
@@ -200,10 +200,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 				}
 				None => {
 					// The feed died mid-stream (source or decode error).
-					if let Some(mut output) = current.take() {
+					if let Some(output) = current.take() {
 						let _ = output.abort(moq_net::Error::Cancel);
 					}
-					producer.abort(moq_net::Error::Cancel)?;
+					producer.clone().abort(moq_net::Error::Cancel)?;
 					return Ok(());
 				}
 			}
@@ -278,11 +278,11 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 		}
 	};
 
-	let mut output = match request.accept(None) {
+	let output = match request.accept(None) {
 		Ok(output) => output,
 		Err(err) => return Err(err.into()),
 	};
-	transcode_group(pipeline, &container, &mut source, &mut output).await?;
+	transcode_group(pipeline, &container, &mut source, output).await?;
 	Ok(())
 }
 
@@ -293,9 +293,9 @@ async fn transcode_group(
 	pipeline: Pipeline,
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
-	output: &mut moq_net::group::Producer,
+	mut output: moq_net::group::Producer,
 ) -> Result<(), Error> {
-	match transcode_group_inner(pipeline, container, source, output).await {
+	match transcode_group_inner(pipeline, container, source, &mut output).await {
 		Ok(()) => {
 			output.finish()?;
 			Ok(())

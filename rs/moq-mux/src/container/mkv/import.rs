@@ -295,7 +295,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				kind,
 				track: self
 					.catalog
-					.media_producer(track, crate::catalog::hang::Container::Legacy),
+					.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 				group: None,
 				last_emitted_ticks: None,
 			},
@@ -407,19 +407,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
-	/// cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
-		for track in self.tracks.values_mut() {
-			if let Some(mut g) = track.group.take() {
+	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.unregister();
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
 			track.track.abort(err.clone());
 		}
 	}
-}
 
-impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
+	/// Drop every rendition this importer registered from the catalog.
+	fn unregister(&mut self) {
 		let mut catalog = self.catalog.lock();
 		for track in self.tracks.values() {
 			match track.kind {
@@ -431,6 +431,12 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 				}
 			}
 		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		self.unregister();
 	}
 }
 

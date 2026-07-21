@@ -2909,8 +2909,8 @@ mod tests {
 
 		// Source A dies (session loss): the track re-splices from B and nothing
 		// is announced.
+		// abort() consumes the producer, so this both aborts and drops it.
 		producer.abort(Error::Dropped).unwrap();
-		drop(producer);
 		source_a.abort();
 		drop(source_a);
 		drop(dynamic_a);

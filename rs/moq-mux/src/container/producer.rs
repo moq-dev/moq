@@ -233,10 +233,10 @@ impl<C: Container> Producer<C> {
 	/// The counterpart to [`Self::finish`] for a failed teardown: consumers observe
 	/// `err` instead of the generic [`moq_net::Error::Dropped`] a bare drop surfaces,
 	/// so the real cause (a disconnect, a decode failure) reaches them. Any buffered
-	/// frames are discarded, not flushed.
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// frames are discarded, not flushed. Consumes the producer.
+	pub fn abort(mut self, err: moq_net::Error) {
 		self.buffer.clear();
-		if let Some(mut group) = self.group.take() {
+		if let Some(group) = self.group.take() {
 			let _ = group.abort(err.clone());
 		}
 		let _ = self.inner.abort(err);

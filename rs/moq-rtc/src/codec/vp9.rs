@@ -7,7 +7,8 @@ use crate::{Result, codec};
 
 /// Forwards str0m's VP9 frames to a `.vp9` track, detecting keyframes inline.
 pub struct Bridge {
-	catalog: moq_mux::catalog::Producer,
+	/// Owns the catalog rendition, retiring it when the bridge goes away.
+	rendition: codec::VideoRendition,
 	track: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
 	announced: bool,
 }
@@ -16,30 +17,32 @@ impl Bridge {
 	/// Publish a `.vp9` track on `broadcast`; the catalog rendition is added on the first frame.
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
 		let track = broadcast.create_track(broadcast.unique_name(".vp9"), hang::container::track_info())?;
-		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		let name = track.name().to_string();
+		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy)?;
 		Ok(Self {
-			catalog,
+			rendition: codec::VideoRendition { catalog, name },
 			track: producer,
 			announced: false,
 		})
 	}
 
-	fn announce(&mut self) {
+	fn announce(&mut self) -> Result<()> {
 		if self.announced {
-			return;
+			return Ok(());
 		}
-		let name = self.track.track().name().to_string();
+		let name = self.rendition.name.clone();
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VP9::default());
 		config.container = hang::catalog::Container::Legacy;
-		config.timeline = Some(self.catalog.timeline(&name).section());
-		self.catalog.lock().video.renditions.insert(name, config);
+		config.timeline = Some(self.rendition.catalog.timeline(&name)?.section());
+		self.rendition.catalog.lock().video.renditions.insert(name, config);
 		self.announced = true;
+		Ok(())
 	}
 }
 
 impl codec::Bridge for Bridge {
 	fn push(&mut self, frame: codec::Frame) -> Result<()> {
-		self.announce();
+		self.announce()?;
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		let keyframe = is_keyframe(&frame.payload);
@@ -54,7 +57,7 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self: Box<Self>, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 }
@@ -81,12 +84,6 @@ fn is_keyframe(payload: &[u8]) -> bool {
 	pos += 1;
 	let frame_type = (b >> (7 - pos)) & 1;
 	frame_type == 0
-}
-
-impl Drop for Bridge {
-	fn drop(&mut self) {
-		self.catalog.lock().video.renditions.remove(self.track.track().name());
-	}
 }
 
 #[cfg(test)]

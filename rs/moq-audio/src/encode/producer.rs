@@ -81,8 +81,8 @@ pub struct Producer<E: CatalogExt = ()> {
 	encoder: Encoder,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire>,
-	track_name: String,
-	catalog: moq_mux::catalog::Producer<E>,
+	/// Owns the catalog rendition, retiring it when this producer goes away.
+	rendition: Rendition<E>,
 	pending: Vec<f32>,
 	/// Samples emitted since the current epoch (reset by [`reset_epoch`](Self::reset_epoch)).
 	frames_produced: u64,
@@ -129,19 +129,18 @@ impl<E: CatalogExt> Producer<E> {
 			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec))?,
 		};
 		let name = track.name().to_string();
-		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire);
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
 
 		let mut catalog_mut = catalog.clone();
 		let mut config = encoder.catalog();
-		config.timeline = Some(catalog.timeline(&name).section());
+		config.timeline = Some(catalog.timeline(&name)?.section());
 		catalog_mut.lock().audio.insert(&name, config)?;
 
 		Ok(Self {
 			encoder,
 			resampler,
 			track,
-			track_name: name,
-			catalog,
+			rendition: Rendition { catalog, name },
 			pending: Vec::new(),
 			frames_produced: 0,
 			epoch_us: None,
@@ -150,7 +149,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// The name of the published track, which is [`Options::track`] resolved.
 	pub fn track_name(&self) -> &str {
-		&self.track_name
+		&self.rendition.name
 	}
 
 	/// The underlying track producer, e.g. to watch subscriber state via
@@ -249,14 +248,23 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// Abort the track with `err` instead of finishing it, so subscribers see the
 	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
-	pub fn abort(mut self, err: moq_net::Error) {
+	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 }
 
-impl<E: CatalogExt> Drop for Producer<E> {
+/// The producer's catalog entry, removed however the producer ends.
+///
+/// A separate value rather than a `Drop` on [`Producer`] itself, so the terminal
+/// [`finish`](Producer::finish) / [`abort`](Producer::abort) can consume the track.
+struct Rendition<E: CatalogExt> {
+	catalog: moq_mux::catalog::Producer<E>,
+	name: String,
+}
+
+impl<E: CatalogExt> Drop for Rendition<E> {
 	fn drop(&mut self) {
-		self.catalog.lock().audio.remove(&self.track_name);
+		self.catalog.lock().audio.remove(&self.name);
 	}
 }
 

@@ -238,7 +238,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			// Each track indexes its own group opens: audio and video group boundaries differ, so a
 			// per-track timeline (the 1:1 default) is correct here, not a shared one.
-			let timeline = self.catalog.timeline(track.name());
+			let timeline = self.catalog.timeline(track.name())?;
 
 			let detect_bitrate = match kind {
 				TrackKind::Video => {
@@ -857,13 +857,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
-	/// cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
-		for track in self.tracks.values_mut() {
-			if let Some(mut g) = track.group.take() {
+	/// cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.unregister();
+		for mut track in std::mem::take(&mut self.tracks).into_values() {
+			if let Some(g) = track.group.take() {
 				let _ = g.abort(err.clone());
 			}
 			let _ = track.track.abort(err.clone());
+		}
+	}
+
+	/// Drop every rendition this importer registered from the catalog.
+	fn unregister(&mut self) {
+		let mut catalog = self.catalog.lock();
+		for track in self.tracks.values() {
+			match track.kind {
+				TrackKind::Video => {
+					catalog.video.renditions.remove(track.track.name());
+				}
+				TrackKind::Audio => {
+					catalog.audio.renditions.remove(track.track.name());
+				}
+			}
 		}
 	}
 
@@ -920,17 +936,6 @@ fn set_detected_bitrate<E: crate::catalog::hang::CatalogExt>(
 
 impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
-		let mut catalog = self.catalog.lock();
-
-		for track in self.tracks.values() {
-			match track.kind {
-				TrackKind::Video => {
-					catalog.video.renditions.remove(track.track.name());
-				}
-				TrackKind::Audio => {
-					catalog.audio.renditions.remove(track.track.name());
-				}
-			}
-		}
+		self.unregister();
 	}
 }

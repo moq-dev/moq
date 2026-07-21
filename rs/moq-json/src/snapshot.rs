@@ -168,6 +168,9 @@ impl<T: Serialize> Producer<T> {
 	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from
 	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
 	/// an `.await`, since that keeps the lock held while suspended.
+	///
+	/// Publishing on drop can fail (a closed track, a value that won't serialize) and only logs a
+	/// warning. Call [`Guard::commit`] instead to handle the error.
 	pub fn lock(&mut self) -> Guard<'_, T>
 	where
 		T: Default + DeserializeOwned,
@@ -196,10 +199,34 @@ impl<T: Serialize> Producer<T> {
 ///
 /// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
 /// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
+///
+/// Publishing on drop swallows any error into a warning, so prefer [`commit`](Self::commit) when the
+/// caller can act on a failure.
 pub struct Guard<'a, T: Serialize> {
 	inner: MutexGuard<'a, Inner>,
 	value: T,
 	dirty: bool,
+}
+
+impl<T: Serialize> Guard<'_, T> {
+	/// Publish the edited value, returning any error.
+	///
+	/// Consumes the guard, so the subsequent drop publishes nothing. A no-op if the value was never
+	/// mutated.
+	pub fn commit(mut self) -> Result<()> {
+		self.publish()
+	}
+
+	/// Publish a dirty value once, clearing the dirty flag so it isn't published again.
+	fn publish(&mut self) -> Result<()> {
+		if !self.dirty {
+			return Ok(());
+		}
+		self.dirty = false;
+
+		// We already hold the lock, so publish through the held guard rather than re-locking.
+		self.inner.update(&self.value)
+	}
 }
 
 impl<T: Serialize> Deref for Guard<'_, T> {
@@ -219,12 +246,9 @@ impl<T: Serialize> DerefMut for Guard<'_, T> {
 
 impl<T: Serialize> Drop for Guard<'_, T> {
 	fn drop(&mut self) {
-		if !self.dirty {
-			return;
+		if let Err(err) = self.publish() {
+			tracing::warn!(%err, "failed to publish JSON value on guard drop");
 		}
-
-		// We already hold the lock, so publish through the held guard rather than re-locking.
-		let _ = self.inner.update(&self.value);
 	}
 }
 
@@ -720,6 +744,50 @@ mod test {
 				scte35: Some(42),
 			}
 		);
+	}
+
+	#[test]
+	fn commit_reports_a_publish_failure() {
+		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			a: u32,
+		}
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
+
+		// A finished track can't take another group, so the publish behind the guard fails.
+		producer.finish().unwrap();
+
+		let mut guard = producer.lock();
+		guard.a = 1;
+		assert!(matches!(guard.commit(), Err(crate::Error::Net(_))));
+	}
+
+	#[test]
+	fn commit_publishes_once() {
+		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			a: u32,
+		}
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let consumer = track.subscribe(None);
+		let mut producer = Producer::<Doc>::new(track, cfg(0));
+
+		let mut guard = producer.lock();
+		guard.a = 1;
+		guard.commit().unwrap();
+
+		// The drop that follows `commit` must not publish a second group.
+		producer.finish().unwrap();
+		assert_eq!(consumer.latest(), Some(0));
 	}
 
 	#[test]

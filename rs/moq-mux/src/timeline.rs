@@ -23,7 +23,9 @@
 //!
 //! On the read side, [`Consumer::subscribe`] reads a timeline straight from its
 //! [`hang::catalog::Timeline`] section (so the track name and timescale come from the catalog and
-//! can't be mismatched) and yields decoded [`Entry`]s with a real [`Timestamp`].
+//! can't be mismatched) and yields decoded [`Entry`]s with a real [`Timestamp`]. It is generic over
+//! a [`RecordExt`], so it can read the extra fields another publisher flattens into a record; the
+//! write side publishes the base record shape only.
 //!
 //! On the wire the track is a DEFLATE-compressed [`moq_json::stream`] (a single group, one record
 //! per frame; see [`hang::timeline`] for the record schema).
@@ -50,13 +52,14 @@ pub const DEFAULT_GRANULARITY: Timestamp = Timestamp::new_const(1, Timescale::SE
 /// A media timeline: its catalog [`section`](Self::section) and wall anchor, and the [`Recorder`]
 /// its group opens are recorded through.
 ///
-/// Generic over the record extension `E` (defaulting to `()`; see [`RecordExt`]). `Clone`, and every
-/// clone shares the one track and its wall anchor, so a set of aligned renditions can advertise one
-/// timeline. Get one from [`catalog::Producer::timeline`](crate::catalog::Producer::timeline), which
-/// keeps ownership and closes the track when the catalog finishes.
+/// Publishes the base [`Record`] shape (no extension); a [`Consumer`] can still read a record
+/// extension published by another implementation. `Clone`, and every clone shares the one track and
+/// its wall anchor, so a set of aligned renditions can advertise one timeline. Get one from
+/// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline), which keeps ownership and
+/// closes the track when the catalog finishes.
 #[derive(Clone)]
-pub struct Producer<E: RecordExt = ()> {
-	inner: moq_json::stream::Producer<Record<E>>,
+pub struct Producer {
+	inner: moq_json::stream::Producer<Record>,
 	track: String,
 	timescale: Timescale,
 	granularity: Timestamp,
@@ -65,7 +68,7 @@ pub struct Producer<E: RecordExt = ()> {
 	wall: Arc<Mutex<Option<u64>>>,
 }
 
-impl<E: RecordExt> Producer<E> {
+impl Producer {
 	/// Create a timeline track for the media rendition `name` on the given broadcast.
 	///
 	/// The track is named per [`hang::timeline::track_name`] (`<name>.timeline.z`) at the
@@ -125,7 +128,7 @@ impl<E: RecordExt> Producer<E> {
 	/// Wire it into a media track's [`container::Producer`](crate::container::Producer) with
 	/// [`with_recorder`](crate::container::Producer::with_recorder). A recorder owns its own throttle
 	/// cursor, so wire exactly one per timeline (a shared timeline is filled by its source alone).
-	pub fn recorder(&self) -> Recorder<E> {
+	pub fn recorder(&self) -> Recorder {
 		Recorder {
 			inner: self.inner.clone(),
 			timescale: self.timescale,
@@ -149,15 +152,15 @@ impl<E: RecordExt> Producer<E> {
 /// Move-only (not `Clone`): it owns its throttle cursor, so wire exactly one per timeline. Minted by
 /// [`Producer::recorder`] and held by a rendition's
 /// [`container::Producer`](crate::container::Producer).
-pub struct Recorder<E: RecordExt = ()> {
-	inner: moq_json::stream::Producer<Record<E>>,
+pub struct Recorder {
+	inner: moq_json::stream::Producer<Record>,
 	timescale: Timescale,
 	granularity: Timestamp,
 	// The pts of the last recorded group; the throttle floor. Owned, since a recorder is 1:1.
 	last: Option<Timestamp>,
 }
 
-impl<E: RecordExt> Recorder<E> {
+impl Recorder {
 	/// Record that group `sequence` opened at presentation time `pts`, unless it falls within the
 	/// granularity of the last recorded group (skipped, so a consumer extrapolates or fetches).
 	pub(crate) fn record(&mut self, sequence: u64, pts: Timestamp) -> Result<(), moq_net::Error> {
@@ -208,40 +211,44 @@ impl<E: RecordExt> Consumer<E> {
 	///
 	/// The section supplies both the track name and the timescale, so a reader can't pair the wrong
 	/// scale with the track.
-	pub async fn subscribe(
-		broadcast: &moq_net::broadcast::Consumer,
-		section: &Timeline,
-	) -> Result<Self, moq_net::Error> {
+	///
+	/// Errors if the section declares a timescale that isn't representable.
+	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Timeline) -> crate::Result<Self> {
 		let track = broadcast.track(&section.track)?.subscribe(None).await?;
 
 		let config = moq_json::stream::ConsumerConfig::default().with_compression(true);
 
 		Ok(Self {
 			inner: moq_json::stream::Consumer::new(track, config),
-			timescale: Timescale::new(section.timescale as u64).unwrap_or(Timescale::MILLI),
+			timescale: Timescale::new(section.timescale as u64)
+				.map_err(|_| crate::Error::InvalidTimescale(section.timescale))?,
 		})
 	}
 
-	fn decode(&self, record: Record<E>) -> Entry<E> {
-		Entry {
+	/// Decode a record into an entry, converting its pts out of the wire timescale.
+	///
+	/// A pts the timescale can't represent is an error rather than a substituted value: silently
+	/// moving a timestamp would misdirect seeking and live-edge logic.
+	fn decode(&self, record: Record<E>) -> crate::Result<Entry<E>> {
+		Ok(Entry {
 			group: record.group,
-			pts: Timestamp::new(record.pts, self.timescale).unwrap_or(Timestamp::ZERO),
+			pts: Timestamp::new(record.pts, self.timescale)?,
 			ext: record.ext,
-		}
+		})
 	}
 
 	/// Get the next entry, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<Entry<E>>, moq_json::Error> {
+	pub async fn next(&mut self) -> crate::Result<Option<Entry<E>>> {
 		match self.inner.next().await? {
-			Some(record) => Ok(Some(self.decode(record))),
+			Some(record) => Ok(Some(self.decode(record)?)),
 			None => Ok(None),
 		}
 	}
 
 	/// Poll for the next entry, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Entry<E>>, moq_json::Error>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Entry<E>>>> {
 		match self.inner.poll_next(waiter)? {
-			Poll::Ready(Some(record)) => Poll::Ready(Ok(Some(self.decode(record)))),
+			Poll::Ready(Some(record)) => Poll::Ready(self.decode(record).map(Some)),
 			Poll::Ready(None) => Poll::Ready(Ok(None)),
 			Poll::Pending => Poll::Pending,
 		}
@@ -287,7 +294,7 @@ mod test {
 	#[tokio::test]
 	async fn records_group_opens_in_milliseconds() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
 		assert_eq!(timeline.track, "video0.timeline.z");
 
 		let track = broadcast.create_track("video0", None).unwrap();
@@ -298,7 +305,7 @@ mod test {
 		media.write(frame(2_000_000, false)).unwrap(); // extends group 0
 		media.write(frame(4_000_000, true)).unwrap(); // group 1 @ 4_000_000us
 		media.finish().unwrap();
-		timeline.finish().unwrap();
+		timeline.clone().finish().unwrap();
 
 		// Entry pts is a real Timestamp (decoded from the ms-timescale record).
 		assert_eq!(drain(&broadcast, &timeline).await, vec![entry(0, 0), entry(1, 4_000)]);
@@ -307,7 +314,7 @@ mod test {
 	#[tokio::test]
 	async fn granularity_throttles_records() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut timeline = Producer::new(&mut broadcast, "audio0").unwrap();
+		let timeline = Producer::new(&mut broadcast, "audio0").unwrap();
 		let mut recorder = timeline.recorder();
 
 		// Default granularity is 1s. Group opens 300ms apart, all within a second of the first, then
@@ -316,7 +323,7 @@ mod test {
 			recorder.record(seq, Timestamp::from_millis(ms).unwrap()).unwrap();
 		}
 		drop(recorder);
-		timeline.finish().unwrap();
+		timeline.clone().finish().unwrap();
 
 		assert_eq!(drain(&broadcast, &timeline).await, vec![entry(0, 0), entry(4, 1200)]);
 	}
@@ -324,7 +331,7 @@ mod test {
 	#[test]
 	fn section_advertises_track_and_wall() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut timeline = Producer::<()>::new(&mut broadcast, "audio0").unwrap();
+		let mut timeline = Producer::new(&mut broadcast, "audio0").unwrap();
 
 		let section = timeline.section();
 		assert_eq!(section.track, "audio0.timeline.z");
@@ -344,14 +351,54 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn rejects_an_invalid_timescale() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		timeline.clone().finish().unwrap();
+
+		// A timescale of 0 can't be honored, and quietly reading the track at milliseconds would
+		// report timestamps the publisher never meant.
+		let mut section = timeline.section();
+		section.timescale = 0;
+		match Consumer::<()>::subscribe(&broadcast.consume(), &section).await {
+			Err(crate::Error::InvalidTimescale(0)) => {}
+			Err(err) => panic!("expected an invalid timescale, got {err:?}"),
+			Ok(_) => panic!("expected an invalid timescale to be rejected"),
+		}
+	}
+
+	#[tokio::test]
+	async fn rejects_an_out_of_range_pts() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
+
+		// Publish a record whose pts no Timestamp can hold, bypassing the recorder.
+		let track = broadcast.create_track("raw.timeline.z", None).unwrap();
+		let config = moq_json::stream::ProducerConfig::default().with_compression(true);
+		let mut raw = moq_json::stream::Producer::new(track, config);
+		raw.append(&Record::<()>::new(0, u64::MAX)).unwrap();
+		raw.finish().unwrap();
+
+		let mut section = timeline.section();
+		section.track = "raw.timeline.z".to_string();
+		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &section).await.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		match consumer.poll_next(&waiter) {
+			Poll::Ready(Err(crate::Error::TimestampOverflow(_))) => {}
+			other => panic!("expected a decode error, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
 	async fn consumer_decodes_pts_from_the_section() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let mut timeline = Producer::new(&mut broadcast, "video0").unwrap();
+		let timeline = Producer::new(&mut broadcast, "video0").unwrap();
 		timeline
 			.recorder()
 			.record(3, Timestamp::from_micros(7_000).unwrap())
 			.unwrap();
-		timeline.finish().unwrap();
+		timeline.clone().finish().unwrap();
 
 		// The reader takes the track name + timescale from the section, and yields a real Timestamp.
 		// The pts is decoded at the timeline's (millisecond) timescale, so compare the instant rather

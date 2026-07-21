@@ -413,9 +413,10 @@ class DecoderTrack {
 	}
 
 	#runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
-		if (this.config.container.kind !== "cmaf") return;
+		const container = this.config.container;
+		if (!Catalog.isCmafContainer(container)) return;
 
-		const initSegment = base64ToBytes(this.config.container.init);
+		const initSegment = base64ToBytes(container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
@@ -555,10 +556,15 @@ class DecoderTrack {
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+	if (!Catalog.containerSupported(config.container)) {
+		console.warn(`video: ignoring rendition with unknown container: ${config.container.kind}`);
+		return false;
+	}
+
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);
-	} else if (config.container.kind === "cmaf") {
+	} else if (Catalog.isCmafContainer(config.container)) {
 		try {
 			description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 		} catch (err) {

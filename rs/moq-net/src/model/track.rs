@@ -460,13 +460,13 @@ impl TrackState {
 			}
 
 			self.duplicates.remove(&group.sequence);
-			// Abort the group before dropping it so any consumer still reading it
-			// surfaces `Error::Old` instead of blocking forever on a frame that will
-			// never arrive (the cached producer is about to be gone). Without this a
-			// reader parked on an aged-out group hangs indefinitely, since the group
-			// was never finished or aborted -- it just silently disappeared.
-			let _ = group.abort(Error::Old);
-			*slot = None;
+			// Take the group out of the cache and abort it, so any consumer still reading
+			// surfaces `Error::Old` instead of blocking forever on a frame that will never
+			// arrive. Without this a reader parked on an aged-out group hangs indefinitely,
+			// since the group is neither finished nor aborted.
+			if let Some((group, _)) = slot.take() {
+				let _ = group.abort(Error::Old);
+			}
 		}
 
 		// Trim leading tombstones to advance the offset.
@@ -841,12 +841,15 @@ impl Producer {
 
 	/// Abort the track with the given error.
 	///
-	/// Drops the cached groups so a stale [`Consumer`] can't pin them (and
-	/// their frame buffers) in memory forever. Consumers that haven't drained yet
-	/// surface the abort error instead of the leftover cache. Child groups are
-	/// independent: a consumer that already pulled a [`group::Consumer`] keeps its
-	/// own handle and can finish reading it.
-	pub fn abort(&mut self, err: Error) -> Result<()> {
+	/// Consumes the handle, since nothing can be written to an aborted track. Drops the
+	/// cached groups so a stale [`Consumer`] can't pin them (and their frame buffers) in
+	/// memory forever. Consumers that haven't drained yet surface the abort error instead
+	/// of the leftover cache. Child groups are independent: a consumer that already pulled
+	/// a [`group::Consumer`] keeps its own handle and can finish reading it.
+	///
+	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
+	/// sequence, and lower-numbered groups may still be written afterwards.
+	pub fn abort(self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.groups.clear();
@@ -2952,7 +2955,7 @@ mod test {
 		let mut consumer = producer.subscribe(None);
 		assert_eq!(live_groups(&producer.state.read()), 2);
 
-		producer.abort(Error::Cancel).unwrap();
+		producer.clone().abort(Error::Cancel).unwrap();
 
 		{
 			let state = producer.state.read();
@@ -3952,7 +3955,7 @@ mod test {
 		tokio::time::advance(Duration::from_millis(10)).await;
 
 		// The publisher aborts its own latest group; the slot stays at max_sequence.
-		let mut latest = producer.append_group().unwrap(); // seq 1
+		let latest = producer.append_group().unwrap(); // seq 1
 		latest.abort(Error::Cancel).unwrap();
 		tokio::time::advance(Duration::from_millis(10)).await;
 
@@ -4023,7 +4026,7 @@ mod test {
 
 	#[tokio::test]
 	async fn fetch_aborts_with_track() {
-		let mut producer = track_producer("test", None);
+		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 

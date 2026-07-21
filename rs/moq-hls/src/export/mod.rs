@@ -233,13 +233,15 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").section());
+		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
 		let track = broadcast.create_track("video0", None).unwrap();
-		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut media = catalog
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(1_000_000, false)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -302,14 +304,16 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").section());
+		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
 		// Two GOPs: group 0 is complete, while group 1 stays at the live edge until the
 		// publisher finishes.
 		let track = broadcast.create_track("video0", None).unwrap();
-		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut media = catalog
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
@@ -395,12 +399,14 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").section());
+		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
 		let track = broadcast.create_track("video0", None).unwrap();
-		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut media = catalog
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
@@ -452,13 +458,15 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").section());
+		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
 		let track = broadcast.create_track("video0", None).unwrap();
-		let mut media = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy);
+		let mut media = catalog
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap();

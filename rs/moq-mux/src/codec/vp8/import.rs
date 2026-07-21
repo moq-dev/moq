@@ -30,20 +30,20 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
-	) -> Self {
+	) -> crate::Result<Self> {
 		let rendition = reserved.video(track.name());
-		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint);
+		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
 			track: reserved
 				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy),
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
 			catalog,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config);
 		}
-		import
+		Ok(import)
 	}
 
 	/// Initialize the importer.
@@ -119,8 +119,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 
@@ -157,7 +157,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn imports_keyframe_then_interframe() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default()).unwrap();
 
 		// Empty init buffer: the catalog is filled on the first key frame.
 		import.initialize(&[]).unwrap();
@@ -188,7 +188,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn rejects_interframe_first() {
 		let (track, catalog) = setup();
-		let mut import = super::Import::new(track, catalog.reserve(), Default::default());
+		let mut import = super::Import::new(track, catalog.reserve(), Default::default()).unwrap();
 
 		let interframe = Bytes::from_static(&[0x31, 0x00, 0x00, 0xaa, 0xbb]);
 		assert!(
