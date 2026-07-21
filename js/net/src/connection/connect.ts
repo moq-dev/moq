@@ -96,6 +96,9 @@ function defaultDiscovery(url: URL): boolean {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
+/** The default connect signal: never aborts. */
+const NEVER_ABORTED = new AbortController().signal;
+
 /**
  * Establishes a connection to a MOQ server.
  *
@@ -103,13 +106,8 @@ const websocketWon = new Set<string>();
  * @param props - Connection options
  * @returns A promise that resolves to a Connection instance
  */
-export function connect(url: URL, props?: ConnectProps): Promise<Established> {
-	const signal = props?.signal;
-	if (!signal) return connectInner(url, props);
-	return connectAbortable(url, props, signal);
-}
-
-async function connectAbortable(url: URL, props: ConnectProps, signal: AbortSignal): Promise<Established> {
+export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
+	const signal = props?.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 
 	const { promise: aborted, reject: rejectAborted } = Promise.withResolvers<never>();
