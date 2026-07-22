@@ -24,7 +24,7 @@ pub enum KeyOperation {
 /// <https://datatracker.ietf.org/doc/html/rfc7518#section-6>
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kty")]
-pub enum KeyType {
+pub enum KeyMaterial {
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2>
 	EC {
 		#[serde(rename = "crv")]
@@ -156,9 +156,9 @@ pub struct Jwk {
 	#[serde(rename = "key_ops")]
 	pub operations: HashSet<KeyOperation>,
 
-	/// The key material. Defaults to [`KeyType::OCT`] when `kty` is absent.
+	/// The key material. Defaults to [`KeyMaterial::OCT`] when `kty` is absent.
 	#[serde(flatten)]
-	pub key: KeyType,
+	pub material: KeyMaterial,
 
 	/// The key ID, useful for rotating keys.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -174,14 +174,30 @@ impl Jwk {
 	///
 	/// Set the remaining fields on the returned value. The struct is `#[non_exhaustive]`, so
 	/// building it this way keeps working as JWK parameters are added.
-	pub fn new(algorithm: Algorithm, key: KeyType) -> Self {
+	pub fn new(algorithm: Algorithm, material: KeyMaterial) -> Self {
 		Self {
 			algorithm,
 			operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
-			key,
+			material,
 			kid: None,
 			scope: None,
 		}
+	}
+
+	/// Check the parameters and turn this into a [`Key`] that can sign and verify.
+	///
+	/// The named counterpart to `Key::try_from`, so the conversion is discoverable from here
+	/// rather than only from a trait impl.
+	pub fn validate(self) -> crate::Result<Key> {
+		if let Some(scope) = &self.scope {
+			scope.validate()?;
+		}
+
+		Ok(Key {
+			jwk: self,
+			decode: Default::default(),
+			encode: Default::default(),
+		})
 	}
 }
 
@@ -245,15 +261,7 @@ impl TryFrom<Jwk> for Key {
 	type Error = crate::Error;
 
 	fn try_from(jwk: Jwk) -> crate::Result<Self> {
-		if let Some(scope) = &jwk.scope {
-			scope.validate()?;
-		}
-
-		Ok(Self {
-			jwk,
-			decode: Default::default(),
-			encode: Default::default(),
-		})
+		jwk.validate()
 	}
 }
 
@@ -344,24 +352,24 @@ impl Key {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
 
-		let key = match self.key {
-			KeyType::RSA { ref public, .. } => KeyType::RSA {
+		let material = match self.material {
+			KeyMaterial::RSA { ref public, .. } => KeyMaterial::RSA {
 				public: public.clone(),
 				private: None,
 			},
-			KeyType::EC {
+			KeyMaterial::EC {
 				ref x,
 				ref y,
 				ref curve,
 				..
-			} => KeyType::EC {
+			} => KeyMaterial::EC {
 				x: x.clone(),
 				y: y.clone(),
 				curve: curve.clone(),
 				d: None,
 			},
-			KeyType::OCT { .. } => return Err(KeyError::NoPublicKey.into()),
-			KeyType::OKP { ref x, ref curve, .. } => KeyType::OKP {
+			KeyMaterial::OCT { .. } => return Err(KeyError::NoPublicKey.into()),
+			KeyMaterial::OKP { ref x, ref curve, .. } => KeyMaterial::OKP {
 				x: x.clone(),
 				curve: curve.clone(),
 				d: None,
@@ -372,7 +380,7 @@ impl Key {
 			jwk: Jwk {
 				algorithm: self.algorithm,
 				operations: [KeyOperation::Verify].into(),
-				key,
+				material,
 				kid: self.kid.clone(),
 				scope: self.scope.clone(),
 			},
@@ -386,12 +394,12 @@ impl Key {
 			return Ok(key);
 		}
 
-		let decoding_key = match self.key {
-			KeyType::OCT { ref secret } => match self.algorithm {
+		let decoding_key = match self.material {
+			KeyMaterial::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => DecodingKey::from_secret(secret),
 				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
-			KeyType::EC {
+			KeyMaterial::EC {
 				ref curve,
 				ref x,
 				ref y,
@@ -425,7 +433,7 @@ impl Key {
 				}
 				_ => return Err(KeyError::InvalidCurve("EC").into()),
 			},
-			KeyType::OKP { ref curve, ref x, .. } => match curve {
+			KeyMaterial::OKP { ref curve, ref x, .. } => match curve {
 				EllipticCurve::Ed25519 => {
 					if self.algorithm != Algorithm::EdDSA {
 						return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
@@ -437,7 +445,7 @@ impl Key {
 				}
 				_ => return Err(KeyError::InvalidCurve("OKP").into()),
 			},
-			KeyType::RSA { ref public, .. } => {
+			KeyMaterial::RSA { ref public, .. } => {
 				DecodingKey::from_rsa_raw_components(public.n.as_ref(), public.e.as_ref())
 			}
 		};
@@ -450,12 +458,12 @@ impl Key {
 			return Ok(key);
 		}
 
-		let encoding_key = match self.key {
-			KeyType::OCT { ref secret } => match self.algorithm {
+		let encoding_key = match self.material {
+			KeyMaterial::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
 				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
-			KeyType::EC { ref curve, ref d, .. } => {
+			KeyMaterial::EC { ref curve, ref d, .. } => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
 				match curve {
@@ -472,7 +480,7 @@ impl Key {
 					_ => return Err(KeyError::InvalidCurve("EC").into()),
 				}
 			}
-			KeyType::OKP {
+			KeyMaterial::OKP {
 				ref curve,
 				ref d,
 				ref x,
@@ -487,7 +495,7 @@ impl Key {
 					_ => return Err(KeyError::InvalidCurve("OKP").into()),
 				}
 			}
-			KeyType::RSA {
+			KeyMaterial::RSA {
 				ref public,
 				ref private,
 			} => {
@@ -658,17 +666,14 @@ mod tests {
 	use std::time::{Duration, SystemTime};
 
 	fn create_test_key() -> Key {
-		Jwk {
-			algorithm: Algorithm::HS256,
-			operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
-			key: KeyType::OCT {
+		let mut jwk = Jwk::new(
+			Algorithm::HS256,
+			KeyMaterial::OCT {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
-			kid: Some(crate::KeyId::decode("test-key-1").unwrap()),
-			scope: None,
-		}
-		.try_into()
-		.unwrap()
+		);
+		jwk.kid = Some(crate::KeyId::decode("test-key-1").unwrap());
+		jwk.validate().unwrap()
 	}
 
 	fn create_test_claims() -> Claims {
@@ -689,8 +694,8 @@ mod tests {
 
 		assert_eq!(loaded_key.algorithm, key.algorithm);
 		assert_eq!(loaded_key.operations, key.operations);
-		match (&loaded_key.key, &key.key) {
-			(KeyType::OCT { secret: loaded_secret }, KeyType::OCT { secret }) => {
+		match (&loaded_key.material, &key.material) {
+			(KeyMaterial::OCT { secret: loaded_secret }, KeyMaterial::OCT { secret }) => {
 				assert_eq!(loaded_secret, secret);
 			}
 			_ => panic!("Expected OCT key"),
@@ -707,7 +712,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		if let KeyType::OCT { secret, .. } = &key.key {
+		if let KeyMaterial::OCT { secret, .. } = &key.material {
 			let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
 			assert_eq!(base64_key, "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68");
 		} else {
@@ -721,7 +726,7 @@ mod tests {
 		assert_eq!(loaded.algorithm, Algorithm::HS256);
 		assert!(loaded.operations.contains(&KeyOperation::Sign));
 		assert!(loaded.operations.contains(&KeyOperation::Verify));
-		assert!(matches!(loaded.key, KeyType::OCT { .. }));
+		assert!(matches!(loaded.material, KeyMaterial::OCT { .. }));
 	}
 
 	#[test]
@@ -973,8 +978,8 @@ mod tests {
 		assert_eq!(key.kid, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert_eq!(key.operations, [KeyOperation::Sign, KeyOperation::Verify].into());
 
-		match &key.key {
-			KeyType::OCT { secret } => assert_eq!(secret.len(), 32),
+		match &key.material {
+			KeyMaterial::OCT { secret } => assert_eq!(secret.len(), 32),
 			_ => panic!("Expected OCT key"),
 		}
 	}
@@ -987,8 +992,8 @@ mod tests {
 
 		assert_eq!(key.algorithm, Algorithm::HS384);
 
-		match &key.key {
-			KeyType::OCT { secret } => assert_eq!(secret.len(), 48),
+		match &key.material {
+			KeyMaterial::OCT { secret } => assert_eq!(secret.len(), 48),
 			_ => panic!("Expected OCT key"),
 		}
 	}
@@ -1001,8 +1006,8 @@ mod tests {
 
 		assert_eq!(key.algorithm, Algorithm::HS512);
 
-		match &key.key {
-			KeyType::OCT { secret } => assert_eq!(secret.len(), 64),
+		match &key.material {
+			KeyMaterial::OCT { secret } => assert_eq!(secret.len(), 64),
 			_ => panic!("Expected OCT key"),
 		}
 	}
@@ -1014,9 +1019,9 @@ mod tests {
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::RS512);
-		assert!(matches!(key.key, KeyType::RSA { .. }));
-		match &key.key {
-			KeyType::RSA { public, private } => {
+		assert!(matches!(key.material, KeyMaterial::RSA { .. }));
+		match &key.material {
+			KeyMaterial::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
 				assert_eq!(public.e.len(), 3);
@@ -1032,7 +1037,7 @@ mod tests {
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::ES256);
-		assert!(matches!(key.key, KeyType::EC { .. }))
+		assert!(matches!(key.material, KeyMaterial::EC { .. }))
 	}
 
 	#[test]
@@ -1042,7 +1047,7 @@ mod tests {
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::PS512);
-		assert!(matches!(key.key, KeyType::RSA { .. }));
+		assert!(matches!(key.material, KeyMaterial::RSA { .. }));
 	}
 
 	#[test]
@@ -1052,7 +1057,7 @@ mod tests {
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::EdDSA);
-		assert!(matches!(key.key, KeyType::OKP { .. }));
+		assert!(matches!(key.material, KeyMaterial::OKP { .. }));
 	}
 
 	#[test]
@@ -1085,12 +1090,12 @@ mod tests {
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key, KeyType::RSA { .. }));
+		assert!(matches!(public_key.material, KeyMaterial::RSA { .. }));
 
-		if let KeyType::RSA { public, private } = &public_key.key {
+		if let KeyMaterial::RSA { public, private } = &public_key.material {
 			assert!(private.is_none());
 
-			if let KeyType::RSA { public: src_public, .. } = &key.key {
+			if let KeyMaterial::RSA { public: src_public, .. } = &key.material {
 				assert_eq!(public.e, src_public.e);
 				assert_eq!(public.n, src_public.n);
 			} else {
@@ -1112,17 +1117,17 @@ mod tests {
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key, KeyType::EC { .. }));
+		assert!(matches!(public_key.material, KeyMaterial::EC { .. }));
 
-		if let KeyType::EC { x, y, d, curve } = &public_key.key {
+		if let KeyMaterial::EC { x, y, d, curve } = &public_key.material {
 			assert!(d.is_none());
 
-			if let KeyType::EC {
+			if let KeyMaterial::EC {
 				x: src_x,
 				y: src_y,
 				curve: src_curve,
 				..
-			} = &key.key
+			} = &key.material
 			{
 				assert_eq!(x, src_x);
 				assert_eq!(y, src_y);
@@ -1146,16 +1151,16 @@ mod tests {
 		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key, KeyType::OKP { .. }));
+		assert!(matches!(public_key.material, KeyMaterial::OKP { .. }));
 
-		if let KeyType::OKP { x, d, curve } = &public_key.key {
+		if let KeyMaterial::OKP { x, d, curve } = &public_key.material {
 			assert!(d.is_none());
 
-			if let KeyType::OKP {
+			if let KeyMaterial::OKP {
 				x: src_x,
 				curve: src_curve,
 				..
-			} = &key.key
+			} = &key.material
 			{
 				assert_eq!(x, src_x);
 				assert_eq!(curve, src_curve);
@@ -1232,13 +1237,13 @@ mod tests {
 		assert_eq!(deserialized.kid, key.kid);
 
 		if let (
-			KeyType::OCT {
+			KeyMaterial::OCT {
 				secret: original_secret,
 			},
-			KeyType::OCT {
+			KeyMaterial::OCT {
 				secret: deserialized_secret,
 			},
-		) = (&key.key, &deserialized.key)
+		) = (&key.material, &deserialized.material)
 		{
 			assert_eq!(deserialized_secret, original_secret);
 		} else {
@@ -1256,11 +1261,11 @@ mod tests {
 		assert_eq!(cloned.kid, key.kid);
 
 		if let (
-			KeyType::OCT {
+			KeyMaterial::OCT {
 				secret: original_secret,
 			},
-			KeyType::OCT { secret: cloned_secret },
-		) = (&key.key, &cloned.key)
+			KeyMaterial::OCT { secret: cloned_secret },
+		) = (&key.material, &cloned.material)
 		{
 			assert_eq!(cloned_secret, original_secret);
 		} else {
@@ -1394,14 +1399,14 @@ mod tests {
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
-		match &key.key {
-			KeyType::RSA { public, private } => {
+		match &key.material {
+			KeyMaterial::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
 				assert_eq!(public.e.len(), 3);
 
-				match &public_key.key {
-					KeyType::RSA {
+				match &public_key.material {
+					KeyMaterial::RSA {
 						public: guest_public,
 						private: public_private,
 					} => {
@@ -1429,14 +1434,14 @@ mod tests {
 		assert!(!public_key.operations.contains(&KeyOperation::Sign));
 		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
-		match &key.key {
-			KeyType::RSA { public, private } => {
+		match &key.material {
+			KeyMaterial::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
 				assert_eq!(public.e.len(), 3);
 
-				match &public_key.key {
-					KeyType::RSA {
+				match &public_key.material {
+					KeyMaterial::RSA {
 						public: guest_public,
 						private: public_private,
 					} => {
@@ -1470,9 +1475,9 @@ mod tests {
 			.decode(k_value)
 			.unwrap();
 
-		if let KeyType::OCT {
+		if let KeyMaterial::OCT {
 			secret: original_secret,
-		} = &key.key
+		} = &key.material
 		{
 			assert_eq!(decoded, *original_secret);
 		} else {
@@ -1490,7 +1495,7 @@ mod tests {
 		assert_eq!(key.algorithm, Algorithm::HS256);
 		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
-		if let KeyType::OCT { secret } = &key.key {
+		if let KeyMaterial::OCT { secret } = &key.material {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
 		} else {
 			panic!("Expected key to be OCT variant");
@@ -1507,7 +1512,7 @@ mod tests {
 		assert_eq!(key.algorithm, Algorithm::HS256);
 		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
-		if let KeyType::OCT { secret } = &key.key {
+		if let KeyMaterial::OCT { secret } = &key.material {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
 		} else {
 			panic!("Expected key to be OCT variant");
@@ -1570,7 +1575,7 @@ mod tests {
 	fn test_js_eddsa_key_load() {
 		let private_key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
 		assert_eq!(private_key.algorithm, Algorithm::EdDSA);
-		assert!(matches!(private_key.key, KeyType::OKP { .. }));
+		assert!(matches!(private_key.material, KeyMaterial::OKP { .. }));
 
 		let public_key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
 		assert_eq!(public_key.algorithm, Algorithm::EdDSA);
@@ -1639,11 +1644,11 @@ mod tests {
 		assert_eq!(loaded_key.kid, key.kid);
 
 		if let (
-			KeyType::OCT {
+			KeyMaterial::OCT {
 				secret: original_secret,
 			},
-			KeyType::OCT { secret: loaded_secret },
-		) = (&key.key, &loaded_key.key)
+			KeyMaterial::OCT { secret: loaded_secret },
+		) = (&key.material, &loaded_key.material)
 		{
 			assert_eq!(loaded_secret, original_secret);
 		} else {
@@ -1674,11 +1679,11 @@ mod tests {
 		assert_eq!(loaded_key.kid, key.kid);
 
 		if let (
-			KeyType::OCT {
+			KeyMaterial::OCT {
 				secret: original_secret,
 			},
-			KeyType::OCT { secret: loaded_secret },
-		) = (&key.key, &loaded_key.key)
+			KeyMaterial::OCT { secret: loaded_secret },
+		) = (&key.material, &loaded_key.material)
 		{
 			assert_eq!(loaded_secret, original_secret);
 		} else {
