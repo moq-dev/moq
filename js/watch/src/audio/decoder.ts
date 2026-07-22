@@ -514,7 +514,9 @@ export class Decoder {
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
-		console.warn(`audio: ignoring rendition with unknown container: ${config.container.kind}`);
+		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
+		const kind = config.container.kind === "unknown" ? config.container.raw.kind : config.container.kind;
+		console.warn(`audio: ignoring rendition with unknown container: ${kind}`);
 		return false;
 	}
 

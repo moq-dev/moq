@@ -143,7 +143,8 @@ pub struct RsaAdditionalPrime {
 /// because it's annoying to implement.
 ///
 /// This is the serialized form of a key, with plain fields you can build and edit. It is not
-/// usable on its own: convert it into a [`Key`] via `Key::try_from` to sign or verify anything.
+/// usable on its own: call [`validate`](Self::validate) (or the equivalent `Key::try_from`) to get
+/// a [`Key`] that can sign and verify.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 #[non_exhaustive]

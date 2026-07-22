@@ -6,8 +6,8 @@ const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
 /**
  * A container this build does not recognize, preserved verbatim.
  *
- * Kept intact so reparsing and republishing a catalog round-trips the rendition instead of
- * corrupting it. Such a rendition must be ignored rather than decoded.
+ * The original object is kept verbatim under `raw`, so nothing about the rendition is lost and a
+ * republisher can write it back out unchanged. Such a rendition must be ignored, not decoded.
  *
  * Recognized kinds are rejected here so they can only ever parse through their own strict
  * schema. Without that, a malformed known container (`{"kind":"cmaf"}` with no `init`) would
