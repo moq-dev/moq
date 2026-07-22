@@ -163,15 +163,11 @@ export class Reload {
 					signal,
 				});
 
-				if (signal.aborted) {
-					// Close a connection that settles during teardown.
-					connection.close();
-					return;
-				}
+				// Hand the connection to the effect, which closes it now if this run is already over.
+				effect.cleanup(() => connection.close());
+				if (signal.aborted) return;
 
 				effect.set(this.established, connection);
-				effect.cleanup(() => connection.close());
-
 				effect.set(this.status, "connected", "disconnected");
 
 				connected = performance.now();

@@ -382,6 +382,10 @@ export class Effect {
 	#abort: AbortController = new AbortController();
 	#abortUsed = false;
 
+	// True between a run's teardown and the start of the next one. A spawn task that resumes in
+	// this window belongs to the run that just died, so its cleanup has to fire now.
+	#stale = false;
+
 	/** If a function is provided, it runs immediately and reruns whenever a tracked signal changes. */
 	constructor(fn?: (effect: Effect) => void) {
 		if (DEV) {
@@ -418,6 +422,7 @@ export class Effect {
 	async #run(): Promise<void> {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
+		this.#stale = true;
 		this.#stopped.resolve();
 		this.#abort.abort();
 		this.#abort = new AbortController();
@@ -463,6 +468,7 @@ export class Effect {
 		// IMPORTANT: must run all of the dispose functions before unscheduling.
 		// Otherwise, cleanup functions could get us stuck in an infinite loop.
 		this.#scheduled = false;
+		this.#stale = false;
 
 		if (this.#fn) {
 			this.#fn(this);
@@ -765,13 +771,15 @@ export class Effect {
 		target.addEventListener(type, listener, merged);
 	}
 
-	/** Registers a function to run when the effect reruns or closes. */
+	/**
+	 * Registers a function to run when the effect reruns or closes.
+	 *
+	 * Runs `fn` immediately if the run that registered it is already over, which is what an
+	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
+	 * therefore always enough to own a resource: it never lands on a later run's list.
+	 */
 	cleanup(fn: Dispose): void {
-		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.cleanup called when closed, running immediately");
-			}
-
+		if (this.#dispose === undefined || this.#stale) {
 			fn();
 			return;
 		}
