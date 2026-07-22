@@ -84,7 +84,7 @@ impl Server {
 	/// Get or create the [`Broadcaster`] for `name`, resolving the broadcast from
 	/// the relay (waiting briefly for its announcement). Returns `None` if the
 	/// broadcast never shows up.
-	pub(crate) async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
+	pub async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
 		{
 			let mut broadcasters = self.inner.broadcasters.lock().unwrap();
 			if let Some(existing) = broadcasters.get(name) {

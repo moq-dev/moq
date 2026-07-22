@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -29,7 +29,7 @@ pub fn router(server: Server) -> Router {
 		.with_state(server)
 }
 
-async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> Response {
+async fn master(State(server): State<Server>, Path(broadcast): Path<String>, RawQuery(query): RawQuery) -> Response {
 	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
 		return not_found();
 	};
@@ -37,12 +37,15 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>) -> 
 	if broadcaster.is_empty() {
 		return not_found();
 	}
-	m3u8(broadcaster.master_playlist())
+	// Propagate whatever query reached the master (e.g. a credential a wrapping
+	// middleware required) down to the child media-playlist URLs.
+	m3u8(broadcaster.master_playlist(query.as_deref()))
 }
 
 async fn media(
 	State(server): State<Server>,
 	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
+	RawQuery(query): RawQuery,
 ) -> Response {
 	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
 		return not_found();
@@ -51,9 +54,6 @@ async fn media(
 	// A playlist with no segments confuses players; give the timeline a moment to index the
 	// first complete segment before answering.
 	let _ = tokio::time::timeout(READY_TIMEOUT, rendition.playable()).await;
-	if !rendition.is_playable() {
-		return not_found();
-	}
 
 	// The playlist references init.mp4 via EXT-X-MAP. Make sure it's actually buildable before
 	// advertising it (an inline-codec init needs a keyframe group fetched first), so a player
@@ -64,7 +64,10 @@ async fn media(
 		Err(err) => return server_error(err),
 	}
 
-	m3u8(crate::export::render_media(&rendition.playlist()))
+	match rendition.media_playlist(query.as_deref()) {
+		Some(playlist) => m3u8(playlist),
+		None => not_found(),
+	}
 }
 
 async fn init(
