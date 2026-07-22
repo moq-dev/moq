@@ -118,7 +118,14 @@ impl Broadcaster {
 	}
 
 	/// Render the multivariant (master) playlist from the current renditions.
-	pub fn master_playlist(&self) -> String {
+	///
+	/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
+	/// appended to every child media-playlist URL, so a credential the master was fetched
+	/// with propagates to the rendition playlists a stock player loads next. It is an
+	/// argument rather than a [`Config`] field because one broadcaster fans out to viewers
+	/// holding different tokens; a credential in `Config` would embed one viewer's in
+	/// another's playlist.
+	pub fn master_playlist(&self, query: Option<&str>) -> String {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		for rendition in self.renditions.snapshot() {
@@ -137,7 +144,7 @@ impl Broadcaster {
 				}),
 			}
 		}
-		master::render_master(&video, &audio)
+		master::render_master(&video, &audio, query)
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
@@ -254,7 +261,7 @@ mod tests {
 			.expect("rendition discovered from the catalog");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
-		let master = broadcaster.master_playlist();
+		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("video/video0/media.m3u8"), "master lists the rendition");
 
 		let playlist = rendition.playlist();
@@ -265,10 +272,15 @@ mod tests {
 		assert_eq!(playlist.target_duration, 2, "ceil of the longest timeline gap");
 		assert!(!playlist.finished);
 
-		let rendered = render_media(&playlist);
+		let rendered = rendition.media_playlist(None).expect("playable");
 		assert!(rendered.contains("#EXT-X-MAP:URI=\"init.mp4\"\n"));
 		assert!(rendered.contains("seg/0.m4s\n"));
 		assert!(rendered.contains("seg/1.m4s\n"));
+
+		// The same render, but carrying a credential into every child URL.
+		let signed = rendition.media_playlist(Some("jwt=abc.def")).expect("playable");
+		assert!(signed.contains("#EXT-X-MAP:URI=\"init.mp4?jwt=abc.def\"\n"));
+		assert!(signed.contains("seg/0.m4s?jwt=abc.def\n"));
 
 		let init = rendition.init().await.unwrap().expect("init segment");
 		assert_eq!(&init[4..8], b"ftyp");
