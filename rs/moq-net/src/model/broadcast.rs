@@ -643,7 +643,8 @@ impl Dynamic {
 		}
 	}
 
-	/// Block until the broadcast is closed (every producer dropped), returning the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
+	/// dropping, returning the cause.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -838,7 +839,8 @@ impl Consumer {
 		}
 	}
 
-	/// Block until the broadcast is closed (every producer dropped) and return the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
+	/// dropping, and return the cause.
 	///
 	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
 	/// only ends when every producer is gone. There is no way to abort it with a code.

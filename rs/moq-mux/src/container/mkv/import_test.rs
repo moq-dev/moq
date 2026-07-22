@@ -389,6 +389,10 @@ fn rendition_is_not_published_when_the_media_producer_fails() {
 		.segment_end()
 		.build();
 
+	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
+	// assertion below cannot pass merely because the fixture stopped reaching track import.
+	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
+
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
@@ -399,6 +403,8 @@ fn rendition_is_not_published_when_the_media_producer_fails() {
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);
+	// The importer logs and skips a track it cannot build, rather than failing the whole
+	// decode, so the outcome shows up in the catalog rather than in this result.
 	let _ = mkv.decode(&buf);
 
 	assert!(

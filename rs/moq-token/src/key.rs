@@ -143,8 +143,9 @@ pub struct RsaAdditionalPrime {
 /// because it's annoying to implement.
 ///
 /// This is the serialized form of a key, with plain fields you can build and edit. It is not
-/// usable on its own: call [`import`](Self::import) to get a [`Key`] that can sign and verify,
-/// and [`Key::export`] to go back the other way.
+/// usable on its own: call [`import`](Self::import) to validate it and get a usable [`Key`], and
+/// [`Key::export`] to go back the other way. What that key may do is whatever `key_ops` allows,
+/// so a verify-only JWK imports fine and simply cannot sign.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 #[non_exhaustive]
@@ -185,7 +186,7 @@ impl Jwk {
 		}
 	}
 
-	/// Check the parameters and import this as a [`Key`] that can sign and verify.
+	/// Validate the parameters and import this as a usable [`Key`].
 	///
 	/// The inverse of [`Key::export`]. Named rather than only a `TryFrom` impl so the conversion
 	/// is discoverable from here, and `import`/`export` rather than `validate` because the
