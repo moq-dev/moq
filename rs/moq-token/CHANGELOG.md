@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/moq-dev/moq/compare/moq-token-v0.6.3...moq-token-v0.7.0) - 2026-07-22
+
+### Added
+
+- *(token)* scope signing keys to publish/subscribe paths ([#2416](https://github.com/moq-dev/moq/pull/2416))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- [**breaking**] pre-bump API polish across the release batch ([#2423](https://github.com/moq-dev/moq/pull/2423))
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- Merge branch 'main' into dev
+
 ## [0.6.3](https://github.com/moq-dev/moq/compare/moq-token-v0.6.2...moq-token-v0.6.3) - 2026-07-18
 
 ### Other

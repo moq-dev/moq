@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.6...moq-mux-v0.8.0) - 2026-07-22
+
+### Added
+
+- *(mux)* preserve the TS service layer as opaque SI sections ([#2440](https://github.com/moq-dev/moq/pull/2440))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+- *(mux)* emit timelines from the fMP4 CMAF passthrough importer ([#2428](https://github.com/moq-dev/moq/pull/2428))
+- *(moq-mux)* emit per-frame fragments without waiting for a successor frame ([#2426](https://github.com/moq-dev/moq/pull/2426))
+
+### Other
+
+- *(mux)* extract shared video-import catalog helper ([#2425](https://github.com/moq-dev/moq/pull/2425))
+- [**breaking**] pre-bump API polish across the release batch ([#2423](https://github.com/moq-dev/moq/pull/2423))
+- *(mux)* [**breaking**] unseal catalog renditions and make timelines explicit/shareable ([#2420](https://github.com/moq-dev/moq/pull/2420))
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- Merge branch 'main' into dev
+
 ## [0.7.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.7.5...moq-mux-v0.7.6) - 2026-07-18
 
 ### Fixed

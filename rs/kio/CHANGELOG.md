@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/moq-dev/moq/compare/kio-v0.4.4...kio-v0.5.0) - 2026-07-22
+
+### Added
+
+- *(net)* route by cumulative cost on lite-06 announcements ([#2424](https://github.com/moq-dev/moq/pull/2424))
+
+### Other
+
+- Merge branch 'main' into dev
+- *(kio)* [**breaking**] rename Future to Pollable, return Closed from the async API ([#2343](https://github.com/moq-dev/moq/pull/2343))
+- *(net)* [**breaking**] caller-driven sessions via a (Session, Driver) pair ([#2302](https://github.com/moq-dev/moq/pull/2302))
+- *(kio)* [**breaking**] delete Consumer write access, add role-less Shared for reverse queues ([#2074](https://github.com/moq-dev/moq/pull/2074))
+- Merge branch 'main' into dev
+- Merge branch 'main' into dev
+
 ## [0.4.4](https://github.com/moq-dev/moq/compare/kio-v0.4.3...kio-v0.4.4) - 2026-07-15
 
 ### Fixed

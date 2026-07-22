@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-msf-v0.3.1...moq-msf-v0.4.0) - 2026-07-22
+
+### Other
+
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(moq-msf)* [**breaking**] rename Catalog::to_string to to_json ([#2346](https://github.com/moq-dev/moq/pull/2346))
+- Merge remote-tracking branch 'origin/main' into dev
+
 ### Changed
 
 - Preserve draft-00 `generatedAt` and `isComplete` as version-neutral `Catalog` fields so broadcast termination can be represented.

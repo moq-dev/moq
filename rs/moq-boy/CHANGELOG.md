@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.28...moq-boy-v0.3.0) - 2026-07-22
+
+### Other
+
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- Merge branch 'main' into dev
+
 ## [0.2.28](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.27...moq-boy-v0.2.28) - 2026-07-18
 
 ### Other
