@@ -76,7 +76,7 @@ impl<E: CatalogExt> Import<E> {
 	/// consumes the stream (and reads the same avcC for the NALU length size). The
 	/// shape is detected from the leading bytes.
 	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
-		if detect_avc1(buf) {
+		if crate::codec::annexb::is_config_record(buf) {
 			self.initialize_avc1(buf)
 		} else {
 			self.initialize_avc3(buf)
@@ -240,12 +240,6 @@ impl<E: CatalogExt> Import<E> {
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
-}
-
-/// Detect the avc1 wire shape from leading bytes: an AVCDecoderConfigurationRecord is
-/// avc1, an Annex-B (or empty) buffer is avc3.
-fn detect_avc1(bytes: &[u8]) -> bool {
-	crate::codec::annexb::is_config_record(bytes)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
