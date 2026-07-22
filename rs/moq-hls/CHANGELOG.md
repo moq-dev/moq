@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.3.0...moq-hls-v0.4.0) - 2026-07-22
+
+### Added
+
+- *(moq-hls)* [**breaking**] expose a credential-aware serve surface for embedders ([#2438](https://github.com/moq-dev/moq/pull/2438))
+- *(moq-hls)* Producer/Consumer cursors for recording a broadcast ([#2389](https://github.com/moq-dev/moq/pull/2389))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+- *(moq-hls)* release retired renditions instead of force-closing them ([#2394](https://github.com/moq-dev/moq/pull/2394))
+
+### Other
+
+- [**breaking**] pre-bump API polish across the release batch ([#2423](https://github.com/moq-dev/moq/pull/2423))
+- *(mux)* [**breaking**] unseal catalog renditions and make timelines explicit/shareable ([#2420](https://github.com/moq-dev/moq/pull/2420))
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- Merge main into dev
+- *(moq-hls)* [**breaking**] replace the Authorizer callback with router middleware ([#2340](https://github.com/moq-dev/moq/pull/2340))
+- Merge branch 'main' into dev
+- Merge branch 'main' into dev
+
 ## [0.3.0](https://github.com/moq-dev/moq/compare/moq-hls-v0.2.0...moq-hls-v0.3.0) - 2026-07-16
 
 ### Fixed

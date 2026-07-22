@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/moq-dev/moq/compare/moq-video-v0.0.6...moq-video-v0.0.7) - 2026-07-22
+
+### Added
+
+- *(moq-video)* [**breaking**] adapt the encoder bitrate to the congestion-control estimate ([#2303](https://github.com/moq-dev/moq/pull/2303))
+- *(capture)* macOS window/app/system-audio sources and device enumeration ([#2293](https://github.com/moq-dev/moq/pull/2293))
+- *(moq-video)* PipeWire screen capture on Linux ([#2238](https://github.com/moq-dev/moq/pull/2238))
+- *(moq-transcode)* decode once per source, GPU resize fanout, and a moq transcode verb ([#2158](https://github.com/moq-dev/moq/pull/2158))
+- *(moq-video)* NVDEC hardware decode, zero-copy NVDEC -> NVENC transcode ([#2145](https://github.com/moq-dev/moq/pull/2145))
+- moq-transcode, just-in-time transcoding for hang broadcasts (NVENC-capable) ([#2140](https://github.com/moq-dev/moq/pull/2140))
+- *(moq-mux,moq-ffi)* catalog init from hints and configs ([#2102](https://github.com/moq-dev/moq/pull/2102))
+- *(moq-net)* require broadcast close() + propagate real errors on abrupt teardown ([#2087](https://github.com/moq-dev/moq/pull/2087)) ([#2108](https://github.com/moq-dev/moq/pull/2108))
+- *(moq-mux)* gate initial catalog publish until reserved tracks resolve ([#2072](https://github.com/moq-dev/moq/pull/2072))
+- *(moq-video)* H.265 hardware decode on macOS (VideoToolbox) ([#1859](https://github.com/moq-dev/moq/pull/1859))
+- *(moq-video)* opt-out nvenc/vaapi features (default-on) + correct libva docs ([#1860](https://github.com/moq-dev/moq/pull/1860))
+- *(moq-video)* H.265 decode + Media Foundation HEVC backend ([#1854](https://github.com/moq-dev/moq/pull/1854))
+- *(moq-video)* Windows screen capture via DXGI Desktop Duplication ([#1855](https://github.com/moq-dev/moq/pull/1855))
+- *(moq-video)* H.264 hardware decode on Windows via Media Foundation ([#1853](https://github.com/moq-dev/moq/pull/1853))
+- *(moq-video)* [**breaking**] make hardware encoders always-on (openh264 stays the software fallback) ([#1819](https://github.com/moq-dev/moq/pull/1819))
+- *(moq-video)* NVENC H.265 encode + refresh README ([#1840](https://github.com/moq-dev/moq/pull/1840))
+- *(moq-video,libmoq)* native H.264 decode (drop ffmpeg dependency) ([#1796](https://github.com/moq-dev/moq/pull/1796))
+- *(moq-video)* H.265 (VideoToolbox) encode ([#1802](https://github.com/moq-dev/moq/pull/1802))
+- *(moq-video)* replace cros-codecs git dep with the published moq-vaapi crate ([#1757](https://github.com/moq-dev/moq/pull/1757))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+- *(moq-video)* mark the macOS Surface Sync so moq-transcode compiles ([#2225](https://github.com/moq-dev/moq/pull/2225))
+- *(moq-video)* make decode Frame/Consumer Send on macOS ([#2162](https://github.com/moq-dev/moq/pull/2162))
+- *(moq-video, moq-audio)* threading/correctness fixes + dedicated capture encode thread ([#2038](https://github.com/moq-dev/moq/pull/2038))
+- *(moq-video, moq-audio)* non-contiguous VT output, blocking mic prompt, DXVA NV12 offset ([#2034](https://github.com/moq-dev/moq/pull/2034))
+- *(moq-video)* make NVENC encode correct on hardware (forced IDR, in-band param sets, pitched input) ([#1997](https://github.com/moq-dev/moq/pull/1997))
+- *(moq-video)* request camera access before capture on macOS ([#1803](https://github.com/moq-dev/moq/pull/1803))
+
+### Other
+
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(audio)* [**breaking**] align the moq-audio capture/encode surface with moq-video ([#2350](https://github.com/moq-dev/moq/pull/2350))
+- align media docs and priorities ([#2336](https://github.com/moq-dev/moq/pull/2336))
+- add NVDEC AV1 decode support ([#2178](https://github.com/moq-dev/moq/pull/2178))
+- carry moq-video decode timestamps as moq_net::Timestamp ([#2146](https://github.com/moq-dev/moq/pull/2146))
+- Factor stats snapshot types
+- *(moq-net)* split flat type names into role modules ([#2070](https://github.com/moq-dev/moq/pull/2070))
+- *(moq-video)* vendor NVENC fork in-tree as moq-nvenc ([#2042](https://github.com/moq-dev/moq/pull/2042))
+- Merge main into dev
+- Merge main into dev
+- *(moq-net)* make request_broadcast/subscribe/fetch_group infallible ([#1890](https://github.com/moq-dev/moq/pull/1890))
+- *(moq-video, moq-audio)* make device capture async (fixes Ctrl+C shutdown hang) ([#1807](https://github.com/moq-dev/moq/pull/1807))
+- decouple importers from the catalog, split byte-parsing into per-codec splitters, and make importers pure frame publishers ([#1749](https://github.com/moq-dev/moq/pull/1749))
+- Merge origin/main into dev
+- *(moq-video)* cover the Windows hardware encoder ([#1740](https://github.com/moq-dev/moq/pull/1740))
+- Merge remote-tracking branch 'origin/dev' into claude/epic-hamilton-e9edf7
+- Merge branch 'main' into dev
+
 ### Added
 
 - `decode::Frame::resize(width, height)`: a scaled copy of a decoded frame,

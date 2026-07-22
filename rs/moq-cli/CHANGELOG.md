@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.7...moq-cli-v0.9.0) - 2026-07-22
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- [**breaking**] pre-bump API polish across the release batch ([#2423](https://github.com/moq-dev/moq/pull/2423))
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- Merge branch 'main' into dev
+
 ## [0.8.7](https://github.com/moq-dev/moq/compare/moq-cli-v0.8.6...moq-cli-v0.8.7) - 2026-07-18
 
 ### Other

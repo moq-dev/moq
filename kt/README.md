@@ -14,7 +14,7 @@ Most apps want `dev.moq:moq`. Reach for `dev.moq:moq-ffi` directly only if you w
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.3.0")
+    implementation("dev.moq:moq:0.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
