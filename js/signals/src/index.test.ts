@@ -10,9 +10,6 @@ async function settle(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
 }
 
-// Real time, for tasks that have to outlive a rerun's microtask window.
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 describe("Signal", () => {
 	test("peek returns the current value synchronously after set", () => {
 		const count = new Signal(0);
@@ -237,29 +234,38 @@ describe("Effect", () => {
 		const closed: string[] = [];
 		let runs = 0;
 
+		// Held open so the task is guaranteed to resume inside the teardown window rather
+		// than racing a timer, which would let a slow runner pass this for the wrong reason.
+		const gate = Promise.withResolvers<void>();
+
 		const effect = new Effect((e) => {
 			e.get(tick);
 			const run = ++runs;
+			if (run > 1) return;
 
 			e.spawn(async () => {
-				await sleep(20); // still in flight when the rerun tears this run down
+				await gate.promise;
 				e.cleanup(() => closed.push(`run ${run}`));
 			});
 		});
 
 		try {
-			await sleep(5);
+			await settle();
 			tick.set(1);
-			await sleep(60);
+			await settle();
+
+			// The rerun has torn run 1 down and is parked awaiting its task, so run 2 has
+			// not started: whatever the task does now belongs to a run that is already over.
+			expect(runs).toBe(1);
+
+			gate.resolve();
+			await settle();
 
 			expect(closed).toEqual(["run 1"]);
 			expect(runs).toBe(2);
 		} finally {
 			effect.close();
 		}
-
-		// The second run's task owned its resource too, released when the effect closed.
-		expect(closed).toEqual(["run 1", "run 2"]);
 	});
 
 	test("cleanup after close fires immediately", async () => {

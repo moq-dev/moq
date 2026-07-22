@@ -776,7 +776,7 @@ export class Effect {
 	 *
 	 * Runs `fn` immediately if the run that registered it is already over, which is what an
 	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
-	 * therefore always enough to own a resource: it never lands on a later run's list.
+	 * therefore enough to own a resource, with no staleness check needed first.
 	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {
