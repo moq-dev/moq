@@ -142,12 +142,7 @@ impl Split {
 				self.maybe_start_frame(pts)?;
 			}
 			// Keyframe containing slices.
-			NALUnitType::IdrWRadl
-			| NALUnitType::IdrNLp
-			| NALUnitType::BlaNLp
-			| NALUnitType::BlaWRadl
-			| NALUnitType::BlaWLp
-			| NALUnitType::CraNut => {
+			nal_type if super::is_irap(nal_type) => {
 				// first_slice_segment_in_pic_flag (bit 7 of the third byte, after the
 				// 2-byte header) marks the first slice of a new picture: close any access
 				// unit still open. A bare IDR arriving right after a delta picture in the

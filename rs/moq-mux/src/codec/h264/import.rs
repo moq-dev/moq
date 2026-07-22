@@ -76,7 +76,7 @@ impl<E: CatalogExt> Import<E> {
 	/// consumes the stream (and reads the same avcC for the NALU length size). The
 	/// shape is detected from the leading bytes.
 	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
-		if detect_avc1(buf) {
+		if crate::codec::annexb::is_config_record(buf) {
 			self.initialize_avc1(buf)
 		} else {
 			self.initialize_avc3(buf)
@@ -240,14 +240,6 @@ impl<E: CatalogExt> Import<E> {
 	pub fn decode(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		self.write_frames(frames)
 	}
-}
-
-/// Detect the avc1 wire shape from leading bytes: a 3- or 4-byte Annex-B start
-/// code means avc3, otherwise an AVCDecoderConfigurationRecord (avc1). An empty
-/// buffer is avc3: there's no avcC to parse, and avc3 self-initializes from the
-/// first keyframe (e.g. moqsink hands an empty init for inline-SPS/PPS streams).
-fn detect_avc1(bytes: &[u8]) -> bool {
-	!(bytes.is_empty() || matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
 }
 
 fn is_sps(nal: &[u8]) -> bool {

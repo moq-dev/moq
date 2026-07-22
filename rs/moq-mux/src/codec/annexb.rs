@@ -21,36 +21,69 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// True when the buffer is an out-of-band config record (avcC / hvcC) rather than an
+/// Annex-B elementary stream: a 3- or 4-byte start code means Annex-B, anything else
+/// non-empty is a config record. An empty buffer is Annex-B, since there's no record to
+/// parse and the in-band shapes self-initialize from the first keyframe (e.g. moqsink
+/// hands an empty init for inline-parameter-set streams).
+pub(crate) fn is_config_record(bytes: &[u8]) -> bool {
+	!(bytes.is_empty() || matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
+}
+
+/// Iterate the NAL units of a length-prefixed (avc1 / hvc1) access unit, where each NAL
+/// is preceded by a `length_size`-byte big-endian length.
+///
+/// Yields [`Error::Truncated`] as the final item when a prefix or length runs past the end
+/// of the buffer: callers that must reject a malformed AU propagate it, while a lenient
+/// scan can stop at it (`.map_while(Result::ok)`).
+pub(crate) fn length_prefixed_nals(data: &[u8], length_size: usize) -> Result<LengthPrefixedNals<'_>> {
+	if !(1..=4).contains(&length_size) {
+		return Err(Error::InvalidLengthSize(length_size));
+	}
+	Ok(LengthPrefixedNals { data, length_size })
+}
+
+/// The iterator [`length_prefixed_nals`] returns.
+pub(crate) struct LengthPrefixedNals<'a> {
+	data: &'a [u8],
+	length_size: usize,
+}
+
+impl<'a> Iterator for LengthPrefixedNals<'a> {
+	type Item = Result<&'a [u8]>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.data.is_empty() {
+			return None;
+		}
+		if self.data.len() < self.length_size {
+			self.data = &[];
+			return Some(Err(Error::Truncated));
+		}
+		let (prefix, rest) = self.data.split_at(self.length_size);
+		let len = prefix.iter().fold(0usize, |acc, &byte| (acc << 8) | byte as usize);
+		if rest.len() < len {
+			self.data = &[];
+			return Some(Err(Error::Truncated));
+		}
+		let (nal, rest) = rest.split_at(len);
+		self.data = rest;
+		Some(Ok(nal))
+	}
+}
+
 /// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
 /// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
 /// in Annex-B form, for keyframe parameter-set injection).
 pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> Result<Bytes> {
-	if !(1..=4).contains(&length_size) {
-		return Err(Error::InvalidLengthSize(length_size));
-	}
-
 	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
 	if let Some(p) = prefix {
 		out.extend_from_slice(p);
 	}
 
-	let mut pos = 0;
-	while pos < payload.len() {
-		let after_prefix = pos.checked_add(length_size).ok_or(Error::Truncated)?;
-		if payload.len() < after_prefix {
-			return Err(Error::Truncated);
-		}
-		let mut len = 0usize;
-		for byte in &payload[pos..after_prefix] {
-			len = (len << 8) | (*byte as usize);
-		}
-		let after_nal = after_prefix.checked_add(len).ok_or(Error::Truncated)?;
-		if payload.len() < after_nal {
-			return Err(Error::Truncated);
-		}
+	for nal in length_prefixed_nals(payload, length_size)? {
 		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(&payload[after_prefix..after_nal]);
-		pos = after_nal;
+		out.extend_from_slice(nal?);
 	}
 
 	Ok(out.freeze())
@@ -161,23 +194,10 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 /// by a `length_size`-byte big-endian length) into Annex-B by replacing every
 /// length prefix with a 4-byte start code. This is the inverse of the
 /// length-prefixing done by [`crate::codec::h264::Avc1`] / [`crate::codec::h265::Hvc1`].
-pub fn length_prefixed_to_annexb(mut data: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::Result<()> {
-	anyhow::ensure!((1..=4).contains(&length_size), "invalid NALU length size {length_size}");
-	while !data.is_empty() {
-		anyhow::ensure!(data.len() >= length_size, "truncated NALU length prefix");
-		let mut len = 0usize;
-		for &b in &data[..length_size] {
-			len = (len << 8) | b as usize;
-		}
-		data = &data[length_size..];
-		anyhow::ensure!(
-			data.len() >= len,
-			"NALU length {len} exceeds {} remaining bytes",
-			data.len()
-		);
+pub fn length_prefixed_to_annexb(data: &[u8], length_size: usize, out: &mut Vec<u8>) -> anyhow::Result<()> {
+	for nal in length_prefixed_nals(data, length_size)? {
 		out.extend_from_slice(&START_CODE);
-		out.extend_from_slice(&data[..len]);
-		data = &data[len..];
+		out.extend_from_slice(nal?);
 	}
 	Ok(())
 }

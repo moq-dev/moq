@@ -4,7 +4,8 @@
 //! and HEVCDecoderConfigurationRecord blobs. The [`Hvc1`] transmuxer
 //! rewrites Annex-B input (inline VPS/SPS/PPS) as length-prefixed NALU
 //! + out-of-band hvcC. [`Export`] is the single-rendition Annex-B
-//!   exporter; [`Import`] is the Annex-B importer.
+//!   exporter; [`Import`] takes either shape, driven by a
+//!   [`Split`] for hev1 or by `hvc1_frame` for hvc1.
 
 mod export;
 mod import;
@@ -16,6 +17,50 @@ pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+
+/// Wrap one hvc1 (length-prefixed NALU) access unit as a single
+/// [`Frame`](crate::container::Frame), with the keyframe flag set when it
+/// carries an IRAP NAL.
+///
+/// hvc1 is not a stream: each access unit arrives whole with its NALU
+/// `length_size` known out-of-band from the hvcC (`super::Hvcc::parse(hvcc).length_size`).
+/// The payload is passed through verbatim.
+pub(crate) fn hvc1_frame(
+	data: impl moq_net::IntoBytes,
+	length_size: usize,
+	pts: moq_net::Timestamp,
+) -> crate::Result<crate::container::Frame> {
+	let keyframe = hvc1_is_keyframe(data.as_ref(), length_size);
+	Ok(crate::container::Frame {
+		timestamp: pts,
+		payload: data.into_bytes(),
+		keyframe,
+		duration: None,
+	})
+}
+
+/// Detect whether an hvc1-shaped (length-prefixed) buffer contains an IRAP slice.
+fn hvc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	nals.map_while(std::result::Result::ok)
+		.any(|nal| nal.first().is_some_and(|header| is_irap(split::nal_unit_type(*header))))
+}
+
+/// True for the IRAP (intra random access point) NAL types, the ones that open a group.
+/// HEVC random access is broader than H.264's single IDR type.
+pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {
+	matches!(
+		nal_type,
+		NALUnitType::IdrWRadl
+			| NALUnitType::IdrNLp
+			| NALUnitType::BlaNLp
+			| NALUnitType::BlaWRadl
+			| NALUnitType::BlaWLp
+			| NALUnitType::CraNut
+	)
+}
 
 /// H.265 parsing and transform errors.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -417,9 +462,113 @@ pub(crate) fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] 
 	flags
 }
 
+/// Real parameter sets from a single-frame x265 encode (1280x720, Main profile),
+/// for tests that need an SPS that scuffle_h265 can actually parse.
+#[cfg(test)]
+pub(crate) mod fixtures {
+	use bytes::Bytes;
+
+	pub(crate) const VPS: &[u8] = &[
+		0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00,
+		0x03, 0x00, 0x5d, 0x95, 0x98, 0x09,
+	];
+	pub(crate) const SPS: &[u8] = &[
+		0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5d,
+		0xa0, 0x02, 0x80, 0x80, 0x2d, 0x16, 0x59, 0x59, 0xa4, 0x93, 0x2b, 0xc0, 0x5a, 0x02, 0x00, 0x00, 0x03, 0x00,
+		0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
+	];
+	pub(crate) const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+
+	/// An hvcC record built from the real parameter sets (4-byte NALU lengths).
+	pub(crate) fn hvcc() -> Bytes {
+		super::build_hvcc(
+			&[Bytes::from_static(VPS)],
+			&[Bytes::from_static(SPS)],
+			&[Bytes::from_static(PPS)],
+		)
+		.expect("real parameter sets must build an hvcC")
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Length-prefix each NAL with a 4-byte big-endian length, the hvc1 wire shape.
+	fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
+		let mut au = Vec::new();
+		for nal in nals {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		au
+	}
+
+	fn ts() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_micros(0).unwrap()
+	}
+
+	/// hvc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
+	/// the payload is passed through verbatim. The leading prefix-SEI NAL exercises
+	/// the walk past non-slice NALs.
+	#[test]
+	fn hvc1_frame_keyframe() {
+		let sei: &[u8] = &[0x4e, 0x01, 0x05, 0xff]; // PrefixSeiNut (39)
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let au = length_prefixed(&[sei, idr]);
+
+		let frame = hvc1_frame(&au, 4, ts()).unwrap();
+		assert!(frame.keyframe);
+		assert_eq!(frame.payload, au);
+	}
+
+	/// hvc1: CRA opens a group too; HEVC random access is broader than IDR.
+	#[test]
+	fn hvc1_frame_cra_keyframe() {
+		let cra: &[u8] = &[0x2a, 0x01, 0x80, 0x55]; // CraNut (21)
+		let au = length_prefixed(&[cra]);
+
+		let frame = hvc1_frame(&au, 4, ts()).unwrap();
+		assert!(frame.keyframe);
+	}
+
+	/// hvc1: a trailing delta slice is not a keyframe.
+	#[test]
+	fn hvc1_frame_delta() {
+		let trail: &[u8] = &[0x02, 0x01, 0x80, 0x33]; // TrailR (1)
+		let au = length_prefixed(&[trail]);
+
+		let frame = hvc1_frame(&au, 4, ts()).unwrap();
+		assert!(!frame.keyframe);
+	}
+
+	/// hvc1: a NAL header whose low five bits read as an H.264 IDR (0x05) is a
+	/// TsaN delta slice under the 2-byte HEVC header and must not be flagged a
+	/// keyframe.
+	#[test]
+	fn hvc1_frame_tsa_delta_not_h264_idr() {
+		let tsa: &[u8] = &[0x05, 0x01, 0x80, 0x33]; // TsaN (2)
+		let au = length_prefixed(&[tsa]);
+
+		let frame = hvc1_frame(&au, 4, ts()).unwrap();
+		assert!(!frame.keyframe);
+	}
+
+	/// The real-SPS fixture resolves a full out-of-band config: dimensions from
+	/// the parsed SPS and the hvcC itself as the catalog `description`.
+	#[test]
+	fn config_from_hvcc_resolves_real_sps() {
+		let hvcc = fixtures::hvcc();
+		let config = config_from_hvcc(&hvcc).unwrap();
+
+		let hang::catalog::VideoCodec::H265(h265) = &config.codec else {
+			panic!("expected H.265 codec")
+		};
+		assert!(!h265.in_band, "hvcC config is out-of-band");
+		assert_eq!(config.coded_width, Some(1280));
+		assert_eq!(config.coded_height, Some(720));
+		assert_eq!(config.description.as_deref(), Some(hvcc.as_ref()));
+	}
 
 	/// Hand-build an hvcC (the layout `build_hvcc` emits) and assert the
 	/// parameter sets and length size are recovered. Built by hand rather than
