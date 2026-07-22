@@ -189,8 +189,11 @@ export default class MoqPublish extends HTMLElement {
 				if (pending) return;
 				pending = true;
 				try {
-					const stats = await connection.stats();
-					this.#bandwidth.set(stats.estimatedSendRate);
+					// A snapshot that lands after this run was torn down describes a
+					// connection we no longer have, so drop it rather than capping the
+					// encoder at a dead peer's estimate.
+					const stats = await Promise.race([effect.cancel, connection.stats()]);
+					if (stats) this.#bandwidth.set(stats.estimatedSendRate);
 				} finally {
 					pending = false;
 				}
