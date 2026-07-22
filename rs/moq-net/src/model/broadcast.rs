@@ -2,8 +2,8 @@
 //!
 //! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
 //! producer either serves a track it already has or is handed a [`track::Request`] to
-//! fill. Both handles are refcounted clones of one broadcast, which closes when the
-//! last producer drops.
+//! fill. Both handles are refcounted clones of one broadcast, which closes on
+//! [`Producer::finish`] or when the last producer drops.
 //!
 //! [Info] is the static metadata; [Route] is the dynamic path the broadcast takes to
 //! reach an origin, including whether it is announced to subscribers.
@@ -445,17 +445,24 @@ impl Producer {
 	/// end. Prefer this over dropping the producer: an accidental drop (see the note
 	/// on [`Producer`]) logs a warning, whereas `finish()` is silent.
 	///
-	/// Only marks intent; the broadcast actually ends once every producer clone is
-	/// gone, so a clone that outlives this call keeps it alive until it too is
-	/// dropped or finished.
-	pub fn finish(self) {
+	/// Ends the broadcast outright: consumers observe a normal end immediately and no
+	/// new tracks are served, whether or not other producer clones are still alive.
+	/// Existing tracks stay readable so consumers can drain what they already have.
+	///
+	/// Borrows rather than consumes, matching [`track::Producer::finish`]. Finishing
+	/// declares the end, so it must not depend on the caller also surrendering the
+	/// handle.
+	pub fn finish(&mut self) {
 		self.state.lock().closing = true;
+		// Ending the broadcast is what consumers wait on, so signal it here rather
+		// than leaving it to the last handle drop.
+		let _ = self.alive.close();
 	}
 
-	/// Mark the broadcast as deliberately ended, without the
-	/// dropped-without-finish warning. Same effect as [`Self::finish`], but takes
-	/// `&self` for callers that can't consume the producer. Used by sessions
-	/// tearing down announced broadcasts when the connection dies.
+	/// Mark the broadcast as deliberately ended so the drop path doesn't warn, without
+	/// ending it for consumers the way [`Self::finish`] does. Used by sessions tearing
+	/// down announced broadcasts when the connection dies, where the broadcast may
+	/// still linger for a reconnect.
 	pub(crate) fn abort(&self) {
 		self.state.lock().closing = true;
 	}
@@ -522,7 +529,7 @@ impl SourceGuard {
 	/// End the source deliberately: the origin detaches it immediately,
 	/// unannouncing the path if it was the last.
 	pub fn finish(mut self) {
-		if let Some(producer) = self.producer.take() {
+		if let Some(mut producer) = self.producer.take() {
 			producer.finish();
 		}
 	}
@@ -636,13 +643,14 @@ impl Dynamic {
 		}
 	}
 
-	/// Block until the broadcast is closed (every producer dropped), returning the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
+	/// dropping, returning the cause.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	/// Poll until the broadcast closes; ready with the cause (always [`Error::Dropped`],
-	/// since a broadcast only ends by every producer dropping).
+	/// whether it ended via [`Producer::finish`] or by every producer dropping).
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.alive.poll_closed(waiter).map(|()| Error::Dropped)
 	}
@@ -831,7 +839,8 @@ impl Consumer {
 		}
 	}
 
-	/// Block until the broadcast is closed (every producer dropped) and return the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
+	/// dropping, and return the cause.
 	///
 	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
 	/// only ends when every producer is gone. There is no way to abort it with a code.
@@ -1214,7 +1223,7 @@ mod test {
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
 		let c1_fut = subscribe_pending!(bc, "unknown_track");
-		let mut producer1 = broadcast.assert_request().accept(None);
+		let producer1 = broadcast.assert_request().accept(None);
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.

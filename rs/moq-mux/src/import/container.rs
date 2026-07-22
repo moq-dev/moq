@@ -53,7 +53,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self, err: moq_net::Error) {
 		match self {
 			ContainerImpl::Fmp4(decoder) => decoder.abort(err),
 			ContainerImpl::Mkv(decoder) => decoder.abort(err),
@@ -110,8 +110,8 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	}
 
 	/// Abort every published track with `err`, so subscribers see the real cause
-	/// rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.inner.abort(err)
 	}
 
@@ -161,8 +161,8 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	}
 
 	/// Abort every published track with `err`, so subscribers see the real cause
-	/// rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.inner.abort(err)
 	}
 

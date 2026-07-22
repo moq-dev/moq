@@ -43,13 +43,13 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		hint: crate::catalog::VideoHint,
-	) -> Self {
+	) -> crate::Result<Self> {
 		let rendition = reserved.video(track.name());
-		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint);
+		let catalog = crate::codec::video::Catalog::new(&reserved, track.name(), hint)?;
 		let mut import = Self {
 			track: reserved
 				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy),
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
 			catalog,
 			last_seq: None,
@@ -57,7 +57,7 @@ impl<E: CatalogExt> Import<E> {
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config);
 		}
-		import
+		Ok(import)
 	}
 
 	/// Resolve the codec config from a sequence header / av1C and other metadata.
@@ -212,8 +212,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 

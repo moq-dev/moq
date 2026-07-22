@@ -205,7 +205,7 @@ impl Task {
 			ticker.tick().await;
 
 			if weak.upgrade().is_none() {
-				for (_, publisher) in groups.drain() {
+				for (_, mut publisher) in groups.drain() {
 					publisher.broadcast.finish();
 				}
 				return;
@@ -318,7 +318,7 @@ impl Task {
 				.cloned()
 				.collect();
 			for group in evicted {
-				if let Some(publisher) = groups.remove(&group) {
+				if let Some(mut publisher) = groups.remove(&group) {
 					publisher.broadcast.finish();
 				}
 			}

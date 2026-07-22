@@ -73,7 +73,7 @@ impl Publish {
 	/// Cleanly finish the broadcast and finalize the catalog stream, so subscribers
 	/// see a normal end rather than [`moq_net::Error::Dropped`].
 	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
-		let (broadcast, mut catalog) = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let (mut broadcast, mut catalog) = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
 		// Finish the broadcast first so the clean end reaches subscribers even if
 		// finalizing the catalog fails.
 		broadcast.finish();
@@ -245,7 +245,7 @@ impl Publish {
 
 	/// Abort a raw track with an application error code.
 	pub fn track_abort(&mut self, track: Id, error_code: u16) -> Result<(), Error> {
-		let mut track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
 		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -326,7 +326,7 @@ impl Publish {
 
 	/// Abort a raw group with an application error code.
 	pub fn group_abort(&mut self, group: Id, error_code: u16) -> Result<(), Error> {
-		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}

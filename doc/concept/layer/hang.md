@@ -125,6 +125,9 @@ Unfortunately, the raw codec bitstream lacks timestamp information so we need so
 Containers can support additional features and configuration.
 For example, `CMAF` specifies a timescale instead of hard-coding it to microseconds like `legacy`.
 
+The `kind` field selects the framing and new kinds can be added over time.
+A consumer ignores any rendition whose `kind` it doesn't recognize, keeping the rest of the catalog usable, and carries the unrecognized entry through untouched when it republishes the catalog.
+
 ### Legacy
 
 This is a lightweight container with no frills attached.

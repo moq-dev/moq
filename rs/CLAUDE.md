@@ -40,7 +40,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-hls` (lib): HLS / LL-HLS gateway (import + export, playlists + fMP4 via `moq-mux`).
 - `moq-bench` (bin): relay load generator. `JoinSet`-spawned staggered connections, rand sampling.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
-- `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyType` (EC/RSA/OCT/OKP), JWKS. CLI does generate/sign/verify.
+- `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. CLI does generate/sign/verify.
 
 **Bindings**
 

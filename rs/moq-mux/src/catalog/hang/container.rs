@@ -27,7 +27,22 @@ impl TryFrom<&hang::catalog::Container> for Container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
 			hang::catalog::Container::Cmaf { init, .. } => Ok(Self::Cmaf(fmp4::Wire::from_init(init)?)),
 			hang::catalog::Container::Loc => Ok(Self::Loc),
+			hang::catalog::Container::Unknown(unknown) => Err(crate::Error::unsupported_container(unknown)),
 		}
+	}
+}
+
+/// Whether a rendition's frames can be parsed by this build, logging the ones dropped.
+///
+/// The hang spec requires a consumer to ignore a rendition whose container `kind` it does not
+/// recognize, so filter on this instead of failing the entire broadcast.
+pub(crate) fn supported(rendition: &str, container: &hang::catalog::Container) -> bool {
+	match container {
+		hang::catalog::Container::Unknown(unknown) => {
+			tracing::warn!(rendition, kind = unknown.kind(), "ignoring unknown container");
+			false
+		}
+		_ => true,
 	}
 }
 

@@ -475,13 +475,15 @@ impl Publisher {
 
 	fn finish(&mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
-		self.broadcast.clone().finish();
+		self.broadcast.finish();
 		Ok(())
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
 	/// (the remote dropped, a protocol error) rather than a generic `Error::Dropped`.
-	fn abort(&mut self, err: moq_net::Error) {
+	///
+	/// Consumes the publisher: the broadcast is done.
+	fn abort(self, err: moq_net::Error) {
 		self.importer.abort(err);
 	}
 }

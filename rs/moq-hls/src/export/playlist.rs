@@ -36,13 +36,19 @@ pub(crate) struct Segment {
 }
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
-pub(crate) fn render_media(snapshot: &Snapshot) -> String {
+///
+/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
+/// appended to every child URL (the init map and each segment), so a stock player that
+/// does not replay request headers still carries a credential on its follow-up requests.
+pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
+	let suffix = query.map(|q| format!("?{q}")).unwrap_or_default();
+
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
-	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4\"");
+	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4{suffix}\"");
 
 	for (index, segment) in snapshot.segments.iter().enumerate() {
 		if index == 0
@@ -55,7 +61,7 @@ pub(crate) fn render_media(snapshot: &Snapshot) -> String {
 			);
 		}
 		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
-		let _ = writeln!(out, "seg/{}.m4s", segment.group);
+		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.group);
 	}
 
 	if snapshot.finished {
@@ -90,7 +96,7 @@ mod tests {
 			program_date_time: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 		};
 
-		let out = render_media(&snapshot);
+		let out = render_media(&snapshot, None);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:6\n"));
 		assert!(out.contains("#EXT-X-TARGETDURATION:2\n"));
 		assert!(out.contains("#EXT-X-MEDIA-SEQUENCE:10\n"));
@@ -99,6 +105,12 @@ mod tests {
 		assert!(out.contains("#EXTINF:2.00000,\nseg/10.m4s\n"));
 		assert!(out.contains("#EXTINF:1.96000,\nseg/11.m4s\n"));
 		assert!(!out.contains("#EXT-X-ENDLIST"));
+
+		// A credential rides every child URL so a header-less player keeps sending it.
+		let signed = render_media(&snapshot, Some("jwt=abc.def"));
+		assert!(signed.contains("#EXT-X-MAP:URI=\"init.mp4?jwt=abc.def\"\n"));
+		assert!(signed.contains("\nseg/10.m4s?jwt=abc.def\n"));
+		assert!(signed.contains("\nseg/11.m4s?jwt=abc.def\n"));
 	}
 
 	#[test]
@@ -114,7 +126,7 @@ mod tests {
 			program_date_time: None,
 		};
 
-		let out = render_media(&snapshot);
+		let out = render_media(&snapshot, None);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
 		assert!(!out.contains("PROGRAM-DATE-TIME"));
 	}

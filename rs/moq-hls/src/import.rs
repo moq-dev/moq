@@ -617,17 +617,18 @@ impl Import {
 	/// Abort every rendition's importer with `err` so subscribers see the real cause.
 	///
 	/// Call this when the import is torn down with a known error; simply dropping the
-	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// [`Import`] instead lets its tracks end as [`moq_net::Error::Dropped`]. Consumes
+	/// the import: every rendition is dead afterwards.
+	pub fn abort(mut self, err: moq_net::Error) {
 		for track in &mut self.video {
-			if let Some(importer) = &mut track.importer {
+			if let Some(importer) = track.importer.take() {
 				importer.abort(err.clone());
 			}
 		}
-		if let Some(track) = &mut self.audio {
-			if let Some(importer) = &mut track.importer {
-				importer.abort(err.clone());
-			}
+		if let Some(track) = &mut self.audio
+			&& let Some(importer) = track.importer.take()
+		{
+			importer.abort(err.clone());
 		}
 	}
 

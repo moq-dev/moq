@@ -2,7 +2,7 @@ import type { Getter } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
-import type { Stats } from "./stats.ts";
+import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
 /** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
@@ -17,12 +17,10 @@ export interface Established {
 	readonly transport: Transport;
 
 	/**
-	 * Live transport statistics, polled from the transport and merged with the MoQ PROBE
-	 * estimates. Every field is individually optional: what a connection can measure
-	 * depends on the transport and the negotiated version, so read the field you need and
-	 * handle `undefined` rather than assuming a populated snapshot.
+	 * Estimates measured by the peer, updated as PROBE messages arrive. Stays empty on
+	 * versions without PROBE. See {@link Stats} for what the local transport counts.
 	 */
-	readonly stats: Getter<Stats>;
+	readonly probe: Getter<Probe>;
 
 	/**
 	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a
@@ -39,6 +37,14 @@ export interface Established {
 
 	/** Consume the broadcast at the given path. */
 	consume(path: Path.Valid): broadcast.Consumer;
+
+	/**
+	 * Snapshot the transport's counters, querying it fresh on each call.
+	 *
+	 * Resolves to an empty snapshot on a transport without `getStats()`. Sample it on
+	 * whatever schedule you need rather than expecting the library to poll for you.
+	 */
+	stats(): Promise<Stats>;
 
 	/** Close the session. */
 	close(): void;

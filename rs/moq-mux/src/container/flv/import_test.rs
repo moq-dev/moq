@@ -133,8 +133,6 @@ async fn import_emits_frames() {
 	assert!(frame.keyframe);
 	// The payload is the length-prefixed NALU, carried through verbatim.
 	assert_eq!(frame.payload.as_ref(), &[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
-
-	drop(importer);
 }
 
 /// Bytes split across two `decode` calls still reassemble into whole tags.

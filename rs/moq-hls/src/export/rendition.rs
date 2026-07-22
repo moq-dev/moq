@@ -83,8 +83,7 @@ pub struct Rendition {
 	live: Arc<segments::Producer>,
 	/// The largest `EXT-X-TARGETDURATION` advertised so far, in seconds. Latched monotonically:
 	/// HLS forbids a live playlist's target duration from changing, so it never shrinks even
-	/// after a long segment evicts from the window. Read only by the serve path's `playlist`.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	/// after a long segment evicts from the window.
 	target_duration: std::sync::atomic::AtomicU64,
 	/// The init segment, built on first request.
 	init: tokio::sync::Mutex<Option<Bytes>>,
@@ -185,15 +184,28 @@ impl Rendition {
 		self.watcher.abort();
 	}
 
-	/// Resolve once the playlist is renderable ([`is_playable`](Self::is_playable)). Bounding
-	/// the wait is the caller's policy (the serve path wraps this in its own timeout).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
-	pub(crate) async fn playable(&self) {
+	/// Resolve once the playlist is renderable, i.e. once [`media_playlist`](Self::media_playlist)
+	/// would return `Some`. Bounding the wait is the caller's policy (the serve path wraps this
+	/// in its own timeout).
+	pub async fn playable(&self) {
 		kio::wait(|waiter| self.live.poll_playable(waiter)).await;
 	}
 
+	/// Render this rendition's media playlist from the current timeline window, or `None` when
+	/// there is nothing to serve yet (no complete segment, and the broadcast has not ended) --
+	/// a playlist with no segments confuses players, so a server should treat `None` as "not
+	/// ready" rather than serve it.
+	///
+	/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
+	/// appended to every child URL (the init map and each segment), so a stock player that does
+	/// not replay request headers still carries a credential on its follow-up requests. It is an
+	/// argument rather than a [`Config`](super::Config) field because one broadcaster fans out
+	/// to viewers holding different tokens.
+	pub fn media_playlist(&self, query: Option<&str>) -> Option<String> {
+		self.is_playable().then(|| super::render_media(&self.playlist(), query))
+	}
+
 	/// Render the media playlist from the current timeline window.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) fn playlist(&self) -> Snapshot {
 		let window = self.live.window();
 
@@ -228,7 +240,6 @@ impl Rendition {
 
 	/// Whether the playlist has anything to serve yet (at least one complete segment, or the
 	/// broadcast already ended).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) fn is_playable(&self) -> bool {
 		self.live.is_playable()
 	}
@@ -301,7 +312,7 @@ impl Rendition {
 	/// Fetches every group the segment covers (audio timelines skip groups, so a segment may span
 	/// several) and encodes them as a single CMAF fragment. `None` when the segment isn't in the
 	/// playlist window or its groups already left the relay cache.
-	pub(crate) async fn segment(&self, sequence: u64) -> Result<Option<Bytes>> {
+	pub async fn segment(&self, sequence: u64) -> Result<Option<Bytes>> {
 		let Some((start, end)) = self.live.segment_groups(sequence) else {
 			return Ok(None);
 		};
@@ -444,7 +455,7 @@ async fn watch(
 	let _ = live.broadcast.set(broadcast.clone());
 
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(&broadcast, section).await?;
-	while let Some(entry) = timeline.next().await.map_err(moq_mux::Error::from)? {
+	while let Some(entry) = timeline.next().await? {
 		live.push(entry, window);
 	}
 	Ok(())

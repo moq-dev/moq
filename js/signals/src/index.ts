@@ -422,13 +422,11 @@ export class Effect {
 	async #run(): Promise<void> {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
+		// The next run's scope is created when that run starts, not here, so a spawn task
+		// resuming in between still sees its own run's state: aborted and cancelled.
 		this.#stale = true;
 		this.#stopped.resolve();
 		this.#abort.abort();
-		this.#abort = new AbortController();
-		this.#abortUsed = false;
-
-		this.#stopped = Promise.withResolvers();
 
 		// Unsubscribe from all signals.
 		for (const unwatch of this.#unwatch) unwatch();
@@ -468,7 +466,12 @@ export class Effect {
 		// IMPORTANT: must run all of the dispose functions before unscheduling.
 		// Otherwise, cleanup functions could get us stuck in an infinite loop.
 		this.#scheduled = false;
+
+		// Open this run's scope. Anything still holding the previous one keeps seeing it torn down.
 		this.#stale = false;
+		this.#stopped = Promise.withResolvers();
+		this.#abort = new AbortController();
+		this.#abortUsed = false;
 
 		if (this.#fn) {
 			this.#fn(this);
@@ -776,7 +779,7 @@ export class Effect {
 	 *
 	 * Runs `fn` immediately if the run that registered it is already over, which is what an
 	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
-	 * therefore always enough to own a resource: it never lands on a later run's list.
+	 * therefore enough to own a resource, with no staleness check needed first.
 	 */
 	cleanup(fn: Dispose): void {
 		if (this.#dispose === undefined || this.#stale) {

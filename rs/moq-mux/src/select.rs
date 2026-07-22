@@ -4,7 +4,8 @@
 //! additive: a default [`Broadcast`] selects *nothing*, and you opt a role in with
 //! [`video`](Broadcast::video) / [`audio`](Broadcast::audio). Within an opted-in
 //! role, an empty field matches everything; listing values keeps renditions matching
-//! any one of them (a union within a field, intersected across fields).
+//! any one of them (a union within a field, intersected across fields). A rendition whose
+//! container `kind` this build does not recognize is never selected, per the hang spec.
 //!
 //! The same [`Broadcast`] drives selection at either end of the pipeline: narrowing
 //! a published catalog on the consume side (see [`catalog::Select`](crate::catalog::Select)),
@@ -12,7 +13,7 @@
 
 use hang::catalog::{AudioCodecKind, AudioConfig, VideoCodecKind, VideoConfig};
 
-use crate::catalog::hang::{Catalog, CatalogExt};
+use crate::catalog::hang::{Catalog, CatalogExt, supported};
 
 /// Which renditions of a broadcast to keep.
 ///
@@ -87,7 +88,8 @@ impl Video {
 	}
 
 	fn matches(&self, name: &str, config: &VideoConfig) -> bool {
-		(self.name.is_empty() || self.name.iter().any(|n| n == name))
+		supported(name, &config.container)
+			&& (self.name.is_empty() || self.name.iter().any(|n| n == name))
 			&& (self.codec.is_empty() || self.codec.contains(&config.codec.kind()))
 	}
 }
@@ -113,7 +115,8 @@ impl Audio {
 	}
 
 	fn matches(&self, name: &str, config: &AudioConfig) -> bool {
-		(self.name.is_empty() || self.name.iter().any(|n| n == name))
+		supported(name, &config.container)
+			&& (self.name.is_empty() || self.name.iter().any(|n| n == name))
 			&& (self.codec.is_empty() || self.codec.contains(&config.codec.kind()))
 	}
 }
@@ -232,6 +235,16 @@ mod tests {
 			.video(Video::default().codec(VideoCodecKind::H264).codec(VideoCodecKind::VP9))
 			.retain(&mut catalog);
 		assert_eq!(video_names(&catalog), vec!["a", "b"]);
+	}
+
+	#[test]
+	fn unknown_container_never_selected() {
+		let (name, mut future) = h264("future");
+		future.container = serde_json::from_str(r#"{"kind":"future"}"#).unwrap();
+
+		let mut catalog = catalog(vec![h264("known"), (name, future)], vec![]);
+		Broadcast::default().video(Video::default()).retain(&mut catalog);
+		assert_eq!(video_names(&catalog), vec!["known"]);
 	}
 
 	#[test]

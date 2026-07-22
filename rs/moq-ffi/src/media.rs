@@ -17,12 +17,20 @@ pub enum MoqContainer {
 	Loc,
 }
 
-impl From<hang::catalog::Container> for MoqContainer {
-	fn from(container: hang::catalog::Container) -> Self {
+impl MoqContainer {
+	/// Convert a catalog container, or `None` if its `kind` is not recognized.
+	///
+	/// A rendition we can't parse is dropped from the catalog we hand to bindings, per the
+	/// hang spec: a consumer must ignore a rendition whose container it doesn't recognize.
+	fn from_catalog(container: &hang::catalog::Container) -> Option<Self> {
 		match container {
-			hang::catalog::Container::Legacy => Self::Legacy,
-			hang::catalog::Container::Cmaf { init, .. } => Self::Cmaf { init: init.to_vec() },
-			hang::catalog::Container::Loc => Self::Loc,
+			hang::catalog::Container::Legacy => Some(Self::Legacy),
+			hang::catalog::Container::Cmaf { init, .. } => Some(Self::Cmaf { init: init.to_vec() }),
+			hang::catalog::Container::Loc => Some(Self::Loc),
+			hang::catalog::Container::Unknown(unknown) => {
+				tracing::warn!(kind = unknown.kind(), "ignoring unknown container");
+				None
+			}
 		}
 	}
 }
@@ -176,8 +184,8 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 		.video
 		.renditions
 		.iter()
-		.map(|(name, config)| {
-			(
+		.filter_map(|(name, config)| {
+			Some((
 				name.clone(),
 				MoqVideo {
 					codec: config.codec.to_string(),
@@ -192,9 +200,9 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					},
 					bitrate: config.bitrate,
 					framerate: config.framerate,
-					container: config.container.clone().into(),
+					container: MoqContainer::from_catalog(&config.container)?,
 				},
-			)
+			))
 		})
 		.collect();
 
@@ -202,8 +210,8 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 		.audio
 		.renditions
 		.iter()
-		.map(|(name, config)| {
-			(
+		.filter_map(|(name, config)| {
+			Some((
 				name.clone(),
 				MoqAudio {
 					codec: config.codec.to_string(),
@@ -211,9 +219,9 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					sample_rate: config.sample_rate,
 					channel_count: config.channel_count,
 					bitrate: config.bitrate,
-					container: config.container.clone().into(),
+					container: MoqContainer::from_catalog(&config.container)?,
 				},
-			)
+			))
 		})
 		.collect();
 

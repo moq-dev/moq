@@ -612,7 +612,7 @@ impl Cluster {
 
 		// Deliberate shutdown: finish the registration rather than dropping it, so
 		// there is no dropped-without-finish warning.
-		if let Some(registration) = self_registration {
+		if let Some(mut registration) = self_registration {
 			registration.finish();
 		}
 		Ok(())

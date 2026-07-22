@@ -457,18 +457,18 @@ viz.run((effect) => {
 
 let prevFrames = 0;
 let prevWhen = performance.now();
-viz.interval(() => {
+viz.interval(async () => {
 	const now = performance.now();
 	const elapsed = now - prevWhen;
 	captureGraph.push(elapsed > 0 ? ((frames - prevFrames) * 1000) / elapsed : undefined);
 	prevFrames = frames;
 	prevWhen = now;
 
-	const stats = publish.connection.stats.peek();
-	const up = stats?.estimatedSendRate;
-	uploadGraph.push(up && up > 0 ? up : undefined);
-	const rtt = stats?.rtt as unknown as number | undefined;
+	const rtt = publish.connection.probe.peek()?.rtt as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
+
+	const up = (await publish.connection.stats())?.estimatedSendRate;
+	uploadGraph.push(up && up > 0 ? up : undefined);
 }, 250);
 
 // Vite re-evaluates this module on hot reload, dropping the references to the

@@ -21,7 +21,7 @@ impl Bridge {
 			channel_count,
 		};
 		let track = moq_mux::import::unique_track(&mut broadcast, ".opus")?;
-		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config.into());
+		let import = moq_mux::codec::opus::Import::new(track, catalog.reserve(), config.into())?;
 		Ok(Self { import })
 	}
 }
@@ -34,7 +34,7 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self: Box<Self>, err: moq_net::Error) {
 		self.import.abort(err);
 	}
 }

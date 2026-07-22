@@ -1,5 +1,5 @@
 use crate::error::KeyError;
-use crate::{Algorithm, EllipticCurve, Key, KeyOperation, KeyType, RsaPublicKey};
+use crate::{Algorithm, EllipticCurve, Jwk, Key, KeyMaterial, RsaPublicKey};
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::KeyPair;
 use p256::elliptic_curve::array::typenum::Unsigned;
@@ -21,21 +21,15 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		Algorithm::EdDSA => generate_ed25519_key(),
 	};
 
-	Ok(Key {
-		kid: id,
-		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
-		algorithm,
-		key: key?,
-		scope: None,
-		decode: Default::default(),
-		encode: Default::default(),
-	})
+	let mut jwk = Jwk::new(algorithm, key?);
+	jwk.kid = id;
+	jwk.try_into()
 }
 
-fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyType> {
+fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyMaterial> {
 	let mut key = [0u8; SIZE];
 	aws_lc_rs::rand::fill(&mut key)?;
-	Ok(KeyType::OCT { secret: key.to_vec() })
+	Ok(KeyMaterial::OCT { secret: key.to_vec() })
 }
 
 struct AwsRng;
@@ -64,12 +58,12 @@ impl rsa::rand_core::RngCore for AwsRng {
 
 impl rsa::rand_core::CryptoRng for AwsRng {}
 
-fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
+fn generate_rsa_key(size: usize) -> crate::Result<KeyMaterial> {
 	let mut rng = AwsRng;
 	let mut key = rsa::RsaPrivateKey::new(&mut rng, size)?;
 	key.precompute()?;
 
-	Ok(KeyType::RSA {
+	Ok(KeyMaterial::RSA {
 		public: RsaPublicKey {
 			e: key.e().to_bytes_be(),
 			n: key.n().to_bytes_be(),
@@ -86,7 +80,7 @@ fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
 	})
 }
 
-fn generate_ec_key<C>(curve: EllipticCurve) -> crate::Result<KeyType>
+fn generate_ec_key<C>(curve: EllipticCurve) -> crate::Result<KeyMaterial>
 where
 	C: Curve + CurveArithmetic + PointCompression,
 	C::AffinePoint: ToSec1Point<C> + FromSec1Point<C>,
@@ -107,7 +101,7 @@ where
 	let y = point.y().ok_or(KeyError::MissingEcY)?.to_vec();
 	let d = secret.to_bytes().to_vec();
 
-	Ok(KeyType::EC {
+	Ok(KeyMaterial::EC {
 		curve,
 		x,
 		y,
@@ -115,13 +109,13 @@ where
 	})
 }
 
-fn generate_ed25519_key() -> crate::Result<KeyType> {
+fn generate_ed25519_key() -> crate::Result<KeyMaterial> {
 	let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate()?;
 
 	let public_key = key_pair.public_key().as_ref().to_vec();
 	let seed = key_pair.seed()?.as_be_bytes()?.as_ref().to_vec();
 
-	Ok(KeyType::OKP {
+	Ok(KeyMaterial::OKP {
 		curve: EllipticCurve::Ed25519,
 		x: public_key,
 		d: Some(seed),
