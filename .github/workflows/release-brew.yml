@@ -9,7 +9,7 @@ name: release-brew
 # the GitHub Release assets are guaranteed to exist by the time we
 # download them.
 #
-# Authenticates as the moq-bot GitHub App. The APP_ID and APP_PRIVATE_KEY
+# Authenticates as the moq-bot GitHub App. The APP_CLIENT_ID and APP_PRIVATE_KEY
 # repo secrets are already wired (see release-swift-lib.yml). The minted
 # installation token is scoped to moq-dev/homebrew-tap and expires in 1
 # hour.
@@ -113,7 +113,7 @@ jobs:
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: token
         with:
-          app-id: ${{ secrets.APP_ID }}
+          client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: homebrew-tap
