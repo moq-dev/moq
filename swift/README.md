@@ -16,7 +16,7 @@ The Swift integration ships as two SPM packages, each mirrored to its own repo:
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.3.0"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.0"),
 ```
 
 SPM resolves `MoqFFI` (and its prebuilt `MoqFFI.xcframework`, attached to the matching `moq-ffi-v*` GitHub Release) transitively. You only depend on `moq-swift`.

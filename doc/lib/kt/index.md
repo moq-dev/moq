@@ -26,7 +26,7 @@ The raw UniFFI bindings (`uniffi.moq.*`) plus the native binaries (JNI on Androi
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.3.0")
+    implementation("dev.moq:moq:0.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
