@@ -39,7 +39,7 @@ Add the `Moq` wrapper; SPM resolves `MoqFFI` (and its XCFramework) transitively:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/moq-dev/moq-swift", from: "0.3.0"),
+    .package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.0"),
 ],
 targets: [
     .target(

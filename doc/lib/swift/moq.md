@@ -12,7 +12,7 @@ A Swift-native wrapper over the UniFFI-generated bindings: de-prefixed types, `A
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.3.0"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.0"),
 ```
 
 Add `Moq` to your target's dependencies:
