@@ -254,6 +254,52 @@ preferred_v6 = "[2001:db8::1]:443"
 		);
 	}
 
+	/// Serializes tests that touch `MOQ_*_QUIC_CONGESTION_CONTROL`. Same
+	/// rationale as `STATS_ENV_LOCK`.
+	static CONGESTION_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the clap+TOML clobber bug applied to the
+	/// `congestion_control` fields on the quic sections of
+	/// `moq-native::ServerConfig` / `ClientConfig`. The fields must stay
+	/// `Option<CongestionControl>` so a TOML-selected family survives the
+	/// CLI re-parse when no `--*-quic-congestion-control` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_congestion_control() {
+		let _guard = CONGESTION_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CONGESTION_ENV_LOCK ensures no other test in this binary
+		// touches these env vars concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_SERVER_QUIC_CONGESTION_CONTROL");
+			std::env::remove_var("MOQ_CLIENT_QUIC_CONGESTION_CONTROL");
+		}
+
+		let toml = r#"
+[server.quic]
+congestion_control = "delay"
+
+[client.quic]
+congestion_control = "loss"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("congestion-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.server.quic.congestion_control,
+			Some(moq_native::quic::CongestionControl::Delay),
+			"TOML's server.quic.congestion_control must not be clobbered by the CLI re-parse"
+		);
+		assert_eq!(
+			config.client.quic.congestion_control,
+			Some(moq_native::quic::CongestionControl::Loss),
+			"TOML's client.quic.congestion_control must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// Serializes tests that touch `MOQ_WEB_HTTPS_*`. Same rationale as
 	/// `STATS_ENV_LOCK`.
 	static WEB_HTTPS_ENV_LOCK: Mutex<()> = Mutex::new(());

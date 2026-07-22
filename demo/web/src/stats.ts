@@ -41,13 +41,20 @@ const $ = <T extends HTMLElement>(id: string): T => {
 interface Snapshot {
 	announced?: number;
 	announced_closed?: number;
+	// Broadcast-name bytes charged for each announce/unannounce, separate from payload `bytes`.
+	announced_bytes?: number;
 	broadcasts?: number;
 	broadcasts_closed?: number;
 	subscriptions?: number;
 	subscriptions_closed?: number;
+	// One-shot group fetches requested (counted at request time, not on resolution).
+	fetches?: number;
 	bytes?: number;
 	frames?: number;
 	groups?: number;
+	// Single-frame groups carried over unreliable QUIC datagrams: a subset of `groups`,
+	// with their payload already in `frames` / `bytes`.
+	datagrams?: number;
 }
 type BroadcastFrame = Record<string, Snapshot>;
 
@@ -161,20 +168,33 @@ function subscribeNode(effect: Signals.Effect, conn: Net.Connection.Established,
 function aggregate(ingress: BroadcastFrame, egress: BroadcastFrame) {
 	let broadcasters = 0; // active broadcasts being published (ingress)
 	let viewers = 0; // active downstream consumers (egress)
+	let tracks = 0; // active egress track subscriptions
 	let ingressBytes = 0;
 	let egressBytes = 0;
+	// Cumulative, so the sampler can turn them into rates. Announce overhead is
+	// counted on both sides; the payload counters are per-direction.
+	let announceBytes = 0;
+	let fetches = 0;
+	let datagrams = 0;
 
 	for (const [path, s] of Object.entries(ingress)) {
 		if (isSystem(path)) continue;
 		if (active(s.announced, s.announced_closed) > 0) broadcasters++;
 		ingressBytes += s.bytes ?? 0;
+		announceBytes += s.announced_bytes ?? 0;
+		fetches += s.fetches ?? 0;
+		datagrams += s.datagrams ?? 0;
 	}
 	for (const [path, s] of Object.entries(egress)) {
 		if (isSystem(path)) continue;
 		egressBytes += s.bytes ?? 0;
 		viewers += active(s.broadcasts, s.broadcasts_closed);
+		tracks += active(s.subscriptions, s.subscriptions_closed);
+		announceBytes += s.announced_bytes ?? 0;
+		fetches += s.fetches ?? 0;
+		datagrams += s.datagrams ?? 0;
 	}
-	return { broadcasters, viewers, ingressBytes, egressBytes };
+	return { broadcasters, viewers, tracks, ingressBytes, egressBytes, announceBytes, fetches, datagrams };
 }
 
 const countSessions = (f: SessionFrame) =>
@@ -189,8 +209,12 @@ interface Sample {
 	t: number;
 	egress: number; // cumulative egress bytes
 	ingress: number; // cumulative ingress bytes
+	announce: number; // cumulative announce-control bytes (both directions)
+	fetches: number; // cumulative group fetches requested
+	datagrams: number; // cumulative single-frame groups sent as QUIC datagrams
 	broadcasters: number;
 	viewers: number;
+	tracks: number;
 	sessions: number;
 }
 
@@ -205,8 +229,12 @@ function sampleNode(t: number, stats: NodeStats): Sample {
 		t,
 		egress: totals.egressBytes,
 		ingress: totals.ingressBytes,
+		announce: totals.announceBytes,
+		fetches: totals.fetches,
+		datagrams: totals.datagrams,
 		broadcasters: totals.broadcasters,
 		viewers: totals.viewers,
+		tracks: totals.tracks,
 		sessions: countSessions(stats.sessions),
 	};
 }
@@ -243,8 +271,12 @@ sampler.run((effect) => {
 			t,
 			egress: 0,
 			ingress: 0,
+			announce: 0,
+			fetches: 0,
+			datagrams: 0,
 			broadcasters: 0,
 			viewers: 0,
+			tracks: 0,
 			sessions: 0,
 		};
 		for (const node of nodes) {
@@ -252,8 +284,12 @@ sampler.run((effect) => {
 			pushSample(node, s);
 			agg.egress += s.egress;
 			agg.ingress += s.ingress;
+			agg.announce += s.announce;
+			agg.fetches += s.fetches;
+			agg.datagrams += s.datagrams;
 			agg.broadcasters += s.broadcasters;
 			agg.viewers += s.viewers;
+			agg.tracks += s.tracks;
 			agg.sessions += s.sessions;
 		}
 		// A changed node set makes this aggregate's baseline incompatible with the
@@ -342,9 +378,15 @@ ui.run((effect) => {
 	$("kpi-nodes").textContent = String(nodes.length);
 	$("kpi-broadcasters").textContent = String(latest?.broadcasters ?? 0);
 	$("kpi-viewers").textContent = String(latest?.viewers ?? 0);
+	$("kpi-tracks").textContent = String(latest?.tracks ?? 0);
 	$("kpi-sessions").textContent = String(latest?.sessions ?? 0);
 	$("kpi-egress").textContent = formatRate(lastRate(cluster, "egress"));
 	$("kpi-ingress").textContent = formatRate(lastRate(cluster, "ingress"));
+	// Cumulative totals rather than rates: both are rare enough that a per-second
+	// number spends most of its life at zero.
+	$("kpi-fetches").textContent = String(latest?.fetches ?? 0);
+	$("kpi-datagrams").textContent = String(latest?.datagrams ?? 0);
+	$("kpi-announce").textContent = formatBytes(latest?.announce ?? 0);
 });
 
 // Cluster throughput chart.
@@ -402,36 +444,74 @@ ui.run((effect) => {
 		{ values: rateSeries(samples, "ingress"), color: "#38bdf8" },
 	]);
 
-	// Broadcasters: what this node ingests from upstream publishers.
-	const ingressRows = (frame: BroadcastFrame) =>
+	const paths = (frame: BroadcastFrame) =>
 		Object.keys(frame)
 			.filter((p) => !isSystem(p))
-			.sort()
-			.map((path) => {
-				const i = frame[path] ?? {};
-				return { key: path, cells: [path, formatBytes(i.bytes ?? 0), String(i.frames ?? 0)] };
-			});
+			.sort();
+
+	// Broadcasters: what this node ingests from upstream publishers. No `fetches`
+	// column: only a consumer can fetch, so the counter is egress-only. The KPI
+	// total still sums both sides in case that ever changes.
+	const ingressRows = (frame: BroadcastFrame) =>
+		paths(frame).map((path) => {
+			const i = frame[path] ?? {};
+			return {
+				key: path,
+				cells: [
+					path,
+					active(i.announced, i.announced_closed) > 0 ? "yes" : "no",
+					String(active(i.subscriptions, i.subscriptions_closed)), // live tracks
+					formatBytes(i.bytes ?? 0),
+					String(i.frames ?? 0),
+					String(i.groups ?? 0),
+					String(i.datagrams ?? 0),
+					formatBytes(i.announced_bytes ?? 0),
+				],
+			};
+		});
 
 	// Viewers: what this node serves to downstream subscribers.
 	const egressRows = (frame: BroadcastFrame) =>
-		Object.keys(frame)
-			.filter((p) => !isSystem(p))
-			.sort()
-			.map((path) => {
-				const e = frame[path] ?? {};
-				return {
-					key: path,
-					cells: [
-						path,
-						String(active(e.broadcasts, e.broadcasts_closed)), // viewers / peers
-						formatBytes(e.bytes ?? 0), // egress
-						String(e.frames ?? 0),
-					],
-				};
-			});
+		paths(frame).map((path) => {
+			const e = frame[path] ?? {};
+			return {
+				key: path,
+				cells: [
+					path,
+					String(active(e.broadcasts, e.broadcasts_closed)), // viewers / peers
+					String(active(e.subscriptions, e.subscriptions_closed)), // live tracks
+					formatBytes(e.bytes ?? 0), // egress
+					String(e.frames ?? 0),
+					String(e.groups ?? 0),
+					String(e.datagrams ?? 0),
+					String(e.fetches ?? 0),
+					formatBytes(e.announced_bytes ?? 0),
+				],
+			};
+		});
 
-	renderTable($("node-publishers"), ["broadcast", "ingress", "frames"], ingressRows(stats.ingress));
-	renderTable($("node-subscribers"), ["broadcast", "viewers", "egress", "frames"], egressRows(stats.egress));
+	// Sessions connected under each auth root, counted regardless of data flow.
+	const sessionRows = Object.keys(stats.sessions)
+		.sort()
+		.map((root) => {
+			const s = stats.sessions[root] ?? {};
+			return {
+				key: root,
+				cells: [root || "(none)", String(active(s.sessions, s.sessions_closed)), String(s.sessions ?? 0)],
+			};
+		});
+
+	renderTable(
+		$("node-publishers"),
+		["broadcast", "announced", "tracks", "ingress", "frames", "groups", "datagrams", "announce"],
+		ingressRows(stats.ingress),
+	);
+	renderTable(
+		$("node-subscribers"),
+		["broadcast", "viewers", "tracks", "egress", "frames", "groups", "datagrams", "fetches", "announce"],
+		egressRows(stats.egress),
+	);
+	renderTable($("node-session-roots"), ["auth root", "connected", "total"], sessionRows);
 
 	const sessions = countSessions(stats.sessions);
 	$("node-sessions").textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;

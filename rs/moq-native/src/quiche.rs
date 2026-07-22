@@ -3,6 +3,7 @@
 
 use crate::client::ClientConfig;
 use crate::crypto;
+use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::server::ServerConfig;
 use rustls::pki_types::pem::PemObject;
@@ -148,6 +149,20 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: Resolved)
 	settings.initial_max_streams_uni = quic.max_streams;
 	settings.max_idle_timeout = Some(quic.idle_timeout);
 	settings.discover_path_mtu = quic.mtu_discovery;
+
+	// quiche defaults to CUBIC, so an unset knob leaves cc_algorithm alone.
+	if let Some(family) = quic.congestion_control {
+		settings.cc_algorithm = cc_algorithm(family).to_owned();
+	}
+}
+
+/// The quiche controller name for a congestion control family. quiche's BBR is the
+/// v2 gcongestion port, and it takes the algorithm by name rather than by type.
+fn cc_algorithm(family: CongestionControl) -> &'static str {
+	match family {
+		CongestionControl::Loss => "cubic",
+		CongestionControl::Delay => "bbr2_gcongestion",
+	}
 }
 
 // ── Client ──────────────────────────────────────────────────────────
@@ -546,5 +561,35 @@ pub(crate) async fn accept(
 			Ok((session, None, None))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// quiche takes its controller by name, so a typo here is only caught when a
+	/// connection is built. Pin the strings against the set quiche's
+	/// `CongestionControlAlgorithm::from_str` accepts.
+	#[test]
+	fn cc_algorithm_names_are_valid() {
+		assert_eq!(cc_algorithm(CongestionControl::Loss), "cubic");
+		assert_eq!(cc_algorithm(CongestionControl::Delay), "bbr2_gcongestion");
+	}
+
+	/// A selected family must reach the settings quiche is built from, and an
+	/// unset one must leave quiche's own default in place.
+	#[test]
+	fn apply_settings_writes_cc_algorithm() {
+		let mut quic = crate::quic::Client::default();
+		let mut settings = web_transport_quiche::Settings::default();
+		let default = settings.cc_algorithm.clone();
+
+		apply_settings(&mut settings, quic.resolve());
+		assert_eq!(settings.cc_algorithm, default);
+
+		quic.congestion_control = Some(CongestionControl::Delay);
+		apply_settings(&mut settings, quic.resolve());
+		assert_eq!(settings.cc_algorithm, "bbr2_gcongestion");
 	}
 }

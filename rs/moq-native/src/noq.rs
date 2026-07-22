@@ -1,6 +1,7 @@
 //! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
 use crate::client::ClientConfig;
+use crate::quic::CongestionControl;
 use crate::quic::Resolved;
 use crate::quic::ServerId;
 use crate::server::ServerConfig;
@@ -30,6 +31,19 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: Resolved) {
 
 	if let Some(gso) = quic.gso {
 		transport.enable_segmentation_offload(gso);
+	}
+
+	// Unlike quinn, this backend defaults to BBR rather than noq's own CUBIC.
+	transport.congestion_controller_factory(congestion_factory(
+		quic.congestion_control.unwrap_or(CongestionControl::Delay),
+	));
+}
+
+/// The noq controller factory for a congestion control family. noq's BBR is v3.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+	match family {
+		CongestionControl::Loss => Arc::new(noq::congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(noq::congestion::Bbr3Config::default()),
 	}
 }
 
@@ -185,7 +199,6 @@ impl NoqClient {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
 		let mut transport = noq::TransportConfig::default();
-		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
@@ -363,7 +376,6 @@ pub(crate) struct NoqServer {
 impl NoqServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
 		let mut transport = noq::TransportConfig::default();
-		transport.congestion_controller_factory(Arc::new(noq::congestion::Bbr3Config::default()));
 		apply_transport(&mut transport, config.quic.resolve());
 		let transport = Arc::new(transport);
 
@@ -587,5 +599,24 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 
 	fn cid_lifetime(&self) -> Option<Duration> {
 		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a controller from each family's factory and downcast it to the
+	/// concrete noq implementation it must map to.
+	#[test]
+	fn congestion_factory_maps_each_family() {
+		let now = std::time::Instant::now();
+		let mtu = 1200;
+
+		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		assert!(loss.into_any().downcast::<noq::congestion::Cubic>().is_ok());
+
+		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		assert!(delay.into_any().downcast::<noq::congestion::Bbr3>().is_ok());
 	}
 }

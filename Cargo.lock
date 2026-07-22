@@ -4418,6 +4418,7 @@ dependencies = [
  "humantime-serde",
  "jni 0.22.4",
  "moq-net",
+ "noq-proto",
  "notify",
  "parking_lot",
  "qmux",

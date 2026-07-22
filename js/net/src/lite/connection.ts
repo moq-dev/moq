@@ -1,8 +1,8 @@
-import { type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
-import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { mergeStats, pollTransportStats, type Stats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -20,8 +20,6 @@ import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
 import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts";
-
-const SEND_BW_POLL_INTERVAL = 100; // ms
 
 /**
  * Constructor options for {@link Connection}.
@@ -74,14 +72,8 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
-	/** Estimated send bitrate from the congestion controller. */
-	readonly sendBandwidth?: Bandwidth;
-
-	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
-	readonly recvBandwidth?: Bandwidth;
-
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
-	readonly rtt?: Signal<Time.Milli | undefined>;
+	/** Live transport statistics; see {@link Established.stats}. */
+	readonly stats: Getter<Stats>;
 
 	/** Random per-connection origin id. Shared by Publisher (for outbound hop
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
@@ -95,6 +87,15 @@ export class Connection implements Established {
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
 	#peerRole = new Signal<Role | undefined>(undefined);
+
+	// PROBE's own estimates, merged into `stats` behind the transport's. The recv rate
+	// exists only on versions that carry PROBE at all (lite-03+).
+	#probeRtt = new Signal<Time.Milli | undefined>(undefined);
+	#probeRecvRate?: Signal<number | undefined>;
+
+	// Merges the two sources into `stats`.
+	#signals = new Effect();
+	#stats = new Signal<Stats>({});
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -123,20 +124,21 @@ export class Connection implements Established {
 		this.transport = transportOf(quic);
 		this.discovery = discovery;
 
-		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
-		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";
-		if (hasGetStats) {
-			this.sendBandwidth = createBandwidth();
-		}
-
 		// Recv bandwidth requires PROBE support (Lite03+).
 		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02) {
-			this.recvBandwidth = createBandwidth();
+			this.#probeRecvRate = new Signal<number | undefined>(undefined);
 		}
 
-		// RTT can be populated by PROBE (Lite04+) or getStats() (when supported).
-		// TODO prefer getStats() when both are available.
-		this.rtt = new Signal<Time.Milli | undefined>(undefined);
+		this.stats = this.#stats;
+		const transport = pollTransportStats(quic, this.closed);
+		this.#signals.run((effect) => {
+			this.#stats.set(
+				mergeStats(effect.get(transport), {
+					rtt: effect.get(this.#probeRtt),
+					estimatedRecvRate: this.#probeRecvRate && effect.get(this.#probeRecvRate),
+				}),
+			);
+		});
 
 		this.origin = randomOrigin();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
@@ -144,8 +146,8 @@ export class Connection implements Established {
 			this.#quic,
 			this.#version,
 			this.origin,
-			this.recvBandwidth,
-			this.rtt,
+			this.#probeRecvRate,
+			this.#probeRtt,
 			this.#peerSetup,
 		);
 
@@ -156,6 +158,7 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
+		this.#signals.close();
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -174,11 +177,7 @@ export class Connection implements Established {
 			tasks.push(this.#sendSetup());
 		}
 
-		if (this.sendBandwidth) {
-			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
-		}
-
-		if (this.recvBandwidth) {
+		if (this.#probeRecvRate) {
 			tasks.push(this.#subscriber.runProbe());
 		}
 
@@ -315,29 +314,6 @@ export class Connection implements Established {
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
-	}
-
-	async #runSendBandwidth(bandwidth: Bandwidth): Promise<void> {
-		const quic = this.#quic as unknown as {
-			getStats: () => Promise<{ estimatedSendRate: number | null }>;
-		};
-
-		return new Promise<void>((resolve) => {
-			const id = setInterval(async () => {
-				try {
-					const stats = await quic.getStats();
-					bandwidth.set(stats.estimatedSendRate ?? undefined);
-				} catch {
-					clearInterval(id);
-					resolve();
-				}
-			}, SEND_BW_POLL_INTERVAL);
-
-			void this.closed.then(() => {
-				clearInterval(id);
-				resolve();
-			});
-		});
 	}
 
 	get closed(): Promise<void> {

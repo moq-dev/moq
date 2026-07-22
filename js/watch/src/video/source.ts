@@ -305,14 +305,11 @@ export class Source {
 		if (!target?.bitrate) {
 			const broadcast = effect.get(this.in.broadcast);
 			const connection = broadcast ? effect.get(broadcast.in.connection) : undefined;
-			const recvBw = connection?.recvBandwidth;
-			if (recvBw) {
-				const estimate = effect.get(recvBw);
-				if (estimate != null) {
-					// Apply a safety margin (80%) to avoid oscillation.
-					const safeBitrate = Math.round(estimate * 0.8);
-					effectiveTarget = { ...target, bitrate: safeBitrate };
-				}
+			const estimate = connection && effect.get(connection.stats).estimatedRecvRate;
+			if (estimate != null) {
+				// Apply a safety margin (80%) to avoid oscillation.
+				const safeBitrate = Math.round(estimate * 0.8);
+				effectiveTarget = { ...target, bitrate: safeBitrate };
 			}
 		}
 

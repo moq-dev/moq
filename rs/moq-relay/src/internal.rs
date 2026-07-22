@@ -158,6 +158,18 @@ fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 	});
 	counter(
 		&mut out,
+		"moq_relay_datagrams_total",
+		"Single-frame groups carried over unreliable QUIC datagrams; a subset of groups.",
+		|c| c.datagrams,
+	);
+	counter(
+		&mut out,
+		"moq_relay_fetches_total",
+		"One-shot group fetches requested.",
+		|c| c.fetches,
+	);
+	counter(
+		&mut out,
 		"moq_relay_subscriptions_opened_total",
 		"Track subscriptions opened.",
 		|c| c.subscriptions,

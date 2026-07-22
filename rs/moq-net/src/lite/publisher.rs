@@ -1027,6 +1027,467 @@ mod test {
 	}
 }
 
+/// The announce loop's demand/linger state machine: a drained broadcast keeps
+/// advertising zero for `COST_LINGER` before the restart that restores its cold
+/// cost, demand returning in the window cancels the restore, and a route change
+/// supersedes it. Time is paused, so the 5s linger is deterministic.
+#[cfg(test)]
+mod announce_test {
+	use super::*;
+	use crate::coding::{Decode, Reader};
+	use std::sync::Mutex;
+
+	#[derive(Debug, Clone, Default)]
+	struct SinkError;
+
+	impl std::fmt::Display for SinkError {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "sink transport error")
+		}
+	}
+
+	impl std::error::Error for SinkError {}
+
+	impl web_transport_trait::Error for SinkError {
+		fn session_error(&self) -> Option<(u32, String)> {
+			Some((0, "closed".to_string()))
+		}
+	}
+
+	/// Captures everything the announce loop writes, so tests decode it back
+	/// into announce messages.
+	#[derive(Clone, Default)]
+	struct SinkSend {
+		writes: Arc<Mutex<Vec<u8>>>,
+	}
+
+	impl web_transport_trait::SendStream for SinkSend {
+		type Error = SinkError;
+
+		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+			self.writes.lock().unwrap().extend_from_slice(buf);
+			Ok(buf.len())
+		}
+
+		fn set_priority(&mut self, _order: u8) {}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	/// A peer that never speaks and never closes, so the announce loop only ever
+	/// acts on model-side events (announces, routes, demand, the linger timer).
+	struct PendingRecv;
+
+	impl web_transport_trait::RecvStream for PendingRecv {
+		type Error = SinkError;
+
+		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn stop(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	/// Only names the stream types for `Stream<S, Version>`; `run_announce`
+	/// never touches the session itself.
+	#[derive(Clone)]
+	struct SinkSession;
+
+	impl web_transport_trait::Session for SinkSession {
+		type SendStream = SinkSend;
+		type RecvStream = PendingRecv;
+		type Error = SinkError;
+
+		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn max_datagram_size(&self) -> usize {
+			0
+		}
+
+		fn protocol(&self) -> Option<&str> {
+			None
+		}
+
+		fn close(&self, _code: u32, _reason: &str) {}
+
+		async fn closed(&self) -> Self::Error {
+			std::future::pending().await
+		}
+
+		fn stats(&self) -> impl web_transport_trait::Stats {
+			SinkStats
+		}
+	}
+
+	struct SinkStats;
+
+	impl web_transport_trait::Stats for SinkStats {
+		fn estimated_send_rate(&self) -> Option<u64> {
+			None
+		}
+	}
+
+	const VERSION: Version = Version::Lite06Wip;
+
+	/// The broadcast's cold cost: what the route advertises without demand.
+	const COLD: u64 = 7;
+
+	/// A cursor over the captured announce-stream bytes, decoding messages
+	/// incrementally so each test step asserts exactly what it caused.
+	struct Wire {
+		writes: Arc<Mutex<Vec<u8>>>,
+		cursor: usize,
+	}
+
+	impl Wire {
+		fn pending(&self) -> Vec<u8> {
+			self.writes.lock().unwrap()[self.cursor..].to_vec()
+		}
+
+		/// Decode the AnnounceOk that opens the stream.
+		fn take_ok(&mut self) -> lite::AnnounceOk {
+			let buf = self.pending();
+			let mut slice = &buf[..];
+			let ok = lite::AnnounceOk::decode(&mut slice, VERSION).expect("announce ok");
+			self.cursor += buf.len() - slice.len();
+			ok
+		}
+
+		/// Decode every announce message written since the last call.
+		fn take_announces(&mut self) -> Vec<lite::AnnounceBroadcast<'static>> {
+			let buf = self.pending();
+			let mut slice = &buf[..];
+			let mut msgs = Vec::new();
+			while !slice.is_empty() {
+				msgs.push(own(
+					lite::AnnounceBroadcast::decode(&mut slice, VERSION).expect("announce message")
+				));
+			}
+			self.cursor += buf.len();
+			msgs
+		}
+
+		/// Assert nothing hit the wire since the last decode.
+		fn assert_quiet(&self) {
+			let pending = self.pending();
+			assert!(pending.is_empty(), "unexpected wire bytes: {pending:?}");
+		}
+	}
+
+	/// Re-own a decoded message so it can outlive the decode buffer.
+	fn own(msg: lite::AnnounceBroadcast<'_>) -> lite::AnnounceBroadcast<'static> {
+		match msg {
+			lite::AnnounceBroadcast::Active { suffix, hops, cost } => lite::AnnounceBroadcast::Active {
+				suffix: suffix.to_owned(),
+				hops,
+				cost,
+			},
+			lite::AnnounceBroadcast::Ended { suffix, hops } => lite::AnnounceBroadcast::Ended {
+				suffix: suffix.to_owned(),
+				hops,
+			},
+			lite::AnnounceBroadcast::EndedId { id } => lite::AnnounceBroadcast::EndedId { id },
+			lite::AnnounceBroadcast::Restart { id, hops, cost } => lite::AnnounceBroadcast::Restart { id, hops, cost },
+		}
+	}
+
+	struct Harness {
+		/// Held for the whole test: dropping the origin producer unannounces
+		/// every broadcast under it, which would end the announce loop.
+		origin: origin::Producer,
+		/// The publishing side: route changes go in here.
+		source: crate::broadcast::Producer,
+		/// A downstream viewer: its `track()` handles are the broadcast's demand.
+		downstream: crate::broadcast::Consumer,
+		wire: Wire,
+		task: tokio::task::JoinHandle<Result<(), Error>>,
+	}
+
+	impl Harness {
+		/// Assert the loop is quiet *and* still alive. A panicked announce task
+		/// also writes nothing, so silence alone would pass for the wrong reason
+		/// (`tokio::spawn` parks the panic in the handle until it's joined).
+		fn assert_idle(&self) {
+			self.wire.assert_quiet();
+			assert!(!self.task.is_finished(), "the announce loop ended unexpectedly");
+		}
+
+		/// Announce a second broadcast once the loop is already running, with a
+		/// viewer attached so it advertises warm. Returns the producer (kept
+		/// alive by the caller) and the viewer handle whose drop drains demand.
+		async fn announce(&mut self, name: &str) -> (crate::broadcast::Producer, track::Consumer) {
+			let source = self
+				.origin
+				.create_broadcast(name, crate::broadcast::Route::new().with_cost(COLD).with_announce(true))
+				.unwrap();
+			let downstream = self.origin.consume().announced_broadcast(name).await.unwrap();
+			let track = downstream.track("video").unwrap();
+			settle().await;
+
+			// It announces cold, then immediately re-prices warm for the viewer.
+			match self.wire.take_announces().as_slice() {
+				[
+					lite::AnnounceBroadcast::Active { cost: first, .. },
+					lite::AnnounceBroadcast::Restart { cost: second, .. },
+				] => {
+					assert_eq!(*first, lite::RouteCost(COLD));
+					assert_eq!(*second, lite::RouteCost(0));
+				}
+				// The viewer may already be attached when the announce is built.
+				[lite::AnnounceBroadcast::Active { cost, .. }] => assert_eq!(*cost, lite::RouteCost(0)),
+				other => panic!("expected {name} to announce, got {other:?}"),
+			}
+
+			(source, track)
+		}
+	}
+
+	async fn settle() {
+		tokio::time::sleep(Duration::from_millis(1)).await;
+	}
+
+	/// Announce one broadcast with cold cost [`COLD`] and run the announce loop
+	/// against it, optionally with a viewer already attached (so the initial
+	/// announce goes out warm, at cost zero).
+	async fn harness(demand: bool) -> (Harness, Option<track::Consumer>) {
+		let origin = Origin::new(1).unwrap().produce();
+		let source = origin
+			.create_broadcast(
+				"cam",
+				crate::broadcast::Route::new().with_cost(COLD).with_announce(true),
+			)
+			.unwrap();
+		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
+		let track = demand.then(|| downstream.track("video").unwrap());
+
+		let writes = Arc::new(Mutex::new(Vec::new()));
+		let consumer = origin.consume();
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend { writes: writes.clone() }, VERSION),
+			reader: Reader::new(PendingRecv, VERSION),
+		};
+		let task = tokio::spawn(async move {
+			let mut announced = consumer.announced();
+			let self_origin = *consumer;
+			Publisher::<SinkSession>::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, 0, VERSION)
+				.await
+		});
+		settle().await;
+
+		let mut wire = Wire { writes, cursor: 0 };
+		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
+		let expected = if demand { 0 } else { COLD };
+		match wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { cost, .. }] => assert_eq!(*cost, lite::RouteCost(expected)),
+			other => panic!("expected the initial announce, got {other:?}"),
+		}
+
+		(
+			Harness {
+				origin,
+				source,
+				downstream,
+				wire,
+				task,
+			},
+			track,
+		)
+	}
+
+	/// Demand draining while zero is advertised must not re-price immediately:
+	/// the restore waits out the linger, so viewer churn doesn't flap routing.
+	#[tokio::test(start_paused = true)]
+	async fn drain_defers_the_cold_restore() {
+		let (h, track) = harness(true).await;
+
+		drop(track);
+		settle().await;
+		h.assert_idle();
+
+		// Still inside the linger window: still quiet.
+		tokio::time::sleep(Duration::from_secs(3)).await;
+		h.assert_idle();
+	}
+
+	/// Demand returning within the linger cancels the pending restore, and the
+	/// next drain starts a fresh window rather than inheriting the old deadline.
+	///
+	/// The second drain is what makes the cancellation observable. Silence alone
+	/// can't distinguish "the deadline was cleared" from "it fired but re-priced
+	/// to the same zero cost, so nothing went out": both are quiet. By draining
+	/// again at t=4s, an uncancelled t=0 deadline would fire at t=5s with demand
+	/// already gone, sending the restart a full four seconds early.
+	#[tokio::test(start_paused = true)]
+	async fn demand_return_cancels_the_restore() {
+		let (mut h, track) = harness(true).await;
+
+		// t=0: demand drains, arming the restore for t=5s.
+		drop(track);
+		tokio::time::sleep(Duration::from_secs(3)).await;
+
+		// t=3s: a new viewer inside the window cancels it.
+		let track = h.downstream.track("video").unwrap();
+		tokio::time::sleep(Duration::from_secs(1)).await;
+
+		// t=4s: drained again, so the restore is due at t=9s, not t=5s.
+		drop(track);
+		tokio::time::sleep(Duration::from_secs(2)).await;
+
+		// t=6s: past the stale deadline. A restart here means it was never cleared.
+		h.assert_idle();
+
+		// t=10s: past the fresh deadline, so the restore finally lands.
+		tokio::time::sleep(Duration::from_secs(4)).await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, lite::RouteCost(COLD)),
+			other => panic!("expected the restore on the fresh deadline, got {other:?}"),
+		}
+	}
+
+	/// Each lingering broadcast restores on its own deadline: the loop sleeps
+	/// until the *earliest* pending restore, not the latest.
+	///
+	/// With one broadcast the deadline scan is trivially correct, so this stages
+	/// two with staggered drains. Taking the maximum instead would hold the first
+	/// broadcast's restore back until the second's deadline.
+	#[tokio::test(start_paused = true)]
+	async fn staggered_lingers_restore_independently() {
+		let (mut h, first) = harness(true).await;
+		let (_second_source, second) = h.announce("cam2").await;
+
+		// t=0: the first drains, due at t=5s.
+		drop(first);
+		tokio::time::sleep(Duration::from_secs(2)).await;
+		h.assert_idle();
+
+		// t=2s: the second drains, due at t=7s.
+		drop(second);
+		tokio::time::sleep(Duration::from_secs(4)).await;
+
+		// t=6s: only the first has expired.
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, lite::RouteCost(COLD)),
+			other => panic!("expected only the first restore, got {other:?}"),
+		}
+
+		// t=8s: now the second's own deadline has passed.
+		tokio::time::sleep(Duration::from_secs(2)).await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 1, cost, .. }] => assert_eq!(*cost, lite::RouteCost(COLD)),
+			other => panic!("expected the second restore, got {other:?}"),
+		}
+	}
+
+	/// An expired linger sends exactly one restart restoring the cold cost.
+	#[tokio::test(start_paused = true)]
+	async fn linger_expiry_restores_the_cold_cost() {
+		let (mut h, track) = harness(true).await;
+
+		drop(track);
+		tokio::time::sleep(Duration::from_secs(6)).await;
+
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, lite::RouteCost(COLD)),
+			other => panic!("expected one cold-cost restart, got {other:?}"),
+		}
+
+		// The restore is a one-shot: the loop settles back to idle.
+		tokio::time::sleep(Duration::from_secs(30)).await;
+		h.assert_idle();
+	}
+
+	/// A route change during the linger supersedes the pending restore: the
+	/// restart it triggers carries the new chain (and, with demand still gone,
+	/// the cold cost), and the old deadline then passes without a second one.
+	#[tokio::test(start_paused = true)]
+	async fn route_change_supersedes_the_linger() {
+		let (mut h, track) = harness(true).await;
+
+		drop(track);
+		tokio::time::sleep(Duration::from_secs(3)).await;
+		h.wire.assert_quiet();
+
+		// An upstream failover mid-linger.
+		let hops = OriginList::try_from(vec![Origin::new(9).unwrap()]).unwrap();
+		h.source
+			.set_route(
+				crate::broadcast::Route::new()
+					.with_hops(hops.clone())
+					.with_cost(COLD)
+					.with_announce(true),
+			)
+			.unwrap();
+		settle().await;
+
+		match h.wire.take_announces().as_slice() {
+			[
+				lite::AnnounceBroadcast::Restart {
+					id: 0,
+					hops: sent,
+					cost,
+				},
+			] => {
+				assert_eq!(sent, &hops);
+				assert_eq!(*cost, lite::RouteCost(COLD));
+			}
+			other => panic!("expected the failover restart, got {other:?}"),
+		}
+
+		// The pending restore went with it: the old deadline passes silently.
+		tokio::time::sleep(Duration::from_secs(30)).await;
+		h.assert_idle();
+	}
+
+	/// The warm edge has no hysteresis: a viewer arriving on a cold
+	/// advertisement re-prices to zero immediately.
+	#[tokio::test(start_paused = true)]
+	async fn demand_reprices_warm_immediately() {
+		let (mut h, _) = harness(false).await;
+
+		let _track = h.downstream.track("video").unwrap();
+		settle().await;
+
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, cost, .. }] => assert_eq!(*cost, lite::RouteCost(0)),
+			other => panic!("expected the warm restart, got {other:?}"),
+		}
+	}
+}
+
 /// Encode the per-frame timing prefix when the track advertises a timescale:
 /// `[zigzag-delta timestamp]` (the lite-05 FRAME format). With `None` the field is
 /// omitted entirely, saving the bytes on tracks where timing isn't meaningful

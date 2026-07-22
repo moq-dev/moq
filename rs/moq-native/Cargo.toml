@@ -22,7 +22,7 @@ watch = ["dep:notify"]
 # The QUIC backends pull in their crypto provider from these features (default-features
 # are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
-iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
+iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
 # Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
@@ -41,6 +41,9 @@ humantime = "2.3"
 humantime-serde = "1.1"
 
 moq-net = { workspace = true }
+# iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
+# congestion configs. Version matched to the copy iroh pulls in.
+noq-proto = { version = "1", default-features = false, optional = true }
 notify = { version = "8", optional = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }

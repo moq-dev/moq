@@ -736,6 +736,8 @@ impl Producer {
 		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
+		// Resolved before the state guard borrows `self`.
+		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
@@ -750,6 +752,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		state.max_sequence = Some(sequence);
+		meter.datagram(payload.len() as u64);
 		state.push_datagram(Datagram {
 			sequence,
 			timestamp,
@@ -767,6 +770,8 @@ impl Producer {
 		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
+		// Resolved before the state guard borrows `self`.
+		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
@@ -780,6 +785,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(datagram.sequence));
+		meter.datagram(datagram.payload.len() as u64);
 		state.push_datagram(datagram);
 		Ok(())
 	}
@@ -2034,10 +2040,17 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		match &mut self.inner {
+		let meter = self.stats.meter();
+		let res = match &mut self.inner {
 			SubscriberKind::Plain(plain) => plain.poll_recv_datagram(waiter),
 			SubscriberKind::Spliced(spliced) => spliced.poll_recv_datagram(waiter),
+		};
+		// Unlike a group (metered lazily as its frames are read), a datagram is
+		// delivered whole here, so count it as the single-frame group it stands in for.
+		if let Poll::Ready(Ok(Some(datagram))) = &res {
+			meter.datagram(datagram.payload.len() as u64);
 		}
+		res
 	}
 
 	/// Receive the next datagram in arrival order.
