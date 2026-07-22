@@ -66,7 +66,7 @@ impl<E: CatalogExt> Import<E> {
 		if detect_hvc1(buf) {
 			self.initialize_hvc1(buf)
 		} else {
-			self.initialize_hvc3(buf)
+			self.initialize_hev1(buf)
 		}
 	}
 
@@ -82,7 +82,7 @@ impl<E: CatalogExt> Import<E> {
 	/// also self-initializes from the first keyframe. Takes a read-only slice: the
 	/// dispatcher-owned [`Split`](super::Split) is what consumes the stream (and seeds
 	/// its parameter-set cache).
-	fn initialize_hvc3(&mut self, buf: &[u8]) -> Result<()> {
+	fn initialize_hev1(&mut self, buf: &[u8]) -> Result<()> {
 		let mut scan = Bytes::copy_from_slice(buf);
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
