@@ -69,7 +69,7 @@ fn group_audio(audio: &[AudioVariant]) -> Vec<AudioGroup<'_>> {
 		.collect()
 }
 
-fn render_video(out: &mut String, variant: &VideoVariant, audio: Option<&AudioGroup<'_>>) {
+fn render_video(out: &mut String, variant: &VideoVariant, audio: Option<&AudioGroup<'_>>, suffix: &str) {
 	let bandwidth = variant
 		.bandwidth
 		.saturating_add(audio.map_or(0, |group| group.bandwidth));
@@ -86,11 +86,17 @@ fn render_video(out: &mut String, variant: &VideoVariant, audio: Option<&AudioGr
 		let _ = write!(line, ",AUDIO=\"{}\"", group.id);
 	}
 	let _ = writeln!(out, "{line}");
-	let _ = writeln!(out, "{}/{}/media.m3u8", Kind::Video.as_str(), variant.name);
+	let _ = writeln!(out, "{}/{}/media.m3u8{suffix}", Kind::Video.as_str(), variant.name);
 }
 
 /// Render the multivariant playlist. The first rendition in each audio codec group is default.
-pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
+///
+/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
+/// appended to every child media-playlist URL, so a credential the master was fetched
+/// with propagates to the rendition playlists a stock player loads next.
+pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant], query: Option<&str>) -> String {
+	let suffix = query.map(|q| format!("?{q}")).unwrap_or_default();
+
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
 	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
@@ -101,7 +107,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 			let default = if index == 0 { "YES" } else { "NO" };
 			let _ = writeln!(
 				out,
-				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/{}/media.m3u8\"",
+				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/{}/media.m3u8{suffix}\"",
 				group.id,
 				variant.name,
 				Kind::Audio.as_str(),
@@ -112,10 +118,10 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 
 	for variant in video {
 		if audio_groups.is_empty() {
-			render_video(&mut out, variant, None);
+			render_video(&mut out, variant, None, &suffix);
 		} else {
 			for group in &audio_groups {
-				render_video(&mut out, variant, Some(group));
+				render_video(&mut out, variant, Some(group), &suffix);
 			}
 		}
 	}
@@ -128,7 +134,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant]) -> String {
 				"#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
 				variant.bandwidth, variant.codec
 			);
-			let _ = writeln!(out, "{}/{}/media.m3u8", Kind::Audio.as_str(), variant.name);
+			let _ = writeln!(out, "{}/{}/media.m3u8{suffix}", Kind::Audio.as_str(), variant.name);
 		}
 	}
 
@@ -154,7 +160,7 @@ mod tests {
 			codec: "mp4a.40.2".into(),
 		}];
 
-		let out = render_master(&video, &audio);
+		let out = render_master(&video, &audio, None);
 		assert!(out.starts_with("#EXTM3U\n#EXT-X-VERSION:9\n"));
 		assert!(out.contains(
 			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/audio/media.m3u8\"\n"
@@ -163,6 +169,11 @@ mod tests {
 			"#EXT-X-STREAM-INF:BANDWIDTH=2628000,RESOLUTION=1280x720,CODECS=\"avc1.42c01f,mp4a.40.2\",AUDIO=\"aud\"\n"
 		));
 		assert!(out.contains("\nvideo/video/media.m3u8\n"));
+
+		// A credential rides every child media-playlist URL, audio and video alike.
+		let signed = render_master(&video, &audio, Some("jwt=abc.def"));
+		assert!(signed.contains("URI=\"audio/audio/media.m3u8?jwt=abc.def\"\n"));
+		assert!(signed.contains("\nvideo/video/media.m3u8?jwt=abc.def\n"));
 	}
 
 	#[test]
@@ -192,7 +203,7 @@ mod tests {
 			},
 		];
 
-		let out = render_master(&video, &audio);
+		let out = render_master(&video, &audio, None);
 		assert!(out.contains("GROUP-ID=\"aud-0\",NAME=\"aac-low\",DEFAULT=YES"));
 		assert!(out.contains("GROUP-ID=\"aud-0\",NAME=\"aac-high\",DEFAULT=NO"));
 		assert!(out.contains("GROUP-ID=\"aud-1\",NAME=\"opus\",DEFAULT=YES"));
@@ -208,7 +219,7 @@ mod tests {
 			bandwidth: 128_000,
 			codec: "opus".into(),
 		}];
-		let out = render_master(&[], &audio);
+		let out = render_master(&[], &audio, None);
 		assert!(out.contains("#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"opus\"\n"));
 		assert!(out.contains("\naudio/audio/media.m3u8\n"));
 	}

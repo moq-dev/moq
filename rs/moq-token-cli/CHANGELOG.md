@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.38](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.37...moq-token-cli-v0.5.38) - 2026-07-22
+
+### Added
+
+- *(token)* scope signing keys to publish/subscribe paths ([#2416](https://github.com/moq-dev/moq/pull/2416))
+
+### Other
+
+- Merge branch 'main' into dev
+
 ## [0.5.37](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.36...moq-token-cli-v0.5.37) - 2026-07-18
 
 ### Other

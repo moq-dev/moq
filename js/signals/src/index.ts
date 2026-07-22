@@ -382,6 +382,10 @@ export class Effect {
 	#abort: AbortController = new AbortController();
 	#abortUsed = false;
 
+	// True between a run's teardown and the start of the next one. A spawn task that resumes in
+	// this window belongs to the run that just died, so its cleanup has to fire now.
+	#stale = false;
+
 	/** If a function is provided, it runs immediately and reruns whenever a tracked signal changes. */
 	constructor(fn?: (effect: Effect) => void) {
 		if (DEV) {
@@ -418,12 +422,11 @@ export class Effect {
 	async #run(): Promise<void> {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
+		// The next run's scope is created when that run starts, not here, so a spawn task
+		// resuming in between still sees its own run's state: aborted and cancelled.
+		this.#stale = true;
 		this.#stopped.resolve();
 		this.#abort.abort();
-		this.#abort = new AbortController();
-		this.#abortUsed = false;
-
-		this.#stopped = Promise.withResolvers();
 
 		// Unsubscribe from all signals.
 		for (const unwatch of this.#unwatch) unwatch();
@@ -463,6 +466,12 @@ export class Effect {
 		// IMPORTANT: must run all of the dispose functions before unscheduling.
 		// Otherwise, cleanup functions could get us stuck in an infinite loop.
 		this.#scheduled = false;
+
+		// Open this run's scope. Anything still holding the previous one keeps seeing it torn down.
+		this.#stale = false;
+		this.#stopped = Promise.withResolvers();
+		this.#abort = new AbortController();
+		this.#abortUsed = false;
 
 		if (this.#fn) {
 			this.#fn(this);
@@ -558,7 +567,12 @@ export class Effect {
 		this.cleanup(() => timeout && clearTimeout(timeout));
 	}
 
-	/** Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds. */
+	/**
+	 * Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds.
+	 *
+	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
+	 * next teardown, not immediately.
+	 */
 	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -621,6 +635,10 @@ export class Effect {
 	 * Returns a disposer that closes the child early and releases it from the parent, so a long-lived
 	 * effect spawning a child per event (e.g. one per accepted subscription) doesn't accumulate dead
 	 * scopes until it finally reruns or closes.
+	 *
+	 * Called from a task that outlived its run, the child is closed at the *next* teardown rather
+	 * than immediately, unlike {@link cleanup}. Closing it now would cancel its first run before
+	 * `fn` executes, so whatever teardown `fn` registers would never fire at all.
 	 */
 	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {
@@ -765,13 +783,15 @@ export class Effect {
 		target.addEventListener(type, listener, merged);
 	}
 
-	/** Registers a function to run when the effect reruns or closes. */
+	/**
+	 * Registers a function to run when the effect reruns or closes.
+	 *
+	 * Runs `fn` immediately if the run that registered it is already over, which is what an
+	 * {@link spawn} task resuming after a rerun or close sees. Registering teardown is
+	 * therefore enough to own a resource, with no staleness check needed first.
+	 */
 	cleanup(fn: Dispose): void {
-		if (this.#dispose === undefined) {
-			if (DEV) {
-				console.warn("Effect.cleanup called when closed, running immediately");
-			}
-
+		if (this.#dispose === undefined || this.#stale) {
 			fn();
 			return;
 		}

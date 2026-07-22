@@ -42,6 +42,24 @@ impl std::str::FromStr for ServerId {
 	}
 }
 
+/// The congestion control family for a QUIC connection.
+///
+/// This selects a family rather than a named algorithm because each backend ships a
+/// different generation: BBRv1 on quinn, BBRv2 on quiche, BBRv3 on noq and iroh. A
+/// `Bbr` variant would promise more than any one backend delivers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CongestionControl {
+	/// Loss-based (CUBIC): grows until it drops packets, so the send rate sawtooths.
+	/// Throughput-oriented, and the default on most stacks.
+	Loss,
+	/// Delay-based (BBR): tracks the measured delivery rate and RTT instead of waiting
+	/// for loss, which keeps queues short and the send rate steady enough for an encoder
+	/// to track.
+	Delay,
+}
+
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
@@ -118,6 +136,17 @@ pub struct Client {
 	)]
 	pub mtu_discovery: Option<bool>,
 
+	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
+	/// quinn and quiche, BBRv3 on noq and iroh.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-quic-congestion-control",
+		long = "client-quic-congestion-control",
+		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+		value_enum
+	)]
+	pub congestion_control: Option<CongestionControl>,
+
 	/// Write qlog traces into this directory. See [`Server::qlog`].
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[arg(id = "client-quic-qlog", long = "client-quic-qlog", env = "MOQ_CLIENT_QUIC_QLOG")]
@@ -150,6 +179,7 @@ impl Client {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.congestion_control,
 			self.qlog.clone(),
 		)
 	}
@@ -221,6 +251,17 @@ pub struct Server {
 	)]
 	pub mtu_discovery: Option<bool>,
 
+	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
+	/// quinn and quiche, BBRv3 on noq.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "server-quic-congestion-control",
+		long = "server-quic-congestion-control",
+		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
+		value_enum
+	)]
+	pub congestion_control: Option<CongestionControl>,
+
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
 	/// Supporting clients (Chrome M131+, native Quinn) migrate to this address
@@ -288,6 +329,7 @@ impl Server {
 			self.idle_timeout,
 			self.keep_alive,
 			self.mtu_discovery,
+			self.congestion_control,
 			self.qlog.clone(),
 		)
 	}
@@ -310,6 +352,8 @@ pub(crate) struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
+	/// Congestion control override, or `None` to leave the backend's own default.
+	pub congestion_control: Option<CongestionControl>,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
 }
@@ -321,6 +365,7 @@ impl Resolved {
 		idle_timeout: Option<Duration>,
 		keep_alive: Option<Duration>,
 		mtu_discovery: Option<bool>,
+		congestion_control: Option<CongestionControl>,
 		qlog: Option<PathBuf>,
 	) -> Self {
 		// A zero keep-alive means "disabled"; anything else (including unset) keeps
@@ -337,6 +382,7 @@ impl Resolved {
 			idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
 			keep_alive,
 			mtu_discovery: mtu_discovery.unwrap_or(false),
+			congestion_control,
 			qlog,
 		}
 	}
@@ -483,12 +529,29 @@ mod tests {
 			max_streams = 7000
 			gso = false
 			preferred_v4 = "192.0.2.1:443"
+			congestion_control = "delay"
 			qlog = "/tmp/qlog"
 		"#;
 		let quic: Server = toml::from_str(toml).unwrap();
 		assert_eq!(quic.max_streams, Some(7000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.preferred_v4, Some("192.0.2.1:443".parse().unwrap()));
+		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
+	}
+
+	#[test]
+	fn congestion_control_flags_parse() {
+		let both = parse(&[
+			"--client-quic-congestion-control",
+			"delay",
+			"--server-quic-congestion-control",
+			"loss",
+		]);
+		assert_eq!(both.client.congestion_control, Some(CongestionControl::Delay));
+		assert_eq!(both.server.congestion_control, Some(CongestionControl::Loss));
+
+		// Unset stays None, which leaves each backend's own default.
+		assert_eq!(Client::default().resolve().congestion_control, None);
 	}
 }

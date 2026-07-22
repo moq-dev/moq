@@ -137,6 +137,9 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
+	///
+	/// The publish happens when the returned [`Guard`] drops and only warns on failure; call
+	/// [`Guard::commit`] instead to handle the error.
 	pub fn lock(&mut self) -> Guard<'_, E> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
@@ -196,7 +199,9 @@ impl<E: CatalogExt> Producer<E> {
 			r.published = true;
 		}
 		let catalog = self.current.lock().unwrap().clone();
-		emit(&mut self.hang, &mut self.hangz, &mut self.msf_track, &catalog);
+		if let Err(err) = emit(&mut self.hang, &mut self.hangz, &mut self.msf_track, &catalog) {
+			tracing::warn!(%err, "failed to publish the catalog");
+		}
 	}
 
 	/// Build the media [`container::Producer`](crate::container::Producer) for `track`, recording its
@@ -204,15 +209,15 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// This is the 1:1 default. To share a timeline across aligned renditions, build the producer
 	/// yourself and wire the shared timeline's recorder:
-	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared).recorder())`,
-	/// and advertise `catalog.timeline(shared).section()` on each of their configs.
+	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared)?.recorder())`,
+	/// and advertise `catalog.timeline(shared)?.section()` on each of their configs.
 	pub fn media_producer<C: crate::container::Container>(
 		&self,
 		track: moq_net::track::Producer,
 		container: C,
-	) -> crate::container::Producer<C> {
-		let recorder = self.timeline(track.name()).recorder();
-		crate::container::Producer::new(track, container).with_recorder(recorder)
+	) -> crate::Result<crate::container::Producer<C>> {
+		let recorder = self.timeline(track.name())?.recorder();
+		Ok(crate::container::Producer::new(track, container).with_recorder(recorder))
 	}
 
 	/// The [`timeline::Producer`](crate::timeline::Producer) named `name`, creating its
@@ -222,15 +227,18 @@ impl<E: CatalogExt> Producer<E> {
 	/// record group opens through its [`recorder`](crate::timeline::Producer::recorder). Two
 	/// renditions naming the same timeline share it: an aligned transcode ladder records the source
 	/// and has the rungs only advertise the same section.
-	pub fn timeline(&self, name: &str) -> crate::timeline::Producer {
+	///
+	/// Errors on first use if the broadcast can't create the `<name>.timeline.z` track, for example
+	/// because something else already took that name.
+	pub fn timeline(&self, name: &str) -> crate::Result<crate::timeline::Producer> {
 		let mut timelines = self.timelines.lock().unwrap();
-		timelines
-			.entry(name.to_string())
-			.or_insert_with(|| {
-				crate::timeline::Producer::new(&mut self.broadcast.clone(), name)
-					.expect("failed to create timeline track")
-			})
-			.clone()
+		if let Some(timeline) = timelines.get(name) {
+			return Ok(timeline.clone());
+		}
+
+		let timeline = crate::timeline::Producer::new(&mut self.broadcast.clone(), name)?;
+		timelines.insert(name.to_string(), timeline.clone());
+		Ok(timeline)
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
@@ -255,7 +263,9 @@ impl<E: CatalogExt> Producer<E> {
 /// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
-/// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was mutated.
+/// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was
+/// mutated. That publish can fail (a closed track, or an extension that won't serialize) and only
+/// logs a warning; call [`commit`](Self::commit) instead to handle the error.
 pub struct Guard<'a, E: CatalogExt = ()> {
 	catalog: MutexGuard<'a, Catalog<E>>,
 	hang: &'a mut moq_json::snapshot::Producer<Catalog<E>>,
@@ -263,6 +273,38 @@ pub struct Guard<'a, E: CatalogExt = ()> {
 	msf_track: &'a mut moq_net::track::Producer,
 	reservations: &'a Mutex<Reservations>,
 	updated: bool,
+}
+
+impl<E: CatalogExt> Guard<'_, E> {
+	/// Publish the edited catalog to every catalog track, returning any error.
+	///
+	/// Consumes the guard, so the subsequent drop publishes nothing. A no-op if the catalog was never
+	/// mutated, and still withheld while a [`Reserved`](super::Reserved) gates the initial snapshot.
+	pub fn commit(mut self) -> crate::Result<()> {
+		self.publish()
+	}
+
+	/// Publish a mutated catalog once, clearing the flag so it isn't published again.
+	fn publish(&mut self) -> crate::Result<()> {
+		if !self.updated {
+			return Ok(());
+		}
+		self.updated = false;
+
+		{
+			let mut r = self.reservations.lock().unwrap();
+			// Withhold every emit while still buffering the initial reserved set; the mutation stays
+			// in `current` and `pending` marks it for the flush once the gate opens.
+			if !r.published && r.reservers != 0 {
+				r.pending = true;
+				return Ok(());
+			}
+			r.pending = false;
+			r.published = true;
+		}
+
+		emit(self.hang, self.hangz, self.msf_track, &self.catalog)
+	}
 }
 
 impl<E: CatalogExt> Deref for Guard<'_, E> {
@@ -304,23 +346,9 @@ impl Guard<'_, Extra> {
 
 impl<E: CatalogExt> Drop for Guard<'_, E> {
 	fn drop(&mut self) {
-		if !self.updated {
-			return;
+		if let Err(err) = self.publish() {
+			tracing::warn!(%err, "failed to publish the catalog on guard drop");
 		}
-
-		{
-			let mut r = self.reservations.lock().unwrap();
-			// Withhold every emit while still buffering the initial reserved set; the mutation stays
-			// in `current` and `pending` marks it for the flush once the gate opens.
-			if !r.published && r.reservers != 0 {
-				r.pending = true;
-				return;
-			}
-			r.pending = false;
-			r.published = true;
-		}
-
-		emit(self.hang, self.hangz, self.msf_track, &self.catalog);
 	}
 }
 
@@ -331,16 +359,19 @@ fn emit<E: CatalogExt>(
 	hangz: &mut moq_json::snapshot::Producer<Catalog<E>>,
 	msf_track: &mut moq_net::track::Producer,
 	catalog: &Catalog<E>,
-) {
+) -> crate::Result<()> {
 	// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-	let _ = hang.update(catalog);
-	let _ = hangz.update(catalog);
+	hang.update(catalog)?;
+	hangz.update(catalog)?;
 
-	let msf = to_msf(&catalog.media());
-	if let Ok(mut group) = msf_track.append_group() {
-		let _ = group.write_frame(moq_net::Timestamp::now(), msf.to_json().expect("invalid MSF catalog"));
-		let _ = group.finish();
-	}
+	// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
+	// the shape; report it like any other JSON failure rather than panicking.
+	let msf = to_msf(&catalog.media()).to_json().map_err(moq_json::Error::from)?;
+	let mut group = msf_track.append_group()?;
+	group.write_frame(moq_net::Timestamp::now(), msf)?;
+	group.finish()?;
+
+	Ok(())
 }
 
 /// Determine the SAP starting type for a given video codec.
@@ -474,6 +505,50 @@ mod test {
 
 		assert_eq!(got_plain, expected);
 		assert_eq!(got_compressed, expected);
+	}
+
+	#[test]
+	fn commit_reports_a_publish_failure() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+
+		// Finished tracks can't take another group, so the publish behind the guard fails.
+		catalog.finish().unwrap();
+
+		let mut guard = catalog.lock();
+		guard
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		assert!(guard.commit().is_err());
+	}
+
+	#[test]
+	fn commit_publishes_once() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+		let track = catalog.hang.consume();
+
+		let mut guard = catalog.lock();
+		guard
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		guard.commit().unwrap();
+
+		// The drop that follows `commit` must not publish a second snapshot.
+		catalog.finish().unwrap();
+		assert_eq!(track.latest(), Some(0));
+	}
+
+	#[test]
+	fn timeline_reports_a_track_collision() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast).unwrap();
+
+		// Something else already took the name the timeline track wants.
+		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
+		assert!(catalog.timeline("video0").is_err());
 	}
 
 	fn h264_config() -> VideoConfig {

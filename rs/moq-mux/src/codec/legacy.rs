@@ -127,7 +127,7 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		config: Config,
-	) -> Self {
+	) -> crate::Result<Self> {
 		let mut audio_config =
 			hang::catalog::AudioConfig::new(descriptor.codec.clone(), config.sample_rate, config.channel_count);
 		audio_config.container = hang::catalog::Container::Legacy;
@@ -138,16 +138,16 @@ impl<E: CatalogExt> Import<E> {
 		tracing::debug!(name = ?track.name(), config = ?audio_config, "starting track");
 
 		// Advertise this rendition's timeline before publishing (the generic set() no longer does).
-		audio_config.timeline = Some(reserved.producer().timeline(track.name()).section());
+		audio_config.timeline = Some(reserved.producer().timeline(track.name())?.section());
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(audio_config);
 
-		Self {
+		Ok(Self {
 			track: reserved
 				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy),
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
-		}
+		})
 	}
 
 	/// The MoQ track name.
@@ -163,8 +163,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 

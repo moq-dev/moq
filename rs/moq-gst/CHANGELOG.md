@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.12...moq-gst-v0.3.0) - 2026-07-22
+
+### Added
+
+- *(net)* unannounce as soon as the last route detaches ([#2419](https://github.com/moq-dev/moq/pull/2419))
+- *(moq-video)* [**breaking**] adapt the encoder bitrate to the congestion-control estimate ([#2303](https://github.com/moq-dev/moq/pull/2303))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- [**breaking**] pre-bump API polish across the release batch ([#2423](https://github.com/moq-dev/moq/pull/2423))
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- *(hang)* [**breaking**] non_exhaustive catalog sections, shared container::track_info, hang draft catch-up ([#2341](https://github.com/moq-dev/moq/pull/2341))
+- Merge branch 'main' into dev
+- Merge branch 'main' into dev
+
 ## [0.2.12](https://github.com/moq-dev/moq/compare/moq-gst-v0.2.11...moq-gst-v0.2.12) - 2026-07-15
 
 ### Fixed

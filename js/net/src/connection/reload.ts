@@ -4,6 +4,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import type { Probe, Stats } from "./stats.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -24,8 +25,8 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
-/** Options for {@link Reload}: connect options plus reactive URL/enabled signals and backoff tuning. */
-export type ReloadProps = ConnectProps & {
+/** Connection and retry options for {@link Reload}. */
+export type ReloadProps = Omit<ConnectProps, "signal"> & {
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
@@ -52,6 +53,14 @@ export class Reload {
 
 	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
+
+	/**
+	 * The current connection's PROBE estimates, spanning reconnects.
+	 *
+	 * Undefined while disconnected: the estimates belong to a single connection.
+	 * See {@link Established.probe}.
+	 */
+	readonly probe: Getter<Probe | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -114,6 +123,11 @@ export class Reload {
 			});
 		}
 
+		this.probe = this.#signals.computed((effect) => {
+			const connection = effect.get(this.established);
+			return connection && effect.get(connection.probe);
+		});
+
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
 		this.#signals.run(this.#connect.bind(this));
@@ -133,52 +147,87 @@ export class Reload {
 
 		effect.set(this.status, "connecting", "disconnected");
 
+		// This run's teardown, handed to connect() so a rerun cancels the attempt in flight.
+		const signal = effect.abort;
+
 		effect.spawn(async () => {
+			// Set once the session is live, so #retry can tell a healthy session that
+			// later dropped from a connect failure or a peer that flaps immediately.
+			let connected: DOMHighResTimeStamp | undefined;
+
 			try {
-				const pending = connect(url, {
+				const connection = await connect(url, {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					signal,
 				});
 
-				const connection = await Promise.race([effect.cancel, pending]);
-				if (!connection) {
-					pending.then((conn) => conn.close()).catch(() => {});
-					return;
-				}
+				// Hand the connection to the effect, which closes it now if this run is already over.
+				effect.cleanup(() => connection.close());
+				if (signal.aborted) return;
 
 				effect.set(this.established, connection);
-				effect.cleanup(() => connection.close());
-
 				effect.set(this.status, "connected", "disconnected");
 
-				// Reset the exponential backoff and timeout on success.
-				this.#delay = this.delay.initial;
-				this.#retryStart = undefined;
+				connected = performance.now();
 
-				await Promise.race([effect.cancel, connection.closed]);
+				// A cancelled effect resolves undefined, so the sentinel tells the session
+				// closing apart from this run being torn down.
+				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
+				if (!closed) return;
+
+				console.warn("connection closed, reconnecting");
+				this.#retry(effect, connected);
 			} catch (err) {
+				// Treat teardown as cancellation, not a connection failure.
+				if (signal.aborted) return;
+
 				console.warn("connection error:", err);
-
-				// Track retry start for timeout.
-				this.#retryStart ??= performance.now();
-
-				const timeout = this.delay.timeout ?? 300000;
-				if (timeout > 0) {
-					const elapsed = performance.now() - this.#retryStart;
-					if (elapsed >= timeout) {
-						console.warn("reconnect timed out");
-						this.#closedReject(err instanceof Error ? err : new Error(String(err)));
-						return;
-					}
-				}
-
-				const tick = this.#tick.peek() + 1;
-				effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
-
-				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+				this.#retry(effect, connected, err);
 			}
 		});
+	}
+
+	/**
+	 * Schedule the next connect attempt after the current backoff, or give up when the
+	 * retry window has expired. `connected` is when the dead session was established, if
+	 * it ever was, and `cause` the error that killed it, if it died with one.
+	 */
+	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
+		// Any session is dead now: report disconnected during the backoff rather than
+		// when the retry reruns the effect.
+		this.established.set(undefined);
+		this.status.set("disconnected");
+
+		// A session that outlived the initial delay was healthy, so clear the backoff and
+		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
+		// shorter is a peer that accepts and immediately severs, which has to keep
+		// escalating or we hammer it forever at the initial delay.
+		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
+			this.#delay = this.delay.initial;
+			this.#retryStart = undefined;
+		}
+
+		// Track retry start for timeout.
+		this.#retryStart ??= performance.now();
+
+		const timeout = this.delay.timeout ?? 300000;
+		if (timeout > 0) {
+			const elapsed = performance.now() - this.#retryStart;
+			if (elapsed >= timeout) {
+				console.warn("reconnect timed out");
+				// A graceful close has no error, so report the timeout itself.
+				if (cause === undefined) this.#closedReject(new Error("reconnect timed out"));
+				else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
+				return;
+			}
+		}
+
+		const tick = this.#tick.peek() + 1;
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
+
+		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
 	}
 
 	/**
@@ -242,6 +291,14 @@ export class Reload {
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
+	}
+
+	/**
+	 * Snapshot the live connection's transport counters, or undefined while disconnected.
+	 * See {@link Established.stats}.
+	 */
+	async stats(): Promise<Stats | undefined> {
+		return this.established.peek()?.stats();
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */

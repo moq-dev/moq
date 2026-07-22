@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-json-v0.2.0...moq-json-v0.3.0) - 2026-07-22
+
+### Added
+
+- *(net)* [**breaking**] extract stats publishing into moq-stats with compressed tracks ([#2380](https://github.com/moq-dev/moq/pull/2380))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(net)* remove implicit frame timestamp helpers ([#2232](https://github.com/moq-dev/moq/pull/2232))
+- Merge origin/main into dev
+
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-json-v0.1.2...moq-json-v0.2.0) - 2026-07-12
 
 ### Other

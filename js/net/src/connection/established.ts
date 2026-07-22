@@ -1,9 +1,8 @@
-import type { Signal } from "@moq/signals";
+import type { Getter } from "@moq/signals";
 import type * as announce from "../announced.ts";
-import type { Bandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
-import type * as Time from "../time.ts";
+import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
 /** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
@@ -17,14 +16,11 @@ export interface Established {
 	/** The wire transport this session runs over. */
 	readonly transport: Transport;
 
-	/** Estimated send bitrate from the congestion controller (if supported). */
-	readonly sendBandwidth?: Bandwidth;
-
-	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
-	readonly recvBandwidth?: Bandwidth;
-
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
-	readonly rtt?: Signal<Time.Milli | undefined>;
+	/**
+	 * Estimates measured by the peer, updated as PROBE messages arrive. Stays empty on
+	 * versions without PROBE. See {@link Stats} for what the local transport counts.
+	 */
+	readonly probe: Getter<Probe>;
 
 	/**
 	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a
@@ -41,6 +37,14 @@ export interface Established {
 
 	/** Consume the broadcast at the given path. */
 	consume(path: Path.Valid): broadcast.Consumer;
+
+	/**
+	 * Snapshot the transport's counters, querying it fresh on each call.
+	 *
+	 * Resolves to an empty snapshot on a transport without `getStats()`. Sample it on
+	 * whatever schedule you need rather than expecting the library to poll for you.
+	 */
+	stats(): Promise<Stats>;
 
 	/** Close the session. */
 	close(): void;

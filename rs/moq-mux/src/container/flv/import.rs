@@ -503,7 +503,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				// site (the producer reports MissingKeyframe), so a mid-GOP join works.
 				track: self
 					.catalog
-					.media_producer(net_track, crate::catalog::hang::Container::Legacy),
+					.media_producer(net_track, crate::catalog::hang::Container::Legacy)?,
 				config,
 			},
 		);
@@ -527,7 +527,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			AudioStream {
 				track: self
 					.catalog
-					.media_producer(net_track, crate::catalog::hang::Container::Legacy),
+					.media_producer(net_track, crate::catalog::hang::Container::Legacy)?,
 				config,
 			},
 		);
@@ -579,18 +579,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Abort every track with `err`, so consumers see the real cause instead of the
 	/// generic [`moq_net::Error::Dropped`] a bare drop surfaces. The counterpart to
 	/// [`Self::finish`] for a failed teardown (e.g. the RTMP client disconnected).
-	pub fn abort(&mut self, err: moq_net::Error) {
-		for stream in self.video.values_mut() {
+	/// Consumes the importer.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.unregister();
+		for stream in std::mem::take(&mut self.video).into_values() {
 			stream.track.abort(err.clone());
 		}
-		for stream in self.audio.values_mut() {
+		for stream in std::mem::take(&mut self.audio).into_values() {
 			stream.track.abort(err.clone());
 		}
 	}
-}
 
-impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
-	fn drop(&mut self) {
+	/// Drop every rendition this importer registered from the catalog.
+	fn unregister(&mut self) {
 		let mut catalog = self.catalog.lock();
 		for stream in self.video.values() {
 			catalog.video.renditions.remove(stream.track.name());
@@ -598,6 +599,12 @@ impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 		for stream in self.audio.values() {
 			catalog.audio.renditions.remove(stream.track.name());
 		}
+	}
+}
+
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
+	fn drop(&mut self) {
+		self.unregister();
 	}
 }
 

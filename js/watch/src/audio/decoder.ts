@@ -513,6 +513,13 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	if (!Catalog.containerSupported(config.container)) {
+		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.
+		const kind = config.container.kind === "unknown" ? config.container.raw.kind : config.container.kind;
+		console.warn(`audio: ignoring rendition with unknown container: ${kind}`);
+		return false;
+	}
+
 	// Opus only runs at its native rates, so a catalog advertising anything else is wrong and Safari
 	// refuses to decode it. Warn rather than reject: Chrome and Firefox ignore the configured rate and
 	// play these streams fine, so rejecting would silence them for a publisher they handle today.

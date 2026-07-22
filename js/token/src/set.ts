@@ -57,9 +57,9 @@ export function findKey(set: KeySet, kid: string): Key | undefined {
 	return set.keys.find((key) => key.kid === kid);
 }
 
-/** Sign the claims with the first key in the set that supports signing. */
+/** Sign the claims with the first key that permits signing and contains signing material. */
 export async function signWith(set: KeySet, claims: Claims): Promise<string> {
-	const key = set.keys.find((key) => key.key_ops.includes("sign"));
+	const key = set.keys.find((key) => key.key_ops.includes("sign") && (key.kty === "oct" || key.d !== undefined));
 	if (!key) throw new Error("Cannot find signing key");
 	return await sign(key, claims);
 }

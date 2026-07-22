@@ -88,7 +88,7 @@ impl AcceptedSession {
 					tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
 					// A deliberate end: finish the broadcast so the origin
 					// unannounces it immediately.
-					if let Some(broadcast) = self.broadcast.take() {
+					if let Some(mut broadcast) = self.broadcast.take() {
 						broadcast.finish();
 					}
 					Ok(())

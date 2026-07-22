@@ -1,6 +1,8 @@
+import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -33,6 +35,9 @@ export class Connection implements Established {
 
 	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
 	readonly discovery: boolean;
+
+	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
+	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
 	// The established WebTransport session.
 	#quic: WebTransport;
@@ -102,6 +107,11 @@ export class Connection implements Established {
 		this.#subscriber = new Subscriber(this.#session);
 
 		void this.#run();
+	}
+
+	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	async stats(): Promise<Stats> {
+		return transportStats(this.#quic);
 	}
 
 	/**

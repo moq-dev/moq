@@ -63,6 +63,14 @@ pub struct Export<E: catalog::Catalog = ()> {
 	counters: HashMap<u16, ContinuityCounter>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
+	/// Transport/service identity captured on import, used to rebuild a consistent
+	/// PAT/PMT. `None` for a media-only source, so a minimal identity is synthesized.
+	program: Option<catalog::Program>,
+	/// Standalone SI sections captured on import, keyed by PID and re-emitted verbatim
+	/// on their own cadence. Opaque: export never parses a table it carries.
+	si: BTreeMap<u16, catalog::Si>,
+	/// When each SI PID was last emitted, so each honors its own interval.
+	last_si: HashMap<u16, Timestamp>,
 
 	/// Program tables, built once the track layout is known.
 	psi: Option<Psi>,
@@ -136,6 +144,9 @@ struct Psi {
 	pat: Pat,
 	pmt: Pmt,
 	pcr_pid: u16,
+	/// PID the PMT rides on: the source's original (preserved from the service
+	/// record) or the synthesized [`PMT_PID`] for a media-only source.
+	pmt_pid: u16,
 }
 
 /// Per-frame PES descriptor (everything but the payload bytes).
@@ -192,6 +203,9 @@ impl<E: catalog::Catalog> Export<E> {
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
+			program: None,
+			si: BTreeMap::new(),
+			last_si: HashMap::new(),
 			psi: None,
 			last_psi: None,
 			video_start: None,
@@ -331,6 +345,8 @@ impl<E: catalog::Catalog> Export<E> {
 		// empty default: no verbatim streams, no preserved PIDs/descriptors).
 		let mpegts = catalog.mpegts_mut().cloned().unwrap_or_default();
 		self.program_descriptors = mpegts.program_descriptors.clone();
+		self.program = mpegts.program.clone();
+		self.si = mpegts.si.clone();
 
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: BTreeMap<String, ()> = BTreeMap::new();
@@ -368,7 +384,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// PIDs, descriptors, and stream_ids across several catalog publishes, so this
 		// runs every snapshot until the PMT is built and the tracks below are
 		// *refreshed*, not latched from the first (partial) snapshot.
-		let mut used: Vec<u16> = vec![0x0000, PMT_PID, 0x1FFF];
+		let mut used: Vec<u16> = vec![0x0000, self.pmt_pid(), 0x1FFF];
 		let mut pids: BTreeMap<String, u16> = BTreeMap::new();
 		for name in active.keys() {
 			if let Some(pid) = mpegts.tracks.get(name).map(|t| t.pid)
@@ -510,6 +526,16 @@ impl<E: catalog::Catalog> Export<E> {
 			.min()
 	}
 
+	/// PID the PMT rides on: the source's original (preserved in the service record),
+	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
+	fn pmt_pid(&self) -> u16 {
+		self.program
+			.as_ref()
+			.map(|s| s.pmt_pid)
+			.filter(|&pid| pid != 0)
+			.unwrap_or(PMT_PID)
+	}
+
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> anyhow::Result<()> {
 		// Order tracks by PID for a stable layout; first video track carries the PCR.
@@ -616,23 +642,39 @@ impl<E: catalog::Catalog> Export<E> {
 			Vec::new()
 		};
 
+		// Preserve the source's program identity so the rebuilt PAT/PMT stay consistent
+		// with the carried SI; synthesize a minimal identity otherwise.
+		let pmt_pid = self.pmt_pid();
+		let transport_stream_id = self.program.as_ref().map(|s| s.transport_stream_id).unwrap_or(1);
+		let program_number = self
+			.program
+			.as_ref()
+			.map(|s| s.program_number)
+			.filter(|&id| id != 0)
+			.unwrap_or(1);
+
 		let pat = Pat {
-			transport_stream_id: 1,
+			transport_stream_id,
 			version_number: VersionNumber::default(),
 			table: vec![ProgramAssociation {
-				program_num: 1,
-				program_map_pid: Pid::new(PMT_PID)?,
+				program_num: program_number,
+				program_map_pid: Pid::new(pmt_pid)?,
 			}],
 		};
 		let pmt = Pmt {
-			program_num: 1,
+			program_num: program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
 			version_number: VersionNumber::default(),
 			program_info,
 			es_info,
 		};
 
-		self.psi = Some(Psi { pat, pmt, pcr_pid });
+		self.psi = Some(Psi {
+			pat,
+			pmt,
+			pcr_pid,
+			pmt_pid,
+		});
 		Ok(())
 	}
 
@@ -702,14 +744,35 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
 		// Refresh PSI at keyframes or after the interval lapses.
-		let psi_due = psi_due(frame.timestamp, self.last_psi);
-		if (is_video && frame.keyframe) || psi_due {
+		if (is_video && frame.keyframe) || due(frame.timestamp, self.last_psi, PSI_INTERVAL) {
 			let psi = self.psi.as_ref().context("PSI not built")?;
+			let pmt_pid = psi.pmt_pid;
 			let pat = TsPayload::Pat(psi.pat.clone());
 			let pmt = TsPayload::Pmt(psi.pmt.clone());
 			self.write_packet(&mut out, Pid::PAT, None, pat)?;
-			self.write_packet(&mut out, PMT_PID, None, pmt)?;
+			self.write_packet(&mut out, pmt_pid, None, pmt)?;
 			self.last_psi = Some(frame.timestamp);
+		}
+
+		// Re-emit each SI PID's sections verbatim on its own cadence, which is the
+		// table's own repetition requirement rather than the PSI interval: an SDT wants
+		// 2s where the PSI wants 500ms, and an EPG table would want far less again.
+		// Unknown PIDs have no declared interval and fall back to the PSI cadence.
+		// `Bytes` clones are refcount bumps, and only a due PID is collected at all.
+		let pending: Vec<(u16, Vec<Bytes>)> = self
+			.si
+			.iter()
+			.filter(|(pid, si)| {
+				let interval = si.interval.unwrap_or(PSI_INTERVAL);
+				due(frame.timestamp, self.last_si.get(*pid).copied(), interval)
+			})
+			.map(|(pid, si)| (*pid, si.sections.clone()))
+			.collect();
+		for (pid, sections) in pending {
+			for section in &sections {
+				self.write_section(&mut out, pid, section)?;
+			}
+			self.last_si.insert(pid, frame.timestamp);
 		}
 
 		match es_payload {
@@ -915,13 +978,13 @@ const PES_DTS_LEN: usize = 5;
 /// [`author_dts`] and [`Track::dts_reserve`].
 const DEFAULT_DTS_RESERVE: u64 = 16;
 
-fn psi_due(timestamp: Timestamp, last: Option<Timestamp>) -> bool {
+fn due(timestamp: Timestamp, last: Option<Timestamp>, interval: Duration) -> bool {
 	let Some(last) = last else {
 		return true;
 	};
 	Duration::from(timestamp)
 		.checked_sub(Duration::from(last))
-		.is_some_and(|elapsed| elapsed >= PSI_INTERVAL)
+		.is_some_and(|elapsed| elapsed >= interval)
 }
 
 /// External byte size of an adaptation field (manual mirror of the crate's
@@ -1073,6 +1136,10 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 		// TS carries raw codec payloads, like the Legacy varint and LOC formats.
 		Container::Legacy | Container::Loc => Ok(()),
 		Container::Cmaf { .. } => anyhow::bail!("TS export does not support CMAF {kind} track '{name}'"),
+		Container::Unknown(unknown) => anyhow::bail!(
+			"TS export does not support container '{}' on {kind} track '{name}'",
+			unknown.kind().unwrap_or("<missing>")
+		),
 	}
 }
 
@@ -1118,7 +1185,9 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 
 #[cfg(test)]
 mod tests {
-	use super::{DEFAULT_DTS_RESERVE, author_dts, is_complete_section, psi_due};
+	use std::time::Duration;
+
+	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section};
 	use moq_net::Timestamp;
 
 	fn ms(value: u64) -> Timestamp {
@@ -1220,11 +1289,17 @@ mod tests {
 	}
 
 	#[test]
-	fn psi_due_uses_elapsed_duration() {
-		assert!(psi_due(ms(1_000), None));
-		assert!(!psi_due(ms(1_250), Some(ms(1_000))));
-		assert!(psi_due(ms(1_500), Some(ms(1_000))));
-		assert!(!psi_due(ms(750), Some(ms(1_000))));
+	fn due_uses_elapsed_duration() {
+		assert!(due(ms(1_000), None, PSI_INTERVAL));
+		assert!(!due(ms(1_250), Some(ms(1_000)), PSI_INTERVAL));
+		assert!(due(ms(1_500), Some(ms(1_000)), PSI_INTERVAL));
+		assert!(!due(ms(750), Some(ms(1_000)), PSI_INTERVAL));
+
+		// A per-PID SI interval is honored independently of the PSI cadence: an SDT at
+		// 2s is not due when the 500ms PSI would be.
+		let sdt = Duration::from_millis(2_000);
+		assert!(!due(ms(1_500), Some(ms(1_000)), sdt));
+		assert!(due(ms(3_000), Some(ms(1_000)), sdt));
 	}
 
 	#[test]

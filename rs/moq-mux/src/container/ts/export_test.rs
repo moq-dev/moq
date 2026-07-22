@@ -7,6 +7,7 @@
 //! TS, and re-parse with the `mpeg2ts` reader.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
@@ -1260,6 +1261,309 @@ async fn scte35_fixtures_survive_roundtrip() {
 			"{source}: every section survived TS -> MoQ -> TS byte-for-byte"
 		);
 	}
+}
+
+/// Build a PSI section: `table_id`, the 12-bit `section_length` (covering `body` plus a
+/// 4-byte CRC), then `body` and a dummy CRC. The reassembler carries it verbatim and
+/// never validates the CRC, so the bytes only need a self-consistent length.
+fn make_section(table_id: u8, body: &[u8]) -> Vec<u8> {
+	let section_length = body.len() + 4;
+	let mut s = vec![
+		table_id,
+		0xb0 | ((section_length >> 8) as u8 & 0x0f),
+		(section_length & 0xff) as u8,
+	];
+	s.extend_from_slice(body);
+	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+	s
+}
+
+/// Wrap a complete section in one PUSI TS packet on `pid` (pointer_field 0), padded to 188.
+fn si_packet(pid: u16, section: &[u8]) -> Vec<u8> {
+	let mut p = vec![0x47, 0x40 | ((pid >> 8) as u8 & 0x1f), (pid & 0xff) as u8, 0x10, 0x00];
+	p.extend_from_slice(section);
+	assert!(p.len() <= 188, "section overflows one TS packet");
+	p.resize(188, 0xff);
+	p
+}
+
+/// Split a complete section across several 188-byte TS packets on `pid`: a PUSI packet
+/// (pointer_field 0) carrying the head, then continuation packets (PUSI clear, continuity
+/// counter advancing) for the rest, the last padded with 0xff stuffing. Unlike `si_packet`
+/// this reaches the multi-packet reassembly path (PUSI + continuity across packets).
+fn si_packets_multi(pid: u16, section: &[u8]) -> Vec<u8> {
+	let mut out = Vec::new();
+	let mut cc = 0u8;
+	// First packet: PUSI set, pointer_field 0, then as much of the section as fits.
+	let mut first = vec![
+		0x47,
+		0x40 | ((pid >> 8) as u8 & 0x1f),
+		(pid & 0xff) as u8,
+		0x10 | cc,
+		0x00,
+	];
+	let head = section.len().min(188 - first.len());
+	first.extend_from_slice(&section[..head]);
+	first.resize(188, 0xff);
+	out.extend_from_slice(&first);
+
+	// Continuation packets: PUSI clear, continuity counter incremented per payload packet.
+	let mut pos = head;
+	while pos < section.len() {
+		cc = (cc + 1) & 0x0f;
+		let mut p = vec![0x47, (pid >> 8) as u8 & 0x1f, (pid & 0xff) as u8, 0x10 | cc];
+		let take = (section.len() - pos).min(188 - p.len());
+		p.extend_from_slice(&section[pos..pos + take]);
+		p.resize(188, 0xff);
+		out.extend_from_slice(&p);
+		pos += take;
+	}
+	out
+}
+
+/// Decode an SDT Actual section's first service: `(service_type, provider, name)` from the
+/// service_descriptor (tag 0x48). Enough to prove the service identity survived, no more.
+fn parse_sdt_service(sec: &[u8]) -> (u8, String, String) {
+	// header(8) + first service loop entry: service_id(2), flags(1), running/free + desc_len(2).
+	let desc_loop_len = (((sec[11 + 3] & 0x0f) as usize) << 8) | sec[11 + 4] as usize;
+	let mut d = 11 + 5;
+	let end = d + desc_loop_len;
+	while d < end {
+		let (tag, len) = (sec[d], sec[d + 1] as usize);
+		let body = &sec[d + 2..d + 2 + len];
+		if tag == 0x48 {
+			let service_type = body[0];
+			let prov_len = body[1] as usize;
+			let provider = String::from_utf8_lossy(&body[2..2 + prov_len]).into_owned();
+			let name_len = body[2 + prov_len] as usize;
+			let name = String::from_utf8_lossy(&body[3 + prov_len..3 + prov_len + name_len]).into_owned();
+			return (service_type, provider, name);
+		}
+		d += 2 + len;
+	}
+	panic!("SDT service_descriptor (0x48) not found");
+}
+
+/// The DVB service layer (SDT + NIT + transport/service identity) must survive
+/// TS -> MoQ -> TS. `bbb.ts` carries a real ffmpeg SDT (service "Service01" / provider
+/// "FFmpeg"); no fixture carries a NIT, so a synthetic one is injected on PID 0x0010.
+/// After the round-trip the SDT and NIT are byte-identical and the identity is preserved.
+#[tokio::test(start_paused = true)]
+async fn service_layer_survives_roundtrip() {
+	let data = include_bytes!("test_data/bbb.ts");
+	let nit = make_section(0x40, &[0x12, 0x34, 0xff, 0x01]);
+
+	// Prepend a synthetic NIT Actual packet (0x0010); prepend keeps bbb's alignment.
+	// Twice, because real SI repeats every few seconds: the repetition must collapse
+	// into the same single section rather than accumulating a duplicate.
+	let mut input = si_packet(0x0010, &nit);
+	input.extend_from_slice(&si_packet(0x0010, &nit));
+	input.extend_from_slice(&data[..]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&input[..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let program = snapshot.mpegts.program.clone().expect("a program record");
+	assert_eq!(program.transport_stream_id, 1, "TSID captured from the PAT");
+	assert_eq!(program.program_number, 1, "program number captured from the PAT");
+	assert_eq!(program.pmt_pid, 0x1000, "original PMT PID captured from the PAT");
+	let si = snapshot.mpegts.si.clone();
+	let entry = |pid: u16| si.get(&pid).expect("an SI entry for the PID");
+
+	assert_eq!(entry(0x0011).sections.len(), 1, "bbb.ts carries one SDT section");
+	let sdt = entry(0x0011).sections[0].clone();
+	assert_eq!(sdt.first(), Some(&0x42), "SDT Actual (table_id 0x42)");
+	assert_eq!(
+		entry(0x0011).interval,
+		Some(std::time::Duration::from_secs(2)),
+		"the DVB SDT interval was filled in"
+	);
+	let (service_type, provider, name) = parse_sdt_service(&sdt);
+	assert_eq!(
+		(service_type, provider.as_str(), name.as_str()),
+		(0x01, "FFmpeg", "Service01")
+	);
+	assert_eq!(
+		entry(0x0010).sections,
+		vec![Bytes::from(make_section(0x40, &[0x12, 0x34, 0xff, 0x01]))],
+		"the repeated NIT deduped to one section"
+	);
+
+	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+
+	// The rebuilt PAT preserves the transport/service identity and PMT PID.
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	let mut checked_pat = false;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pat(pat)) = packet.payload {
+			assert_eq!(pat.transport_stream_id, 1, "TSID preserved in the rebuilt PAT");
+			assert_eq!(pat.table.len(), 1);
+			assert_eq!(pat.table[0].program_num, 1, "service number preserved");
+			assert_eq!(pat.table[0].program_map_pid.as_u16(), 0x1000, "PMT PID preserved");
+			checked_pat = true;
+			break;
+		}
+	}
+	assert!(checked_pat, "missing PAT");
+
+	// Re-import: the SDT and NIT must come back byte-for-byte.
+	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
+	let _consumer2 = broadcast2.consume();
+	let catalog2 =
+		crate::catalog::Producer::with_catalog(&mut broadcast2, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
+	import2.finish().unwrap();
+
+	let snapshot2 = catalog2.snapshot();
+	let program2 = snapshot2
+		.mpegts
+		.program
+		.clone()
+		.expect("a program record after round-trip");
+	assert_eq!(
+		program2.transport_stream_id, program.transport_stream_id,
+		"TSID survived"
+	);
+	assert_eq!(
+		program2.program_number, program.program_number,
+		"program number survived"
+	);
+	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
+	assert_eq!(snapshot2.mpegts.si, si, "every SI PID survived byte-for-byte");
+}
+
+/// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
+/// and of video keyframes. The fixtures are a fraction of a second long, so nothing else
+/// distinguishes a correct interval from "emitted once and never again": this builds a
+/// 12-second synthetic timeline where the SDT (2s) and NIT (10s) land a different number
+/// of times, and neither matches the 13 keyframes that drive the PSI.
+#[tokio::test(start_paused = true)]
+async fn si_pids_are_re_emitted_on_their_own_interval() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+
+		// SDT every 2s, NIT every 10s: the DVB maxima import fills in.
+		guard.mpegts.si.insert(
+			0x0011,
+			tscat::Si {
+				sections: vec![Bytes::from(make_section(0x42, &[0xaa; 8]))],
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+		guard.mpegts.si.insert(
+			0x0010,
+			tscat::Si {
+				sections: vec![Bytes::from(make_section(0x40, &[0xbb; 8]))],
+				interval: Some(Duration::from_secs(10)),
+				..Default::default()
+			},
+		);
+	}
+
+	// One keyframe per second across 12s, so the PSI fires on every one of the 13.
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	for sec in 0..=12u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+
+	let count = |pid: u16| {
+		ts.chunks_exact(188)
+			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+			.count()
+	};
+
+	// Control: the PSI rides every output frame here (each is a keyframe, and they are
+	// further apart than PSI_INTERVAL either way). The SI PIDs must not follow it.
+	assert_eq!(count(0x0000), 13, "PAT on every frame");
+	// SDT at 0,2,4,6,8,10,12s.
+	assert_eq!(count(0x0011), 7, "SDT re-emitted on its 2s interval");
+	// NIT at 0 and 10s.
+	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
+}
+
+/// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
+/// `si_packet` only covers a single-packet section; a real SDT with several services (or a
+/// NIT) spans packets, exercising the `SectionReassembler` PUSI + continuity path that
+/// feeds `service.sdt`. The body is arbitrary here (capture is verbatim, not parsed).
+#[test]
+fn multi_packet_si_section_is_captured() {
+	// 400-byte body forces the SDT Actual across three TS packets (183 + 184 + rest).
+	let body: Vec<u8> = (0..400u16).map(|i| i as u8).collect();
+	let sdt = make_section(0x42, &body);
+	let input = si_packets_multi(0x0011, &sdt);
+	assert!(input.len() > 188, "the SDT must span more than one TS packet");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let _consumer = broadcast.consume();
+	let catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&input[..])).unwrap();
+	import.finish().unwrap();
+
+	let si = catalog.snapshot().mpegts.si.clone();
+	assert_eq!(
+		si.get(&0x0011).expect("an SDT entry").sections,
+		vec![Bytes::from(sdt)],
+		"the multi-packet SDT was reassembled and captured byte-for-byte"
+	);
 }
 
 /// A raw Opus packet: a one-byte TOC (config 1 = SILK NB 20 ms, stereo, code 0) plus

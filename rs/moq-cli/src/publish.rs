@@ -175,8 +175,8 @@ impl PublishDecoder {
 	}
 
 	/// Abort the tracks with `err` instead of finishing, so subscribers see the
-	/// real cause rather than `Error::Dropped`.
-	fn abort(&mut self, err: moq_net::Error) {
+	/// real cause rather than `Error::Dropped`. Consumes the decoder.
+	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Avc3 { import, .. } => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
@@ -238,7 +238,7 @@ impl Publish {
 		let source = match format {
 			PublishFormat::Avc3 => {
 				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
-				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default());
+				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
 					split,

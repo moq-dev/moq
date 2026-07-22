@@ -46,7 +46,24 @@ pub trait Bridge: Send {
 
 	/// Abort the published track with `err` so subscribers see the real cause
 	/// (the peer disconnected, an ICE failure) rather than a bare `Error::Dropped`.
-	fn abort(&mut self, err: moq_net::Error);
+	///
+	/// Consumes the bridge: the track is dead afterwards.
+	fn abort(self: Box<Self>, err: moq_net::Error);
+}
+
+/// A bridge's video catalog entry, removed however the bridge ends.
+///
+/// A separate value rather than a `Drop` on the bridge itself, so a bridge's terminal
+/// [`Bridge::abort`] can consume its track producer.
+pub(crate) struct VideoRendition {
+	pub catalog: moq_mux::catalog::Producer,
+	pub name: String,
+}
+
+impl Drop for VideoRendition {
+	fn drop(&mut self) {
+		self.catalog.lock().video.renditions.remove(&self.name);
+	}
 }
 
 /// One RTP-ready codec frame produced by an egress [`Track`].

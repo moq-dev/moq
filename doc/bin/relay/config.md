@@ -187,6 +187,39 @@ tls.disable_verify = true
 # tls.system_roots = true
 ```
 
+### \[server.quic] and \[client.quic]
+
+Per-connection QUIC transport knobs, applied to incoming connections
+(`server.quic`) and to outgoing cluster dials (`client.quic`) independently.
+
+```toml
+[server.quic]
+# Congestion control: "loss" or "delay". Omit to keep the backend's default.
+congestion_control = "delay"
+
+[client.quic]
+congestion_control = "delay"
+```
+
+`loss` is CUBIC: it grows until it drops packets, so the send rate sawtooths.
+`delay` is BBR: it tracks the measured delivery rate and RTT instead of waiting
+for loss, which keeps queues shorter and the send rate steady enough for a live
+encoder to follow. Prefer `delay` for interactive media.
+
+The knob names a family rather than an algorithm because each QUIC backend ships
+a different BBR generation:
+
+| Backend | `loss` | `delay` | Default when unset |
+| --- | --- | --- | --- |
+| quinn | CUBIC | BBRv1 | CUBIC |
+| quiche | CUBIC | BBRv2 | CUBIC |
+| noq | CUBIC | BBRv3 | BBRv3 |
+| iroh | CUBIC | BBRv3 | BBRv3 |
+
+Also available as `--server-quic-congestion-control` /
+`--client-quic-congestion-control`, or `MOQ_SERVER_QUIC_CONGESTION_CONTROL` /
+`MOQ_CLIENT_QUIC_CONGESTION_CONTROL`.
+
 ### \[stats]
 
 Per-node stats publishing. When enabled, the relay publishes stats broadcasts

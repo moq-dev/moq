@@ -114,18 +114,18 @@ impl<E: CatalogExt> Import<E> {
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
 		mut config: hang::catalog::AudioConfig,
-	) -> Self {
+	) -> crate::Result<Self> {
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
 		// Advertise this rendition's timeline before publishing (the generic set() no longer does).
-		config.timeline = Some(reserved.producer().timeline(track.name()).section());
+		config.timeline = Some(reserved.producer().timeline(track.name())?.section());
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(config);
-		Self {
+		Ok(Self {
 			track: reserved
 				.producer()
-				.media_producer(track, crate::catalog::hang::Container::Legacy),
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
-		}
+		})
 	}
 
 	/// A watch-only handle to this track's subscriber demand.
@@ -141,8 +141,8 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes this importer.
+	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
 

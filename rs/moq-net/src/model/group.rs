@@ -381,7 +381,7 @@ impl Producer {
 	/// Fail the group because an in-flight frame couldn't complete (called by
 	/// [`frame::Producer::abort`] / its drop).
 	pub(crate) fn frame_abort(&mut self, err: Error) {
-		let _ = self.abort(err);
+		let _ = self.clone().abort(err);
 	}
 
 	/// Return the number of frames written so far (completed plus any in-flight).
@@ -391,6 +391,9 @@ impl Producer {
 	}
 
 	/// Mark the group as complete; no more frames will be written.
+	///
+	/// Borrows rather than consumes, so a later failure can still be reported through
+	/// [`abort`](Self::abort). The handle also keeps the cached frames readable.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;
 		state.fin = true;
@@ -399,10 +402,10 @@ impl Producer {
 
 	/// Abort the group with the given error.
 	///
-	/// No updates can be made after this point. Drops the cached frames so a stale
-	/// [`Consumer`] can't pin their buffers in memory forever; consumers that haven't
-	/// drained yet surface the abort error instead of the leftover cache.
-	pub fn abort(&mut self, err: Error) -> Result<()> {
+	/// Consumes the handle. Drops the cached frames so a stale [`Consumer`] can't pin
+	/// their buffers in memory forever; consumers that haven't drained yet surface the
+	/// abort error instead of the leftover cache.
+	pub fn abort(self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
 		guard.abort = Some(err);
 		guard.release();
@@ -880,7 +883,7 @@ mod test {
 
 	#[test]
 	fn abort_propagates() {
-		let mut producer = Info { sequence: 0 }.produce();
+		let producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 		producer.abort(crate::Error::Cancel).unwrap();
 
@@ -899,7 +902,7 @@ mod test {
 		let _consumer = producer.consume();
 		assert_eq!(producer.state.read().frames.len(), 1);
 
-		producer.abort(crate::Error::Cancel).unwrap();
+		producer.clone().abort(crate::Error::Cancel).unwrap();
 
 		let state = producer.state.read();
 		assert!(state.frames.is_empty(), "cached frames should be dropped on abort");

@@ -37,7 +37,8 @@ const Base64FieldSchema = z.string().check(
 
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
-	key_ops: z.array(OperationSchema).check(z.minLength(1)),
+	// RFC 7517 leaves omitted key_ops unrestricted. Default to the operations this library supports.
+	key_ops: z._default(z.array(OperationSchema).check(z.minLength(1)), ["sign", "verify"]),
 	kid: z.optional(KeyIdSchema),
 	scope: z.optional(ScopeSchema),
 });

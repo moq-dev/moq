@@ -744,7 +744,7 @@ impl MoqTrackProducer {
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut track = guard.take().ok_or(MoqError::Closed)?;
+		let track = guard.take().ok_or(MoqError::Closed)?;
 		track.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -824,7 +824,7 @@ impl MoqGroupProducer {
 	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut group = guard.take().ok_or(MoqError::Closed)?;
+		let group = guard.take().ok_or(MoqError::Closed)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}

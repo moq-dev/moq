@@ -118,7 +118,7 @@ impl Pad {
 				let name = broadcast.unique_name(".mp3");
 				let request = broadcast.reserve_track(name)?;
 				let producer = request.accept(hang::container::track_info());
-				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into()).into()
+				moq_mux::codec::mp3::Import::new(producer, catalog.reserve(), config.into())?.into()
 			}
 			"audio/mpeg" => {
 				// AAC: the AudioSpecificConfig rides in caps as codec_data, not in the bitstream.
@@ -149,7 +149,7 @@ impl Pad {
 				let name = broadcast.unique_name(".opus");
 				let request = broadcast.reserve_track(name)?;
 				let producer = request.accept(hang::container::track_info());
-				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into()).into()
+				moq_mux::codec::opus::Import::new(producer, catalog.reserve(), config.into())?.into()
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};

@@ -1,12 +1,11 @@
 import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
-import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
+import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
-import type * as Time from "../time.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -19,9 +18,7 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
-import { hasDatagrams, hasSetupStream, Version, versionName } from "./version.ts";
-
-const SEND_BW_POLL_INTERVAL = 100; // ms
+import { hasDatagrams, hasSetupStream, type Version, versionName } from "./version.ts";
 
 /**
  * Constructor options for {@link Connection}.
@@ -74,14 +71,8 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
-	/** Estimated send bitrate from the congestion controller. */
-	readonly sendBandwidth?: Bandwidth;
-
-	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
-	readonly recvBandwidth?: Bandwidth;
-
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
-	readonly rtt?: Signal<Time.Milli | undefined>;
+	/** The peer's PROBE estimates; see {@link Established.probe}. */
+	readonly probe: Getter<Probe>;
 
 	/** Random per-connection origin id. Shared by Publisher (for outbound hop
 	 * chains) and Subscriber (available for optional self-filtering on announces). */
@@ -95,6 +86,9 @@ export class Connection implements Established {
 	// Mirrors the role out of #peerSetup, so the public surface exposes the peer's declared
 	// direction without handing out the whole SETUP (whose probe level gates our own streams).
 	#peerRole = new Signal<Role | undefined>(undefined);
+
+	// Written by the Subscriber as PROBE messages arrive.
+	#probe = new Signal<Probe>({});
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -123,31 +117,11 @@ export class Connection implements Established {
 		this.transport = transportOf(quic);
 		this.discovery = discovery;
 
-		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
-		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";
-		if (hasGetStats) {
-			this.sendBandwidth = createBandwidth();
-		}
-
-		// Recv bandwidth requires PROBE support (Lite03+).
-		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02) {
-			this.recvBandwidth = createBandwidth();
-		}
-
-		// RTT can be populated by PROBE (Lite04+) or getStats() (when supported).
-		// TODO prefer getStats() when both are available.
-		this.rtt = new Signal<Time.Milli | undefined>(undefined);
+		this.probe = this.#probe;
 
 		this.origin = randomOrigin();
 		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
-		this.#subscriber = new Subscriber(
-			this.#quic,
-			this.#version,
-			this.origin,
-			this.recvBandwidth,
-			this.rtt,
-			this.#peerSetup,
-		);
+		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.#probe, this.#peerSetup);
 
 		void this.#run();
 	}
@@ -174,13 +148,7 @@ export class Connection implements Established {
 			tasks.push(this.#sendSetup());
 		}
 
-		if (this.sendBandwidth) {
-			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
-		}
-
-		if (this.recvBandwidth) {
-			tasks.push(this.#subscriber.runProbe());
-		}
+		tasks.push(this.#subscriber.runProbe());
 
 		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams
 		// no-ops on a transport that doesn't carry them).
@@ -317,27 +285,9 @@ export class Connection implements Established {
 		}
 	}
 
-	async #runSendBandwidth(bandwidth: Bandwidth): Promise<void> {
-		const quic = this.#quic as unknown as {
-			getStats: () => Promise<{ estimatedSendRate: number | null }>;
-		};
-
-		return new Promise<void>((resolve) => {
-			const id = setInterval(async () => {
-				try {
-					const stats = await quic.getStats();
-					bandwidth.set(stats.estimatedSendRate ?? undefined);
-				} catch {
-					clearInterval(id);
-					resolve();
-				}
-			}, SEND_BW_POLL_INTERVAL);
-
-			void this.closed.then(() => {
-				clearInterval(id);
-				resolve();
-			});
-		});
+	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	async stats(): Promise<Stats> {
+		return transportStats(this.#quic);
 	}
 
 	get closed(): Promise<void> {

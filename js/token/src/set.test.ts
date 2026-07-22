@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { decodeProtectedHeader } from "jose";
 import { generate } from "./generate.ts";
 import { sign } from "./key.ts";
 import { findKey, type KeySet, loadSet, signWith, toPublicSet, verifyWith } from "./set.ts";
@@ -57,6 +58,19 @@ test("signWith - fails when no key can sign", async () => {
 	set.keys[0].key_ops = ["verify"];
 
 	await expect(signWith(set, CLAIMS)).rejects.toThrow(/Cannot find signing key/);
+});
+
+test("signWith - skips a public-only key that claims sign", async () => {
+	const privateKey = await generate("ES256", "active");
+
+	const publicOnly = await generate("ES256", "old");
+	if (publicOnly.kty !== "EC") throw new Error("expected an EC key");
+	delete publicOnly.d;
+	publicOnly.key_ops = ["sign", "verify"];
+
+	const set: KeySet = { keys: [publicOnly, privateKey] };
+	const token = await signWith(set, CLAIMS);
+	expect(decodeProtectedHeader(token).kid).toBe("active");
 });
 
 test("toPublicSet - strips private material", async () => {

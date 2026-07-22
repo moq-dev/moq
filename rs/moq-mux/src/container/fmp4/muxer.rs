@@ -66,7 +66,7 @@ impl Muxer {
 			container,
 			transform: build_video_transform(config),
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: catalog_timescale_video(config),
+			timescale: catalog_timescale_video(config)?,
 			default_frame: Duration::from_secs_f64(1.0 / framerate),
 			kind: Kind::Video(config.clone()),
 		})
@@ -79,7 +79,7 @@ impl Muxer {
 			container,
 			transform: None,
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: catalog_timescale_audio(config),
+			timescale: catalog_timescale_audio(config)?,
 			// Fallback for a duration-less trailing sample (~1024 samples per frame).
 			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
 			kind: Kind::Audio(config.clone()),
@@ -162,6 +162,7 @@ impl Muxer {
 				});
 				traks.push(trak);
 			}
+			CatalogContainer::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 		}
 
 		let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {

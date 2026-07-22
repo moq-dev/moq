@@ -226,6 +226,149 @@ describe("Effect", () => {
 		}
 	});
 
+	test("cleanup from a spawn that outlived its run fires immediately", async () => {
+		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
+		// after that point used to register teardown against the NEXT run: the resource it owned
+		// stayed alive until some unrelated later teardown, or forever if there wasn't one.
+		const tick = new Signal(0);
+		const closed: string[] = [];
+		let runs = 0;
+
+		// Held open so the task is guaranteed to resume inside the teardown window rather
+		// than racing a timer, which would let a slow runner pass this for the wrong reason.
+		const gate = Promise.withResolvers<void>();
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			const run = ++runs;
+			if (run > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				e.cleanup(() => closed.push(`run ${run}`));
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+
+			// The rerun has torn run 1 down and is parked awaiting its task, so run 2 has
+			// not started: whatever the task does now belongs to a run that is already over.
+			expect(runs).toBe(1);
+
+			gate.resolve();
+			await settle();
+
+			expect(closed).toEqual(["run 1"]);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
+	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {
+		// The scope a stale task reads has to be its own, not the incoming run's: an abort
+		// signal that never fires would scope its listeners to the next run, and a cancel
+		// promise that never resolves would park it forever.
+		const tick = new Signal(0);
+		const target = new EventTarget();
+		let events = 0;
+		let aborted: boolean | undefined;
+		let cancelled = false;
+		let runs = 0;
+
+		const gate = Promise.withResolvers<void>();
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				aborted = e.abort.aborted;
+				e.event(target, "ping", () => events++);
+				await e.cancel;
+				cancelled = true;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1);
+
+			gate.resolve();
+			await settle();
+
+			expect(aborted).toBe(true);
+			expect(cancelled).toBe(true);
+
+			// The listener belonged to a dead run, so it must not survive into the next one.
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(0);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
+	test("run() from a stale spawn defers its child to the next teardown", async () => {
+		// Deliberately unlike cleanup(): closing the child right away would cancel its first run
+		// before `fn` executes, so the teardown `fn` registers would never fire at all. Landing on
+		// the next teardown is late, but it still runs and still releases.
+		const tick = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		const log: string[] = [];
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				e.run((child) => {
+					log.push("served");
+					child.cleanup(() => log.push("released"));
+				});
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // stale window
+
+			gate.resolve();
+			await settle();
+
+			// The child ran rather than being cancelled before it could serve.
+			expect(log).toEqual(["served"]);
+		} finally {
+			effect.close();
+		}
+
+		expect(log).toEqual(["served", "released"]);
+	});
+
+	test("cleanup after close fires immediately", async () => {
+		const effect = new Effect((e) => {
+			e.get(new Signal(0));
+		});
+		await settle();
+
+		let closed = false;
+		effect.close();
+		effect.cleanup(() => {
+			closed = true;
+		});
+		expect(closed).toBe(true);
+	});
+
 	test("empty effects still warn", async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const effect = new Effect(() => {});

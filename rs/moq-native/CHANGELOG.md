@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/moq-dev/moq/compare/moq-native-v0.18.3...moq-native-v0.19.0) - 2026-07-22
+
+### Added
+
+- *(moq-native)* expose a congestion control knob on every QUIC backend ([#2432](https://github.com/moq-dev/moq/pull/2432))
+- *(net)* route by cumulative cost on lite-06 announcements ([#2424](https://github.com/moq-dev/moq/pull/2424))
+- *(net)* [**breaking**] accept an empty PATH and default it to "" across protocols ([#2414](https://github.com/moq-dev/moq/pull/2414))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- *(stats)* [**breaking**] collect traffic counters in the model layer ([#2427](https://github.com/moq-dev/moq/pull/2427))
+- Merge branch 'main' into dev
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- Merge branch 'main' into dev
+
 ## [0.18.3](https://github.com/moq-dev/moq/compare/moq-native-v0.18.2...moq-native-v0.18.3) - 2026-07-18
 
 ### Fixed

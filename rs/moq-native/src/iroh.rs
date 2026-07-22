@@ -4,8 +4,9 @@
 //! falling back to an iroh relay. Both WebTransport-over-H3 and raw QUIC are
 //! negotiated via ALPN.
 
-use std::{net, path::PathBuf, str::FromStr};
+use std::{net, path::PathBuf, str::FromStr, sync::Arc};
 
+use crate::quic::CongestionControl;
 use url::Url;
 use web_transport_iroh::iroh::{self, SecretKey};
 // NOTE: web-transport-iroh should re-export proto like web-transport-quinn does.
@@ -13,6 +14,17 @@ use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint;
 pub use web_transport_iroh;
+
+/// The iroh controller factory for a congestion control family.
+///
+/// iroh is built on noq, so its BBR is v3. It re-exports the `ControllerFactory`
+/// trait but not the concrete configs, hence the direct `noq-proto` dependency.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::ControllerFactory + Send + Sync> {
+	match family {
+		CongestionControl::Loss => Arc::new(noq_proto::congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+	}
+}
 
 /// Errors specific to the iroh P2P backend.
 #[derive(Debug, thiserror::Error)]
@@ -144,8 +156,8 @@ impl EndpointConfig {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It only honors the knobs
 	/// its transport-config builder exposes (stream limits, idle timeout, MTU
-	/// discovery); it has no keep-alive knob and cannot disable GSO, so `gso = false`
-	/// fails with [`Error::GsoUnsupported`].
+	/// discovery, congestion control); it has no keep-alive knob and cannot disable
+	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Client) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -190,6 +202,10 @@ impl EndpointConfig {
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
 		}
+		// iroh runs on noq, so match the noq backend's BBR default rather than noq's own CUBIC.
+		transport = transport.congestion_controller_factory(congestion_factory(
+			quic.congestion_control.unwrap_or(CongestionControl::Delay),
+		));
 
 		let mut builder = if self.disable_relay.unwrap_or(false) {
 			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
@@ -314,4 +330,24 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 	)
 	.parse()?;
 	Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Build a controller from each family's factory and downcast it to the
+	/// concrete implementation it must map to. iroh runs on noq, so this is the
+	/// same pairing as the noq backend.
+	#[test]
+	fn congestion_factory_maps_each_family() {
+		let now = std::time::Instant::now();
+		let mtu = 1200;
+
+		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		assert!(loss.into_any().downcast::<noq_proto::congestion::Cubic>().is_ok());
+
+		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+	}
 }

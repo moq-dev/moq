@@ -339,6 +339,45 @@ mod test {
 	}
 
 	#[test]
+	fn unknown_container_keeps_siblings() {
+		// A rendition using a future container must not take down the rest of the catalog.
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"future": {
+						"codec": "avc1.64001f",
+						"container": {"kind": "future", "magic": 7}
+					},
+					"legacy": {
+						"codec": "avc1.64001f",
+						"codedWidth": 1280,
+						"codedHeight": 720,
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+
+		let known = parsed.video.renditions.get("legacy").expect("missing rendition");
+		assert_eq!(known.container, Container::Legacy);
+		assert_eq!(known.coded_width, Some(1280));
+
+		let future = parsed.video.renditions.get("future").expect("missing rendition");
+		let Container::Unknown(unknown) = &future.container else {
+			panic!("expected unknown container: {:?}", future.container);
+		};
+		assert_eq!(unknown.kind(), Some("future"));
+
+		// The unknown rendition survives a republish intact.
+		let output = parsed.to_json().expect("failed to encode");
+		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
+		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
+		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
+	}
+
+	#[test]
 	fn extension_roundtrip() {
 		// An application extends the catalog with its own root section by flattening Catalog.
 		#[derive(Serialize, Deserialize, PartialEq, Debug)]
