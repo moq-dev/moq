@@ -593,11 +593,11 @@ mod tests {
 		let mut settings = web_transport_quiche::Settings::default();
 		let default = settings.cc_algorithm.clone();
 
-		apply_settings(&mut settings, quic.resolve());
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, default);
 
 		quic.congestion_control = Some(CongestionControl::Delay);
-		apply_settings(&mut settings, quic.resolve());
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, "bbr2_gcongestion");
 	}
 }
