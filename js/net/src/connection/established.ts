@@ -1,9 +1,8 @@
-import type { Signal } from "@moq/signals";
+import type { Getter } from "@moq/signals";
 import type * as announce from "../announced.ts";
-import type { Bandwidth } from "../bandwidth.ts";
 import type * as broadcast from "../broadcast.ts";
 import type * as Path from "../path.ts";
-import type * as Time from "../time.ts";
+import type { Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
 /** An established MoQ session, implemented by both the moq-lite and moq-ietf protocols. */
@@ -17,14 +16,13 @@ export interface Established {
 	/** The wire transport this session runs over. */
 	readonly transport: Transport;
 
-	/** Estimated send bitrate from the congestion controller (if supported). */
-	readonly sendBandwidth?: Bandwidth;
-
-	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
-	readonly recvBandwidth?: Bandwidth;
-
-	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
-	readonly rtt?: Signal<Time.Milli | undefined>;
+	/**
+	 * Live transport statistics, polled from the transport and merged with the MoQ PROBE
+	 * estimates. Every field is individually optional: what a connection can measure
+	 * depends on the transport and the negotiated version, so read the field you need and
+	 * handle `undefined` rather than assuming a populated snapshot.
+	 */
+	readonly stats: Getter<Stats>;
 
 	/**
 	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a

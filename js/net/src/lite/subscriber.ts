@@ -1,6 +1,5 @@
 import { Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
-import type { Bandwidth } from "../bandwidth.ts";
 import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as netGroup from "../group.ts";
@@ -103,7 +102,7 @@ export class Subscriber {
 	#fetches = new Map<string, netGroup.Producer>();
 
 	// Recv bandwidth producer (Lite03+ only).
-	#recvBandwidth?: Bandwidth;
+	#recvBandwidth?: Signal<number | undefined>;
 
 	// RTT producer (Lite04+ only).
 	#rtt?: Signal<Time.Milli | undefined>;
@@ -129,7 +128,7 @@ export class Subscriber {
 		quic: WebTransport,
 		version: Version,
 		origin: Origin,
-		recvBandwidth?: Bandwidth,
+		recvBandwidth?: Signal<number | undefined>,
 		rtt?: Signal<Time.Milli | undefined>,
 		peerSetup?: Signal<Setup | undefined>,
 	) {

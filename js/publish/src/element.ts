@@ -175,9 +175,7 @@ export default class MoqPublish extends HTMLElement {
 
 		// Track the connection's send bandwidth estimate, the encoder's bitrate cap.
 		this.signals.run((effect) => {
-			const conn = effect.get(this.connection.established);
-			const bandwidth = conn?.sendBandwidth;
-			this.#bandwidth.set(bandwidth ? effect.get(bandwidth) : undefined);
+			this.#bandwidth.set(effect.get(this.connection.stats)?.estimatedSendRate);
 		});
 
 		this.capture = new Video.Capture({ source: this.#videoSource });

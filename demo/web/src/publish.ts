@@ -464,10 +464,10 @@ viz.interval(() => {
 	prevFrames = frames;
 	prevWhen = now;
 
-	const conn = publish.connection.established.peek();
-	const up = conn?.sendBandwidth?.peek() as unknown as number | undefined;
+	const stats = publish.connection.stats.peek();
+	const up = stats?.estimatedSendRate;
 	uploadGraph.push(up && up > 0 ? up : undefined);
-	const rtt = conn?.rtt?.peek() as unknown as number | undefined;
+	const rtt = stats?.rtt as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 }, 250);
 
