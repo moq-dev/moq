@@ -19,6 +19,8 @@ struct ConnectTest<'a> {
 	/// Authority the client dials: a DNS name (sends SNI) or a bare IP (no SNI).
 	authority: &'a str,
 	backend: moq_native::QuicBackend,
+	/// Capture qlog traces from both ends into this directory.
+	qlog: Option<&'a std::path::Path>,
 }
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
@@ -33,6 +35,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		bind: "[::]:0",
 		authority: "localhost",
 		backend,
+		qlog: None,
 	})
 	.await;
 }
@@ -48,6 +51,7 @@ async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
 		bind: "127.0.0.1:0",
 		authority: "127.0.0.1",
 		backend,
+		qlog: None,
 	})
 	.await;
 }
@@ -61,6 +65,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		bind,
 		authority,
 		backend,
+		qlog,
 	} = config;
 
 	// ── publisher (server) ──────────────────────────────────────────
@@ -80,6 +85,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	server_config.bind = Some(bind.to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
+	server_config.quic.qlog = qlog.map(Into::into);
 
 	let mut server = server_config.init().expect("failed to init server");
 	let addr = server.local_addr().expect("failed to get local addr");
@@ -91,6 +97,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	client_config.backend = Some(backend);
+	client_config.quic.qlog = qlog.map(Into::into);
 	// Bind the client to the same address family as the server so an IPv4 dial
 	// doesn't try to egress from an IPv6 socket (and vice versa).
 	client_config.bind = bind.parse().expect("invalid bind address");
@@ -473,4 +480,85 @@ async fn noq_webtransport() {
 #[tokio::test]
 async fn noq_mtls() {
 	mtls_test("https", moq_native::QuicBackend::Noq).await;
+}
+
+// ── qlog ────────────────────────────────────────────────────────────
+
+/// Run a connect through `connect_test` with qlog capture on, and return the trace
+/// files it left behind.
+///
+/// Both ends write into one directory, so this covers the client and server paths
+/// at once. The layout differs per backend (one file per endpoint for quinn, one per
+/// connection for noq and quiche), so callers only assert on the count they expect.
+#[cfg(all(feature = "qlog", any(feature = "quinn", feature = "quiche", feature = "noq")))]
+async fn qlog_test(scheme: &str, backend: moq_native::QuicBackend) -> Vec<std::path::PathBuf> {
+	let dir = tempfile::tempdir().expect("failed to create tempdir");
+
+	connect_test(ConnectTest {
+		scheme,
+		bind: "[::]:0",
+		authority: "localhost",
+		backend,
+		qlog: Some(dir.path()),
+	})
+	.await;
+
+	let traces: Vec<_> = std::fs::read_dir(dir.path())
+		.expect("failed to read qlog dir")
+		.map(|entry| entry.expect("failed to read qlog entry").path())
+		.collect();
+
+	for trace in &traces {
+		// Every backend writes JSON-SEQ (RFC 7464): each record is a 0x1e separator then
+		// JSON, the first being the qlog header. Checking the bytes rather than just the
+		// length catches a writer that was buffered and never flushed.
+		let raw = std::fs::read(trace).expect("failed to read trace");
+		let header = raw.split(|&b| b == b'\n').next().unwrap_or_default();
+		let header = String::from_utf8_lossy(header);
+
+		assert!(
+			header.starts_with('\u{1e}'),
+			"qlog trace {} is not JSON-SEQ: {header:?}",
+			trace.display()
+		);
+		assert!(
+			header.contains("JSON-SEQ"),
+			"qlog trace {} has no qlog header: {header:?}",
+			trace.display()
+		);
+		assert!(
+			raw.iter().filter(|&&b| b == 0x1e).count() > 1,
+			"qlog trace {} has a header but no events",
+			trace.display()
+		);
+	}
+
+	traces
+}
+
+/// quinn shares one [`quinn::QlogStream`] across an endpoint, so the client and the
+/// server each write exactly one file, with connections separated by `group_id`.
+#[cfg(all(feature = "qlog", feature = "quinn"))]
+#[tokio::test]
+async fn quinn_qlog() {
+	let traces = qlog_test("moqt", moq_native::QuicBackend::Quinn).await;
+	assert_eq!(traces.len(), 2, "expected one trace per endpoint, got {traces:?}");
+}
+
+/// noq's factory opens a file per connection, named after its initial destination
+/// connection ID, so both ends land in the same directory under different names.
+#[cfg(all(feature = "qlog", feature = "noq"))]
+#[tokio::test]
+async fn noq_qlog() {
+	let traces = qlog_test("moqt", moq_native::QuicBackend::Noq).await;
+	assert!(!traces.is_empty(), "expected at least one trace");
+}
+
+/// tokio-quiche writes a file per connection from `Settings::qlog_dir`.
+#[cfg(all(feature = "qlog", feature = "quiche"))]
+#[tokio::test]
+#[ignore = "shares the connect path that quiche_webtransport is ignored for; the qlog plumbing itself is verified by running this locally"]
+async fn quiche_qlog() {
+	let traces = qlog_test("https", moq_native::QuicBackend::Quiche).await;
+	assert!(!traces.is_empty(), "expected at least one trace");
 }

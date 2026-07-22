@@ -254,6 +254,36 @@ preferred_v6 = "[2001:db8::1]:443"
 		);
 	}
 
+	/// Same clobbering hazard as the preferred addresses above, for the qlog
+	/// directory: a TOML-configured trace dir must survive the CLI re-parse.
+	#[test]
+	fn cli_does_not_clobber_toml_qlog() {
+		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: PREFERRED_ENV_LOCK ensures no other test in this binary
+		// touches these env vars concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_SERVER_QUIC_QLOG");
+		}
+
+		let toml = r#"
+[server.quic]
+qlog = "/tmp/moq-qlog"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("qlog-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.server.quic.qlog.as_deref(),
+			Some(std::path::Path::new("/tmp/moq-qlog")),
+			"TOML's server.quic.qlog must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// Serializes tests that touch `MOQ_*_QUIC_CONGESTION_CONTROL`. Same
 	/// rationale as `STATS_ENV_LOCK`.
 	static CONGESTION_ENV_LOCK: Mutex<()> = Mutex::new(());

@@ -144,7 +144,7 @@ type Result<T> = std::result::Result<T, Error>;
 ///
 /// quiche has no keep-alive interval knob, so [`Resolved::keep_alive`] is ignored;
 /// GSO is probed from the socket and rejected up front (see [`Error::GsoUnsupported`]).
-fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: Resolved) {
+fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved) -> Result<()> {
 	settings.initial_max_streams_bidi = quic.max_streams;
 	settings.initial_max_streams_uni = quic.max_streams;
 	settings.max_idle_timeout = Some(quic.idle_timeout);
@@ -154,6 +154,14 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: Resolved)
 	if let Some(family) = quic.congestion_control {
 		settings.cc_algorithm = cc_algorithm(family).to_owned();
 	}
+
+	// quiche writes one file per connection itself, named after the connection ID.
+	if let Some(dir) = quic.qlog_dir() {
+		settings.qlog_dir = Some(dir.to_string_lossy().into_owned());
+		tracing::info!(dir = %dir.display(), "writing qlog");
+	}
+
+	Ok(())
 }
 
 /// The quiche controller name for a congestion control family. quiche's BBR is the
@@ -238,7 +246,7 @@ impl QuicheClient {
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
-		apply_settings(&mut settings, self.quic);
+		apply_settings(&mut settings, &self.quic)?;
 
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
@@ -438,7 +446,7 @@ impl QuicheServer {
 
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.alpn = alpns;
-		apply_settings(&mut settings, quic);
+		apply_settings(&mut settings, &quic)?;
 
 		let server = web_transport_quiche::ez::ServerBuilder::default()
 			.with_settings(settings)
@@ -585,11 +593,11 @@ mod tests {
 		let mut settings = web_transport_quiche::Settings::default();
 		let default = settings.cc_algorithm.clone();
 
-		apply_settings(&mut settings, quic.resolve());
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, default);
 
 		quic.congestion_control = Some(CongestionControl::Delay);
-		apply_settings(&mut settings, quic.resolve());
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, "bbr2_gcongestion");
 	}
 }

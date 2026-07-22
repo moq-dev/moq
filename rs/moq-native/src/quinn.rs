@@ -13,8 +13,43 @@ use url::Url;
 
 pub use web_transport_quinn;
 
+/// Attach a qlog stream writing into `dir`, if one was configured.
+///
+/// quinn's [`quinn::QlogStream`] is a shared handle: every connection on the endpoint
+/// writes into it, tagged with its own qlog `group_id`. So this is one file per
+/// endpoint rather than per connection, unlike the noq and quiche backends.
+fn apply_qlog(transport: &mut quinn::TransportConfig, quic: &Resolved, role: &str) -> Result<()> {
+	// `Client::validate` already rejected a directory this build can't honor, so the
+	// block below is only reached where capture actually works.
+	let Some(dir) = quic.qlog_dir() else {
+		return Ok(());
+	};
+
+	#[cfg(feature = "qlog")]
+	{
+		// The pid keeps concurrent processes sharing a directory from clobbering each other.
+		let path = dir.join(format!("moq-{role}-{}.sqlog", std::process::id()));
+		let file = std::fs::File::create(&path).map_err(Error::CreateQlog)?;
+
+		// Deliberately unbuffered: qlog's streamer only flushes on `finish_log`, which
+		// quinn never calls per event, so a BufWriter would hold every trace in memory
+		// until the endpoint drops and lose the lot if the process is killed. Killing a
+		// stuck process is exactly when these traces are worth having.
+		let mut config = quinn::QlogConfig::default();
+		config.writer(Box::new(file)).title(Some(format!("moq-native {role}")));
+
+		transport.qlog_stream(config.into_stream());
+		tracing::info!(path = %path.display(), "writing qlog");
+	}
+
+	#[cfg(not(feature = "qlog"))]
+	let _ = (transport, dir, role);
+
+	Ok(())
+}
+
 /// Apply the resolved quic knobs to a quinn transport config.
-fn apply_transport(transport: &mut quinn::TransportConfig, quic: Resolved) {
+fn apply_transport(transport: &mut quinn::TransportConfig, quic: &Resolved) {
 	transport.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
 	transport.keep_alive_interval(quic.keep_alive);
 
@@ -57,6 +92,10 @@ pub enum Error {
 	/// The bound socket couldn't be turned into a QUIC endpoint.
 	#[error("failed to create QUIC endpoint")]
 	CreateEndpoint(#[source] std::io::Error),
+
+	/// The qlog trace file couldn't be created, usually a missing directory.
+	#[error("failed to create qlog file")]
+	CreateQlog(#[source] std::io::Error),
 
 	/// Quinn found no async runtime. Construct the client or server from within a tokio context.
 	#[error("no async runtime")]
@@ -197,8 +236,10 @@ impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
 
+		let quic = config.quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
-		apply_transport(&mut transport, config.quic.resolve());
+		apply_transport(&mut transport, &quic);
+		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -374,8 +415,10 @@ pub(crate) struct QuinnServer {
 
 impl QuinnServer {
 	pub fn new(config: ServerConfig) -> Result<Self> {
+		let quic = config.quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
-		apply_transport(&mut transport, config.quic.resolve());
+		apply_transport(&mut transport, &quic);
+		apply_qlog(&mut transport, &quic, "server")?;
 		let transport = Arc::new(transport);
 
 		let provider = crate::crypto::provider();

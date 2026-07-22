@@ -145,6 +145,8 @@ impl Server {
 		// Build a QUIC backend when `--server-bind` is set, or when nothing else
 		// is (the default). A stream-only server (`--server-unix-bind` with no
 		// `--server-bind`) doesn't also open UDP/443.
+		config.quic.validate()?;
+
 		let build_quic = config.bind.is_some() || !config.has_stream_listener();
 
 		if build_quic && !config.tls.root.is_empty() {

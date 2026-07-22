@@ -4786,6 +4786,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "n0-qlog"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb1c2fc610d1facce51b0bf5d8245b309c91996a933defdf7742c92ac78a58cb"
+dependencies = [
+ "humantime",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+]
+
+[[package]]
 name = "n0-watcher"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5050,6 +5063,7 @@ dependencies = [
  "getrandom 0.4.3",
  "identity-hash",
  "lru-slab",
+ "n0-qlog",
  "rand 0.10.2",
  "rand_pcg",
  "ring",
@@ -6339,6 +6353,18 @@ dependencies = [
 
 [[package]]
 name = "qlog"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f15b83c59e6b945f2261c95a1dd9faf239187f32ff0a96af1d1d28c4557f919"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_with",
+ "smallvec",
+]
+
+[[package]]
+name = "qlog"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c65c0ae39cba4538fd935d376ba17f858046b386dc4597e3fa5c1aedb919ef30"
@@ -6402,7 +6428,7 @@ dependencies = [
  "libm",
  "log",
  "octets",
- "qlog",
+ "qlog 0.18.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -6451,6 +6477,7 @@ dependencies = [
  "fastbloom",
  "getrandom 0.4.3",
  "lru-slab",
+ "qlog 0.15.2",
  "rand 0.10.2",
  "rand_pcg",
  "ring",
@@ -7603,6 +7630,9 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smawk"
@@ -8208,7 +8238,7 @@ dependencies = [
  "nix",
  "octets",
  "pin-project",
- "qlog",
+ "qlog 0.18.0",
  "quiche",
  "serde",
  "serde_with",

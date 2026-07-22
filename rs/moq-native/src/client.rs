@@ -160,6 +160,8 @@ impl Client {
 		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
 
+		config.quic.validate()?;
+
 		let tls = config.tls.build()?;
 
 		#[cfg(feature = "noq")]
