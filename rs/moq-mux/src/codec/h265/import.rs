@@ -62,13 +62,27 @@ impl<E: CatalogExt> Import<E> {
 		import
 	}
 
+	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
+		if detect_hvc1(buf) {
+			self.initialize_hvc1(buf)
+		} else {
+			self.initialize_hvc3(buf)
+		}
+	}
+
+	fn initialize_hvc1(&mut self, hvcc_bytes: &[u8]) -> Result<()> {
+		let config = super::config_from_hvcc(hvcc_bytes)?;
+		self.apply_config(config);
+		Ok(())
+	}
+
 	/// Resolve the codec config from VPS/SPS/PPS and other non-slice NALs.
 	///
 	/// Resolves the config from any SPS in the buffer. Optional, since the importer
 	/// also self-initializes from the first keyframe. Takes a read-only slice: the
 	/// dispatcher-owned [`Split`](super::Split) is what consumes the stream (and seeds
 	/// its parameter-set cache).
-	pub fn initialize(&mut self, buf: &[u8]) -> Result<()> {
+	fn initialize_hvc3(&mut self, buf: &[u8]) -> Result<()> {
 		let mut scan = Bytes::copy_from_slice(buf);
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
@@ -206,6 +220,11 @@ impl<E: CatalogExt> Import<E> {
 	}
 }
 
+fn detect_hvc1(bytes: &[u8]) -> bool {
+	// __jm__ copied from avc1
+	!(bytes.is_empty() || matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
+}
+
 fn is_sps(nal: &[u8]) -> bool {
 	nal.first()
 		.is_some_and(|h| nal_unit_type(*h) == scuffle_h265::NALUnitType::SpsNut)
@@ -278,5 +297,80 @@ fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)
 		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
 		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
 		_ => None, // Reserved
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use bytes::BytesMut;
+
+	use super::*;
+	use crate::codec::h265::{Split, fixtures};
+
+	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+		let track = broadcast.create_track(name, hang::container::track_info()).unwrap();
+		(track, catalog)
+	}
+
+	/// An hvcC initializer resolves a config with the hvcC stored as `description`.
+	/// The hvc1 analogue of the avcC test in [`crate::codec::h264`]'s importer.
+	#[tokio::test(start_paused = true)]
+	async fn initialize_hvcc_lands_in_catalog() {
+		let hvcc = fixtures::hvcc();
+
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
+		// initialize() must not consume the buffer (the dispatcher reads the same
+		// hvcC for the NALU length size).
+		let buf = BytesMut::from(hvcc.as_ref());
+		import.initialize(&buf).expect("initialize hvcC");
+		assert_eq!(buf.len(), hvcc.len(), "initialize must not consume the buffer");
+
+		let snapshot = catalog.snapshot();
+		let cfg = snapshot.video.renditions.get("video").expect("rendition");
+		let hang::catalog::VideoCodec::H265(h265) = &cfg.codec else {
+			panic!("expected H.265 codec")
+		};
+		assert!(!h265.in_band, "hvc1 source should land as in_band=false");
+		assert_eq!(cfg.coded_width, Some(1280));
+		assert_eq!(cfg.coded_height, Some(720));
+		assert_eq!(cfg.description.as_deref(), Some(hvcc.as_ref()));
+	}
+
+	/// A hev1 stream self-initializes: the config is resolved from the SPS the
+	/// splitter packages into the first keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn hev1_self_initializes_from_first_keyframe() {
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut annexb = BytesMut::new();
+		for nal in [fixtures::VPS, fixtures::SPS, fixtures::PPS, idr] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default());
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"no config before any frame"
+		);
+
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+
+		let snapshot = catalog.snapshot();
+		let cfg = snapshot.video.renditions.get("video").expect("rendition");
+		let hang::catalog::VideoCodec::H265(h265) = &cfg.codec else {
+			panic!("expected H.265 codec")
+		};
+		assert!(h265.in_band, "hev1 source should land as in_band=true");
+		assert!(cfg.description.is_none(), "hev1 has no out-of-band description");
+		assert_eq!(cfg.coded_width, Some(1280));
+		assert_eq!(cfg.coded_height, Some(720));
 	}
 }

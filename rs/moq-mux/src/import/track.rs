@@ -70,6 +70,18 @@ fn build_h265<E: CatalogExt>(
 	Ok((split, import))
 }
 
+fn build_h265_hvc1<E: CatalogExt>(
+	track: moq_net::track::Producer,
+	reserved: crate::catalog::Reserved<E>,
+	init: &[u8],
+	hint: VideoHint,
+) -> Result<(usize, crate::codec::h265::Import<E>)> {
+	let mut import = crate::codec::h265::Import::new(track, reserved, hint);
+	import.initialize(init)?;
+	let length_size = crate::codec::h265::Hvcc::parse(init)?.length_size;
+	Ok((length_size, import))
+}
+
 /// Build an AV1 split + import pair.
 fn build_av1<E: CatalogExt>(
 	track: moq_net::track::Producer,
@@ -108,6 +120,10 @@ enum TrackKind<E: CatalogExt = ()> {
 	},
 	Hev1 {
 		split: crate::codec::h265::Split,
+		import: crate::codec::h265::Import<E>,
+	},
+	Hvc1 {
+		length_size: usize,
 		import: crate::codec::h265::Import<E>,
 	},
 	Av01 {
@@ -155,6 +171,10 @@ impl<E: CatalogExt> Track<E> {
 			"avc3" | "h264" => {
 				let (split, import) = build_h264_avc3(track, reserved, data, video_hint(&init, None))?;
 				TrackKind::Avc3 { split, import }
+			}
+			"hvc1" | "hvcc" => {
+				let (length_size, import) = build_h265_hvc1(track, reserved, data, video_hint(&init, None))?;
+				TrackKind::Hvc1 { length_size, import }
 			}
 			"hev1" => {
 				let (split, import) = build_h265(track, reserved, data, video_hint(&init, None))?;
@@ -229,6 +249,14 @@ impl<E: CatalogExt> Track<E> {
 				frames.extend(split.flush(pts)?);
 				import.decode(frames)?;
 			}
+			TrackKind::Hvc1 {
+				length_size,
+				ref mut import,
+			} => {
+				let pts = pts.ok_or(crate::codec::h265::Error::MissingTimestamp)?;
+				let frame = crate::codec::h265::hvc1_frame(frame, length_size, pts)?;
+				import.decode([frame])?;
+			}
 			TrackKind::Av01 {
 				ref mut split,
 				ref mut import,
@@ -254,6 +282,7 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Avc3 { ref mut import, .. } => import.finish(),
 			TrackKind::Avc1 { ref mut import, .. } => import.finish(),
 			TrackKind::Hev1 { ref mut import, .. } => import.finish(),
+			TrackKind::Hvc1 { ref mut import, .. } => import.finish(),
 			TrackKind::Av01 { ref mut import, .. } => import.finish(),
 			TrackKind::Vp8(ref mut import) => import.finish(),
 			TrackKind::Vp9(ref mut import) => import.finish(),
@@ -271,6 +300,7 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Avc3 { ref mut import, .. } => import.abort(err),
 			TrackKind::Avc1 { ref mut import, .. } => import.abort(err),
 			TrackKind::Hev1 { ref mut import, .. } => import.abort(err),
+			TrackKind::Hvc1 { ref mut import, .. } => import.abort(err),
 			TrackKind::Av01 { ref mut import, .. } => import.abort(err),
 			TrackKind::Vp8(ref mut import) => import.abort(err),
 			TrackKind::Vp9(ref mut import) => import.abort(err),
@@ -287,6 +317,7 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Avc3 { ref mut import, .. } => import.cut(end),
 			TrackKind::Avc1 { ref mut import, .. } => import.cut(end),
 			TrackKind::Hev1 { ref mut import, .. } => import.cut(end),
+			TrackKind::Hvc1 { ref mut import, .. } => import.cut(end),
 			TrackKind::Av01 { ref mut import, .. } => import.cut(end),
 			TrackKind::Vp8(ref mut import) => import.cut(end),
 			TrackKind::Vp9(ref mut import) => import.cut(end),
@@ -315,6 +346,7 @@ impl<E: CatalogExt> Track<E> {
 				split.reset();
 				import.seek(sequence)
 			}
+			TrackKind::Hvc1 { ref mut import, .. } => import.seek(sequence),
 			TrackKind::Av01 {
 				ref mut split,
 				ref mut import,
@@ -337,6 +369,7 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Avc3 { ref import, .. } => import.demand(),
 			TrackKind::Avc1 { ref import, .. } => import.demand(),
 			TrackKind::Hev1 { ref import, .. } => import.demand(),
+			TrackKind::Hvc1 { ref import, .. } => import.demand(),
 			TrackKind::Av01 { ref import, .. } => import.demand(),
 			TrackKind::Vp8(ref import) => import.demand(),
 			TrackKind::Vp9(ref import) => import.demand(),
@@ -802,5 +835,58 @@ mod tests {
 
 		let video = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
 		assert_eq!(video.codec.to_string(), "vp8");
+	}
+
+	/// hvc1 publishes the catalog up front from the out-of-band hvcC: dimensions
+	/// from the parsed SPS and the record itself as the `description`.
+	#[tokio::test(start_paused = true)]
+	async fn existing_track_hvc1_uses_existing_name_in_catalog() {
+		let hvcc = crate::codec::h265::fixtures::hvcc();
+		let (mut broadcast, catalog) = new_broadcast();
+		let request = broadcast.reserve_track("camera").unwrap();
+
+		let import = Track::new(request, catalog.reserve(), Init::new("hvc1", hvcc.clone())).unwrap();
+
+		assert_eq!(import.name(), "camera");
+		let snapshot = catalog.snapshot();
+		let video = snapshot.video.renditions.get("camera").unwrap();
+		assert_eq!(video.coded_width, Some(1280));
+		assert_eq!(video.coded_height, Some(720));
+		assert_eq!(video.description.as_deref(), Some(hvcc.as_ref()));
+	}
+
+	/// hvc1: a length-prefixed keyframe access unit is delivered verbatim with the
+	/// keyframe flag set. The payload stays length-prefixed on the wire, matching
+	/// the out-of-band description the catalog advertises.
+	#[tokio::test(start_paused = true)]
+	async fn hvc1_track_delivers_length_prefixed_keyframe() {
+		let hvcc = crate::codec::h265::fixtures::hvcc();
+		let (mut broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut import = Track::new(request, catalog.reserve(), Init::new("hvc1", hvcc)).unwrap();
+
+		let track = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut media = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
+
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut au = Vec::new();
+		au.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+		au.extend_from_slice(idr);
+
+		import
+			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert!(frame.keyframe, "an IDR access unit must open a group");
+		assert_eq!(frame.payload, au, "the payload must pass through verbatim");
+		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
+
+		import.finish().unwrap();
 	}
 }
