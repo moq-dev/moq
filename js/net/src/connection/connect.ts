@@ -65,7 +65,8 @@ export interface ConnectProps {
 	 * Use a pre-existing WebTransport session instead of connecting; skips the
 	 * WebTransport/WebSocket race. The publisher acquires the session's datagram
 	 * writer lock (`datagrams.writable.getWriter()`) for the session's lifetime,
-	 * so the caller must not hold it.
+	 * so the caller must not hold it. Aborting via {@link ConnectProps.signal}
+	 * closes this session, so don't share one you intend to reuse afterwards.
 	 */
 	transport?: WebTransport;
 
