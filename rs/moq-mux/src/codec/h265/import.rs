@@ -221,7 +221,6 @@ impl<E: CatalogExt> Import<E> {
 }
 
 fn detect_hvc1(bytes: &[u8]) -> bool {
-	// __jm__ copied from avc1
 	!(bytes.is_empty() || matches!(bytes, [0, 0, 1, ..]) || matches!(bytes, [0, 0, 0, 1, ..]))
 }
 
