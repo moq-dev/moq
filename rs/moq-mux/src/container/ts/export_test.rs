@@ -7,6 +7,7 @@
 //! TS, and re-parse with the `mpeg2ts` reader.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
@@ -1445,6 +1446,95 @@ async fn service_layer_survives_roundtrip() {
 	);
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
 	assert_eq!(snapshot2.mpegts.si, si, "every SI PID survived byte-for-byte");
+}
+
+/// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
+/// and of video keyframes. The fixtures are a fraction of a second long, so nothing else
+/// distinguishes a correct interval from "emitted once and never again": this builds a
+/// 12-second synthetic timeline where the SDT (2s) and NIT (10s) land a different number
+/// of times, and neither matches the 13 keyframes that drive the PSI.
+#[tokio::test(start_paused = true)]
+async fn si_pids_are_re_emitted_on_their_own_interval() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog =
+		crate::catalog::Producer::with_catalog(&mut broadcast, crate::catalog::hang::Catalog::<tscat::Ext>::default())
+			.unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let track = broadcast
+		.create_track(broadcast.unique_name(".avc1"), hang::container::track_info())
+		.unwrap();
+	let name = track.name().to_string();
+	{
+		let mut guard = catalog.lock();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description = Some(avcc);
+		guard.video.renditions.insert(name.clone(), cfg);
+
+		// SDT every 2s, NIT every 10s: the DVB maxima import fills in.
+		guard.mpegts.si.insert(
+			0x0011,
+			tscat::Si {
+				sections: vec![Bytes::from(make_section(0x42, &[0xaa; 8]))],
+				interval: Some(Duration::from_secs(2)),
+				..Default::default()
+			},
+		);
+		guard.mpegts.si.insert(
+			0x0010,
+			tscat::Si {
+				sections: vec![Bytes::from(make_section(0x40, &[0xbb; 8]))],
+				interval: Some(Duration::from_secs(10)),
+				..Default::default()
+			},
+		);
+	}
+
+	// One keyframe per second across 12s, so the PSI fires on every one of the 13.
+	let mut producer = Producer::new(track, HangContainer::Legacy);
+	let mut idr = vec![0x65u8];
+	idr.extend(std::iter::repeat_n(0xAB, 300));
+	for sec in 0..=12u64 {
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(sec * 1_000_000).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&idr]),
+				keyframe: true,
+			})
+			.unwrap();
+		producer.cut(None).unwrap();
+	}
+	producer.finish().unwrap();
+
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+
+	let count = |pid: u16| {
+		ts.chunks_exact(188)
+			.filter(|p| ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
+			.count()
+	};
+
+	// Control: the PSI rides every output frame here (each is a keyframe, and they are
+	// further apart than PSI_INTERVAL either way). The SI PIDs must not follow it.
+	assert_eq!(count(0x0000), 13, "PAT on every frame");
+	// SDT at 0,2,4,6,8,10,12s.
+	assert_eq!(count(0x0011), 7, "SDT re-emitted on its 2s interval");
+	// NIT at 0 and 10s.
+	assert_eq!(count(0x0010), 2, "NIT re-emitted on its 10s interval");
 }
 
 /// A DVB SI section larger than one TS packet must be reassembled and captured verbatim.
