@@ -10,6 +10,9 @@ async function settle(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
 }
 
+// Real time, for tasks that have to outlive a rerun's microtask window.
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 describe("Signal", () => {
 	test("peek returns the current value synchronously after set", () => {
 		const count = new Signal(0);
@@ -224,6 +227,53 @@ describe("Effect", () => {
 			effect.close();
 			warn.mockRestore();
 		}
+	});
+
+	test("cleanup from a spawn that outlived its run fires immediately", async () => {
+		// A rerun drains the dispose list before it awaits in-flight spawns, so a task resuming
+		// after that point used to register teardown against the NEXT run: the resource it owned
+		// stayed alive until some unrelated later teardown, or forever if there wasn't one.
+		const tick = new Signal(0);
+		const closed: string[] = [];
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			const run = ++runs;
+
+			e.spawn(async () => {
+				await sleep(20); // still in flight when the rerun tears this run down
+				e.cleanup(() => closed.push(`run ${run}`));
+			});
+		});
+
+		try {
+			await sleep(5);
+			tick.set(1);
+			await sleep(60);
+
+			expect(closed).toEqual(["run 1"]);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+
+		// The second run's task owned its resource too, released when the effect closed.
+		expect(closed).toEqual(["run 1", "run 2"]);
+	});
+
+	test("cleanup after close fires immediately", async () => {
+		const effect = new Effect((e) => {
+			e.get(new Signal(0));
+		});
+		await settle();
+
+		let closed = false;
+		effect.close();
+		effect.cleanup(() => {
+			closed = true;
+		});
+		expect(closed).toBe(true);
 	});
 
 	test("empty effects still warn", async () => {
