@@ -47,25 +47,11 @@ pub(crate) fn avc1_frame(
 
 /// Detect whether an avc1-shaped (length-prefixed) buffer contains an IDR slice.
 fn avc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
-	let mut offset = 0;
-	while offset + length_size <= data.len() {
-		let nal_len = match length_size {
-			1 => data[offset] as usize,
-			2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
-			3 => u32::from_be_bytes([0, data[offset], data[offset + 1], data[offset + 2]]) as usize,
-			4 => u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize,
-			_ => return false,
-		};
-		offset += length_size;
-		if offset + nal_len > data.len() {
-			break;
-		}
-		if nal_len > 0 && data[offset] & 0x1f == 5 {
-			return true; // IDR slice
-		}
-		offset += nal_len;
-	}
-	false
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	nals.map_while(std::result::Result::ok)
+		.any(|nal| nal.first().is_some_and(|header| header & 0x1f == 5))
 }
 
 /// H.264 parsing and transform errors.

@@ -4,7 +4,8 @@
 //! and HEVCDecoderConfigurationRecord blobs. The [`Hvc1`] transmuxer
 //! rewrites Annex-B input (inline VPS/SPS/PPS) as length-prefixed NALU
 //! + out-of-band hvcC. [`Export`] is the single-rendition Annex-B
-//!   exporter; [`Import`] is the Annex-B importer.
+//!   exporter; [`Import`] takes either shape, driven by a
+//!   [`Split`] for hev1 or by `hvc1_frame` for hvc1.
 
 mod export;
 mod import;
@@ -19,9 +20,9 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it
-/// carries an IRAP NALU
+/// carries an IRAP NAL.
 ///
-/// hvc1 is not a stream: each access unit arrives whole with its NALu
+/// hvc1 is not a stream: each access unit arrives whole with its NALU
 /// `length_size` known out-of-band from the hvcC (`super::Hvcc::parse(hvcc).length_size`).
 /// The payload is passed through verbatim.
 pub(crate) fn hvc1_frame(
@@ -38,32 +39,27 @@ pub(crate) fn hvc1_frame(
 	})
 }
 
-/// Detect whether an hvc1-shaped (length-prefixed) buffer contains an IDR slice.
+/// Detect whether an hvc1-shaped (length-prefixed) buffer contains an IRAP slice.
 fn hvc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
-	let mut offset = 0;
-	while offset + length_size <= data.len() {
-		let nal_len = data[offset..offset + length_size]
-			.iter()
-			.fold(0, |acc, &byte| (acc << 8) | byte as usize);
-		offset += length_size;
-		if offset + nal_len > data.len() {
-			break;
-		}
-		if nal_len > 0
-			&& matches!(
-				split::nal_unit_type(data[offset]),
-				NALUnitType::IdrWRadl
-					| NALUnitType::IdrNLp
-					| NALUnitType::BlaNLp
-					| NALUnitType::BlaWRadl
-					| NALUnitType::BlaWLp
-					| NALUnitType::CraNut
-			) {
-			return true;
-		}
-		offset += nal_len;
-	}
-	false
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	nals.map_while(std::result::Result::ok)
+		.any(|nal| nal.first().is_some_and(|header| is_irap(split::nal_unit_type(*header))))
+}
+
+/// True for the IRAP (intra random access point) NAL types, the ones that open a group.
+/// HEVC random access is broader than H.264's single IDR type.
+pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {
+	matches!(
+		nal_type,
+		NALUnitType::IdrWRadl
+			| NALUnitType::IdrNLp
+			| NALUnitType::BlaNLp
+			| NALUnitType::BlaWRadl
+			| NALUnitType::BlaWLp
+			| NALUnitType::CraNut
+	)
 }
 
 /// H.265 parsing and transform errors.

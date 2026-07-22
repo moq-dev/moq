@@ -70,6 +70,9 @@ fn build_h265<E: CatalogExt>(
 	Ok((split, import))
 }
 
+/// Build an H.265 hvc1 import, resolving the config and the NALU length size from
+/// the hvcC. hvc1 has no splitter: each access unit is wrapped directly via
+/// [`crate::codec::h265::hvc1_frame`].
 fn build_h265_hvc1<E: CatalogExt>(
 	track: moq_net::track::Producer,
 	reserved: crate::catalog::Reserved<E>,
@@ -122,6 +125,9 @@ enum TrackKind<E: CatalogExt = ()> {
 		split: crate::codec::h265::Split,
 		import: crate::codec::h265::Import<E>,
 	},
+	/// H.265 hvc1 (length-prefixed NALU, out-of-band hvcC). No splitter: each
+	/// access unit is wrapped directly. `length_size` is the NALU length prefix
+	/// width read from the hvcC.
 	Hvc1 {
 		length_size: usize,
 		import: crate::codec::h265::Import<E>,
