@@ -14,6 +14,9 @@ import * as Source from "./source";
 import * as Video from "./video";
 
 const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
+
+/** How often the encoder's bitrate cap resamples the transport's send estimate. */
+const BANDWIDTH_POLL = 100; // ms
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -173,9 +176,28 @@ export default class MoqPublish extends HTMLElement {
 			this.#publishEnabled.set(enabled && announcing);
 		});
 
-		// Track the connection's send bandwidth estimate, the encoder's bitrate cap.
+		// Track the connection's send bandwidth estimate, the encoder's bitrate cap. The
+		// transport has no event for it, so sample on our own schedule and skip a tick
+		// while the previous snapshot is outstanding.
 		this.signals.run((effect) => {
-			this.#bandwidth.set(effect.get(this.connection.stats)?.estimatedSendRate);
+			const connection = effect.get(this.connection.established);
+			effect.set(this.#bandwidth, undefined);
+			if (!connection) return;
+
+			let pending = false;
+			const sample = async () => {
+				if (pending) return;
+				pending = true;
+				try {
+					const stats = await connection.stats();
+					this.#bandwidth.set(stats.estimatedSendRate);
+				} finally {
+					pending = false;
+				}
+			};
+
+			void sample();
+			effect.interval(sample, BANDWIDTH_POLL);
 		});
 
 		this.capture = new Video.Capture({ source: this.#videoSource });

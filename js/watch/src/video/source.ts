@@ -305,7 +305,7 @@ export class Source {
 		if (!target?.bitrate) {
 			const broadcast = effect.get(this.in.broadcast);
 			const connection = broadcast ? effect.get(broadcast.in.connection) : undefined;
-			const estimate = connection && effect.get(connection.stats).estimatedRecvRate;
+			const estimate = connection && effect.get(connection.probe).estimatedRecvRate;
 			if (estimate != null) {
 				// Apply a safety margin (80%) to avoid oscillation.
 				const safeBitrate = Math.round(estimate * 0.8);

@@ -536,7 +536,7 @@ viz.interval(() => {
 	fpsGraph.push(fps);
 	throughputGraph.push(throughput);
 
-	const rtt = watch.connection.stats.peek()?.rtt as unknown as number | undefined;
+	const rtt = watch.connection.probe.peek()?.rtt as unknown as number | undefined;
 	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 
 	prev = { frames, videoBytes, audioBytes, when: now };

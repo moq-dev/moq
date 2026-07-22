@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type { Probe } from "../connection/stats.ts";
 import { OriginSchema } from "./origin.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Version } from "./version.ts";
@@ -12,12 +13,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 			writable: new WritableStream<Uint8Array>(),
 		}),
 	} as unknown as WebTransport;
-	const subscriber = new Subscriber(
-		quic,
-		Version.DRAFT_03,
-		OriginSchema.parse(1n),
-		new Signal<number | undefined>(undefined),
-	);
+	const subscriber = new Subscriber(quic, Version.DRAFT_03, OriginSchema.parse(1n), new Signal<Probe>({}));
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 	try {

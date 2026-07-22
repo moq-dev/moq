@@ -1,8 +1,8 @@
-import type { Getter } from "@moq/signals";
+import { type Getter, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
-import { pollTransportStats, type Stats } from "../connection/stats.ts";
+import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -36,8 +36,8 @@ export class Connection implements Established {
 	/** Whether the relay supports broadcast discovery; see {@link Established.discovery}. */
 	readonly discovery: boolean;
 
-	/** Live transport statistics; see {@link Established.stats}. */
-	readonly stats: Getter<Stats>;
+	/** moq-transport has no PROBE, so this stays empty; see {@link Established.probe}. */
+	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
 	// The established WebTransport session.
 	#quic: WebTransport;
@@ -88,9 +88,6 @@ export class Connection implements Established {
 		this.transport = transportOf(quic);
 		this.#quic = quic;
 
-		// moq-transport has no PROBE, so the transport counters are the whole picture.
-		this.stats = pollTransportStats(quic, this.closed);
-
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
 			this.#session = new NativeSession(quic, version, client);
@@ -110,6 +107,11 @@ export class Connection implements Established {
 		this.#subscriber = new Subscriber(this.#session);
 
 		void this.#run();
+	}
+
+	/** Snapshot the transport's counters; see {@link Established.stats}. */
+	async stats(): Promise<Stats> {
+		return transportStats(this.#quic);
 	}
 
 	/**

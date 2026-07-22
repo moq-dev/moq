@@ -146,7 +146,7 @@ export class Sync {
 
 		// "real-time" mode: compute jitter from RTT on the established connection.
 		const conn = effect.get(this.in.connection);
-		const rtt = conn && effect.get(conn.stats).rtt;
+		const rtt = conn && effect.get(conn.probe).rtt;
 		if (rtt !== undefined) {
 			// Track minimum RTT as baseline, ignoring bufferbloat.
 			this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;

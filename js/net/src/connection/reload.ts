@@ -4,7 +4,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
-import type { Stats } from "./stats.ts";
+import type { Probe, Stats } from "./stats.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -55,12 +55,12 @@ export class Reload {
 	established = new Signal<Established | undefined>(undefined);
 
 	/**
-	 * Live transport statistics of the current connection, spanning reconnects.
+	 * The current connection's PROBE estimates, spanning reconnects.
 	 *
-	 * Undefined while disconnected: the counters belong to a single connection, so
-	 * they reset rather than accumulate across a reconnect. See {@link Established.stats}.
+	 * Undefined while disconnected: the estimates belong to a single connection.
+	 * See {@link Established.probe}.
 	 */
-	readonly stats: Getter<Stats | undefined>;
+	readonly probe: Getter<Probe | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -123,9 +123,9 @@ export class Reload {
 			});
 		}
 
-		this.stats = this.#signals.computed((effect) => {
+		this.probe = this.#signals.computed((effect) => {
 			const connection = effect.get(this.established);
-			return connection && effect.get(connection.stats);
+			return connection && effect.get(connection.probe);
 		});
 
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
@@ -288,6 +288,14 @@ export class Reload {
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
+	}
+
+	/**
+	 * Snapshot the live connection's transport counters, or undefined while disconnected.
+	 * See {@link Established.stats}.
+	 */
+	async stats(): Promise<Stats | undefined> {
+		return this.established.peek()?.stats();
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
