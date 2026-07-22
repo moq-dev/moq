@@ -222,15 +222,23 @@ impl Serialize for Jwk {
 /// key rather than editing an existing one.
 #[derive(Clone)]
 pub struct Key {
-	algorithm: Algorithm,
-	operations: HashSet<KeyOperation>,
-	key: KeyType,
-	kid: Option<crate::KeyId>,
-	scope: Option<crate::Scope>,
+	jwk: Jwk,
 
 	// Cached for performance reasons, unfortunately.
 	decode: OnceLock<DecodingKey>,
 	encode: OnceLock<EncodingKey>,
+}
+
+/// Read-only access to the underlying [`Jwk`] fields (`key.algorithm`, `key.kid`, ...).
+///
+/// Deliberately no `DerefMut`: handing out `&mut Jwk` would let a caller change the algorithm or
+/// key material behind the cached crypto material, which is the bug this split exists to prevent.
+impl std::ops::Deref for Key {
+	type Target = Jwk;
+
+	fn deref(&self) -> &Self::Target {
+		&self.jwk
+	}
 }
 
 impl TryFrom<Jwk> for Key {
@@ -242,11 +250,7 @@ impl TryFrom<Jwk> for Key {
 		}
 
 		Ok(Self {
-			algorithm: jwk.algorithm,
-			operations: jwk.operations,
-			key: jwk.key,
-			kid: jwk.kid,
-			scope: jwk.scope,
+			jwk,
 			decode: Default::default(),
 			encode: Default::default(),
 		})
@@ -255,13 +259,7 @@ impl TryFrom<Jwk> for Key {
 
 impl From<&Key> for Jwk {
 	fn from(key: &Key) -> Self {
-		Self {
-			algorithm: key.algorithm,
-			operations: key.operations.clone(),
-			key: key.key.clone(),
-			kid: key.kid.clone(),
-			scope: key.scope.clone(),
-		}
+		key.jwk.clone()
 	}
 }
 
@@ -298,31 +296,6 @@ impl fmt::Debug for Key {
 }
 
 impl Key {
-	/// The algorithm this key signs and verifies with.
-	pub fn algorithm(&self) -> Algorithm {
-		self.algorithm
-	}
-
-	/// The operations this key is allowed to perform.
-	pub fn operations(&self) -> &HashSet<KeyOperation> {
-		&self.operations
-	}
-
-	/// The key material, including its JWK type.
-	pub fn key_type(&self) -> &KeyType {
-		&self.key
-	}
-
-	/// The key ID (`kid`), used to select this key out of a [`crate::KeySet`].
-	pub fn kid(&self) -> Option<&crate::KeyId> {
-		self.kid.as_ref()
-	}
-
-	/// The authorization ceiling on tokens this key signs or verifies, if any.
-	pub fn scope(&self) -> Option<&crate::Scope> {
-		self.scope.as_ref()
-	}
-
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
@@ -396,11 +369,13 @@ impl Key {
 		};
 
 		Ok(Self {
-			algorithm: self.algorithm,
-			operations: [KeyOperation::Verify].into(),
-			key,
-			kid: self.kid.clone(),
-			scope: self.scope.clone(),
+			jwk: Jwk {
+				algorithm: self.algorithm,
+				operations: [KeyOperation::Verify].into(),
+				key,
+				kid: self.kid.clone(),
+				scope: self.scope.clone(),
+			},
 			decode: Default::default(),
 			encode: Default::default(),
 		})
@@ -603,13 +578,13 @@ impl Key {
 	/// scope that permits nothing.
 	pub fn with_scope(mut self, scope: crate::Scope) -> crate::Result<Self> {
 		scope.validate()?;
-		self.scope = Some(scope);
+		self.jwk.scope = Some(scope);
 		Ok(self)
 	}
 
 	/// Derive a key restricted to the given operations.
 	pub fn with_operations(mut self, operations: impl IntoIterator<Item = KeyOperation>) -> Self {
-		self.operations = operations.into_iter().collect();
+		self.jwk.operations = operations.into_iter().collect();
 		self
 	}
 
@@ -712,15 +687,15 @@ mod tests {
 		let json = key.to_str().unwrap();
 		let loaded_key = Key::from_str(&json).unwrap();
 
-		assert_eq!(loaded_key.algorithm(), key.algorithm());
-		assert_eq!(loaded_key.operations(), key.operations());
-		match (loaded_key.key_type(), key.key_type()) {
+		assert_eq!(loaded_key.algorithm, key.algorithm);
+		assert_eq!(loaded_key.operations, key.operations);
+		match (&loaded_key.key, &key.key) {
 			(KeyType::OCT { secret: loaded_secret }, KeyType::OCT { secret }) => {
 				assert_eq!(loaded_secret, secret);
 			}
 			_ => panic!("Expected OCT key"),
 		}
-		assert_eq!(loaded_key.kid(), key.kid());
+		assert_eq!(loaded_key.kid, key.kid);
 	}
 
 	/// Tests whether Key::from_str() works for keys without a kty value to fall back to OCT
@@ -732,7 +707,7 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		if let KeyType::OCT { secret, .. } = key.key_type() {
+		if let KeyType::OCT { secret, .. } = &key.key {
 			let base64_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
 			assert_eq!(base64_key, "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68");
 		} else {
@@ -743,10 +718,10 @@ mod tests {
 
 		// Round-trip through from_str and verify fields
 		let loaded = Key::from_str(&key_str).unwrap();
-		assert_eq!(loaded.algorithm(), Algorithm::HS256);
-		assert!(loaded.operations().contains(&KeyOperation::Sign));
-		assert!(loaded.operations().contains(&KeyOperation::Verify));
-		assert!(matches!(loaded.key_type(), KeyType::OCT { .. }));
+		assert_eq!(loaded.algorithm, Algorithm::HS256);
+		assert!(loaded.operations.contains(&KeyOperation::Sign));
+		assert!(loaded.operations.contains(&KeyOperation::Verify));
+		assert!(matches!(loaded.key, KeyType::OCT { .. }));
 	}
 
 	#[test]
@@ -765,10 +740,10 @@ mod tests {
 
 		// Round-trip through from_str
 		let loaded = Key::from_str(&encoded).unwrap();
-		assert_eq!(loaded.algorithm(), Algorithm::HS256);
-		assert_eq!(loaded.kid(), key.kid());
-		assert!(loaded.operations().contains(&KeyOperation::Sign));
-		assert!(loaded.operations().contains(&KeyOperation::Verify));
+		assert_eq!(loaded.algorithm, Algorithm::HS256);
+		assert_eq!(loaded.kid, key.kid);
+		assert!(loaded.operations.contains(&KeyOperation::Sign));
+		assert!(loaded.operations.contains(&KeyOperation::Verify));
 	}
 
 	#[test]
@@ -848,7 +823,7 @@ mod tests {
 	#[test]
 	fn test_key_scope_requires_validation() {
 		let key = create_test_key();
-		assert!(key.scope().is_none());
+		assert!(key.scope.is_none());
 
 		let useless = crate::Scope::default();
 		assert!(matches!(
@@ -994,11 +969,11 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::HS256);
-		assert_eq!(key.kid(), Some(&crate::KeyId::decode("test-id").unwrap()));
-		assert_eq!(key.operations(), &[KeyOperation::Sign, KeyOperation::Verify].into());
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-id").unwrap()));
+		assert_eq!(key.operations, [KeyOperation::Sign, KeyOperation::Verify].into());
 
-		match key.key_type() {
+		match &key.key {
 			KeyType::OCT { secret } => assert_eq!(secret.len(), 32),
 			_ => panic!("Expected OCT key"),
 		}
@@ -1010,9 +985,9 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::HS384);
+		assert_eq!(key.algorithm, Algorithm::HS384);
 
-		match key.key_type() {
+		match &key.key {
 			KeyType::OCT { secret } => assert_eq!(secret.len(), 48),
 			_ => panic!("Expected OCT key"),
 		}
@@ -1024,9 +999,9 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::HS512);
+		assert_eq!(key.algorithm, Algorithm::HS512);
 
-		match key.key_type() {
+		match &key.key {
 			KeyType::OCT { secret } => assert_eq!(secret.len(), 64),
 			_ => panic!("Expected OCT key"),
 		}
@@ -1038,9 +1013,9 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::RS512);
-		assert!(matches!(key.key_type(), KeyType::RSA { .. }));
-		match key.key_type() {
+		assert_eq!(key.algorithm, Algorithm::RS512);
+		assert!(matches!(key.key, KeyType::RSA { .. }));
+		match &key.key {
 			KeyType::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
@@ -1056,8 +1031,8 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::ES256);
-		assert!(matches!(key.key_type(), KeyType::EC { .. }))
+		assert_eq!(key.algorithm, Algorithm::ES256);
+		assert!(matches!(key.key, KeyType::EC { .. }))
 	}
 
 	#[test]
@@ -1066,8 +1041,8 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::PS512);
-		assert!(matches!(key.key_type(), KeyType::RSA { .. }));
+		assert_eq!(key.algorithm, Algorithm::PS512);
+		assert!(matches!(key.key, KeyType::RSA { .. }));
 	}
 
 	#[test]
@@ -1076,8 +1051,8 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::EdDSA);
-		assert!(matches!(key.key_type(), KeyType::OKP { .. }));
+		assert_eq!(key.algorithm, Algorithm::EdDSA);
+		assert!(matches!(key.key, KeyType::OKP { .. }));
 	}
 
 	#[test]
@@ -1086,9 +1061,9 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert_eq!(key.algorithm(), Algorithm::HS256);
-		assert_eq!(key.kid(), None);
-		assert_eq!(key.operations(), &[KeyOperation::Sign, KeyOperation::Verify].into());
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, None);
+		assert_eq!(key.operations, [KeyOperation::Sign, KeyOperation::Verify].into());
 	}
 
 	#[test]
@@ -1106,16 +1081,16 @@ mod tests {
 		let key = key.unwrap();
 
 		let public_key = key.to_public().unwrap();
-		assert_eq!(key.kid(), public_key.kid());
-		assert_eq!(public_key.operations(), &[KeyOperation::Verify].into());
+		assert_eq!(key.kid, public_key.kid);
+		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key_type(), KeyType::RSA { .. }));
+		assert!(matches!(public_key.key, KeyType::RSA { .. }));
 
-		if let KeyType::RSA { public, private } = public_key.key_type() {
+		if let KeyType::RSA { public, private } = &public_key.key {
 			assert!(private.is_none());
 
-			if let KeyType::RSA { public: src_public, .. } = key.key_type() {
+			if let KeyType::RSA { public: src_public, .. } = &key.key {
 				assert_eq!(public.e, src_public.e);
 				assert_eq!(public.n, src_public.n);
 			} else {
@@ -1133,13 +1108,13 @@ mod tests {
 		let key = key.unwrap();
 
 		let public_key = key.to_public().unwrap();
-		assert_eq!(key.kid(), public_key.kid());
-		assert_eq!(public_key.operations(), &[KeyOperation::Verify].into());
+		assert_eq!(key.kid, public_key.kid);
+		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key_type(), KeyType::EC { .. }));
+		assert!(matches!(public_key.key, KeyType::EC { .. }));
 
-		if let KeyType::EC { x, y, d, curve } = public_key.key_type() {
+		if let KeyType::EC { x, y, d, curve } = &public_key.key {
 			assert!(d.is_none());
 
 			if let KeyType::EC {
@@ -1147,7 +1122,7 @@ mod tests {
 				y: src_y,
 				curve: src_curve,
 				..
-			} = key.key_type()
+			} = &key.key
 			{
 				assert_eq!(x, src_x);
 				assert_eq!(y, src_y);
@@ -1167,20 +1142,20 @@ mod tests {
 		let key = key.unwrap();
 
 		let public_key = key.to_public().unwrap();
-		assert_eq!(key.kid(), public_key.kid());
-		assert_eq!(public_key.operations(), &[KeyOperation::Verify].into());
+		assert_eq!(key.kid, public_key.kid);
+		assert_eq!(public_key.operations, [KeyOperation::Verify].into());
 		assert!(public_key.encode.get().is_none());
 		assert!(public_key.decode.get().is_none());
-		assert!(matches!(public_key.key_type(), KeyType::OKP { .. }));
+		assert!(matches!(public_key.key, KeyType::OKP { .. }));
 
-		if let KeyType::OKP { x, d, curve } = public_key.key_type() {
+		if let KeyType::OKP { x, d, curve } = &public_key.key {
 			assert!(d.is_none());
 
 			if let KeyType::OKP {
 				x: src_x,
 				curve: src_curve,
 				..
-			} = key.key_type()
+			} = &key.key
 			{
 				assert_eq!(x, src_x);
 				assert_eq!(curve, src_curve);
@@ -1252,9 +1227,9 @@ mod tests {
 		let json = serde_json::to_string(&key).unwrap();
 		let deserialized: Key = serde_json::from_str(&json).unwrap();
 
-		assert_eq!(deserialized.algorithm(), key.algorithm());
-		assert_eq!(deserialized.operations(), key.operations());
-		assert_eq!(deserialized.kid(), key.kid());
+		assert_eq!(deserialized.algorithm, key.algorithm);
+		assert_eq!(deserialized.operations, key.operations);
+		assert_eq!(deserialized.kid, key.kid);
 
 		if let (
 			KeyType::OCT {
@@ -1263,7 +1238,7 @@ mod tests {
 			KeyType::OCT {
 				secret: deserialized_secret,
 			},
-		) = (key.key_type(), deserialized.key_type())
+		) = (&key.key, &deserialized.key)
 		{
 			assert_eq!(deserialized_secret, original_secret);
 		} else {
@@ -1276,16 +1251,16 @@ mod tests {
 		let key = create_test_key();
 		let cloned = key.clone();
 
-		assert_eq!(cloned.algorithm(), key.algorithm());
-		assert_eq!(cloned.operations(), key.operations());
-		assert_eq!(cloned.kid(), key.kid());
+		assert_eq!(cloned.algorithm, key.algorithm);
+		assert_eq!(cloned.operations, key.operations);
+		assert_eq!(cloned.kid, key.kid);
 
 		if let (
 			KeyType::OCT {
 				secret: original_secret,
 			},
 			KeyType::OCT { secret: cloned_secret },
-		) = (key.key_type(), cloned.key_type())
+		) = (&key.key, &cloned.key)
 		{
 			assert_eq!(cloned_secret, original_secret);
 		} else {
@@ -1412,20 +1387,20 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert!(key.operations().contains(&KeyOperation::Sign));
-		assert!(key.operations().contains(&KeyOperation::Verify));
+		assert!(key.operations.contains(&KeyOperation::Sign));
+		assert!(key.operations.contains(&KeyOperation::Verify));
 
 		let public_key = key.to_public().unwrap();
-		assert!(!public_key.operations().contains(&KeyOperation::Sign));
-		assert!(public_key.operations().contains(&KeyOperation::Verify));
+		assert!(!public_key.operations.contains(&KeyOperation::Sign));
+		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
-		match key.key_type() {
+		match &key.key {
 			KeyType::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
 				assert_eq!(public.e.len(), 3);
 
-				match public_key.key_type() {
+				match &public_key.key {
 					KeyType::RSA {
 						public: guest_public,
 						private: public_private,
@@ -1447,20 +1422,20 @@ mod tests {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
-		assert!(key.operations().contains(&KeyOperation::Sign));
-		assert!(key.operations().contains(&KeyOperation::Verify));
+		assert!(key.operations.contains(&KeyOperation::Sign));
+		assert!(key.operations.contains(&KeyOperation::Verify));
 
 		let public_key = key.to_public().unwrap();
-		assert!(!public_key.operations().contains(&KeyOperation::Sign));
-		assert!(public_key.operations().contains(&KeyOperation::Verify));
+		assert!(!public_key.operations.contains(&KeyOperation::Sign));
+		assert!(public_key.operations.contains(&KeyOperation::Verify));
 
-		match key.key_type() {
+		match &key.key {
 			KeyType::RSA { public, private } => {
 				assert!(private.is_some());
 				assert_eq!(public.n.len(), 256);
 				assert_eq!(public.e.len(), 3);
 
-				match public_key.key_type() {
+				match &public_key.key {
 					KeyType::RSA {
 						public: guest_public,
 						private: public_private,
@@ -1497,7 +1472,7 @@ mod tests {
 
 		if let KeyType::OCT {
 			secret: original_secret,
-		} = key.key_type()
+		} = &key.key
 		{
 			assert_eq!(decoded, *original_secret);
 		} else {
@@ -1512,10 +1487,10 @@ mod tests {
 
 		// Should be able to deserialize new format
 		let key: Key = serde_json::from_str(unpadded_json).unwrap();
-		assert_eq!(key.algorithm(), Algorithm::HS256);
-		assert_eq!(key.kid(), Some(&crate::KeyId::decode("test-key-1").unwrap()));
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
-		if let KeyType::OCT { secret } = key.key_type() {
+		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
 		} else {
 			panic!("Expected key to be OCT variant");
@@ -1529,10 +1504,10 @@ mod tests {
 
 		// Should be able to deserialize old format for backwards compatibility
 		let key: Key = serde_json::from_str(padded_json).unwrap();
-		assert_eq!(key.algorithm(), Algorithm::HS256);
-		assert_eq!(key.kid(), Some(&crate::KeyId::decode("test-key-1").unwrap()));
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
-		if let KeyType::OCT { secret } = key.key_type() {
+		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
 		} else {
 			panic!("Expected key to be OCT variant");
@@ -1563,8 +1538,8 @@ mod tests {
 	#[test]
 	fn test_js_hs256_key_load() {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
-		assert_eq!(key.algorithm(), Algorithm::HS256);
-		assert_eq!(key.kid(), Some(&crate::KeyId::decode("js-test-key").unwrap()));
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, Some(crate::KeyId::decode("js-test-key").unwrap()));
 	}
 
 	#[test]
@@ -1594,11 +1569,11 @@ mod tests {
 	#[test]
 	fn test_js_eddsa_key_load() {
 		let private_key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
-		assert_eq!(private_key.algorithm(), Algorithm::EdDSA);
-		assert!(matches!(private_key.key_type(), KeyType::OKP { .. }));
+		assert_eq!(private_key.algorithm, Algorithm::EdDSA);
+		assert!(matches!(private_key.key, KeyType::OKP { .. }));
 
 		let public_key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
-		assert_eq!(public_key.algorithm(), Algorithm::EdDSA);
+		assert_eq!(public_key.algorithm, Algorithm::EdDSA);
 	}
 
 	#[test]
@@ -1637,7 +1612,7 @@ mod tests {
 	fn test_file_io_base64url() {
 		let key = create_test_key();
 		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk.key_type()");
+		let temp_path = temp_dir.join("test_jwk.key");
 
 		// Write key to file as base64url
 		key.to_file(&temp_path).unwrap();
@@ -1659,16 +1634,16 @@ mod tests {
 
 		// Read key back from file
 		let loaded_key = Key::from_file(&temp_path).unwrap();
-		assert_eq!(loaded_key.algorithm(), key.algorithm());
-		assert_eq!(loaded_key.operations(), key.operations());
-		assert_eq!(loaded_key.kid(), key.kid());
+		assert_eq!(loaded_key.algorithm, key.algorithm);
+		assert_eq!(loaded_key.operations, key.operations);
+		assert_eq!(loaded_key.kid, key.kid);
 
 		if let (
 			KeyType::OCT {
 				secret: original_secret,
 			},
 			KeyType::OCT { secret: loaded_secret },
-		) = (key.key_type(), loaded_key.key_type())
+		) = (&key.key, &loaded_key.key)
 		{
 			assert_eq!(loaded_secret, original_secret);
 		} else {
@@ -1683,7 +1658,7 @@ mod tests {
 	fn test_file_io_raw_json() {
 		let key = create_test_key();
 		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk_raw_json.key_type()");
+		let temp_path = temp_dir.join("test_jwk_raw_json.key");
 
 		// Write key as raw JSON (backwards compat format)
 		let json = serde_json::to_string(&key).unwrap();
@@ -1694,16 +1669,16 @@ mod tests {
 
 		// Load via from_file (should auto-detect JSON)
 		let loaded_key = Key::from_file(&temp_path).unwrap();
-		assert_eq!(loaded_key.algorithm(), key.algorithm());
-		assert_eq!(loaded_key.operations(), key.operations());
-		assert_eq!(loaded_key.kid(), key.kid());
+		assert_eq!(loaded_key.algorithm, key.algorithm);
+		assert_eq!(loaded_key.operations, key.operations);
+		assert_eq!(loaded_key.kid, key.kid);
 
 		if let (
 			KeyType::OCT {
 				secret: original_secret,
 			},
 			KeyType::OCT { secret: loaded_secret },
-		) = (key.key_type(), loaded_key.key_type())
+		) = (&key.key, &loaded_key.key)
 		{
 			assert_eq!(loaded_secret, original_secret);
 		} else {

@@ -414,7 +414,7 @@ class DecoderTrack {
 
 	#runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
 		const container = this.config.container;
-		if (!Catalog.isCmafContainer(container)) return;
+		if (container.kind !== "cmaf") return;
 
 		const initSegment = base64ToBytes(container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
@@ -564,7 +564,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	let description: Uint8Array | undefined;
 	if (config.description) {
 		description = Util.Hex.toBytes(config.description);
-	} else if (Catalog.isCmafContainer(config.container)) {
+	} else if (config.container.kind === "cmaf") {
 		try {
 			description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 		} catch (err) {

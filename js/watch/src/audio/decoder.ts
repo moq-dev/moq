@@ -332,7 +332,7 @@ export class Decoder {
 	}
 
 	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: Catalog.AudioConfig): void {
-		if (!Catalog.isCmafContainer(config.container)) return; // just to help typescript
+		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
@@ -530,7 +530,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	if (config.codec !== "opus") {
 		if (config.description) {
 			description = Util.Hex.toBytes(config.description);
-		} else if (Catalog.isCmafContainer(config.container)) {
+		} else if (config.container.kind === "cmaf") {
 			try {
 				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 			} catch (err) {

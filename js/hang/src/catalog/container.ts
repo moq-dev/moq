@@ -13,13 +13,19 @@ const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
  * schema. Without that, a malformed known container (`{"kind":"cmaf"}` with no `init`) would
  * fall through to this arm, still report as CMAF, and hand decoders an undefined init segment.
  */
-export const UnknownContainerSchema = z.looseObject({
-	kind: z.string().check(
-		z.refine((kind) => !KNOWN_KINDS.includes(kind), {
-			message: "recognized container kind must match its own schema",
-		}),
-	),
-});
+export const UnknownContainerSchema = z.pipe(
+	z.looseObject({
+		kind: z.string().check(
+			z.refine((kind) => !KNOWN_KINDS.includes(kind), {
+				message: "recognized container kind must match its own schema",
+			}),
+		),
+	}),
+	// Map to a literal `kind` so {@link Container} stays a discriminated union: a bare
+	// `kind: string` arm would widen the discriminant and stop `kind === "cmaf"` from
+	// narrowing. `raw` keeps the original object, including its real `kind`.
+	z.transform((raw) => ({ kind: "unknown" as const, raw })),
+);
 
 /**
  * Container format for frame timestamp encoding and frame payload structure.
@@ -52,23 +58,19 @@ export const ContainerSchema = z._default(
 	{ kind: "legacy" },
 );
 
-/** The per-frame container format declared in the catalog. */
+/**
+ * The per-frame container format declared in the catalog.
+ *
+ * A discriminated union: `container.kind === "cmaf"` narrows and gives you `init`. An
+ * unrecognized container arrives as `{ kind: "unknown", raw }` rather than widening `kind`,
+ * so tolerating a future container costs no type safety here.
+ */
 export type Container = z.infer<typeof ContainerSchema>;
 
 /** The CMAF variant of {@link Container}, carrying the base64 init segment. */
 export type CmafContainer = Extract<Container, { kind: "cmaf" }>;
 
-/**
- * Whether the container is CMAF, narrowing it so `init` is available.
- *
- * The passthrough case makes `kind` a plain string, so an equality check alone no longer
- * narrows the union.
- */
-export function isCmafContainer(container: Container): container is CmafContainer {
-	return container.kind === "cmaf";
-}
-
 /** Whether a container can be decoded by this build, i.e. its `kind` is recognized. */
 export function containerSupported(container: Container): boolean {
-	return KNOWN_KINDS.includes(container.kind);
+	return container.kind !== "unknown";
 }

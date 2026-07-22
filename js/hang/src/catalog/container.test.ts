@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { ContainerSchema, containerSupported } from "./container.ts";
+import { type Container, ContainerSchema, containerSupported } from "./container.ts";
 import { RootSchema } from "./root.ts";
 
 test("known containers round-trip", () => {
-	for (const container of [{ kind: "legacy" }, { kind: "cmaf", init: "AAEC" }, { kind: "loc" }]) {
+	const known: Container[] = [{ kind: "legacy" }, { kind: "cmaf", init: "AAEC" }, { kind: "loc" }];
+	for (const container of known) {
 		const parsed = ContainerSchema.parse(container);
 		expect(parsed).toEqual(container);
 		expect(containerSupported(parsed)).toBe(true);
@@ -13,7 +14,8 @@ test("known containers round-trip", () => {
 test("unknown container is preserved instead of throwing", () => {
 	const container = { kind: "future", extra: { nested: [1, 2] }, flag: true };
 	const parsed = ContainerSchema.parse(container);
-	expect(parsed).toEqual(container);
+	// Tagged with a literal `kind` so the union stays discriminated; `raw` is the original.
+	expect(parsed).toEqual({ kind: "unknown", raw: container });
 	expect(containerSupported(parsed)).toBe(false);
 });
 
@@ -42,8 +44,11 @@ test("catalog with an unknown container keeps its other renditions", () => {
 	expect(known?.container.kind).toBe("legacy");
 	expect(Number(known?.codedWidth)).toBe(1280);
 
-	// The unknown rendition survives a republish intact.
-	expect(parsed.video.renditions.future?.container).toEqual({ kind: "future", magic: 7 });
+	// The unknown rendition keeps its original JSON verbatim under `raw`.
+	expect(parsed.video.renditions.future?.container).toEqual({
+		kind: "unknown",
+		raw: { kind: "future", magic: 7 },
+	});
 });
 
 test("a malformed known container errors instead of degrading to passthrough", () => {
@@ -52,5 +57,8 @@ test("a malformed known container errors instead of degrading to passthrough", (
 	expect(() => ContainerSchema.parse({ kind: "cmaf" })).toThrow();
 
 	// A genuinely unrecognized kind still parses, so one future rendition can't fail the catalog.
-	expect(ContainerSchema.parse({ kind: "future", magic: 7 })).toEqual({ kind: "future", magic: 7 });
+	expect(ContainerSchema.parse({ kind: "future", magic: 7 })).toEqual({
+		kind: "unknown",
+		raw: { kind: "future", magic: 7 },
+	});
 });
