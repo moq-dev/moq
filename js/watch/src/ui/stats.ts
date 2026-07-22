@@ -139,13 +139,13 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 
 		// Network. "Estimated max" is the congestion controller / PROBE estimate;
 		// "Actual" is the goodput we measure from the video + audio byte counters.
-		const conn = watch.connection.stats.peek();
-		const estimate = conn?.estimatedRecvRate;
+		const nStats = watch.connection.stats.peek();
+		const estimate = nStats?.estimatedRecvRate;
 		nMax.textContent = estimate ? formatBitrate(estimate) : "—";
 		const actual =
 			vBitrate !== undefined || aBitrate2 !== undefined ? (vBitrate ?? 0) + (aBitrate2 ?? 0) : undefined;
 		nActual.textContent = actual !== undefined ? formatBitrate(actual) : "—";
-		const rtt = conn?.rtt;
+		const rtt = nStats?.rtt;
 		nRttGraph.push(rtt !== undefined && rtt > 0 ? rtt : undefined);
 	}, POLL_MS);
 
