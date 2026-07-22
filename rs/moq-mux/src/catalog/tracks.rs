@@ -533,7 +533,7 @@ mod tests {
 		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
 		let reserved = catalog.reserve();
 
-		let shared = catalog.timeline("video");
+		let shared = catalog.timeline("video").unwrap();
 		let mut source = reserved.video("video0");
 		let mut rung = reserved.video("video1");
 		drop(reserved);
@@ -637,7 +637,7 @@ mod tests {
 
 			// The caller advertises the timeline explicitly, exactly as an importer does for video/audio.
 			let mut config = telemetry(None);
-			config.timeline = Some(catalog.timeline("gps").section());
+			config.timeline = Some(catalog.timeline("gps").unwrap().section());
 			rendition.set(config);
 			feed(&mut rendition);
 

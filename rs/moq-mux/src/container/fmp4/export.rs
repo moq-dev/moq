@@ -318,6 +318,18 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
+		// A rendition we can't parse is ignored rather than failing the whole export.
+		let mut catalog = catalog.clone();
+		catalog
+			.video
+			.renditions
+			.retain(|name, config| crate::catalog::hang::supported(name, &config.container));
+		catalog
+			.audio
+			.renditions
+			.retain(|name, config| crate::catalog::hang::supported(name, &config.container));
+		let catalog = &catalog;
+
 		let mut active: HashMap<String, ()> = HashMap::new();
 		for name in catalog.video.renditions.keys() {
 			active.insert(name.clone(), ());
@@ -335,7 +347,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
-			let timescale = catalog_timescale_video(config);
+			let timescale = catalog_timescale_video(config)?;
 			// A zero / NaN / infinite framerate would make `1.0 / fps` non-finite and panic
 			// `Duration::from_secs_f64`; fall back to the default in that case.
 			let framerate = config
@@ -366,7 +378,7 @@ impl<S: Stream> Export<S> {
 				continue;
 			}
 			let source = ExportSource::for_audio(&self.source, name, config, self.latency)?;
-			let timescale = catalog_timescale_audio(config);
+			let timescale = catalog_timescale_audio(config)?;
 			self.tracks.insert(
 				name.clone(),
 				Fmp4Track {
@@ -435,6 +447,7 @@ impl<S: Stream> Export<S> {
 					});
 					traks.push(trak);
 				}
+				Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 			}
 		}
 
@@ -456,6 +469,7 @@ impl<S: Stream> Export<S> {
 					});
 					traks.push(trak);
 				}
+				Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 			}
 		}
 
@@ -679,20 +693,22 @@ fn next_timestamp(frames: &[Frame], successor: Option<&Frame>, index: usize) -> 
 		.or_else(|| successor.map(|next| next.timestamp))
 }
 
-pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> u64 {
-	match &config.container {
+pub(crate) fn catalog_timescale_video(config: &VideoConfig) -> Result<u64> {
+	Ok(match &config.container {
 		Container::Cmaf { init, .. } => {
 			parse_timescale_from_init(init).unwrap_or_else(|_| crate::container::fmp4::default_video_timescale(config))
 		}
 		Container::Loc | Container::Legacy => crate::container::fmp4::default_video_timescale(config),
-	}
+		Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
+	})
 }
 
-pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> u64 {
-	match &config.container {
+pub(crate) fn catalog_timescale_audio(config: &hang::catalog::AudioConfig) -> Result<u64> {
+	Ok(match &config.container {
 		Container::Cmaf { init, .. } => parse_timescale_from_init(init).unwrap_or(config.sample_rate as u64),
 		Container::Loc | Container::Legacy => config.sample_rate as u64,
-	}
+		Container::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
+	})
 }
 
 fn parse_timescale_from_init(init: &[u8]) -> Result<u64> {

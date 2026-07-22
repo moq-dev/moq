@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.9...moq-audio-v0.0.10) - 2026-07-22
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+
+### Other
+
+- *(mux)* [**breaking**] unseal catalog renditions and make timelines explicit/shareable ([#2420](https://github.com/moq-dev/moq/pull/2420))
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- Merge remote-tracking branch 'origin/main' into dev
+- *(deps)* bump the cargo group with 2 updates ([#2409](https://github.com/moq-dev/moq/pull/2409))
+
 ## [0.0.9](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.8...moq-audio-v0.0.9) - 2026-07-16
 
 ### Added

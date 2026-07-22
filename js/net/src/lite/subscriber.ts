@@ -1,7 +1,7 @@
 import { Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
-import type { Bandwidth } from "../bandwidth.ts";
 import * as broadcast from "../broadcast.ts";
+import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
@@ -102,11 +102,8 @@ export class Subscriber {
 	// each get an independent mirror; the entry is evicted once the group closes.
 	#fetches = new Map<string, netGroup.Producer>();
 
-	// Recv bandwidth producer (Lite03+ only).
-	#recvBandwidth?: Bandwidth;
-
-	// RTT producer (Lite04+ only).
-	#rtt?: Signal<Time.Milli | undefined>;
+	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
+	#probe?: Signal<ProbeStats>;
 
 	// The peer's SETUP (lite-05+), undefined until it arrives. Gates opening the PROBE
 	// stream on the peer having advertised Probe >= Report.
@@ -119,8 +116,7 @@ export class Subscriber {
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
 	 * @param origin - Origin id shared with the Publisher
-	 * @param recvBandwidth - Optional bandwidth producer for PROBE
-	 * @param rtt - Optional RTT signal for PROBE
+	 * @param probe - Optional sink for the peer's PROBE estimates
 	 * @param peerSetup - Optional peer SETUP slot for capability gating (lite-05+)
 	 *
 	 * @internal
@@ -129,15 +125,13 @@ export class Subscriber {
 		quic: WebTransport,
 		version: Version,
 		origin: Origin,
-		recvBandwidth?: Bandwidth,
-		rtt?: Signal<Time.Milli | undefined>,
+		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
 	) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
-		this.#recvBandwidth = recvBandwidth;
-		this.#rtt = rtt;
+		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 	}
 
@@ -789,7 +783,7 @@ export class Subscriber {
 	}
 
 	async runProbe(): Promise<void> {
-		if (!this.#recvBandwidth) return;
+		if (!this.#probe) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 
 		// Lite-05+ gates the PROBE stream on the peer advertising Probe >= Report in its
@@ -802,7 +796,7 @@ export class Subscriber {
 
 		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
 		// transport hiccup) MUST NOT tear down the connection. On error, drop the
-		// bandwidth/RTT estimates so consumers know they're stale.
+		// estimates so consumers know they're stale.
 		try {
 			const stream = await Stream.open(this.#quic);
 			await stream.writer.u53(StreamId.Probe);
@@ -810,18 +804,20 @@ export class Subscriber {
 			for (;;) {
 				const probe = await Probe.decodeMaybe(stream.reader, this.version);
 				if (!probe) break;
-				this.#recvBandwidth.set(probe.bitrate ?? undefined);
-				if (this.#rtt && probe.rtt !== undefined) {
-					this.#rtt.set(Time.Milli(probe.rtt));
-				}
+				// A message that omits the RTT leaves the last one standing, so a
+				// bitrate-only report doesn't blank it.
+				const prev = this.#probe.peek();
+				this.#probe.set({
+					estimatedRecvRate: probe.bitrate ?? undefined,
+					rtt: probe.rtt !== undefined ? Time.Milli(probe.rtt) : prev.rtt,
+				});
 			}
 		} catch (err: unknown) {
 			if (!this.#closed.signal.aborted) {
 				console.warn("probe stream error", err);
 			}
 		} finally {
-			this.#recvBandwidth.set(undefined);
-			this.#rtt?.set(undefined);
+			this.#probe.set({});
 		}
 	}
 

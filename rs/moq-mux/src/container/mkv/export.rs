@@ -531,6 +531,7 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> Result<()> {
 			name: name.to_string(),
 		}
 		.into()),
+		Container::Unknown(unknown) => Err(crate::Error::unsupported_container(unknown)),
 	}
 }
 

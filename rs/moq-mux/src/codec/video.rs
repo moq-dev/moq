@@ -26,12 +26,12 @@ pub(crate) struct Catalog {
 
 impl Catalog {
 	/// Snapshot the timeline for the rendition named `name`, and hold `hint` for every publish.
-	pub(crate) fn new(reserved: &Reserved<impl CatalogExt>, name: &str, hint: VideoHint) -> Self {
-		Self {
-			timeline: reserved.producer().timeline(name).section(),
+	pub(crate) fn new(reserved: &Reserved<impl CatalogExt>, name: &str, hint: VideoHint) -> crate::Result<Self> {
+		Ok(Self {
+			timeline: reserved.producer().timeline(name)?.section(),
 			hint,
 			last: None,
-		}
+		})
 	}
 
 	/// The config the hint alone resolves to, for importers that publish the catalog before parsing

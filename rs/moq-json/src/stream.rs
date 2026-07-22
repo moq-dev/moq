@@ -11,8 +11,14 @@
 //! catch-up machinery): the only reason to roll would be moq-net's per-group frame cap, which
 //! isn't worth working around here. A caller that wants to bound the record rate throttles at
 //! the source (e.g. the timeline's granularity); a consumer that finds a gap can fetch or
-//! extrapolate. A late joiner reads whatever frames the relay still retains for the group;
-//! deep history is served from a recording, not this live stream.
+//! extrapolate.
+//!
+//! That single group is what bounds the log's history. moq-net caps a group's cached bytes, and a
+//! consumer always starts at frame 0, so once the log outgrows that budget and the earliest frames
+//! are evicted a new consumer fails with [`moq_net::Error::Lagged`] rather than reading a partial
+//! log. (With compression the retained suffix would be undecodable anyway, since its DEFLATE window
+//! depends on the evicted prefix.) The live stream is therefore bounded history by design; deep
+//! history is served from a recording.
 
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};

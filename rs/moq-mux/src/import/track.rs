@@ -32,7 +32,7 @@ fn build_h264_avc3<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h264::Split, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, reserved, hint);
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h264::Split::new();
 	let frames = split.decode(init, None)?;
@@ -49,7 +49,7 @@ fn build_h264_avc1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(usize, crate::codec::h264::Import<E>)> {
-	let mut import = crate::codec::h264::Import::new(track, reserved, hint);
+	let mut import = crate::codec::h264::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let length_size = crate::codec::h264::Avcc::parse(init)?.length_size;
 	Ok((length_size, import))
@@ -62,7 +62,7 @@ fn build_h265<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::h265::Split, crate::codec::h265::Import<E>)> {
-	let mut import = crate::codec::h265::Import::new(track, reserved, hint);
+	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::h265::Split::new();
 	let frames = split.decode(init, None)?;
@@ -79,7 +79,7 @@ fn build_h265_hvc1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(usize, crate::codec::h265::Import<E>)> {
-	let mut import = crate::codec::h265::Import::new(track, reserved, hint);
+	let mut import = crate::codec::h265::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let length_size = crate::codec::h265::Hvcc::parse(init)?.length_size;
 	Ok((length_size, import))
@@ -92,7 +92,7 @@ fn build_av1<E: CatalogExt>(
 	init: &[u8],
 	hint: VideoHint,
 ) -> Result<(crate::codec::av1::Split, crate::codec::av1::Import<E>)> {
-	let mut import = crate::codec::av1::Import::new(track, reserved, hint);
+	let mut import = crate::codec::av1::Import::new(track, reserved, hint)?;
 	import.initialize(init)?;
 	let mut split = crate::codec::av1::Split::new();
 	// av1C (leading 0x81, ISO/IEC 14496-15) is an out-of-band config record, not an
@@ -192,12 +192,12 @@ impl<E: CatalogExt> Track<E> {
 			}
 			"vp8" | "vp08" => {
 				let mut import =
-					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)));
+					crate::codec::vp8::Import::new(track, reserved, video_hint(&init, Some(VideoCodec::VP8)))?;
 				import.initialize(data)?;
 				TrackKind::Vp8(import)
 			}
 			"vp9" | "vp09" => {
-				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None));
+				let mut import = crate::codec::vp9::Import::new(track, reserved, video_hint(&init, None))?;
 				import.initialize(data)?;
 				TrackKind::Vp9(import)
 			}
@@ -205,20 +205,20 @@ impl<E: CatalogExt> Track<E> {
 			// OpusHead, AudioSpecificConfig, ...); `codec::config` errors when they're missing or bad.
 			"aac" => {
 				let config = crate::codec::aac::config(data)?;
-				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config))
+				TrackKind::Aac(crate::codec::aac::Import::new(track, reserved, config)?)
 			}
 			"opus" => {
 				let config = crate::codec::opus::config(data)?;
-				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config))
+				TrackKind::Opus(crate::codec::opus::Import::new(track, reserved, config)?)
 			}
 			"flac" => {
 				// `data` is a FLAC header: the `fLaC` marker plus the STREAMINFO block.
 				let config = crate::codec::flac::config(data)?;
-				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config))
+				TrackKind::Flac(crate::codec::flac::Import::new(track, reserved, config)?)
 			}
 			"mp3" => {
 				let config = crate::codec::mp3::config(data)?;
-				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config))
+				TrackKind::Mp3(crate::codec::mp3::Import::new(track, reserved, config)?)
 			}
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
@@ -300,20 +300,20 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(self, err: moq_net::Error) {
 		match self.kind {
-			TrackKind::Avc3 { ref mut import, .. } => import.abort(err),
-			TrackKind::Avc1 { ref mut import, .. } => import.abort(err),
-			TrackKind::Hev1 { ref mut import, .. } => import.abort(err),
-			TrackKind::Hvc1 { ref mut import, .. } => import.abort(err),
-			TrackKind::Av01 { ref mut import, .. } => import.abort(err),
-			TrackKind::Vp8(ref mut import) => import.abort(err),
-			TrackKind::Vp9(ref mut import) => import.abort(err),
-			TrackKind::Aac(ref mut import) => import.abort(err),
-			TrackKind::Opus(ref mut import) => import.abort(err),
-			TrackKind::Mp3(ref mut import) => import.abort(err),
-			TrackKind::Flac(ref mut import) => import.abort(err),
+			TrackKind::Avc3 { import, .. } => import.abort(err),
+			TrackKind::Avc1 { import, .. } => import.abort(err),
+			TrackKind::Hev1 { import, .. } => import.abort(err),
+			TrackKind::Hvc1 { import, .. } => import.abort(err),
+			TrackKind::Av01 { import, .. } => import.abort(err),
+			TrackKind::Vp8(import) => import.abort(err),
+			TrackKind::Vp9(import) => import.abort(err),
+			TrackKind::Aac(import) => import.abort(err),
+			TrackKind::Opus(import) => import.abort(err),
+			TrackKind::Mp3(import) => import.abort(err),
+			TrackKind::Flac(import) => import.abort(err),
 		}
 	}
 
@@ -462,15 +462,15 @@ impl<E: CatalogExt> TrackStream<E> {
 		let kind = match init.format.as_str() {
 			"avc3" | "h264" => TrackStreamKind::Avc3 {
 				split: crate::codec::h264::Split::new(),
-				import: crate::codec::h264::Import::new(track, reserved, hint),
+				import: crate::codec::h264::Import::new(track, reserved, hint)?,
 			},
 			"hev1" => TrackStreamKind::Hev1 {
 				split: crate::codec::h265::Split::new(),
-				import: crate::codec::h265::Import::new(track, reserved, hint),
+				import: crate::codec::h265::Import::new(track, reserved, hint)?,
 			},
 			"av01" | "av1" | "av1c" | "av1C" => TrackStreamKind::Av01 {
 				split: crate::codec::av1::Split::new(),
-				import: crate::codec::av1::Import::new(track, reserved, hint),
+				import: crate::codec::av1::Import::new(track, reserved, hint)?,
 			},
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
@@ -580,12 +580,12 @@ impl<E: CatalogExt> TrackStream<E> {
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
-	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	pub fn abort(&mut self, err: moq_net::Error) {
+	/// see the real cause rather than [`moq_net::Error::Dropped`]. Consumes the importer.
+	pub fn abort(self, err: moq_net::Error) {
 		match self.kind {
-			TrackStreamKind::Avc3 { ref mut import, .. } => import.abort(err),
-			TrackStreamKind::Hev1 { ref mut import, .. } => import.abort(err),
-			TrackStreamKind::Av01 { ref mut import, .. } => import.abort(err),
+			TrackStreamKind::Avc3 { import, .. } => import.abort(err),
+			TrackStreamKind::Hev1 { import, .. } => import.abort(err),
+			TrackStreamKind::Av01 { import, .. } => import.abort(err),
 		}
 	}
 
@@ -750,7 +750,7 @@ mod tests {
 			sample_rate: 48_000,
 			channel_count: 2,
 		};
-		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into());
+		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
 		let mut media = crate::container::Consumer::new(subscriber, crate::catalog::hang::Container::Legacy);

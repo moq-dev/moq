@@ -8,9 +8,12 @@
 //! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
 //! other private sections, which are not PES) are intercepted before the mpeg2ts
 //! reader and reassembled. TS adds PAT/PMT discovery, PES reassembly, the
-//! private-section path, and the 90 kHz -> microsecond PTS conversion.
+//! private-section path, and the 90 kHz -> microsecond PTS conversion. The service
+//! layer is captured into the `mpegts` catalog too: the identity parsed from the PAT
+//! as a [`Program`](catalog::Program) record, and the standalone SI PIDs as opaque
+//! [`Si`](catalog::Si) sections, so both survive the round-trip.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +100,17 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Whether the PMT program-level descriptors have been recorded yet (set once;
 	/// PMT `program_info` is stable for the program's life).
 	program_recorded: bool,
+	/// Reassemblers for the standalone SI PIDs ([`catalog::SI_PIDS`]), keyed by PID.
+	/// Intercepted before the reader (like SCTE-35 sections) so the service layer
+	/// survives the round-trip. Only populated with `mpegts` catalog support.
+	si_sections: HashMap<u16, SectionReassembler>,
+	/// The SI sections currently published, keyed by PID. Kept alongside the catalog
+	/// so a repetition can be recognized without taking the catalog's write lock,
+	/// which would mark it modified and republish it every couple of seconds.
+	si: BTreeMap<u16, catalog::Si>,
+	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
+	/// the PAT into the catalog service record yet (set once; the PAT is stable).
+	identity_recorded: bool,
 	/// Latest video PTS: the media clock used to timestamp private sections, which
 	/// carry no PES PTS of their own. Unwrapped independently of the video stream.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
@@ -133,6 +147,9 @@ impl<E: catalog::Catalog> Import<E> {
 			es_descriptors: HashMap::new(),
 			recorded_media: HashSet::new(),
 			program_recorded: false,
+			si_sections: HashMap::new(),
+			si: BTreeMap::new(),
+			identity_recorded: false,
 			last_pts: None,
 			media_unwrap: PtsUnwrap::default(),
 		}
@@ -193,6 +210,13 @@ impl<E: catalog::Catalog> Import<E> {
 			let pts = self.last_pts.unwrap_or(Timestamp::ZERO);
 			if let Some(section) = self.sections.get_mut(&pid) {
 				section.packet(&pkt, pts)?;
+				continue;
+			}
+			// Intercept the standalone SI PIDs before the routing gate below drops them:
+			// they carry the service layer, not media, and are not fed to the reader
+			// (which only routes the PAT/PMT/ES PIDs it learns).
+			if self.supports_mpegts && catalog::SI_PIDS.iter().any(|(p, _)| *p == pid) {
+				self.si_section(pid, &pkt);
 				continue;
 			}
 			// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
@@ -281,6 +305,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(TsPayload::Pat(pat)) => {
 				self.pmt_pids
 					.extend(pat.table.iter().map(|entry| entry.program_map_pid));
+				self.record_program_identity(&pat);
 			}
 			_ => {}
 		}
@@ -311,7 +336,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
 				Stream::H264 {
 					split: h264::Split::new(),
-					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())),
+					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -319,7 +344,7 @@ impl<E: catalog::Catalog> Import<E> {
 				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
 				Stream::H265 {
 					split: h265::Split::new(),
-					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())),
+					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
 					unwrap: PtsUnwrap::default(),
 				}
 			}
@@ -349,7 +374,7 @@ impl<E: catalog::Catalog> Import<E> {
 					channel_count,
 				};
 				Stream::Opus(Box::new(OpusStream {
-					import: opus::Import::new(track, self.catalog.reserve(), config.into()),
+					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
 					unwrap: PtsUnwrap::default(),
 				}))
 			}
@@ -565,6 +590,64 @@ impl<E: catalog::Catalog> Import<E> {
 		self.recorded_media.insert(pid);
 	}
 
+	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
+	/// PAT into the catalog service record, once. No-op without `mpegts` support.
+	fn record_program_identity(&mut self, pat: &mpeg2ts::ts::payload::Pat) {
+		if !self.supports_mpegts || self.identity_recorded {
+			return;
+		}
+		// program_number 0 is the network PID association, not a service; skip it.
+		let Some(entry) = pat.table.iter().find(|entry| entry.program_num != 0) else {
+			return;
+		};
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			let program = mpegts.program.get_or_insert_with(Default::default);
+			program.transport_stream_id = pat.transport_stream_id;
+			program.program_number = entry.program_num;
+			program.pmt_pid = entry.program_map_pid.as_u16();
+		}
+		self.identity_recorded = true;
+	}
+
+	/// Feed one TS packet on a standalone SI PID to its reassembler, recording each
+	/// completed section verbatim into that PID's catalog entry.
+	///
+	/// Every section is captured, whatever its `table_id`: the SDT PID also carries
+	/// the BAT, an SDT can describe several services across several sections, and a
+	/// table we don't recognize is exactly as worth preserving as one we do. The
+	/// catalog holds a *set* per PID, so these coexist instead of overwriting each
+	/// other, and a plain repetition (SI repeats every couple of seconds) leaves the
+	/// set untouched rather than republishing the catalog.
+	fn si_section(&mut self, pid: u16, pkt: &[u8]) {
+		let mut sections = Vec::new();
+		self.si_sections.entry(pid).or_default().push(pkt, &mut sections);
+		if sections.is_empty() {
+			return;
+		}
+
+		// Apply to the local copy first and bail on a repetition. Taking the catalog's
+		// write lock marks it modified even when the value is unchanged, so doing this
+		// the other way round would republish the catalog on every SI cycle.
+		let updated = {
+			let si = self.si.entry(pid).or_insert_with(|| catalog::Si {
+				interval: catalog::SI_PIDS.iter().find(|(p, _)| *p == pid).map(|(_, i)| *i),
+				..Default::default()
+			});
+			let mut changed = false;
+			for section in sections {
+				changed |= si.upsert(bytes::Bytes::from(section));
+			}
+			changed.then(|| si.clone())
+		};
+		let Some(updated) = updated else {
+			return;
+		};
+
+		if let Some(mpegts) = self.catalog.lock().mpegts_mut() {
+			mpegts.si.insert(pid, updated);
+		}
+	}
+
 	/// Close the current group on every track and reopen at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> anyhow::Result<()> {
 		for stream in self.streams.values_mut() {
@@ -593,11 +676,12 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Abort every track with `err` instead of finishing, so subscribers see the
 	/// real cause rather than [`moq_net::Error::Dropped`]. Buffered PES is discarded.
-	pub fn abort(&mut self, err: moq_net::Error) {
-		for stream in self.streams.values_mut() {
+	/// Consumes the importer.
+	pub fn abort(mut self, err: moq_net::Error) {
+		for stream in std::mem::take(&mut self.streams).into_values() {
 			stream.abort(err.clone());
 		}
-		for section in self.sections.values_mut() {
+		for section in std::mem::take(&mut self.sections).into_values() {
 			section.abort(err.clone());
 		}
 	}
@@ -643,6 +727,13 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
 	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
+	let name = track.name().to_string();
+
+	// Build the media producer before advertising the track. It is fallible (its
+	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
+	// entry on drop only exists once this function returns successfully, so an entry
+	// published first would be stranded.
+	let media = catalog.media_producer(track, crate::catalog::hang::Container::Legacy)?;
 
 	let mut guard = catalog.lock();
 	let Some(mpegts) = guard.mpegts_mut() else {
@@ -651,7 +742,7 @@ fn register_verbatim<E: catalog::Catalog>(
 		anyhow::bail!("catalog extension no longer carries an mpegts section");
 	};
 	mpegts.tracks.insert(
-		track.name().to_string(),
+		name,
 		catalog::Track {
 			pid,
 			descriptors,
@@ -660,13 +751,25 @@ fn register_verbatim<E: catalog::Catalog>(
 	);
 	drop(guard);
 
-	Ok(catalog.media_producer(track, crate::catalog::hang::Container::Legacy))
+	Ok(media)
 }
 
 /// Remove a verbatim track's entry from the `mpegts` catalog section on drop.
 fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Producer<E>, name: &str) {
 	if let Some(mpegts) = catalog.lock().mpegts_mut() {
 		mpegts.tracks.remove(name);
+	}
+}
+
+/// Owns a verbatim track's `mpegts` catalog entry, removing it however the stream ends.
+struct VerbatimEntry<E: catalog::Catalog> {
+	catalog: crate::catalog::Producer<E>,
+	name: String,
+}
+
+impl<E: catalog::Catalog> Drop for VerbatimEntry<E> {
+	fn drop(&mut self) {
+		unregister_verbatim(&mut self.catalog, &self.name);
 	}
 }
 
@@ -679,7 +782,8 @@ fn unregister_verbatim<E: catalog::Catalog>(catalog: &mut crate::catalog::Produc
 /// track and catalog entry and stamps each section with the media clock.
 struct SectionStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	catalog: crate::catalog::Producer<E>,
+	/// Held for its `Drop`, which clears this track's catalog entry.
+	_entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
 }
 
@@ -699,9 +803,13 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			catalog::Framing::Section,
 			descriptors,
 		)?;
+		let entry = VerbatimEntry {
+			name: track.name().to_string(),
+			catalog,
+		};
 		Ok(Self {
 			track,
-			catalog,
+			_entry: entry,
 			reassembler: SectionReassembler::default(),
 		})
 	}
@@ -741,15 +849,8 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
-	}
-}
-
-impl<E: catalog::Catalog> Drop for SectionStream<E> {
-	fn drop(&mut self) {
-		let name = self.track.name().to_string();
-		unregister_verbatim(&mut self.catalog, &name);
 	}
 }
 
@@ -761,7 +862,7 @@ impl<E: catalog::Catalog> Drop for SectionStream<E> {
 /// type only stamps each PES payload with its (unwrapped) PTS and writes it.
 struct VerbatimStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	catalog: crate::catalog::Producer<E>,
+	entry: VerbatimEntry<E>,
 	unwrap: PtsUnwrap,
 	/// Whether the PES stream_id has been recorded into the catalog yet (once).
 	stream_id_recorded: bool,
@@ -783,9 +884,13 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			catalog::Framing::Pes,
 			descriptors,
 		)?;
+		let entry = VerbatimEntry {
+			name: track.name().to_string(),
+			catalog,
+		};
 		Ok(Self {
 			track,
-			catalog,
+			entry,
 			unwrap: PtsUnwrap::default(),
 			stream_id_recorded: false,
 		})
@@ -798,7 +903,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
 		if !self.stream_id_recorded {
 			let name = self.track.name().to_string();
-			if let Some(mpegts) = self.catalog.lock().mpegts_mut()
+			if let Some(mpegts) = self.entry.catalog.lock().mpegts_mut()
 				&& let Some(verbatim) = mpegts.tracks.get_mut(&name).and_then(|t| t.verbatim.as_mut())
 			{
 				verbatim.stream_id = Some(pending.stream_id);
@@ -828,15 +933,8 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
-	}
-}
-
-impl<E: catalog::Catalog> Drop for VerbatimStream<E> {
-	fn drop(&mut self) {
-		let name = self.track.name().to_string();
-		unregister_verbatim(&mut self.catalog, &name);
 	}
 }
 
@@ -1084,7 +1182,7 @@ impl<E: catalog::Catalog> Stream<E> {
 		}
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self, err: moq_net::Error) {
 		match self {
 			Stream::H264 { import, .. } => import.abort(err),
 			Stream::H265 { import, .. } => import.abort(err),
@@ -1153,7 +1251,7 @@ impl<E: CatalogExt> AacStream<E> {
 					// The importer synthesizes the AudioSpecificConfig `description` from the config so
 					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
-					let aac = aac::Import::new(track, reserved, config.into());
+					let aac = aac::Import::new(track, reserved, config.into())?;
 					self.import.insert(aac)
 				}
 			};
@@ -1231,8 +1329,8 @@ impl<E: CatalogExt> AacStream<E> {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
-		if let Some(import) = &mut self.import {
+	fn abort(mut self, err: moq_net::Error) {
+		if let Some(import) = self.import.take() {
 			import.abort(err);
 		}
 	}
@@ -1288,7 +1386,7 @@ impl<E: CatalogExt> OpusStream<E> {
 		Ok(self.import.finish()?)
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
+	fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}
 }
@@ -1433,7 +1531,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
 					// Consume the reservation held since the PMT: this resolves the gated rendition.
 					let reserved = self.reserved.take().expect("legacy reservation already consumed");
-					let legacy = legacy::Import::new(self.descriptor, track, reserved, config);
+					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
 					self.import.insert(legacy)
 				}
 			};
@@ -1491,8 +1589,8 @@ impl<E: CatalogExt> LegacyStream<E> {
 		Ok(())
 	}
 
-	fn abort(&mut self, err: moq_net::Error) {
-		if let Some(import) = &mut self.import {
+	fn abort(mut self, err: moq_net::Error) {
+		if let Some(import) = self.import.take() {
 			import.abort(err);
 		}
 	}
@@ -1864,7 +1962,6 @@ mod test {
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, 0x21)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
 		import.decode(&bytes).unwrap(); // must not abort on the private section
-		import.finish().unwrap();
 
 		assert!(
 			import.sections.is_empty(),
@@ -1877,6 +1974,7 @@ mod test {
 			),
 			"the CUEI PID routes to Ignored"
 		);
+		import.finish().unwrap();
 		// SCTE detection takes no lock here (video/audio would still publish later): the old
 		// discarding ScteStream took the lock and republished an empty catalog on this path.
 		assert!(
@@ -1921,7 +2019,6 @@ mod test {
 		bytes.extend_from_slice(&synth_pmt(&[(StreamType::Dts8ChannelLosslessAudio, SECTION_PID)], true));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
 		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
 
 		assert!(
 			!import.streams.contains_key(&pid),
@@ -1933,7 +2030,10 @@ mod test {
 			"upgrade advertises the cue track"
 		);
 
+		// The importer clears its verbatim entries from the catalog when it drops, so read the
+		// track name while it is still registered.
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
+		import.finish().unwrap();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy).with_latency(std::time::Duration::ZERO);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())

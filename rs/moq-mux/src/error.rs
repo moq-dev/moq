@@ -118,10 +118,27 @@ pub enum Error {
 	#[error("{0}")]
 	Other(std::sync::Arc<anyhow::Error>),
 
+	/// A timeline catalog section declared a timescale that isn't a valid
+	/// [`moq_net::Timescale`] (zero, or too large).
+	#[error("invalid timeline timescale: {0}")]
+	InvalidTimescale(u32),
+
 	/// Tried to set an application catalog section whose name collides with a
 	/// reserved media section (`video`/`audio`).
 	#[error("reserved catalog section: {0}")]
 	ReservedSection(String),
+
+	/// A rendition declared a container `kind` this build does not recognize, so its
+	/// frames cannot be parsed. Such a rendition must be ignored, not guessed at.
+	#[error("unsupported container: {0}")]
+	UnsupportedContainer(String),
+}
+
+impl Error {
+	/// The error for a rendition whose container this build does not recognize.
+	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
+		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+	}
 }
 
 impl From<anyhow::Error> for Error {

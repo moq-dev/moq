@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/moq-dev/moq/releases/tag/moq-transcode-v0.0.1) - 2026-07-22
+
+### Added
+
+- *(moq-net)* let finish_at declare a future exclusive end group ([#2219](https://github.com/moq-dev/moq/pull/2219)) ([#2234](https://github.com/moq-dev/moq/pull/2234))
+- *(moq-transcode)* decode once per source, GPU resize fanout, and a moq transcode verb ([#2158](https://github.com/moq-dev/moq/pull/2158))
+- *(moq-video)* NVDEC hardware decode, zero-copy NVDEC -> NVENC transcode ([#2145](https://github.com/moq-dev/moq/pull/2145))
+- moq-transcode, just-in-time transcoding for hang broadcasts (NVENC-capable) ([#2140](https://github.com/moq-dev/moq/pull/2140))
+
+### Fixed
+
+- [**breaking**] correct catalog, timeline, token, and teardown contracts found in API review ([#2439](https://github.com/moq-dev/moq/pull/2439))
+- *(moq-video)* mark the macOS Surface Sync so moq-transcode compiles ([#2225](https://github.com/moq-dev/moq/pull/2225))
+
+### Other
+
+- compile doc examples across the workspace ([#2421](https://github.com/moq-dev/moq/pull/2421))
+- *(net)* [**breaking**] route everything through create_broadcast, gate announce on Route.live ([#2396](https://github.com/moq-dev/moq/pull/2396))
+- *(audio)* [**breaking**] align the moq-audio capture/encode surface with moq-video ([#2350](https://github.com/moq-dev/moq/pull/2350))
+- *(hang)* [**breaking**] non_exhaustive catalog sections, shared container::track_info, hang draft catch-up ([#2341](https://github.com/moq-dev/moq/pull/2341))
+- moq-net + js/net: pre-merge API hardening for moq-lite-05 ([#2170](https://github.com/moq-dev/moq/pull/2170))
+- add NVDEC AV1 decode support ([#2178](https://github.com/moq-dev/moq/pull/2178))
+- carry moq-video decode timestamps as moq_net::Timestamp ([#2146](https://github.com/moq-dev/moq/pull/2146))
+
 ### Added
 
 - Shared live decode: all rungs of a source with live demand now share one

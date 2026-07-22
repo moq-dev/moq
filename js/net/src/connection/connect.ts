@@ -65,7 +65,8 @@ export interface ConnectProps {
 	 * Use a pre-existing WebTransport session instead of connecting; skips the
 	 * WebTransport/WebSocket race. The publisher acquires the session's datagram
 	 * writer lock (`datagrams.writable.getWriter()`) for the session's lifetime,
-	 * so the caller must not hold it.
+	 * so the caller must not hold it. Aborting via {@link ConnectProps.signal}
+	 * closes this session, so don't share one you intend to reuse afterwards.
 	 */
 	transport?: WebTransport;
 
@@ -74,6 +75,13 @@ export interface ConnectProps {
 	 * Defaults to true, except for relays known to lack it.
 	 */
 	discovery?: boolean;
+
+	/**
+	 * Aborts the connection attempt with the signal's reason. An already-aborted
+	 * signal rejects before anything opens, and aborting after the connection is
+	 * established has no effect. Use `AbortSignal.timeout(ms)` for a deadline.
+	 */
+	signal?: AbortSignal;
 }
 
 // Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would
@@ -89,21 +97,51 @@ function defaultDiscovery(url: URL): boolean {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
+/** The default connect signal: never aborts. */
+const NEVER_ABORTED = new AbortController().signal;
+
 /**
  * Establishes a connection to a MOQ server.
  *
  * @param url - The URL of the server to connect to
+ * @param props - Connection options
  * @returns A promise that resolves to a Connection instance
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
+	const signal = props?.signal ?? NEVER_ABORTED;
+	signal.throwIfAborted();
+
+	// Resolves on abort so every in-flight transport tears itself down.
+	const { promise: abort, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+
+	const pending = connectInner(url, props, abort);
+	try {
+		// A `pending` rejection propagates unless the abort beat it to the finish line.
+		const connection = await Promise.race([pending, abort.then(() => undefined)]);
+		if (connection && !signal.aborted) return connection;
+
+		// Close a connection that settles after the abort.
+		pending.then((conn) => conn.close()).catch(() => {});
+		throw signal.reason;
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function connectInner(url: URL, props: ConnectProps | undefined, abort: Promise<void>): Promise<Established> {
 	const discovery = props?.discovery ?? defaultDiscovery(url);
 
 	if (props?.transport) {
-		return connectTransport(url, props.transport, discovery);
+		const transport = props.transport;
+		void abort.then(() => transport.close());
+		return connectTransport(url, transport, discovery);
 	}
 
-	// Create a cancel promise to kill whichever is still connecting.
-	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
+	// Stop transports after one connects or the caller aborts.
+	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
+	const cancel = Promise.race([raced, abort]);
 
 	const webtransport = isWebTransportSupported() ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
@@ -134,6 +172,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	if (!session) throw new Error("no transport available");
 
+	// Abort the setup handshake without leaking the selected transport.
+	void abort.then(() => session.close());
+
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 	if (session instanceof Session) {
 		console.warn(url.toString(), "connected via WebSocket");
@@ -142,112 +183,15 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		console.debug(url.toString(), "connected via WebTransport");
 	}
 
-	// Get the negotiated protocol. qmux Session exposes it directly;
-	// native WebTransport doesn't have a standard .protocol property yet.
-	const protocol: string | undefined =
-		session instanceof Session
-			? session.protocol || undefined
-			: // @ts-expect-error - TODO: add protocol to WebTransport
-				session.protocol;
-	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
-
-	// Choose setup encoding based on negotiated WebTransport protocol (if any).
-	let setupVersion: Ietf.Version;
-	const modernVersion =
-		protocol === Ietf.ALPN.DRAFT_19
-			? Ietf.Version.DRAFT_19
-			: protocol === Ietf.ALPN.DRAFT_18
-				? Ietf.Version.DRAFT_18
-				: protocol === Ietf.ALPN.DRAFT_17
-					? Ietf.Version.DRAFT_17
-					: undefined;
-	if (modernVersion !== undefined) {
-		return await handshakeAlpn(url, session as WebTransport, modernVersion, discovery);
-	} else if (protocol === Ietf.ALPN.DRAFT_16) {
-		setupVersion = Ietf.Version.DRAFT_16;
-	} else if (protocol === Ietf.ALPN.DRAFT_15) {
-		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_06_WIP) {
-		// moq-lite draft-06 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_06, discovery });
-	} else if (protocol === Lite.ALPN_05) {
-		// moq-lite draft-05 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_05, discovery });
-	} else if (protocol === Lite.ALPN_04) {
-		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_04, discovery });
-	} else if (protocol === Lite.ALPN_03) {
-		// moq-lite draft-03 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection({ url, quic: session, version: Lite.Version.DRAFT_03, discovery });
-	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
-		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
-		// then negotiates the actual version via the SETUP message.
-		setupVersion = Ietf.Version.DRAFT_14;
-	} else {
-		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
-	}
-
-	// We're encoding 0x20 so it's backwards compatible with moq-transport-10+
-	const stream = await Stream.open(session);
-	await stream.writer.u53(Lite.StreamId.ClientCompat);
-
-	const encoder = new TextEncoder();
-
-	const params = new Ietf.SetupOptions();
-	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n); // Allow a ton of request IDs.
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
-
-	const client = new Ietf.ClientSetup({
-		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
-		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
-		versions:
-			setupVersion === Ietf.Version.DRAFT_16
-				? [Ietf.Version.DRAFT_16]
-				: setupVersion === Ietf.Version.DRAFT_15
-					? [Ietf.Version.DRAFT_15]
-					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
-		parameters: params,
-	});
-	console.debug(url.toString(), "sending client setup", client);
-	await client.encode(stream.writer, setupVersion);
-
-	// And we expect 0x21 as the response.
-	const serverCompat = await stream.reader.u53();
-	if (serverCompat !== Lite.StreamId.ServerCompat) {
-		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
-	}
-
-	// Decode ServerSetup in Draft14 format (version + params)
-	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
-	console.debug(url.toString(), "received server setup", server);
-
-	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection({
-			url,
-			quic: session,
-			version: server.version as Lite.Version,
-			session: stream,
-			discovery,
-		});
-	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
-		return new Ietf.Connection({
-			discovery,
-			client: true,
-			url,
-			quic: session,
-			control: stream,
-			maxRequestId,
-			version: server.version as Ietf.IetfVersion,
-		});
-	} else {
-		throw new Error(`unsupported server version: ${server.version.toString()}`);
-	}
+	// The remaining setup is identical whether the transport was raced or supplied.
+	return await connectTransport(url, session as WebTransport, discovery);
 }
 
 async function connectTransport(url: URL, session: WebTransport, discovery: boolean): Promise<Established> {
-	// @ts-expect-error - TODO: add protocol to WebTransport
-	const protocol: string | undefined = session.protocol;
+	// qmux Session exposes the negotiated protocol directly (as "" when there is none);
+	// native WebTransport doesn't have a standard .protocol property yet.
+	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
+	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;

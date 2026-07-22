@@ -544,8 +544,10 @@ impl Bridges {
 
 	/// Abort every bridge's track with `err` so subscribers see the real cause
 	/// rather than a bare `Error::Dropped`.
+	///
+	/// Aborting consumes each bridge, so the map is emptied: the session is over.
 	pub fn abort(&mut self, err: moq_net::Error) {
-		for bridge in self.inner.values_mut() {
+		for bridge in std::mem::take(&mut self.inner).into_values() {
 			bridge.abort(err.clone());
 		}
 	}

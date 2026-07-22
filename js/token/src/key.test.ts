@@ -110,13 +110,34 @@ test("load - missing required fields", () => {
 	const invalidKey = {
 		alg: "HS256",
 		kty: "oct",
-		// missing key_ops and k
+		// missing k
 	};
 	const jwk = encodeJwk(invalidKey);
 
 	expect(() => {
 		load(jwk);
 	}).toThrow();
+});
+
+test("load - missing key_ops defaults to sign and verify", async () => {
+	const { key_ops: _ignored, ...keyWithoutOps } = testKey;
+	const key = load(encodeJwk(keyWithoutOps));
+
+	expect(key.key_ops).toEqual(["sign", "verify"]);
+
+	const token = await sign(key, testClaims);
+	const claims = await verify(key, token);
+	expect(claims.root).toBe(testClaims.root);
+});
+
+test("toPublicKey - defaulted key_ops yields exactly verify", async () => {
+	const { privateKey } = await generateKeyPair("EdDSA", { extractable: true });
+	const jwk = await exportJWK(privateKey);
+	const key = load(encodeJwk({ ...jwk, alg: "EdDSA", kid: "defaulted" }));
+	expect(key.key_ops).toEqual(["sign", "verify"]);
+
+	const publicKey = toPublicKey(key);
+	expect(publicKey.key_ops).toEqual(["verify"]);
 });
 
 test("load - legacy oct key without kty", () => {

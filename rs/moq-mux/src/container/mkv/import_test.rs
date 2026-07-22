@@ -373,3 +373,42 @@ fn test_block_timestamp_scaling() {
 	// rendition wiring.
 	let _ = run(&data);
 }
+
+/// A rendition must never be advertised when its media producer could not be built.
+///
+/// `media_producer` is fallible (it mints the rendition's `<name>.timeline.z` track, which can
+/// collide), so publishing the catalog entry first would leave consumers a rendition that is
+/// announced but has no producer behind it and is therefore never served.
+#[test]
+fn rendition_is_not_published_when_the_media_producer_fails() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![track_entry_video_vp9(1, 640, 480)])
+		.segment_end()
+		.build();
+
+	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
+	// assertion below cannot pass merely because the fixture stopped reaching track import.
+	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+
+	// Squat the timeline track the first video rendition will want, so building its media
+	// producer fails. `unique_name` is deterministic, so this is the name it will pick. The
+	// handle must stay alive: the broadcast tracks names weakly, so dropping it frees the name.
+	let _squat = broadcast.create_track("0.mkv-v.timeline.z", None).unwrap();
+
+	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+	let buf = bytes::BytesMut::from(&data[..]);
+	// The importer logs and skips a track it cannot build, rather than failing the whole
+	// decode, so the outcome shows up in the catalog rather than in this result.
+	let _ = mkv.decode(&buf);
+
+	assert!(
+		catalog.snapshot().video.renditions.is_empty(),
+		"a rendition whose media producer failed must not be advertised"
+	);
+}

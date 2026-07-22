@@ -4,6 +4,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import type { Probe, Stats } from "./stats.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -24,8 +25,8 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
-/** Options for {@link Reload}: connect options plus reactive URL/enabled signals and backoff tuning. */
-export type ReloadProps = ConnectProps & {
+/** Connection and retry options for {@link Reload}. */
+export type ReloadProps = Omit<ConnectProps, "signal"> & {
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
@@ -52,6 +53,14 @@ export class Reload {
 
 	/** The currently established session, or undefined while disconnected. */
 	established = new Signal<Established | undefined>(undefined);
+
+	/**
+	 * The current connection's PROBE estimates, spanning reconnects.
+	 *
+	 * Undefined while disconnected: the estimates belong to a single connection.
+	 * See {@link Established.probe}.
+	 */
+	readonly probe: Getter<Probe | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -114,6 +123,11 @@ export class Reload {
 			});
 		}
 
+		this.probe = this.#signals.computed((effect) => {
+			const connection = effect.get(this.established);
+			return connection && effect.get(connection.probe);
+		});
+
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
 		this.#signals.run(this.#connect.bind(this));
@@ -133,27 +147,27 @@ export class Reload {
 
 		effect.set(this.status, "connecting", "disconnected");
 
+		// This run's teardown, handed to connect() so a rerun cancels the attempt in flight.
+		const signal = effect.abort;
+
 		effect.spawn(async () => {
 			// Set once the session is live, so #retry can tell a healthy session that
 			// later dropped from a connect failure or a peer that flaps immediately.
 			let connected: DOMHighResTimeStamp | undefined;
 
 			try {
-				const pending = connect(url, {
+				const connection = await connect(url, {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					signal,
 				});
 
-				const connection = await Promise.race([effect.cancel, pending]);
-				if (!connection) {
-					pending.then((conn) => conn.close()).catch(() => {});
-					return;
-				}
+				// Hand the connection to the effect, which closes it now if this run is already over.
+				effect.cleanup(() => connection.close());
+				if (signal.aborted) return;
 
 				effect.set(this.established, connection);
-				effect.cleanup(() => connection.close());
-
 				effect.set(this.status, "connected", "disconnected");
 
 				connected = performance.now();
@@ -166,6 +180,9 @@ export class Reload {
 				console.warn("connection closed, reconnecting");
 				this.#retry(effect, connected);
 			} catch (err) {
+				// Treat teardown as cancellation, not a connection failure.
+				if (signal.aborted) return;
+
 				console.warn("connection error:", err);
 				this.#retry(effect, connected, err);
 			}
@@ -274,6 +291,14 @@ export class Reload {
 		void consumer.closed.then(() => pump.close());
 
 		return consumer;
+	}
+
+	/**
+	 * Snapshot the live connection's transport counters, or undefined while disconnected.
+	 * See {@link Established.stats}.
+	 */
+	async stats(): Promise<Stats | undefined> {
+		return this.established.peek()?.stats();
 	}
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
