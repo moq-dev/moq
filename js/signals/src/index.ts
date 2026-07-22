@@ -567,7 +567,12 @@ export class Effect {
 		this.cleanup(() => timeout && clearTimeout(timeout));
 	}
 
-	/** Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds. */
+	/**
+	 * Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds.
+	 *
+	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
+	 * next teardown, not immediately.
+	 */
 	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
@@ -630,6 +635,10 @@ export class Effect {
 	 * Returns a disposer that closes the child early and releases it from the parent, so a long-lived
 	 * effect spawning a child per event (e.g. one per accepted subscription) doesn't accumulate dead
 	 * scopes until it finally reruns or closes.
+	 *
+	 * Called from a task that outlived its run, the child is closed at the *next* teardown rather
+	 * than immediately, unlike {@link cleanup}. Closing it now would cancel its first run before
+	 * `fn` executes, so whatever teardown `fn` registers would never fire at all.
 	 */
 	run(fn: (effect: Effect) => void): Dispose {
 		if (this.#dispose === undefined) {

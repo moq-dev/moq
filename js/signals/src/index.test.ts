@@ -315,6 +315,46 @@ describe("Effect", () => {
 		}
 	});
 
+	test("run() from a stale spawn defers its child to the next teardown", async () => {
+		// Deliberately unlike cleanup(): closing the child right away would cancel its first run
+		// before `fn` executes, so the teardown `fn` registers would never fire at all. Landing on
+		// the next teardown is late, but it still runs and still releases.
+		const tick = new Signal(0);
+		const gate = Promise.withResolvers<void>();
+		const log: string[] = [];
+		let runs = 0;
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				e.run((child) => {
+					log.push("served");
+					child.cleanup(() => log.push("released"));
+				});
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1); // stale window
+
+			gate.resolve();
+			await settle();
+
+			// The child ran rather than being cancelled before it could serve.
+			expect(log).toEqual(["served"]);
+		} finally {
+			effect.close();
+		}
+
+		expect(log).toEqual(["served", "released"]);
+	});
+
 	test("cleanup after close fires immediately", async () => {
 		const effect = new Effect((e) => {
 			e.get(new Signal(0));
