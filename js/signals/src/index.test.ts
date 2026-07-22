@@ -268,6 +268,53 @@ describe("Effect", () => {
 		}
 	});
 
+	test("a spawn that outlived its run sees that run aborted and cancelled", async () => {
+		// The scope a stale task reads has to be its own, not the incoming run's: an abort
+		// signal that never fires would scope its listeners to the next run, and a cancel
+		// promise that never resolves would park it forever.
+		const tick = new Signal(0);
+		const target = new EventTarget();
+		let events = 0;
+		let aborted: boolean | undefined;
+		let cancelled = false;
+		let runs = 0;
+
+		const gate = Promise.withResolvers<void>();
+
+		const effect = new Effect((e) => {
+			e.get(tick);
+			if (++runs > 1) return;
+
+			e.spawn(async () => {
+				await gate.promise;
+				aborted = e.abort.aborted;
+				e.event(target, "ping", () => events++);
+				await e.cancel;
+				cancelled = true;
+			});
+		});
+
+		try {
+			await settle();
+			tick.set(1);
+			await settle();
+			expect(runs).toBe(1);
+
+			gate.resolve();
+			await settle();
+
+			expect(aborted).toBe(true);
+			expect(cancelled).toBe(true);
+
+			// The listener belonged to a dead run, so it must not survive into the next one.
+			target.dispatchEvent(new Event("ping"));
+			expect(events).toBe(0);
+			expect(runs).toBe(2);
+		} finally {
+			effect.close();
+		}
+	});
+
 	test("cleanup after close fires immediately", async () => {
 		const effect = new Effect((e) => {
 			e.get(new Signal(0));
