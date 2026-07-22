@@ -143,8 +143,8 @@ pub struct RsaAdditionalPrime {
 /// because it's annoying to implement.
 ///
 /// This is the serialized form of a key, with plain fields you can build and edit. It is not
-/// usable on its own: call [`validate`](Self::validate) (or the equivalent `Key::try_from`) to get
-/// a [`Key`] that can sign and verify.
+/// usable on its own: call [`import`](Self::import) to get a [`Key`] that can sign and verify,
+/// and [`Key::export`] to go back the other way.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 #[non_exhaustive]
@@ -185,11 +185,12 @@ impl Jwk {
 		}
 	}
 
-	/// Check the parameters and turn this into a [`Key`] that can sign and verify.
+	/// Check the parameters and import this as a [`Key`] that can sign and verify.
 	///
-	/// The named counterpart to `Key::try_from`, so the conversion is discoverable from here
-	/// rather than only from a trait impl.
-	pub fn validate(self) -> crate::Result<Key> {
+	/// The inverse of [`Key::export`]. Named rather than only a `TryFrom` impl so the conversion
+	/// is discoverable from here, and `import`/`export` rather than `validate` because the
+	/// `validate` methods elsewhere in this crate check without converting.
+	pub fn import(self) -> crate::Result<Key> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 		}
@@ -262,13 +263,13 @@ impl TryFrom<Jwk> for Key {
 	type Error = crate::Error;
 
 	fn try_from(jwk: Jwk) -> crate::Result<Self> {
-		jwk.validate()
+		jwk.import()
 	}
 }
 
 impl From<&Key> for Jwk {
 	fn from(key: &Key) -> Self {
-		key.jwk.clone()
+		key.export()
 	}
 }
 
@@ -305,6 +306,14 @@ impl fmt::Debug for Key {
 }
 
 impl Key {
+	/// The serializable [`Jwk`] behind this key, cloned so editing it can't reach the original.
+	///
+	/// The inverse of [`Jwk::import`]. Use it to derive a variant: export, edit, import again.
+	/// Reading a single field needs no clone, since a [`Key`] derefs to its [`Jwk`].
+	pub fn export(&self) -> Jwk {
+		self.jwk.clone()
+	}
+
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
@@ -674,7 +683,7 @@ mod tests {
 			},
 		);
 		jwk.kid = Some(crate::KeyId::decode("test-key-1").unwrap());
-		jwk.validate().unwrap()
+		jwk.import().unwrap()
 	}
 
 	fn create_test_claims() -> Claims {
