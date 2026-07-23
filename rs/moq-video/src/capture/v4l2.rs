@@ -104,7 +104,7 @@ impl Camera {
 
 		let (width, height, stride) = (format.width, format.height, format.stride);
 		// I420 chroma is 2x2 subsampled, so the encoder needs even dimensions.
-		if width % 2 != 0 || height % 2 != 0 {
+		if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"camera resolution {width}x{height} must be even for H.264 encoding"
 			)));

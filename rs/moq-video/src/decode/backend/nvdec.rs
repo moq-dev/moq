@@ -271,13 +271,12 @@ impl State {
 		// keyframe) keeps the existing decoder. The display crop matters even at
 		// the same coded and target sizes: it selects the source rect the scaler
 		// reads from.
-		if let Some(decoder) = &self.decoder {
-			if decoder.coded == coded
-				&& decoder.display_area == display_area
-				&& (decoder.width, decoder.height) == (width, height)
-			{
-				return Ok(surfaces);
-			}
+		if let Some(decoder) = &self.decoder
+			&& decoder.coded == coded
+			&& decoder.display_area == display_area
+			&& (decoder.width, decoder.height) == (width, height)
+		{
+			return Ok(surfaces);
 		}
 		self.decoder = None;
 
