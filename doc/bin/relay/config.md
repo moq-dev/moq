@@ -24,6 +24,17 @@ key = "key.pem"
 
 ## Full Reference
 
+### Top-level keys {#drain-timeout}
+
+```toml
+# How long (in seconds) accepted sessions may keep running after a shutdown
+# signal (SIGINT/ctrl-c, or SIGTERM on unix). The first signal sends every
+# session a GOAWAY (telling clients to
+# reconnect) and waits this long before force-closing them; a second signal
+# exits immediately. Default: 10.
+drain_timeout = 10
+```
+
 ### \[log]
 
 Logging configuration.
@@ -171,6 +182,13 @@ token = "cluster.jwt"
 # never notice. A clean unannounce always takes effect immediately. "0"
 # unannounces abrupt losses immediately too. Default: 5s.
 linger = "5s"
+
+# Optional. Fallback drain time in seconds when an upstream peer sends a GOAWAY
+# without its own deadline: after reconnecting to the replacement, the relay
+# keeps the old upstream alive this long so in-flight groups finish, then
+# force-closes it. A deadline on the received GOAWAY takes precedence.
+# Default: 10.
+drain_timeout = 10
 ```
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
