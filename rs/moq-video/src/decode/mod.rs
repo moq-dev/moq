@@ -47,10 +47,11 @@ pub struct Frame {
 
 impl Frame {
 	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
-	/// preserving the timestamp. A GPU frame scales on the GPU (a box filter,
+	/// preserving the timestamp. A CUDA frame scales on the GPU (a box filter,
 	/// correct at any downscale factor) and stays there, so resize ->
-	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU; a CPU
-	/// frame scales on the CPU. When one output size is enough, prefer decoding
+	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU. Every
+	/// other frame scales on the CPU, which for a `CVPixelBuffer` means a
+	/// download first. When one output size is enough, prefer decoding
 	/// straight to it ([`Config::resize`]), which is free on decoders with a
 	/// hardware scaler; this method is for fanning one decoded stream out to
 	/// several sizes.
@@ -71,8 +72,8 @@ impl Frame {
 					crate::frame::Frame::I420(cuda.download_i420()?.resize(width, height)?)
 				}
 			},
-			// Capture-only surfaces (CVPixelBuffer / D3D11) never appear in
-			// decoded frames, but stay total: download, then scale on the CPU.
+			// CVPixelBuffer (the VideoToolbox decoder's output) and D3D11 textures
+			// have no GPU scaler wired up yet: download, then scale on the CPU.
 			#[allow(unreachable_patterns)]
 			other => crate::frame::Frame::I420(other.to_i420()?.into_owned().resize(width, height)?),
 		};
