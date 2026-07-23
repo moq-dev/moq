@@ -45,11 +45,15 @@ jobs:
     name: Build wrapper module
     runs-on: ubuntu-latest
     # Owner gate, plus: only react to a successful Release Go FFI run for a
-    # moq-ffi-v* tag (ignore its PR/failed runs). Pushes are unconditional.
+    # moq-ffi-v* tag. Require event == 'push' so a fork PR whose head branch is
+    # named `moq-ffi-v*` can't satisfy head_branch and reach the publish secrets
+    # (workflow_run runs in the base repo's privileged context). Pushes here are
+    # unconditional.
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name == 'push' ||
        (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
     outputs:
       skip: ${{ steps.gate.outputs.skip }}
@@ -103,7 +107,14 @@ jobs:
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: |
-          if git ls-remote --tags https://github.com/moq-dev/moq-go-ffi "refs/tags/v${FFI_VERSION}" | grep -q .; then
+          # Distinguish "tag absent" from a lookup failure: a network error must
+          # fail loudly, not masquerade as "defer" (nothing retries a wrapper-only
+          # push, so a silent skip would drop the release).
+          if ! TAGS=$(git ls-remote --tags https://github.com/moq-dev/moq-go-ffi "refs/tags/v${FFI_VERSION}"); then
+            echo "::error::failed to query the moq-go-ffi mirror for tags"
+            exit 1
+          fi
+          if [[ -n "$TAGS" ]]; then
             echo "moq-go-ffi v${FFI_VERSION} is published; proceeding."
           else
             echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the Release Go FFI chain."
