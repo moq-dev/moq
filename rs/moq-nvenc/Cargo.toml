@@ -3,7 +3,7 @@ name = "moq-nvenc"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+rust-version.workspace = true
 
 description = "NVENC hardware video encoder bindings, forked from ViliamVadocz/nvidia-video-codec-sdk with runtime dynamic loading (dlopen only)"
 repository = "https://github.com/moq-dev/moq"

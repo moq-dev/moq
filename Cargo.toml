@@ -62,7 +62,13 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.85"
+# Floor for the library surface: iroh 1.0 (via moq-native) needs 1.91. This is
+# what library consumers see. moq-relay overrides it to 1.95 (sysinfo 0.39); it
+# is a binary, so that higher floor never propagates to anyone building on the
+# libraries. The nix flake / rust-toolchain.toml pin the build toolchain (1.95,
+# so the whole workspace including the relay compiles) rather than latest
+# stable, which keeps the relay's ceiling from silently creeping up unnoticed.
+rust-version = "1.91"
 
 [workspace.dependencies]
 flate2 = "1.1"

@@ -1,2 +1,5 @@
 [toolchain]
+# Pinned to the workspace MSRV (see Cargo.toml rust-version). Keep in sync with
+# the version pinned in flake.nix / nix/overlay.nix.
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
