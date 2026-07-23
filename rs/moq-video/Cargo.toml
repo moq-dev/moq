@@ -28,9 +28,9 @@ nvenc = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # links GPU-less and starts driverless, falling back to the next decoder. Decoded
 # frames stay in CUDA memory and feed NVENC zero-copy (the transcode path).
 nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi 0.0.2 hard-links libva (the
-# binary carries NEEDED libva.so.2 / libva-drm.so.2), so disable this feature for a
-# build with no libva dependency. See #1837.
+# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi dlopen's libva at runtime, so
+# an enabled-vaapi build needs no libva at build time and still starts on a
+# libva-less host, falling back to the next encoder like the NVENC backend.
 vaapi = ["dep:moq-vaapi"]
 # Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
@@ -86,12 +86,9 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
 libloading = { version = "0.8", optional = true }
 moq-nvenc = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware encoder, behind the default-on `vaapi` feature. As of
-# moq-vaapi 0.0.2 libva is dynamically linked via pkg-config (the binary carries
-# NEEDED libva.so.2 / libva-drm.so.2), so an enabled-vaapi Linux build needs libva
-# at build time and the binary needs it at runtime: a libva-less host fails to load
-# rather than falling back. Disable the `vaapi` feature for a libva-free build, or
-# switch moq-vaapi to dlopen libva (one portable binary that falls back like the
-# NVENC backend); the latter is tracked in #1837.
+# moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED
+# libva: the build needs no libva-dev, and a libva-less host loads and falls back
+# to the next encoder instead of failing at load, matching the NVENC backend.
 moq-vaapi = { workspace = true, optional = true }
 # PipeWire video stream for the portal's node, behind the `pipewire` feature.
 # Links libpipewire-0.3 via pkg-config at build time; bindgen needs libclang.
