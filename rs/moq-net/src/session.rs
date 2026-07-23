@@ -1,7 +1,7 @@
 use std::{
 	future::Future,
 	pin::Pin,
-	sync::Arc,
+	sync::{Arc, atomic::Ordering},
 	task::{Context, Poll},
 	time::Duration,
 };
@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	Error, Version, bandwidth,
+	Error, Version, bandwidth, goaway,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -68,6 +68,7 @@ pub struct Session {
 	version: Version,
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
+	goaway: Arc<goaway::Handle>,
 }
 
 impl Session {
@@ -109,6 +110,155 @@ impl Session {
 	/// Block until the transport session is closed, returning the reason.
 	pub async fn closed(&self) -> Error {
 		Error::Transport(self.shared.inner.closed().await)
+	}
+
+	/// Initiate a graceful GOAWAY drain of this session.
+	///
+	/// Returns a [`Drain`] handle; call [`Drain::start`] (or
+	/// [`start_with_timeout`](Drain::start_with_timeout)) to send the GOAWAY frame
+	/// and transition into the [`Draining`] state, then await
+	/// [`Draining::complete`] for the peer to disconnect.
+	///
+	/// Returns `None` when the negotiated version has no GOAWAY message
+	/// (moq-lite-03 and earlier), or when a drain is already in progress (only
+	/// one GOAWAY per session). The claim is released if the returned [`Drain`]
+	/// is dropped before starting, so a caller that bails out can retry later.
+	pub fn drain(&self) -> Option<Drain> {
+		// Pre-GOAWAY versions have no send path listening on the trigger, so a
+		// Drain would silently no-op and Draining::complete could hang.
+		if !self.version.has_goaway() {
+			return None;
+		}
+		// Atomically claim the drain so two concurrent callers can't both get a handle.
+		if self
+			.goaway
+			.draining
+			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+			.is_err()
+		{
+			return None;
+		}
+		Some(Drain {
+			session: Some(self.clone()),
+		})
+	}
+
+	/// Wait until a GOAWAY is received from the peer.
+	///
+	/// Resolves with the payload (redirect URI and optional deadline) once the
+	/// remote endpoint signals that this session should reconnect elsewhere.
+	/// Returns `None` if the session closes before a GOAWAY arrives.
+	pub async fn goaway(&self) -> Option<crate::GoawayReceived> {
+		kio::wait(|waiter| {
+			match self.goaway.received.poll(waiter, |state| match &**state {
+				Some(v) => std::task::Poll::Ready(v.clone()),
+				None => std::task::Poll::Pending,
+			}) {
+				std::task::Poll::Ready(Ok(v)) => std::task::Poll::Ready(Some(v)),
+				std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(None),
+				std::task::Poll::Pending => std::task::Poll::Pending,
+			}
+		})
+		.await
+	}
+
+	/// Whether a GOAWAY has been received from the peer.
+	///
+	/// Once this returns `true`, new subscribe and announce-interest requests on
+	/// this session are rejected with [`Error::GoingAway`]; existing
+	/// subscriptions keep flowing until the session closes.
+	pub fn is_going_away(&self) -> bool {
+		self.goaway.going_away.is_set()
+	}
+}
+
+/// A claimed but not yet started GOAWAY drain, from [`Session::drain`].
+///
+/// Call [`start`](Self::start) to send the GOAWAY frame; dropping instead
+/// releases the claim so a later [`Session::drain`] can retry.
+#[must_use = "call start() to send the GOAWAY; dropping releases the drain claim"]
+pub struct Drain {
+	// `Some` until start consumes it; `Drop` uses the remainder to release the claim.
+	session: Option<Session>,
+}
+
+impl Drain {
+	/// Send the GOAWAY frame with no deadline.
+	///
+	/// `uri` is the new session URI the peer should reconnect to; empty tells the
+	/// peer to reconnect to the same endpoint.
+	pub fn start(self, uri: impl Into<Arc<str>>) -> Draining {
+		self.start_inner(uri, None)
+	}
+
+	/// Send the GOAWAY frame with a deadline for the peer to disconnect.
+	///
+	/// [`Draining::complete`] force-closes the session with
+	/// [`Error::GoawayTimeout`] when `timeout` elapses. The deadline also rides
+	/// the wire on versions with a timeout field (IETF draft-17+) so the peer can
+	/// observe it; the wire encodes 0 as "no deadline", so pass a non-zero
+	/// duration for a deadline the peer can see.
+	pub fn start_with_timeout(self, uri: impl Into<Arc<str>>, timeout: Duration) -> Draining {
+		self.start_inner(uri, Some(timeout))
+	}
+
+	fn start_inner(mut self, uri: impl Into<Arc<str>>, timeout: Option<Duration>) -> Draining {
+		let session = self.session.take().expect("start consumes the drain");
+		let payload = goaway::Payload {
+			uri: uri.into(),
+			timeout,
+		};
+		if let Ok(mut state) = session.goaway.trigger.write() {
+			*state = Some(payload);
+		}
+		// The drain claim stays set: only one GOAWAY per session.
+		Draining { session, timeout }
+	}
+}
+
+impl Drop for Drain {
+	fn drop(&mut self) {
+		// Not started: release the claim so a later drain() can retry.
+		if let Some(session) = &self.session {
+			session.goaway.draining.store(false, Ordering::Release);
+		}
+	}
+}
+
+/// An in-flight GOAWAY drain, from [`Drain::start`].
+///
+/// The session must be kept driven (its [`Driver`] polled) for the GOAWAY to
+/// actually reach the wire and for the drain to progress.
+#[must_use = "await complete() to observe the drain finishing"]
+pub struct Draining {
+	session: Session,
+	timeout: Option<Duration>,
+}
+
+impl Draining {
+	/// Wait for the peer to close the session after receiving the GOAWAY.
+	///
+	/// With a deadline (from [`Drain::start_with_timeout`]), the session is
+	/// force-closed with [`Error::GoawayTimeout`] when it expires; the timer is
+	/// cancelled if the peer closes first.
+	pub async fn complete(self) {
+		let mut closed = std::pin::pin!(self.session.closed());
+		let mut deadline = self.timeout.map(|timeout| Box::pin(web_async::time::sleep(timeout)));
+
+		kio::wait(|waiter| {
+			if waiter.poll_future(closed.as_mut()).is_ready() {
+				return std::task::Poll::Ready(());
+			}
+			if let Some(sleep) = &mut deadline
+				&& waiter.poll_future(sleep.as_mut()).is_ready()
+			{
+				self.session.abort(Error::GoawayTimeout);
+				// Keep polling: the abort resolves `closed` on the next pass.
+				deadline = None;
+			}
+			std::task::Poll::Pending
+		})
+		.await
 	}
 }
 
@@ -225,6 +375,7 @@ impl Session {
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: MaybeSendBox<'static, Result<(), Error>>,
+		goaway: goaway::Handle,
 	) -> (Self, Driver) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
@@ -247,6 +398,7 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
+			goaway: Arc::new(goaway),
 		};
 		let driver = Driver {
 			protocol,
@@ -367,7 +519,18 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 	}
 
 	fn closed(&self) -> MaybeSendBox<'_, String> {
-		Box::pin(async move { S::closed(self).await.to_string() })
+		Box::pin(async move {
+			let err = S::closed(self).await;
+			// Surface the application close code and reason when the transport
+			// carries them: Display alone often drops both (e.g. quinn reports a
+			// bare "connection error: closed"), and the reason is how a peer
+			// distinguishes a GOAWAY-timeout force-close from a network failure.
+			match web_transport_trait::Error::session_error(&err) {
+				Some((code, reason)) if !reason.is_empty() => format!("code={code}: {reason}"),
+				Some((code, _)) => format!("code={code}: {err}"),
+				None => err.to_string(),
+			}
+		})
 	}
 
 	fn stats(&self) -> ConnectionStats {

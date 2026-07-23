@@ -509,14 +509,17 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 
 	/// Run the control stream read + write tasks.
 	/// This reads from the control stream and routes messages to virtual streams,
-	/// and also drains the write queue to the control stream writer.
+	/// and also drains the write queue to the control stream writer. A decoded
+	/// GOAWAY is surfaced through `goaway` so [`crate::Session::goaway`] resolves
+	/// instead of the session tearing down.
 	pub async fn run(
 		&self,
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
+		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		let res = {
-			let mut read = std::pin::pin!(self.run_read(reader));
+			let mut read = std::pin::pin!(self.run_read(reader, goaway));
 			let mut write = std::pin::pin!(self.run_write(writer));
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
@@ -539,6 +542,38 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		res
 	}
 
+	/// Queue a GOAWAY message onto the shared control stream (draft-14-16).
+	///
+	/// Framed as `[type_id varint][size u16][body]` like every other control
+	/// message. Best-effort: an encode failure or a closed control stream is
+	/// logged and dropped, since the session is tearing down anyway.
+	pub(super) fn send_goaway(&self, uri: &str, timeout_ms: u64, version: Version) {
+		use crate::coding::Encode;
+
+		let msg = crate::ietf::GoAway {
+			new_session_uri: std::borrow::Cow::Borrowed(uri),
+			timeout: timeout_ms,
+		};
+
+		let mut body = BytesMut::new();
+		if let Err(err) = msg.encode_msg(&mut body, version) {
+			tracing::warn!(%err, "failed to encode goaway");
+			return;
+		}
+
+		let mut raw = BytesMut::new();
+		if crate::ietf::GoAway::ID.encode(&mut raw, version).is_err()
+			|| (body.len() as u16).encode(&mut raw, version).is_err()
+		{
+			return;
+		}
+		raw.extend_from_slice(&body);
+
+		if !self.shared.control.push(raw.freeze()) {
+			tracing::debug!("control stream closed; goaway not sent");
+		}
+	}
+
 	/// Writer task: drains the queue and writes to the control stream.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
 		while let Some(msg) = self.shared.control.pop().await {
@@ -549,7 +584,11 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	}
 
 	/// Dispatcher loop that reads control stream messages and routes them.
-	async fn run_read(&self, mut reader: Reader<S::RecvStream, Version>) -> Result<(), Error> {
+	async fn run_read(
+		&self,
+		mut reader: Reader<S::RecvStream, Version>,
+		goaway: crate::goaway::Protocol,
+	) -> Result<(), Error> {
 		loop {
 			let type_id: u64 = match reader.decode_maybe().await? {
 				Some(id) => id,
@@ -596,7 +635,24 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					self.control.max_request_id(max);
 				}
 				Route::GoAway => {
-					return Err(Error::Unsupported);
+					let mut data = body;
+					let msg = crate::ietf::GoAway::decode_msg(&mut data, self.version)?;
+					tracing::info!(message = ?msg, "received GOAWAY");
+
+					// Draft-14-16 have no timeout field.
+					let received = crate::GoawayReceived {
+						uri: std::sync::Arc::from(msg.new_session_uri.as_ref()),
+						timeout: None,
+					};
+					// A peer sends at most one GOAWAY per session. Keep the first
+					// payload: an observer may already be acting on its URI, so a
+					// second GOAWAY must not swap the redirect target out from
+					// under it.
+					if !goaway.record(received) {
+						tracing::warn!(uri = %msg.new_session_uri, "duplicate GOAWAY received; ignoring");
+					}
+					// Keep processing control messages: existing subscriptions
+					// flow until the session actually closes.
 				}
 			}
 		}
