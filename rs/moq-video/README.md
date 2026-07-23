@@ -57,10 +57,12 @@ GPU-less builder and still starts on a GPU-less machine.
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
 H.264, H.265, or AV1 track and returns raw frames. A hardware-decoded frame stays
-on the GPU: `into_i420()` downloads it, feeding it back to `encode::Encoder`
-keeps it there (the transcode path), and the `surface` feature exposes the
-underlying handle so you can draw it yourself. Backends are tried hardware-first,
-like encode:
+on the GPU: feeding it back to `encode::Encoder` keeps it there (the transcode
+path), while `into_i420()` downloads it. The off-by-default `surface` feature
+exposes the underlying handle so you can draw it yourself, which today means
+macOS only (`decode::Frame::pixel_buffer` hands back the `CVPixelBuffer`);
+enabling it on Windows or Linux compiles but adds nothing yet. Backends are tried
+hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|

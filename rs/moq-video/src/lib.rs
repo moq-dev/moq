@@ -47,8 +47,10 @@
 //! exposes the GPU handle behind a decoded frame (`decode::Frame::pixel_buffer`)
 //! so you can render or re-encode it yourself without a CPU round trip. That
 //! handle is a platform type, so enabling the feature couples you to the
-//! `objc2-core-video` version this crate links. Leave it off and the guarantee
-//! above holds unchanged.
+//! `objc2-core-video` version this crate links. It covers macOS only today:
+//! turning it on elsewhere compiles and exposes nothing, since the Windows
+//! (Direct3D11) and Linux (CUDA) accessors aren't wired up yet. Leave it off and
+//! the guarantee above holds unchanged.
 
 pub mod capture;
 pub mod decode;
