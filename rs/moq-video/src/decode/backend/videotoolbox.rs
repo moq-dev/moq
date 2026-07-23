@@ -39,7 +39,7 @@ use objc2_video_toolbox::{
 
 use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::{Frame, macos::PixelBuffer};
+use crate::frame::{Surface, macos::PixelBuffer};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -237,7 +237,7 @@ impl Backend for VideoToolbox {
 			.into_iter()
 			.map(|surface| Decoded {
 				timestamp,
-				frame: Frame::PixelBuffer(surface),
+				frame: Surface::PixelBuffer(surface),
 			})
 			.collect())
 	}

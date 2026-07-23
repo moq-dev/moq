@@ -52,7 +52,7 @@ pub struct Config {
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a
 	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
-	/// Check each [`Frame`](super::Frame)'s dimensions and scale the remainder
+	/// Check each [`Frame`](super::Surface)'s dimensions and scale the remainder
 	/// yourself.
 	pub resize: Option<Size>,
 }
@@ -349,7 +349,7 @@ mod tests {
 	fn videotoolbox_decode_stays_gpu_resident() {
 		for out in &decode_gray(3) {
 			assert!(
-				matches!(out.frame, crate::frame::Frame::PixelBuffer(_)),
+				matches!(out.frame, crate::frame::Surface::PixelBuffer(_)),
 				"VideoToolbox decode downloaded to the CPU instead of keeping its surface"
 			);
 		}

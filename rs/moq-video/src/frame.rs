@@ -57,21 +57,17 @@ pub enum Surface {
 	I420(I420),
 }
 
-/// The internal name for [`Surface`], kept so the platform backends that predate
-/// the public rename read the same as before.
-pub(crate) type Frame = Surface;
-
-impl Frame {
+impl Surface {
 	/// The frame width in pixels.
 	pub fn width(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::PixelBuffer(s) => s.width,
+			Surface::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => t.width,
+			Surface::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => c.width,
-			Frame::I420(i) => i.width,
+			Surface::Cuda(c) => c.width,
+			Surface::I420(i) => i.width,
 		}
 	}
 
@@ -79,12 +75,12 @@ impl Frame {
 	pub fn height(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::PixelBuffer(s) => s.height,
+			Surface::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => t.height,
+			Surface::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => c.height,
-			Frame::I420(i) => i.height,
+			Surface::Cuda(c) => c.height,
+			Surface::I420(i) => i.height,
 		}
 	}
 
@@ -129,12 +125,12 @@ impl Frame {
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
+			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
+			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
-			Frame::I420(i) => Ok(Cow::Borrowed(i)),
+			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
+			Surface::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
 }
@@ -143,15 +139,48 @@ impl Frame {
 /// at the encoder resolution. Width and height are even (chroma is 2x2).
 #[derive(Clone)]
 pub struct I420 {
-	pub width: u32,
-	pub height: u32,
+	pub(crate) width: u32,
+	pub(crate) height: u32,
 	/// Y plane (`width * height`) then U then V (`width/2 * height/2` each).
-	pub data: Vec<u8>,
+	pub(crate) data: Vec<u8>,
 }
 
 impl I420 {
+	/// Wrap tightly-packed I420 planes: Y (`width * height`), then U, then V
+	/// (`width/2 * height/2` each), no row padding.
+	///
+	/// Both dimensions must be even and non-zero (4:2:0 chroma is 2x2), and `data`
+	/// must be exactly [`I420::len`] bytes. Checked here so a short buffer can't
+	/// reach a plane split and panic downstream.
+	pub fn new(width: u32, height: u32, data: Vec<u8>) -> Result<Self, Error> {
+		crate::Size::new(width, height).validate("I420")?;
+		let expected = Self::len(width, height);
+		if data.len() != expected {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"I420 {width}x{height} needs {expected} bytes, got {}",
+				data.len()
+			)));
+		}
+		Ok(Self { width, height, data })
+	}
+
+	/// The frame width in pixels.
+	pub fn width(&self) -> u32 {
+		self.width
+	}
+
+	/// The frame height in pixels.
+	pub fn height(&self) -> u32 {
+		self.height
+	}
+
+	/// The packed planes, Y then U then V.
+	pub fn data(&self) -> &[u8] {
+		&self.data
+	}
+
 	/// Tightly-packed I420 byte length for the given even dimensions.
-	pub(crate) fn len(width: u32, height: u32) -> usize {
+	pub fn len(width: u32, height: u32) -> usize {
 		let luma = width as usize * height as usize;
 		luma + luma / 2
 	}
@@ -291,7 +320,7 @@ impl I420 {
 
 	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
 	/// convolution: Y at full size, U/V at quarter size. The CPU half of
-	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+	/// [`decode::Surface::resize`](crate::decode::Surface::resize).
 	pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 		use std::cell::RefCell;
 
@@ -360,16 +389,19 @@ impl I420 {
 		self.luma_len() / 4
 	}
 
-	pub(crate) fn y(&self) -> &[u8] {
+	/// The Y (luma) plane, `width * height` bytes.
+	pub fn y(&self) -> &[u8] {
 		&self.data[..self.luma_len()]
 	}
 
-	pub(crate) fn u(&self) -> &[u8] {
+	/// The U (chroma) plane, `width/2 * height/2` bytes.
+	pub fn u(&self) -> &[u8] {
 		let start = self.luma_len();
 		&self.data[start..start + self.chroma_len()]
 	}
 
-	pub(crate) fn v(&self) -> &[u8] {
+	/// The V (chroma) plane, `width/2 * height/2` bytes.
+	pub fn v(&self) -> &[u8] {
 		let start = self.luma_len() + self.chroma_len();
 		&self.data[start..start + self.chroma_len()]
 	}
@@ -397,6 +429,9 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 
 #[cfg(target_os = "macos")]
 pub mod macos {
+	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
+	//! `Surface::PixelBuffer`, plus the download/upload between it and CPU I420.
+
 	use std::ptr;
 
 	use std::ptr::NonNull;
@@ -521,7 +556,7 @@ pub mod macos {
 	}
 
 	/// Allocate a planar I420 `CVPixelBuffer` and copy the frame into it: the
-	/// upload half of [`Surface::download_i420`], for when the pixels are on the
+	/// upload half of [`Surface::into_i420`], for when the pixels are on the
 	/// CPU but a CoreVideo consumer (the VideoToolbox encoder, a renderer) needs a
 	/// buffer. Note the format is planar I420, not the NV12 a hardware decode
 	/// hands back, so callers query `CVPixelBufferGetPixelFormatType`.
@@ -577,6 +612,9 @@ pub mod macos {
 
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
 pub mod cuda {
+	//! Linux CUDA device memory: the NV12 [`Frame`] behind `Surface::Cuda`, which
+	//! NVDEC produces and NVENC consumes in place.
+
 	use std::sync::{Arc, OnceLock};
 
 	use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
@@ -651,7 +689,7 @@ pub mod cuda {
 		pub(crate) pitch: u32,
 	}
 
-	impl Frame {
+	impl Surface {
 		/// Allocate an NV12 buffer for `width` x `height` (both even) at row
 		/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
 		pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
@@ -723,7 +761,7 @@ pub mod cuda {
 
 		/// Resize to `width` x `height` (both even) with the box-filter kernel,
 		/// staying in device memory. The GPU half of
-		/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+		/// [`decode::Surface::resize`](crate::decode::Surface::resize).
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let ctx = &self.buf.ctx;
 			let kernels = kernels(ctx)?;
@@ -800,6 +838,9 @@ pub mod cuda {
 
 #[cfg(target_os = "windows")]
 pub mod d3d11 {
+	//! Windows Direct3D11 surfaces: the NV12 [`Texture`] behind
+	//! `Surface::Texture`, shared by Media Foundation capture and encode.
+
 	use std::ptr;
 
 	use windows::Win32::Foundation::HMODULE;
@@ -976,6 +1017,21 @@ pub mod d3d11 {
 
 #[cfg(test)]
 mod tests {
+	/// A short buffer is rejected at construction rather than panicking later: the
+	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
+	/// a public `I420` has to be impossible to build malformed.
+	#[test]
+	fn i420_new_rejects_a_short_buffer() {
+		use super::I420;
+
+		assert!(I420::new(64, 32, vec![0; I420::len(64, 32)]).is_ok());
+		assert!(I420::new(64, 32, vec![0; I420::len(64, 32) - 1]).is_err());
+		assert!(I420::new(64, 32, Vec::new()).is_err());
+		// Odd and zero dimensions have no valid 4:2:0 chroma.
+		assert!(I420::new(63, 32, vec![0; I420::len(63, 32)]).is_err());
+		assert!(I420::new(0, 32, Vec::new()).is_err());
+	}
+
 	use super::I420;
 
 	/// A gradient I420 frame with structure in every plane, so resize bugs
@@ -1045,7 +1101,7 @@ mod tests {
 
 		// Upload as pitched NV12: Y rows, then interleaved UV rows.
 		let pitch = 512u32;
-		let frame = cuda::Frame::alloc(&ctx, w, h, pitch).unwrap();
+		let frame = cuda::Surface::alloc(&ctx, w, h, pitch).unwrap();
 		let mut host = vec![0u8; pitch as usize * h as usize * 3 / 2];
 		for row in 0..h as usize {
 			let dst = row * pitch as usize;

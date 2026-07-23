@@ -37,7 +37,7 @@ use objc2_video_toolbox::{
 use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -151,14 +151,14 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match frame {
-			Frame::PixelBuffer(surface) => surface.buffer.clone(),
-			Frame::I420(i420) => crate::frame::macos::upload_i420(i420)?,
+			Surface::PixelBuffer(surface) => surface.buffer.clone(),
+			Surface::I420(i420) => crate::frame::macos::upload_i420(i420)?,
 		};
 		let image: &CVImageBuffer = &pixel_buffer;
 

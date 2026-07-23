@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 
 use super::channel::FrameChannel;
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 /// The negotiated geometry a backend reports once its device is open.
 pub(super) struct Geometry {
@@ -57,7 +57,7 @@ pub(super) async fn spawn<S, I, R>(
 ) -> Result<(Geometry, PumpGuard), Error>
 where
 	I: FnOnce() -> Result<(S, Geometry), Error> + Send + 'static,
-	R: FnMut(&mut S) -> Result<Option<Frame>, Error> + Send + 'static,
+	R: FnMut(&mut S) -> Result<Option<Surface>, Error> + Send + 'static,
 {
 	let stop = Arc::new(AtomicBool::new(false));
 	let (geo_tx, geo_rx) = tokio::sync::oneshot::channel();

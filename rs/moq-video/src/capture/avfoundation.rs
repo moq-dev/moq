@@ -1,7 +1,7 @@
 //! Camera capture via AVFoundation (macOS), the zero-copy path.
 //!
 //! `AVCaptureVideoDataOutput` delivers IOSurface-backed `CVPixelBuffer`s on a
-//! dispatch queue; the delegate wraps each as a [`Frame::PixelBuffer`] and pushes it
+//! dispatch queue; the delegate wraps each as a [`Surface::PixelBuffer`] and pushes it
 //! into the shared [`FrameChannel`], which the encode loop awaits. Frames reach
 //! VideoToolbox with no copy and no color conversion.
 

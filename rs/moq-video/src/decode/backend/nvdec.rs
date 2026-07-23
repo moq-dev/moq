@@ -6,7 +6,7 @@
 //! next decoder (see [`backend::open`](super::open)).
 //!
 //! Decoded 8-bit 4:2:0 frames come back as NV12 in CUDA device memory
-//! ([`Frame::Cuda`]).
+//! ([`Surface::Cuda`]).
 //! Each mapped cuvid surface is copied device-to-device into an owned buffer
 //! (surfaces come from a small fixed pool, so holding them across calls would
 //! stall the decoder), which the NVENC encode backend then registers directly:
@@ -39,7 +39,7 @@ use moq_nvenc::sys::nvcuvid::{
 
 use super::{Backend, Codec, Decoded};
 use crate::Error;
-use crate::frame::{Frame, cuda};
+use crate::frame::{Surface, cuda};
 
 pub(crate) const NAME: &str = "nvdec";
 
@@ -386,7 +386,7 @@ impl State {
 		Ok(Decoded {
 			// Timestamps rode the parser from `decode` (microseconds, unsigned).
 			timestamp: Timestamp::from_micros(disp.timestamp.max(0) as u64).unwrap_or(Timestamp::ZERO),
-			frame: Frame::Cuda(copied?),
+			frame: Surface::Cuda(copied?),
 		})
 	}
 }
@@ -662,10 +662,10 @@ mod tests {
 		let mut packets = Vec::new();
 		for (i, out) in decoded.iter().enumerate() {
 			assert!(
-				matches!(out.frame, Frame::Cuda(_)),
+				matches!(out.frame, Surface::Cuda(_)),
 				"NVDEC produced a non-CUDA frame; the zero-copy path is not exercised"
 			);
-			packets.extend(nvenc.encode_raw(&out.frame, i == 0).unwrap());
+			packets.extend(nvenc.encode(&out.frame, i == 0).unwrap());
 		}
 		packets.extend(nvenc.finish().unwrap());
 		assert!(!packets.is_empty(), "NVENC produced no packets from CUDA frames");

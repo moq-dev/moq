@@ -18,7 +18,7 @@ use moq_net::Timestamp;
 
 use super::decoder::{Config, Kind};
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 mod openh264;
 
@@ -58,7 +58,7 @@ pub(crate) struct Decoded {
 	pub timestamp: Timestamp,
 	/// The decoded picture: CPU I420, or a GPU frame the encode side can consume
 	/// without a CPU round trip.
-	pub frame: Frame,
+	pub frame: Surface,
 }
 
 /// An opened decoder. Feed it prepared access units in decode order; get back

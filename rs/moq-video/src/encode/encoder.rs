@@ -8,7 +8,7 @@
 use bytes::Bytes;
 
 use super::backend::{self, Backend};
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 use crate::{Error, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
@@ -192,7 +192,7 @@ impl Encoder {
 		// dimensions.
 		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
 
-		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
+		let frame = Surface::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
 		self.encode(&frame, keyframe)
 	}
 
@@ -210,7 +210,7 @@ impl Encoder {
 	pub fn encode_i420(&mut self, i420: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		self.check_frame(size, i420.len(), I420::len(size.width, size.height), "I420")?;
 
-		let frame = Frame::I420(I420 {
+		let frame = Surface::I420(I420 {
 			width: size.width,
 			height: size.height,
 			data: i420.to_vec(),
@@ -249,7 +249,7 @@ impl Encoder {
 	/// must already be at the encoder's resolution: decode with
 	/// [`decode::Config::resize`](crate::decode::Config), or scale first with
 	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
-	pub fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	pub fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		let size = Size::new(frame.width(), frame.height());
 		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -537,7 +537,7 @@ mod tests {
 
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			let frame = Frame::PixelBuffer(nv12_surface(320, 240));
+			let frame = Surface::PixelBuffer(nv12_surface(320, 240));
 			packets.extend(encoder.encode(&frame, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
@@ -561,7 +561,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let frame = Frame::PixelBuffer(nv12_surface(320, 240));
+		let frame = Surface::PixelBuffer(nv12_surface(320, 240));
 		let mut packets = encoder.encode(&frame, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 
@@ -675,7 +675,7 @@ mod tests {
 		let mut textures = 0;
 		for i in 0..30 {
 			let frame = camera.read().await.expect("frame, not end of stream");
-			if matches!(frame, Frame::Texture(_)) {
+			if matches!(frame, Surface::Texture(_)) {
 				textures += 1;
 			}
 			packets.extend(encoder.encode(&frame, i == 0).unwrap());

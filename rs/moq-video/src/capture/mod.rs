@@ -1,4 +1,4 @@
-//! Frame capture. [`Config`] is shared; the implementation is per-platform and
+//! Surface capture. [`Config`] is shared; the implementation is per-platform and
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 mod channel;
 use channel::FrameChannel;
@@ -235,7 +235,7 @@ pub(crate) struct FrameStream {
 	device: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
-	pending: Option<Frame>,
+	pending: Option<Surface>,
 	/// Keeps the backend alive and releases it on drop. Type-erased because it
 	/// differs per platform (objc session + delegate, or pump-thread guard).
 	_backend: Keepalive,
@@ -249,7 +249,7 @@ impl FrameStream {
 		height: u32,
 		framerate: Option<u32>,
 		device: String,
-		pending: Option<Frame>,
+		pending: Option<Surface>,
 		backend: Keepalive,
 	) -> Self {
 		Self {
@@ -265,7 +265,7 @@ impl FrameStream {
 
 	/// Await the next frame, or `None` once the source ends. Cancel-safe: drop
 	/// the future to stop reading and release the device.
-	pub(crate) async fn read(&mut self) -> Option<Frame> {
+	pub(crate) async fn read(&mut self) -> Option<Surface> {
 		if let Some(frame) = self.pending.take() {
 			return Some(frame);
 		}
