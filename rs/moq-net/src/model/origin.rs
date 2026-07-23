@@ -3041,8 +3041,7 @@ mod tests {
 		// is announced.
 		// abort() consumes the producer, so this both aborts and drops it.
 		producer.abort(Error::Dropped).unwrap();
-		source_a.abort();
-		drop(source_a);
+		source_a.abort(Error::Dropped).unwrap();
 		drop(dynamic_a);
 		settle().await;
 		announced.assert_next_wait();
@@ -3198,8 +3197,7 @@ mod tests {
 		sub.assert_closed();
 
 		// A detaching must not re-dispatch the finished track to B.
-		source_a.abort();
-		drop(source_a);
+		source_a.abort(Error::Dropped).unwrap();
 		drop(dynamic_a);
 		settle().await;
 		dynamic_b.assert_no_request();
@@ -3368,8 +3366,7 @@ mod tests {
 
 		// The session dies without unannouncing.
 		drop(producer);
-		source.abort();
-		drop(source);
+		source.abort(Error::Dropped).unwrap();
 		drop(dynamic);
 
 		settle().await;
@@ -3423,8 +3420,7 @@ mod tests {
 		// The session dies without unannouncing: the broadcast enters the linger
 		// window instead of closing.
 		drop(producer);
-		source.abort();
-		drop(source);
+		source.abort(Error::Dropped).unwrap();
 		drop(dynamic);
 		settle().await;
 
@@ -3485,8 +3481,7 @@ mod tests {
 		let mut sub = subscribing.await.unwrap();
 
 		drop(producer);
-		source.abort();
-		drop(source);
+		source.abort(Error::Dropped).unwrap();
 		drop(dynamic);
 		settle().await;
 		announced.assert_next_wait();
@@ -3526,8 +3521,7 @@ mod tests {
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 		announced.assert_next_some("test");
 
-		source.abort();
-		drop(source);
+		source.abort(Error::Dropped).unwrap();
 		settle().await;
 
 		// Days later the broadcast is still announced and still splices a reconnect.
