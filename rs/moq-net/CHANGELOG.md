@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/moq-dev/moq/compare/moq-net-v0.2.0...moq-net-v0.2.1) - 2026-07-23
+
+### Other
+
+- *(rust)* pin the toolchain and correct the MSRV claims ([#2462](https://github.com/moq-dev/moq/pull/2462))
+
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-net-v0.1.18...moq-net-v0.2.0) - 2026-07-22
 
 ### Added

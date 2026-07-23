@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/moq-dev/moq/compare/moq-boy-v0.3.0...moq-boy-v0.3.1) - 2026-07-23
+
+### Other
+
+- *(rust)* pin the toolchain and correct the MSRV claims ([#2462](https://github.com/moq-dev/moq/pull/2462))
+
 ## [0.3.0](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.28...moq-boy-v0.3.0) - 2026-07-22
 
 ### Other
