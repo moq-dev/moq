@@ -1134,6 +1134,7 @@ GOAWAY Message {
 **New Session URI**:
 A URI for the peer to reconnect to.
 An empty string indicates no redirect; the peer should simply close the session.
+The URI MUST NOT exceed 8,192 bytes; a receiver MUST treat a longer URI as a protocol violation and MAY reject it based on the length prefix alone.
 A recipient MUST validate the URI against local policy before reconnecting, including verifying the scheme, authority, and port are permitted.
 If validation fails, the recipient MUST close the session without reconnecting.
 
@@ -1198,9 +1199,14 @@ The `Message Length` describes the payload size on the wire.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
+<<<<<<< HEAD
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
 - Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
 - Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the earlier is served until it ends.
+||||||| parent of 51f6c4b49 (fix(moq-net): align GOAWAY codecs across moq-transport drafts and cap the URI)
+=======
+- Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
+>>>>>>> 51f6c4b49 (fix(moq-net): align GOAWAY codecs across moq-transport drafts and cap the URI)
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
