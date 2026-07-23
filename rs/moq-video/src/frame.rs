@@ -1,29 +1,51 @@
-//! The frame passed between capture, the codec backends, and the consumer.
+//! [`Surface`]: the pixels behind a frame, and where they currently live.
 //!
 //! Representations chosen so the common path stays zero-copy:
-//! - [`Frame::Surface`] is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
+//! - `Surface::PixelBuffer` is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
 //!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
 //!   encoder consumes it directly, no copy and no color conversion.
-//! - [`Frame::Texture`] is a Windows Direct3D11 NV12 texture. Media Foundation
+//! - `Surface::Texture` is a Windows Direct3D11 NV12 texture. Media Foundation
 //!   capture produces it on a shared D3D11 device and the hardware encoder MFT
 //!   consumes it on that same device, also zero-copy.
-//! - [`Frame::I420`] is CPU-resident planar I420, for the CPU encode path and
+//! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
 //! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
-//! asks for I420 via [`Frame::to_i420`], which downloads the GPU frame only when
+//! asks for I420 via [`Surface::into_i420`], which downloads the GPU frame only when
 //! needed.
 
 use std::borrow::Cow;
+
+use bytes::Bytes;
 
 use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix, rgba_to_yuv420};
 
 use crate::Error;
 
-pub(crate) enum Frame {
-	/// Zero-copy GPU surface (macOS `CVPixelBuffer`).
+/// Where a frame's pixels currently live.
+///
+/// Decoders and capture sources hand these out; encoders and renderers consume
+/// them. Match to take a zero-copy fast path for the representation you can use,
+/// and fall back to [`into_i420`](Self::into_i420) for everything else, which is
+/// always available:
+///
+/// ```ignore
+/// match surface {
+///     #[cfg(target_os = "macos")]
+///     Surface::PixelBuffer(buffer) => draw_metal(buffer),
+///     other => upload(other.into_i420()?),
+/// }
+/// ```
+///
+/// Variants are platform-gated, and the enum is `#[non_exhaustive]` so new
+/// representations stay additive: write that `other` arm and your code keeps
+/// building everywhere.
+#[non_exhaustive]
+pub enum Surface {
+	/// Zero-copy GPU surface (macOS `CVPixelBuffer`), from capture or a
+	/// VideoToolbox decode.
 	#[cfg(target_os = "macos")]
-	Surface(macos::Surface),
+	PixelBuffer(macos::PixelBuffer),
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
@@ -35,11 +57,16 @@ pub(crate) enum Frame {
 	I420(I420),
 }
 
+/// The internal name for [`Surface`], kept so the platform backends that predate
+/// the public rename read the same as before.
+pub(crate) type Frame = Surface;
+
 impl Frame {
-	pub(crate) fn width(&self) -> u32 {
+	/// The frame width in pixels.
+	pub fn width(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => s.width,
+			Frame::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
@@ -48,10 +75,11 @@ impl Frame {
 		}
 	}
 
-	pub(crate) fn height(&self) -> u32 {
+	/// The frame height in pixels.
+	pub fn height(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => s.height,
+			Frame::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
@@ -60,11 +88,48 @@ impl Frame {
 		}
 	}
 
+	/// The pixels as tightly-packed I420 (YUV 4:2:0, BT.601 limited range): Y
+	/// (`width * height` bytes), then U, then V (`width/2 * height/2` each), no row
+	/// padding.
+	///
+	/// Always available, whichever variant you hold, so it is the universal arm of
+	/// a `match`. Free for `Surface::I420`; downloads any GPU surface.
+	pub fn into_i420(self) -> Result<Bytes, Error> {
+		match self {
+			Surface::I420(i420) => Ok(Bytes::from(i420.data)),
+			#[allow(unreachable_patterns)]
+			other => Ok(Bytes::from(other.to_i420()?.into_owned().data)),
+		}
+	}
+
+	/// The pixels as a CoreVideo pixel buffer, the mirror of
+	/// [`into_i420`](Self::into_i420) pointing the other way.
+	///
+	/// Free for `Surface::PixelBuffer` (a retain, staying on the GPU);
+	/// a CPU frame is uploaded into a fresh buffer, so this always yields something
+	/// drawable rather than making you write the upload. Wrap it in a
+	/// `CVMetalTextureCache` to render it.
+	///
+	/// Check `CVPixelBufferGetPixelFormatType` before sampling: a hardware decode
+	/// gives NV12 (bi-planar), an uploaded CPU frame planar I420.
+	///
+	/// A decoded buffer comes from the decoder's pool, so holding many frames holds
+	/// pool slots and eventually stalls decoding. Draw and drop.
+	#[cfg(target_os = "macos")]
+	pub fn into_pixel_buffer(
+		self,
+	) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, Error> {
+		match self {
+			Surface::PixelBuffer(pixels) => Ok(pixels.buffer),
+			Surface::I420(i420) => macos::upload_i420(&i420),
+		}
+	}
+
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
+			Frame::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
 			Frame::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
@@ -77,7 +142,7 @@ impl Frame {
 /// A raw video frame in planar I420 (YUV 4:2:0), tightly packed (no padding),
 /// at the encoder resolution. Width and height are even (chroma is 2x2).
 #[derive(Clone)]
-pub(crate) struct I420 {
+pub struct I420 {
 	pub width: u32,
 	pub height: u32,
 	/// Y plane (`width * height`) then U then V (`width/2 * height/2` each).
@@ -331,7 +396,7 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) mod macos {
+pub mod macos {
 	use std::ptr;
 
 	use std::ptr::NonNull;
@@ -352,7 +417,7 @@ pub(crate) mod macos {
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
 	/// is what keeps the capture -> encode path zero-copy.
-	pub(crate) struct Surface {
+	pub struct PixelBuffer {
 		pub(crate) buffer: CFRetained<CVPixelBuffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
@@ -367,10 +432,26 @@ pub(crate) mod macos {
 	// conservatism. Sync is load-bearing: the VideoToolbox decoder hands these
 	// out as decoded frames, and moq-transcode shares them as Arc<decode::Frame>
 	// across its rung fanout.
-	unsafe impl Send for Surface {}
-	unsafe impl Sync for Surface {}
+	unsafe impl Send for PixelBuffer {}
+	unsafe impl Sync for PixelBuffer {}
 
-	impl Surface {
+	impl PixelBuffer {
+		/// The underlying CoreVideo buffer, to hand to Metal or another CoreVideo
+		/// consumer. Borrowing keeps it on the GPU.
+		pub fn buffer(&self) -> &CVPixelBuffer {
+			&self.buffer
+		}
+
+		/// The buffer width in pixels.
+		pub fn width(&self) -> u32 {
+			self.width
+		}
+
+		/// The buffer height in pixels.
+		pub fn height(&self) -> u32 {
+			self.height
+		}
+
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
 			Self { buffer, width, height }
 		}
@@ -495,7 +576,7 @@ pub(crate) mod macos {
 }
 
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
-pub(crate) mod cuda {
+pub mod cuda {
 	use std::sync::{Arc, OnceLock};
 
 	use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
@@ -562,7 +643,7 @@ pub(crate) mod cuda {
 	/// Both codecs use the device's primary CUDA context (`CudaContext::new`
 	/// retains it), so a frame decoded by NVDEC is directly addressable by NVENC.
 	#[derive(Clone)]
-	pub(crate) struct Frame {
+	pub struct Frame {
 		buf: Arc<Buffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
@@ -718,7 +799,7 @@ pub(crate) mod cuda {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) mod d3d11 {
+pub mod d3d11 {
 	use std::ptr;
 
 	use windows::Win32::Foundation::HMODULE;
@@ -774,7 +855,7 @@ pub(crate) mod d3d11 {
 	/// hardware encoder run on the same device that owns the texture. Cloning the
 	/// COM handles is a cheap `AddRef`, which is what keeps capture -> encode
 	/// zero-copy.
-	pub(crate) struct Texture {
+	pub struct Texture {
 		pub(crate) device: ID3D11Device,
 		pub(crate) texture: ID3D11Texture2D,
 		/// The texture-array slice this frame lives in. Media Foundation pools the

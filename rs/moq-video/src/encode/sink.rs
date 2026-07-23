@@ -185,7 +185,7 @@ mod inline {
 		}
 
 		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.0.encode_raw(&frame, keyframe)
+			self.0.encode(&frame, keyframe)
 		}
 
 		/// Retune the encoder. Async only to match the threaded `Sink`; there's

@@ -38,13 +38,6 @@ vaapi = ["dep:moq-vaapi"]
 # at build time (and its bindgen needs libclang), so it only belongs in builds
 # that actually capture displays. Camera capture (V4L2) needs nothing extra.
 pipewire = ["dep:pipewire", "dep:ashpd"]
-# Expose the GPU surface behind a decoded frame (macOS `CVPixelBuffer` today), plus
-# a re-export of the platform crate it belongs to, so a consumer can build its own
-# renderer or encoder on top of moq-video without a CPU round trip. Adds no
-# dependency: the platform crate is already linked. It does opt you into the one
-# corner of the API that names a platform type, so a major bump of that crate
-# becomes a breaking change for you. Off by default for exactly that reason.
-surface = []
 
 [dependencies]
 anyhow = "1"

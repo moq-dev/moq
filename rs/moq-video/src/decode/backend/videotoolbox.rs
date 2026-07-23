@@ -39,7 +39,7 @@ use objc2_video_toolbox::{
 
 use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::{Frame, macos::Surface};
+use crate::frame::{Frame, macos::PixelBuffer};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -56,7 +56,7 @@ enum NalKind {
 /// `decode_frame`. Boxed so its address is a stable refcon for the session.
 #[derive(Default)]
 struct Sink {
-	frames: Vec<Surface>,
+	frames: Vec<PixelBuffer>,
 	error: Option<String>,
 }
 
@@ -237,7 +237,7 @@ impl Backend for VideoToolbox {
 			.into_iter()
 			.map(|surface| Decoded {
 				timestamp,
-				frame: Frame::Surface(surface),
+				frame: Frame::PixelBuffer(surface),
 			})
 			.collect())
 	}
@@ -276,7 +276,7 @@ unsafe extern "C-unwind" fn output_callback(
 	let width = CVPixelBufferGetWidth(&pixel_buffer) as u32;
 	let height = CVPixelBufferGetHeight(&pixel_buffer) as u32;
 
-	sink.frames.push(Surface::new(pixel_buffer, width, height));
+	sink.frames.push(PixelBuffer::new(pixel_buffer, width, height));
 }
 
 /// Build a `CMVideoFormatDescription` from the ordered parameter-set NAL units

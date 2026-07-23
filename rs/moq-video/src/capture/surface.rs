@@ -1,4 +1,4 @@
-//! Zero-copy `CMSampleBuffer` -> [`Frame::Surface`] extraction, shared by the
+//! Zero-copy `CMSampleBuffer` -> [`Frame::PixelBuffer`] extraction, shared by the
 //! AVFoundation (camera) and ScreenCaptureKit (screen) backends.
 
 use objc2_core_foundation::CFRetained;
@@ -6,7 +6,7 @@ use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 
 use crate::frame::Frame;
-use crate::frame::macos::Surface;
+use crate::frame::macos::PixelBuffer;
 
 /// Extract the `CVPixelBuffer` from a sample buffer as a zero-copy surface.
 pub(super) fn surface_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame> {
@@ -16,5 +16,5 @@ pub(super) fn surface_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame> {
 	let pixel: CFRetained<CVPixelBuffer> = unsafe { CFRetained::from_raw(CFRetained::into_raw(image).cast()) };
 	let width = CVPixelBufferGetWidth(&pixel) as u32;
 	let height = CVPixelBufferGetHeight(&pixel) as u32;
-	Some(Frame::Surface(Surface::new(pixel, width, height)))
+	Some(Frame::PixelBuffer(PixelBuffer::new(pixel, width, height)))
 }

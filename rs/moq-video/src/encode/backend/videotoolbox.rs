@@ -157,7 +157,7 @@ impl Backend for VideoToolbox {
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
 		let pixel_buffer = match frame {
-			Frame::Surface(surface) => surface.buffer.clone(),
+			Frame::PixelBuffer(surface) => surface.buffer.clone(),
 			Frame::I420(i420) => crate::frame::macos::upload_i420(i420)?,
 		};
 		let image: &CVImageBuffer = &pixel_buffer;

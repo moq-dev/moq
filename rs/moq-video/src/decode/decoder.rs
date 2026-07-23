@@ -178,7 +178,7 @@ impl Decoder {
 			.map(|decoded| Frame {
 				timestamp: decoded.timestamp,
 				size: Size::new(decoded.frame.width(), decoded.frame.height()),
-				inner: decoded.frame,
+				surface: decoded.frame,
 			})
 			.collect())
 	}
@@ -349,7 +349,7 @@ mod tests {
 	fn videotoolbox_decode_stays_gpu_resident() {
 		for out in &decode_gray(3) {
 			assert!(
-				matches!(out.frame, crate::frame::Frame::Surface(_)),
+				matches!(out.frame, crate::frame::Frame::PixelBuffer(_)),
 				"VideoToolbox decode downloaded to the CPU instead of keeping its surface"
 			);
 		}
@@ -374,7 +374,7 @@ mod tests {
 
 		let mut packets = 0;
 		for (i, out) in decoded.iter().enumerate() {
-			packets += encoder.encode_raw(&out.frame, i == 0).unwrap().len();
+			packets += encoder.encode(&out.frame, i == 0).unwrap().len();
 		}
 		packets += encoder.finish().unwrap().len();
 

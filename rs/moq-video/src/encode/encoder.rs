@@ -193,7 +193,7 @@ impl Encoder {
 		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
 
 		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
-		self.encode_raw(&frame, keyframe)
+		self.encode(&frame, keyframe)
 	}
 
 	/// Encode one tightly-packed I420 frame of `size` (Y then U then V, no row
@@ -215,7 +215,7 @@ impl Encoder {
 			height: size.height,
 			data: i420.to_vec(),
 		});
-		self.encode_raw(&frame, keyframe)
+		self.encode(&frame, keyframe)
 	}
 
 	/// Reject a frame the encoder can't encode: the wrong shape, or a buffer that
@@ -240,19 +240,16 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// Encode a decoded [`Frame`](crate::decode::Frame), the transcode input
-	/// path: a hardware frame feeds a hardware encoder on the same device
-	/// directly (NVDEC -> NVENC stays on the GPU); everything else falls back to
-	/// a CPU I420 upload. The frame must already be at the encoder's resolution;
-	/// decode with [`decode::Config::resize`](crate::decode::Config) (or scale
-	/// yourself) first.
-	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		self.encode_raw(&frame.inner, keyframe)
-	}
-
-	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
-	/// already be at the encoder's resolution.
-	pub(crate) fn encode_raw(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	/// Encode a [`Surface`](crate::Surface), whether it came from capture or a
+	/// decoder (the transcode input path).
+	///
+	/// A GPU surface feeds a hardware encoder on the same device directly
+	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
+	/// VideoToolbox); anything else falls back to a CPU I420 upload. The surface
+	/// must already be at the encoder's resolution: decode with
+	/// [`decode::Config::resize`](crate::decode::Config), or scale first with
+	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+	pub fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		let size = Size::new(frame.width(), frame.height());
 		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -540,8 +537,8 @@ mod tests {
 
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			let frame = Frame::Surface(nv12_surface(320, 240));
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			let frame = Frame::PixelBuffer(nv12_surface(320, 240));
+			packets.extend(encoder.encode(&frame, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -564,8 +561,8 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let frame = Frame::Surface(nv12_surface(320, 240));
-		let mut packets = encoder.encode_raw(&frame, true).unwrap();
+		let frame = Frame::PixelBuffer(nv12_surface(320, 240));
+		let mut packets = encoder.encode(&frame, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty());
@@ -575,7 +572,7 @@ mod tests {
 	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
 	/// hand us. Y and interleaved UV planes filled with 128.
 	#[cfg(target_os = "macos")]
-	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::Surface {
+	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::PixelBuffer {
 		use std::ptr::{self, NonNull};
 
 		use objc2_core_foundation::CFRetained;
@@ -608,7 +605,7 @@ mod tests {
 		}
 		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 
-		crate::frame::macos::Surface::new(buffer, width, height)
+		crate::frame::macos::PixelBuffer::new(buffer, width, height)
 	}
 
 	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
@@ -681,7 +678,7 @@ mod tests {
 			if matches!(frame, Frame::Texture(_)) {
 				textures += 1;
 			}
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			packets.extend(encoder.encode(&frame, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
