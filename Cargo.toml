@@ -76,10 +76,10 @@ rust-version = "1.91"
 flate2 = "1.1"
 hang = { version = "0.20", path = "rs/hang" }
 kio = { version = "0.5", path = "rs/kio" }
-moq-audio = { version = "0.0.10", path = "rs/moq-audio" }
+moq-audio = { version = "0.0.11", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
 moq-hls = { version = "0.4.0", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.3.0", path = "rs/moq-json" }
+moq-json = { version = "0.3.1", path = "rs/moq-json" }
 moq-loc = { version = "0.2", path = "rs/moq-loc" }
 moq-msf = { version = "0.4", path = "rs/moq-msf" }
 moq-mux = { version = "0.8", path = "rs/moq-mux" }
@@ -88,21 +88,21 @@ moq-net = { version = "0.2", path = "rs/moq-net" }
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually
 # used by moq-video on Linux.
-moq-nvenc = { version = "0.0.1", path = "rs/moq-nvenc" }
+moq-nvenc = { version = "0.0.2", path = "rs/moq-nvenc" }
 moq-rtc = { version = "0.2.0", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.0", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.2.0", path = "rs/moq-srt" }
-moq-stats = { version = "0.1.0", path = "rs/moq-stats" }
+moq-stats = { version = "0.1.1", path = "rs/moq-stats" }
 moq-token = { version = "0.7", path = "rs/moq-token" }
 # default-features off (the hardware codecs) on moq-transcode and moq-video so
 # each consumer opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a
 # self-compiler can leave them off to drop the CUDA / libva deps. Both crates
 # still default them on when depended on directly.
-moq-transcode = { version = "0.0.1", path = "rs/moq-transcode", default-features = false }
+moq-transcode = { version = "0.0.2", path = "rs/moq-transcode", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"
-moq-video = { version = "0.0.7", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.0.8", path = "rs/moq-video", default-features = false }
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"

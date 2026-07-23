@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/moq-dev/moq/compare/moq-native-v0.19.0...moq-native-v0.19.1) - 2026-07-23
+
+### Added
+
+- *(native)* capture qlog traces on the quinn, quiche, and noq backends ([#2451](https://github.com/moq-dev/moq/pull/2451))
+
+### Other
+
+- *(rust)* pin the toolchain and correct the MSRV claims ([#2462](https://github.com/moq-dev/moq/pull/2462))
+
 ## [0.19.0](https://github.com/moq-dev/moq/compare/moq-native-v0.18.3...moq-native-v0.19.0) - 2026-07-22
 
 ### Added

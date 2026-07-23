@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.10...moq-audio-v0.0.11) - 2026-07-23
+
+### Other
+
+- *(rust)* pin the toolchain and correct the MSRV claims ([#2462](https://github.com/moq-dev/moq/pull/2462))
+
 ## [0.0.10](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.9...moq-audio-v0.0.10) - 2026-07-22
 
 ### Fixed
