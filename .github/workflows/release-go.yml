@@ -8,35 +8,55 @@ name: Release Go
 #     (registry is the gate, like release-plz / the PyPI check in release.sh).
 #
 # Triggers:
-#   * push to main      — a wrapper API or VERSION change.
-#   * moq-ffi-v* tags    — auto-bump the moq-go-ffi require to the new ffi and
-#                          re-publish, so `moq-go@latest` always pulls the
-#                          newest native core (Go MVS won't float on its own).
+#   * push to main        — a wrapper API or VERSION change. The ffi require is
+#                           pinned to the current crate version, whose mirror tag
+#                           already exists in steady state. If it's missing (a
+#                           release is mid-flight), the job skips: the
+#                           workflow_run below republishes once the ffi lands.
+#   * Release Go FFI done  — a new ffi just published to the moq-go-ffi mirror.
+#                           Re-cut the wrapper so `moq-go@latest` floats to the
+#                           newest native core (Go MVS won't float on its own).
+#                           Chaining off the upstream run guarantees the mirror
+#                           tag is already present, so there is nothing to poll.
 #
-# No `paths` filter on push: GitHub drops tag pushes when paths is set (a tag on
-# an existing commit has no file diff), and we must react to moq-ffi-v* tags.
-# Stray main pushes are harmless — publish-wrapper.sh skips when the staged tree
+# Stray main pushes are harmless: publish-wrapper.sh skips when the staged tree
 # matches the mirror, so unchanged content never mints an empty patch release.
 
 on:
   push:
     branches:
       - main
-    tags:
-      - "moq-ffi-v*"
+  workflow_run:
+    workflows: ["Release Go FFI"]
+    types:
+      - completed
 
 permissions:
   contents: read
 
+# One at a time: publish-wrapper.sh derives the next patch from the mirror's
+# tags, so two concurrent runs could race to the same tag.
 concurrency:
-  group: release-go-${{ github.event_name }}-${{ github.ref }}
+  group: release-go
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build wrapper module
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'moq-dev' }}
+    # Owner gate, plus: only react to a successful Release Go FFI run for a
+    # moq-ffi-v* tag. Require event == 'push' so a fork PR whose head branch is
+    # named `moq-ffi-v*` can't satisfy head_branch and reach the publish secrets
+    # (workflow_run runs in the base repo's privileged context). Pushes here are
+    # unconditional.
+    if: >-
+      github.repository_owner == 'moq-dev' &&
+      (github.event_name == 'push' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -58,38 +78,51 @@ jobs:
           echo "line=$LINE" >> "$GITHUB_OUTPUT"
           echo "wrapper line: $LINE"
 
-      # The ffi version the wrapper should require: the triggering tag's version,
-      # or (on main push) the current crate version.
+      # The ffi version the wrapper should require: the version of the ffi that
+      # just published (workflow_run), or the current crate version (main push).
       - name: Resolve ffi version
         id: ffi
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/moq-ffi-v* ]]; then
-            .github/scripts/release.sh parse-version moq-ffi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            # Upstream tag ref, e.g. moq-ffi-v0.3.1.
+            VERSION="${HEAD_BRANCH#moq-ffi-v}"
+            echo "Triggered by Release Go FFI: ffi v$VERSION"
           else
-            CARGO_VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            echo "version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-            echo "Using ffi version from Cargo.toml: $CARGO_VERSION"
+            VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            echo "Using ffi version from Cargo.toml: $VERSION"
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # On a moq-ffi-v* tag the ffi mirror is published concurrently by
-      # release-go-ffi.yml; the wrapper can't resolve moq-go-ffi@vX.Y.Z (for
-      # go mod tidy) until that tag lands. Poll briefly before packaging.
-      - name: Wait for moq-go-ffi tag
+      # On a main push the wrapper pins the current crate's ffi, whose mirror tag
+      # already exists in steady state. If it's missing, a release is mid-flight
+      # (release-plz merged but Release Go FFI hasn't published yet): skip, since
+      # the workflow_run trigger republishes once the ffi lands. One existence
+      # check, no polling. workflow_run runs are chained after that publish, so
+      # the tag is guaranteed present and this gate doesn't run for them.
+      - name: Gate on published ffi (push only)
+        id: gate
+        if: github.event_name == 'push'
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: |
-          for i in $(seq 1 30); do
-            if git ls-remote --tags https://github.com/moq-dev/moq-go-ffi "refs/tags/v${FFI_VERSION}" | grep -q .; then
-              echo "moq-go-ffi v${FFI_VERSION} is published."
-              exit 0
-            fi
-            echo "Waiting for moq-go-ffi v${FFI_VERSION} to publish ($i/30)..."
-            sleep 10
-          done
-          echo "::error::moq-go-ffi v${FFI_VERSION} not published after timeout"
-          exit 1
+          # Distinguish "tag absent" from a lookup failure: a network error must
+          # fail loudly, not masquerade as "defer" (nothing retries a wrapper-only
+          # push, so a silent skip would drop the release).
+          if ! TAGS=$(git ls-remote --tags https://github.com/moq-dev/moq-go-ffi "refs/tags/v${FFI_VERSION}"); then
+            echo "::error::failed to query the moq-go-ffi mirror for tags"
+            exit 1
+          fi
+          if [[ -n "$TAGS" ]]; then
+            echo "moq-go-ffi v${FFI_VERSION} is published; proceeding."
+          else
+            echo "::warning::moq-go-ffi v${FFI_VERSION} not on the mirror yet; deferring to the Release Go FFI chain."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Package wrapper
+        if: steps.gate.outputs.skip != 'true'
         env:
           LINE: ${{ steps.line.outputs.line }}
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
@@ -97,6 +130,7 @@ jobs:
           ./go/scripts/package-wrapper.sh --line "$LINE" --ffi-version "$FFI_VERSION" --output release-out
 
       - name: Upload wrapper module
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: go-wrapper-package
@@ -105,6 +139,7 @@ jobs:
   publish:
     name: Publish to Go module mirror
     needs: [build]
+    if: needs.build.outputs.skip != 'true'
     runs-on: ubuntu-latest
 
     steps:
