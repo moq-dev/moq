@@ -1,6 +1,7 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
+import { canvasPresentationTransform } from "./presentation";
 
 // Fraction of the canvas that must intersect the viewport before it counts as visible.
 const INTERSECTION_THRESHOLD = 0.01;
@@ -181,14 +182,19 @@ export class Renderer {
 		ctx.fillStyle = "#000";
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-		// Apply horizontal flip if specified in the video config
-		const flip = this.decoder.source.out.catalog.peek()?.flip;
-		if (flip) {
-			ctx.scale(-1, 1);
-			ctx.translate(-ctx.canvas.width, 0);
+		// Apply rotation and horizontal flip from the latest video config.
+		const video = this.decoder.source.out.catalog.peek();
+		if (!video?.rotation) {
+			if (video?.flip) {
+				ctx.scale(-1, 1);
+				ctx.translate(-ctx.canvas.width, 0);
+			}
+			ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
+		} else {
+			const transform = canvasPresentationTransform(ctx.canvas, video);
+			ctx.setTransform(...transform.matrix);
+			ctx.drawImage(frame, 0, 0, transform.source.width, transform.source.height);
 		}
-
-		ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
 		ctx.restore();
 	}
 
