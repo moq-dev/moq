@@ -58,6 +58,8 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// The peer's SETUP (lite-05+), shared with the subscriber half that reads
 	/// it. Carries the peer's declared origin id for split-horizon serving.
 	pub peer_setup: super::PeerSetup,
+	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
+	pub goaway: crate::goaway::Protocol,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -73,6 +75,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	serving: std::sync::OnceLock<origin::Consumer>,
 	priority: PriorityQueue,
 	version: Version,
+	goaway: crate::goaway::Protocol,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
@@ -89,6 +92,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			serving: std::sync::OnceLock::new(),
 			priority: Default::default(),
 			version: config.version,
+			goaway: config.goaway,
 		}
 	}
 
@@ -146,12 +150,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				self.recv_probe(stream).await;
 				Ok(())
 			}
-			lite::ControlType::Goaway => {
-				tracing::info!("received goaway stream");
-				Ok(())
-			}
+			lite::ControlType::Goaway => self.recv_goaway(stream).await,
 			lite::ControlType::Session => Err(Error::UnexpectedStream),
 		}
+	}
+
+	/// Decode the peer's GOAWAY and surface it through [`crate::Session::goaway`].
+	///
+	/// A decode error propagates to the caller, which logs and continues: a
+	/// malformed GOAWAY must not tear down the session it is trying to drain.
+	async fn recv_goaway(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let msg: lite::Goaway = stream.reader.decode().await?;
+		tracing::info!(uri = %msg.uri, "received goaway");
+
+		let received = crate::GoawayReceived {
+			uri: Arc::from(msg.uri.as_ref()),
+			// moq-lite has no timeout field on the wire.
+			timeout: None,
+		};
+		// A peer sends at most one GOAWAY per session. Keep the first payload: an
+		// observer may already be acting on its URI, so a second GOAWAY must not
+		// swap the redirect target out from under it.
+		if !self.goaway.record(received) {
+			tracing::warn!(uri = %msg.uri, "duplicate GOAWAY received; ignoring");
+		}
+		Ok(())
 	}
 
 	async fn recv_probe(&self, mut stream: Stream<S, Version>) {

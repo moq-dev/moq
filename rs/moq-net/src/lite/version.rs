@@ -72,6 +72,17 @@ impl Version {
 		}
 	}
 
+	/// Whether the session supports the GOAWAY control stream (0x5) for graceful
+	/// shutdown and migration. Added in lite-04.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_goaway(self) -> bool {
+		// Match form so future versions default forward (CLAUDE.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
