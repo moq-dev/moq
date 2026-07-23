@@ -194,7 +194,7 @@ Per-connection QUIC transport knobs, applied to incoming connections
 
 ```toml
 [server.quic]
-# Congestion control: "loss" or "delay". Omit to keep the backend's default.
+# "loss" or "delay". Defaults per backend; don't set "delay" on noq/iroh (see below).
 congestion_control = "delay"
 
 [client.quic]
@@ -211,10 +211,14 @@ a different BBR generation:
 
 | Backend | `loss` | `delay` | Default when unset |
 | --- | --- | --- | --- |
-| quinn | CUBIC | BBRv1 | CUBIC |
-| quiche | CUBIC | BBRv2 | CUBIC |
-| noq | CUBIC | BBRv3 | BBRv3 |
-| iroh | CUBIC | BBRv3 | BBRv3 |
+| quinn | CUBIC | BBRv1 | BBRv1 |
+| quiche | CUBIC | BBRv2 | BBRv2 |
+| noq | CUBIC | BBRv3 | CUBIC |
+| iroh | CUBIC | BBRv3 | CUBIC |
+
+noq and iroh are the exception because their shared BBRv3 can panic on packet
+loss, which aborts the process. Do not select `delay` on those backends unless
+you are testing that controller on purpose and can tolerate the crash.
 
 Also available as `--server-quic-congestion-control` /
 `--client-quic-congestion-control`, or `MOQ_SERVER_QUIC_CONGESTION_CONTROL` /
