@@ -29,7 +29,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// server that gated on the client's path via [`accept_setup`]). It becomes the
 	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
 	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
-) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error> {
+	// GOAWAY wiring: the public Session holds one half (drain trigger, received
+	// signal), the protocol tasks below hold the other.
+	let (goaway_handle, goaway) = crate::goaway::Handle::new();
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
@@ -48,7 +51,42 @@ pub fn start<S: web_transport_trait::Session>(
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version, tasks);
+				let subscriber = Subscriber::new(
+					adapter.clone(),
+					subscribe,
+					control,
+					version,
+					tasks.clone(),
+					goaway.going_away.clone(),
+				);
+
+				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
+				// stream. Parked on the drain trigger; races the transport close so
+				// a parked trigger never blocks the task set draining.
+				{
+					let session = session.clone();
+					let adapter = adapter.clone();
+					let goaway = goaway.clone();
+					tasks.push(async move {
+						let payload = {
+							let mut closed = std::pin::pin!(async { session.closed().await });
+							let mut triggered = std::pin::pin!(goaway.triggered());
+							kio::wait(|waiter| {
+								if waiter.poll_future(closed.as_mut()).is_ready() {
+									return std::task::Poll::Ready(None);
+								}
+								waiter.poll_future(triggered.as_mut())
+							})
+							.await
+						};
+						let Some(payload) = payload else {
+							return;
+						};
+						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+						adapter.send_goaway(&payload.uri, timeout_ms, version);
+					});
+				}
+				drop(tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -56,8 +94,8 @@ pub fn start<S: web_transport_trait::Session>(
 
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
-				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
-				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version)));
+				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer, goaway.clone())));
+				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version, goaway)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
 					publisher.clone(),
@@ -107,11 +145,12 @@ pub fn start<S: web_transport_trait::Session>(
 				.await
 			}
 			_ => {
-				// Send SETUP and keep the stream alive for GOAWAY.
+				// Send SETUP and keep the stream alive: it is also our GOAWAY channel.
 				let setup = {
 					let session = session.clone();
+					let goaway = goaway.clone();
 					async move {
-						if let Err(err) = run_setup(session, version, path).await {
+						if let Err(err) = run_setup(session, version, path, goaway).await {
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -121,7 +160,14 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(None, client);
 				let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, version, tasks);
+				let subscriber = Subscriber::new(
+					session.clone(),
+					subscribe,
+					control,
+					version,
+					tasks,
+					goaway.going_away.clone(),
+				);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();
@@ -129,17 +175,20 @@ pub fn start<S: web_transport_trait::Session>(
 				// When the peer's SETUP was pre-read (a gated server accept), monitor
 				// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
 				// arrives on the wire.
-				let goaway = async move {
-					match peer_setup {
-						Some(reader) => run_goaway(reader.with_version(version), version).await,
-						None => std::future::pending().await,
+				let goaway_recv = {
+					let goaway = goaway.clone();
+					async move {
+						match peer_setup {
+							Some(reader) => run_goaway(reader.with_version(version), version, goaway).await,
+							None => std::future::pending().await,
+						}
 					}
 				};
 
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); `setup` never resolves (it holds the stream open) and the
 				// task set draining is the one clean exit.
-				let mut unis = std::pin::pin!(err_only(run_unis(session.clone(), subscriber.clone(), version)));
+				let mut unis = std::pin::pin!(err_only(run_unis(session.clone(), subscriber.clone(), version, goaway)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					session.clone(),
 					publisher.clone(),
@@ -147,7 +196,7 @@ pub fn start<S: web_transport_trait::Session>(
 					version
 				)));
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
-				let mut goaway = std::pin::pin!(err_only(goaway));
+				let mut goaway_recv = std::pin::pin!(err_only(goaway_recv));
 				let mut setup = std::pin::pin!(setup);
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let stream = Stream::open(&sub_ns_session, version).await?;
@@ -168,7 +217,7 @@ pub fn start<S: web_transport_trait::Session>(
 					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					if let Poll::Ready(err) = waiter.poll_future(goaway.as_mut()) {
+					if let Poll::Ready(err) = waiter.poll_future(goaway_recv.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
 					if waiter.poll_future(setup.as_mut()).is_ready() {
@@ -205,7 +254,7 @@ pub fn start<S: web_transport_trait::Session>(
 	}
 	.maybe_boxed();
 
-	Ok(driver)
+	Ok((driver, goaway_handle))
 }
 
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
@@ -247,7 +296,8 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 	}
 }
 
-/// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
+/// Send our SETUP on a uni stream and keep it alive: on draft-17+ this stream is
+/// also our GOAWAY channel, so a fired drain trigger encodes the GOAWAY here.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
 /// server passes `None`.
@@ -255,6 +305,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 	session: S,
 	version: Version,
 	path: Option<String>,
+	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -270,9 +321,48 @@ async fn run_setup<S: web_transport_trait::Session>(
 
 	writer.encode(&setup::Setup { parameters }).await?;
 
-	// Hold the writer alive until the session closes.
-	session.closed().await;
-	writer.finish().ok();
+	// Hold the writer alive until the session closes, sending a GOAWAY if the
+	// drain trigger fires meanwhile. The trigger resolves `None` when the session
+	// drops without draining; keep holding either way (closing this stream
+	// mid-session is a protocol violation on strict peers).
+	let payload = {
+		let mut closed = std::pin::pin!(session.closed());
+		let mut triggered = std::pin::pin!(goaway.triggered());
+		kio::wait(|waiter| {
+			if waiter.poll_future(closed.as_mut()).is_ready() {
+				return std::task::Poll::Ready(None);
+			}
+			waiter.poll_future(triggered.as_mut())
+		})
+		.await
+	};
+
+	if let Some(payload) = payload {
+		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+		let msg = ietf::GoAway {
+			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
+			timeout: timeout_ms,
+		};
+
+		// Frame as [type_id varint][size u16][body], the same shape as the
+		// control-stream messages this channel otherwise carries.
+		let mut body = bytes::BytesMut::new();
+		msg.encode_msg(&mut body, version)?;
+		let size: u16 = body
+			.len()
+			.try_into()
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+
+		let mut writer = writer.with_version(version);
+		writer.encode(&ietf::GoAway::ID).await?;
+		writer.encode(&size).await?;
+		writer.write_all(&mut std::io::Cursor::new(body)).await?;
+
+		session.closed().await;
+		writer.finish().ok();
+	} else {
+		writer.finish().ok();
+	}
 
 	Ok(())
 }
@@ -285,6 +375,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 	session: S,
 	subscriber: Subscriber<S>,
 	version: Version,
+	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
@@ -298,6 +389,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 		// We accept it in the background without blocking, since there are no
 		// extensions that require waiting on the SETUP before proceeding.
 		if kind == setup::SETUP_V17 {
+			let goaway = goaway.clone();
 			tasks.push(async move {
 				// Decode and discard the unified SETUP message.
 				if let Err(err) = reader.decode::<setup::Setup>().await {
@@ -306,7 +398,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 				}
 
 				// Monitor for GOAWAY after setup completes.
-				if let Err(err) = run_goaway(reader.with_version(version), version).await {
+				if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
 					tracing::warn!(%err, "goaway error");
 				}
 			});
@@ -390,10 +482,12 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	}
 }
 
-/// Block until GOAWAY or stream close.
+/// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
+/// [`crate::Session::goaway`], then hold the stream until it FINs.
 async fn run_goaway<R: web_transport_trait::RecvStream>(
 	mut reader: Reader<R, Version>,
 	version: Version,
+	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
 	let id: u64 = match reader.decode_maybe().await? {
 		Some(id) => id,
@@ -403,11 +497,42 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(
 	let size: u16 = reader.decode::<u16>().await?;
 	let mut data = reader.read_exact(size as usize).await?;
 
-	if id == ietf::GoAway::ID {
-		let msg = ietf::GoAway::decode_msg(&mut data, version)?;
-		tracing::debug!(message = ?msg, "received GOAWAY");
-		Err(Error::Unsupported)
-	} else {
-		Err(Error::UnexpectedMessage)
+	if id != ietf::GoAway::ID {
+		return Err(Error::UnexpectedMessage);
+	}
+
+	let msg = ietf::GoAway::decode_msg(&mut data, version)?;
+	tracing::info!(message = ?msg, "received GOAWAY");
+
+	let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
+	let received = crate::GoawayReceived {
+		uri: std::sync::Arc::from(msg.new_session_uri.as_ref()),
+		timeout,
+	};
+	if !goaway.record(received) {
+		tracing::warn!("duplicate GOAWAY received; ignoring");
+	}
+
+	// Keep the reader alive until the peer FINs or the session closes. Dropping
+	// it here would STOP_SENDING the peer's SETUP uni stream, which draft-19
+	// sect 3.3 forbids closing at the transport layer mid-session, so a strict
+	// peer would tear the session down as a PROTOCOL_VIOLATION right in the
+	// middle of the drain we are trying to honor.
+	//
+	// Nothing else is expected on this stream: a peer sends at most one GOAWAY
+	// per session. Read (and discard) any further framed messages so a
+	// duplicate GOAWAY is surfaced in the logs rather than silently consumed.
+	loop {
+		let id: u64 = match reader.decode_maybe().await? {
+			Some(id) => id,
+			None => return Ok(()),
+		};
+		let size: u16 = reader.decode::<u16>().await?;
+		let _ = reader.read_exact(size as usize).await?;
+		tracing::warn!(
+			id,
+			duplicate_goaway = id == ietf::GoAway::ID,
+			"unexpected message after GOAWAY on the SETUP stream; ignoring"
+		);
 	}
 }

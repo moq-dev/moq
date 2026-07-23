@@ -87,6 +87,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
+	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
+	// Error::GoingAway (the peer told us to stop opening streams).
+	going_away: crate::goaway::GoingAway,
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
@@ -108,7 +111,14 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: origin::Producer, control: Control, version: Version, tasks: Tasks) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Producer,
+		control: Control,
+		version: Version,
+		tasks: Tasks,
+		going_away: crate::goaway::GoingAway,
+	) -> Self {
 		Self {
 			session,
 			origin,
@@ -117,6 +127,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			state: Default::default(),
 			tasks,
 			version,
+			going_away,
 		}
 	}
 
@@ -673,6 +684,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
 		let info = track::Info::default().with_timescale(crate::Timescale::MICRO);
 		let mut track = request.accept(info);
+
+		// A peer that sent GOAWAY told us to stop opening streams on this session.
+		if self.going_away.is_set() {
+			let _ = track.abort(Error::GoingAway);
+			return;
+		}
 
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,

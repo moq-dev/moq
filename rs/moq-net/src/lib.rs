@@ -74,6 +74,7 @@
 mod client;
 mod coding;
 mod error;
+mod goaway;
 mod ietf;
 mod lite;
 mod model;
@@ -89,6 +90,7 @@ pub mod stats;
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use error::*;
+pub use goaway::GoawayReceived;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;

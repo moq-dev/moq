@@ -136,6 +136,19 @@ pub enum Error {
 	#[error("evicted")]
 	Evicted,
 
+	/// The session is going away (a GOAWAY was received); new subscribe and
+	/// announce-interest requests are rejected while existing subscriptions
+	/// keep flowing.
+	#[error("going away")]
+	GoingAway,
+
+	/// The peer did not close the session within the GOAWAY drain deadline.
+	///
+	/// Sent as the session termination code when the draining side force-closes
+	/// after the advertised deadline expires (see [`crate::Drain::start_with_timeout`]).
+	#[error("goaway timeout")]
+	GoawayTimeout,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -173,6 +186,8 @@ impl Error {
 			Self::TimestampMismatch => 29,
 			Self::Unroutable => 30,
 			Self::Evicted => 31,
+			Self::GoingAway => 32,
+			Self::GoawayTimeout => 33,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}
@@ -210,6 +225,8 @@ mod tests {
 		assert_eq!(Error::UnknownAlpn(String::new()).to_code(), 21);
 		assert_eq!(Error::Lagged.to_code(), 26);
 		assert_eq!(Error::Evicted.to_code(), 31);
+		assert_eq!(Error::GoingAway.to_code(), 32);
+		assert_eq!(Error::GoawayTimeout.to_code(), 33);
 		// App codes sit past the reserved library range; Remote is the raw received code.
 		assert_eq!(Error::App(0).to_code(), 64);
 		assert_eq!(Error::App(404).to_code(), 468);
