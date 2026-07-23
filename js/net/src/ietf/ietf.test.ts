@@ -653,6 +653,39 @@ test("GoAway v17: with timeout", async () => {
 	expect(decoded.timeout).toBe(5000n);
 });
 
+test("GoAway v18: appends the required Request ID", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+
+	// Draft-18 (#1559) requires a trailing Request ID on the control stream, so
+	// the v18 body must be exactly one varint longer than the v17 body. This
+	// locks byte-level parity with the Rust encoder.
+	const encoded17 = await encodeVersioned(msg, Version.DRAFT_17);
+	const encoded18 = await encodeVersioned(msg, Version.DRAFT_18);
+	expect(encoded18.byteLength).toBe(encoded17.byteLength + 1);
+
+	const decoded = await decodeVersioned(encoded18, GoAway.GoAway.decode, Version.DRAFT_18);
+	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
+	expect(decoded.timeout).toBe(5000n);
+});
+
+test("GoAway v19: round trip without the Request ID", async () => {
+	// Draft-19 (#1623) removed the Request ID again: the body is just URI + timeout.
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_19);
+	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_19);
+
+	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
+	expect(decoded.timeout).toBe(5000n);
+});
+
+test("GoAway: rejects New Session URI over the 8192-byte cap", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "a".repeat(8193) });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	await expect(decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_14)).rejects.toThrow(/8,192/);
+});
+
 test("Setup v17: unified 0x2F00 round trip", async () => {
 	const params = new SetupOptions();
 	params.setBytes(7n, new TextEncoder().encode("test-impl"));

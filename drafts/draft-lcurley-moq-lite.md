@@ -1107,6 +1107,7 @@ GOAWAY Message {
 **New Session URI**:
 A URI for the peer to reconnect to.
 An empty string indicates no redirect; the peer should simply close the session.
+The URI MUST NOT exceed 8,192 bytes; a receiver MUST treat a longer URI as a protocol violation and MAY reject it based on the length prefix alone.
 A recipient MUST validate the URI against local policy before reconnecting, including verifying the scheme, authority, and port are permitted.
 If validation fails, the recipient MUST close the session without reconnecting.
 
@@ -1169,6 +1170,7 @@ The `Message Length` describes the payload size on the wire.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
+- Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

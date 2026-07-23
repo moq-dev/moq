@@ -28,7 +28,13 @@ export class Goaway {
 	}
 
 	static async #decode(r: Reader): Promise<Goaway> {
-		return new Goaway(await r.string());
+		const uri = await r.string();
+		// The URI is capped at 8,192 bytes, matching the IETF wire and the Rust
+		// decoder; a longer one is a protocol violation.
+		if (new TextEncoder().encode(uri).byteLength > 8192) {
+			throw new Error("GOAWAY URI exceeds 8,192 bytes");
+		}
+		return new Goaway(uri);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
