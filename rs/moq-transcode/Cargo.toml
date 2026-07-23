@@ -18,7 +18,7 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 default = ["nvenc", "vaapi", "nvdec"]
 # NVIDIA NVENC hardware encoder (Linux, dlopen'd at runtime; a no-op elsewhere).
 nvenc = ["moq-video/nvenc"]
-# Intel/AMD VAAPI hardware encoder (Linux; links libva at build time).
+# Intel/AMD VAAPI hardware encoder (Linux; libva dlopen'd at runtime; a no-op elsewhere).
 vaapi = ["moq-video/vaapi"]
 # NVIDIA NVDEC hardware decoder (Linux, dlopen'd at runtime; a no-op elsewhere).
 # With `nvenc` this is the zero-copy GPU pipeline: NVDEC decodes and scales in

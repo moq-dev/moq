@@ -122,12 +122,10 @@
             # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
             # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
             pkgs.alsa-lib
-            # moq-video's VAAPI backend (always-on for Linux): moq-vaapi links
-            # libva via pkg-config at build time and the resulting binary carries
-            # NEEDED libva.so.2 / libva-drm.so.2, so libva must be present both to
-            # build and to run vaapi in the devShell. macOS has no VAAPI. (See
-            # #1837: if moq-vaapi switches to dlopen'ing libva, this stays needed
-            # only to run it, and a libva-less build/host would fall back cleanly.)
+            # moq-video's VAAPI backend (always-on for Linux): moq-vaapi dlopen's
+            # libva at runtime, so it isn't needed to build. This is here only to
+            # actually run vaapi in the devShell; a libva-less host loads and falls
+            # back cleanly. macOS has no VAAPI.
             pkgs.libva
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
