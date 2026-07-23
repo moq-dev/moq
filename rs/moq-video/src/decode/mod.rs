@@ -101,24 +101,30 @@ impl Frame {
 		}
 	}
 
-	/// The CoreVideo pixel buffer backing this frame, if it is still GPU-resident.
+	/// This frame as a CoreVideo pixel buffer, the mirror of
+	/// [`into_i420`](Self::into_i420) pointing the other way.
 	///
-	/// `Some` for a VideoToolbox-decoded frame (NV12, IOSurface-backed), `None`
-	/// once it is CPU-resident: the software decoder's output, or a frame already
-	/// downloaded. Borrowing is free and leaves the picture on the GPU, which is
-	/// the point. Wrap it in a `CVMetalTextureCache` to draw it, instead of paying
-	/// [`into_i420`](Self::into_i420) to bounce through the CPU and back.
+	/// Free for a hardware-decoded frame: it is already a `CVPixelBuffer`, so this
+	/// is a retain, and the picture never leaves the GPU. A CPU frame (the software
+	/// decoder's output) is uploaded into a fresh buffer instead, so this always
+	/// gives you something to draw rather than making you write the upload
+	/// yourself. Wrap the result in a `CVMetalTextureCache` to render it.
 	///
-	/// The buffer comes from the decoder's pool, so holding many frames holds pool
-	/// slots and eventually stalls decoding. Draw and drop, or download.
+	/// Check `CVPixelBufferGetPixelFormatType` before sampling: a hardware decode
+	/// hands back NV12 (bi-planar), while an uploaded CPU frame is planar I420.
+	///
+	/// A hardware-decoded buffer comes from the decoder's pool, so holding many
+	/// frames holds pool slots and eventually stalls decoding. Draw and drop.
 	///
 	/// Requires the `surface` feature. See [`objc2_core_video`] for the version
 	/// coupling that implies.
 	#[cfg(all(feature = "surface", target_os = "macos"))]
-	pub fn pixel_buffer(&self) -> Option<&objc2_core_video::CVPixelBuffer> {
-		match &self.inner {
-			crate::frame::Frame::Surface(surface) => Some(&surface.buffer),
-			_ => None,
+	pub fn into_pixel_buffer(
+		self,
+	) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, Error> {
+		match self.inner {
+			crate::frame::Frame::Surface(surface) => Ok(surface.buffer),
+			crate::frame::Frame::I420(i420) => crate::frame::macos::upload_i420(&i420),
 		}
 	}
 }
@@ -139,21 +145,26 @@ mod tests {
 		assert_send::<super::Consumer>();
 	}
 
-	/// `pixel_buffer` reports residency rather than always handing something back:
-	/// a CPU frame (software decode, or one already downloaded) has no surface.
+	/// `into_pixel_buffer` is total: a CPU frame uploads rather than failing, so a
+	/// renderer never has to write the upload itself. Software-decoded frames take
+	/// this path.
 	#[cfg(all(feature = "surface", target_os = "macos"))]
 	#[test]
-	fn pixel_buffer_is_none_when_cpu_resident() {
+	fn into_pixel_buffer_uploads_a_cpu_frame() {
+		use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+
 		let frame = super::Frame {
 			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
-			size: crate::Size::new(2, 2),
+			size: crate::Size::new(64, 32),
 			inner: crate::frame::Frame::I420(crate::frame::I420 {
-				width: 2,
-				height: 2,
-				data: vec![0; crate::frame::I420::len(2, 2)],
+				width: 64,
+				height: 32,
+				data: vec![0x80; crate::frame::I420::len(64, 32)],
 			}),
 		};
 
-		assert!(frame.pixel_buffer().is_none());
+		let buffer = frame.into_pixel_buffer().expect("upload a CPU frame");
+		assert_eq!(CVPixelBufferGetWidth(&buffer), 64);
+		assert_eq!(CVPixelBufferGetHeight(&buffer), 32);
 	}
 }

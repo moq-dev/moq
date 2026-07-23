@@ -44,7 +44,7 @@
 //! `default()`/`new()` and set fields, so new options stay additive.
 //!
 //! The one deliberate exception is the off-by-default `surface` feature, which
-//! exposes the GPU handle behind a decoded frame (`decode::Frame::pixel_buffer`)
+//! exposes the GPU handle behind a decoded frame (`decode::Frame::into_pixel_buffer`)
 //! so you can render or re-encode it yourself without a CPU round trip. That
 //! handle is a platform type, so enabling the feature couples you to the
 //! `objc2-core-video` version this crate links. It covers macOS only today:
@@ -66,8 +66,12 @@ mod mf;
 pub use error::Error;
 pub use size::Size;
 
-/// The CoreVideo bindings [`decode::Frame::pixel_buffer`] hands back, re-exported
-/// so you name the exact version this crate links rather than guessing at a
-/// matching one. A major bump here is a breaking change for `surface` users.
+/// The CoreFoundation bindings owning the handle [`decode::Frame::into_pixel_buffer`]
+/// returns, re-exported alongside [`objc2_core_video`] for the same reason.
+#[cfg(all(feature = "surface", target_os = "macos"))]
+pub use objc2_core_foundation;
+/// The CoreVideo bindings [`decode::Frame::into_pixel_buffer`] hands back,
+/// re-exported so you name the exact version this crate links rather than guessing
+/// at a matching one. A major bump here is a breaking change for `surface` users.
 #[cfg(all(feature = "surface", target_os = "macos"))]
 pub use objc2_core_video;

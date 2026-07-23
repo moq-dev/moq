@@ -334,12 +334,14 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 pub(crate) mod macos {
 	use std::ptr;
 
+	use std::ptr::NonNull;
+
 	use objc2_core_foundation::CFRetained;
 	use objc2_core_video::{
-		CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
 		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
 		CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 
 	use super::I420;
@@ -434,6 +436,60 @@ pub(crate) mod macos {
 	impl Drop for UnlockGuard<'_> {
 		fn drop(&mut self) {
 			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
+		}
+	}
+
+	/// Allocate a planar I420 `CVPixelBuffer` and copy the frame into it: the
+	/// upload half of [`Surface::download_i420`], for when the pixels are on the
+	/// CPU but a CoreVideo consumer (the VideoToolbox encoder, a renderer) needs a
+	/// buffer. Note the format is planar I420, not the NV12 a hardware decode
+	/// hands back, so callers query `CVPixelBufferGetPixelFormatType`.
+	pub(crate) fn upload_i420(frame: &I420) -> Result<CFRetained<CVPixelBuffer>, Error> {
+		let (w, h) = (frame.width as usize, frame.height as usize);
+		let (cw, ch) = (w / 2, h / 2);
+
+		let mut ptr: *mut CVPixelBuffer = std::ptr::null_mut();
+		let status = unsafe {
+			CVPixelBufferCreate(
+				None,
+				w,
+				h,
+				kCVPixelFormatType_420YpCbCr8Planar,
+				None,
+				NonNull::new(&mut ptr).unwrap(),
+			)
+		};
+		let buffer = NonNull::new(ptr)
+			.filter(|_| status == 0)
+			.map(|p| unsafe { CFRetained::from_raw(p) })
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
+
+		let flags = CVPixelBufferLockFlags(0);
+		let status = unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) };
+		if status != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"CVPixelBufferLockBaseAddress failed: {status}"
+			)));
+		}
+
+		copy_plane(&buffer, 0, frame.y(), w, h);
+		copy_plane(&buffer, 1, frame.u(), cw, ch);
+		copy_plane(&buffer, 2, frame.v(), cw, ch);
+
+		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+		Ok(buffer)
+	}
+
+	/// Copy a tightly-packed source plane into a pixel-buffer plane, honoring its
+	/// (possibly padded) row stride.
+	fn copy_plane(buffer: &CVPixelBuffer, plane: usize, src: &[u8], row_bytes: usize, rows: usize) {
+		let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) as *mut u8;
+		let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+		for y in 0..rows {
+			unsafe {
+				let dst = base.add(y * stride);
+				std::ptr::copy_nonoverlapping(src[y * row_bytes..].as_ptr(), dst, row_bytes);
+			}
 		}
 	}
 }
