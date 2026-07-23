@@ -659,13 +659,13 @@ impl Subscriber {
 		let mut all_done = true;
 		for seg in &mut self.segments {
 			// Re-offer a group parked at the cap once the cap rises.
-			if let Some(group) = seg.parked.take_if(|group| !beyond_cap(group.sequence)) {
-				if group.sequence >= self.min_sequence {
-					self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
-					return Poll::Ready(Ok(Some(group)));
-				}
-				// A `start_at` overtook the parked group; drop it and read on.
+			if let Some(group) = seg.parked.take_if(|group| !beyond_cap(group.sequence))
+				&& group.sequence >= self.min_sequence
+			{
+				self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
+				return Poll::Ready(Ok(Some(group)));
 			}
+			// A `start_at` overtook the parked group; drop it and read on.
 			if seg.parked.is_some() {
 				// Still capped: the segment isn't done, it's parked.
 				all_done = false;

@@ -568,8 +568,8 @@ mod tests {
 			}
 		};
 
-		assert!(stream.width() >= 2 && stream.width() % 2 == 0, "bad width");
-		assert!(stream.height() >= 2 && stream.height() % 2 == 0, "bad height");
+		assert!(stream.width() >= 2 && stream.width().is_multiple_of(2), "bad width");
+		assert!(stream.height() >= 2 && stream.height().is_multiple_of(2), "bad height");
 
 		for i in 0..5 {
 			let frame = stream.read().await.unwrap_or_else(|| panic!("no frame {i}"));

@@ -70,7 +70,7 @@ impl Resampler {
 	/// Returns whatever the resampler can produce given the input and
 	/// the chunk size; remaining samples are buffered for the next call.
 	pub fn process(&mut self, samples: &[f32]) -> Result<Vec<f32>, Error> {
-		if samples.len() % self.channels != 0 {
+		if !samples.len().is_multiple_of(self.channels) {
 			return Err(Error::Misaligned {
 				got: samples.len(),
 				expected: samples.len().next_multiple_of(self.channels),

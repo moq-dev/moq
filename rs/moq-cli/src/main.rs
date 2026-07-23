@@ -104,10 +104,10 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	// platform capture stream is not Send, so its future cannot be spawned.
 	let mut local: Option<Publish> = None;
 
-	if let ImportSource::Rtc(rtc) = &import.source {
-		if rtc.connect.is_some() {
-			reject_listener_cors(&rtc.cors, "import rtc")?;
-		}
+	if let ImportSource::Rtc(rtc) = &import.source
+		&& rtc.connect.is_some()
+	{
+		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
 	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
@@ -119,18 +119,18 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	let mut send_bandwidth = None;
 
 	// MoQ side: publish the Origin outward.
-	if moq.client.connect.is_some() {
-		if let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume()) {
-			moq::notify_ready();
-			// Read before the handle moves into the task. This consumer is
-			// persistent: it survives reconnects, reading `None` while down, so it
-			// can be wired up before anything connects.
-			#[cfg(feature = "capture")]
-			{
-				send_bandwidth = Some(reconnect.send_bandwidth());
-			}
-			tasks.spawn(async move { Ok(reconnect.closed().await?) });
+	if moq.client.connect.is_some()
+		&& let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume())
+	{
+		moq::notify_ready();
+		// Read before the handle moves into the task. This consumer is
+		// persistent: it survives reconnects, reading `None` while down, so it
+		// can be wired up before anything connects.
+		#[cfg(feature = "capture")]
+		{
+			send_bandwidth = Some(reconnect.send_bandwidth());
 		}
+		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;
@@ -215,18 +215,18 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
 
-	if let ExportSink::Rtc(rtc) = &export.sink {
-		if rtc.connect.is_some() {
-			reject_listener_cors(&rtc.cors, "export rtc")?;
-		}
+	if let ExportSink::Rtc(rtc) = &export.sink
+		&& rtc.connect.is_some()
+	{
+		reject_listener_cors(&rtc.cors, "export rtc")?;
 	}
 
 	// MoQ side: fill the Origin.
-	if moq.client.connect.is_some() {
-		if let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone()) {
-			moq::notify_ready();
-			tasks.spawn(async move { Ok(reconnect.closed().await?) });
-		}
+	if moq.client.connect.is_some()
+		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
+	{
+		moq::notify_ready();
+		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	if let Some(web_bind) = moq.server.bind.clone() {
 		let server = net.server(moq.server.clone())?;

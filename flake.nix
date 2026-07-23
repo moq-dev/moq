@@ -50,7 +50,12 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        rust-toolchain = pkgs.rust-bin.stable.latest.default.override {
+        # Pinned build toolchain (not latest stable) so `nix develop` and CI
+        # compile against a fixed rustc and the relay's MSRV can't creep up
+        # unnoticed. Set to moq-relay's 1.95 (the highest crate MSRV in the
+        # workspace) so the whole workspace, including the relay, builds; the
+        # library crates declare a lower 1.91 floor (Cargo.toml rust-version).
+        rust-toolchain = pkgs.rust-bin.stable."1.95.0".default.override {
           extensions = [
             "rust-src"
             "rust-analyzer"

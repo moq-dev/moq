@@ -2,16 +2,17 @@
 { crane }:
 final: prev:
 let
-  # Pin crane to rust-overlay's latest stable so `nix build` uses the same
-  # toolchain as `nix develop`. Without this, crane falls back to
-  # `final.rustc`/`final.cargo`, which nixpkgs resolves to its default Rust
-  # (currently 1.94) while the devShell pulls 1.95 from rust-overlay.
+  # Pin crane to the workspace MSRV (Cargo.toml rust-version /
+  # rust-toolchain.toml) so `nix build` uses the same toolchain as
+  # `nix develop` and release artifacts build with the version CI verifies.
+  # Without an explicit toolchain, crane falls back to `final.rustc`/
+  # `final.cargo`, which nixpkgs resolves to its own default Rust.
   #
   # Add both Apple targets so an aarch64-darwin host can cross-compile the
   # x86_64-darwin release artifacts (Apple's clang is multi-arch, so no
   # emulated x86_64 toolchain is needed). The default profile only ships
   # std for the host triple, which is why the target list is explicit.
-  rustToolchain = final.rust-bin.stable.latest.default.override {
+  rustToolchain = final.rust-bin.stable."1.95.0".default.override {
     targets = final.lib.optionals final.stdenv.isDarwin [
       "x86_64-apple-darwin"
       "aarch64-apple-darwin"

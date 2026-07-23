@@ -282,10 +282,10 @@ impl Hvc1 {
 			}
 		}
 
-		if let Some(nal) = nal_iter.flush()? {
-			if process_nal(&nal, &mut out, &mut frame_vps, &mut frame_sps, &mut frame_pps)? {
-				emitted_any_slice = true;
-			}
+		if let Some(nal) = nal_iter.flush()?
+			&& process_nal(&nal, &mut out, &mut frame_vps, &mut frame_sps, &mut frame_pps)?
+		{
+			emitted_any_slice = true;
 		}
 
 		// A frame that carries parameter sets (a keyframe) redefines the active

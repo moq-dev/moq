@@ -1986,10 +1986,10 @@ impl Consumer {
 				broadcast,
 			} = announced.next().await?;
 			// `scope` narrows by prefix, but we only want an exact-path match.
-			if announced_path.as_path() == path {
-				if let Some(broadcast) = broadcast {
-					return Some(broadcast.with_stats(scope));
-				}
+			if announced_path.as_path() == path
+				&& let Some(broadcast) = broadcast
+			{
+				return Some(broadcast.with_stats(scope));
 			}
 		}
 	}

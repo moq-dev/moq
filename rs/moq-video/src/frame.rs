@@ -518,7 +518,7 @@ pub(crate) mod cuda {
 		/// Allocate an NV12 buffer for `width` x `height` (both even) at row
 		/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
 		pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
-			debug_assert!(pitch >= width && width % 2 == 0 && height % 2 == 0);
+			debug_assert!(pitch >= width && width.is_multiple_of(2) && height.is_multiple_of(2));
 			let len = pitch as usize * height as usize * 3 / 2;
 			ctx.bind_to_thread()
 				.map_err(|e| Error::Codec(anyhow::anyhow!("CUDA bind: {e:?}")))?;

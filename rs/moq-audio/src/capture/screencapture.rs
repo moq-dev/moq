@@ -302,11 +302,11 @@ define_class!(
 			if kind.0 != SCStreamOutputType::Audio.0 {
 				return;
 			}
-			if let Some(buffer) = samples(sample_buffer) {
-				if let Some(tx) = self.ivars().tx.lock().unwrap().as_ref() {
-					// Send errors mean the reader is gone, i.e. capture is shutting down.
-					let _ = tx.send(buffer);
-				}
+			if let Some(buffer) = samples(sample_buffer)
+				&& let Some(tx) = self.ivars().tx.lock().unwrap().as_ref()
+			{
+				// Send errors mean the reader is gone, i.e. capture is shutting down.
+				let _ = tx.send(buffer);
 			}
 		}
 	}
