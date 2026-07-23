@@ -406,6 +406,41 @@ pub extern "C" fn moq_error() -> *const c_char {
 	ffi::last_error_ptr()
 }
 
+/// Disable TLS certificate verification for all future sessions.
+///
+/// Global setting; call before [moq_session_connect]. Convenient for local development
+/// against a self-signed relay; use with caution in production.
+///
+/// Returns a zero on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_tls_disable_verify(disable: bool) -> i32 {
+	ffi::enter(move || {
+		State::lock().tls_disable_verify = disable;
+		Ok(())
+	})
+}
+
+/// Configure the exponential backoff used when a session reconnects.
+///
+/// Global setting; call before [moq_session_connect]. Durations are in milliseconds.
+/// `multiplier` scales the delay after each failed attempt. A `timeout_ms` of 0 retries
+/// forever; otherwise reconnection gives up (delivering a terminal negative status) once
+/// the timeout is exceeded.
+///
+/// Returns a zero on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_backoff_config(initial_ms: u64, multiplier: u32, max_ms: u64, timeout_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let mut backoff = moq_native::Backoff::default();
+		backoff.initial = std::time::Duration::from_millis(initial_ms);
+		backoff.multiplier = multiplier;
+		backoff.max = std::time::Duration::from_millis(max_ms);
+		backoff.timeout = std::time::Duration::from_millis(timeout_ms);
+		State::lock().backoff = backoff;
+		Ok(())
+	})
+}
+
 /// Start establishing a connection to a MoQ server.
 ///
 /// Takes origin handles, which are used for publishing and consuming broadcasts respectively.
@@ -461,8 +496,12 @@ pub unsafe extern "C" fn moq_session_connect(
 			.transpose()?
 			.cloned();
 
+		let tls_disable_verify = state.tls_disable_verify;
+		let backoff = state.backoff.clone();
 		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
-		state.session.connect(url, publish, consume, on_status)
+		state
+			.session
+			.connect(url, publish, consume, tls_disable_verify, backoff, on_status)
 	})
 }
 

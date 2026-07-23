@@ -30,9 +30,14 @@ impl Session {
 		url: Url,
 		publish: Option<moq_net::origin::Producer>,
 		consume: Option<moq_net::origin::Producer>,
+		tls_disable_verify: bool,
+		backoff: moq_native::Backoff,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
-		let mut client = moq_native::ClientConfig::default().init()?;
+		let mut config = moq_native::ClientConfig::default();
+		config.tls.disable_verify = Some(tls_disable_verify);
+		config.backoff = backoff;
+		let mut client = config.init()?;
 		if let Some(publish) = &publish {
 			client = client.with_publisher(publish);
 		}
