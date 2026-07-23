@@ -42,6 +42,13 @@
 //! internal. So swapping or bumping any backend crate is not a breaking change
 //! for consumers. Config structs are `#[non_exhaustive]`: build them via
 //! `default()`/`new()` and set fields, so new options stay additive.
+//!
+//! The one deliberate exception is the off-by-default `surface` feature, which
+//! exposes the GPU handle behind a decoded frame (`decode::Frame::pixel_buffer`)
+//! so you can render or re-encode it yourself without a CPU round trip. That
+//! handle is a platform type, so enabling the feature couples you to the
+//! `objc2-core-video` version this crate links. Leave it off and the guarantee
+//! above holds unchanged.
 
 pub mod capture;
 pub mod decode;
@@ -56,3 +63,9 @@ mod mf;
 
 pub use error::Error;
 pub use size::Size;
+
+/// The CoreVideo bindings [`decode::Frame::pixel_buffer`] hands back, re-exported
+/// so you name the exact version this crate links rather than guessing at a
+/// matching one. A major bump here is a breaking change for `surface` users.
+#[cfg(all(feature = "surface", target_os = "macos"))]
+pub use objc2_core_video;

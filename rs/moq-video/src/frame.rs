@@ -1,9 +1,9 @@
-//! The frame handed from capture to an encoder backend.
+//! The frame passed between capture, the codec backends, and the consumer.
 //!
 //! Representations chosen so the common path stays zero-copy:
-//! - [`Frame::Surface`] is a macOS `CVPixelBuffer` (IOSurface-backed NV12). The
-//!   capture source produces it and VideoToolbox consumes it directly, no copy
-//!   and no color conversion.
+//! - [`Frame::Surface`] is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
+//!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
+//!   encoder consumes it directly, no copy and no color conversion.
 //! - [`Frame::Texture`] is a Windows Direct3D11 NV12 texture. Media Foundation
 //!   capture produces it on a shared D3D11 device and the hardware encoder MFT
 //!   consumes it on that same device, also zero-copy.
@@ -360,11 +360,11 @@ pub(crate) mod macos {
 	// an IOSurface. Retain/release are thread-safe, every &self access is a
 	// plain field read or a read-only CVPixelBufferLockBaseAddress, and no code
 	// path write-locks a shared surface, so the handle can move between threads
-	// (capture delegate -> encode loop) and be shared by reference. objc2
-	// leaves CoreVideo types !Send/!Sync out of conservatism. Sync exists for
-	// the enum-level bound: moq-transcode shares Arc<decode::Frame>, which
-	// needs every variant Sync even though macOS decoded frames are always
-	// downloaded to I420 before they reach that fanout.
+	// (capture delegate -> encode loop, decode callback -> consumer) and be
+	// shared by reference. objc2 leaves CoreVideo types !Send/!Sync out of
+	// conservatism. Sync is load-bearing: the VideoToolbox decoder hands these
+	// out as decoded frames, and moq-transcode shares them as Arc<decode::Frame>
+	// across its rung fanout.
 	unsafe impl Send for Surface {}
 	unsafe impl Sync for Surface {}
 

@@ -56,8 +56,11 @@ GPU-less builder and still starts on a GPU-less machine.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw I420 frames. Backends are tried
-hardware-first, like encode:
+H.264, H.265, or AV1 track and returns raw frames. A hardware-decoded frame stays
+on the GPU: `into_i420()` downloads it, feeding it back to `encode::Encoder`
+keeps it there (the transcode path), and the `surface` feature exposes the
+underlying handle so you can draw it yourself. Backends are tried hardware-first,
+like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|

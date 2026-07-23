@@ -315,6 +315,39 @@ mod tests {
 		round_trip(h264_software_encoder(), decoder, "videotoolbox");
 	}
 
+	/// VideoToolbox hands back its `CVPixelBuffer` rather than packing to I420 in
+	/// the output callback, which is what leaves a render or re-encode path free of
+	/// a CPU round trip. `round_trip` above only checks the pixels, so it passes
+	/// either way: this is the test that pins the frame's residency.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_decode_stays_gpu_resident() {
+		let mut encoder = h264_software_encoder();
+		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
+			.expect("videotoolbox decoder");
+
+		let rgba = gray_rgba(320, 240);
+		let mut decoded = Vec::new();
+		for i in 0..3u64 {
+			let keyframe = i == 0;
+			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
+			for packet in encoder
+				.encode_rgba(&rgba, crate::Size::new(320, 240), keyframe)
+				.unwrap()
+			{
+				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
+			}
+		}
+
+		assert!(!decoded.is_empty(), "decoder produced no frames");
+		for out in &decoded {
+			assert!(
+				matches!(out.frame, crate::frame::Frame::Surface(_)),
+				"VideoToolbox decode downloaded to the CPU instead of keeping its surface"
+			);
+		}
+	}
+
 	/// H.265 has no software path, so the HEVC round-trip rides VideoToolbox on
 	/// both ends: hardware HEVC encode emitting hev1 (inline VPS/SPS/PPS) and
 	/// hardware HEVC decode. Skips cleanly on a Mac without HEVC hardware (older

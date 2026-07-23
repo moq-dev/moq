@@ -99,6 +99,27 @@ impl Frame {
 			other => Ok(Bytes::from(other.to_i420()?.into_owned().data)),
 		}
 	}
+
+	/// The CoreVideo pixel buffer backing this frame, if it is still GPU-resident.
+	///
+	/// `Some` for a VideoToolbox-decoded frame (NV12, IOSurface-backed), `None`
+	/// once it is CPU-resident: the software decoder's output, or a frame already
+	/// downloaded. Borrowing is free and leaves the picture on the GPU, which is
+	/// the point. Wrap it in a `CVMetalTextureCache` to draw it, instead of paying
+	/// [`into_i420`](Self::into_i420) to bounce through the CPU and back.
+	///
+	/// The buffer comes from the decoder's pool, so holding many frames holds pool
+	/// slots and eventually stalls decoding. Draw and drop, or download.
+	///
+	/// Requires the `surface` feature. See [`objc2_core_video`] for the version
+	/// coupling that implies.
+	#[cfg(all(feature = "surface", target_os = "macos"))]
+	pub fn pixel_buffer(&self) -> Option<&objc2_core_video::CVPixelBuffer> {
+		match &self.inner {
+			crate::frame::Frame::Surface(surface) => Some(&surface.buffer),
+			_ => None,
+		}
+	}
 }
 
 #[cfg(test)]
@@ -115,5 +136,23 @@ mod tests {
 		assert_send::<super::Frame>();
 		assert_sync::<super::Frame>();
 		assert_send::<super::Consumer>();
+	}
+
+	/// `pixel_buffer` reports residency rather than always handing something back:
+	/// a CPU frame (software decode, or one already downloaded) has no surface.
+	#[cfg(all(feature = "surface", target_os = "macos"))]
+	#[test]
+	fn pixel_buffer_is_none_when_cpu_resident() {
+		let frame = super::Frame {
+			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			size: crate::Size::new(2, 2),
+			inner: crate::frame::Frame::I420(crate::frame::I420 {
+				width: 2,
+				height: 2,
+				data: vec![0; crate::frame::I420::len(2, 2)],
+			}),
+		};
+
+		assert!(frame.pixel_buffer().is_none());
 	}
 }
