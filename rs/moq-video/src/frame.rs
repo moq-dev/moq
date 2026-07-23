@@ -320,7 +320,7 @@ impl I420 {
 
 	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
 	/// convolution: Y at full size, U/V at quarter size. The CPU half of
-	/// [`decode::Surface::resize`](crate::decode::Surface::resize).
+	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
 	pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 		use std::cell::RefCell;
 
@@ -689,7 +689,7 @@ pub mod cuda {
 		pub(crate) pitch: u32,
 	}
 
-	impl Surface {
+	impl Frame {
 		/// Allocate an NV12 buffer for `width` x `height` (both even) at row
 		/// pitch `pitch`. Uninitialized: the caller copies the full extent in.
 		pub(crate) fn alloc(ctx: &Arc<CudaContext>, width: u32, height: u32, pitch: u32) -> Result<Self, Error> {
@@ -761,7 +761,7 @@ pub mod cuda {
 
 		/// Resize to `width` x `height` (both even) with the box-filter kernel,
 		/// staying in device memory. The GPU half of
-		/// [`decode::Surface::resize`](crate::decode::Surface::resize).
+		/// [`decode::Frame::resize`](crate::decode::Frame::resize).
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let ctx = &self.buf.ctx;
 			let kernels = kernels(ctx)?;
