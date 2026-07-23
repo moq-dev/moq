@@ -170,6 +170,11 @@ struct BroadcastState {
 	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
 	// tell a deliberate shutdown apart from a producer dropped by accident.
 	closing: bool,
+
+	// Set only by `Producer::finish()`: the broadcast ended deliberately, as
+	// opposed to aborting or losing its producer. The origin reads this to decide
+	// whether a detached source may linger for a replacement.
+	finished: bool,
 }
 
 /// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
@@ -453,7 +458,11 @@ impl Producer {
 	/// declares the end, so it must not depend on the caller also surrendering the
 	/// handle.
 	pub fn finish(&mut self) {
-		self.state.lock().closing = true;
+		{
+			let mut state = self.state.lock();
+			state.closing = true;
+			state.finished = true;
+		}
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
 		let _ = self.alive.close();
@@ -860,6 +869,13 @@ impl Consumer {
 	/// than a strike.
 	pub(crate) fn is_closing(&self) -> bool {
 		self.is_closed() || self.state.read().closing
+	}
+
+	/// Whether the broadcast ended via an explicit [`Producer::finish`], as opposed
+	/// to aborting or losing its producer. The origin uses this to close a front
+	/// immediately on a deliberate end instead of lingering for a replacement.
+	pub(crate) fn is_finished(&self) -> bool {
+		self.state.read().finished
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
