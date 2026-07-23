@@ -63,11 +63,13 @@ resolver = "2"
 
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-native) needs 1.91. This is
-# what library consumers see. moq-relay overrides it to 1.95 (sysinfo 0.39); it
-# is a binary, so that higher floor never propagates to anyone building on the
-# libraries. The nix flake / rust-toolchain.toml pin the build toolchain (1.95,
-# so the whole workspace including the relay compiles) rather than latest
-# stable, which keeps the relay's ceiling from silently creeping up unnoticed.
+# what consumers of moq-net / hang / moq-native / etc. see. moq-relay overrides
+# it to 1.95 (sysinfo 0.39). moq-relay is lib+bin, so 1.95 does apply to its
+# own library target, but that crate is an application with no external
+# consumers; the point of the override is to keep the bump off the libraries
+# others actually build on. The nix flake / rust-toolchain.toml pin the build
+# toolchain to 1.95 (so the whole workspace including the relay compiles) rather
+# than latest stable, which keeps the relay's ceiling from creeping up unnoticed.
 rust-version = "1.91"
 
 [workspace.dependencies]

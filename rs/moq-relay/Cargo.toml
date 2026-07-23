@@ -8,8 +8,10 @@ license = "MIT OR Apache-2.0"
 version = "0.14.0"
 edition = "2024"
 # sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
-# workspace floor. moq-relay is a binary, so this doesn't reach library
-# consumers; keep it a per-crate override rather than raising the workspace.
+# workspace floor. moq-relay is lib+bin, so this applies to its library target
+# too, but the crate is an application with no external consumers; keeping the
+# bump per-crate holds it off the libraries others build on rather than raising
+# the whole workspace.
 rust-version = "1.95"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
