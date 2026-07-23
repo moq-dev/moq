@@ -114,7 +114,8 @@ pub struct Info {
 	/// splices in seamlessly, so consumers never observe the gap. A source that ends
 	/// deliberately ([`broadcast::Producer::finish`], a clean unannounce from a peer)
 	/// closes the broadcast immediately regardless. Zero (the default) closes
-	/// immediately either way.
+	/// immediately either way; a duration too large to represent as a deadline
+	/// (e.g. [`Duration::MAX`]) lingers indefinitely.
 	pub linger: Duration,
 }
 
@@ -826,6 +827,19 @@ impl Producer {
 		self
 	}
 
+	/// Set the linger (see [`Info::linger`]) for broadcasts created through this
+	/// handle and any handle derived from it.
+	///
+	/// A broadcast adopts the window of the handle whose source *created* it (the
+	/// first source at the path), so set this before handing the producer to
+	/// whatever attaches sources through it (e.g. a session). Lets one supplier
+	/// declare its own recovery promise, like a reconnecting client lingering for
+	/// as long as its retry loop keeps trying, without reconfiguring the origin.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
 	/// This origin's [`Info`] (identity + cache pool), the parent handle a broadcast
 	/// created under this origin carries (see [`broadcast::Info::origin`]).
 	pub fn info(&self) -> Info {
@@ -1368,7 +1382,9 @@ async fn run_front(
 			!s.closed && s.routes.is_empty()
 		};
 		deadline = match (empty, deadline) {
-			(true, None) => Some(web_async::time::Instant::now() + linger),
+			// An unrepresentable deadline (e.g. `Duration::MAX`) lingers forever:
+			// no timer, only a re-attach or teardown moves the front on.
+			(true, None) => web_async::time::Instant::now().checked_add(linger),
 			(true, at) => at,
 			(false, _) => None,
 		};
@@ -3491,6 +3507,38 @@ mod tests {
 			!fresh.is_clone(&broadcast),
 			"a late re-create must not splice the expired broadcast"
 		);
+	}
+
+	/// A linger too large to represent as a deadline never expires: the broadcast
+	/// outlives an arbitrarily long outage (a reconnect loop with no give-up
+	/// timeout promises to retry forever).
+	#[tokio::test(start_paused = true)]
+	async fn test_linger_forever() {
+		let origin = Info::new(Origin::random()).with_linger(Duration::MAX).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next_some("test");
+
+		source.abort();
+		drop(source);
+		settle().await;
+
+		// Days later the broadcast is still announced and still splices a reconnect.
+		tokio::time::sleep(std::time::Duration::from_secs(60 * 60 * 24 * 3)).await;
+		announced.assert_next_wait();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		settle().await;
+		settle().await;
+		let again = consumer.request_broadcast("test").await.unwrap();
+		assert!(again.is_clone(&broadcast), "the reconnect must splice, not replace");
+		drop(source);
 	}
 
 	/// A deliberate finish never lingers, even with a linger configured: a clean
