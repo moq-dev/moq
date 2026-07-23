@@ -137,7 +137,8 @@ pub struct Client {
 	pub mtu_discovery: Option<bool>,
 
 	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq and iroh, whose BBRv3 is not yet fit to run by default.
+	/// `loss` on noq and iroh, whose shared BBRv3 can panic on packet loss and take
+	/// the process with it. Selecting `delay` there is for deliberate testing only.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-quic-congestion-control",
@@ -252,7 +253,8 @@ pub struct Server {
 	pub mtu_discovery: Option<bool>,
 
 	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
-	/// `loss` on noq, whose BBRv3 is not yet fit to run by default.
+	/// `loss` on noq, whose BBRv3 can panic on packet loss and take the process with
+	/// it. Selecting `delay` there is for deliberate testing only.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "server-quic-congestion-control",
