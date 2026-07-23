@@ -16,6 +16,15 @@ categories = ["multimedia", "network-programming", "web-programming"]
 name = "moq"
 crate-type = ["staticlib"]
 
+[features]
+# No hardware / system-dep video by default: a stock libmoq builds with no libva/CUDA.
+# Opt into native video decode (the moq_consume_video* C API) with `--features hw-video`,
+# which pulls in moq-video (NVENC/VAAPI/NVDEC); its vaapi backend links libva at build time.
+# Mirrors moq-cli's capture/transcode: hardware / system deps are opt-in, never assumed.
+# INVARIANT: libmoq MUST keep building with --no-default-features (no libva/CUDA). CI enforces this.
+default = []
+hw-video = ["dep:moq-video"]
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
@@ -25,8 +34,9 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
-# Enable the NVENC / VAAPI / NVDEC hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvenc", "vaapi", "nvdec"] }
+# Optional, behind the `hw-video` feature: native video decode for the moq_consume_video* C API.
+# Keeps its default NVENC/VAAPI/NVDEC backends; the vaapi backend links libva at build time.
+moq-video = { workspace = true, optional = true }
 serde_json = "1"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }

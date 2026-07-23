@@ -10,12 +10,17 @@
 //! terminal error on the callback.
 
 use std::ffi::c_void;
+#[cfg(feature = "hw-video")]
 use std::time::Duration;
 
+#[cfg(feature = "hw-video")]
 use tokio::sync::oneshot;
 
+#[cfg(feature = "hw-video")]
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, ffi};
+use crate::{Error, ffi};
+#[cfg(feature = "hw-video")]
+use crate::{Id, NonZeroSlab, State};
 
 // ---- C-visible types ----
 
@@ -24,6 +29,7 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 /// Output is always tightly-packed I420 (see [`moq_video_frame`]); there is no
 /// format/resolution knob yet. The struct exists so future options (a pixel
 /// format, a target size) stay additive.
+#[cfg_attr(not(feature = "hw-video"), allow(dead_code))]
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
@@ -41,6 +47,7 @@ pub struct moq_video_decoder_output {
 /// limited range. `width` and `height` are even. `data` is owned by the consume
 /// slab and stays valid until the same id is released with
 /// [`moq_consume_video_raw_frame_free`].
+#[cfg_attr(not(feature = "hw-video"), allow(dead_code))]
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_frame {
@@ -54,6 +61,7 @@ pub struct moq_video_frame {
 // ---- State extension (used internally by lib.rs) ----
 
 /// Raw-video consume state: decoder tasks plus their buffered decoded frames.
+#[cfg(feature = "hw-video")]
 #[derive(Default)]
 pub struct Video {
 	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
@@ -63,6 +71,7 @@ pub struct Video {
 /// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
 /// out a stable byte pointer, so a GPU-decoded frame (e.g. NVDEC) is downloaded
 /// exactly once here.
+#[cfg(feature = "hw-video")]
 struct VideoFrame {
 	timestamp_us: u64,
 	width: u32,
@@ -76,11 +85,13 @@ struct VideoFrame {
 /// terminal callback and then removes itself, so `user_data` stays valid until
 /// that callback fires. `close` is an `Option` so `consume_close` can drop just
 /// the sender without removing the entry.
+#[cfg(feature = "hw-video")]
 struct VideoTaskEntry {
 	close: Option<oneshot::Sender<()>>,
 	callback: OnStatus,
 }
 
+#[cfg(feature = "hw-video")]
 impl Video {
 	pub fn consume(
 		&mut self,
@@ -202,6 +213,7 @@ impl Video {
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
 /// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
+#[cfg(feature = "hw-video")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_raw(
 	catalog: u32,
@@ -237,6 +249,7 @@ pub unsafe extern "C" fn moq_consume_video_raw(
 /// terminal `0` (or a negative error), which is where `user_data` should be
 /// released. Frame ids already delivered are likewise not freed; release each
 /// with [`moq_consume_video_raw_frame_free`].
+#[cfg(feature = "hw-video")]
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_video_raw_close(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -252,6 +265,7 @@ pub extern "C" fn moq_consume_video_raw_close(consumer: u32) -> i32 {
 ///
 /// # Safety
 /// - `dst` must point to a writable [`moq_video_frame`].
+#[cfg(feature = "hw-video")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_raw_frame(id: u32, dst: *mut moq_video_frame) -> i32 {
 	ffi::enter(move || {
@@ -263,10 +277,62 @@ pub unsafe extern "C" fn moq_consume_video_raw_frame(id: u32, dst: *mut moq_vide
 
 /// Free a frame previously delivered through the consume callback. Required for
 /// every delivered frame id; closing the parent consumer is not enough.
+#[cfg(feature = "hw-video")]
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_video_raw_frame_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		State::lock().video.frame_free(id)
 	})
+}
+
+// ---- Stubs when `hw-video` is disabled ----
+//
+// The C ABI stays identical (same symbols, same moq.h) so a header consumer links either
+// build; without `hw-video` these entry points report the missing capability at runtime
+// instead of pulling in moq-video (and its libva/CUDA link).
+
+#[cfg(not(feature = "hw-video"))]
+#[derive(Default)]
+pub struct Video {}
+
+/// Video decode is unavailable in this build (compiled without the `hw-video` feature);
+/// returns [`Error::Unsupported`]. The `hw-video` build carries the real implementation.
+///
+/// # Safety
+/// - `_output` must point to a valid [`moq_video_decoder_output`] (unused; not dereferenced here).
+/// - `_user_data` is never touched.
+#[cfg(not(feature = "hw-video"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_video_raw(
+	_catalog: u32,
+	_index: u32,
+	_output: *const moq_video_decoder_output,
+	_on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
+	_user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(|| Result::<(), Error>::Err(Error::Unsupported))
+}
+
+#[cfg(not(feature = "hw-video"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_video_raw_close(_consumer: u32) -> i32 {
+	ffi::enter(|| Result::<(), Error>::Err(Error::Unsupported))
+}
+
+/// Video decode is unavailable in this build (compiled without the `hw-video` feature);
+/// returns [`Error::Unsupported`].
+///
+/// # Safety
+/// - `_dst` must point to a writable [`moq_video_frame`] (unused; not written here).
+#[cfg(not(feature = "hw-video"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_video_raw_frame(_id: u32, _dst: *mut moq_video_frame) -> i32 {
+	ffi::enter(|| Result::<(), Error>::Err(Error::Unsupported))
+}
+
+#[cfg(not(feature = "hw-video"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_video_raw_frame_free(_id: u32) -> i32 {
+	ffi::enter(|| Result::<(), Error>::Err(Error::Unsupported))
 }

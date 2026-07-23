@@ -798,6 +798,40 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	})
 }
 
+/// Force a synchronized group boundary across all tracks of a media importer, opening the next
+/// group at `sequence`.
+///
+/// Lets a caller drive aligned, explicitly-numbered groups (e.g. two encoders publishing the same
+/// content align their groups per GOP for dual-pipeline redundancy). Without it, group boundaries
+/// follow video keyframes.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_group(media: u32, sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_seek(media, sequence)
+	})
+}
+
+/// Enable caller-driven (manual) audio grouping for a media importer.
+///
+/// Default `false`: each audio frame is its own group (one QUIC stream per packet), forwarded
+/// without waiting. Pass `true` when the caller drives its own boundaries via
+/// [moq_publish_media_group]: audio frames then accumulate into the current group until the next
+/// boundary, so the origin can align audio groups to a segment cadence. For the fMP4 container
+/// passthrough, audio fragments likewise accumulate into the caller's group instead of one per
+/// fragment. No effect on video, which groups by its own keyframes.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_manual_grouping(media: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_manual_grouping(media, enabled)
+	})
+}
+
 /// Write data to a track.
 ///
 /// The encoding of `data` depends on the track `format`.

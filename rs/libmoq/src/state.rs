@@ -8,6 +8,7 @@ pub struct State {
 	pub publish: Publish,
 	pub consume: Consume,
 	pub audio: Audio,
+	#[cfg_attr(not(feature = "hw-video"), allow(dead_code))]
 	pub video: Video,
 }
 

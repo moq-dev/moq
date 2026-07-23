@@ -1518,6 +1518,7 @@ fn video_publish_consume() {
 
 /// End-to-end native decode: publish real H.264 (encoded by moq-video) and
 /// consume it through `moq_consume_video_raw`, asserting decoded I420 frames.
+#[cfg(feature = "hw-video")]
 #[test]
 fn video_raw_decode() {
 	// Encode a few gray frames to Annex-B (avc3, SPS/PPS inline on the keyframe).

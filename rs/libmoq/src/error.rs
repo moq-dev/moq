@@ -143,9 +143,16 @@ pub enum Error {
 	#[error("audio error: {0}")]
 	Audio(Arc<moq_audio::Error>),
 
-	/// Error from the moq-video codec layer.
+	/// Error from the moq-video codec layer (only present with the `hw-video` feature).
+	#[cfg(feature = "hw-video")]
 	#[error("video error: {0}")]
 	Video(Arc<moq_video::Error>),
+
+	/// A capability compiled out of this build, e.g. hardware video decode without the
+	/// `hw-video` feature. The matching C entry point returns this rather than linking a
+	/// backend that isn't present.
+	#[error("unsupported: feature not enabled in this build")]
+	Unsupported,
 
 	/// Invalid JSON passed for a catalog section.
 	#[error("json error: {0}")]
@@ -177,6 +184,7 @@ impl From<moq_audio::Error> for Error {
 	}
 }
 
+#[cfg(feature = "hw-video")]
 impl From<moq_video::Error> for Error {
 	fn from(err: moq_video::Error) -> Self {
 		Error::Video(Arc::new(err))
@@ -228,7 +236,9 @@ impl ffi::ReturnCode for Error {
 			Error::Native(_) => -33,
 			Error::Unauthorized => -34,
 			Error::Forbidden => -35,
+			#[cfg(feature = "hw-video")]
 			Error::Video(_) => -36,
+			Error::Unsupported => -39,
 			Error::Json(_) => -37,
 			Error::JsonTrack(_) => -38,
 		}

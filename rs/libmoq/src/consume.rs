@@ -778,6 +778,7 @@ impl Consume {
 	/// Look up a video rendition by catalog index, returning the
 	/// (broadcast, config, name) tuple needed to subscribe, mirroring
 	/// the index-based selection in `video`.
+	#[cfg(feature = "hw-video")]
 	pub fn video_rendition(
 		&self,
 		catalog: Id,
