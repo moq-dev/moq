@@ -57,6 +57,13 @@ pub struct Config {
 	#[serde(default)]
 	pub internal: InternalConfig,
 
+	/// How long (in seconds) accepted sessions may keep running after a shutdown
+	/// signal. The first signal sends every session a GOAWAY and waits this long
+	/// for clients to reconnect elsewhere before force-closing them; a second
+	/// signal exits immediately. Defaults to 10 seconds.
+	#[arg(id = "drain-timeout", long = "drain-timeout", env = "MOQ_DRAIN_TIMEOUT")]
+	pub drain_timeout: Option<u64>,
+
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
 	pub file: Option<String>,

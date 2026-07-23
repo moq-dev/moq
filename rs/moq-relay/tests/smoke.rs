@@ -402,6 +402,7 @@ async fn spawn_stream_relay(config: moq_native::ServerConfig, auth_config: AuthC
 				request,
 				cluster: cluster.clone(),
 				auth: auth.clone(),
+				shutdown: moq_relay::Shutdown::disabled(),
 			};
 			id += 1;
 			tokio::spawn(async move {

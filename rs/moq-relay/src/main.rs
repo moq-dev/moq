@@ -70,8 +70,14 @@ async fn main() -> anyhow::Result<()> {
 	// when unconfigured.
 	let internal = Internal::new(config.internal, cluster.stats.clone());
 
+	// Graceful shutdown: the first signal drains every accepted session with a
+	// GOAWAY; a second signal (or the drain window elapsing) exits.
+	let drain_timeout = std::time::Duration::from_secs(config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS));
+	let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
+
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-	let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
+	let web =
+		Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web).with_shutdown(shutdown.clone());
 
 	match addr {
 		Some(addr) => tracing::info!(%addr, "listening"),
@@ -91,13 +97,57 @@ async fn main() -> anyhow::Result<()> {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
 		Err(err) = internal.run() => return Err(err).context("internal server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
+		Err(err) = serve(server, cluster, auth, shutdown) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
-		else => Ok(()),
+		res = drain_on_signal(shutdown_trigger, drain_timeout) => return res,
+		else => Ok(())
 	}
 }
 
-async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
+/// Two-stage shutdown: the first signal fires the drain broadcast (every session
+/// sends GOAWAY and waits for its peer to leave); the second signal, or the
+/// drain window elapsing, exits the process.
+async fn drain_on_signal(trigger: ShutdownTrigger, window: std::time::Duration) -> anyhow::Result<()> {
+	shutdown_signal().await?;
+	tracing::info!(
+		?window,
+		"shutdown signal received; draining sessions (signal again to exit immediately)"
+	);
+	trigger.start();
+
+	// One extra second past the window so per-session force-closes fire first,
+	// giving every peer a proper GoawayTimeout instead of a dropped transport.
+	let grace = window + std::time::Duration::from_secs(1);
+	tokio::select! {
+		res = shutdown_signal() => {
+			res?;
+			tracing::warn!("second shutdown signal; exiting immediately");
+		}
+		_ = tokio::time::sleep(grace) => tracing::info!("drain window elapsed; exiting"),
+	}
+	Ok(())
+}
+
+/// Resolve on a shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what
+/// systemd and most process supervisors send on stop).
+async fn shutdown_signal() -> anyhow::Result<()> {
+	#[cfg(unix)]
+	{
+		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+			.context("failed to listen for SIGTERM")?;
+		tokio::select! {
+			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
+			_ = term.recv() => {}
+		}
+		Ok(())
+	}
+	#[cfg(not(unix))]
+	{
+		tokio::signal::ctrl_c().await.context("failed to listen for shutdown")
+	}
+}
+
+async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
 	while let Some(request) = server.accept().await {
@@ -106,6 +156,7 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 			request,
 			cluster: cluster.clone(),
 			auth: auth.clone(),
+			shutdown: shutdown.clone(),
 		};
 
 		conn_id += 1;
