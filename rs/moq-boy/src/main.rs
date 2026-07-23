@@ -433,10 +433,10 @@ fn run_emulator(
 				audio_encoder.reset_epoch();
 			}
 			let samples = emu.audio_samples();
-			if !samples.is_empty() {
-				if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
-					tracing::warn!(error = %e, "audio encode error");
-				}
+			if !samples.is_empty()
+				&& let Err(e) = audio_encoder.push_samples(&samples, elapsed)
+			{
+				tracing::warn!(error = %e, "audio encode error");
 			}
 		} else {
 			// Drain audio buffer even when not encoding to prevent buildup.

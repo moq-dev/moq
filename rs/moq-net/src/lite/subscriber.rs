@@ -1181,20 +1181,20 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				// Last subscriber left: pause the upstream (cap at the latest cached
 				// group, priority 0) but keep the stream open in case one returns.
 				if supports_update {
-					if let Sub::Active(active) = sub {
-						if !active.paused {
-							active.paused = true;
-							active.start_group = None;
-							let cap = producer.latest().unwrap_or(0);
-							let update = lite::SubscribeUpdate {
-								priority: 0,
-								ordered: active.ordered,
-								max_latency: active.max_latency,
-								start_group: active.start_group,
-								end_group: Some(cap),
-							};
-							active.stream.writer.encode(&update).await?;
-						}
+					if let Sub::Active(active) = sub
+						&& !active.paused
+					{
+						active.paused = true;
+						active.start_group = None;
+						let cap = producer.latest().unwrap_or(0);
+						let update = lite::SubscribeUpdate {
+							priority: 0,
+							ordered: active.ordered,
+							max_latency: active.max_latency,
+							start_group: active.start_group,
+							end_group: Some(cap),
+						};
+						active.stream.writer.encode(&update).await?;
 					}
 				} else if let Sub::Active(active) = sub {
 					// No SUBSCRIBE_UPDATE to pause with (Lite01/02): cancel the

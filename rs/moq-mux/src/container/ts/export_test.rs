@@ -504,14 +504,12 @@ async fn export_bframe_video_authors_dts() {
 	let mut effective = Vec::new();
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		match packet.payload {
-			Some(TsPayload::Pmt(pmt)) => {
-				if video_pid.is_none() {
-					video_pid = pmt
-						.es_info
-						.iter()
-						.find(|e| e.stream_type == StreamType::H264)
-						.map(|e| e.elementary_pid);
-				}
+			Some(TsPayload::Pmt(pmt)) if video_pid.is_none() => {
+				video_pid = pmt
+					.es_info
+					.iter()
+					.find(|e| e.stream_type == StreamType::H264)
+					.map(|e| e.elementary_pid);
 			}
 			Some(TsPayload::PesStart(pes)) if Some(packet.header.pid) == video_pid => {
 				let p = pes.header.pts.expect("video PES carried no PTS").as_u64();

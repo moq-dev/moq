@@ -69,7 +69,7 @@ impl Format {
 		}
 
 		let bps = self.bytes_per_sample();
-		if data.len() % (bps * channels) != 0 {
+		if !data.len().is_multiple_of(bps * channels) {
 			return Err(Error::Misaligned {
 				got: data.len(),
 				expected: data.len().next_multiple_of(bps * channels),
@@ -162,7 +162,7 @@ impl Format {
 		if channels == 0 {
 			return Err(Error::Unsupported("channel count must be > 0".into()));
 		}
-		if samples.len() % channels != 0 {
+		if !samples.len().is_multiple_of(channels) {
 			return Err(Error::Misaligned {
 				got: samples.len(),
 				expected: samples.len().next_multiple_of(channels),

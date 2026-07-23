@@ -101,10 +101,10 @@ impl Backend for Openh264 {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
-		if self.started {
-			if let Some(bitrate) = self.pending.take() {
-				self.apply_bitrate(bitrate)?;
-			}
+		if self.started
+			&& let Some(bitrate) = self.pending.take()
+		{
+			self.apply_bitrate(bitrate)?;
 		}
 
 		if keyframe {
