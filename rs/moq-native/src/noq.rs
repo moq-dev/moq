@@ -56,10 +56,17 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
-	// Unlike quinn, this backend defaults to BBR rather than noq's own CUBIC.
-	transport.congestion_controller_factory(congestion_factory(
-		quic.congestion_control.unwrap_or(CongestionControl::Delay),
-	));
+	transport.congestion_controller_factory(congestion_factory(congestion_control(quic)));
+}
+
+/// The congestion control family to install, defaulting to loss-based.
+///
+/// Unlike the other backends we don't default to BBR here: noq's BBRv3 subtracts
+/// without a floor when computing the inflight bytes at the loss event, so a single
+/// packet loss can underflow and panic, taking the whole process with it. Delay-based
+/// stays reachable, but only when an operator asks for it by name.
+fn congestion_control(quic: &Resolved) -> CongestionControl {
+	quic.congestion_control.unwrap_or(CongestionControl::Loss)
 }
 
 /// The noq controller factory for a congestion control family. noq's BBR is v3.
@@ -645,5 +652,17 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq::congestion::Bbr3>().is_ok());
+	}
+
+	/// noq's BBRv3 panics on loss, so an unset knob must land on CUBIC here even
+	/// though every other backend defaults to BBR.
+	#[test]
+	fn congestion_control_defaults_to_loss() {
+		let mut quic = crate::quic::Client::default();
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
+
+		// An explicit request still gets through.
+		quic.congestion_control = Some(CongestionControl::Delay);
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
 	}
 }

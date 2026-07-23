@@ -150,10 +150,10 @@ fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved
 	settings.max_idle_timeout = Some(quic.idle_timeout);
 	settings.discover_path_mtu = quic.mtu_discovery;
 
-	// quiche defaults to CUBIC, so an unset knob leaves cc_algorithm alone.
-	if let Some(family) = quic.congestion_control {
-		settings.cc_algorithm = cc_algorithm(family).to_owned();
-	}
+	// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
+	// so default to BBR rather than quiche's own CUBIC.
+	let family = quic.congestion_control.unwrap_or(CongestionControl::Delay);
+	settings.cc_algorithm = cc_algorithm(family).to_owned();
 
 	// quiche writes one file per connection itself, named after the connection ID.
 	if let Some(dir) = quic.qlog_dir() {
@@ -585,19 +585,18 @@ mod tests {
 		assert_eq!(cc_algorithm(CongestionControl::Delay), "bbr2_gcongestion");
 	}
 
-	/// A selected family must reach the settings quiche is built from, and an
-	/// unset one must leave quiche's own default in place.
+	/// A selected family must reach the settings quiche is built from, and an unset
+	/// one must land on BBR rather than quiche's own CUBIC default.
 	#[test]
 	fn apply_settings_writes_cc_algorithm() {
 		let mut quic = crate::quic::Client::default();
 		let mut settings = web_transport_quiche::Settings::default();
-		let default = settings.cc_algorithm.clone();
 
-		apply_settings(&mut settings, &quic.resolve()).unwrap();
-		assert_eq!(settings.cc_algorithm, default);
-
-		quic.congestion_control = Some(CongestionControl::Delay);
 		apply_settings(&mut settings, &quic.resolve()).unwrap();
 		assert_eq!(settings.cc_algorithm, "bbr2_gcongestion");
+
+		quic.congestion_control = Some(CongestionControl::Loss);
+		apply_settings(&mut settings, &quic.resolve()).unwrap();
+		assert_eq!(settings.cc_algorithm, "cubic");
 	}
 }

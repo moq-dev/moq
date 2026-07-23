@@ -136,8 +136,8 @@ pub struct Client {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
-	/// quinn and quiche, BBRv3 on noq and iroh.
+	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
+	/// `loss` on noq and iroh, whose BBRv3 is not yet fit to run by default.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-quic-congestion-control",
@@ -251,8 +251,8 @@ pub struct Server {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Unset keeps the backend's own default: CUBIC on
-	/// quinn and quiche, BBRv3 on noq.
+	/// Congestion control family. Defaults to `delay` on quinn and quiche, and to
+	/// `loss` on noq, whose BBRv3 is not yet fit to run by default.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "server-quic-congestion-control",
@@ -352,7 +352,8 @@ pub(crate) struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` to leave the backend's own default.
+	/// Congestion control override, or `None` for the backend's own default. Each
+	/// backend picks that default itself, since they don't all agree.
 	pub congestion_control: Option<CongestionControl>,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
@@ -551,7 +552,7 @@ mod tests {
 		assert_eq!(both.client.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(both.server.congestion_control, Some(CongestionControl::Loss));
 
-		// Unset stays None, which leaves each backend's own default.
+		// Unset stays None; each backend then picks its own default.
 		assert_eq!(Client::default().resolve().congestion_control, None);
 	}
 }

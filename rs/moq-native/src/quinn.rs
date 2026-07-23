@@ -67,10 +67,11 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: &Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
-	// quinn defaults to CUBIC, so an unset knob leaves the factory alone.
-	if let Some(family) = quic.congestion_control {
-		transport.congestion_controller_factory(congestion_factory(family));
-	}
+	// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
+	// so default to BBR rather than quinn's own CUBIC.
+	transport.congestion_controller_factory(congestion_factory(
+		quic.congestion_control.unwrap_or(CongestionControl::Delay),
+	));
 }
 
 /// The quinn controller factory for a congestion control family. quinn's BBR is v1.
