@@ -100,7 +100,8 @@ moq-token = { version = "0.7", path = "rs/moq-token" }
 # still default them on when depended on directly.
 moq-transcode = { version = "0.0.2", path = "rs/moq-transcode", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
-moq-vaapi = "0.0.2"
+# dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
+moq-vaapi = "0.0.3"
 moq-video = { version = "0.0.8", path = "rs/moq-video", default-features = false }
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
