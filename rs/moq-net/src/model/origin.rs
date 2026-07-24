@@ -3,8 +3,8 @@ use kio::Pollable;
 use std::{
 	collections::{BTreeMap, HashMap},
 	fmt,
-	sync::Arc,
 	sync::atomic::{AtomicU64, Ordering},
+	sync::{Arc, Mutex as StdMutex},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -884,10 +884,11 @@ impl Producer {
 	/// subscribes and fetches (e.g. serving cached or on-demand content), so
 	/// toggling `live` announces or unannounces without touching the broadcast.
 	///
-	/// The broadcast becomes visible to consumers asynchronously, shortly after
-	/// this returns. Create tracks and register a
-	/// [`broadcast::Producer::dynamic`] handler before awaiting, so the first
-	/// consumer finds them.
+	/// The broadcast is visible to consumers (announced, if the route says so) by
+	/// the time this returns. Create tracks and register a
+	/// [`broadcast::Producer::dynamic`] handler before yielding to other tasks,
+	/// so the first consumer finds them; a track requested before then waits in
+	/// the front's queue rather than failing.
 	///
 	/// End the broadcast with [`broadcast::Producer::finish`]; dropping it
 	/// without finishing also works, but logs a warning. A finish closes and
@@ -923,16 +924,49 @@ impl Producer {
 		}
 
 		// Resolve the ingress counters once, keyed by the absolute broadcast path.
-		// The source producer tags its tracks; run_source drives the announce guard
+		// The source producer tags its tracks; the link drives the announce guard
 		// off route transitions.
 		let ingress = self.stats.ingress(&full);
 
 		let mut source = broadcast::Info { origin: self.info() }
 			.produce()
 			.with_stats(ingress.clone());
-		source.set_route(route).expect("fresh producer");
+		source.set_route(route.clone()).expect("fresh producer");
 
-		web_async::spawn(run_source(self.info(), node, full, rest, source.consume(), ingress));
+		// Attach inline: the broadcast is visible to consumers as soon as this
+		// returns. The link installed on the producer then drives every later
+		// route update and the detach from the producer's own call sites; no task
+		// watches the source.
+		let leaf = if rest.is_empty() {
+			node.clone()
+		} else {
+			node.lock().leaf(&rest)
+		};
+		let (state, front, id) = attach_source(
+			&self.info(),
+			&node,
+			&leaf,
+			&full,
+			&rest,
+			&source.consume(),
+			route.clone(),
+		);
+
+		// Ingress announce guard: held while this source's route is announced.
+		// Opening bumps `announced` + `announced_bytes`; clearing (route offline,
+		// or the source detaching) bumps `announced_closed` + `announced_bytes`.
+		let announce = route.announce.then(|| ingress.announce());
+
+		source.set_link(Arc::new(SourceLink {
+			state,
+			front,
+			leaf,
+			id,
+			node,
+			rest,
+			ingress,
+			announce: StdMutex::new(announce),
+		}));
 
 		Ok(source)
 	}
@@ -1036,9 +1070,14 @@ const MAX_TRACK_RETRIES: u32 = 3;
 /// One attached source in a [`FrontState`] table.
 struct FrontRoute {
 	id: u64,
-	/// The source's latest [`broadcast::Route`], mirrored from its
-	/// `route_changed` stream; picks the active source and gates the announce.
+	/// The source's latest [`broadcast::Route`], mirrored inline from
+	/// [`broadcast::Producer::set_route`]; picks the active source and gates the
+	/// announce.
 	route: broadcast::Route,
+	/// The producer epoch `route` was taken at. Applications race here after
+	/// releasing the producer's lock, so a stale one (epoch not above this) is
+	/// dropped rather than clobbering a newer route.
+	epoch: u64,
 	/// The source broadcast tracks are served from.
 	source: broadcast::Consumer,
 }
@@ -1176,93 +1215,125 @@ fn detach_source(
 	leaf: &Lock<OriginNode>,
 	id: u64,
 	graceful: bool,
-) {
+) -> bool {
 	let close = {
 		let carrying = broadcast.demand().is_used();
-		let Ok(mut s) = state.write() else { return };
+		let Ok(mut s) = state.write() else { return false };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
-			return;
+			return false;
 		};
 		s.routes.remove(pos);
 		s.reselect(carrying);
 		if s.routes.is_empty() && !s.closed && (graceful || s.linger.is_zero()) {
-			// Last one out: close now. The front task observes `closed` and
-			// finishes the teardown (unpublish).
+			// Last one out: close now. The caller runs [`teardown_front`]; the
+			// front task also observes `closed` and exits.
 			s.closed = true;
 			true
 		} else {
 			false
 		}
 	};
-	if close {
-		broadcast.abort_spliced(Error::Dropped);
-	}
 	sync_front(state, broadcast, leaf);
+	close
 }
 
-/// Owns one source's lifecycle: attaches it to the front at its path on the first
-/// route observation, forwards route updates, and detaches it when the source
-/// closes. Spawned by [`Producer::create_broadcast`].
-async fn run_source(
-	origin: Info,
-	node: Lock<OriginNode>,
-	full: PathOwned,
-	rest: PathOwned,
-	mut source: broadcast::Consumer,
-	ingress: stats::Scope,
+/// Tear a closed front down: abort the logical tracks (releasing their
+/// subscribers), end the spliced broadcast, and unpublish the path. Idempotent:
+/// the inline close path and [`run_front`]'s exit both run it.
+fn teardown_front(
+	state: &kio::Producer<FrontState>,
+	broadcast: &broadcast::Producer,
+	node: &Lock<OriginNode>,
+	rest: &PathOwned,
 ) {
-	// The first `route_changed` yields the current route immediately; nothing is
-	// visible to consumers until this attach, giving the creator a window to set
-	// up tracks and dynamic handlers.
-	let Ok(route) = source.route_changed().await else {
-		// Closed before ever attaching; nothing became visible.
-		return;
-	};
+	broadcast.abort_spliced(Error::Dropped);
 
-	// Ingress announce guard: held while this source's route is announced. Opening
-	// bumps `announced` + `announced_bytes`; dropping (route offline, or the source
-	// closing below) bumps `announced_closed` + `announced_bytes`. Empty scope =
-	// no-op.
-	let mut announce = route.announce.then(|| ingress.announce());
+	// Deliberate end; suppresses the dropped-without-finish warning.
+	broadcast.clone().finish();
 
-	let leaf = if rest.is_empty() {
-		node.clone()
-	} else {
-		node.lock().leaf(&rest)
-	};
+	// Remove the broadcast from the tree (identity-checked, so a replacement is
+	// untouched) and prune empty nodes.
+	node.lock().remove(state, rest);
+}
 
-	let (state, broadcast, id) = attach_source(&origin, &node, &leaf, &full, &rest, &source, route);
+/// One source's front attachment, driven inline from the source producer's own
+/// call sites: `set_route` mirrors into the front table via [`Self::route`], and
+/// finish/abort/last-drop call [`Self::detach`]. Installed on the producer by
+/// [`Producer::create_broadcast`]; no task watches the source. A concrete struct
+/// with concrete methods, deliberately not a callback.
+pub(crate) struct SourceLink {
+	/// The front's source table.
+	state: kio::Producer<FrontState>,
+	/// The spliced front broadcast consumers see.
+	front: broadcast::Producer,
+	/// The tree node the front publishes at.
+	leaf: Lock<OriginNode>,
+	/// This source's id in the table.
+	id: u64,
+	/// The subtree node the front unpublishes from at teardown.
+	node: Lock<OriginNode>,
+	/// The front's path within `node`.
+	rest: PathOwned,
+	/// Ingress counters for the source's path.
+	ingress: stats::Scope,
+	/// Ingress announce guard: held while this source's route is announced.
+	/// Opening bumps `announced` + `announced_bytes`; clearing (route offline, or
+	/// detach) bumps `announced_closed` + `announced_bytes`. Empty scope = no-op.
+	announce: StdMutex<Option<stats::Announce>>,
+}
 
-	loop {
-		match source.route_changed().await {
-			Ok(route) => {
-				let announced = route.announce;
-				{
-					let carrying = broadcast.demand().is_used();
-					let Ok(mut s) = state.write() else { return };
-					let Some(entry) = s.routes.iter_mut().find(|r| r.id == id) else {
-						return;
-					};
-					if entry.route == route {
-						continue;
-					}
-					entry.route = route;
-					s.reselect(carrying);
-				}
-				// Toggle the ingress announce guard on a live/offline transition.
-				match (announced, announce.is_some()) {
-					(true, false) => announce = Some(ingress.announce()),
-					(false, true) => announce = None,
-					_ => {}
-				}
-				sync_front(&state, &broadcast, &leaf);
-			}
-			Err(_) => {
-				// A deliberate finish closes the front immediately; an abrupt loss
-				// (dropped producer, dead session) may linger for a replacement.
-				detach_source(&state, &broadcast, &leaf, id, source.is_finished());
+impl SourceLink {
+	/// Mirror the source's new route into the front table and re-advertise.
+	///
+	/// `epoch` is taken under the producer's lock, but the calls themselves race
+	/// after releasing it (clones of one producer), so an application older than
+	/// one already applied is dropped.
+	pub(crate) fn route(&self, route: broadcast::Route, epoch: u64) {
+		let announced = route.announce;
+		{
+			let carrying = self.front.demand().is_used();
+			let Ok(mut s) = self.state.write() else { return };
+			let Some(entry) = s.routes.iter_mut().find(|r| r.id == self.id) else {
+				return;
+			};
+			// Clone races: a slower call carrying an older route must not clobber
+			// a newer one that already applied.
+			if epoch <= entry.epoch {
 				return;
 			}
+			entry.epoch = epoch;
+			if entry.route == route {
+				return;
+			}
+			entry.route = route;
+			s.reselect(carrying);
+		}
+		// Toggle the ingress announce guard on a live/offline transition.
+		{
+			let mut guard = self.announce.lock().unwrap();
+			match (announced, guard.is_some()) {
+				(true, false) => *guard = Some(self.ingress.announce()),
+				(false, true) => *guard = None,
+				_ => {}
+			}
+		}
+		sync_front(&self.state, &self.front, &self.leaf);
+	}
+
+	/// Detach the source from its front, tearing the front down if this closed it.
+	///
+	/// `graceful` distinguishes a deliberate finish from an abort or a dropped
+	/// producer. Idempotent: the producer's drop path re-fires it after an
+	/// explicit finish or abort already has.
+	pub(crate) fn detach(&self, graceful: bool) {
+		// A deliberate finish closes the front immediately; an abrupt loss
+		// (dropped producer, dead session) may linger for a replacement.
+		let close = detach_source(&self.state, &self.front, &self.leaf, self.id, graceful);
+		*self.announce.lock().unwrap() = None;
+		if close {
+			// The whole close is inline too: consumers observe the unannounce
+			// before the producer's call returns.
+			teardown_front(&self.state, &self.front, &self.node, &self.rest);
 		}
 	}
 }
@@ -1295,6 +1366,7 @@ fn attach_source(
 			s.routes.push(FrontRoute {
 				id,
 				route: route.clone(),
+				epoch: 0,
 				source: source.clone(),
 			});
 			s.reselect(carrying);
@@ -1320,6 +1392,7 @@ fn attach_source(
 		routes: vec![FrontRoute {
 			id: 0,
 			route,
+			epoch: 0,
 			source: source.clone(),
 		}],
 		active: Some(0),
@@ -1356,7 +1429,7 @@ fn attach_source(
 /// until the last source detaches, then unpublishes the broadcast.
 async fn run_front(
 	state: kio::Producer<FrontState>,
-	mut broadcast: broadcast::Producer,
+	broadcast: broadcast::Producer,
 	node: Lock<OriginNode>,
 	rest: PathOwned,
 ) {
@@ -1459,15 +1532,7 @@ async fn run_front(
 		}
 	}
 
-	// Abort the logical tracks (releasing their subscribers) and unpublish.
-	broadcast.abort_spliced(Error::Dropped);
-
-	// Deliberate end; suppresses the dropped-without-finish warning.
-	broadcast.finish();
-
-	// Remove the broadcast from the tree (identity-checked, so a replacement is
-	// untouched) and prune empty nodes.
-	node.lock().remove(&state, &rest);
+	teardown_front(&state, &broadcast, &node, &rest);
 }
 
 /// Serves one spliced logical track: splices in the best source's copy of the
@@ -2500,6 +2565,7 @@ mod tests {
 				.map(|(id, route)| FrontRoute {
 					id: id as u64,
 					route,
+					epoch: 0,
 					source: source.clone(),
 				})
 				.collect(),
@@ -3384,6 +3450,52 @@ mod tests {
 			!fresh.is_clone(&broadcast),
 			"re-create must not splice the old broadcast"
 		);
+	}
+
+	/// The source lifecycle is inline: creating announces, `set_route` re-adverts,
+	/// and finishing unannounces, each synchronously at its call site. Note the
+	/// absence of `settle()`: no task sits between the call and the effect.
+	#[tokio::test]
+	async fn test_source_lifecycle_inline() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let mut source = origin.create_broadcast("test", announce()).unwrap();
+		let broadcast = announced.assert_next_some("test");
+
+		// A route update reaches the front's advert synchronously.
+		let hops = OriginList::try_from(vec![Origin::new(9).unwrap()]).unwrap();
+		source.set_route(announce().with_hops(hops).with_cost(7)).unwrap();
+		assert_eq!(broadcast.route().cost, 7);
+
+		// A finish detaches and unannounces synchronously.
+		source.finish();
+		announced.assert_next_none("test");
+		broadcast.assert_closed();
+	}
+
+	/// Dropping the last producer clone without finish() is the backstop detach:
+	/// abrupt, so a lingering front stays; with zero linger it closes inline.
+	#[tokio::test]
+	async fn test_source_drop_detaches_inline() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let source = origin.create_broadcast("test", announce()).unwrap();
+		let broadcast = announced.assert_next_some("test");
+
+		// A transient clone dropping changes nothing.
+		#[allow(clippy::redundant_clone)]
+		drop(source.clone());
+		announced.assert_next_wait();
+		broadcast.assert_not_closed();
+
+		// The last handle dropping detaches synchronously (zero linger: closes).
+		drop(source);
+		announced.assert_next_none("test");
+		broadcast.assert_closed();
 	}
 
 	/// With a linger configured, an ungraceful source loss keeps the broadcast

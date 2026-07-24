@@ -272,6 +272,12 @@ pub struct Producer {
 	// `create_broadcast`. Inherited by the tracks this producer creates. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
+
+	// The front attachment of an origin-created source: route updates and the
+	// detach run at this producer's own call sites, via this shared link's
+	// concrete methods (no task watches the source, and no callback hides the
+	// control flow). `None` for a plain or spliced broadcast.
+	link: Option<Arc<super::origin_impl::SourceLink>>,
 }
 
 impl Producer {
@@ -282,6 +288,7 @@ impl Producer {
 			alive: Default::default(),
 			state: Default::default(),
 			stats: stats::Scope::default(),
+			link: None,
 		}
 	}
 
@@ -290,6 +297,14 @@ impl Producer {
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
+	}
+
+	/// Attach a source's front link: from here on, route updates and the
+	/// close/drop paths of this producer (and its clones) drive the origin inline.
+	/// Set once by `origin::Producer::create_broadcast`, after the source is
+	/// attached to its front.
+	pub(crate) fn set_link(&mut self, link: Arc<super::origin_impl::SourceLink>) {
+		self.link = Some(link);
 	}
 
 	/// Create a route-fed (spliced) broadcast: consumer track lookups mint logical
@@ -306,6 +321,7 @@ impl Producer {
 			// The origin-owned spliced broadcast stays untagged: egress attribution is
 			// applied when a tagged `origin::Consumer` hands the consumer out.
 			stats: stats::Scope::default(),
+			link: None,
 		}
 	}
 
@@ -400,12 +416,21 @@ impl Producer {
 	/// sessions forward it downstream as a restart, never as a new broadcast.
 	/// Setting the current route again is a no-op.
 	pub fn set_route(&mut self, route: Route) -> Result<(), Error> {
-		let mut state = self.state.lock();
-		if state.route == route {
-			return Ok(());
+		let epoch = {
+			let mut state = self.state.lock();
+			if state.route == route {
+				return Ok(());
+			}
+			state.route = route.clone();
+			state.route_epoch += 1;
+			state.route_epoch
+		};
+		// After releasing this producer's lock: the link takes the origin's locks
+		// (leaf, then front table) and must never nest under a broadcast lock. The
+		// epoch lets it order calls racing here from different producer clones.
+		if let Some(link) = &self.link {
+			link.route(route, epoch);
 		}
-		state.route = route;
-		state.route_epoch += 1;
 		Ok(())
 	}
 
@@ -470,6 +495,10 @@ impl Producer {
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
 		let _ = self.alive.close();
+		// An origin source detaches inline: a finish unannounces immediately.
+		if let Some(link) = &self.link {
+			link.detach(true);
+		}
 	}
 
 	/// Abort the broadcast, ending it for consumers with `err`.
@@ -494,6 +523,10 @@ impl Producer {
 			state.abort = Some(err);
 		}
 		let _ = self.alive.close();
+		// An origin source detaches inline; abrupt, so the front may linger.
+		if let Some(link) = &self.link {
+			link.detach(false);
+		}
 		Ok(())
 	}
 
@@ -513,10 +546,19 @@ impl Drop for Producer {
 		if !self.alive.is_last() {
 			return;
 		}
-		if !self.state.read().closing {
+		let (closing, finished) = {
+			let state = self.state.read();
+			(state.closing, state.finished)
+		};
+		if !closing {
 			tracing::warn!(
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
 			);
+		}
+		// The backstop detach for a source dropped without finish/abort (those
+		// already detached inline; detach is idempotent so re-firing is harmless).
+		if let Some(link) = &self.link {
+			link.detach(finished);
 		}
 	}
 }
