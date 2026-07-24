@@ -357,15 +357,20 @@ pub(crate) async fn serve_subscribe(
 	let mut anchor = Instant::now();
 	let mut base = None;
 	let mut send_at = anchor;
+	// The first payload's send instant, the floor every later one is clamped up to
+	// (see `clamp_to_floor`).
+	let mut floor = None;
 	let mut buffer = bytes::BytesMut::new();
 	while let Some(frame) = subscriber.next().await? {
 		// The media zero-point the rest pace against; `pace` re-anchors it forward to
 		// the live edge whenever the media outruns wall-clock.
 		let zero = *base.get_or_insert(frame.timestamp);
 		let paced = pace(anchor, zero, frame.timestamp, Instant::now());
-		send_at = paced.send_at;
 		anchor = paced.anchor;
 		base = Some(paced.base);
+		// Preserve the media-clock anchor for future frames, but never transmit a
+		// timestamp below the first packet's (see `floor` above).
+		send_at = clamp_to_floor(paced.send_at, &mut floor);
 
 		buffer.extend_from_slice(&frame.payload);
 		while buffer.len() >= SRT_PAYLOAD {
@@ -379,6 +384,19 @@ pub(crate) async fn serve_subscribe(
 	socket.close().await?;
 
 	Ok(())
+}
+
+/// Clamp a paced send instant up to the connection's first one, seeding that floor
+/// on the first call.
+///
+/// The receiver anchors its TSBPD clock on the first packet, and an SRT packet
+/// timestamp is `u32` microseconds relative to the socket epoch, so a later payload
+/// stamped *before* the first underflows on the receiver -- it wraps ~4295s into the
+/// future, and in-order TSBPD delivery stalls behind it after ~one packet. `pace`
+/// paces a reordered B-frame *before* the current anchor, and at tune-in the anchor
+/// sits at the first packet, so without this clamp that reorder underflows.
+fn clamp_to_floor(send_at: Instant, floor: &mut Option<Instant>) -> Instant {
+	send_at.max(*floor.get_or_insert(send_at))
 }
 
 /// One frame's SRT send time plus the media-clock anchor to carry into the next
@@ -584,6 +602,60 @@ mod tests {
 			"a reordered frame can pace before the anchor"
 		);
 		assert_eq!(reordered.anchor, edge.anchor, "no re-anchor when media trails the edge");
+	}
+
+	/// Regression: a reordered frame paced before the first packet must be clamped up
+	/// to it, not transmitted with an earlier SRT timestamp. Reproduces the tune-in
+	/// sequence a looping TS source triggers intermittently: a fast first delivery
+	/// leaves the anchor at the live edge, then a newer frame re-anchors and an older
+	/// (reordered) frame paces behind it -- below the first packet, which would
+	/// underflow the receiver's u32 timestamp and stall in-order delivery after ~one
+	/// packet.
+	#[test]
+	fn reordered_frame_is_clamped_to_the_first_packet() {
+		use moq_net::Timestamp;
+		let ms = |m: u64| Timestamp::from_micros(m * 1_000).unwrap();
+
+		// Drive pace + clamp exactly like `serve_subscribe`, with controlled `now`s so
+		// the second frame re-anchors (its media outruns wall-clock) and the third is a
+		// reorder whose media trails the new anchor.
+		let start = Instant::now();
+		let mut anchor = start;
+		let mut base = None;
+		let mut floor = None;
+
+		let step = |anchor: &mut Instant, base: &mut Option<Timestamp>, floor: &mut Option<Instant>, ts, now| {
+			let zero = *base.get_or_insert(ts);
+			let paced = pace(*anchor, zero, ts, now);
+			*anchor = paced.anchor;
+			*base = Some(paced.base);
+			(paced.send_at, clamp_to_floor(paced.send_at, floor))
+		};
+
+		// i0: first frame, delivered ~instantly -> stamped at the live edge.
+		let (_, first) = step(&mut anchor, &mut base, &mut floor, ms(1_400), start);
+		// i1: 83ms newer in media, produced ~1ms later -> re-anchors to `now`.
+		let (_, _) = step(
+			&mut anchor,
+			&mut base,
+			&mut floor,
+			ms(1_483),
+			start + Duration::from_millis(1),
+		);
+		// i2: a reordered B-frame 41ms behind the new anchor.
+		let (unclamped, clamped) = step(
+			&mut anchor,
+			&mut base,
+			&mut floor,
+			ms(1_442),
+			start + Duration::from_millis(2),
+		);
+
+		assert!(
+			unclamped < first,
+			"the reorder paces before the first packet without the clamp (the bug)"
+		);
+		assert_eq!(clamped, first, "the clamp holds it at the first packet's instant");
 	}
 
 	fn sid(s: &str) -> StreamId {
