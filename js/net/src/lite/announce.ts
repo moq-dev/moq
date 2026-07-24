@@ -245,13 +245,13 @@ export class AnnounceRequest {
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.prefix));
 		switch (version) {
-			case Version.DRAFT_01:
-			case Version.DRAFT_02:
-			case Version.DRAFT_03:
+			case Version.DRAFT_04:
+			case Version.DRAFT_05:
+				// Lite04/05 only: exclude_hop field (u62 varint). Lite06 moved the
+				// identity to the session-wide SETUP Origin parameter.
+				await w.u62(this.excludeHop);
 				break;
 			default:
-				// Lite04+: exclude_hop field (u62 varint).
-				await w.u62(this.excludeHop);
 				break;
 		}
 	}
@@ -260,12 +260,11 @@ export class AnnounceRequest {
 		const prefix = Path.decode(await r.string());
 		let excludeHop = 0n;
 		switch (version) {
-			case Version.DRAFT_01:
-			case Version.DRAFT_02:
-			case Version.DRAFT_03:
+			case Version.DRAFT_04:
+			case Version.DRAFT_05:
+				excludeHop = await r.u62();
 				break;
 			default:
-				excludeHop = await r.u62();
 				break;
 		}
 		return new AnnounceRequest(prefix, excludeHop);

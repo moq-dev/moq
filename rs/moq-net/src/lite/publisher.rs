@@ -37,7 +37,7 @@ struct WatchedRoute {
 /// What the peer currently holds for a path: the forwarded hop chain plus, on
 /// lite-06+, the route cost. A fresh route that differs in either is worth a wire
 /// message; one that matches is not.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 struct SentRoute {
 	hops: OriginList,
 	cost: lite::RouteCost,
@@ -207,7 +207,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnounceRequest>().await?;
 		let prefix = interest.prefix.to_owned();
-		let exclude_hop = interest.exclude_hop;
+
+		// The identity whose routes we filter out. Lite-04/05 carry it per
+		// announce stream; lite-06+ reads the session-wide SETUP Origin
+		// parameter, the same identity the subscribe path excludes.
+		let exclude_hop = if self.version.has_request_exclude_hop() {
+			interest.exclude_hop
+		} else if self.version.has_setup_stream() {
+			self.peer_setup.origin().await.map(|origin| origin.id()).unwrap_or(0)
+		} else {
+			0
+		};
 
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
@@ -592,8 +602,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let hops = Self::select_route(&routes, &entry.demand, self_origin, exclude_hop, version, &absolute);
 					let sent = entry.sent.clone();
 					match (hops, sent) {
-						// Neither the forwarded chain nor the cost moved: nothing to send.
-						(Some(route), Some(sent)) if route == sent => {}
+						// Neither the forwarded chain nor the cost moved: nothing to
+						// send. The serving flag may still have flipped (a failover
+						// onto the already-advertised standby), so store it for the
+						// demand watches without a wire message.
+						(Some(route), Some(sent)) if route.hops == sent.hops && route.cost == sent.cost => {
+							entry.sent = Some(route);
+						}
 						// The chain or the cost changed (an upstream failover, a repriced
 						// link, or a broadcast going hot): restart, so the peer updates its
 						// route in place instead of re-resolving.
@@ -1676,6 +1691,61 @@ mod announce_test {
 			}
 			other => panic!("expected the standby route, got {other:?}"),
 		}
+	}
+
+	/// A relay carrying a broadcast via its peer initially has nothing to
+	/// advertise to that peer; a standby with the same original publisher
+	/// attaching later must go out as a fresh announce, giving the peer the
+	/// route it needs to fail over (#2473, e2e finding 1). The active source
+	/// dying afterward changes nothing on this stream: the standby is already
+	/// the advertised route, so the failover is invisible to the peer.
+	#[tokio::test(start_paused = true)]
+	async fn standby_attach_announces_to_excluded_peer() {
+		let peer = Origin::new(33).unwrap();
+		let origin = Origin::new(1).unwrap().produce();
+
+		// The active route: the broadcast as carried via the peer itself.
+		let via_peer = OriginList::try_from(vec![Origin::new(9).unwrap(), peer]).unwrap();
+		let source_a = origin
+			.create_broadcast(
+				"cam",
+				crate::broadcast::Route::new().with_hops(via_peer).with_announce(true),
+			)
+			.unwrap();
+		settle().await;
+
+		// The peer sees nothing: its own hop is on the only route.
+		let (mut wire, task) = spawn_announce(origin.consume(), peer.id());
+		settle().await;
+		assert_eq!(wire.take_ok().active, 0);
+		wire.assert_quiet();
+
+		// The standby (same first hop, reached directly) attaches later: a
+		// fresh announce toward the peer.
+		let _source_b = origin
+			.create_broadcast(
+				"cam",
+				crate::broadcast::Route::new()
+					.with_hops(pub_hops())
+					.with_cost(COLD)
+					.with_announce(true),
+			)
+			.unwrap();
+		settle().await;
+		match wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { hops, cost, .. }] => {
+				assert_eq!(hops, &pub_hops());
+				assert_eq!(*cost, lite::RouteCost(COLD));
+			}
+			other => panic!("expected the standby announce, got {other:?}"),
+		}
+
+		// The active source dying promotes the standby locally; the peer's
+		// advertisement is already that standby, so the wire stays quiet.
+		source_a.abort(Error::Dropped).unwrap();
+		settle().await;
+		wire.assert_quiet();
+		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
 	}
 
 	/// The route swinging into the peer's chain retracts the announce (no clean

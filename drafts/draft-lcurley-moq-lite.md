@@ -290,7 +290,7 @@ ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating
 Each broadcast starts unavailable.
 An ANNOUNCE_START makes the broadcast available; a subsequent ANNOUNCE_END makes it unavailable again and retires its Announce ID.
 
-A publisher SHOULD advertise, for each broadcast, the best path it knows whose entries avoid the subscriber's Exclude Hop (see [ANNOUNCE_REQUEST](#announce-request)); when every known path contains it, the publisher SHOULD advertise nothing for that broadcast.
+A publisher SHOULD advertise, for each broadcast, the best path it knows whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)); when every known path contains it, the publisher SHOULD advertise nothing for that broadcast.
 Selection is per stream: two subscribers can legitimately receive different paths for the same broadcast, and in particular a subscriber that the serving path flows through receives the best standby path instead of nothing, which is what lets it fail over to that standby if its own copy dies.
 The per-subscriber winner changing travels as an ANNOUNCE_RESTART; it swinging into or out of existence (the last qualifying path appearing or disappearing) travels as a fresh ANNOUNCE_START or an ANNOUNCE_END.
 If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send an ANNOUNCE_RESTART referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
@@ -303,7 +303,7 @@ Advertisements for the same broadcast path whose reconstructed paths share the s
 Cooperating redundant publishers MAY share a Hop ID to opt into this.
 Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD keep serving the earlier one, treating the later as a replacement only once the earlier ends.
 
-When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter); the same identity the subscriber sends as its Exclude Hop).
+When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
 If only excluded sources remain, the subscription is unroutable; serving it would hand the subscriber data that already flowed through itself.
 Advertisement and dispatch being one selection keeps advertised paths truthful, which is what makes the Exclude-Hop filter sufficient to prevent subscription cycles of any length: any would-be cycle surfaces the subscriber's own Hop ID inside the candidate path, where the filter removes it.
 
@@ -680,7 +680,7 @@ A server MUST NOT send a Cost Parameter.
 Like the [Path Parameter](#path-parameter), it is per-hop setup metadata: a relay MUST NOT forward it.
 
 ### Origin Parameter {#origin-parameter}
-The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards, and the same value it sends as the Exclude Hop of its ANNOUNCE_REQUEST messages (see [ANNOUNCE_REQUEST](#announce-request)).
+The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards. It replaces the per-stream `Exclude Hop` that ANNOUNCE_REQUEST carried in earlier versions.
 The Parameter Value is a variable-length integer; a value of 0 carries no identity and is equivalent to omitting the parameter.
 
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection for the peer's *subscriptions* can apply the same exclusion as its announcements (see [Announce](#announce)): a subscriber is never served data that flowed through itself, even when it never opens an Announce Stream.
@@ -695,16 +695,14 @@ A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive a
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
-  Exclude Hop (i),
 }
 ~~~
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
 
-**Exclude Hop**:
-If non-zero, the publisher SHOULD skip announcements for broadcasts whose Hop ID entries (including the publisher's own `Hop ID` from ANNOUNCE_OK) contain this value.
-This is used by relays to avoid routing loops in a cluster.
+The publisher SHOULD skip announcements for broadcasts whose reconstructed path (including the publisher's own `Hop ID` from ANNOUNCE_OK) contains the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
+This is used by relays to avoid routing loops in a cluster; earlier versions carried the identity here as a per-stream `Exclude Hop` field.
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_RESTART messages for any future updates.
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
@@ -783,7 +781,7 @@ When forwarding an announcement received from an upstream peer, a relay adds the
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
 This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
-The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose Exclude Hop filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
+The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose declared origin filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
 
 Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
@@ -1190,8 +1188,9 @@ The `Message Length` describes the payload size on the wire.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
-- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's Exclude Hop (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
-- Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, so the peer can apply the serve-side exclusion to subscriptions from sessions that never open an Announce Stream.
+- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
+- Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, filtering announcements and subscriptions alike (including sessions that never open an Announce Stream).
+- Removed ANNOUNCE_REQUEST's `Exclude Hop` field; the SETUP `Origin` parameter carries the identity session-wide instead.
 - Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the earlier is served until it ends.
 
 ## moq-lite-05
@@ -1318,7 +1317,7 @@ The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subs
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy — scheme, authority, and port — before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier. The `Exclude Hop` filter in ANNOUNCE_REQUEST is a loop-avoidance hint, not an access control; a publisher is not required to honor it, and it MUST NOT be relied upon to hide broadcasts.
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier. The origin-based announcement filter (see [Origin Parameter](#origin-parameter)) is a loop-avoidance hint, not an access control; a publisher is not required to honor it, and it MUST NOT be relied upon to hide broadcasts.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches) or request large announce prefixes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control.

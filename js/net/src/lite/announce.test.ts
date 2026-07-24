@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import {
+	type AnnounceBroadcast,
+	AnnounceRequest,
+	decodeAnnounceBroadcast,
+	encodeAnnounceBroadcast,
+} from "./announce.ts";
 import { OriginSchema } from "./origin.ts";
 import { Version } from "./version.ts";
 
@@ -99,4 +104,20 @@ test("AnnounceBroadcast rejects explicit restart status before draft-05", async 
 	wire[1] = 2;
 
 	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_04)).rejects.toThrow();
+});
+
+test("AnnounceRequest carries exclude_hop only on draft-04/05", async () => {
+	const msg = new AnnounceRequest(Path.from("room"), 7n);
+
+	for (const version of [Version.DRAFT_04, Version.DRAFT_05]) {
+		const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
+		const got = await AnnounceRequest.decode(reader, version);
+		expect(got.excludeHop).toBe(7n);
+	}
+
+	// Draft-06 moved the identity to the SETUP Origin parameter, so the field is
+	// gone from its wire image and decodes back to zero.
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_06)));
+	const got = await AnnounceRequest.decode(reader, Version.DRAFT_06);
+	expect(got.excludeHop).toBe(0n);
 });

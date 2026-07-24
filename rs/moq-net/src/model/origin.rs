@@ -4129,14 +4129,63 @@ mod tests {
 		settle().await;
 		subscribing.await.unwrap();
 
-		// The peer is pinned to the clean source; its request never reaches the
-		// front (or the tainted source).
+		// The peer is pinned to the clean source. Crucially, nothing reaches the
+		// via-peer source: a track request on it is what a session would forward
+		// upstream as a SUBSCRIBE, and forwarding this one would send the peer's
+		// own subscription back to them.
 		let scoped = consumer.clone().excluding(peer);
 		let pinned = scoped.request_broadcast("test").await.unwrap();
 		let subscribing = pinned.track("video").unwrap().subscribe(None);
 		let _producer_b = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 		subscribing.await.unwrap();
+		dynamic_a.assert_no_request();
+	}
+
+	/// A local standby with the same original publisher joining a front that is
+	/// carrying the broadcast from a peer must splice the live subscription onto
+	/// the new source, never tear it down (#2473, e2e finding 2). Redundant
+	/// publishers sharing an origin id MUST produce the same tracks, so the
+	/// splice resumes seamlessly at the group boundary.
+	#[tokio::test]
+	async fn test_standby_join_splices_live_subscriber() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		// Carrying via the peer, with a live subscriber mid-stream.
+		let source_remote = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_remote = source_remote.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer_remote = accept_track(&mut dynamic_remote, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer_remote.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// The local standby joins with the same first hop and a cheaper route:
+		// it wins dispatch and the live track re-splices at the boundary.
+		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_local = source_local.dynamic();
+		settle().await;
+		let mut producer_local = accept_track(&mut dynamic_local, "video").await;
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer_local.subscription().unwrap().group_start, Some(1));
+		producer_local.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
 	}
 
 	/// When every route flows through the requester, the path is unroutable for

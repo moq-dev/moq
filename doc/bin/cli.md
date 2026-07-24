@@ -105,8 +105,17 @@ Relays key a broadcast's content identity on the publisher's origin id (the
 first hop of its announcements). Two publishers of the same broadcast that
 share an id are treated as interchangeable sources: relays hold both routes
 and fail over between them at a group boundary, so killing one leaves viewers
-running off the other. Run the same command from two encoders, pinning the
-same id on both:
+running off the other.
+
+Sharing an id is a promise: the publishers MUST produce exactly the same
+broadcast, meaning the same track names carrying the same content, with group
+sequences aligned on the same boundaries. Relays splice between same-id
+sources at any moment, so encoders that drift (for example segment-numbered
+tracks from processes started at different times) tear down subscribers
+mid-splice. Independent publishers with different tracks or timelines MUST use
+different origin ids; the newcomer then waits as a replacement instead of
+joining. Run the same command from two aligned encoders, pinning the same id
+on both:
 
 ```bash
 moq --origin 42 --client-connect https://relay-a.example.com/anon --broadcast event.hang import ts

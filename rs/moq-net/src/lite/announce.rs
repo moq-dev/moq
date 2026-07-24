@@ -259,27 +259,26 @@ fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &OriginList)
 pub struct AnnounceRequest<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
-	// If non-zero, the publisher SHOULD skip announces whose hop IDs contain this value.
+	// If non-zero, the publisher SHOULD skip announces whose hop IDs contain this
+	// value. On the wire only for lite-04/05; lite-06 moved the identity to the
+	// session-wide SETUP Origin parameter, so this stays zero there.
 	pub exclude_hop: u64,
 }
 
 impl Message for AnnounceRequest<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		let exclude_hop = match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => 0,
-			_ => u64::decode(r, version)?,
+		let exclude_hop = match version.has_request_exclude_hop() {
+			true => u64::decode(r, version)?,
+			false => 0,
 		};
 		Ok(Self { prefix, exclude_hop })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
-		match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
-			_ => {
-				self.exclude_hop.encode(w, version)?;
-			}
+		if version.has_request_exclude_hop() {
+			self.exclude_hop.encode(w, version)?;
 		}
 
 		Ok(())
@@ -600,6 +599,28 @@ mod tests {
 			.encode(&mut buf, Version::Lite06Wip)
 			.unwrap();
 		assert_eq!(buf.len(), 3);
+	}
+
+	// Lite-04/05 carry the per-stream exclude hop; lite-06 moved the identity to
+	// the SETUP Origin parameter, so the field is gone from its wire image.
+	#[test]
+	fn announce_request_exclude_hop_by_version() {
+		fn round_trip(version: Version) -> u64 {
+			let msg = AnnounceRequest {
+				prefix: Path::new("room"),
+				exclude_hop: 7,
+			};
+			let mut buf = bytes::BytesMut::new();
+			msg.encode(&mut buf, version).unwrap();
+			let mut slice = &buf[..];
+			let got = AnnounceRequest::decode(&mut slice, version).unwrap();
+			assert!(!slice.has_remaining(), "trailing bytes after decode");
+			got.exclude_hop
+		}
+
+		assert_eq!(round_trip(Version::Lite04), 7);
+		assert_eq!(round_trip(Version::Lite05), 7);
+		assert_eq!(round_trip(Version::Lite06Wip), 0, "lite-06 carries no exclude hop");
 	}
 
 	#[test]

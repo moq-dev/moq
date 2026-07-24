@@ -96,6 +96,13 @@ impl Version {
 			_ => true,
 		}
 	}
+
+	/// Whether ANNOUNCE_REQUEST carries a per-stream Exclude Hop field. Added in
+	/// lite-04; lite-06 moved the identity to the session-wide SETUP `Origin`
+	/// parameter, which filters announcements and subscriptions alike.
+	pub fn has_request_exclude_hop(self) -> bool {
+		matches!(self, Self::Lite04 | Self::Lite05)
+	}
 }
 
 impl fmt::Display for Version {
