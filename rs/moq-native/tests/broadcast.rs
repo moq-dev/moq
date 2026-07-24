@@ -1825,11 +1825,10 @@ async fn broadcast_race_quic_wins() {
 // ── Subscription churn: drop the last consumer, then come back ──────
 //
 // When the last consumer of an upstream subscription drops, the subscriber
-// cancels the upstream SUBSCRIBE (FIN) rather than parking it. The track
-// producer stays alive, so a returning consumer re-establishes a fresh
-// SUBSCRIBE against the same cache. These tests cover both halves: the
-// re-subscribe keeps flowing, and the cancel actually releases the
-// publisher's viewer accounting.
+// cancels the upstream SUBSCRIBE (FIN). The track producer stays alive, so a
+// returning consumer re-establishes a fresh SUBSCRIBE against the same cache.
+// These tests cover both halves: the re-subscribe keeps flowing, and the
+// cancel releases the publisher's viewer accounting.
 
 /// Smoke test: dropping the last consumer and resubscribing doesn't wedge the
 /// subscription, and groups appended after the resume still arrive at the new
@@ -1962,10 +1961,9 @@ fn active_viewers(registry: &moq_net::stats::Registry) -> u64 {
 
 /// The last consumer leaving must release the publisher's viewer refcount.
 ///
-/// A subscriber that parks its upstream SUBSCRIBE instead of canceling it leaves
-/// the publisher's per-session subscription alive, so the broadcast keeps
-/// reporting a viewer that nobody is watching (and, chained through relays, a
-/// phantom viewer per hop).
+/// The refcount is held by the publisher's per-session subscription, so an
+/// upstream SUBSCRIBE that outlives its demand keeps the broadcast reporting a
+/// viewer nobody is watching (chained through relays, one phantom per hop).
 #[tokio::test]
 async fn idle_subscription_releases_the_viewer_count() {
 	let pub_origin = Origin::random().produce();

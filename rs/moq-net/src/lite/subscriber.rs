@@ -923,7 +923,8 @@ struct TrackServe<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> TrackServe<S> {
 	async fn run(self, request: track::Request) {
-		// SUBSCRIBE_UPDATE (and thus pause/resume) only exists on Lite03+.
+		// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
+		// preference change to an established subscription.
 		let supports_update = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 		let supports_fetch = self.subscriber.version.has_track_stream();
 
