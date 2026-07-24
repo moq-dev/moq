@@ -1783,25 +1783,44 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			sequence,
 		};
 		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
-
 		let mut stream = Writer::new(stream, self.version);
-		stream.set_priority(priority.current());
-		stream.encode(&lite::DataType::Group).await?;
-		stream.encode(&msg).await?;
 
-		// Lite05+ delta-encodes per-frame timestamps within the group. The first
-		// frame's delta is absolute (against an implicit prev value of 0), every
-		// subsequent delta is signed against the previous frame.
-		let mut prev_ts: u64 = 0;
-		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
-				.await?;
+		if let Err(err) = self.write_group(&mut stream, &msg, &mut priority, &mut group).await {
+			// Reset with the real reason (Old, Lagged, Evicted, ...) so the subscriber can
+			// tell a truncated group from a routine cancel. Without this the Writer's Drop
+			// fallback reports every failure as Cancel.
+			stream.abort(&err);
+			return Err(err);
 		}
 
 		stream.finish()?;
 		stream.closed().await?;
 
 		tracing::debug!(sequence, "finished group");
+
+		Ok(())
+	}
+
+	/// Write the group header and every frame, leaving the stream open for the caller to
+	/// finish or abort.
+	async fn write_group(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &lite::Group,
+		priority: &mut PriorityHandle,
+		group: &mut group::Consumer,
+	) -> Result<(), Error> {
+		stream.set_priority(priority.current());
+		stream.encode(&lite::DataType::Group).await?;
+		stream.encode(msg).await?;
+
+		// Lite05+ delta-encodes per-frame timestamps within the group. The first
+		// frame's delta is absolute (against an implicit prev value of 0), every
+		// subsequent delta is signed against the previous frame.
+		let mut prev_ts: u64 = 0;
+		while let Some(frame) = self.next_frame(stream, priority, group).await? {
+			self.serve_frame(stream, priority, frame, &mut prev_ts).await?;
+		}
 
 		Ok(())
 	}
@@ -1973,5 +1992,174 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let track_priority = self.track_priority_current();
 		priority.set_track(track_priority);
 		stream.set_priority(priority.current());
+	}
+}
+
+/// A group that fails mid-stream must reset with its own error code. The subscriber uses
+/// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
+/// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
+#[cfg(test)]
+mod serve_group_test {
+	use super::*;
+	use crate::{Timestamp, broadcast};
+	use std::sync::Mutex;
+
+	#[derive(Debug, Clone, Default)]
+	struct SinkError;
+
+	impl std::fmt::Display for SinkError {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "sink transport error")
+		}
+	}
+
+	impl std::error::Error for SinkError {}
+
+	impl web_transport_trait::Error for SinkError {
+		fn session_error(&self) -> Option<(u32, String)> {
+			Some((0, "closed".to_string()))
+		}
+	}
+
+	/// Every reset code the group stream received, in order, so a second reset from the
+	/// drop fallback is visible rather than silently overwriting the first.
+	#[derive(Clone, Default)]
+	struct Resets(Arc<Mutex<Vec<u32>>>);
+
+	struct Send {
+		resets: Resets,
+	}
+
+	impl web_transport_trait::SendStream for Send {
+		type Error = SinkError;
+
+		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+			Ok(buf.len())
+		}
+
+		fn set_priority(&mut self, _order: u8) {}
+
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		fn reset(&mut self, code: u32) {
+			self.resets.0.lock().unwrap().push(code);
+		}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	struct Recv;
+
+	impl web_transport_trait::RecvStream for Recv {
+		type Error = SinkError;
+
+		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn stop(&mut self, _code: u32) {}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	#[derive(Clone)]
+	struct Session {
+		resets: Resets,
+	}
+
+	impl web_transport_trait::Session for Session {
+		type SendStream = Send;
+		type RecvStream = Recv;
+		type Error = SinkError;
+
+		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+
+		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+			Ok(Send {
+				resets: self.resets.clone(),
+			})
+		}
+
+		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+			Ok(())
+		}
+
+		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
+			std::future::pending().await
+		}
+
+		fn max_datagram_size(&self) -> usize {
+			0
+		}
+
+		fn close(&self, _code: u32, _reason: &str) {}
+
+		async fn closed(&self) -> Self::Error {
+			std::future::pending().await
+		}
+
+		fn stats(&self) -> impl web_transport_trait::Stats {
+			Stats
+		}
+	}
+
+	struct Stats;
+
+	impl web_transport_trait::Stats for Stats {
+		fn estimated_send_rate(&self) -> Option<u64> {
+			None
+		}
+	}
+
+	#[tokio::test]
+	async fn resets_with_the_abort_code() {
+		let resets = Resets::default();
+		let session = Session { resets: resets.clone() };
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+
+		// Drain the frame, leaving the task parked awaiting the next one.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		// The group is dropped from the cache mid-stream: a truncated group, not a cancel.
+		group.abort(Error::Old).unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(*resets.0.lock().unwrap(), vec![Error::Old.to_code()]);
 	}
 }

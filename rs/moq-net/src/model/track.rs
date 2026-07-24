@@ -2703,6 +2703,30 @@ mod test {
 		}
 	}
 
+	/// A group whose frames outlive `latency_max` is aged out when the next group starts, but
+	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
+	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
+	#[tokio::test]
+	async fn aging_out_a_finished_group_keeps_the_clean_end() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut consumer = group.consume();
+
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		assert_eq!(consumer.next_frame().await.unwrap().unwrap().size, 5);
+
+		// The group stays open well past latency_max, then the next period starts.
+		tokio::time::advance(DEFAULT_LATENCY_MAX * 12).await;
+		group.finish().unwrap();
+		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		assert!(consumer.next_frame().await.unwrap().is_none());
+	}
+
 	#[tokio::test]
 	async fn evict_keeps_max_sequence() {
 		tokio::time::pause();
