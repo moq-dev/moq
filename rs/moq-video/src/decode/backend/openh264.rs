@@ -12,7 +12,7 @@ use openh264::formats::YUVSource;
 
 use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -71,7 +71,7 @@ impl Backend for Openh264 {
 		// openh264 is one-in one-out, so the input timestamp is the output's.
 		Ok(vec![Decoded {
 			timestamp,
-			frame: Frame::I420(frame),
+			frame: Surface::I420(frame),
 		}])
 	}
 

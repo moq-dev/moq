@@ -42,17 +42,36 @@
 //! internal. So swapping or bumping any backend crate is not a breaking change
 //! for consumers. Config structs are `#[non_exhaustive]`: build them via
 //! `default()`/`new()` and set fields, so new options stay additive.
+//!
+//! The one deliberate exception is [`Surface`], the enum behind every frame.
+//! Its variants name platform representations (`CVPixelBuffer`, Direct3D11,
+//! CUDA) so you can render or re-encode a frame yourself without a CPU round
+//! trip, which means a major bump of one of those platform crates is a breaking
+//! change here. It is `#[non_exhaustive]` and every variant has a universal
+//! fallback in [`Surface::into_i420`], so matching on it stays portable: take the
+//! fast path you recognize and let the `_` arm handle the rest.
 
 pub mod capture;
 pub mod decode;
 pub mod encode;
 
 mod error;
-mod frame;
+pub mod frame;
 mod size;
 
 #[cfg(target_os = "windows")]
 mod mf;
 
 pub use error::Error;
+pub use frame::{I420, Surface};
 pub use size::Size;
+
+/// The CoreFoundation bindings owning the handle [`Surface::into_pixel_buffer`]
+/// returns, re-exported alongside [`objc2_core_video`] for the same reason.
+#[cfg(target_os = "macos")]
+pub use objc2_core_foundation;
+/// The CoreVideo bindings [`Surface::into_pixel_buffer`] hands back,
+/// re-exported so you name the exact version this crate links rather than guessing
+/// at a matching one. A major bump here is a breaking change for this crate.
+#[cfg(target_os = "macos")]
+pub use objc2_core_video;

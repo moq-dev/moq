@@ -52,7 +52,7 @@ pub struct Config {
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a
 	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
-	/// Check each [`Frame`](super::Frame)'s dimensions and scale the remainder
+	/// Check each [`Frame`](super::Surface)'s dimensions and scale the remainder
 	/// yourself.
 	pub resize: Option<Size>,
 }
@@ -178,7 +178,7 @@ impl Decoder {
 			.map(|decoded| Frame {
 				timestamp: decoded.timestamp,
 				size: Size::new(decoded.frame.width(), decoded.frame.height()),
-				inner: decoded.frame,
+				surface: decoded.frame,
 			})
 			.collect())
 	}
@@ -313,6 +313,72 @@ mod tests {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
 			.expect("videotoolbox decoder");
 		round_trip(h264_software_encoder(), decoder, "videotoolbox");
+	}
+
+	/// Encode `count` gray frames and decode them, returning the decoded pictures.
+	/// The shared setup for the residency and re-encode tests below.
+	#[cfg(target_os = "macos")]
+	fn decode_gray(count: u64) -> Vec<backend::Decoded> {
+		let mut encoder = h264_software_encoder();
+		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
+			.expect("videotoolbox decoder");
+
+		let rgba = gray_rgba(320, 240);
+		let mut decoded = Vec::new();
+		for i in 0..count {
+			let keyframe = i == 0;
+			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
+			for packet in encoder
+				.encode_rgba(&rgba, crate::Size::new(320, 240), keyframe)
+				.unwrap()
+			{
+				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
+			}
+		}
+
+		assert!(!decoded.is_empty(), "decoder produced no frames");
+		decoded
+	}
+
+	/// VideoToolbox hands back its `CVPixelBuffer` rather than packing to I420 in
+	/// the output callback, which is what leaves a render or re-encode path free of
+	/// a CPU round trip. `round_trip` above only checks the pixels, so it passes
+	/// either way: this is the test that pins the frame's residency.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_decode_stays_gpu_resident() {
+		for out in &decode_gray(3) {
+			assert!(
+				matches!(out.frame, crate::frame::Surface::PixelBuffer(_)),
+				"VideoToolbox decode downloaded to the CPU instead of keeping its surface"
+			);
+		}
+	}
+
+	/// A decoded surface feeds the hardware encoder as-is, which is the zero-copy
+	/// transcode path (`moq-transcode` re-encodes what it decodes). On macOS that
+	/// only became reachable once decode stopped downloading to I420.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_surface_reencodes_in_place() {
+		let decoded = decode_gray(3);
+
+		let encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Named("videotoolbox".into()),
+			..EncodeConfig::new(320, 240, 30)
+		});
+		let Ok(mut encoder) = encoder else {
+			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
+			return;
+		};
+
+		let mut packets = 0;
+		for (i, out) in decoded.iter().enumerate() {
+			packets += encoder.encode(&out.frame, i == 0).unwrap().len();
+		}
+		packets += encoder.finish().unwrap().len();
+
+		assert!(packets > 0, "re-encoding decoded surfaces produced no packets");
 	}
 
 	/// H.265 has no software path, so the HEVC round-trip rides VideoToolbox on

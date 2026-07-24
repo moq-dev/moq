@@ -3,10 +3,10 @@
 //! Drives an [`IMFSourceReader`] over the selected capture device. When a
 //! Direct3D11 device is available the reader runs with that device's DXGI
 //! manager and the advanced video processor, so each sample arrives as a
-//! GPU-resident NV12 texture ([`Frame::Texture`]) that the hardware encoder MFT
+//! GPU-resident NV12 texture ([`Surface::Texture`]) that the hardware encoder MFT
 //! consumes zero-copy. Without a GPU (e.g. a headless VM) it falls back to the
 //! source reader's software video processor, copying each sample to a packed CPU
-//! [`I420`] ([`Frame::I420`]) the encoder uploads.
+//! [`I420`] ([`Surface::I420`]) the encoder uploads.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -30,7 +30,7 @@ use super::pump::{self, Geometry};
 use super::{Config, FrameStream};
 use crate::Error;
 use crate::frame::d3d11::Texture;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 /// List Media Foundation capture devices by their stable symbolic links.
 pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
@@ -208,8 +208,8 @@ impl Camera {
 		})
 	}
 
-	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Frame::Texture`].
-	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Frame, Error> {
+	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Surface::Texture`].
+	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Surface, Error> {
 		let buffer = unsafe { sample.GetBufferByIndex(0).map_err(|e| mf_err("get buffer", e))? };
 		let dxgi = buffer
 			.cast::<IMFDXGIBuffer>()
@@ -226,7 +226,7 @@ impl Camera {
 				.map_err(|e| mf_err("get subresource index", e))?
 		};
 
-		Ok(Frame::Texture(Texture::new(
+		Ok(Surface::Texture(Texture::new(
 			device.clone(),
 			texture,
 			subresource,
@@ -235,8 +235,8 @@ impl Camera {
 		)))
 	}
 
-	/// Copy a CPU sample's NV12 to a packed [`Frame::I420`] (the fallback path).
-	fn sample_to_i420(&self, sample: &IMFSample) -> Result<Frame, Error> {
+	/// Copy a CPU sample's NV12 to a packed [`Surface::I420`] (the fallback path).
+	fn sample_to_i420(&self, sample: &IMFSample) -> Result<Surface, Error> {
 		let buffer = unsafe {
 			sample
 				.ConvertToContiguousBuffer()
@@ -274,12 +274,12 @@ impl Camera {
 			data
 		};
 
-		Ok(Frame::I420(I420::from_nv12(&nv12, self.width, self.height)?))
+		Ok(Surface::I420(I420::from_nv12(&nv12, self.width, self.height)?))
 	}
 
 	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop
 	/// and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self) -> Result<Option<Surface>, Error> {
 		loop {
 			let mut flags: u32 = 0;
 			let mut sample: Option<IMFSample> = None;

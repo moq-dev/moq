@@ -12,7 +12,7 @@ use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 use super::super::encoder::Config;
 use super::Backend;
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -97,7 +97,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -171,8 +171,8 @@ mod tests {
 		}
 	}
 
-	fn gray() -> Frame {
-		Frame::I420(I420 {
+	fn gray() -> Surface {
+		Surface::I420(I420 {
 			width: 320,
 			height: 240,
 			data: vec![0x80u8; I420::len(320, 240)],

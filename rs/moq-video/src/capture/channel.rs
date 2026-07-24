@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 /// Bounded depth; the oldest frame is dropped to favor latency over completeness.
 const DEPTH: usize = 4;
@@ -25,7 +25,7 @@ pub(super) struct FrameChannel {
 }
 
 struct State {
-	frames: VecDeque<Frame>,
+	frames: VecDeque<Surface>,
 	closed: bool,
 }
 
@@ -42,7 +42,7 @@ impl FrameChannel {
 
 	/// Enqueue a frame, dropping the oldest if the buffer is full. Safe to call
 	/// from the foreign producer thread; a no-op once closed.
-	pub(super) fn push(&self, frame: Frame) {
+	pub(super) fn push(&self, frame: Surface) {
 		{
 			let mut state = self.state.lock().unwrap();
 			if state.closed {
@@ -63,7 +63,7 @@ impl FrameChannel {
 	}
 
 	/// Await the next frame, or `None` once the channel is closed and drained.
-	pub(super) async fn recv(&self) -> Option<Frame> {
+	pub(super) async fn recv(&self) -> Option<Surface> {
 		loop {
 			// Register for a wakeup before checking, so a `push` that races the
 			// check still wakes this future (tokio's documented Notify pattern).
@@ -89,8 +89,8 @@ mod tests {
 
 	/// A throwaway frame tagged via its width, so a test can identify which frame
 	/// `recv` returned without building real pixel data.
-	fn frame(id: u32) -> Frame {
-		Frame::I420(I420 {
+	fn frame(id: u32) -> Surface {
+		Surface::I420(I420 {
 			width: id,
 			height: 2,
 			data: Vec::new(),

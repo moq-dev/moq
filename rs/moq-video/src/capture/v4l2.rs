@@ -19,7 +19,7 @@ use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 /// List V4L2 capture nodes using paths that [`open_device`] accepts.
 pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
@@ -175,7 +175,7 @@ impl Camera {
 
 	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
 	/// in a loop and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self) -> Result<Option<Surface>, Error> {
 		let (buf, meta) =
 			CaptureStream::next(&mut self.stream).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 capture: {e}")))?;
 
@@ -195,7 +195,7 @@ impl Camera {
 				I420::from_rgb(&rgb, w as u32, h as u32)?
 			}
 		};
-		Ok(Some(Frame::I420(i420)))
+		Ok(Some(Surface::I420(i420)))
 	}
 }
 

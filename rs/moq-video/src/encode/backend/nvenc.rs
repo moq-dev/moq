@@ -22,7 +22,7 @@
 //!      each plane pitched, which works for any (even) width.
 //!
 //! The session's input format is NV12 (NVENC's native layout). A CPU I420 frame
-//! is interleaved into an NVENC input buffer; a CUDA frame ([`Frame::Cuda`],
+//! is interleaved into an NVENC input buffer; a CUDA frame ([`Surface::Cuda`],
 //! NVDEC output, already NV12) is registered as an external resource and encoded
 //! in place, so the NVDEC -> NVENC transcode path never touches the CPU.
 
@@ -42,7 +42,7 @@ use moq_nvenc::{Encoder, EncoderInitParams, Session};
 use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
-use crate::frame::{Frame, interleave_uv};
+use crate::frame::{Surface, interleave_uv};
 
 pub(crate) const NAME: &str = "nvenc";
 
@@ -157,7 +157,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		let mut output = self
 			.session
 			.create_output_bitstream()
@@ -179,7 +179,7 @@ impl Backend for Nvenc {
 			// register its buffer as an external NVENC resource and encode in
 			// place, no CPU round trip and no GPU copy.
 			#[cfg(feature = "nvdec")]
-			Frame::Cuda(cuda) => {
+			Surface::Cuda(cuda) => {
 				// Registration keeps a raw pointer into the frame; the frame
 				// (borrowed) outlives the registration.
 				let mut resource = self

@@ -23,7 +23,7 @@ use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 use super::super::encoder::Config;
 use super::Backend;
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 pub(crate) const NAME: &str = "vaapi";
 
@@ -53,7 +53,7 @@ impl Vaapi {
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		let i420 = frame.to_i420()?;
 		let nv12 = i420_to_nv12(&i420);
 		let annexb = self

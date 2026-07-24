@@ -2,7 +2,7 @@
 //!
 //! [`Backend`] is the seam between frame input prep (capture + color conversion,
 //! owned by [`Encoder`](super::Encoder)) and the codec itself. Every backend
-//! takes a planar I420 [`Frame`] and emits Annex-B with in-band parameter sets
+//! takes a planar I420 [`Surface`] and emits Annex-B with in-band parameter sets
 //! (SPS/PPS, plus VPS for H.265), the framing the matching catalog importer
 //! expects. Each backend produces exactly one codec, so the producer can route
 //! its packets to the right importer.
@@ -16,7 +16,7 @@ use bytes::Bytes;
 
 use super::encoder::{Codec, Config, Kind};
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 mod openh264;
 
@@ -37,7 +37,7 @@ mod vaapi;
 pub(crate) trait Backend: Send {
 	/// Encode one frame. Set `keyframe` to force an IDR (e.g. on resume so a
 	/// re-subscribing viewer can start decoding at once).
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error>;
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error>;
 
 	/// Flush the encoder, returning any buffered packets.
 	fn finish(&mut self) -> Result<Vec<Bytes>, Error>;

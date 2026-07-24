@@ -30,7 +30,7 @@ mod threaded {
 
 	use super::super::encoder::{self, Encoder};
 	use crate::Error;
-	use crate::frame::Frame;
+	use crate::frame::Surface;
 
 	/// Work for the encode thread. Both variants go down the same channel so a
 	/// bitrate change lands in order with the frames around it, rather than
@@ -39,7 +39,7 @@ mod threaded {
 		/// A frame and whether to force a keyframe, plus a oneshot to return that
 		/// frame's packets (or an error) in order.
 		Encode {
-			frame: Frame,
+			frame: Surface,
 			keyframe: bool,
 			resp: oneshot::Sender<Result<Vec<Bytes>, Error>>,
 		},
@@ -89,7 +89,7 @@ mod threaded {
 				while let Some(req) = req_rx.blocking_recv() {
 					match req {
 						Request::Encode { frame, keyframe, resp } => {
-							let _ = resp.send(encoder.encode_raw(&frame, keyframe));
+							let _ = resp.send(encoder.encode(&frame, keyframe));
 						}
 						Request::SetBitrate { bitrate, resp } => {
 							let _ = resp.send(encoder.set_bitrate(bitrate));
@@ -120,7 +120,7 @@ mod threaded {
 
 		/// Encode one frame, awaiting its packets. The frame is moved to the
 		/// encode thread; the result returns over a oneshot.
-		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		pub(in crate::encode) async fn encode(&mut self, frame: Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 			self.request(|resp| Request::Encode { frame, keyframe, resp }).await
 		}
 
@@ -169,7 +169,7 @@ mod inline {
 
 	use super::super::encoder::{self, Encoder};
 	use crate::Error;
-	use crate::frame::Frame;
+	use crate::frame::Surface;
 
 	/// An [`Encoder`] driven inline on the capture task (see the module docs).
 	pub(in crate::encode) struct Sink(Encoder);
@@ -184,8 +184,8 @@ mod inline {
 			self.0.name()
 		}
 
-		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.0.encode_raw(&frame, keyframe)
+		pub(in crate::encode) async fn encode(&mut self, frame: Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+			self.0.encode(&frame, keyframe)
 		}
 
 		/// Retune the encoder. Async only to match the threaded `Sink`; there's
