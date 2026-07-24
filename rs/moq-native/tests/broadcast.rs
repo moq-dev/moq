@@ -2235,3 +2235,218 @@ fn expect_connect_err(result: moq_native::Result<moq_net::Session>) -> moq_nativ
 		Err(err) => err,
 	}
 }
+
+// ── GOAWAY over real transports ─────────────────────────────────────
+
+/// Server drains the client with a GOAWAY over a real transport; the client
+/// observes the URI (and the deadline on versions that carry one) and keeps an
+/// existing subscription flowing before leaving.
+///
+/// Real-QUIC coverage matters beyond the mock: on draft-17+ the GOAWAY rides
+/// the SETUP uni streams, where dropping the reader mid-session would emit a
+/// STOP_SENDING a strict peer treats as a protocol violation.
+async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
+	let version: moq_net::Version = version.parse().expect("invalid version");
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("failed to create broadcast");
+	let mut track = broadcast.create_track("video", None).expect("failed to create track");
+
+	let mut group = track.append_group().expect("failed to append group");
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"pre-goaway".as_ref())
+		.expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version];
+
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec![version];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+
+	// The server accepts one session, waits for the signal, then drains it
+	// with a deadline and waits for the peer to leave.
+	let (start_drain_tx, start_drain_rx) = tokio::sync::oneshot::channel::<()>();
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+
+		start_drain_rx.await.expect("drain signal");
+		let draining = session
+			.drain()
+			.expect("drain must be available")
+			.start_with_timeout("https://elsewhere.example/", Duration::from_secs(5));
+
+		// Keep producers alive while the client finishes reading.
+		let _broadcast = broadcast;
+		let _track = track;
+
+		draining.complete().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Subscribe and read the pre-GOAWAY group.
+	let moq_net::announce::Update { path, broadcast: bc } = tokio::time::timeout(TIMEOUT, announcements.next())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	let mut sub = tokio::time::timeout(TIMEOUT, async {
+		bc.track("video").expect("track handle").subscribe(None).await
+	})
+	.await
+	.expect("subscribe timed out")
+	.expect("subscribe failed");
+
+	let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
+		.expect("track closed prematurely");
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+	assert_eq!(&frame.payload[..], b"pre-goaway");
+
+	// Trigger the drain and observe the GOAWAY.
+	start_drain_tx.send(()).expect("send drain signal");
+	let goaway = tokio::time::timeout(TIMEOUT, session.goaway())
+		.await
+		.expect("goaway timed out")
+		.expect("session closed before GOAWAY");
+	assert_eq!(&*goaway.uri, "https://elsewhere.example/");
+	assert!(session.is_going_away());
+	if expect_wire_timeout {
+		assert_eq!(
+			goaway.timeout,
+			Some(Duration::from_secs(5)),
+			"draft-17+ carries the deadline"
+		);
+	} else {
+		assert_eq!(goaway.timeout, None, "no wire timeout on this version");
+	}
+
+	// Honor the GOAWAY: leave, letting the server's drain complete cleanly.
+	drop(sub);
+	drop(session);
+	tokio::time::timeout(TIMEOUT, server_handle)
+		.await
+		.expect("server drain timed out")
+		.expect("server task panicked")
+		.expect("server errored");
+}
+
+#[tokio::test]
+async fn goaway_moq_lite_04_quic() {
+	goaway_test("moql", "moq-lite-04", false).await;
+}
+
+#[tokio::test]
+async fn goaway_moq_lite_05_webtransport() {
+	goaway_test("https", "moq-lite-05", false).await;
+}
+
+#[tokio::test]
+async fn goaway_moq_transport_14_quic() {
+	goaway_test("moqt", "moq-transport-14", false).await;
+}
+
+#[tokio::test]
+async fn goaway_moq_transport_17_quic() {
+	goaway_test("moqt", "moq-transport-17", true).await;
+}
+
+#[tokio::test]
+async fn goaway_moq_transport_19_quic() {
+	goaway_test("moqt", "moq-transport-19", true).await;
+}
+
+/// The draining side force-closes an overstaying peer after the deadline, over
+/// a real QUIC transport, on the newest IETF draft.
+#[tokio::test]
+async fn goaway_timeout_force_close_moq_transport_19_quic() {
+	let version: moq_net::Version = "moq-transport-19".parse().unwrap();
+
+	let pub_origin = Origin::random().produce();
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version];
+	let mut server = server_config.init().expect("failed to init server");
+	let addr = server.local_addr().expect("failed to get local addr");
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec![version];
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+
+		let draining = session
+			.drain()
+			.expect("drain")
+			.start_with_timeout("", Duration::from_millis(200));
+		// The client deliberately overstays; this resolves via the force-close.
+		draining.complete().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let sub_origin = Origin::random().produce();
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Observe the GOAWAY but do NOT leave.
+	let goaway = tokio::time::timeout(TIMEOUT, session.goaway())
+		.await
+		.expect("goaway timed out")
+		.expect("session closed before GOAWAY");
+	assert_eq!(goaway.timeout, Some(Duration::from_millis(200)));
+
+	// The server force-closes after the 200ms deadline. Assert the enforcement:
+	// the session ends promptly despite the client overstaying. The close
+	// *reason* is best-effort on real QUIC (the client driver's own teardown
+	// close can race the server's CONNECTION_CLOSE and stomp it), so the
+	// structured reason is asserted in the deterministic mock test
+	// (rs/moq-net/tests/goaway.rs) instead.
+	let reason = tokio::time::timeout(Duration::from_secs(3), session.closed())
+		.await
+		.expect("force-close was not enforced within the deadline");
+	tracing::info!(%reason, "session force-closed after the GOAWAY deadline");
+
+	tokio::time::timeout(TIMEOUT, server_handle)
+		.await
+		.expect("server force-close timed out")
+		.expect("server task panicked")
+		.expect("server errored");
+}

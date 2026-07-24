@@ -130,6 +130,10 @@ pub(crate) struct WebState {
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	pub(crate) conn_id: AtomicU64,
+	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
+	/// when it fires. Defaults to a handle that never fires.
+	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+	pub(crate) shutdown: crate::Shutdown,
 }
 
 /// Run a HTTP server using Axum
@@ -148,8 +152,17 @@ impl Web {
 			cluster,
 			certificates,
 			conn_id: AtomicU64::new(0),
+			shutdown: crate::Shutdown::disabled(),
 		});
 		Self { state, config }
+	}
+
+	/// Attach the relay-wide shutdown broadcast so WebSocket sessions drain with
+	/// a GOAWAY when it fires. Without it they are cut off on process exit.
+	pub fn with_shutdown(mut self, shutdown: crate::Shutdown) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_shutdown called after routes were built");
+		state.shutdown = shutdown;
+		self
 	}
 
 	/// Build the default web router with `state` applied, returning a

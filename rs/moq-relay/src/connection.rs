@@ -34,6 +34,9 @@ pub struct Connection {
 	pub cluster: Cluster,
 	/// The authenticator used to verify credentials.
 	pub auth: Auth,
+	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
+	/// a GOAWAY instead of being cut off.
+	pub shutdown: crate::Shutdown,
 }
 
 impl Connection {
@@ -125,17 +128,32 @@ impl Connection {
 
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
-		// valid. Without an expiry, just wait for the session to close.
-		let Some(expires) = token.expires else {
-			return Err(session.closed().await.into());
+		// valid; without an expiry, wait for the session to close. Either way, a
+		// relay shutdown drains the session with a GOAWAY instead of cutting it off.
+		let expiry = async {
+			match token.expires {
+				Some(expires) => {
+					let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+					tokio::time::sleep(remaining).await
+				}
+				None => std::future::pending().await,
+			}
 		};
+		let mut shutdown = self.shutdown.clone();
 
-		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-		match tokio::time::timeout(remaining, session.closed()).await {
-			Ok(err) => Err(err.into()),
-			Err(_) => {
+		tokio::select! {
+			err = session.closed() => Err(err.into()),
+			_ = expiry => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);
+				Ok(())
+			}
+			_ = shutdown.started() => {
+				tracing::info!("relay shutting down; draining session");
+				// Empty URI: "reconnect to me" (the relay is restarting). The session
+				// driver was spawned by `request.ok()`, so the GOAWAY still reaches
+				// the wire while we wait here.
+				shutdown.drain_session(&session).await;
 				Ok(())
 			}
 		}

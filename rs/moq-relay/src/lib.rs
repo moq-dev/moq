@@ -14,6 +14,7 @@ mod config;
 mod connection;
 mod http_client;
 mod internal;
+mod shutdown;
 mod stats;
 mod web;
 #[cfg(feature = "websocket")]
@@ -22,6 +23,11 @@ mod websocket;
 /// The relay needs higher stream limits than the library default
 /// to handle many concurrent subscriptions across connections.
 pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
+
+/// Default drain window in seconds for a GOAWAY without its own deadline: how
+/// long an old session keeps serving after its replacement connects, before
+/// being force-closed with [`moq_net::Error::GoawayTimeout`].
+pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 10;
 
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
@@ -35,5 +41,6 @@ pub use cluster::*;
 pub use config::*;
 pub use connection::*;
 pub use internal::*;
+pub use shutdown::*;
 pub use stats::*;
 pub use web::*;
