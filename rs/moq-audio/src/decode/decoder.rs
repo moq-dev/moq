@@ -8,6 +8,7 @@ use std::time::Duration;
 use unsafe_libopus::{OPUS_OK, OpusDecoder, opus_decode_float, opus_decoder_create, opus_decoder_destroy};
 
 use crate::opus;
+use crate::pcm;
 use crate::{Error, Format};
 
 /// Opus packets cap at 120 ms (RFC 6716 §2.1.4).
@@ -65,7 +66,7 @@ pub struct Decoder {
 
 enum Backend {
 	Opus(Opus),
-	Pcm,
+	Pcm { bytes_per_frame: usize },
 }
 
 struct Opus {
@@ -130,9 +131,16 @@ impl Decoder {
 		if catalog.description.is_some() {
 			return Err(Error::Unsupported("pcm catalog description must be absent".into()));
 		}
+		let bitrate = pcm::bitrate(catalog.sample_rate, catalog.channel_count)?;
+		if catalog.bitrate.is_some_and(|declared| declared != bitrate) {
+			return Err(Error::Unsupported(format!(
+				"pcm catalog bitrate must be {bitrate} bits per second"
+			)));
+		}
+		let bytes_per_frame = pcm::frame_bytes(1, catalog.channel_count)?;
 
 		Ok(Self {
-			backend: Backend::Pcm,
+			backend: Backend::Pcm { bytes_per_frame },
 			sample_rate: catalog.sample_rate,
 			channel_count: catalog.channel_count,
 		})
@@ -171,17 +179,16 @@ impl Decoder {
 				out.truncate(samples as usize * self.channel_count as usize);
 				Ok(out)
 			}
-			Backend::Pcm => {
-				let bytes_per_frame = std::mem::size_of::<f32>() * self.channel_count as usize;
-				if packet.is_empty() || !packet.len().is_multiple_of(bytes_per_frame) {
+			Backend::Pcm { bytes_per_frame } => {
+				if packet.is_empty() || !packet.len().is_multiple_of(*bytes_per_frame) {
 					return Err(Error::Misaligned {
 						got: packet.len(),
-						expected: packet.len().max(1).next_multiple_of(bytes_per_frame),
+						expected: packet.len().max(1).next_multiple_of(*bytes_per_frame),
 					});
 				}
 
 				Ok(packet
-					.chunks_exact(std::mem::size_of::<f32>())
+					.chunks_exact(pcm::BYTES_PER_SAMPLE)
 					.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
 					.collect())
 			}
@@ -218,6 +225,14 @@ mod tests {
 	#[test]
 	fn decoder_rejects_unknown_codec() {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Unknown("future".into()), 48_000, 2);
+
+		assert!(matches!(Decoder::new(&catalog), Err(Error::Unsupported(_))));
+	}
+
+	#[test]
+	fn pcm_rejects_incorrect_catalog_bitrate() {
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 2);
+		catalog.bitrate = Some(1);
 
 		assert!(matches!(Decoder::new(&catalog), Err(Error::Unsupported(_))));
 	}

@@ -14,6 +14,7 @@ use unsafe_libopus::{
 };
 
 use crate::opus;
+use crate::pcm;
 use crate::{Error, Format};
 
 /// libopus packet size ceiling per RFC 6716 §3.4.
@@ -239,11 +240,9 @@ impl Encoder {
 			)));
 		}
 
-		let frame_size = pcm_frame_size(codec_rate, config.frame_duration)?;
-		frame_size
-			.checked_mul(codec_channels as usize)
-			.ok_or_else(|| Error::Unsupported("pcm frame contains too many samples".into()))?;
-		pcm_bitrate(codec_rate, codec_channels)?;
+		let frame_size = pcm::frame_size(codec_rate, config.frame_duration)?;
+		pcm::frame_bytes(frame_size, codec_channels)?;
+		pcm::bitrate(codec_rate, codec_channels)?;
 		Ok(Self {
 			backend: Backend::Pcm,
 			config,
@@ -353,7 +352,7 @@ impl Encoder {
 					self.codec_channels,
 				);
 				config.bitrate = Some(
-					pcm_bitrate(self.codec_rate, self.codec_channels)
+					pcm::bitrate(self.codec_rate, self.codec_channels)
 						.expect("pcm encoder bitrate validated at construction"),
 				);
 				config.container = hang::catalog::Container::Legacy;
@@ -368,23 +367,6 @@ impl Drop for Opus {
 		// SAFETY: `inner` is a live OpusEncoder that nothing else aliases.
 		unsafe { opus_encoder_destroy(self.inner) };
 	}
-}
-
-fn pcm_frame_size(sample_rate: u32, duration: Duration) -> Result<usize, Error> {
-	let samples = u128::from(sample_rate) * duration.as_nanos();
-	if samples == 0 || !samples.is_multiple_of(1_000_000_000) {
-		return Err(Error::Unsupported(format!(
-			"pcm frame duration must contain a whole number of samples at {sample_rate} Hz"
-		)));
-	}
-	usize::try_from(samples / 1_000_000_000).map_err(|_| Error::Unsupported("pcm frame duration is too large".into()))
-}
-
-fn pcm_bitrate(sample_rate: u32, channels: u32) -> Result<u64, Error> {
-	u64::from(sample_rate)
-		.checked_mul(u64::from(channels))
-		.and_then(|samples| samples.checked_mul(32))
-		.ok_or_else(|| Error::Unsupported("pcm bitrate exceeds the catalog range".into()))
 }
 
 #[cfg(test)]

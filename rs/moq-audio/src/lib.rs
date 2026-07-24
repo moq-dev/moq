@@ -31,6 +31,7 @@ mod error;
 mod format;
 mod frame;
 mod opus;
+mod pcm;
 mod resample;
 
 #[cfg(feature = "capture")]
