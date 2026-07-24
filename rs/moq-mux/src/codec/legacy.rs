@@ -1,8 +1,9 @@
 //! Legacy broadcast audio (MP2, AC-3, E-AC-3) carried verbatim.
 //!
 //! These codecs share one model: every frame is whole and self-describing
-//! (framing header included), published as one hang frame in its own group,
-//! never decoded. Verbatim is byte-exact for complete, well-formed frames;
+//! (framing header included), never decoded. [`decode`](Import::decode) marks only the first frame of
+//! each group a keyframe (the rest extend it); the caller bounds groups via [`cut`](Import::cut) /
+//! [`seek`](Import::seek). Verbatim is byte-exact for complete, well-formed frames;
 //! malformed or out-of-scope input is rejected, never mis-described. Each
 //! codec contributes only a header parser and a [`Descriptor`]; this module
 //! owns the track lifecycle.
@@ -157,7 +158,6 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.finish()?;
 		Ok(())
 	}
@@ -169,32 +169,45 @@ impl<E: CatalogExt> Import<E> {
 	}
 
 	/// Cut the current group at `end` without finishing the track.
-	#[allow(dead_code)]
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		self.rendition.record_group_end(end);
+		// An explicit boundary finalizes the pending bitrate window at `end`. A bare `cut(None)`
+		// (the facade's per-frame close) stays metric-neutral, leaving the estimator to decode's
+		// per-packet window so it isn't clobbered by a zero-length group.
+		if end.is_some() {
+			self.rendition.record_group_end(end);
+		}
 		self.track.cut(end)?;
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
 		Ok(())
 	}
 
-	/// Publish one whole frame as a hang frame in its own group.
+	/// Publish one whole frame, stamping `pts` or a wall clock when absent.
+	///
+	/// Legacy frames are self-describing and independently decodable, so the frame is marked a
+	/// keyframe only when it starts a group (see
+	/// [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it extends
+	/// the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
+		// Feed the bitrate estimator one window per packet: close the previous packet's window at
+		// this timestamp, then open this one. Owned entirely by decode so it's independent of where
+		// the caller draws group boundaries (cut/seek).
 		self.rendition.record_group_end(Some(timestamp));
 		let bytes = frame.as_ref().len();
+		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
+		// instead of opening one group (one QUIC stream) per packet.
+		let keyframe = self.track.needs_keyframe();
 		self.track.write(Frame {
 			timestamp,
 			duration: None,
 			payload: frame.into_bytes(),
-			keyframe: true,
+			keyframe,
 		})?;
-		self.track.cut(None)?;
 		self.rendition.record_frame(timestamp, bytes);
 		Ok(())
 	}

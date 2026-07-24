@@ -149,6 +149,12 @@ enum TrackKind<E: CatalogExt = ()> {
 /// Use this when the caller already has whole frames (the typical case for files
 /// and reassembled network input). Each [`decode`](Self::decode) call takes one
 /// complete frame.
+///
+/// Audio is independently decodable per frame, so this cuts a group after each audio frame (one
+/// group, one QUIC stream, forwarded without waiting); video groups by its own keyframes. For
+/// multi-frame audio groups (aligning to a segment cadence), drive a codec importer (e.g.
+/// [`codec::opus::Import`](crate::codec::opus::Import)) directly and bound groups with its `cut` /
+/// `seek` rather than going through this facade.
 pub struct Track<E: CatalogExt = ()> {
 	kind: TrackKind<E>,
 }
@@ -273,10 +279,24 @@ impl<E: CatalogExt> Track<E> {
 			}
 			TrackKind::Vp8(ref mut import) => import.decode(frame, pts)?,
 			TrackKind::Vp9(ref mut import) => import.decode(frame, pts)?,
-			TrackKind::Aac(ref mut import) => import.decode(frame, pts)?,
-			TrackKind::Opus(ref mut import) => import.decode(frame, pts)?,
-			TrackKind::Mp3(ref mut import) => import.decode(frame, pts)?,
-			TrackKind::Flac(ref mut import) => import.decode(frame, pts)?,
+			// Audio: one group (one QUIC stream) per frame, so the relay forwards each without
+			// waiting. A caller wanting multi-frame audio groups drives a codec importer directly.
+			TrackKind::Aac(ref mut import) => {
+				import.decode(frame, pts)?;
+				import.cut(None)?;
+			}
+			TrackKind::Opus(ref mut import) => {
+				import.decode(frame, pts)?;
+				import.cut(None)?;
+			}
+			TrackKind::Mp3(ref mut import) => {
+				import.decode(frame, pts)?;
+				import.cut(None)?;
+			}
+			TrackKind::Flac(ref mut import) => {
+				import.decode(frame, pts)?;
+				import.cut(None)?;
+			}
 		}
 
 		Ok(())
@@ -766,6 +786,99 @@ mod tests {
 		assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap());
 
 		import.finish().unwrap();
+	}
+
+	/// Count the frames in each group of a finished track.
+	async fn collect_groups(mut subscriber: moq_net::track::Subscriber) -> Vec<usize> {
+		let mut groups = Vec::new();
+		while let Some(mut group) = subscriber.recv_group().await.unwrap() {
+			let mut count = 0;
+			while group.next_frame().await.unwrap().is_some() {
+				count += 1;
+			}
+			groups.push(count);
+		}
+		groups
+	}
+
+	fn opus_import(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: &crate::catalog::Producer,
+	) -> (crate::codec::opus::Import, moq_net::track::Subscriber) {
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let subscriber = track.subscribe(None);
+		let config = crate::codec::opus::Config::new(48_000, 2);
+		let import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
+		(import, subscriber)
+	}
+
+	/// The facade cuts a group after each audio frame: one group (one QUIC stream) per packet, so the
+	/// relay forwards it without waiting for the next.
+	#[tokio::test(start_paused = true)]
+	async fn audio_cuts_a_group_per_frame() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		import.decode(b"a", Some(Timestamp::from_micros(0).unwrap())).unwrap();
+		import
+			.decode(b"b", Some(Timestamp::from_micros(10_000).unwrap()))
+			.unwrap();
+		import
+			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
+			.unwrap();
+		import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![1, 1, 1]);
+	}
+
+	/// Driven directly (not through the facade), the codec importer accumulates audio frames into the
+	/// current group until an explicit `seek`/`cut`, marking only the first frame of each group a
+	/// keyframe. This is how a caller drives its own audio grouping.
+	#[tokio::test(start_paused = true)]
+	async fn codec_import_accumulates_until_boundary() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (mut import, subscriber) = opus_import(&mut broadcast, &catalog);
+
+		import.decode(b"a", Some(Timestamp::from_micros(0).unwrap())).unwrap();
+		import
+			.decode(b"b", Some(Timestamp::from_micros(10_000).unwrap()))
+			.unwrap();
+		import.seek(1).unwrap();
+		import
+			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
+			.unwrap();
+		import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![2, 1]);
+	}
+
+	/// A caller-provided `cut(Some(end))` boundary reaches the bitrate estimator: it finalizes the
+	/// pending window at `end` so the caller's segment cut is measured. Without it the last window
+	/// stays open, the 1s averaging window never closes, and no bitrate is detected. Regression for
+	/// the metrics hole in caller-driven grouping (a bare `cut(None)` stays neutral by design).
+	#[tokio::test(start_paused = true)]
+	async fn explicit_cut_finalizes_bitrate_at_boundary() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (mut import, _subscriber) = opus_import(&mut broadcast, &catalog);
+
+		// A full second of audio, then an explicit boundary at 1s. The estimator averages bitrate
+		// over a 1s window, so it's the boundary that closes the final packet's window and carries
+		// the accumulated duration to the reporting threshold.
+		let payload = vec![0u8; 4_000];
+		for us in [0u64, 250_000, 500_000, 750_000] {
+			import
+				.decode(&payload, Some(Timestamp::from_micros(us).unwrap()))
+				.unwrap();
+		}
+		import.cut(Some(Timestamp::from_micros(1_000_000).unwrap())).unwrap();
+		import.finish().unwrap();
+
+		let audio = catalog.snapshot().audio.renditions.get("audio").cloned().unwrap();
+		assert!(
+			audio.bitrate.is_some(),
+			"an explicit cut boundary should finalize the bitrate window"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

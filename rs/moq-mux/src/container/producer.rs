@@ -8,14 +8,19 @@ use super::{Container, Frame};
 ///
 /// ## Group Management
 ///
-/// Every group must start with a keyframe. Writing a frame with `keyframe = true`
-/// closes the previous group (if any) and starts a new one. Writing a non-keyframe
-/// frame when no group is open is a protocol violation.
+/// `keyframe = true` means "start a new group": it closes the previous group (if any) and opens a
+/// new one, so every group begins with a keyframe. A non-keyframe extends the current group, and
+/// writing one when no group is open is a protocol violation.
+///
+/// A stream where every frame is independently decodable (e.g. audio) still drives grouping through
+/// this bit: mark only the *first* frame of each group a keyframe and the rest non-keyframes, so the
+/// caller's [`cut`](Self::cut) / [`seek`](Self::seek) boundaries define the groups instead of every
+/// frame opening its own (one QUIC stream per frame). [`needs_keyframe`](Self::needs_keyframe)
+/// reports whether the next frame has to be one.
 ///
 /// [`cut`](Self::cut) closes the current group early, ideally saying where its content
 /// ends; the next write must be a keyframe. Reach for it when the following keyframe won't
-/// supply that boundary in time, or for a stream without inherent keyframes (e.g. audio)
-/// that marks every Nth frame as one but wants to close the current group now.
+/// supply that boundary in time, or to bound each group of an accumulating audio track.
 /// [`discontinuity`](Self::discontinuity) goes further and publishes an empty group, for
 /// when the timeline is about to jump rather than merely continue.
 ///
@@ -63,6 +68,16 @@ impl<C: Container> Producer<C> {
 		}
 	}
 
+	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
+	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
+	///
+	/// A stream where every frame is independently decodable (audio) uses this to mark only the first
+	/// frame of each group a keyframe: `write(Frame { keyframe: producer.needs_keyframe(), .. })`, so
+	/// grouping follows the caller's `cut`/`seek` boundaries rather than opening a group per frame.
+	pub fn needs_keyframe(&self) -> bool {
+		self.group.is_none()
+	}
+
 	/// Set the maximum buffering latency.
 	///
 	/// When non-zero, frames are buffered and flushed together when the buffered duration exceeds
@@ -94,9 +109,11 @@ impl<C: Container> Producer<C> {
 
 	/// Write a frame to the track.
 	///
-	/// A keyframe closes any open group and starts a new one. A non-keyframe extends
-	/// the current group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe),
-	/// so a caller joining mid-stream can skip frames until the first keyframe.
+	/// A keyframe closes any open group and starts a new one. A non-keyframe extends the current
+	/// group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe), so a caller
+	/// joining mid-stream can skip frames until the first keyframe. A source where every frame is
+	/// independently decodable (audio) marks only the first frame of each group a keyframe (see
+	/// [`needs_keyframe`](Self::needs_keyframe)) so the group spans more than one frame.
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
 		// A keyframe cuts the previous group, using its timestamp as the boundary
 		// where the previous group's content ends.
@@ -384,6 +401,33 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![2, 2]);
+	}
+
+	/// `needs_keyframe` tracks whether a group is open, so an audio importer can mark only the first
+	/// frame of each group a keyframe (`keyframe: producer.needs_keyframe()`) and accumulate the rest
+	/// into that group until it cuts or seeks. Regression guard for the "one group (one QUIC stream)
+	/// per audio packet" storm.
+	#[tokio::test]
+	async fn needs_keyframe_drives_audio_grouping() {
+		let track = track_producer("test", hang::container::track_info());
+		let consumer = track.subscribe(None);
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		// Drive grouping off `needs_keyframe`, as the audio importers do: the first frame of each
+		// group is a keyframe, the rest are not, so they accumulate into ONE group...
+		for ts in [0, 10_000, 20_000] {
+			let keyframe = producer.needs_keyframe();
+			producer.write(frame(ts, keyframe)).unwrap();
+		}
+		producer.cut(None).unwrap();
+		// ...until the caller draws a boundary, which opens the next group.
+		for ts in [30_000, 40_000] {
+			let keyframe = producer.needs_keyframe();
+			producer.write(frame(ts, keyframe)).unwrap();
+		}
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![3, 2]);
 	}
 
 	/// `cut()` flushes the current group immediately; the next write must be a keyframe.

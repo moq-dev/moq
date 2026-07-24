@@ -236,9 +236,9 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), Error> {
-		// Each audio packet is its own moq-lite group, matching
-		// moq_mux::codec::opus::Import. Codecs can recover independently after
-		// a dropped group.
+		// Publish each audio packet as its own moq-lite group: write it as a keyframe, then cut
+		// (below) so the relay forwards it without waiting for the next. Codecs can recover
+		// independently after a dropped group.
 		let mux_frame = MuxFrame {
 			timestamp,
 			payload,

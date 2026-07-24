@@ -28,6 +28,9 @@ impl codec::Bridge for Bridge {
 		let pts = moq_net::Timestamp::from_micros(frame.timestamp_us)
 			.map_err(|err| crate::Error::Other(anyhow::anyhow!("invalid timestamp: {err}")))?;
 		self.import.decode(&frame.payload, Some(pts))?;
+		// The importer accumulates; cut each packet into its own group (one QUIC stream) so the
+		// relay forwards it without waiting for the next.
+		self.import.cut(None)?;
 		Ok(())
 	}
 
