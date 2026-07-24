@@ -680,7 +680,7 @@ impl Dynamic {
 
 	/// Poll until the broadcast closes; ready with the cause: the error passed to
 	/// [`Producer::abort`], or [`Error::Dropped`] for a [`Producer::finish`] or a
-	/// dropped producer (check [`is_finished`](Self::is_finished) to tell those apart).
+	/// dropped producer (check [`Consumer::is_finished`] to tell those apart).
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
 		ready!(self.alive.poll_closed(waiter));
 		Poll::Ready(self.state.read().abort.clone().unwrap_or(Error::Dropped))
@@ -870,14 +870,15 @@ impl Consumer {
 		}
 	}
 
-	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
-	/// dropping, and return the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`],
+	/// [`Producer::abort`], or every producer dropping, and return the cause.
 	///
-	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
-	/// only ends when every producer is gone. There is no way to abort it with a code.
+	/// Returns the error passed to [`Producer::abort`], or [`Error::Dropped`] for a
+	/// [`Producer::finish`] or a dropped producer (check [`Self::is_finished`] to
+	/// tell those apart).
 	pub async fn closed(&self) -> Error {
 		self.alive.closed().await;
-		Error::Dropped
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
 	/// Returns true if every [`Producer`] has been dropped.
@@ -1183,6 +1184,33 @@ mod test {
 		// track1's producer is held outside the broadcast, so it survives.
 		assert!(!track1.is_closed());
 		track1c.assert_not_closed();
+	}
+
+	/// `closed()` reports the cause: the abort error, or `Dropped` for a finish or
+	/// a dropped producer, with `is_finished` telling the latter two apart.
+	#[tokio::test]
+	async fn closed_cause() {
+		// Abort: the error comes through, and it isn't a finish.
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		producer.abort(Error::Timeout).unwrap();
+		assert!(matches!(consumer.closed().await, Error::Timeout));
+		assert!(!consumer.is_finished());
+
+		// Finish: a deliberate clean end.
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		producer.finish();
+		assert!(matches!(consumer.closed().await, Error::Dropped));
+		assert!(consumer.is_finished());
+
+		// Plain drop: neither aborted nor finished.
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		// Deliberate for the test: exercises the accidental-drop path (warns).
+		drop(producer);
+		assert!(matches!(consumer.closed().await, Error::Dropped));
+		assert!(!consumer.is_finished());
 	}
 
 	#[tokio::test]
