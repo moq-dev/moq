@@ -15,6 +15,8 @@ mod connection;
 mod http_client;
 mod internal;
 mod stats;
+#[cfg(test)]
+mod test_env;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;

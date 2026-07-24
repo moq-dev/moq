@@ -1345,6 +1345,10 @@ mod tests {
 	/// `mesh` is a string (clobber-safe) that accepts a TOML boolean.
 	#[test]
 	fn cluster_node_and_mesh_round_trip() {
+		// clap reads the environment while parsing, so serialize with the tests
+		// that mutate it.
+		let _env = crate::test_env::EnvGuard::lock();
+
 		let toml =
 			"[cluster]\nnode = \"us-east.example.com:4443\"\nmesh = true\nconnect = [\"root.example.com:4443\"]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
@@ -1437,6 +1441,10 @@ mod tests {
 	/// config tests guard, which is why the field is `Option<String>`).
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
+		// clap reads the environment while parsing, so serialize with the tests
+		// that mutate it.
+		let _env = crate::test_env::EnvGuard::lock();
+
 		let toml = "[cluster]\nconnect_api = \"https://api.example.com/cluster/connect\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();

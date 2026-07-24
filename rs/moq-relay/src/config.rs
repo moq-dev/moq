@@ -111,55 +111,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::Mutex;
-
 	use super::*;
-
-	/// Clears environment variables for the duration of a test, restoring what
-	/// they held (or their absence) on drop.
-	///
-	/// clap reads the `MOQ_*` vars via `env = ...`, so a value set in the host
-	/// environment would make these assertions pass for the wrong reason. The
-	/// restore keeps the rest of the test process seeing the environment it
-	/// started with, rather than one the suite quietly emptied.
-	struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-	impl EnvGuard {
-		/// Removes each variable, remembering what it held.
-		///
-		/// The caller must hold the matching per-group mutex: the process env is
-		/// shared, and the restore on drop is as racy as the removal here.
-		fn clear(vars: &[&'static str]) -> Self {
-			Self(
-				vars.iter()
-					.map(|&key| {
-						let prev = std::env::var_os(key);
-						// SAFETY: the caller's group mutex serializes env access.
-						unsafe { std::env::remove_var(key) };
-						(key, prev)
-					})
-					.collect(),
-			)
-		}
-	}
-
-	impl Drop for EnvGuard {
-		fn drop(&mut self) {
-			for (key, prev) in &self.0 {
-				// SAFETY: the caller's group mutex is still held; see `clear`.
-				match prev {
-					Some(value) => unsafe { std::env::set_var(key, value) },
-					None => unsafe { std::env::remove_var(key) },
-				}
-			}
-		}
-	}
-
-	/// Serializes tests that touch `MOQ_STATS_*`. Cargo runs tests in parallel
-	/// within a single binary, and `env::set_var` / `remove_var` are not
-	/// thread-safe with concurrent env reads (which is why they're `unsafe` as
-	/// of Rust 1.80). Any test that mutates this env must hold this lock.
-	static STATS_ENV_LOCK: Mutex<()> = Mutex::new(());
+	use crate::test_env::EnvGuard;
 
 	/// Regression test for the clap+TOML interaction documented on
 	/// `Config::parse_and_merge`. A TOML file that enables stats with no
@@ -171,7 +124,6 @@ mod tests {
 	/// stats publishing for any deployment that configured it via TOML.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
-		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH"]);
 
 		let toml = r#"
@@ -204,16 +156,11 @@ depth = 2
 		assert_eq!(config.stats.depth, Some(2));
 	}
 
-	/// Serializes tests that touch `MOQ_CACHE_*`. Same rationale as
-	/// `STATS_ENV_LOCK`.
-	static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Both
 	/// fields are `Option<String>` so a TOML-configured cache size survives the
 	/// CLI re-parse when no `--cache-*` flag is passed.
 	#[test]
 	fn cli_does_not_clobber_toml_cache() {
-		let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CACHE_CAPACITY", "MOQ_CACHE_HEADROOM", "MOQ_CACHE_DURATION"]);
 
 		let toml = r#"
@@ -261,16 +208,11 @@ duration = "30s"
 		toml::to_string(&unset).expect("serialize None");
 	}
 
-	/// Serializes tests that touch `MOQ_CLUSTER_LINGER`. Same rationale as
-	/// `STATS_ENV_LOCK`.
-	static LINGER_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	/// Regression test for the clap+TOML clobber bug applied to `cluster.linger`.
 	/// The field is `Option<Duration>` so a TOML-configured window survives the
 	/// CLI re-parse when no `--cluster-linger` flag is passed.
 	#[test]
 	fn cli_does_not_clobber_toml_linger() {
-		let _guard = LINGER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
 
 		let toml = r#"
@@ -292,10 +234,6 @@ linger = "30s"
 		);
 	}
 
-	/// Serializes tests that touch `MOQ_SERVER_PREFERRED_V4` / `_V6`. Same
-	/// rationale as `STATS_ENV_LOCK`.
-	static PREFERRED_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	/// Regression test for the same clap+TOML clobber bug applied to the
 	/// `preferred_v4` / `preferred_v6` fields on `moq-native::ServerConfig`.
 	/// If either field is ever re-typed as a bare `SocketAddrV4` / `SocketAddrV6`
@@ -305,7 +243,6 @@ linger = "30s"
 	/// TOML. This test asserts the TOML value survives an absent CLI flag.
 	#[test]
 	fn cli_does_not_clobber_toml_preferred_addresses() {
-		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_SERVER_PREFERRED_V4", "MOQ_SERVER_PREFERRED_V6"]);
 
 		let toml = r#"
@@ -337,7 +274,6 @@ preferred_v6 = "[2001:db8::1]:443"
 	/// directory: a TOML-configured trace dir must survive the CLI re-parse.
 	#[test]
 	fn cli_does_not_clobber_toml_qlog() {
-		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_SERVER_QUIC_QLOG"]);
 
 		let toml = r#"
@@ -359,10 +295,6 @@ qlog = "/tmp/moq-qlog"
 		);
 	}
 
-	/// Serializes tests that touch `MOQ_*_QUIC_CONGESTION_CONTROL`. Same
-	/// rationale as `STATS_ENV_LOCK`.
-	static CONGESTION_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	/// Regression test for the clap+TOML clobber bug applied to the
 	/// `congestion_control` fields on the quic sections of
 	/// `moq-native::ServerConfig` / `ClientConfig`. The fields must stay
@@ -370,7 +302,6 @@ qlog = "/tmp/moq-qlog"
 	/// CLI re-parse when no `--*-quic-congestion-control` flag is passed.
 	#[test]
 	fn cli_does_not_clobber_toml_congestion_control() {
-		let _guard = CONGESTION_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&[
 			"MOQ_SERVER_QUIC_CONGESTION_CONTROL",
 			"MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
@@ -403,13 +334,8 @@ congestion_control = "loss"
 		);
 	}
 
-	/// Serializes tests that touch `MOQ_WEB_HTTPS_*`. Same rationale as
-	/// `STATS_ENV_LOCK`.
-	static WEB_HTTPS_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	#[test]
 	fn cli_does_not_clobber_toml_web_https_cert_arrays() {
-		let _guard = WEB_HTTPS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_WEB_HTTPS_CERT", "MOQ_WEB_HTTPS_KEY"]);
 
 		let toml = r#"
@@ -447,7 +373,6 @@ key = ["cdn.key", "moq-pro.key"]
 	/// path.
 	#[test]
 	fn cli_flag_overrides_toml_stats_enabled() {
-		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED"]);
 
 		let toml = "[stats]\nenabled = true\n";
@@ -468,11 +393,8 @@ key = ["cdn.key", "moq-pro.key"]
 	/// Same clap+TOML clobber guard applied to `auth.auth_api`. It's typed as
 	/// `Option<String>` so an absent `--auth-api` CLI flag must not wipe a
 	/// TOML-configured value during the `update_from` re-parse.
-	static AUTH_API_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	#[test]
 	fn cli_does_not_clobber_toml_auth_api() {
-		let _guard = AUTH_API_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_AUTH_API"]);
 
 		let toml = r#"
@@ -499,11 +421,8 @@ auth_api = "https://api.moq.dev/cluster/auth"
 	/// TOML-configured value during the `update_from` re-parse. A bare `bool`
 	/// would reset it to `false`, silently dropping the system roots for a
 	/// cluster client that opted into trusting both system and custom roots.
-	static SYSTEM_ROOTS_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	#[test]
 	fn cli_does_not_clobber_toml_system_roots() {
-		let _guard = SYSTEM_ROOTS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
 
 		let toml = r#"
@@ -530,11 +449,8 @@ system_roots = true
 	/// during the `update_from` re-parse. A bare `u64` would reset it to `0`,
 	/// which the cluster treats as reserved and silently swaps for a random id,
 	/// defeating the point of pinning a stable origin via TOML.
-	static CLUSTER_ID_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	#[test]
 	fn cli_does_not_clobber_toml_cluster_id() {
-		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
 
 		let toml = r#"
@@ -558,11 +474,8 @@ id = 12345
 
 	/// The per-site stats tier flags are `Option<String>`, so an absent CLI flag
 	/// must not wipe a TOML value during the `update_from` re-parse.
-	static TIER_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	#[test]
 	fn cli_does_not_clobber_toml_tiers() {
-		let _guard = TIER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER", "MOQ_AUTH_MTLS_TIER"]);
 
 		let toml = r#"
@@ -597,12 +510,8 @@ mtls_tier = "edge"
 	/// `update_from` re-parse when their CLI flags are absent, or a TOML-configured
 	/// Unix listener (and its allowlist) gets silently dropped.
 	#[cfg(all(feature = "uds", unix))]
-	static SERVER_UNIX_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-	#[cfg(all(feature = "uds", unix))]
 	#[test]
 	fn cli_does_not_clobber_toml_server_unix() {
-		let _guard = SERVER_UNIX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_SERVER_UNIX_BIND", "MOQ_SERVER_UNIX_ALLOW_UID"]);
 
 		let toml = r#"
@@ -638,7 +547,6 @@ uid = [1001]
 
 	#[test]
 	fn cli_flag_overrides_toml_cluster_id() {
-		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
 
 		let toml = "[cluster]\nid = 12345\n";
@@ -656,10 +564,6 @@ uid = [1001]
 		assert_eq!(config.cluster.id, Some(67890));
 	}
 
-	/// Serializes tests that touch `MOQ_INTERNAL_LISTEN`. Same rationale as
-	/// `STATS_ENV_LOCK`.
-	static INTERNAL_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 	/// Regression test for the same clap+TOML clobber bug on `internal.listen`
 	/// (the `--internal-listen` / `MOQ_INTERNAL_LISTEN` ops listener). It's an
 	/// `Option<SocketAddr>`, so an absent CLI flag must leave the TOML value
@@ -667,7 +571,6 @@ uid = [1001]
 	/// re-parse would overwrite a TOML-configured listener with the default.
 	#[test]
 	fn cli_does_not_clobber_toml_internal_listen() {
-		let _guard = INTERNAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 		let _env = EnvGuard::clear(&["MOQ_INTERNAL_LISTEN"]);
 
 		let toml = "[internal]\nlisten = \"127.0.0.1:9101\"\n";
