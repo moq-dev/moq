@@ -1,7 +1,7 @@
-//! Opus decoder front end.
+//! Audio decoder front end.
 //!
-//! Mirror of [`encode::Encoder`](crate::encode::Encoder): wraps libopus via
-//! [`unsafe_libopus`] and produces interleaved `f32` PCM.
+//! Mirror of [`encode::Encoder`](crate::encode::Encoder): dispatches over the
+//! catalog codec and produces interleaved `f32` PCM.
 
 use std::time::Duration;
 
@@ -58,21 +58,39 @@ impl Config {
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
 /// when the packets don't come from a plain track subscription.
 pub struct Decoder {
-	inner: *mut OpusDecoder,
+	backend: Backend,
 	sample_rate: u32,
 	channel_count: u32,
+}
+
+enum Backend {
+	Opus(Opus),
+	Pcm,
+}
+
+struct Opus {
+	inner: *mut OpusDecoder,
 	max_frame_size: usize,
 }
 
 // SAFETY: see Encoder.
-unsafe impl Send for Decoder {}
+unsafe impl Send for Opus {}
 
 impl Decoder {
 	/// Build a decoder from a catalog [`AudioConfig`](hang::catalog::AudioConfig).
 	///
 	/// Parses the OpusHead `description` if present; falls back to the catalog's
-	/// declared sample rate / channel count.
+	/// declared sample rate / channel count. PCM uses those catalog fields
+	/// directly and requires an absent `description`.
 	pub fn new(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
+		match &catalog.codec {
+			hang::catalog::AudioCodec::Opus => Self::new_opus(catalog),
+			hang::catalog::AudioCodec::Pcm => Self::new_pcm(catalog),
+			codec => Err(Error::Unsupported(format!("unsupported audio codec: {codec}"))),
+		}
+	}
+
+	fn new_opus(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
 		let (sample_rate, channel_count) = if let Some(desc) = &catalog.description {
 			let mut buf = desc.as_ref();
 			match moq_mux::codec::opus::Config::parse(&mut buf) {
@@ -96,10 +114,27 @@ impl Decoder {
 		let max_frame_size = (sample_rate as usize * MAX_FRAME_MS) / 1000;
 
 		Ok(Self {
-			inner,
+			backend: Backend::Opus(Opus { inner, max_frame_size }),
 			sample_rate,
 			channel_count,
-			max_frame_size,
+		})
+	}
+
+	fn new_pcm(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
+		if catalog.sample_rate == 0 {
+			return Err(Error::Unsupported("pcm sample rate must be greater than zero".into()));
+		}
+		if catalog.channel_count == 0 {
+			return Err(Error::Unsupported("pcm channel count must be greater than zero".into()));
+		}
+		if catalog.description.is_some() {
+			return Err(Error::Unsupported("pcm catalog description must be absent".into()));
+		}
+
+		Ok(Self {
+			backend: Backend::Pcm,
+			sample_rate: catalog.sample_rate,
+			channel_count: catalog.channel_count,
 		})
 	}
 
@@ -115,30 +150,75 @@ impl Decoder {
 
 	/// Decode one packet into interleaved `f32` PCM.
 	pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>, Error> {
-		let mut out = vec![0.0f32; self.max_frame_size * self.channel_count as usize];
-		// SAFETY: `inner` owns a live OpusDecoder; packet/out slices bound
-		// by the lengths we pass.
-		let samples = unsafe {
-			opus_decode_float(
-				&mut *self.inner,
-				packet.as_ptr(),
-				packet.len() as i32,
-				out.as_mut_ptr(),
-				self.max_frame_size as i32,
-				0,
-			)
-		};
-		if samples < 0 {
-			return Err(opus::error(samples, "opus_decode_float"));
+		match &mut self.backend {
+			Backend::Opus(opus) => {
+				let mut out = vec![0.0f32; opus.max_frame_size * self.channel_count as usize];
+				// SAFETY: `inner` owns a live OpusDecoder; packet/out slices are
+				// bounded by the lengths we pass.
+				let samples = unsafe {
+					opus_decode_float(
+						&mut *opus.inner,
+						packet.as_ptr(),
+						packet.len() as i32,
+						out.as_mut_ptr(),
+						opus.max_frame_size as i32,
+						0,
+					)
+				};
+				if samples < 0 {
+					return Err(crate::opus::error(samples, "opus_decode_float"));
+				}
+				out.truncate(samples as usize * self.channel_count as usize);
+				Ok(out)
+			}
+			Backend::Pcm => {
+				let bytes_per_frame = std::mem::size_of::<f32>() * self.channel_count as usize;
+				if packet.is_empty() || !packet.len().is_multiple_of(bytes_per_frame) {
+					return Err(Error::Misaligned {
+						got: packet.len(),
+						expected: packet.len().max(1).next_multiple_of(bytes_per_frame),
+					});
+				}
+
+				Ok(packet
+					.chunks_exact(std::mem::size_of::<f32>())
+					.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
+					.collect())
+			}
 		}
-		out.truncate(samples as usize * self.channel_count as usize);
-		Ok(out)
 	}
 }
 
-impl Drop for Decoder {
+impl Drop for Opus {
 	fn drop(&mut self) {
 		// SAFETY: `inner` is a live OpusDecoder that nothing else aliases.
 		unsafe { opus_decoder_destroy(self.inner) };
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pcm_rejects_incomplete_channel_frame() {
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 2);
+		let mut decoder = Decoder::new(&catalog).unwrap();
+
+		assert!(matches!(
+			decoder.decode(&[]),
+			Err(Error::Misaligned { got: 0, expected: 8 })
+		));
+		assert!(matches!(
+			decoder.decode(&[0; 4]),
+			Err(Error::Misaligned { got: 4, expected: 8 })
+		));
+	}
+
+	#[test]
+	fn decoder_rejects_unknown_codec() {
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Unknown("future".into()), 48_000, 2);
+
+		assert!(matches!(Decoder::new(&catalog), Err(Error::Unsupported(_))));
 	}
 }

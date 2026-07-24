@@ -1,6 +1,6 @@
 //! Encode raw PCM and publish it as a moq audio track.
 //!
-//! The output codec is selected via [`Codec`]; Opus is the only one today.
+//! The output codec is selected via [`Codec`].
 //!
 //! Entry points, high to low level:
 //! - `publish_capture` captures a microphone (or system audio) and publishes

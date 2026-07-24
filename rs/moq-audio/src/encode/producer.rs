@@ -35,9 +35,11 @@ pub struct Options {
 	/// Channel count the codec runs at. `None` matches the input; anything else
 	/// is rejected, since remapping isn't implemented.
 	pub channels: Option<u32>,
-	/// Bitrate in bits per second. `None` lets the codec pick.
+	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
+	/// because its bitrate is fixed by the sample rate and channel count.
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
+	/// PCM accepts any duration containing a whole number of samples.
 	pub frame_duration: Duration,
 }
 
@@ -217,7 +219,8 @@ impl<E: CatalogExt> Producer<E> {
 
 	fn publish(&mut self, payload: Bytes, timestamp: Timestamp) -> Result<(), Error> {
 		// Each audio packet is its own moq-lite group, matching
-		// moq_mux::codec::opus::Import. Opus PLC handles dropped groups.
+		// moq_mux::codec::opus::Import. Codecs can recover independently after
+		// a dropped group.
 		let mux_frame = MuxFrame {
 			timestamp,
 			payload,
