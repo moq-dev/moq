@@ -44,7 +44,7 @@ public typealias Container = MoqFFI.MoqContainer
 /// A best-effort raw-track datagram as received: sequence, timestamp, and payload.
 public typealias Datagram = MoqFFI.MoqDatagram
 /// The route a broadcast takes to reach this origin: relay hop ids (oldest
-/// first) plus the publisher's advertised cost (lower wins).
+/// first), the publisher's advertised cost (lower wins), and whether it's announced.
 public typealias Route = MoqFFI.MoqRoute
 /// Per-subscription delivery preferences: priority, group ordering, latency
 /// budget, and group range.

@@ -99,7 +99,7 @@ typealias Init = uniffi.moq.MoqInit
 typealias Audio = uniffi.moq.MoqAudio
 /** A width and height pair, in pixels. */
 typealias Dimensions = uniffi.moq.MoqDimensions
-/** The route a broadcast takes to reach this origin: relay hop ids (oldest first) plus advertised cost (lower wins). */
+/** The route a broadcast takes to reach this origin: relay hop ids (oldest first), advertised cost (lower wins), and whether it's announced. */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
 typealias Subscription = uniffi.moq.MoqSubscription
