@@ -1,132 +1,61 @@
 ---
 name: moq
-description: Build live video, audio, and real-time data apps with Media over QUIC (MoQ). Use when integrating the @moq/* npm packages or moq-* Rust crates, embedding the <moq-watch> or <moq-publish> web components, publishing media via moq-cli/ffmpeg/OBS/GStreamer, or running a moq-relay server.
+description: Build live video, audio, and real-time data apps with Media over QUIC (MoQ). Use when adding live streaming, conferencing, voice AI, or real-time pub/sub to an app; when integrating the @moq/* npm packages, moq-* Rust crates, or the Python/Kotlin/Swift/Go/C bindings; or when running a moq-relay server or a gateway (RTMP, SRT, WebRTC, HLS, OBS, GStreamer, ffmpeg).
 ---
 
 # Media over QUIC (MoQ)
 
-MoQ is a live media protocol that delivers real-time (sub-second) latency at CDN scale.
-It is generic pub/sub over QUIC: video and audio are the flagship use case, but any live data works (chat, game state, JSON snapshots, AI/TTS output).
+MoQ is a live media protocol delivering real-time (sub-second) latency at CDN scale.
+It is generic pub/sub over QUIC: video and audio are the flagship use case, but any live data rides the same relays (chat, game input, JSON state, AI output).
 
-This file is a map, not the manual. Full documentation lives at https://doc.moq.dev; fetch the linked pages when you need details.
+This skill is an index of the moq-dev monorepo (https://github.com/moq-dev/moq): what you can build and which pieces to reach for. Fetch the linked docs for details instead of guessing APIs.
 
-## Architecture
+## The two layers
 
-The stack is layered. Pick the highest layer that fits and only drop down when you need control:
+- **moq-lite**: generic real-time pub/sub. A *broadcast* contains named *tracks*; tracks carry *groups* of *frames*. Relays cache, deduplicate, and fan out without understanding the payload, so anything can be end-to-end encrypted. Rust `moq-net`, TypeScript `@moq/net`.
+- **hang**: media on top. A catalog track describes codecs/renditions; containers carry timestamped codec bitstream. Rust `hang`, TypeScript `@moq/hang`. Think of hang as HLS/DASH and moq-lite as HTTP.
 
-1. **Web components** (`<moq-watch>`, `<moq-publish>`): drop-in playback and capture for the browser.
-2. **hang** (`@moq/hang`, Rust `hang`): media catalog + container. Codecs, capture, encode, decode, render.
-3. **moq-lite** (`@moq/net`, Rust `moq-net`): generic pub/sub transport. Broadcasts contain tracks, tracks contain groups, groups contain frames.
-4. **WebTransport / QUIC**: provided by the browser or the `web-transport` crates.
+Everything below builds on these two. Custom applications can extend hang with their own tracks or replace it entirely.
 
-Key rule: the relay (CDN) knows nothing about media or codecs. All business logic lives in the client; content can be end-to-end encrypted.
+## What you can build
 
-## Relays
+**Live streaming (Twitch-style)**. Ingest via the OBS plugin (`cpp/obs`), RTMP (`rs/moq-rtmp`), SRT (`rs/moq-srt`), GStreamer (`rs/moq-gst`), or pipe ffmpeg into the `moq` CLI (`rs/moq-cli`, a media router bridging fMP4/CMAF, MPEG-TS, FLV, HLS, RTMP, SRT, WebRTC). Distribute through `moq-relay` and watch in the browser with `<moq-watch>` (`@moq/watch`). Serve legacy players via the HLS/LL-HLS gateway (`rs/moq-hls`) and build a rendition ladder with just-in-time transcoding (`rs/moq-transcode`). Docs: https://doc.moq.dev/bin/
 
-Every client connects to a relay URL. The URL path is an auth scope, and broadcast names are appended to it.
+**Conferencing (Zoom-style)**. Browser capture and playback with `@moq/publish` + `@moq/watch`; each participant is a broadcast, discovered via announcements. Bridge existing WebRTC clients with the WHIP/WHEP gateway (`rs/moq-rtc`). Why MoQ over WebRTC: https://doc.moq.dev/concept/use-case/conferencing
 
-- **Public dev relay**: `https://cdn.moq.dev/anon`. No auth, anyone can publish or subscribe under it. Testing only; use a unique broadcast name to avoid collisions.
-- **Local relay**: `cargo install moq-relay` (or brew/apt/dnf/nix/docker), then run with a `relay.toml`. See https://doc.moq.dev/bin/relay/
-- **Auth**: JWT tokens signed with `moq-token`, passed as a `?jwt=` query parameter on the connection URL. See https://doc.moq.dev/bin/relay/auth
+**Voice/video AI agents**. Server-side media without a browser: `rs/moq-video` and `rs/moq-audio` do native capture, hardware encode/decode (VideoToolbox, D3D11, NVENC, VAAPI). Python bindings fit ML stacks. TTS output written faster than real-time plays smoothly via `@moq/watch` buffered playback (`latency-max`). Background: https://moq.dev/blog/webrtc-is-the-problem and https://doc.moq.dev/concept/use-case/ai
 
-## Browser: watch a broadcast
+**Real-time data, no media at all**. Chat, multiplayer game state, telemetry, collaborative apps: publish raw tracks with `@moq/net` or `moq-net`. Helpers: `moq-json` / `@moq/json` (JSON snapshots, merge-patch deltas, append logs) and `moq-flate` / `@moq/flate` (compression). A synchronized-clock example lives in `js/clock`. Same relays, same auth as media.
 
-Requires WebTransport (Chrome/Edge 97+; Firefox and Safari support is experimental). Works with any bundler, or without one via esm.sh:
+**Interactive streams (Twitch-plays)**. Combine both directions: media down, input tracks up. MoQ Boy (`rs/moq-boy`, `demo/boy`) is a crowd-controlled Game Boy doing exactly this: https://moq.dev/blog/moq-boy
 
-```html
-<script type="module">
-    import "https://esm.sh/@moq/watch/element";
-    import "https://esm.sh/@moq/watch/ui";
-</script>
+**Cloud gaming / remote desktop**. Screen capture and low-latency hardware encoding via `rs/moq-video` (camera and display sources on macOS/Windows/Linux, plus window capture), sub-100ms playback in the browser.
 
-<moq-watch-ui>
-    <moq-watch url="https://cdn.moq.dev/anon" name="room/alice.hang">
-        <canvas></canvas>
-    </moq-watch>
-</moq-watch-ui>
-```
+**Native and mobile apps**. One Rust core (`rs/moq-ffi`) with idiomatic bindings: Python (asyncio), Kotlin (coroutines/Flow, Android), Swift (async sequences, iOS/macOS), Go, and C (`rs/libmoq` for C/C++ build systems). Index: https://doc.moq.dev/lib/
 
-For a bundler, `npm add @moq/watch` and `import "@moq/watch/element"` instead. Useful attributes: `latency` (default `"real-time"`, or ms), `latency-max` (set above `latency-min` for buffered playback, e.g. TTS streamed faster than real-time), `muted`, `paused`, `controls`. Details: https://doc.moq.dev/lib/js/@moq/watch
+**Your own CDN**. `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-token`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Or skip self-hosting: moq-lite is forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). Native apps can also connect P2P via Iroh.
 
-## Browser: publish camera or screen
+**Web playback/capture on any site**. `<moq-watch>` and `<moq-publish>` are plain web components with optional UI overlays; embeddable with no build step. Docs: https://doc.moq.dev/lib/js/@moq/watch and https://doc.moq.dev/lib/js/@moq/publish
 
-```html
-<script type="module">
-    import "https://esm.sh/@moq/publish/element";
-    import "https://esm.sh/@moq/publish/ui";
-</script>
+## Repo map
 
-<moq-publish-ui>
-    <moq-publish url="https://cdn.moq.dev/anon" name="room/alice.hang" source="camera">
-        <video muted autoplay></video>
-    </moq-publish>
-</moq-publish-ui>
-```
+- `rs/` Rust: `moq-net` (pub/sub), `hang` (media), `moq-relay`, `moq-cli` (installs a `moq` binary), `moq-native` (QUIC/TLS setup), `moq-mux` (container muxing), `moq-token[-cli]` (auth), gateways (`moq-rtmp`, `moq-srt`, `moq-rtc`, `moq-hls`), native codecs (`moq-video`, `moq-audio`, `moq-nvenc`), `moq-ffi`/`libmoq` (bindings core).
+- `js/` TypeScript, published as `@moq/*`: `net`, `hang`, `watch`, `publish`, `token`, `json`, `signals`.
+- `py/`, `swift/`, `kt/`, `go/` bindings; `cpp/obs` OBS plugin; `demo/` runnable demos.
 
-`source` is `"camera"`, `"screen"`, or `"file"`. Add `simulcast` for an extra low-res rendition. Details: https://doc.moq.dev/lib/js/@moq/publish
+Note: some crates are in-tree but not yet on crates.io (e.g. `moq-video`, `moq-transcode`); check https://crates.io before depending on one, or build from the repo.
 
-Both elements also expose a full JavaScript API (`Watch.Broadcast`, `Publish.Broadcast`) plus `publishTrack`/`subscribeTrack` for custom data tracks alongside the media.
+## Getting started
 
-## Browser/server: raw data with @moq/net
-
-For non-media live data, use `@moq/net` directly (server-side works via a WebTransport polyfill):
-
-```typescript
-import * as Moq from "@moq/net";
-
-const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon"));
-
-// Publish: a broadcast contains named tracks; append groups and frames.
-const broadcast = new Moq.Broadcast.Producer();
-const track = broadcast.createTrack("chat");
-connection.publish(Moq.Path.from("my-broadcast"), broadcast);
-const group = track.appendGroup();
-group.writeString("Hello MoQ!");
-group.close();
-```
-
-Runnable examples: https://github.com/moq-dev/moq/tree/main/js/net/examples
-
-## Rust
-
-`moq-native` configures QUIC/TLS, `moq-net` speaks the protocol, `hang` handles media:
-
-```rust
-let client = moq_native::ClientConfig::default().init()?;
-let url = url::Url::parse("https://cdn.moq.dev/anon")?;
-
-// Subscribe: wire an Origin in before connecting, then await announcements.
-let origin = moq_net::Origin::new().produce();
-let mut consumer = origin.consume();
-let session = client.with_subscriber(origin).connect(url).await?;
-while let Some((path, broadcast)) = consumer.announced().await {
-    // subscribe to tracks on each broadcast
-}
-```
-
-Guide: https://doc.moq.dev/lib/rs/env/native. Runnable media examples: https://github.com/moq-dev/moq/tree/main/rs/hang/examples
-
-## Publish media from the command line
-
-The `moq-cli` crate installs a `moq` binary that bridges FFmpeg, HLS, RTMP, SRT, and WebRTC into MoQ:
-
-```bash
-ffmpeg -i input.mp4 -c copy -f mpegts - | \
-    moq --client-connect https://cdn.moq.dev/anon --broadcast my-stream.hang import ts
-```
-
-There are also OBS and GStreamer plugins. See https://doc.moq.dev/bin/
-
-## Gotchas
-
-- **Broadcast naming**: the `.hang` suffix selects the hang catalog format (`.msf` selects MSF). Media broadcasts should end in `.hang`.
-- **TLS**: WebTransport requires a valid certificate. Local development against `localhost` uses certificate-hash fetching; production needs a real domain and cert.
-- **Latency is a range**: the default minimizes latency and skips ahead. For content written faster than real-time (TTS, server-rendered), raise `latency-max` so playback buffers instead of skipping.
-- **Other languages**: Python, Kotlin, Swift, Go, and C bindings wrap the same Rust core. See https://doc.moq.dev/lib/
+- Every client connects to a relay URL; the path scopes auth and broadcast names append to it. Public dev relay: `https://cdn.moq.dev/anon` (unauthenticated, testing only, pick a unique name). Local: `cargo install moq-relay`, or clone the repo and `nix develop -c just` to run a relay, demo media, and web UI together.
+- Media broadcast names end in `.hang` (selects the hang catalog; `.msf` selects the IETF MSF format).
+- Browsers need WebTransport (Chrome/Edge; Firefox/Safari experimental) and, outside localhost, a real TLS certificate.
+- Auth is a JWT in the `?jwt=` query parameter, signed by `moq-token`.
 
 ## Reference
 
-- Concepts and protocol layering: https://doc.moq.dev/concept/
-- Relay configuration, auth, clustering: https://doc.moq.dev/bin/relay/
+- Documentation: https://doc.moq.dev (concepts, apps, libraries, relay ops)
 - Rust API docs: https://docs.rs/moq-net and https://docs.rs/hang
+- Runnable examples: https://github.com/moq-dev/moq/tree/main/js/net/examples and https://github.com/moq-dev/moq/tree/main/rs/hang/examples
 - Protocol drafts: https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html
+- Inspiration: https://moq.dev/blog/

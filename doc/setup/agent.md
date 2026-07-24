@@ -11,7 +11,7 @@ Using an AI coding agent like Claude Code, Cursor, or Codex? Teach it MoQ by pas
 Follow the instructions at https://doc.moq.dev/setup/agent/prompt.md
 ```
 
-The agent will fetch the instructions and install the [MoQ skill](https://github.com/moq-dev/moq/tree/main/skills/moq) into your project. The skill covers the protocol layering, the [`@moq/*`](/lib/js/) npm packages and [`moq-*`](/lib/rs/) Rust crates, the web components, relay setup, and common pitfalls, so the agent reaches for the right layer instead of hallucinating an API.
+The agent will fetch the instructions and install the [MoQ skill](https://github.com/moq-dev/moq/tree/main/skills/moq) into your project. The skill is an index of the MoQ ecosystem: what you can build (live streaming, conferencing, voice AI, real-time data, and more) and which [`@moq/*`](/lib/js/) packages, [`moq-*`](/lib/rs/) crates, gateways, and plugins to reach for, so the agent starts from the right layer instead of hallucinating an API.
 
 ## Manual Installation
 
@@ -25,6 +25,6 @@ Add `--global` for a user-level install, or `-a <agent>` to target a specific ag
 
 ## What's in the Skill?
 
-The skill is a single markdown file, [`skills/moq/SKILL.md`](https://github.com/moq-dev/moq/blob/main/skills/moq/SKILL.md), that your agent loads when a task involves MoQ. It's a map of the documentation rather than a copy: quick starts for watching, publishing, and raw data tracks, plus links back to [doc.moq.dev](https://doc.moq.dev) for the details.
+The skill is a single markdown file, [`skills/moq/SKILL.md`](https://github.com/moq-dev/moq/blob/main/skills/moq/SKILL.md), that your agent loads when a task involves MoQ. It's a map rather than a manual: use cases matched to the libraries, binaries, and gateways that implement them, plus links back to [doc.moq.dev](https://doc.moq.dev) for the details.
 
 Contributions welcome; it's just markdown.
