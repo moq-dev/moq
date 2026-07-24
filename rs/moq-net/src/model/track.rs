@@ -1210,6 +1210,11 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 		if sub.is_closed() {
 			continue;
 		}
+		// Arm the closed waiter explicitly. `poll` below registers on the value
+		// channel only when it returns Pending, so a subscriber that contributes
+		// demand (always the case for the first one) would leave nothing watching
+		// for its departure, and the last one leaving would never wake this poll.
+		let _ = sub.poll_closed(waiter);
 		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
 			combined = Some(sub);
 		}
@@ -2859,6 +2864,49 @@ mod test {
 			producer.subscription().is_none(),
 			"snapshot must exclude a dropped subscriber",
 		);
+	}
+
+	#[test]
+	fn dropped_subscriber_wakes_the_aggregate() {
+		// The value being right isn't enough: nothing re-polls the aggregate on its
+		// own, so the drop has to wake the waiter. A subscriber contributing demand
+		// takes `kio::Consumer::poll`'s Ready path, which registers no waiter, so
+		// the departure needs the closed waiter armed explicitly. Without it a relay
+		// never learns the last viewer left and holds the upstream subscription (and
+		// the upstream's viewer count) open forever.
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer("test", None);
+		let a = producer.subscribe(Subscription::default().with_priority(5));
+
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+
+		// Prime the cursor, then confirm the next poll parks.
+		assert!(matches!(
+			producer.poll_subscription_changed(&waiter),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert!(
+			producer.poll_subscription_changed(&waiter).is_pending(),
+			"the aggregate is unchanged, so this poll must park",
+		);
+		assert!(!woken.load(Ordering::SeqCst), "nothing happened yet");
+
+		drop(a);
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the last subscriber leaving must wake the aggregate watcher",
+		);
+	}
+
+	/// An [`ArcWake`] that just records that it was woken.
+	struct FlagWake(Arc<std::sync::atomic::AtomicBool>);
+
+	impl futures::task::ArcWake for FlagWake {
+		fn wake_by_ref(arc_self: &Arc<Self>) {
+			arc_self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
 	}
 
 	#[tokio::test]

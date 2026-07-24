@@ -1822,27 +1822,20 @@ async fn broadcast_race_quic_wins() {
 		.expect("server task failed");
 }
 
-// ── Linger: relay-style subscription reuse ──────────────────────────
+// ── Subscription churn: drop the last consumer, then come back ──────
 //
-// When the last consumer of an upstream subscription drops, the relay keeps
-// the TrackProducer alive briefly so a returning consumer reuses it instead
-// of triggering a fresh upstream Subscribe. This is the moq-lite linger
-// behavior: on `track.unused()` the subscriber sends `SubscribeUpdate(priority=0)`
-// + FIN, then waits up to LINGER_TIMEOUT for either the upstream to FIN back,
-// the timeout to expire, or a new consumer to arrive (resume with
-// `start_group = max + 1`).
-//
-// Reliably distinguishing the Reused vs Complete vs Cancelled branches from a
-// black-box client test is hard because all three paths converge on the same
-// observable behavior at the consumer (groups eventually flow). What we *can*
-// test cheaply here is the end-to-end smoke: subscribe → drop → resubscribe
-// must keep working, with a fresh group flowing afterwards.
+// When the last consumer of an upstream subscription drops, the subscriber
+// cancels the upstream SUBSCRIBE (FIN) rather than parking it. The track
+// producer stays alive, so a returning consumer re-establishes a fresh
+// SUBSCRIBE against the same cache. These tests cover both halves: the
+// re-subscribe keeps flowing, and the cancel actually releases the
+// publisher's viewer accounting.
 
-/// Smoke test: dropping the last consumer and resubscribing within the linger
-/// window doesn't wedge the subscription, and groups appended after the resume
-/// still arrive at the new consumer.
+/// Smoke test: dropping the last consumer and resubscribing doesn't wedge the
+/// subscription, and groups appended after the resume still arrive at the new
+/// consumer.
 #[tokio::test]
-async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
+async fn resubscribe_keeps_flowing_moq_lite_03() {
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin
 		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
@@ -1907,20 +1900,18 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("group closed early");
 	assert_eq!(&frame.payload[..], b"a");
 
-	// Drop the only consumer to trigger the linger phase.
+	// Drop the only consumer, canceling the upstream subscription.
 	drop(g);
 	drop(sub1);
 
-	// Yield a few times so the subscriber task can observe `track.unused()` and
-	// enter the linger select. A small real sleep also makes the test less
+	// Yield a few times so the subscriber task can observe the demand going away
+	// and send the FIN. A small real sleep also makes the test less
 	// scheduler-dependent across runtimes.
 	tokio::time::sleep(Duration::from_millis(20)).await;
 
-	// Resubscribe well inside the 5s linger window.
 	let mut sub2 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe2");
 
-	// A new group published after the resubscribe must reach the consumer
-	// regardless of which linger branch fired.
+	// A new group published after the resubscribe must reach the consumer.
 	let mut group1 = track.append_group().expect("append group 1");
 	group1
 		.write_frame(moq_native::moq_net::Timestamp::ZERO, b"b".as_ref())
@@ -1948,6 +1939,116 @@ async fn linger_resubscribe_keeps_flowing_moq_lite_03() {
 	assert!(
 		saw_group1,
 		"expected group 1 to be delivered to the resubscribed consumer"
+	);
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+/// Active viewers on the publisher, summed across every tier. This is the number
+/// the relay's stats broadcast reports as viewers of a broadcast.
+fn active_viewers(registry: &moq_net::stats::Registry) -> u64 {
+	registry
+		.snapshot()
+		.traffic()
+		.into_iter()
+		.filter(|(_, role, _)| matches!(role, moq_net::stats::Role::Publisher))
+		.map(|(_, _, traffic)| traffic.active_broadcasts())
+		.sum()
+}
+
+/// The last consumer leaving must release the publisher's viewer refcount.
+///
+/// A subscriber that parks its upstream SUBSCRIBE instead of canceling it leaves
+/// the publisher's per-session subscription alive, so the broadcast keeps
+/// reporting a viewer that nobody is watching (and, chained through relays, a
+/// phantom viewer per hop).
+#[tokio::test]
+async fn idle_subscription_releases_the_viewer_count() {
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("create broadcast");
+	let mut track = broadcast.create_track("video", None).expect("create track");
+
+	let mut group = track.append_group().expect("append group");
+	group
+		.write_frame(moq_native::moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("write frame");
+	group.finish().expect("finish group");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("server addr");
+
+	// The publisher counts viewers through a stats context, exactly like the relay.
+	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
+	let stats = registry.tier(moq_net::stats::Tier::default()).session("");
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&pub_origin).with_stats(stats).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_subscriber(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let moq_native::moq_net::announce::Update { broadcast: bc, .. } =
+		tokio::time::timeout(TIMEOUT, announcements.next())
+			.await
+			.expect("announce timeout")
+			.expect("origin closed");
+	let bc = bc.expect("expected announce");
+
+	let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
+	let mut g = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("recv group timeout")
+		.expect("recv group failed")
+		.expect("track closed early");
+	let frame = tokio::time::timeout(TIMEOUT, g.read_frame())
+		.await
+		.expect("read frame timeout")
+		.expect("read frame failed")
+		.expect("group closed early");
+	assert_eq!(&frame.payload[..], b"hello");
+	assert_eq!(active_viewers(&registry), 1, "the live consumer must count as a viewer");
+
+	// Stop watching, keeping the session (and its announce) open: a real viewer
+	// closing a player, not disconnecting.
+	drop(g);
+	drop(sub);
+
+	let released = tokio::time::timeout(TIMEOUT, async {
+		while active_viewers(&registry) != 0 {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await;
+	assert!(
+		released.is_ok(),
+		"viewer count stuck at {} after the last consumer left",
+		active_viewers(&registry)
 	);
 
 	drop(session);
