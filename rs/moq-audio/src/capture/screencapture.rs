@@ -6,8 +6,8 @@
 //! still started (SCK has no audio-only mode), so it's pinned to a tiny frame at
 //! a low rate and its samples are dropped.
 //!
-//! Like the mic path, buffers arrive on a dispatch queue and are forwarded to an
-//! async channel, so dropping the capture future releases the stream.
+//! Like the mic path, buffers arrive on a dispatch queue and are forwarded to a
+//! bounded async channel, so dropping the capture future releases the stream.
 //!
 //! Not covered by tests: this needs the Screen Recording TCC grant and a real
 //! display, so it can't run headless.
@@ -26,9 +26,10 @@ use objc2_screen_capture_kit::{
 	SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput,
 	SCStreamOutputType, SCWindow,
 };
-use tokio::sync::mpsc;
 
 use crate::Error;
+
+use super::channel;
 
 /// SCK's audio defaults, used when the caller doesn't pin a format.
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
@@ -51,7 +52,7 @@ struct Buffer {
 
 /// An open system-audio capture, read buffer-by-buffer via [`read`](Self::read).
 pub(crate) struct SystemAudio {
-	rx: mpsc::UnboundedReceiver<Buffer>,
+	rx: channel::Receiver<Buffer>,
 	/// The first buffer, captured during [`open`](Self::open) so a missing screen
 	/// recording grant is an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -97,7 +98,7 @@ impl SystemAudio {
 			configuration.setMinimumFrameInterval(CMTime::new(1, IDLE_VIDEO_FPS));
 		}
 
-		let (tx, mut rx) = mpsc::unbounded_channel::<Buffer>();
+		let (tx, mut rx) = channel::bounded::<Buffer>();
 		let delegate = Delegate::new(tx);
 		let dispatch = DispatchQueue::new("dev.moq.audio.system", None);
 
@@ -272,10 +273,8 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 }
 
 struct DelegateIvars {
-	/// Dropped when the stream stops, which closes the channel and lets a parked
-	/// `read` return `None` instead of hanging. Behind a lock because the stop and
-	/// the sample callbacks arrive on different queues.
-	tx: std::sync::Mutex<Option<mpsc::UnboundedSender<Buffer>>>,
+	/// Closed when the stream stops so a parked `read` returns `None`.
+	tx: channel::Sender<Buffer>,
 }
 
 define_class!(
@@ -290,8 +289,7 @@ define_class!(
 		#[unsafe(method(stream:didStopWithError:))]
 		unsafe fn did_stop(&self, _stream: &SCStream, error: &NSError) {
 			tracing::warn!(error = %error.localizedDescription(), "system audio capture stopped");
-			// Dropping the sender closes the channel, so a parked read returns.
-			self.ivars().tx.lock().unwrap().take();
+			self.ivars().tx.close();
 		}
 	}
 
@@ -302,21 +300,16 @@ define_class!(
 			if kind.0 != SCStreamOutputType::Audio.0 {
 				return;
 			}
-			if let Some(buffer) = samples(sample_buffer)
-				&& let Some(tx) = self.ivars().tx.lock().unwrap().as_ref()
-			{
-				// Send errors mean the reader is gone, i.e. capture is shutting down.
-				let _ = tx.send(buffer);
+			if let Some(buffer) = samples(sample_buffer) {
+				self.ivars().tx.push(buffer);
 			}
 		}
 	}
 );
 
 impl Delegate {
-	fn new(tx: mpsc::UnboundedSender<Buffer>) -> Retained<Self> {
-		let this = Self::alloc().set_ivars(DelegateIvars {
-			tx: std::sync::Mutex::new(Some(tx)),
-		});
+	fn new(tx: channel::Sender<Buffer>) -> Retained<Self> {
+		let this = Self::alloc().set_ivars(DelegateIvars { tx });
 		unsafe { msg_send![super(this), init] }
 	}
 }
