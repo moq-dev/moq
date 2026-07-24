@@ -231,6 +231,18 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(())
 	}
 
+	/// Mark a break in the published timeline: whatever is published next does not continue
+	/// what came before.
+	///
+	/// Call this when capture stops rather than merely gapping between packets -- going idle,
+	/// switching source, anything that resumes on a re-anchored epoch (see
+	/// [`reset_epoch`](Self::reset_epoch)). See
+	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
+	pub fn discontinuity(&mut self) -> Result<(), Error> {
+		self.track.discontinuity()?;
+		Ok(())
+	}
+
 	/// Flush any pending samples (zero-padded to a full frame) and finalize the
 	/// track.
 	pub fn finish(mut self) -> Result<(), Error> {
