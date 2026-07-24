@@ -290,12 +290,22 @@ ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating
 Each broadcast starts unavailable.
 An ANNOUNCE_START makes the broadcast available; a subsequent ANNOUNCE_END makes it unavailable again and retires its Announce ID.
 
-A publisher SHOULD advertise only the best path it knows for each broadcast.
+A publisher SHOULD advertise, for each broadcast, the best path it knows whose entries avoid the subscriber's Exclude Hop (see [ANNOUNCE_REQUEST](#announce-request)); when every known path contains it, the publisher SHOULD advertise nothing for that broadcast.
+Selection is per stream: two subscribers can legitimately receive different paths for the same broadcast, and in particular a subscriber that the serving path flows through receives the best standby path instead of nothing, which is what lets it fail over to that standby if its own copy dies.
+The per-subscriber winner changing travels as an ANNOUNCE_RESTART; it swinging into or out of existence (the last qualifying path appearing or disappearing) travels as a fresh ANNOUNCE_START or an ANNOUNCE_END.
 If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send an ANNOUNCE_RESTART referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
 The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)); a restart that preserves it is an alternate route to the same broadcast, while one that changes it replaces the broadcast entirely (see [ANNOUNCE_RESTART](#announce-restart)).
 A publisher MUST NOT keep multiple current advertisements for the same broadcast on the same stream — each broadcast has at most one current advertisement at a time, and a second ANNOUNCE_START for an already-available path is a protocol violation (use ANNOUNCE_RESTART).
 A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the lowest Route Cost after adding each arriving link's cost, breaking ties by the shortest total path length (see [ANNOUNCE_START](#announce-start)).
 Advertisements from peers that predate the Route Cost carry an effective cost of 0, so a mixed mesh degrades to shortest-path routing.
+
+Advertisements for the same broadcast path whose reconstructed paths share the same first entry carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary, e.g. when the serving route ends.
+Cooperating redundant publishers MAY share a Hop ID to opt into this.
+Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD keep serving the earlier one, treating the later as a replacement only once the earlier ends.
+
+When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the subscriber's Exclude Hop.
+If only excluded sources remain, the subscription is unroutable; serving it would hand the subscriber data that already flowed through itself.
+Advertisement and dispatch being one selection keeps advertised paths truthful, which is what makes the Exclude-Hop filter sufficient to prevent subscription cycles of any length: any would-be cycle surfaces the subscriber's own Hop ID inside the candidate path, where the filter removes it.
 
 The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
@@ -763,6 +773,7 @@ When forwarding an announcement received from an upstream peer, a relay adds the
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
 This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
+The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose Exclude Hop filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
 
 Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
@@ -1169,6 +1180,8 @@ The `Message Length` describes the payload size on the wire.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
+- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's Exclude Hop (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. No wire change; this is how redundant (shared first hop) publishers fail over across a mesh.
+- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the earlier is served until it ends.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

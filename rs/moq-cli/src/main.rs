@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Route one source INTO the shared Origin, exposing it to the MoQ network.
 async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
@@ -209,7 +209,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 
 /// Route the shared Origin OUT to one sink, filling it from the MoQ network.
 async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
