@@ -50,10 +50,9 @@ impl AudioEncoder {
 
 	/// Publish an empty group marking the pause, so the gap the re-anchored epoch is about
 	/// to open reads as a break rather than one very long packet.
-	pub fn discontinuity(&mut self) {
-		if let Err(e) = self.producer.discontinuity() {
-			tracing::warn!(error = %e, "failed to mark the audio discontinuity");
-		}
+	pub fn discontinuity(&mut self) -> Result<()> {
+		self.producer.discontinuity()?;
+		Ok(())
 	}
 
 	/// Push interleaved signed-16-bit stereo PCM captured at `elapsed` (since

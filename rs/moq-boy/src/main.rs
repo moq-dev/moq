@@ -338,7 +338,7 @@ fn run_emulator(
 			// media instead of being served the pre-pause group as if it were live
 			// (moq-dev/moq.pro#814).
 			session.video_encoder.discontinuity();
-			audio_encoder.discontinuity();
+			audio_encoder.discontinuity()?;
 
 			session.wait_for_resume();
 
