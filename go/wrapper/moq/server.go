@@ -14,8 +14,11 @@ type Transport string
 // Known transports reported by Request.Transport. Future native versions may
 // report values not listed here, so treat Transport as an open set.
 const (
-	TransportQUIC      Transport = "quic"
-	TransportIroh      Transport = "iroh"
+	// TransportQUIC is a session that arrived over native QUIC.
+	TransportQUIC Transport = "quic"
+	// TransportIroh is a session that arrived over an Iroh peer-to-peer connection.
+	TransportIroh Transport = "iroh"
+	// TransportWebSocket is a session that arrived over the WebSocket fallback transport.
 	TransportWebSocket Transport = "websocket"
 )
 

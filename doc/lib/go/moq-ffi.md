@@ -35,6 +35,7 @@ cargo install uniffi-bindgen-go \
 
 ## See also
 
+- API reference: [pkg.go.dev/github.com/moq-dev/moq-go-ffi](https://pkg.go.dev/github.com/moq-dev/moq-go-ffi) (the cgo build can keep pkg.go.dev from rendering it; the ergonomic [moq](/lib/go/moq) package is the documented surface)
 - Source: [go/ffi](https://github.com/moq-dev/moq/tree/main/go/ffi)
 - Mirror repo: [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi)
 - Ergonomic wrapper: [moq](/lib/go/moq)

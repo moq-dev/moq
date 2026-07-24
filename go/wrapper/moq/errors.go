@@ -14,6 +14,7 @@ type Error = ffi.MoqError
 
 // Configuration errors returned by the wrapper itself (not the FFI layer).
 var (
+	// ErrNoPublishOrigin is returned when a publish operation is attempted but the server has no publish origin configured.
 	ErrNoPublishOrigin = errors.New("moq: no publish origin configured")
 )
 
@@ -23,26 +24,46 @@ var (
 // (Protocol, Media, ...) wrap a lower-level error whose detail survives in the
 // message.
 var (
-	ErrProtocol         = ffi.ErrMoqErrorProtocol
-	ErrMedia            = ffi.ErrMoqErrorMedia
-	ErrMux              = ffi.ErrMoqErrorMux
-	ErrAudio            = ffi.ErrMoqErrorAudio
-	ErrURL              = ffi.ErrMoqErrorUrl
-	ErrTimeOverflow     = ffi.ErrMoqErrorTimeOverflow
-	ErrLogLevel         = ffi.ErrMoqErrorLogLevel
-	ErrTask             = ffi.ErrMoqErrorTask
-	ErrCancelled        = ffi.ErrMoqErrorCancelled
-	ErrClosed           = ffi.ErrMoqErrorClosed
-	ErrConnect          = ffi.ErrMoqErrorConnect
-	ErrBind             = ffi.ErrMoqErrorBind
-	ErrReject           = ffi.ErrMoqErrorReject
+	// ErrProtocol matches a lower-level moq-net transport or protocol error; the underlying detail survives in the message.
+	ErrProtocol = ffi.ErrMoqErrorProtocol
+	// ErrMedia matches a hang media error, such as a malformed catalog or container.
+	ErrMedia = ffi.ErrMoqErrorMedia
+	// ErrMux matches a muxing or demuxing failure from moq-mux.
+	ErrMux = ffi.ErrMoqErrorMux
+	// ErrAudio matches a raw-audio encode or decode failure.
+	ErrAudio = ffi.ErrMoqErrorAudio
+	// ErrURL matches a malformed URL passed when connecting or publishing.
+	ErrURL = ffi.ErrMoqErrorUrl
+	// ErrTimeOverflow matches a timestamp that overflowed its timescale.
+	ErrTimeOverflow = ffi.ErrMoqErrorTimeOverflow
+	// ErrLogLevel matches an unparseable log level string passed to LogLevel.
+	ErrLogLevel = ffi.ErrMoqErrorLogLevel
+	// ErrTask matches a panic or cancellation in a background native task.
+	ErrTask = ffi.ErrMoqErrorTask
+	// ErrCancelled is returned when an operation is cancelled, e.g. via a cancelled context; IsShutdown treats it as a graceful stop.
+	ErrCancelled = ffi.ErrMoqErrorCancelled
+	// ErrClosed is returned when the session or stream has closed; IsShutdown treats it as a graceful stop.
+	ErrClosed = ffi.ErrMoqErrorClosed
+	// ErrConnect is returned when establishing a client session fails.
+	ErrConnect = ffi.ErrMoqErrorConnect
+	// ErrBind is returned when the server fails to bind its listening address.
+	ErrBind = ffi.ErrMoqErrorBind
+	// ErrReject is returned when a session is refused during the handshake.
+	ErrReject = ffi.ErrMoqErrorReject
+	// ErrAlreadyResponded is returned when a Request is accepted or rejected more than once.
 	ErrAlreadyResponded = ffi.ErrMoqErrorAlreadyResponded
-	ErrCodec            = ffi.ErrMoqErrorCodec
-	ErrUnauthorized     = ffi.ErrMoqErrorUnauthorized
-	ErrForbidden        = ffi.ErrMoqErrorForbidden
-	ErrNotFound         = ffi.ErrMoqErrorNotFound
-	ErrUnsupported      = ffi.ErrMoqErrorUnsupported
-	ErrLog              = ffi.ErrMoqErrorLog
+	// ErrCodec is returned when codec configuration or bitstream parsing fails.
+	ErrCodec = ffi.ErrMoqErrorCodec
+	// ErrUnauthorized is returned when the relay rejects the session with HTTP 401.
+	ErrUnauthorized = ffi.ErrMoqErrorUnauthorized
+	// ErrForbidden is returned when the relay rejects the session with HTTP 403.
+	ErrForbidden = ffi.ErrMoqErrorForbidden
+	// ErrNotFound is returned when the requested track or group is not available.
+	ErrNotFound = ffi.ErrMoqErrorNotFound
+	// ErrUnsupported is returned when the requested operation is not supported.
+	ErrUnsupported = ffi.ErrMoqErrorUnsupported
+	// ErrLog is returned when installing or configuring the native log subscriber fails.
+	ErrLog = ffi.ErrMoqErrorLog
 )
 
 // IsShutdown reports whether err is the expected result of a graceful shutdown

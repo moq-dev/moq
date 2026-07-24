@@ -9,6 +9,8 @@ The ergonomic Swift Package Manager target for [Media over QUIC](/).
 
 A Swift-native wrapper over the UniFFI-generated bindings: de-prefixed types, `AsyncSequence` streams, throwing initializers, `Sendable` handles, and Swift-friendly errors. The raw `MoqFFI` types it wraps stay out of your way (data types like `Frame` and `Catalog` are re-exported under de-prefixed names).
 
+Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq), which builds and hosts the DocC docs from the `///` comments on each tagged release.
+
 ## Install
 
 ```swift
@@ -259,6 +261,7 @@ This runs `swift/scripts/check.sh`, which builds `moq-ffi` for the host arch, re
 
 ## See also
 
+- API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [swift/Sources/Moq](https://github.com/moq-dev/moq/tree/main/swift/Sources/Moq)
 - Mirror repos: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) (wrapper), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) (raw bindings)
 - The Rust crate this wraps: [moq-net](/lib/rs/crate/moq-net)

@@ -92,6 +92,7 @@ public final class BroadcastConsumer: Sendable {
 /// route first, then every change, ending when the broadcast does. Created by
 /// `BroadcastConsumer.routeUpdates`.
 public final class RouteWatch: AsyncSequence, Sendable {
+    /// The route emitted by this sequence.
     public typealias Element = Route
 
     let ffi: MoqRouteWatch
@@ -111,6 +112,7 @@ public final class RouteWatch: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Route, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.next()
@@ -126,6 +128,8 @@ public final class RouteWatch: AsyncSequence, Sendable {
 public final class BroadcastProducer: Sendable {
     let ffi: MoqBroadcastProducer
 
+    /// Create a standalone broadcast for serving dynamic requests or local
+    /// pub/sub. To publish at a path, use `OriginProducer.createBroadcast(path:)`.
     public init() throws {
         ffi = try MoqBroadcastProducer()
     }

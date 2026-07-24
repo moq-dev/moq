@@ -4,6 +4,7 @@ import MoqFFI
 /// Read side of a broadcast's catalog. Iterating yields catalog updates as the
 /// set of tracks changes.
 public final class CatalogConsumer: AsyncSequence, Sendable {
+    /// The catalog update emitted by this sequence.
     public typealias Element = Catalog
 
     let ffi: MoqCatalogConsumer
@@ -22,6 +23,7 @@ public final class CatalogConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Catalog, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.next()
@@ -31,6 +33,7 @@ public final class CatalogConsumer: AsyncSequence, Sendable {
 
 /// Read side of a media track. Iterating yields decoded frames in decode order.
 public final class MediaConsumer: AsyncSequence, Sendable {
+    /// The decoded media frame emitted by this sequence.
     public typealias Element = MediaFrame
 
     let ffi: MoqMediaConsumer
@@ -49,6 +52,7 @@ public final class MediaConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<MediaFrame, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.next()

@@ -20,6 +20,10 @@ plugins {
     kotlin("plugin.serialization") version "2.0.21" apply false
     id("com.android.library") apply false
     id("com.vanniktech.maven.publish") version "0.30.0" apply false
+    // Generates the KDoc HTML that `:moq` ships as its Maven Central javadoc jar,
+    // which javadoc.io then hosts. Declared once here (see the header note) so the
+    // module can request it by id.
+    id("org.jetbrains.dokka") version "1.9.20" apply false
 }
 
 allprojects {

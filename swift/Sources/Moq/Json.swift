@@ -30,6 +30,7 @@ public final class JsonSnapshotProducer<Value: Encodable>: Sendable {
 /// Read side of a JSON snapshot track (lossy latest-value). Iterating yields the latest value,
 /// collapsing the backlog for a reader that has fallen behind: `for try await value in json { ... }`.
 public final class JsonSnapshotConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
+    /// The decoded snapshot value emitted by this sequence.
     public typealias Element = Value
 
     let ffi: MoqJsonSnapshotConsumer
@@ -49,6 +50,7 @@ public final class JsonSnapshotConsumer<Value: Decodable & Sendable>: AsyncSeque
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Value, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [self] in
             try await next()
@@ -83,6 +85,7 @@ public final class JsonStreamProducer<Value: Encodable>: Sendable {
 /// Read side of a JSON stream track (lossless append-log). Iterating yields every record in
 /// order: `for try await record in json { ... }`.
 public final class JsonStreamConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
+    /// The decoded stream record emitted by this sequence.
     public typealias Element = Value
 
     let ffi: MoqJsonStreamConsumer
@@ -102,6 +105,7 @@ public final class JsonStreamConsumer<Value: Decodable & Sendable>: AsyncSequenc
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Value, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [self] in
             try await next()
