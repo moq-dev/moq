@@ -13,6 +13,8 @@ public typealias Catalog = MoqFFI.MoqCatalog
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
+/// Video presentation metadata applied to all video renditions in the catalog.
+public typealias VideoPresentation = MoqFFI.MoqVideoPresentation
 public typealias Audio = MoqFFI.MoqAudio
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
 public typealias Dimensions = MoqFFI.MoqDimensions

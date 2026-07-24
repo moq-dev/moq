@@ -30,6 +30,35 @@ pub struct moq_video_config {
 	pub coded_height: *const u32,
 }
 
+/// Video presentation metadata applied to all video renditions in the catalog.
+///
+/// A false `has_*` flag clears that field from the next catalog rather than preserving its previous value.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Default)]
+pub struct moq_video_presentation {
+	/// Final rendered width in pixels when `has_display` is true.
+	pub display_width: u32,
+
+	/// Final rendered height in pixels when `has_display` is true.
+	pub display_height: u32,
+
+	/// Whether `display_width` and `display_height` are present.
+	pub has_display: bool,
+
+	/// Clockwise rotation in degrees when `has_rotation` is true.
+	pub rotation: f64,
+
+	/// Whether `rotation` is present.
+	pub has_rotation: bool,
+
+	/// Whether to flip horizontally after rotation when `has_flip` is true.
+	pub flip: bool,
+
+	/// Whether `flip` is present.
+	pub has_flip: bool,
+}
+
 /// Information about an audio rendition in the catalog.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -793,6 +822,35 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
+/// Replace the video presentation metadata in the catalog.
+///
+/// Rotation is clockwise and normalized to the nearest quarter turn. A field whose matching `has_*` flag is false is removed from the next catalog update.
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `presentation` points to a valid [moq_video_presentation].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_presentation(
+	broadcast: u32,
+	presentation: *const moq_video_presentation,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let presentation = unsafe { presentation.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let mut value = hang::catalog::VideoPresentation::default();
+		value.display = presentation.has_display.then_some(hang::catalog::Display {
+			width: presentation.display_width,
+			height: presentation.display_height,
+		});
+		value.rotation = presentation.has_rotation.then_some(presentation.rotation);
+		value.flip = presentation.has_flip.then_some(presentation.flip);
+
+		State::lock().publish.video_presentation(broadcast, value)
+	})
+}
+
 /// Add or replace a video rendition in a broadcast's catalog.
 ///
 /// This is the producer counterpart to [moq_consume_video_config]: instead of
@@ -1329,6 +1387,24 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 		let index = index as usize;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.video_config(catalog, index, dst)
+	})
+}
+
+/// Query the video presentation metadata in the catalog.
+///
+/// The destination is filled by value and remains valid after the catalog snapshot is freed.
+/// Inspect each `has_*` flag before reading its value.
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` points to a valid [moq_video_presentation].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_video_presentation(catalog: u32, dst: *mut moq_video_presentation) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
+		State::lock().consume.video_presentation(catalog, dst)
 	})
 }
 

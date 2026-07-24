@@ -162,6 +162,19 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Replace the video presentation metadata as one catalog update.
+	pub fn video_presentation(
+		&mut self,
+		broadcast: Id,
+		presentation: hang::catalog::VideoPresentation,
+	) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let mut catalog = catalog.lock();
+		catalog.video.set_presentation(presentation)?;
+		catalog.commit()?;
+		Ok(())
+	}
+
 	/// Insert or replace a top-level application catalog section by name.
 	///
 	/// `value` is any JSON document. Errors if `name` is reserved (`video`/`audio`).

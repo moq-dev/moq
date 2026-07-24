@@ -26,6 +26,7 @@ type (
 	TrackInfo          = ffi.MoqTrackInfo
 	Video              = ffi.MoqVideo
 	VideoHint          = ffi.MoqVideoHint
+	VideoPresentation  = ffi.MoqVideoPresentation
 
 	// Container selects how subscribed media frames are demuxed. Build one with
 	// LegacyContainer, CmafContainer, or LocContainer.

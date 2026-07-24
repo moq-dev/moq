@@ -5,7 +5,7 @@ use moq_mux::catalog::hang::Extra;
 use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::media::{MoqFrame, MoqInit};
+use crate::media::{MoqFrame, MoqInit, MoqVideoPresentation};
 use crate::origin::MoqRoute;
 
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
@@ -288,6 +288,27 @@ impl MoqBroadcastProducer {
 		self.with_state(|state| {
 			let route = state.broadcast.consume().route();
 			Ok(state.broadcast.set_route(route.with_announce(announce))?)
+		})
+	}
+
+	/// Replace the video presentation metadata in the catalog.
+	///
+	/// Rotation is clockwise and normalized to the nearest quarter turn. An absent field is removed from the next catalog update.
+	pub fn set_video_presentation(&self, presentation: MoqVideoPresentation) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut value = hang::catalog::VideoPresentation::default();
+		value.display = presentation.display.map(|display| hang::catalog::Display {
+			width: display.width,
+			height: display.height,
+		});
+		value.rotation = presentation.rotation;
+		value.flip = presentation.flip;
+
+		self.with_state(|state| {
+			let mut catalog = state.catalog.lock();
+			catalog.video.set_presentation(value)?;
+			catalog.commit()?;
+			Ok(())
 		})
 	}
 

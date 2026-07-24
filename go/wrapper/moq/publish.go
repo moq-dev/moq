@@ -76,6 +76,11 @@ func (b *BroadcastProducer) SetAnnounce(live bool) error {
 	return b.inner.SetAnnounce(live)
 }
 
+// SetVideoPresentation replaces the video presentation metadata in the catalog.
+func (b *BroadcastProducer) SetVideoPresentation(presentation VideoPresentation) error {
+	return b.inner.SetVideoPresentation(presentation)
+}
+
 // PublishMedia publishes a media track from an init segment, fed frame by
 // frame with explicit timestamps.
 func (b *BroadcastProducer) PublishMedia(format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {

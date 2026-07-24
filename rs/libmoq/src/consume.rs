@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::ffi::OnStatus;
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_section, moq_string,
-	moq_video_config,
+	moq_video_config, moq_video_presentation,
 };
 
 struct ConsumeCatalog {
@@ -213,6 +213,24 @@ impl Consume {
 				.as_ref()
 				.map(|height| height as *const u32)
 				.unwrap_or(std::ptr::null()),
+		};
+
+		Ok(())
+	}
+
+	/// Fill `dst` with the video presentation metadata from the catalog.
+	pub fn video_presentation(&self, catalog: Id, dst: &mut moq_video_presentation) -> Result<(), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let display = consume.catalog.video.display.as_ref();
+
+		*dst = moq_video_presentation {
+			display_width: display.map_or(0, |display| display.width),
+			display_height: display.map_or(0, |display| display.height),
+			has_display: display.is_some(),
+			rotation: consume.catalog.video.rotation.unwrap_or_default(),
+			has_rotation: consume.catalog.video.rotation.is_some(),
+			flip: consume.catalog.video.flip.unwrap_or_default(),
+			has_flip: consume.catalog.video.flip.is_some(),
 		};
 
 		Ok(())

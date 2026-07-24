@@ -43,7 +43,7 @@ pub struct Video {
 	#[serde(default)]
 	pub display: Option<Display>,
 
-	/// The rotation of the video in degrees.
+	/// The clockwise rotation of the video in degrees, normalized to the nearest multiple of 90 degrees.
 	/// Default: 0
 	#[serde(default)]
 	pub rotation: Option<f64>,
@@ -52,6 +52,36 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
+}
+
+/// Video presentation metadata applied to all video renditions in the catalog.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct VideoPresentation {
+	/// Render the video at this final size after rotation, or clear the explicit size when absent.
+	pub display: Option<Display>,
+
+	/// Apply this clockwise rotation before rendering, or clear it when absent.
+	pub rotation: Option<f64>,
+
+	/// Flip horizontally after rotation, or clear the explicit value when absent.
+	pub flip: Option<bool>,
+}
+
+impl VideoPresentation {
+	fn normalized(mut self) -> crate::Result<Self> {
+		self.rotation = self.rotation.map(normalize_video_rotation).transpose()?;
+		Ok(self)
+	}
+}
+
+fn normalize_video_rotation(rotation: f64) -> crate::Result<f64> {
+	if !rotation.is_finite() {
+		return Err(crate::Error::InvalidVideoRotation);
+	}
+
+	let normalized = rotation.rem_euclid(360.0);
+	Ok(((normalized / 90.0).round() as u16 % 4) as f64 * 90.0)
 }
 
 impl Video {
@@ -67,6 +97,15 @@ impl Video {
 	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<VideoConfig> {
 		self.renditions.remove(name)
+	}
+
+	/// Normalize and replace the video presentation metadata as one catalog update.
+	pub fn set_presentation(&mut self, presentation: VideoPresentation) -> crate::Result<()> {
+		let presentation = presentation.normalized()?;
+		self.display = presentation.display;
+		self.rotation = presentation.rotation;
+		self.flip = presentation.flip;
+		Ok(())
 	}
 }
 

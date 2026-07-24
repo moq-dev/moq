@@ -23,7 +23,17 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from .types import AudioEncoderInput, AudioEncoderOutput, AudioFrame, Frame, Route, Subscription, TrackInfo, VideoHint
+from .types import (
+    AudioEncoderInput,
+    AudioEncoderOutput,
+    AudioFrame,
+    Frame,
+    Route,
+    Subscription,
+    TrackInfo,
+    VideoHint,
+    VideoPresentation,
+)
 
 if TYPE_CHECKING:
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
@@ -373,6 +383,10 @@ class BroadcastProducer:
         how a publisher goes on and off the air without tearing down the broadcast.
         """
         self._inner.set_announce(announce)
+
+    def set_video_presentation(self, presentation: VideoPresentation) -> None:
+        """Replace the video presentation metadata in the catalog."""
+        self._inner.set_video_presentation(presentation)
 
     def publish_media(
         self,

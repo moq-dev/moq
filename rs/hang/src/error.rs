@@ -54,6 +54,10 @@ pub enum Error {
 	/// A track with this name already exists in the catalog.
 	#[error("duplicate track: {0}")]
 	Duplicate(String),
+
+	/// The video presentation rotation is not a finite number.
+	#[error("video rotation must be finite")]
+	InvalidVideoRotation,
 }
 
 /// A Result type alias for hang operations.
