@@ -128,11 +128,6 @@ impl TrafficConsumer {
 	pub async fn next(&mut self) -> Result<Option<TrafficFrame>> {
 		kio::wait(|waiter| self.inner.poll_next(waiter)).await
 	}
-
-	/// Poll for the next merged frame; the `poll_*` counterpart to [`Self::next`].
-	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<TrafficFrame>>> {
-		self.inner.poll_next(waiter)
-	}
 }
 
 /// A merged reader over one sessions track across every node in the group; see
@@ -145,11 +140,6 @@ impl SessionsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 		kio::wait(|waiter| self.inner.poll_next(waiter)).await
-	}
-
-	/// Poll for the next merged frame; the `poll_*` counterpart to [`Self::next`].
-	pub fn poll_next(&mut self, waiter: &Waiter) -> Poll<Result<Option<SessionsFrame>>> {
-		self.inner.poll_next(waiter)
 	}
 }
 
