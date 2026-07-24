@@ -1,3 +1,4 @@
+use crate::util::{TaskSet, Tasks};
 use crate::{broadcast, cache, stats, track};
 use kio::Pollable;
 use std::{
@@ -789,6 +790,12 @@ pub struct Producer {
 	// [`Info::linger`]). Zero by default.
 	linger: Duration,
 
+	// Submission handle for the origin's lifecycle work (source watchers, front
+	// dispatch, track serving), polled by the origin's [`Driver`]. Every task the
+	// origin runs goes through this instead of an executor spawn, so the whole
+	// origin is drivable from a single poll.
+	tasks: Tasks,
+
 	// Ingress stats context. Broadcasts created through this producer are attributed
 	// to it (writes counted on the subscriber/ingress side). Empty (no-op) unless a
 	// session tagged this handle via [`Self::with_stats`].
@@ -803,20 +810,59 @@ impl std::ops::Deref for Producer {
 	}
 }
 
+/// The future running an origin's lifecycle work: source watchers, front
+/// dispatch, and track serving for every broadcast under it.
+///
+/// Poll-based like [`crate::session::Driver`]: the origin makes no progress
+/// unless this is polled. [`Producer::new`] keeps the public API spawn-free to
+/// callers by driving it on a detached task internally; tests (and eventually a
+/// public caller-driven constructor) step it directly.
+pub(crate) struct Driver {
+	set: TaskSet,
+}
+
+impl Driver {
+	/// Poll the origin's work. `Ready` once every producer handle is gone and all
+	/// lifecycle tasks have drained; the origin is fully torn down then.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.set.poll(waiter)
+	}
+
+	/// Poll the origin's work while awaiting `future`, returning its output.
+	#[cfg(test)]
+	pub async fn drive<F: std::future::Future>(&mut self, future: F) -> F::Output {
+		self.set.drive(future).await
+	}
+}
+
 impl Producer {
 	/// Build a producer from an [`Info`] (identity + cache pool) with no scoped
 	/// prefix and no pre-existing broadcasts. Prefer [`Info::produce`] /
 	/// [`Origin::produce`].
+	///
+	/// Must be called with a runtime available: it spawns the task driving the
+	/// origin's lifecycle work (source watchers, front dispatch, track serving).
 	pub fn new(info: Info) -> Self {
-		Self {
+		let (producer, mut driver) = Self::new_driven(info);
+		web_async::spawn(async move { kio::wait(|waiter| driver.poll(waiter)).await });
+		producer
+	}
+
+	/// [`Self::new`] without the spawn: the caller polls the returned [`Driver`],
+	/// so the origin runs wherever it is driven (no runtime required).
+	pub(crate) fn new_driven(info: Info) -> (Self, Driver) {
+		let (tasks, set) = TaskSet::new();
+		let producer = Self {
 			info: info.id,
 			nodes: OriginNodes::default(),
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
 			pool: info.pool,
 			linger: info.linger,
+			tasks,
 			stats: stats::Session::default(),
-		}
+		};
+		(producer, Driver { set })
 	}
 
 	/// Attach an ingress stats context: broadcasts created through this handle (and
@@ -855,6 +901,9 @@ impl Producer {
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
 	pub(crate) fn empty(info: Origin) -> Self {
+		// No prefixes means no broadcasts, so nothing ever runs: a dropped-set
+		// Tasks handle (submissions are discarded) needs no driver.
+		let (tasks, _) = TaskSet::new();
 		Self {
 			info,
 			nodes: OriginNodes { nodes: Vec::new() },
@@ -862,6 +911,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 			linger: Duration::ZERO,
+			tasks,
 			stats: stats::Session::default(),
 		}
 	}
@@ -899,11 +949,11 @@ impl Producer {
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope) /
 	/// [`with_root`](Self::with_root)), or [`Error::BoundsExceeded`] if the full
-	/// rooted path exceeds [`Path::MAX_PARTS`]. Must be called with a runtime
-	/// available (it spawns the broadcast's lifecycle task). Callers must not use
-	/// a route whose hop chain contains this origin's id (it would form a routing
-	/// loop); relays filter such reflections before they reach here, checked by a
-	/// `debug_assert`.
+	/// rooted path exceeds [`Path::MAX_PARTS`]. The broadcast's lifecycle work runs
+	/// on the origin's driver (spawned by [`Self::new`]), not a per-call task.
+	/// Callers must not use a route whose hop chain contains this origin's id (it
+	/// would form a routing loop); relays filter such reflections before they reach
+	/// here, checked by a `debug_assert`.
 	pub fn create_broadcast(&self, path: impl AsPath, route: broadcast::Route) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
 
@@ -932,7 +982,15 @@ impl Producer {
 			.with_stats(ingress.clone());
 		source.set_route(route).expect("fresh producer");
 
-		web_async::spawn(run_source(self.info(), node, full, rest, source.consume(), ingress));
+		self.tasks.push(run_source(
+			self.info(),
+			node,
+			full,
+			rest,
+			source.consume(),
+			ingress,
+			self.tasks.clone(),
+		));
 
 		Ok(source)
 	}
@@ -951,6 +1009,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			linger: self.linger,
+			tasks: self.tasks.clone(),
 			stats: self.stats.clone(),
 		})
 	}
@@ -1006,6 +1065,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			linger: self.linger,
+			tasks: self.tasks.clone(),
 			stats: self.stats.clone(),
 		})
 	}
@@ -1210,6 +1270,7 @@ async fn run_source(
 	rest: PathOwned,
 	mut source: broadcast::Consumer,
 	ingress: stats::Scope,
+	tasks: Tasks,
 ) {
 	// The first `route_changed` yields the current route immediately; nothing is
 	// visible to consumers until this attach, giving the creator a window to set
@@ -1231,7 +1292,7 @@ async fn run_source(
 		node.lock().leaf(&rest)
 	};
 
-	let (state, broadcast, id) = attach_source(&origin, &node, &leaf, &full, &rest, &source, route);
+	let (state, broadcast, id) = attach_source(&origin, &node, &leaf, &full, &rest, &source, route, &tasks);
 
 	loop {
 		match source.route_changed().await {
@@ -1271,6 +1332,7 @@ async fn run_source(
 /// broadcast if none is live. Returns the shared source table, the spliced
 /// broadcast, and the source's table id. One lock acquisition covers the whole
 /// join-or-create decision, so concurrent attaches cannot race each other.
+#[allow(clippy::too_many_arguments)] // internal plumbing shared by one caller
 fn attach_source(
 	origin: &Info,
 	node: &Lock<OriginNode>,
@@ -1279,6 +1341,7 @@ fn attach_source(
 	rest: &PathOwned,
 	source: &broadcast::Consumer,
 	route: broadcast::Route,
+	tasks: &Tasks,
 ) -> (kio::Producer<FrontState>, broadcast::Producer, u64) {
 	let mut leaf_guard = leaf.lock();
 
@@ -1347,7 +1410,13 @@ fn attach_source(
 	leaf_guard.broadcast = Some(entry);
 	drop(leaf_guard);
 
-	web_async::spawn(run_front(state.clone(), broadcast.clone(), node.clone(), rest.clone()));
+	tasks.push(run_front(
+		state.clone(),
+		broadcast.clone(),
+		node.clone(),
+		rest.clone(),
+		tasks.clone(),
+	));
 
 	(state, broadcast, 0)
 }
@@ -1359,6 +1428,7 @@ async fn run_front(
 	mut broadcast: broadcast::Producer,
 	node: Lock<OriginNode>,
 	rest: PathOwned,
+	tasks: Tasks,
 ) {
 	enum Step {
 		Serve(Arc<str>, super::resume::Producer),
@@ -1435,7 +1505,7 @@ async fn run_front(
 			Step::Serve(name, resume) => {
 				// Serve tasks self-terminate when the track completes or the
 				// front closes.
-				web_async::spawn(serve_track(state.clone(), name, resume));
+				tasks.push(serve_track(state.clone(), name, resume));
 			}
 			Step::Changed => {}
 			Step::Expired => {
@@ -3384,6 +3454,40 @@ mod tests {
 			!fresh.is_clone(&broadcast),
 			"re-create must not splice the old broadcast"
 		);
+	}
+
+	/// The origin's whole lifecycle runs on its [`Driver`]: nothing progresses
+	/// until it is polled, and driving it inline (no spawn, no runtime tasks) is
+	/// enough to attach a source, announce it, and serve a track end to end.
+	#[tokio::test]
+	async fn test_driver_polls_everything() {
+		let (origin, mut driver) = Producer::new_driven(Info::new(Origin::random()));
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let source = origin.create_broadcast("test", announce()).unwrap();
+		let mut dynamic = source.dynamic();
+
+		// Nothing has been driven yet, so the source hasn't attached: no announce.
+		announced.assert_next_wait();
+
+		// Driving the origin inline attaches the source and announces the path.
+		let broadcast = driver.drive(consumer.announced_broadcast("test")).await.unwrap();
+		announced.assert_next_some("test");
+
+		// Serve a track end to end while the driver is stepped in place.
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let (mut producer, mut sub) = driver
+			.drive(async {
+				let producer = accept_track(&mut dynamic, "video").await;
+				let sub = subscribing.await.unwrap();
+				(producer, sub)
+			})
+			.await;
+
+		// Once spliced, data flows directly through the model without the driver.
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
 	}
 
 	/// With a linger configured, an ungraceful source loss keeps the broadcast
