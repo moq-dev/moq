@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.0"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "base64",
