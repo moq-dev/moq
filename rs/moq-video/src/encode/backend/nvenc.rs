@@ -40,7 +40,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Codec, Config, Packet};
+use super::super::encoder::{Codec, Config, Frame as EncodedFrame};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, interleave_uv};
@@ -158,7 +158,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<EncodedFrame>, Error> {
 		let mut output = self
 			.session
 			.create_output_bitstream()
@@ -240,11 +240,11 @@ impl Backend for Nvenc {
 		Ok(if data.is_empty() {
 			Vec::new()
 		} else {
-			vec![Packet::new(Bytes::from(data), timestamp)]
+			vec![EncodedFrame::new(Bytes::from(data), timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+	fn finish(&mut self) -> Result<Vec<EncodedFrame>, Error> {
 		// Each encode locks its own output synchronously, so nothing is buffered.
 		Ok(Vec::new())
 	}

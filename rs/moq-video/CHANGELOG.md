@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- [**breaking**] Carry each input timestamp through `encode::Packet`, including
-  packets drained by `Encoder::finish`, and publish packets at their own
+- [**breaking**] Carry each input timestamp through `encode::Frame`, including
+  frames drained by `Encoder::finish`, and publish frames at their own
   timestamps.
 
 - `decode::Frame::resize(width, height)`: a scaled copy of a decoded frame,

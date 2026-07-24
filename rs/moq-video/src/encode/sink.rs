@@ -9,7 +9,7 @@
 //! per-thread COM refcount as the future migrates between workers and park a
 //! worker on a stalled MFT. Confining the whole encoder lifetime to one thread
 //! fixes both; frames are `Send` there (Windows D3D11 textures and CPU I420 both
-//! are) and packets come back over a channel.
+//! are) and encoded frames come back over a channel.
 //!
 //! macOS keeps encoding inline: VideoToolbox has no COM apartment to balance and
 //! doesn't block on an event loop, so a thread would only add a hop, and its
@@ -28,7 +28,7 @@ mod threaded {
 	use moq_net::Timestamp;
 	use tokio::sync::{mpsc, oneshot};
 
-	use super::super::encoder::{self, Encoder, Packet};
+	use super::super::encoder::{self, Encoder, Frame as EncodedFrame};
 	use crate::Error;
 	use crate::frame::Frame;
 
@@ -37,12 +37,12 @@ mod threaded {
 	/// racing them.
 	enum Request {
 		/// A frame and whether to force a keyframe, plus a oneshot to return that
-		/// frame's packets (or an error) in order.
+		/// frame's encoded output (or an error) in order.
 		Encode {
 			frame: Frame,
 			timestamp: Timestamp,
 			keyframe: bool,
-			resp: oneshot::Sender<Result<Vec<Packet>, Error>>,
+			resp: oneshot::Sender<Result<Vec<EncodedFrame>, Error>>,
 		},
 		/// Retune to a new bitrate, reporting whether the backend took it so the
 		/// caller can stop adapting against an encoder that can't. The round trip
@@ -124,14 +124,14 @@ mod threaded {
 			&self.name
 		}
 
-		/// Encode one frame, awaiting its packets. The frame is moved to the
+		/// Encode one frame, awaiting its output. The frame is moved to the
 		/// encode thread; the result returns over a oneshot.
 		pub(in crate::encode) async fn encode(
 			&mut self,
 			frame: Frame,
 			timestamp: Timestamp,
 			keyframe: bool,
-		) -> Result<Vec<Packet>, Error> {
+		) -> Result<Vec<EncodedFrame>, Error> {
 			self.request(|resp| Request::Encode {
 				frame,
 				timestamp,
@@ -184,7 +184,7 @@ mod threaded {
 mod inline {
 	use moq_net::Timestamp;
 
-	use super::super::encoder::{self, Encoder, Packet};
+	use super::super::encoder::{self, Encoder, Frame as EncodedFrame};
 	use crate::Error;
 	use crate::frame::Frame;
 
@@ -206,7 +206,7 @@ mod inline {
 			frame: Frame,
 			timestamp: Timestamp,
 			keyframe: bool,
-		) -> Result<Vec<Packet>, Error> {
+		) -> Result<Vec<EncodedFrame>, Error> {
 			self.0.encode_raw(&frame, timestamp, keyframe)
 		}
 

@@ -335,16 +335,16 @@ async fn transcode_group_inner(
 	}
 
 	if saw_frame {
-		// One-shot group: drain whatever the encoder still buffers. Every packet
+		// One-shot group: drain whatever the encoder still buffers. Every frame
 		// keeps the timestamp of the frame that produced it.
 		write(output, pipeline.finish()?)?;
 	}
 	Ok(())
 }
 
-/// Append encoded packets to the output group in the legacy hang framing.
-fn write(output: &mut moq_net::group::Producer, packets: Vec<moq_video::encode::Packet>) -> Result<(), Error> {
-	for moq_video::encode::Packet { timestamp, payload, .. } in packets {
+/// Append encoded frames to the output group in the legacy hang framing.
+fn write(output: &mut moq_net::group::Producer, frames: Vec<moq_video::encode::Frame>) -> Result<(), Error> {
+	for moq_video::encode::Frame { timestamp, payload } in frames {
 		let frame = hang::container::Frame { timestamp, payload };
 		frame.write_to(output)?;
 	}
@@ -378,15 +378,15 @@ impl Pipeline {
 		})
 	}
 
-	/// Transcode one container payload into zero or more encoded packets, each
+	/// Transcode one container payload into zero or more encoded frames, each
 	/// paired with its presentation timestamp.
 	fn process(
 		&mut self,
 		payload: &Bytes,
 		timestamp: moq_net::Timestamp,
 		keyframe: bool,
-	) -> Result<Vec<moq_video::encode::Packet>, Error> {
-		let mut packets = Vec::new();
+	) -> Result<Vec<moq_video::encode::Frame>, Error> {
+		let mut frames = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
 			let encoded = if raw.size == self.size {
 				// Already at the rung size (the decoder scaled): feed the frame
@@ -395,14 +395,14 @@ impl Pipeline {
 			} else {
 				self.encoder.encode(&raw.resize(self.size)?, keyframe)?
 			};
-			packets.extend(encoded);
+			frames.extend(encoded);
 		}
-		Ok(packets)
+		Ok(frames)
 	}
 
 	/// Consumes the pipeline, since flushing the encoder consumes it: a one-shot
 	/// group's pipeline is done once drained.
-	fn finish(self) -> Result<Vec<moq_video::encode::Packet>, Error> {
+	fn finish(self) -> Result<Vec<moq_video::encode::Frame>, Error> {
 		Ok(self.encoder.finish()?)
 	}
 }

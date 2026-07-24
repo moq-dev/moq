@@ -77,14 +77,14 @@ selection + linear fallback chain (which is already the right shape, see
 ```rust
 // encode/backend/mod.rs
 pub(crate) trait Backend: Send {
-    /// Encode one frame. Every emitted packet keeps the input timestamp.
+    /// Encode one frame. Every emitted frame keeps the input timestamp.
     fn encode(
         &mut self,
         frame: &Frame,
         timestamp: Timestamp,
         force_keyframe: bool,
-    ) -> Result<Vec<Packet>, Error>;
-    fn finish(&mut self) -> Result<Vec<Packet>, Error>;
+    ) -> Result<Vec<Frame>, Error>;
+    fn finish(&mut self) -> Result<Vec<Frame>, Error>;
 
     /// Which `moq_mux::h264::Mode` the producer should run for this backend.
     /// Avc3 (Annex-B, in-band SPS/PPS) for openh264/nvenc/vaapi; Avc1 for VT.
@@ -469,7 +469,7 @@ The "H.264 only" scope above was the ffmpeg-removal project. H.265 encode landed
 afterward on top of the same `Backend` seam:
 
 - `Encoder`/`Config`/`Options` gained a `Codec` field (`H264` / `H265`);
-  `Producer::new` takes the codec and routes packets to the matching
+  `Producer::new` takes the codec and routes frames to the matching
   `moq_mux::codec` importer (`.avc3` / `.hev1`). The mux + `hang` catalog already
   supported both, so only `moq-video` needed work.
 - Backends advertise the codecs they emit and `backend::open` filters by the

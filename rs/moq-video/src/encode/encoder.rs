@@ -1,7 +1,7 @@
 //! Video encoder front end.
 //!
 //! Accepts raw RGBA frames, converts them to I420, and delegates the actual
-//! encode to a [`Backend`](super::backend::Backend). The resulting packets are
+//! encode to a [`Backend`](super::backend::Backend). The resulting frames are
 //! Annex-B in the framing the catalog importer for [`Config::codec`] expects:
 //! H.264 (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
@@ -9,22 +9,21 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend};
-use crate::frame::{Frame, I420};
+use crate::frame::{Frame as RawFrame, I420};
 use crate::{Error, Size};
 
 /// One encoded video access unit and the presentation timestamp of its input frame.
 ///
-/// Construct packets for [`Producer`](super::Producer) with [`Packet::new`].
+/// Construct encoded frames for [`Producer`](super::Producer) with [`Frame::new`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Packet {
+pub struct Frame {
 	/// The encoded access unit in the codec's framing.
 	pub payload: Bytes,
 	/// The presentation timestamp carried by the frame that produced this access unit.
 	pub timestamp: Timestamp,
 }
 
-impl Packet {
+impl Frame {
 	/// Pair an encoded access unit with its presentation timestamp.
 	pub fn new(payload: Bytes, timestamp: Timestamp) -> Self {
 		Self { payload, timestamp }
@@ -121,7 +120,7 @@ impl Config {
 }
 
 /// Video encoder. Build one with [`Encoder::new`], feed it raw RGBA frames via
-/// [`encode_rgba`](Self::encode_rgba), and publish the resulting packets through
+/// [`encode_rgba`](Self::encode_rgba), and publish the resulting frames through
 /// a [`Producer`](super::Producer) built for the same [`Codec`].
 pub struct Encoder {
 	backend: Box<dyn Backend>,
@@ -195,13 +194,13 @@ impl Encoder {
 	}
 
 	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
-	/// built for the same codec to publish its packets.
+	/// built for the same codec to publish its frames.
 	pub fn codec(&self) -> Codec {
 		self.codec
 	}
 
 	/// Encode one tightly-packed RGBA frame of `size`, returning zero or more
-	/// encoded packets in the codec's framing. Every packet carries `timestamp`,
+	/// encoded frames in the codec's framing. Every frame carries `timestamp`,
 	/// even when a backend emits it from a later encode or [`finish`](Self::finish).
 	/// Set `keyframe` to force an IDR (e.g. on resume so a re-subscribing viewer
 	/// can start decoding at once).
@@ -214,19 +213,19 @@ impl Encoder {
 		size: Size,
 		timestamp: Timestamp,
 		keyframe: bool,
-	) -> Result<Vec<Packet>, Error> {
+	) -> Result<Vec<Frame>, Error> {
 		// The encoder resolution is validated even and non-zero in `new`, so a
 		// frame matching it is even too and the conversion below can't fail on odd
 		// dimensions.
 		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
 
-		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
+		let frame = RawFrame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
 		self.encode_raw(&frame, timestamp, keyframe)
 	}
 
 	/// Encode one tightly-packed I420 frame of `size` (Y then U then V, no row
-	/// padding, BT.601 limited range), returning zero or more encoded packets in
-	/// the codec's framing. Every packet carries `timestamp`. Set `keyframe` to
+	/// padding, BT.601 limited range), returning zero or more encoded frames in
+	/// the codec's framing. Every frame carries `timestamp`. Set `keyframe` to
 	/// force an IDR.
 	///
 	/// `size` must equal the encoder's [`size`](Self::size), and `i420` must hold
@@ -242,10 +241,10 @@ impl Encoder {
 		size: Size,
 		timestamp: Timestamp,
 		keyframe: bool,
-	) -> Result<Vec<Packet>, Error> {
+	) -> Result<Vec<Frame>, Error> {
 		self.check_frame(size, i420.len(), I420::len(size.width, size.height), "I420")?;
 
-		let frame = Frame::I420(I420 {
+		let frame = RawFrame::I420(I420 {
 			width: size.width,
 			height: size.height,
 			data: i420.to_vec(),
@@ -280,19 +279,19 @@ impl Encoder {
 	/// directly (NVDEC -> NVENC stays on the GPU); everything else falls back to
 	/// a CPU I420 upload. The frame must already be at the encoder's resolution;
 	/// decode with [`decode::Config::resize`](crate::decode::Config) (or scale
-	/// yourself) first. Each output packet preserves [`Frame::timestamp`](crate::decode::Frame::timestamp).
-	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Packet>, Error> {
+	/// yourself) first. Each output frame preserves [`Frame::timestamp`](crate::decode::Frame::timestamp).
+	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Frame>, Error> {
 		self.encode_raw(&frame.inner, frame.timestamp, keyframe)
 	}
 
-	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
+	/// Encode a captured frame (a GPU surface or CPU I420). The frame must
 	/// already be at the encoder's resolution.
 	pub(crate) fn encode_raw(
 		&mut self,
-		frame: &Frame,
+		frame: &RawFrame,
 		timestamp: Timestamp,
 		keyframe: bool,
-	) -> Result<Vec<Packet>, Error> {
+	) -> Result<Vec<Frame>, Error> {
 		let size = Size::new(frame.width(), frame.height());
 		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -303,11 +302,11 @@ impl Encoder {
 		self.backend.encode(frame, timestamp, keyframe)
 	}
 
-	/// Flush the encoder, returning any buffered packets with their input timestamps.
+	/// Flush the encoder, returning any buffered frames with their input timestamps.
 	///
 	/// Consumes the encoder: nothing can be encoded after a flush, so this is the
 	/// last call rather than one leaving a drained encoder in your hands.
-	pub fn finish(mut self) -> Result<Vec<Packet>, Error> {
+	pub fn finish(mut self) -> Result<Vec<Frame>, Error> {
 		self.backend.finish()
 	}
 }
@@ -328,18 +327,18 @@ mod tests {
 	}
 
 	impl Backend for Delayed {
-		fn encode(&mut self, _frame: &Frame, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Packet>, Error> {
+		fn encode(&mut self, _frame: &RawFrame, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 			let Some(timestamp) = self.pending.replace(timestamp) else {
 				return Ok(Vec::new());
 			};
-			Ok(vec![Packet::new(Bytes::from_static(b"encoded"), timestamp)])
+			Ok(vec![Frame::new(Bytes::from_static(b"encoded"), timestamp)])
 		}
 
-		fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+		fn finish(&mut self) -> Result<Vec<Frame>, Error> {
 			Ok(self
 				.pending
 				.take()
-				.map(|timestamp| vec![Packet::new(Bytes::from_static(b"tail"), timestamp)])
+				.map(|timestamp| vec![Frame::new(Bytes::from_static(b"tail"), timestamp)])
 				.unwrap_or_default())
 		}
 
@@ -654,7 +653,7 @@ mod tests {
 
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			let frame = Frame::Surface(nv12_surface(320, 240));
+			let frame = RawFrame::Surface(nv12_surface(320, 240));
 			packets.extend(encoder.encode_raw(&frame, Timestamp::ZERO, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
@@ -678,7 +677,7 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let frame = Frame::Surface(nv12_surface(320, 240));
+		let frame = RawFrame::Surface(nv12_surface(320, 240));
 		let mut packets = encoder.encode_raw(&frame, Timestamp::ZERO, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 
@@ -796,7 +795,7 @@ mod tests {
 		let mut textures = 0;
 		for i in 0..30 {
 			let frame = camera.read().await.expect("frame, not end of stream");
-			if matches!(frame, Frame::Texture(_)) {
+			if matches!(frame, RawFrame::Texture(_)) {
 				textures += 1;
 			}
 			packets.extend(encoder.encode_raw(&frame, Timestamp::ZERO, i == 0).unwrap());

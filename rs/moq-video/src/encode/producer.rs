@@ -13,14 +13,14 @@ use moq_net::Timestamp;
 use crate::Error;
 use crate::capture;
 
-use super::encoder::{self, Codec, Packet};
+use super::encoder::{self, Codec, Frame};
 use super::rate::{Control, Policy};
 use super::sink::Sink;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
 
-/// Per-codec splitter + importer pair. Each codec frames its packets and resolves
+/// Per-codec splitter + importer pair. Each codec frames its access units and resolves
 /// its catalog rendition differently, so the producer holds one of these.
 enum Codecs {
 	H264 {
@@ -46,7 +46,7 @@ pub struct Producer {
 
 impl Producer {
 	/// Publish a track for `codec` into `broadcast`, registering its rendition
-	/// in `catalog`. The packets fed to [`publish`](Self::publish) must be in
+	/// in `catalog`. The frames fed to [`publish`](Self::publish) must be in
 	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
@@ -82,12 +82,12 @@ impl Producer {
 		}
 	}
 
-	/// Publish already-encoded packets. Each packet is one whole access unit in
+	/// Publish already-encoded frames. Each frame is one whole access unit in
 	/// the producer's codec framing with its own presentation timestamp.
-	pub fn publish(&mut self, packets: Vec<Packet>) -> Result<(), Error> {
-		for packet in packets {
-			let Packet { payload, timestamp, .. } = packet;
-			// The encoder emits one whole access unit per packet, so flush to emit it.
+	pub fn publish(&mut self, frames: Vec<Frame>) -> Result<(), Error> {
+		for frame in frames {
+			let Frame { payload, timestamp } = frame;
+			// The encoder emits one whole access unit per frame, so flush to emit it.
 			match &mut self.codecs {
 				Codecs::H264 { split, import } => {
 					let mut frames = split.decode(&payload, Some(timestamp))?;

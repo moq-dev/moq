@@ -5,7 +5,7 @@
 //! takes a planar I420 [`Frame`] and emits Annex-B with in-band parameter sets
 //! (SPS/PPS, plus VPS for H.265), the framing the matching catalog importer
 //! expects. Each backend produces exactly one codec, so the producer can route
-//! its packets to the right importer.
+//! its encoded frames to the right importer.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
@@ -14,7 +14,7 @@
 
 use moq_net::Timestamp;
 
-use super::encoder::{Codec, Config, Kind, Packet};
+use super::encoder::{Codec, Config, Frame as EncodedFrame, Kind};
 use crate::Error;
 use crate::frame::Frame;
 
@@ -33,14 +33,14 @@ mod nvenc;
 mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
-/// back zero or more packets in the codec's wire framing.
+/// back zero or more encoded frames in the codec's wire framing.
 pub(crate) trait Backend: Send {
-	/// Encode one frame. Every emitted packet keeps `timestamp`, including when
+	/// Encode one frame. Every emitted frame keeps `timestamp`, including when
 	/// output was queued by an earlier call. Set `keyframe` to force an IDR.
-	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error>;
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<EncodedFrame>, Error>;
 
-	/// Flush the encoder, returning any buffered packets.
-	fn finish(&mut self) -> Result<Vec<Packet>, Error>;
+	/// Flush the encoder, returning any buffered frames.
+	fn finish(&mut self) -> Result<Vec<EncodedFrame>, Error>;
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. Called as the congestion controller's estimate

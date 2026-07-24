@@ -10,7 +10,7 @@ use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePe
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
-use super::super::encoder::{Config, Packet};
+use super::super::encoder::{Config, Frame as EncodedFrame};
 use super::Backend;
 use crate::Error;
 use crate::frame::Frame;
@@ -98,7 +98,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<EncodedFrame>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -132,11 +132,11 @@ impl Backend for Openh264 {
 		Ok(if bytes.is_empty() {
 			Vec::new()
 		} else {
-			vec![Packet::new(Bytes::from(bytes), timestamp)]
+			vec![EncodedFrame::new(Bytes::from(bytes), timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+	fn finish(&mut self) -> Result<Vec<EncodedFrame>, Error> {
 		// Low-delay: nothing is buffered, so there's nothing to flush.
 		Ok(Vec::new())
 	}

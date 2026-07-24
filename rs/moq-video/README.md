@@ -45,8 +45,8 @@ Two public entry points:
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Producer` publishes `encode::Packet`s you encoded yourself, handling
-  the catalog and framing. Each packet carries its own presentation timestamp,
+- `encode::Producer` publishes `encode::Frame`s you encoded yourself, handling
+  the catalog and framing. Each frame carries its own presentation timestamp,
   so delayed encoder output is published at the input frame's time.
 
 The NVENC and VAAPI backends are Linux-only and gated behind their respective

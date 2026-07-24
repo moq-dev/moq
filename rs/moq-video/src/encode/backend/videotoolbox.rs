@@ -39,7 +39,7 @@ use objc2_video_toolbox::{
 	kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config, Packet};
+use super::super::encoder::{Codec, Config, Frame as EncodedFrame};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, I420};
@@ -156,7 +156,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<EncodedFrame>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
@@ -206,11 +206,11 @@ impl Backend for VideoToolbox {
 		}
 		Ok(std::mem::take(&mut self.sink.packets)
 			.into_iter()
-			.map(|payload| Packet::new(payload, timestamp))
+			.map(|payload| EncodedFrame::new(payload, timestamp))
 			.collect())
 	}
 
-	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+	fn finish(&mut self) -> Result<Vec<EncodedFrame>, Error> {
 		// complete_frames runs per-encode, so nothing is buffered at shutdown.
 		Ok(Vec::new())
 	}

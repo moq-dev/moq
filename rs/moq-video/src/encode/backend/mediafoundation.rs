@@ -38,7 +38,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config, Packet};
+use super::super::encoder::{Codec, Config, Frame as EncodedFrame};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, interleave_uv};
@@ -333,7 +333,7 @@ impl MediaFoundation {
 	/// Block on events until the MFT is ready for input, collecting any output
 	/// that arrives meanwhile. Runs on the dedicated encode thread (see
 	/// `encode::sink`), so this blocking wait never parks a tokio worker.
-	fn wait_for_input(&mut self, out: &mut Vec<Packet>) -> Result<(), Error> {
+	fn wait_for_input(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), Error> {
 		while !self.needs_input {
 			let event = unsafe {
 				self.events
@@ -346,7 +346,7 @@ impl MediaFoundation {
 	}
 
 	/// Drain events already queued without blocking (called after feeding input).
-	fn drain_ready(&mut self, out: &mut Vec<Packet>) -> Result<(), Error> {
+	fn drain_ready(&mut self, out: &mut Vec<EncodedFrame>) -> Result<(), Error> {
 		loop {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
 				Ok(event) => self.handle_event(&event, out)?,
@@ -356,7 +356,7 @@ impl MediaFoundation {
 		}
 	}
 
-	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Packet>) -> Result<(), Error> {
+	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<EncodedFrame>) -> Result<(), Error> {
 		// Surface an async failure (e.g. an MEError event) instead of looping in
 		// `wait_for_input` forever for an input request that will never come.
 		unsafe { event.GetStatus() }
@@ -381,7 +381,7 @@ impl MediaFoundation {
 
 	/// Pull one encoded access unit. Returns `None` if the MFT had nothing ready
 	/// or asked us to renegotiate the output type.
-	fn process_output(&mut self) -> Result<Option<Packet>, Error> {
+	fn process_output(&mut self) -> Result<Option<EncodedFrame>, Error> {
 		let provided = if self.provides_samples {
 			None
 		} else {
@@ -425,12 +425,12 @@ impl MediaFoundation {
 				"Media Foundation returned unknown sample time {sample_time}"
 			))
 		})?;
-		Ok(Some(Packet::new(sample_to_bytes(&sample)?, timestamp)))
+		Ok(Some(EncodedFrame::new(sample_to_bytes(&sample)?, timestamp)))
 	}
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<EncodedFrame>, Error> {
 		if !self.started {
 			self.start(frame)?;
 		}
@@ -456,7 +456,7 @@ impl Backend for MediaFoundation {
 		Ok(out)
 	}
 
-	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+	fn finish(&mut self) -> Result<Vec<EncodedFrame>, Error> {
 		if !self.started {
 			return Ok(Vec::new());
 		}

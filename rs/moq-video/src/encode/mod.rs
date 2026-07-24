@@ -6,9 +6,9 @@
 //! Entry points, high to low level:
 //! - [`publish_capture`] captures and publishes a webcam (turnkey).
 //! - [`Encoder`] encodes raw RGBA frames you supply, and [`Producer`]
-//!   publishes the resulting packets (bring your own frames). Build both for the
-//!   same [`Codec`]. Each [`Packet`] carries the timestamp of its input frame.
-//! - [`Producer`] alone publishes timestamped packets you already encoded.
+//!   publishes the resulting encoded frames (bring your own frames). Build both for the
+//!   same [`Codec`]. Each [`Frame`] carries the timestamp of its input frame.
+//! - [`Producer`] alone publishes timestamped frames you already encoded.
 //!
 //! [`Options`] / [`Kind`] / [`Config`] configure them. The decode/consume
 //! counterpart (mirror of `moq-audio`'s consumer) lives in the sibling
@@ -24,5 +24,5 @@ mod sink;
 
 pub mod rate;
 
-pub use encoder::{Codec, Config, Encoder, Kind, Packet};
+pub use encoder::{Codec, Config, Encoder, Frame, Kind};
 pub use producer::{Options, Producer, publish_capture};
