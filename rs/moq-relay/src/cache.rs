@@ -15,10 +15,11 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Configuration for the relay's group cache.
 ///
-/// Non-latest groups stay cached until their track's TTL expires or the pool
-/// runs out of room, whichever comes first (the latest group of every track is
-/// always retained). With neither knob set the pool is unbounded and only the
-/// per-track TTL bounds memory.
+/// Non-latest groups stay cached until their track's retention window expires,
+/// the `duration` ceiling is reached, or the pool runs out of room, whichever
+/// comes first (the latest group of every track is always retained). With none
+/// of the knobs set the pool is unbounded and only each track's own window
+/// bounds memory.
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -41,12 +42,34 @@ pub struct CacheConfig {
 	/// absolute size.
 	#[arg(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
+
+	/// Maximum age of any cached group, e.g. "30s" or "500ms".
+	///
+	/// Caps each track's own retention window: a publisher advertising a longer
+	/// window is clamped down to this, so the relay never holds a group longer
+	/// than this regardless of what upstream asks for. This bounds memory by age
+	/// where `capacity` bounds it by bytes. Unbounded (each track keeps its own
+	/// window) when unset.
+	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
+	#[serde(default, with = "humantime_serde")]
+	pub duration: Option<Duration>,
+}
+
+/// The relay's resolved cache settings: the shared byte-budget pool plus the
+/// age ceiling applied to every track.
+pub struct Cache {
+	/// The shared byte-budget pool every session's groups register with.
+	pub pool: cache::Pool,
+
+	/// Ceiling on how long any cached group is retained. [`Duration::MAX`] imposes
+	/// no ceiling, leaving each track's own window in force.
+	pub duration: Duration,
 }
 
 impl CacheConfig {
-	/// Build the shared [`cache::Pool`], spawning the headroom governor when
-	/// configured. Requires a tokio runtime.
-	pub fn init(&self) -> anyhow::Result<cache::Pool> {
+	/// Resolve the size knobs into a shared [`cache::Pool`] and age ceiling,
+	/// spawning the headroom governor when configured. Requires a tokio runtime.
+	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
 		let pool = match capacity {
 			Some(bytes) => cache::Pool::new(bytes),
@@ -62,7 +85,14 @@ impl CacheConfig {
 			tracing::info!(capacity, "cache capacity set");
 		}
 
-		Ok(pool)
+		if let Some(duration) = self.duration {
+			tracing::info!(?duration, "cache duration ceiling set");
+		}
+
+		Ok(Cache {
+			pool,
+			duration: self.duration.unwrap_or(Duration::MAX),
+		})
 	}
 }
 

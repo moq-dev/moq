@@ -418,15 +418,19 @@ impl Cluster {
 		})
 	}
 
-	/// Attach the shared group [`cache::Pool`](moq_net::cache::Pool) so every
-	/// session's broadcasts cache into one memory budget. Call before deriving
-	/// any origin handles (e.g. [`with_stats`](Self::with_stats)) so they inherit
-	/// the pool.
+	/// Attach the resolved [`Cache`](crate::Cache) (the shared group pool and the
+	/// per-track retention ceiling) so every session's broadcasts cache into one
+	/// memory budget bounded by both bytes and age. Call before deriving any origin
+	/// handles (e.g. [`with_stats`](Self::with_stats)) so they inherit the settings.
 	///
-	/// Rebuilds the origin with the pool: safe because the cluster's origin is
+	/// Rebuilds the origin with the cache: safe because the cluster's origin is
 	/// still pristine here (no broadcasts published, no scopes derived).
-	pub fn with_cache(mut self, pool: moq_net::cache::Pool) -> Self {
-		self.info = self.info.clone().with_pool(pool);
+	pub fn with_cache(mut self, cache: crate::Cache) -> Self {
+		self.info = self
+			.info
+			.clone()
+			.with_pool(cache.pool)
+			.with_cache_duration(cache.duration);
 		self.origin = self.info.clone().produce();
 		self
 	}

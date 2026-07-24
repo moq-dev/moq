@@ -131,6 +131,17 @@ impl Info {
 		self.ordered = ordered;
 		self
 	}
+
+	/// Bind this track to its parent `broadcast`, the moment groups gain a shared
+	/// cache pool to register with. Also clamps [`Self::latency_max`] down to the
+	/// origin's [`cache_duration`](crate::origin::Info::cache_duration) ceiling, so a
+	/// group is never retained longer than the origin allows regardless of the window
+	/// the publisher advertised. Every bind path funnels through here, so the clamp
+	/// covers local publishers and relayed (lite / IETF) tracks alike.
+	pub(crate) fn bind(&mut self, broadcast: Arc<broadcast::Info>) {
+		self.latency_max = self.latency_max.min(broadcast.origin.cache_duration);
+		self.broadcast = broadcast;
+	}
 }
 
 #[derive(Default)]
@@ -578,7 +589,7 @@ impl TrackState {
 			.info
 			.get_or_insert_with(|| {
 				let mut info = info.unwrap_or_default();
-				info.broadcast = broadcast;
+				info.bind(broadcast);
 				info
 			})
 			.clone();
@@ -629,7 +640,7 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let mut info = info.into().unwrap_or_default();
-		info.broadcast = broadcast.clone();
+		info.bind(broadcast.clone());
 		Self {
 			name: name.into(),
 			state: kio::Producer::new(TrackState {
@@ -2296,7 +2307,7 @@ impl Request {
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		let mut info = info.into().unwrap_or_default();
-		info.broadcast = self.broadcast.clone();
+		info.bind(self.broadcast.clone());
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
@@ -2780,6 +2791,54 @@ mod test {
 			.update(Subscription::default().with_latency_max(Duration::ZERO))
 			.unwrap();
 		assert_eq!(producer.subscription().unwrap().latency_max, Duration::ZERO);
+	}
+
+	/// Mint a track under an origin whose retention ceiling is `cap`, so the
+	/// track's own window is clamped down to it on bind.
+	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
+		let origin = crate::origin::Info::default().with_cache_duration(cap);
+		Producer::new(Arc::new(broadcast::Info { origin }), name, info)
+	}
+
+	#[test]
+	fn origin_cache_duration_clamps_latency_max() {
+		// A publisher asking to keep groups for a minute is capped to the origin's 1s
+		// ceiling; a publisher already below the ceiling is left alone (it's a min).
+		let capped = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_secs(60)),
+			Duration::from_secs(1),
+		);
+		assert_eq!(capped.state.read().latency_bound(), Some(Duration::from_secs(1)));
+
+		let under = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_millis(500)),
+			Duration::from_secs(1),
+		);
+		assert_eq!(under.state.read().latency_bound(), Some(Duration::from_millis(500)));
+	}
+
+	#[tokio::test]
+	async fn origin_cache_duration_caps_eviction() {
+		tokio::time::pause();
+
+		// The publisher wants a 60s window, but the origin caps retention at 1s.
+		let mut producer = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_secs(60)),
+			Duration::from_secs(1),
+		);
+		producer.append_group().unwrap(); // seq 0
+
+		// Past the origin ceiling but far within the publisher's own 60s window.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		producer.append_group().unwrap(); // seq 1
+
+		// Seq 0 is evicted anyway: the origin ceiling wins over the larger publisher window.
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 1);
+		assert_eq!(first_live_sequence(&state), 1);
 	}
 
 	#[test]

@@ -185,12 +185,14 @@ depth = 2
 		unsafe {
 			std::env::remove_var("MOQ_CACHE_CAPACITY");
 			std::env::remove_var("MOQ_CACHE_HEADROOM");
+			std::env::remove_var("MOQ_CACHE_DURATION");
 		}
 
 		let toml = r#"
 [cache]
 capacity = "8GiB"
 headroom = "10%"
+duration = "30s"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -206,6 +208,11 @@ headroom = "10%"
 			"TOML's cache.capacity must not be clobbered by the CLI re-parse"
 		);
 		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
+		assert_eq!(
+			config.cache.duration,
+			Some(std::time::Duration::from_secs(30)),
+			"TOML's cache.duration must not be clobbered by the CLI re-parse"
+		);
 	}
 
 	/// Serializes tests that touch `MOQ_CLUSTER_LINGER`. Same rationale as

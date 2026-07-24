@@ -108,6 +108,14 @@ pub struct Info {
 	/// whole process share one memory budget.
 	pub pool: cache::Pool,
 
+	/// Ceiling on how long any non-latest group under this origin is retained. Each
+	/// track's own [`latency_max`](track::Info::latency_max) window is clamped down to
+	/// this when the track binds, so a group is never held longer than this regardless
+	/// of what a publisher advertises. The age budget alongside [`Self::pool`]'s byte
+	/// budget: a relay bounds memory by both. [`Duration::MAX`] (the default) imposes no
+	/// ceiling, leaving each track's own window in force.
+	pub cache_duration: Duration,
+
 	/// How long a broadcast under this origin outlives the *ungraceful* loss of its
 	/// last source before closing. Within the window the path stays announced and a
 	/// source re-attaching at it (a session reconnecting, a publisher re-announcing)
@@ -126,6 +134,7 @@ impl Default for Info {
 		Self {
 			id: Origin::UNKNOWN,
 			pool: cache::Pool::default(),
+			cache_duration: Duration::MAX,
 			linger: Duration::ZERO,
 		}
 	}
@@ -140,6 +149,13 @@ impl Info {
 	/// Set the cache pool this origin's broadcasts inherit, returning `self` for chaining.
 	pub fn with_pool(mut self, pool: cache::Pool) -> Self {
 		self.pool = pool;
+		self
+	}
+
+	/// Set the retention ceiling (see [`Self::cache_duration`]) applied to every track
+	/// under this origin, returning `self` for chaining.
+	pub fn with_cache_duration(mut self, cache_duration: Duration) -> Self {
+		self.cache_duration = cache_duration;
 		self
 	}
 
@@ -785,6 +801,10 @@ pub struct Producer {
 	// mint their remote broadcasts with it). Unbounded by default.
 	pool: cache::Pool,
 
+	// Retention ceiling inherited by broadcasts created under this origin (see
+	// [`Info::cache_duration`]). `Duration::MAX` (no ceiling) by default.
+	cache_duration: Duration,
+
 	// How long a broadcast outlives ungracefully losing its last source (see
 	// [`Info::linger`]). Zero by default.
 	linger: Duration,
@@ -814,6 +834,7 @@ impl Producer {
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
 			pool: info.pool,
+			cache_duration: info.cache_duration,
 			linger: info.linger,
 			stats: stats::Session::default(),
 		}
@@ -846,6 +867,7 @@ impl Producer {
 		Info {
 			id: self.info,
 			pool: self.pool.clone(),
+			cache_duration: self.cache_duration,
 			linger: self.linger,
 		}
 	}
@@ -861,6 +883,7 @@ impl Producer {
 			root: PathOwned::default(),
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
+			cache_duration: Duration::MAX,
 			linger: Duration::ZERO,
 			stats: stats::Session::default(),
 		}
@@ -950,6 +973,7 @@ impl Producer {
 			root: self.root.clone(),
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
+			cache_duration: self.cache_duration,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})
@@ -1005,6 +1029,7 @@ impl Producer {
 			nodes: self.nodes.root(&prefix)?,
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
+			cache_duration: self.cache_duration,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})
