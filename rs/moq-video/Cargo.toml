@@ -44,7 +44,7 @@ anyhow = "1"
 bytes = "1"
 # CPU I420 resize (SIMD per-plane convolution), the software half of
 # decode::Frame::resize; CUDA frames resize on the GPU instead.
-fast_image_resize = "5"
+fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
 moq-mux = { workspace = true }
@@ -84,7 +84,7 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
 # Probe for the NVIDIA driver libraries before calling cudarc / the NVENC SDK,
 # which panic (process-abort under release `panic = "abort"`) if their library is
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 moq-nvenc = { workspace = true, optional = true }
 # Intel/AMD VAAPI hardware encoder, behind the default-on `vaapi` feature. As of
 # moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED
