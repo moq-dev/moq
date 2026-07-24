@@ -25,6 +25,11 @@ Per-platform, picked at compile time:
   Desktop Duplication (display; BGRA -> CPU I420). Display capture is
   whole-monitor; select one with a bare index or `display:{index}`.
 
+`capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
+identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
+the same for macOS and Windows displays. Linux display selection stays in the
+desktop portal picker, which does not expose a stable display identifier.
+
 ## Encode
 
 The codec is chosen via `encode::Codec`. Backends are tried in order (hardware

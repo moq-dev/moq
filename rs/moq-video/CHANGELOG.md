@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- List V4L2 and Media Foundation cameras on Linux and Windows, and list DXGI
+  displays on Windows, using identifiers accepted by `capture::Source`.
+
 ## [0.0.8](https://github.com/moq-dev/moq/compare/moq-video-v0.0.7...moq-video-v0.0.8) - 2026-07-23
 
 ### Other
