@@ -37,9 +37,9 @@ use moq_nvenc::sys::nvcuvid::{
 	CUVIDEOFORMAT, CUVIDPARSERDISPINFO, CUVIDPARSERPARAMS, CUVIDSOURCEDATAPACKET, CUvideopacketflags, CUvideoparser,
 };
 
-use super::{Backend, Codec, Decoded};
-use crate::Error;
+use super::{Backend, Codec};
 use crate::frame::{Surface, cuda};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "nvdec";
 
@@ -162,7 +162,7 @@ impl Nvdec {
 }
 
 impl Backend for Nvdec {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// The parser callbacks (decoder create, decode) and the map/copy below
 		// all need the CUDA context current on this thread.
 		self.state
@@ -337,7 +337,7 @@ impl State {
 
 	/// Map one decoded picture and copy it device-to-device into an owned CUDA
 	/// buffer, so the fixed surface pool is released before the next decode.
-	fn map_frame(&self, disp: &CUVIDPARSERDISPINFO) -> Result<Decoded, Error> {
+	fn map_frame(&self, disp: &CUVIDPARSERDISPINFO) -> Result<Frame, Error> {
 		let decoder = self
 			.decoder
 			.as_ref()
@@ -383,11 +383,9 @@ impl State {
 		// copy failed; a leaked mapping would starve the output-surface pool.
 		unsafe { (self.api.unmap_video_frame)(decoder.handle, dev_ptr) };
 
-		Ok(Decoded {
-			// Timestamps rode the parser from `decode` (microseconds, unsigned).
-			timestamp: Timestamp::from_micros(disp.timestamp.max(0) as u64).unwrap_or(Timestamp::ZERO),
-			frame: Surface::Cuda(copied?),
-		})
+		// Timestamps rode the parser from `decode` (microseconds, unsigned).
+		let timestamp = Timestamp::from_micros(disp.timestamp.max(0) as u64).unwrap_or(Timestamp::ZERO);
+		Ok(Frame::new(Surface::Cuda(copied?), timestamp))
 	}
 }
 
@@ -501,6 +499,12 @@ mod tests {
 		buf
 	}
 
+	/// Wrap a gradient RGBA buffer as the `index`th frame of a 30fps stream.
+	fn gradient_frame(rgba: &[u8], w: u32, h: u32, index: u64) -> crate::Frame {
+		let surface = crate::Surface::rgba(rgba, crate::Size::new(w, h)).unwrap();
+		crate::Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap())
+	}
+
 	/// Mean absolute error between two equal-length planes.
 	fn mae(a: &[u8], b: &[u8]) -> u64 {
 		assert_eq!(a.len(), b.len());
@@ -513,10 +517,12 @@ mod tests {
 		let rgba = gradient_rgba(w, h);
 		let mut out = Vec::new();
 		for i in 0..10u64 {
-			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-				for decoded in decoder.decode(packet, timestamp, i == 0).unwrap() {
-					let i420 = decoded.frame.to_i420().unwrap().into_owned();
+			if i == 0 {
+				encoder.keyframe();
+			}
+			for encoded in encoder.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
+				for decoded in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+					let i420 = decoded.surface.to_i420().unwrap().into_owned();
 					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
 			}
@@ -650,9 +656,11 @@ mod tests {
 			let mut decoder = decoder;
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
-				let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-				for packet in source.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-					frames.extend(decoder.decode(packet, timestamp, i == 0).unwrap());
+				if i == 0 {
+					source.keyframe();
+				}
+				for encoded in source.encode(&gradient_frame(&rgba, w, h, i)).unwrap() {
+					frames.extend(decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap());
 				}
 			}
 			frames
@@ -660,12 +668,15 @@ mod tests {
 		assert!(!decoded.is_empty());
 
 		let mut packets = Vec::new();
-		for (i, out) in decoded.iter().enumerate() {
+		for (i, out) in decoded.into_iter().enumerate() {
 			assert!(
-				matches!(out.frame, Surface::Cuda(_)),
+				matches!(out.surface, Surface::Cuda(_)),
 				"NVDEC produced a non-CUDA frame; the zero-copy path is not exercised"
 			);
-			packets.extend(nvenc.encode(&out.frame, i == 0).unwrap());
+			if i == 0 {
+				nvenc.keyframe();
+			}
+			packets.extend(nvenc.encode(&out).unwrap());
 		}
 		packets.extend(nvenc.finish().unwrap());
 		assert!(!packets.is_empty(), "NVENC produced no packets from CUDA frames");
@@ -690,12 +701,9 @@ mod tests {
 		)
 		.unwrap();
 		let mut last = None;
-		for (i, packet) in packets.into_iter().enumerate() {
-			for out in check
-				.decode(packet, Timestamp::from_micros(i as u64).unwrap(), i == 0)
-				.unwrap()
-			{
-				last = Some(out.frame.to_i420().unwrap().into_owned());
+		for (i, encoded) in packets.into_iter().enumerate() {
+			for out in check.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+				last = Some(out.surface.to_i420().unwrap().into_owned());
 			}
 		}
 		let last = last.expect("software decoder produced no frames");

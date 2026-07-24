@@ -161,6 +161,12 @@ mod tests {
 		_track: moq_net::track::Producer,
 	}
 
+	/// Wrap a gray 320x240 RGBA buffer as a raw frame at `timestamp` microseconds.
+	fn gray_frame(rgba: &[u8], timestamp: u64) -> moq_video::Frame {
+		let surface = moq_video::Surface::rgba(rgba, moq_video::Size::new(320, 240)).unwrap();
+		moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp).unwrap())
+	}
+
 	/// Build a 320x240 avc3 source broadcast: a catalog plus a video track with
 	/// `groups` groups of `frames` gray frames each, encoded with openh264.
 	fn source_broadcast(groups: u64, frames: u64) -> Source {
@@ -194,13 +200,13 @@ mod tests {
 			let mut group = track.create_group(sequence.into()).unwrap();
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
-				for payload in encoder
-					.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
-					.unwrap()
-				{
+				if index == 0 {
+					encoder.keyframe();
+				}
+				for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
 					let frame = hang::container::Frame {
-						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
-						payload,
+						timestamp: encoded.timestamp,
+						payload: encoded.payload,
 					};
 					frame.write_to(&mut group).unwrap();
 				}
@@ -262,13 +268,13 @@ mod tests {
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
 					let timestamp = (sequence * frames + index) * 33_333;
-					for payload in encoder
-						.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
-						.unwrap()
-					{
+					if index == 0 {
+						encoder.keyframe();
+					}
+					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
 						let frame = hang::container::Frame {
-							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
-							payload,
+							timestamp: encoded.timestamp,
+							payload: encoded.payload,
 						};
 						frame.write_to(&mut group).unwrap();
 					}
@@ -516,9 +522,16 @@ mod tests {
 			.fetch_group(0, None)
 			.await
 			.unwrap();
-		let payload = fetched.read_frame().await.unwrap().unwrap();
-		let frame = hang::container::Frame::decode(payload.payload).unwrap();
-		assert!(!frame.payload.is_empty());
+		let mut timestamps = Vec::new();
+		while let Some(payload) = fetched.read_frame().await.unwrap() {
+			let frame = hang::container::Frame::decode(payload.payload).unwrap();
+			assert!(!frame.payload.is_empty());
+			timestamps.push(frame.timestamp.as_micros());
+		}
+		// Each output frame keeps the presentation time of the source frame it was
+		// transcoded from, including the tail the encoder drains at the end of the
+		// group. Collapsing them onto one instant would stall playback here.
+		assert_eq!(timestamps, (0..5).map(|i| i * 33_333).collect::<Vec<u128>>());
 		// The fetched group is complete: the source group had 5 frames, and a
 		// finished transcode carries them all through.
 		let total = fetched.finished().await.unwrap();

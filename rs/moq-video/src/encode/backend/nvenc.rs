@@ -40,9 +40,9 @@ use moq_nvenc::sys::nvEncodeAPI::{
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Codec, Config};
-use super::Backend;
-use crate::Error;
+use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "nvenc";
 
@@ -157,7 +157,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 		let mut output = self
 			.session
 			.create_output_bitstream()
@@ -174,7 +174,7 @@ impl Backend for Nvenc {
 		// resource / input buffer): the synchronous bitstream lock is what
 		// guarantees NVENC is done reading the input, so releasing the input
 		// first would race the encoder.
-		let data = match frame {
+		let data = match &frame.surface {
 			// A CUDA frame is already NV12 in device memory (NVDEC output):
 			// register its buffer as an external NVENC resource and encode in
 			// place, no CPU round trip and no GPU copy.
@@ -236,14 +236,15 @@ impl Backend for Nvenc {
 			}
 		};
 
+		// The bitstream lock above is synchronous, so this is that frame's output.
 		Ok(if data.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(data)]
+			vec![Encoded::new(Bytes::from(data), frame.timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// Each encode locks its own output synchronously, so nothing is buffered.
 		Ok(Vec::new())
 	}
@@ -315,6 +316,12 @@ mod tests {
 		vec![0x80u8; width as usize * height as usize * 4]
 	}
 
+	/// Wrap a 320x240 gray RGBA buffer as the `index`th frame of a 30fps stream.
+	fn gray_frame(rgba: &[u8], index: u64) -> crate::Frame {
+		let surface = crate::Surface::rgba(rgba, crate::Size::new(320, 240)).unwrap();
+		crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap())
+	}
+
 	/// H.264 NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
 	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
 	fn h264_nal_types(annexb: &[u8]) -> Vec<u8> {
@@ -372,11 +379,11 @@ mod tests {
 		let mut first = Vec::new();
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
-			let keyframe = i == 0 || i == 5;
-			let packets = encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
-				.unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			if i == 0 || i == 5 {
+				encoder.keyframe();
+			}
+			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			if i == 0 {
 				first = joined;
 			} else if i == 5 {
@@ -419,11 +426,11 @@ mod tests {
 		let mut first = Vec::new();
 		let mut forced = Vec::new();
 		for i in 0..10u32 {
-			let keyframe = i == 0 || i == 5;
-			let packets = encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
-				.unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			if i == 0 || i == 5 {
+				encoder.keyframe();
+			}
+			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			if i == 0 {
 				first = joined;
 			} else if i == 5 {
@@ -466,8 +473,8 @@ mod tests {
 		// Never force a keyframe (only frame 0 would be); the backend must insert
 		// IDRs at frames 3 and 6 on its own.
 		for i in 0..7u32 {
-			let packets = encoder.encode_rgba(&frame, crate::Size::new(320, 240), false).unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			let encoded = encoder.encode(&gray_frame(&frame, i.into())).unwrap();
+			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
 			let types = h264_nal_types(&joined);
 			if types.contains(&5) {
 				assert!(types.contains(&7), "periodic IDR at frame {i} missing SPS: {types:?}");
@@ -528,10 +535,14 @@ mod tests {
 		// decoder latency or frame reordering.
 		let mut decoded = None;
 		for i in 0..10u64 {
-			let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-				for out in decoder.decode(packet, timestamp, i == 0).unwrap() {
-					decoded = Some(out.frame.to_i420().unwrap().into_owned());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(w, h)).unwrap();
+			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
+			for encoded in encoder.encode(&frame).unwrap() {
+				for out in decoder.decode(encoded.payload, encoded.timestamp, i == 0).unwrap() {
+					decoded = Some(out.surface.to_i420().unwrap().into_owned());
 				}
 			}
 		}

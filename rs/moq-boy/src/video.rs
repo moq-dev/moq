@@ -132,9 +132,22 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
-			Ok(packets) => {
-				if let Err(e) = producer.publish(packets, ts) {
+		let surface = match moq_video::Surface::rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT)) {
+			Ok(surface) => surface,
+			// A single bad frame is tolerable; keep going.
+			Err(e) => {
+				tracing::error!(error = %e, "RGBA conversion error");
+				continue;
+			}
+		};
+		// The emulator asks for one when a viewer needs a decodable starting point;
+		// otherwise the encoder's own GOP keys the stream.
+		if keyframe {
+			enc.keyframe();
+		}
+		match enc.encode(&moq_video::Frame::new(surface, ts)) {
+			Ok(encoded) => {
+				if let Err(e) = producer.publish(&encoded) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");

@@ -35,9 +35,9 @@ use objc2_video_toolbox::{
 };
 
 use super::super::encoder::{Codec, Config};
-use super::Backend;
-use crate::Error;
+use super::{Backend, Encoded};
 use crate::frame::Surface;
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -151,12 +151,12 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
 		// Zero-copy when the capture handed us a surface; otherwise upload I420.
-		let pixel_buffer = match frame {
+		let pixel_buffer = match &frame.surface {
 			Surface::PixelBuffer(surface) => surface.buffer.clone(),
 			Surface::I420(i420) => crate::frame::macos::upload_i420(i420)?,
 		};
@@ -199,10 +199,15 @@ impl Backend for VideoToolbox {
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
-		Ok(std::mem::take(&mut self.sink.packets))
+		// `complete_frames` above forces this frame out before returning, so every
+		// packet collected here came from it and carries its timestamp.
+		Ok(std::mem::take(&mut self.sink.packets)
+			.into_iter()
+			.map(|payload| Encoded::new(payload, frame.timestamp))
+			.collect())
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// complete_frames runs per-encode, so nothing is buffered at shutdown.
 		Ok(Vec::new())
 	}
