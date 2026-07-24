@@ -114,9 +114,17 @@ class Client:
         return self._require_publisher().create_broadcast(path)
 
     def announced(self, prefix: str = "") -> Announced:
+        """Async-iterate broadcasts announced under ``prefix`` (empty matches all).
+
+        See :meth:`OriginConsumer.announced`.
+        """
         return self._require_consumer().announced(prefix)
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
+        """Await announcement of the broadcast at exactly ``path``.
+
+        See :meth:`OriginConsumer.announced_broadcast`.
+        """
         return self._require_consumer().announced_broadcast(path)
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:

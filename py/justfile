@@ -69,6 +69,17 @@ package:
     rm -rf dist
     uv build --package moq-rs --out-dir dist
 
+# Build the Sphinx API docs for the `moq` wrapper into py/dist/docs. Read the
+# Docs builds the same config (see .readthedocs.yaml) and hosts the result. The
+# native moq_ffi is mocked (autodoc_mock_imports in docs/conf.py), so this needs
+# no Rust build: install the pure-python wrapper metadata and render.
+docs:
+    uv sync --no-install-workspace
+    uv pip install --no-deps -e moq-rs
+    rm -rf dist/docs
+    uv run --no-sync --with sphinx --with myst-parser --with furo \
+        sphinx-build -b html moq-rs/docs dist/docs
+
 # Full Python CI: lint + tests + build. Takes a newline-separated list
 # of changed files; skips if FILES is non-empty and none match the
 # Python scope (which includes rs/moq-ffi because moq-ffi bundles it via
@@ -84,3 +95,4 @@ ci FILES="":
     just check
     just test
     just build
+    just docs

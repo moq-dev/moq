@@ -61,6 +61,7 @@ class Moq internal constructor(
      */
     suspend fun requestBroadcast(path: String): MoqBroadcastConsumer = session.consumer().requestBroadcast(path)
 
+    /** Gracefully shut down the session and cancel the client, releasing the native handles. */
     override fun close() {
         session.shutdown()
         client.cancel()

@@ -4,6 +4,7 @@ import MoqFFI
 public final class Client: Sendable {
     let ffi: MoqClient
 
+    /// Create a client with default settings, ready to configure and `connect(to:)`.
     public init() {
         ffi = MoqClient()
     }

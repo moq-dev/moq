@@ -37,7 +37,11 @@ from .types import (
 
 
 class MediaConsumer:
-    """Wraps MoqMediaConsumer as an async iterator of MediaFrame."""
+    """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
+
+    Built via :meth:`BroadcastConsumer.subscribe_media`. Iterate with ``async for``;
+    usable as an async context manager that cancels on exit.
+    """
 
     def __init__(self, inner: MoqMediaConsumer) -> None:
         self._inner = inner
@@ -58,6 +62,7 @@ class MediaConsumer:
         return frame
 
     def cancel(self) -> None:
+        """Cancel the subscription and stop delivering frames."""
         self._inner.cancel()
 
 
@@ -92,6 +97,7 @@ class GroupConsumer:
         return await self._inner.read_frame()
 
     def cancel(self) -> None:
+        """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
@@ -183,6 +189,7 @@ class TrackConsumer:
         self._inner.update(subscription)
 
     def cancel(self) -> None:
+        """Cancel the subscription and stop delivering groups."""
         self._inner.cancel()
 
 
@@ -213,6 +220,7 @@ class AudioConsumer:
         return frame
 
     def cancel(self) -> None:
+        """Cancel the subscription and stop delivering audio frames."""
         self._inner.cancel()
 
 
@@ -264,7 +272,11 @@ class JsonStreamConsumer:
 
 
 class CatalogConsumer:
-    """Wraps MoqCatalogConsumer as an async iterator of Catalog."""
+    """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
+
+    Built via :meth:`BroadcastConsumer.subscribe_catalog`. Each item is the latest
+    catalog describing the broadcast's tracks; usable as an async context manager.
+    """
 
     def __init__(self, inner: MoqCatalogConsumer) -> None:
         self._inner = inner
@@ -285,11 +297,16 @@ class CatalogConsumer:
         return catalog
 
     def cancel(self) -> None:
+        """Cancel the catalog subscription and stop delivering updates."""
         self._inner.cancel()
 
 
 class BroadcastConsumer:
-    """Wraps MoqBroadcastConsumer with convenience methods."""
+    """The consume side of one broadcast: subscribe to its tracks, catalog, and media.
+
+    Built by resolving an announcement or request. Read its :attr:`route`, then use
+    the ``subscribe_*`` / :meth:`fetch_group` methods to pull tracks and media.
+    """
 
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
@@ -316,6 +333,7 @@ class BroadcastConsumer:
         return await self._route_watch.next()
 
     async def subscribe_catalog(self) -> CatalogConsumer:
+        """Subscribe to the broadcast's catalog, async-iterating snapshots as it changes."""
         return CatalogConsumer(await self._inner.subscribe_catalog())
 
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:

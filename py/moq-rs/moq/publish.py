@@ -34,7 +34,11 @@ def _media_init(format: str, init: bytes, video: VideoHint | None) -> MoqInit:
 
 
 class MediaProducer:
-    """Wraps MoqMediaProducer with a cleaner interface."""
+    """Publish encoded media frames on a single track, one payload at a time.
+
+    Built via :meth:`BroadcastProducer.publish_media`. Push each encoded frame
+    with :meth:`write_frame`, then :meth:`finish` when the stream ends.
+    """
 
     def __init__(self, inner: MoqMediaProducer) -> None:
         self._inner = inner
@@ -53,9 +57,11 @@ class MediaProducer:
         await self._inner.unused()
 
     def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
+        """Write one encoded frame with a presentation timestamp in microseconds."""
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def finish(self) -> None:
+        """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
 
 
@@ -76,6 +82,7 @@ class MediaStreamProducer:
         self._inner.write(payload)
 
     def finish(self) -> None:
+        """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
 
 
@@ -101,6 +108,7 @@ class GroupProducer:
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
     def finish(self) -> None:
+        """Close this group cleanly, marking it complete for subscribers."""
         self._inner.finish()
 
     def abort(self, error_code: int) -> None:
@@ -168,6 +176,7 @@ class TrackProducer:
         self._inner.abort(error_code)
 
     def finish(self) -> None:
+        """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()
 
     def finish_at(self, final_sequence: int) -> None:
@@ -328,9 +337,11 @@ class BroadcastDynamic:
         return await self.requested_track()
 
     async def requested_track(self) -> TrackRequest:
+        """Await the next track a subscriber requested but that isn't published yet."""
         return TrackRequest(await self._inner.requested_track())
 
     def cancel(self) -> None:
+        """Stop accepting track requests and release the underlying handle."""
         self._inner.cancel()
 
 
@@ -475,4 +486,5 @@ class BroadcastProducer:
         return BroadcastConsumer(self._inner.consume())
 
     def finish(self) -> None:
+        """Finish the broadcast, closing its tracks and unpublishing it."""
         self._inner.finish()

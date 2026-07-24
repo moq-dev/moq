@@ -85,6 +85,7 @@ asyncio.run(main())
 
 ## Source and issues
 
+- API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
 - README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
 - Example scripts: [py/moq-rs/examples](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples)
