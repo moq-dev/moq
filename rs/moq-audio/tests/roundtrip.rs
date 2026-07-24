@@ -165,3 +165,49 @@ async fn opus_round_trip_44100_s16_resampled() {
 		total_bytes
 	);
 }
+
+#[tokio::test]
+async fn pcm_round_trip_is_lossless() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut catalog_consumer = catalog.consume().unwrap();
+	let broadcast_consumer = broadcast.consume();
+
+	let input = encode::Input {
+		format: Format::F32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let mut options = encode::Options::default();
+	options.track = Some("pcm".to_string());
+	options.codec = encode::Codec::Pcm;
+
+	let mut producer = encode::Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
+	let samples = sine_f32_interleaved(440.0, 48_000, 2, 960);
+	producer
+		.write(&Frame {
+			timestamp: Timestamp::from_micros(123_000).unwrap(),
+			data: f32_bytes(&samples),
+		})
+		.unwrap();
+
+	let snapshot = catalog_consumer.next().await.unwrap().unwrap();
+	let catalog = snapshot.audio.renditions.get("pcm").unwrap();
+	assert_eq!(catalog.codec, hang::catalog::AudioCodec::Pcm);
+	assert_eq!(catalog.bitrate, Some(3_072_000));
+
+	let mut consumer = decode::Consumer::new(&broadcast_consumer, catalog, "pcm", decode::Config::default())
+		.await
+		.unwrap();
+	producer.finish().unwrap();
+
+	let frame = consumer.read().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
+	let decoded: Vec<f32> = frame
+		.data
+		.chunks_exact(4)
+		.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
+		.collect();
+	assert_eq!(decoded, samples);
+	assert!(consumer.read().await.unwrap().is_none());
+}

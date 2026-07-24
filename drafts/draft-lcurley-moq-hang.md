@@ -201,6 +201,19 @@ Any Uint8Array fields are hex-encoded as a string.
 
 In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}).
 
+### PCM {#audio-pcm}
+
+Hang defines the `"pcm"` audio codec for uncompressed samples.
+The `sampleRate` and `numberOfChannels` fields MUST be present and greater than zero.
+The `description` field MUST NOT be present.
+If `bitrate` is present, it MUST equal `sampleRate * numberOfChannels * 32`.
+
+Each codec payload consists of interleaved IEEE 754 binary32 samples in little-endian byte order.
+Samples are ordered by sample frame, then by ascending channel index within each frame.
+The payload length MUST be a non-zero multiple of `4 * numberOfChannels`.
+The frame timestamp identifies the presentation time of its first sample.
+The frame duration in seconds is the payload length divided by `4 * numberOfChannels * sampleRate`.
+
 For example:
 
 ~~~

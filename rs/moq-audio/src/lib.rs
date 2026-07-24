@@ -2,9 +2,8 @@
 //!
 //! Counterpart to [`moq-video`](https://crates.io/crates/moq-video) for audio
 //! tracks, and shaped the same way. Sits on top of [`moq_mux`] and [`hang`] and
-//! adds the missing piece for native callers: a Rust-native Opus implementation
-//! that turns raw PCM into the bitstreams `moq_mux::codec::opus` already knows
-//! how to ingest (and vice versa for decode).
+//! adds the missing piece for native callers: Rust-native Opus and uncompressed
+//! PCM codecs that turn raw samples into HANG audio tracks and back.
 //!
 //! - `capture` describes an audio source (`capture::Config`) and grabs buffers
 //!   per platform: a microphone via cpal (CoreAudio / WASAPI / ALSA) everywhere,

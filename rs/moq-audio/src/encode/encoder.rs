@@ -1,10 +1,8 @@
-//! Opus encoder front end.
+//! Audio encoder front end.
 //!
-//! Single-codec implementation today: [`Encoder`] wraps libopus 1.3.1 via
-//! [`unsafe_libopus`], a pure-Rust c2rust transpilation. No CMake toolchain, no
-//! sys crate, no linker gymnastics. When AAC or other codecs land we'll factor
-//! out a backend dispatch behind [`Codec`]; introducing a trait now would be
-//! premature.
+//! [`Encoder`] dispatches over the closed [`Codec`] set. Opus wraps libopus
+//! 1.3.1 via [`unsafe_libopus`], while PCM serializes interleaved `f32` samples
+//! directly.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -26,9 +24,11 @@ const MAX_PACKET_BYTES: usize = 4_000;
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Codec {
-	/// Opus (RFC 6716). The only codec today, and the default.
+	/// Opus (RFC 6716), and the default.
 	#[default]
 	Opus,
+	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
+	Pcm,
 }
 
 impl Codec {
@@ -37,6 +37,7 @@ impl Codec {
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Opus => "opus",
+			Self::Pcm => "pcm",
 		}
 	}
 }
@@ -53,6 +54,7 @@ impl FromStr for Codec {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
 			"opus" => Ok(Self::Opus),
+			"pcm" => Ok(Self::Pcm),
 			other => Err(Error::Unsupported(format!("unknown codec: {other}"))),
 		}
 	}
@@ -105,9 +107,11 @@ pub struct Config {
 	/// Channel count the codec runs at. `None` matches [`Input::channels`];
 	/// anything else is rejected, since remapping isn't implemented.
 	pub channels: Option<u32>,
-	/// Bitrate in bits per second. `None` lets the codec pick.
+	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
+	/// because its bitrate is fixed by the sample rate and channel count.
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
+	/// PCM accepts any duration containing a whole number of samples.
 	pub frame_duration: Duration,
 }
 
@@ -131,7 +135,7 @@ impl Config {
 /// and publish the resulting packets through a [`Producer`](super::Producer)
 /// built from the same [`Config`].
 pub struct Encoder {
-	inner: *mut OpusEncoder,
+	backend: Backend,
 	config: Config,
 	/// Resolved codec sample rate (from `config.sample_rate`, else the input rate
 	/// snapped up to a supported one).
@@ -139,19 +143,29 @@ pub struct Encoder {
 	/// Resolved codec channel count (currently always the input's).
 	codec_channels: u32,
 	frame_size: usize,
+}
+
+enum Backend {
+	Opus(Opus),
+	Pcm,
+}
+
+struct Opus {
+	inner: *mut OpusEncoder,
 	scratch: Vec<u8>,
 }
 
 // SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
-// struct; libopus encoder methods take a single &mut, so a unique
-// owner is allowed to move it across threads.
-unsafe impl Send for Encoder {}
+// struct; libopus encoder methods take a single &mut, so a unique owner is
+// allowed to move it across threads.
+unsafe impl Send for Opus {}
 
 impl Encoder {
 	/// Open an encoder for `config`.
 	pub fn new(config: &Config) -> Result<Self, Error> {
 		match config.codec {
 			Codec::Opus => Self::new_opus(config.clone()),
+			Codec::Pcm => Self::new_pcm(config.clone()),
 		}
 	}
 
@@ -191,12 +205,51 @@ impl Encoder {
 		}
 
 		Ok(Self {
-			inner,
+			backend: Backend::Opus(Opus {
+				inner,
+				scratch: vec![0u8; MAX_PACKET_BYTES],
+			}),
 			config,
 			codec_rate,
 			codec_channels,
 			frame_size,
-			scratch: vec![0u8; MAX_PACKET_BYTES],
+		})
+	}
+
+	fn new_pcm(config: Config) -> Result<Self, Error> {
+		if config.bitrate.is_some() {
+			return Err(Error::Unsupported(
+				"pcm bitrate is fixed; leave Config::bitrate unset".into(),
+			));
+		}
+
+		let codec_rate = config.sample_rate.unwrap_or(config.input.sample_rate);
+		if codec_rate == 0 {
+			return Err(Error::Unsupported("pcm sample rate must be greater than zero".into()));
+		}
+
+		let codec_channels = config.channels.unwrap_or(config.input.channels);
+		if codec_channels == 0 {
+			return Err(Error::Unsupported("pcm channel count must be greater than zero".into()));
+		}
+		if codec_channels != config.input.channels {
+			return Err(Error::Unsupported(format!(
+				"channel remapping not implemented (input {}ch, output {codec_channels}ch)",
+				config.input.channels
+			)));
+		}
+
+		let frame_size = pcm_frame_size(codec_rate, config.frame_duration)?;
+		frame_size
+			.checked_mul(codec_channels as usize)
+			.ok_or_else(|| Error::Unsupported("pcm frame contains too many samples".into()))?;
+		pcm_bitrate(codec_rate, codec_channels)?;
+		Ok(Self {
+			backend: Backend::Pcm,
+			config,
+			codec_rate,
+			codec_channels,
+			frame_size,
 		})
 	}
 
@@ -242,48 +295,96 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
-		// are bounded by the lengths we pass.
-		let n = unsafe {
-			opus_encode_float(
-				self.inner,
-				pcm.as_ptr(),
-				self.frame_size as i32,
-				self.scratch.as_mut_ptr(),
-				self.scratch.len() as i32,
-			)
-		};
-		if n < 0 {
-			return Err(opus::error(n, "opus_encode_float"));
+		match &mut self.backend {
+			Backend::Opus(opus) => {
+				// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
+				// are bounded by the lengths we pass.
+				let n = unsafe {
+					opus_encode_float(
+						opus.inner,
+						pcm.as_ptr(),
+						self.frame_size as i32,
+						opus.scratch.as_mut_ptr(),
+						opus.scratch.len() as i32,
+					)
+				};
+				if n < 0 {
+					return Err(crate::opus::error(n, "opus_encode_float"));
+				}
+				Ok(Bytes::copy_from_slice(&opus.scratch[..n as usize]))
+			}
+			Backend::Pcm => {
+				let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
+				for sample in pcm {
+					payload.extend_from_slice(&sample.to_le_bytes());
+				}
+				Ok(payload.into())
+			}
 		}
-		Ok(Bytes::copy_from_slice(&self.scratch[..n as usize]))
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
-		// `codec_channels` is validated to mono/stereo at encoder construction, so the
-		// OpusHead (channel mapping family 0) always encodes.
-		let head = moq_mux::codec::opus::Config {
-			sample_rate: self.codec_rate,
-			channel_count: self.codec_channels,
-		}
-		.encode()
-		.expect("opus encoder channels validated to mono/stereo");
+		match self.config.codec {
+			Codec::Opus => {
+				// `codec_channels` is validated to mono/stereo at encoder construction,
+				// so the OpusHead (channel mapping family 0) always encodes.
+				let head = moq_mux::codec::opus::Config {
+					sample_rate: self.codec_rate,
+					channel_count: self.codec_channels,
+				}
+				.encode()
+				.expect("opus encoder channels validated to mono/stereo");
 
-		let mut config =
-			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.codec_rate, self.codec_channels);
-		config.bitrate = self.config.bitrate.map(|b| b as u64);
-		config.description = Some(head);
-		config.container = hang::catalog::Container::Legacy;
-		config
+				let mut config = hang::catalog::AudioConfig::new(
+					hang::catalog::AudioCodec::Opus,
+					self.codec_rate,
+					self.codec_channels,
+				);
+				config.bitrate = self.config.bitrate.map(|b| b as u64);
+				config.description = Some(head);
+				config.container = hang::catalog::Container::Legacy;
+				config
+			}
+			Codec::Pcm => {
+				let mut config = hang::catalog::AudioConfig::new(
+					hang::catalog::AudioCodec::Pcm,
+					self.codec_rate,
+					self.codec_channels,
+				);
+				config.bitrate = Some(
+					pcm_bitrate(self.codec_rate, self.codec_channels)
+						.expect("pcm encoder bitrate validated at construction"),
+				);
+				config.container = hang::catalog::Container::Legacy;
+				config
+			}
+		}
 	}
 }
 
-impl Drop for Encoder {
+impl Drop for Opus {
 	fn drop(&mut self) {
 		// SAFETY: `inner` is a live OpusEncoder that nothing else aliases.
 		unsafe { opus_encoder_destroy(self.inner) };
 	}
+}
+
+fn pcm_frame_size(sample_rate: u32, duration: Duration) -> Result<usize, Error> {
+	let samples = u128::from(sample_rate) * duration.as_nanos();
+	if samples == 0 || !samples.is_multiple_of(1_000_000_000) {
+		return Err(Error::Unsupported(format!(
+			"pcm frame duration must contain a whole number of samples at {sample_rate} Hz"
+		)));
+	}
+	usize::try_from(samples / 1_000_000_000).map_err(|_| Error::Unsupported("pcm frame duration is too large".into()))
+}
+
+fn pcm_bitrate(sample_rate: u32, channels: u32) -> Result<u64, Error> {
+	u64::from(sample_rate)
+		.checked_mul(u64::from(channels))
+		.and_then(|samples| samples.checked_mul(32))
+		.ok_or_else(|| Error::Unsupported("pcm bitrate exceeds the catalog range".into()))
 }
 
 #[cfg(test)]
@@ -376,6 +477,9 @@ mod tests {
 		assert_eq!(Codec::Opus.as_str(), "opus");
 		assert_eq!(Codec::Opus.to_string(), "opus");
 		assert_eq!("opus".parse::<Codec>().unwrap(), Codec::Opus);
+		assert_eq!(Codec::Pcm.as_str(), "pcm");
+		assert_eq!(Codec::Pcm.to_string(), "pcm");
+		assert_eq!("pcm".parse::<Codec>().unwrap(), Codec::Pcm);
 		assert!("aac".parse::<Codec>().is_err());
 	}
 
@@ -392,5 +496,62 @@ mod tests {
 		.unwrap();
 		assert_eq!(enc.codec_rate(), 24_000);
 		assert_eq!(enc.catalog().sample_rate, 24_000);
+	}
+
+	#[test]
+	fn pcm_roundtrip_is_lossless() {
+		let mut enc = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+		let mut dec = Decoder::new(&enc.catalog()).unwrap();
+		let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
+
+		let packet = enc.encode(&input).unwrap();
+		let output = dec.decode(&packet).unwrap();
+
+		assert_eq!(output, input);
+	}
+
+	#[test]
+	fn pcm_catalog_declares_fixed_bitrate() {
+		let enc = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+		let catalog = enc.catalog();
+
+		assert_eq!(catalog.codec, hang::catalog::AudioCodec::Pcm);
+		assert_eq!(catalog.bitrate, Some(48_000 * 2 * 32));
+		assert_eq!(catalog.description, None);
+	}
+
+	#[test]
+	fn pcm_rejects_fractional_sample_frame_duration() {
+		let err = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			frame_duration: Duration::from_micros(2_500),
+			..Config::new(Input {
+				sample_rate: 44_100,
+				..Input::default()
+			})
+		});
+		assert!(matches!(err, Err(Error::Unsupported(_))));
+	}
+
+	#[test]
+	fn pcm_rejects_bitrate_overflow() {
+		let err = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			frame_duration: Duration::from_secs(1),
+			..Config::new(Input {
+				sample_rate: u32::MAX,
+				channels: u32::MAX,
+				..Input::default()
+			})
+		});
+		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 }
