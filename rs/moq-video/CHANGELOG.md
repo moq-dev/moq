@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- [**breaking**] Carry each input timestamp through `encode::Packet`, including
+  packets drained by `Encoder::finish`, and publish packets at their own
+  timestamps.
+
 - `decode::Frame::resize(width, height)`: a scaled copy of a decoded frame,
   preserving the timestamp. A CUDA frame (NVDEC output) resizes on the GPU with
   a box-filter kernel (vendored PTX, JIT-compiled by the driver; no CUDA

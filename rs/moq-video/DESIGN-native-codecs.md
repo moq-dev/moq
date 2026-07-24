@@ -77,11 +77,14 @@ selection + linear fallback chain (which is already the right shape, see
 ```rust
 // encode/backend/mod.rs
 pub(crate) trait Backend: Send {
-    /// Encode one NV12 frame. `force_keyframe` requests an IDR. Returns zero or
-    /// more H.264 packets in this backend's native framing (see `wire_mode`):
-    /// Annex-B for Avc3 backends, length-prefixed NALs for Avc1.
-    fn encode(&mut self, frame: &Nv12, force_keyframe: bool) -> Result<Vec<Bytes>, Error>;
-    fn finish(&mut self) -> Result<Vec<Bytes>, Error>;
+    /// Encode one frame. Every emitted packet keeps the input timestamp.
+    fn encode(
+        &mut self,
+        frame: &Frame,
+        timestamp: Timestamp,
+        force_keyframe: bool,
+    ) -> Result<Vec<Packet>, Error>;
+    fn finish(&mut self) -> Result<Vec<Packet>, Error>;
 
     /// Which `moq_mux::h264::Mode` the producer should run for this backend.
     /// Avc3 (Annex-B, in-band SPS/PPS) for openh264/nvenc/vaapi; Avc1 for VT.
@@ -109,9 +112,9 @@ encode/
     openh264.rs     # software fallback, all platforms
 ```
 
-The public surface (`Encoder`, `Config`, `Kind`, `Producer`, `Options`,
-`publish_capture`) stays **identical**, so `moq-cli` and the catalog/producer
-path don't change. `Kind::Named(String)` keeps working but its meaning shifts
+The backend selection surface (`Encoder`, `Config`, `Kind`, `Producer`,
+`Options`, `publish_capture`) stays codec-agnostic. `Kind::Named(String)` keeps
+working but its meaning shifts
 from "ffmpeg encoder name" to "backend id" (`"videotoolbox"`, `"nvenc"`,
 `"vaapi"`, `"openh264"`); document the change.
 

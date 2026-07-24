@@ -175,8 +175,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 						let scaled = frame.resize(rung.info.size)?;
 						encoder.encode(&scaled, keyframe)?
 					};
-					let timestamp = frame.timestamp;
-					write(output, encoded.into_iter().map(|packet| (timestamp, packet)).collect())?;
+					write(output, encoded)?;
 				}
 				Some(Item::End) => {
 					if let Some(mut output) = current.take() {
@@ -314,17 +313,12 @@ async fn transcode_group_inner(
 	output: &mut moq_net::group::Producer,
 ) -> Result<(), Error> {
 	let mut first = true;
-	// The latest presentation time seen, tracked so a one-shot group can stamp any
-	// packets the encoder still holds at the end. `None` until the first frame:
-	// `Timestamp` compares by raw value at a fixed scale, so there's no scale-neutral
-	// zero to seed it with (the source's scale isn't known until a frame arrives).
-	let mut last_timestamp: Option<moq_net::Timestamp> = None;
+	let mut saw_frame = false;
 
 	while let Some(frames) = container.read(source).await? {
 		for frame in frames {
 			let timestamp = frame.timestamp;
-			// All source frames share one scale, so this `max` never crosses scales.
-			last_timestamp = Some(last_timestamp.map_or(timestamp, |last| last.max(timestamp)));
+			saw_frame = true;
 
 			// A group opens on a keyframe by construction, so the first frame is
 			// an IDR. The low-level `Container::read` the transcoder uses does not
@@ -340,17 +334,17 @@ async fn transcode_group_inner(
 		}
 	}
 
-	if let Some(last_timestamp) = last_timestamp {
-		// One-shot group: drain whatever the encoder still buffers, stamping it with
-		// the last presentation time we saw. No frames read means nothing to drain.
-		write(output, pipeline.finish(last_timestamp)?)?;
+	if saw_frame {
+		// One-shot group: drain whatever the encoder still buffers. Every packet
+		// keeps the timestamp of the frame that produced it.
+		write(output, pipeline.finish()?)?;
 	}
 	Ok(())
 }
 
 /// Append encoded packets to the output group in the legacy hang framing.
-fn write(output: &mut moq_net::group::Producer, packets: Vec<(moq_net::Timestamp, Bytes)>) -> Result<(), Error> {
-	for (timestamp, payload) in packets {
+fn write(output: &mut moq_net::group::Producer, packets: Vec<moq_video::encode::Packet>) -> Result<(), Error> {
+	for moq_video::encode::Packet { timestamp, payload, .. } in packets {
 		let frame = hang::container::Frame { timestamp, payload };
 		frame.write_to(output)?;
 	}
@@ -391,10 +385,9 @@ impl Pipeline {
 		payload: &Bytes,
 		timestamp: moq_net::Timestamp,
 		keyframe: bool,
-	) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
+	) -> Result<Vec<moq_video::encode::Packet>, Error> {
 		let mut packets = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
-			let raw_timestamp = raw.timestamp;
 			let encoded = if raw.size == self.size {
 				// Already at the rung size (the decoder scaled): feed the frame
 				// through as-is, keeping a GPU frame on the GPU.
@@ -402,23 +395,14 @@ impl Pipeline {
 			} else {
 				self.encoder.encode(&raw.resize(self.size)?, keyframe)?
 			};
-			for packet in encoded {
-				packets.push((raw_timestamp, packet));
-			}
+			packets.extend(encoded);
 		}
 		Ok(packets)
 	}
 
-	/// Drain the encoder, pairing any buffered packets with `timestamp`.
-	///
 	/// Consumes the pipeline, since flushing the encoder consumes it: a one-shot
 	/// group's pipeline is done once drained.
-	fn finish(self, timestamp: moq_net::Timestamp) -> Result<Vec<(moq_net::Timestamp, Bytes)>, Error> {
-		Ok(self
-			.encoder
-			.finish()?
-			.into_iter()
-			.map(|packet| (timestamp, packet))
-			.collect())
+	fn finish(self) -> Result<Vec<moq_video::encode::Packet>, Error> {
+		Ok(self.encoder.finish()?)
 	}
 }

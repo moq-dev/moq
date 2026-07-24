@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cudarc::driver::CudaContext;
+use moq_net::Timestamp;
 // The CUDA zero-copy input path only exists when NVDEC (its producer) is on.
 #[cfg(feature = "nvdec")]
 use moq_nvenc::sys::nvEncodeAPI::NV_ENC_INPUT_RESOURCE_TYPE;
@@ -39,7 +40,7 @@ use moq_nvenc::sys::nvEncodeAPI::{
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Packet};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, interleave_uv};
@@ -157,7 +158,7 @@ impl Nvenc {
 }
 
 impl Backend for Nvenc {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
 		let mut output = self
 			.session
 			.create_output_bitstream()
@@ -239,11 +240,11 @@ impl Backend for Nvenc {
 		Ok(if data.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(data)]
+			vec![Packet::new(Bytes::from(data), timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
 		// Each encode locks its own output synchronously, so nothing is buffered.
 		Ok(Vec::new())
 	}
@@ -374,9 +375,13 @@ mod tests {
 		for i in 0..10u32 {
 			let keyframe = i == 0 || i == 5;
 			let packets = encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.encode_rgba(&frame, crate::Size::new(320, 240), Timestamp::ZERO, keyframe)
 				.unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			let joined: Vec<u8> = packets
+				.iter()
+				.flat_map(|packet| packet.payload.iter())
+				.copied()
+				.collect();
 			if i == 0 {
 				first = joined;
 			} else if i == 5 {
@@ -421,9 +426,13 @@ mod tests {
 		for i in 0..10u32 {
 			let keyframe = i == 0 || i == 5;
 			let packets = encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.encode_rgba(&frame, crate::Size::new(320, 240), Timestamp::ZERO, keyframe)
 				.unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			let joined: Vec<u8> = packets
+				.iter()
+				.flat_map(|packet| packet.payload.iter())
+				.copied()
+				.collect();
 			if i == 0 {
 				first = joined;
 			} else if i == 5 {
@@ -466,8 +475,14 @@ mod tests {
 		// Never force a keyframe (only frame 0 would be); the backend must insert
 		// IDRs at frames 3 and 6 on its own.
 		for i in 0..7u32 {
-			let packets = encoder.encode_rgba(&frame, crate::Size::new(320, 240), false).unwrap();
-			let joined: Vec<u8> = packets.iter().flatten().copied().collect();
+			let packets = encoder
+				.encode_rgba(&frame, crate::Size::new(320, 240), Timestamp::ZERO, false)
+				.unwrap();
+			let joined: Vec<u8> = packets
+				.iter()
+				.flat_map(|packet| packet.payload.iter())
+				.copied()
+				.collect();
 			let types = h264_nal_types(&joined);
 			if types.contains(&5) {
 				assert!(types.contains(&7), "periodic IDR at frame {i} missing SPS: {types:?}");
@@ -529,8 +544,11 @@ mod tests {
 		let mut decoded = None;
 		for i in 0..10u64 {
 			let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-				for out in decoder.decode(packet, timestamp, i == 0).unwrap() {
+			for packet in encoder
+				.encode_rgba(&rgba, crate::Size::new(w, h), timestamp, i == 0)
+				.unwrap()
+			{
+				for out in decoder.decode(packet.payload, packet.timestamp, i == 0).unwrap() {
 					decoded = Some(out.frame.to_i420().unwrap().into_owned());
 				}
 			}

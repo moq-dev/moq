@@ -25,10 +25,10 @@ pub(super) use inline::Sink;
 mod threaded {
 	use std::thread::JoinHandle;
 
-	use bytes::Bytes;
+	use moq_net::Timestamp;
 	use tokio::sync::{mpsc, oneshot};
 
-	use super::super::encoder::{self, Encoder};
+	use super::super::encoder::{self, Encoder, Packet};
 	use crate::Error;
 	use crate::frame::Frame;
 
@@ -40,8 +40,9 @@ mod threaded {
 		/// frame's packets (or an error) in order.
 		Encode {
 			frame: Frame,
+			timestamp: Timestamp,
 			keyframe: bool,
-			resp: oneshot::Sender<Result<Vec<Bytes>, Error>>,
+			resp: oneshot::Sender<Result<Vec<Packet>, Error>>,
 		},
 		/// Retune to a new bitrate, reporting whether the backend took it so the
 		/// caller can stop adapting against an encoder that can't. The round trip
@@ -88,8 +89,13 @@ mod threaded {
 				// MFT handles are created, used, and dropped only on this thread.
 				while let Some(req) = req_rx.blocking_recv() {
 					match req {
-						Request::Encode { frame, keyframe, resp } => {
-							let _ = resp.send(encoder.encode_raw(&frame, keyframe));
+						Request::Encode {
+							frame,
+							timestamp,
+							keyframe,
+							resp,
+						} => {
+							let _ = resp.send(encoder.encode_raw(&frame, timestamp, keyframe));
 						}
 						Request::SetBitrate { bitrate, resp } => {
 							let _ = resp.send(encoder.set_bitrate(bitrate));
@@ -120,8 +126,19 @@ mod threaded {
 
 		/// Encode one frame, awaiting its packets. The frame is moved to the
 		/// encode thread; the result returns over a oneshot.
-		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.request(|resp| Request::Encode { frame, keyframe, resp }).await
+		pub(in crate::encode) async fn encode(
+			&mut self,
+			frame: Frame,
+			timestamp: Timestamp,
+			keyframe: bool,
+		) -> Result<Vec<Packet>, Error> {
+			self.request(|resp| Request::Encode {
+				frame,
+				timestamp,
+				keyframe,
+				resp,
+			})
+			.await
 		}
 
 		/// Retune the encoder, awaiting the backend's verdict.
@@ -165,9 +182,9 @@ mod threaded {
 
 #[cfg(target_os = "macos")]
 mod inline {
-	use bytes::Bytes;
+	use moq_net::Timestamp;
 
-	use super::super::encoder::{self, Encoder};
+	use super::super::encoder::{self, Encoder, Packet};
 	use crate::Error;
 	use crate::frame::Frame;
 
@@ -184,8 +201,13 @@ mod inline {
 			self.0.name()
 		}
 
-		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.0.encode_raw(&frame, keyframe)
+		pub(in crate::encode) async fn encode(
+			&mut self,
+			frame: Frame,
+			timestamp: Timestamp,
+			keyframe: bool,
+		) -> Result<Vec<Packet>, Error> {
+			self.0.encode_raw(&frame, timestamp, keyframe)
 		}
 
 		/// Retune the encoder. Async only to match the threaded `Sink`; there's

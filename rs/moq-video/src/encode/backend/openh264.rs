@@ -4,12 +4,13 @@
 //! in-band SPS/PPS, ready for `moq_mux::codec::h264::Import` in avc3 mode.
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use openh264::OpenH264API;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType};
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Packet};
 use super::Backend;
 use crate::Error;
 use crate::frame::Frame;
@@ -97,7 +98,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -131,11 +132,11 @@ impl Backend for Openh264 {
 		Ok(if bytes.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(bytes)]
+			vec![Packet::new(Bytes::from(bytes), timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
 		// Low-delay: nothing is buffered, so there's nothing to flush.
 		Ok(Vec::new())
 	}
@@ -184,7 +185,7 @@ mod tests {
 	#[test]
 	fn set_bitrate_reaches_the_encoder() {
 		let mut enc = Openh264::new(&config()).unwrap();
-		enc.encode(&gray(), true).unwrap();
+		enc.encode(&gray(), Timestamp::ZERO, true).unwrap();
 
 		let lower = config().resolved_bitrate() / 2;
 		enc.set_bitrate(lower).unwrap();
@@ -198,7 +199,7 @@ mod tests {
 	#[test]
 	fn set_bitrate_above_the_opening_rate_is_rejected() {
 		let mut enc = Openh264::new(&config()).unwrap();
-		enc.encode(&gray(), true).unwrap();
+		enc.encode(&gray(), Timestamp::ZERO, true).unwrap();
 
 		let higher = config().resolved_bitrate() * 4;
 		assert!(enc.set_bitrate(higher).is_err());
@@ -210,7 +211,7 @@ mod tests {
 	#[test]
 	fn set_bitrate_at_the_opening_rate_is_accepted() {
 		let mut enc = Openh264::new(&config()).unwrap();
-		enc.encode(&gray(), true).unwrap();
+		enc.encode(&gray(), Timestamp::ZERO, true).unwrap();
 		let opened = config().resolved_bitrate();
 
 		enc.set_bitrate(opened / 2).unwrap();
@@ -230,11 +231,11 @@ mod tests {
 
 		// Deferred: the encoder doesn't exist yet.
 		enc.set_bitrate(opened / 2).unwrap();
-		enc.encode(&gray(), true).unwrap();
+		enc.encode(&gray(), Timestamp::ZERO, true).unwrap();
 
 		// Live: this is the rate the caller last asked for.
 		enc.set_bitrate(opened / 4).unwrap();
-		enc.encode(&gray(), false).unwrap();
+		enc.encode(&gray(), Timestamp::ZERO, false).unwrap();
 
 		assert_eq!(enc.read_bitrate(), (opened / 4) as i64, "the deferred rate resurrected");
 	}

@@ -1501,13 +1501,16 @@ fn video_raw_decode() {
 	let gray = vec![0x80u8; 320 * 240 * 4];
 	let mut frames: Vec<bytes::Bytes> = Vec::new();
 	for i in 0..5 {
+		let timestamp = moq_net::Timestamp::from_micros(i * 33_333).unwrap();
 		frames.extend(
 			encoder
-				.encode_rgba(&gray, moq_video::Size::new(320, 240), i == 0)
-				.unwrap(),
+				.encode_rgba(&gray, moq_video::Size::new(320, 240), timestamp, i == 0)
+				.unwrap()
+				.into_iter()
+				.map(|packet| packet.payload),
 		);
 	}
-	frames.extend(encoder.finish().unwrap());
+	frames.extend(encoder.finish().unwrap().into_iter().map(|packet| packet.payload));
 	assert!(!frames.is_empty(), "encoder produced no frames");
 
 	let origin = id(moq_origin_create());

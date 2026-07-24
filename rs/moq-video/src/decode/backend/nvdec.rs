@@ -515,8 +515,11 @@ mod tests {
 		let mut out = Vec::new();
 		for i in 0..10u64 {
 			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-				for decoded in decoder.decode(packet, timestamp, i == 0).unwrap() {
+			for packet in encoder
+				.encode_rgba(&rgba, crate::Size::new(w, h), timestamp, i == 0)
+				.unwrap()
+			{
+				for decoded in decoder.decode(packet.payload, packet.timestamp, i == 0).unwrap() {
 					let i420 = decoded.frame.to_i420().unwrap().into_owned();
 					out.push((decoded.timestamp.as_micros() as u64, i420));
 				}
@@ -652,8 +655,11 @@ mod tests {
 			let mut frames = Vec::new();
 			for i in 0..10u64 {
 				let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-				for packet in source.encode_rgba(&rgba, crate::Size::new(w, h), i == 0).unwrap() {
-					frames.extend(decoder.decode(packet, timestamp, i == 0).unwrap());
+				for packet in source
+					.encode_rgba(&rgba, crate::Size::new(w, h), timestamp, i == 0)
+					.unwrap()
+				{
+					frames.extend(decoder.decode(packet.payload, packet.timestamp, i == 0).unwrap());
 				}
 			}
 			frames
@@ -666,7 +672,7 @@ mod tests {
 				matches!(out.frame, Frame::Cuda(_)),
 				"NVDEC produced a non-CUDA frame; the zero-copy path is not exercised"
 			);
-			packets.extend(nvenc.encode_raw(&out.frame, i == 0).unwrap());
+			packets.extend(nvenc.encode_raw(&out.frame, out.timestamp, i == 0).unwrap());
 		}
 		packets.extend(nvenc.finish().unwrap());
 		assert!(!packets.is_empty(), "NVENC produced no packets from CUDA frames");
@@ -692,10 +698,7 @@ mod tests {
 		.unwrap();
 		let mut last = None;
 		for (i, packet) in packets.into_iter().enumerate() {
-			for out in check
-				.decode(packet, Timestamp::from_micros(i as u64).unwrap(), i == 0)
-				.unwrap()
-			{
+			for out in check.decode(packet.payload, packet.timestamp, i == 0).unwrap() {
 				last = Some(out.frame.to_i420().unwrap().into_owned());
 			}
 		}

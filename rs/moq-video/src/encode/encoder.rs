@@ -6,10 +6,30 @@
 //! H.264 (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 
 use super::backend::{self, Backend};
 use crate::frame::{Frame, I420};
 use crate::{Error, Size};
+
+/// One encoded video access unit and the presentation timestamp of its input frame.
+///
+/// Construct packets for [`Producer`](super::Producer) with [`Packet::new`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Packet {
+	/// The encoded access unit in the codec's framing.
+	pub payload: Bytes,
+	/// The presentation timestamp carried by the frame that produced this access unit.
+	pub timestamp: Timestamp,
+}
+
+impl Packet {
+	/// Pair an encoded access unit with its presentation timestamp.
+	pub fn new(payload: Bytes, timestamp: Timestamp) -> Self {
+		Self { payload, timestamp }
+	}
+}
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -181,24 +201,33 @@ impl Encoder {
 	}
 
 	/// Encode one tightly-packed RGBA frame of `size`, returning zero or more
-	/// encoded packets in the codec's framing. Set `keyframe` to force an IDR
-	/// (e.g. on resume so a re-subscribing viewer can start decoding at once).
+	/// encoded packets in the codec's framing. Every packet carries `timestamp`,
+	/// even when a backend emits it from a later encode or [`finish`](Self::finish).
+	/// Set `keyframe` to force an IDR (e.g. on resume so a re-subscribing viewer
+	/// can start decoding at once).
 	///
 	/// `size` must equal the encoder's [`size`](Self::size), and `rgba` must hold
 	/// exactly `width * height * 4` bytes with no row padding.
-	pub fn encode_rgba(&mut self, rgba: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	pub fn encode_rgba(
+		&mut self,
+		rgba: &[u8],
+		size: Size,
+		timestamp: Timestamp,
+		keyframe: bool,
+	) -> Result<Vec<Packet>, Error> {
 		// The encoder resolution is validated even and non-zero in `new`, so a
 		// frame matching it is even too and the conversion below can't fail on odd
 		// dimensions.
 		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
 
 		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
-		self.encode_raw(&frame, keyframe)
+		self.encode_raw(&frame, timestamp, keyframe)
 	}
 
 	/// Encode one tightly-packed I420 frame of `size` (Y then U then V, no row
 	/// padding, BT.601 limited range), returning zero or more encoded packets in
-	/// the codec's framing. Set `keyframe` to force an IDR.
+	/// the codec's framing. Every packet carries `timestamp`. Set `keyframe` to
+	/// force an IDR.
 	///
 	/// `size` must equal the encoder's [`size`](Self::size), and `i420` must hold
 	/// exactly `width * height * 3 / 2` bytes.
@@ -207,7 +236,13 @@ impl Encoder {
 	/// it. A transcoder should prefer [`encode`](Self::encode): it takes a decoded
 	/// frame directly and keeps a GPU one on the GPU, so it neither copies nor
 	/// round-trips through system memory.
-	pub fn encode_i420(&mut self, i420: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	pub fn encode_i420(
+		&mut self,
+		i420: &[u8],
+		size: Size,
+		timestamp: Timestamp,
+		keyframe: bool,
+	) -> Result<Vec<Packet>, Error> {
 		self.check_frame(size, i420.len(), I420::len(size.width, size.height), "I420")?;
 
 		let frame = Frame::I420(I420 {
@@ -215,7 +250,7 @@ impl Encoder {
 			height: size.height,
 			data: i420.to_vec(),
 		});
-		self.encode_raw(&frame, keyframe)
+		self.encode_raw(&frame, timestamp, keyframe)
 	}
 
 	/// Reject a frame the encoder can't encode: the wrong shape, or a buffer that
@@ -245,14 +280,19 @@ impl Encoder {
 	/// directly (NVDEC -> NVENC stays on the GPU); everything else falls back to
 	/// a CPU I420 upload. The frame must already be at the encoder's resolution;
 	/// decode with [`decode::Config::resize`](crate::decode::Config) (or scale
-	/// yourself) first.
-	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		self.encode_raw(&frame.inner, keyframe)
+	/// yourself) first. Each output packet preserves [`Frame::timestamp`](crate::decode::Frame::timestamp).
+	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Packet>, Error> {
+		self.encode_raw(&frame.inner, frame.timestamp, keyframe)
 	}
 
 	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
 	/// already be at the encoder's resolution.
-	pub(crate) fn encode_raw(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	pub(crate) fn encode_raw(
+		&mut self,
+		frame: &Frame,
+		timestamp: Timestamp,
+		keyframe: bool,
+	) -> Result<Vec<Packet>, Error> {
 		let size = Size::new(frame.width(), frame.height());
 		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -260,14 +300,14 @@ impl Encoder {
 				self.size
 			)));
 		}
-		self.backend.encode(frame, keyframe)
+		self.backend.encode(frame, timestamp, keyframe)
 	}
 
-	/// Flush the encoder, returning any buffered packets.
+	/// Flush the encoder, returning any buffered packets with their input timestamps.
 	///
 	/// Consumes the encoder: nothing can be encoded after a flush, so this is the
 	/// last call rather than one leaving a drained encoder in your hands.
-	pub fn finish(mut self) -> Result<Vec<Bytes>, Error> {
+	pub fn finish(mut self) -> Result<Vec<Packet>, Error> {
 		self.backend.finish()
 	}
 }
@@ -279,6 +319,62 @@ mod tests {
 	/// A mid-gray RGBA frame: encodable without a camera.
 	fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 		vec![0x80u8; width as usize * height as usize * 4]
+	}
+
+	/// A one-frame-delay backend that emits frame N while frame N+1 is submitted,
+	/// then drains the final frame from `finish`.
+	struct Delayed {
+		pending: Option<Timestamp>,
+	}
+
+	impl Backend for Delayed {
+		fn encode(&mut self, _frame: &Frame, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Packet>, Error> {
+			let Some(timestamp) = self.pending.replace(timestamp) else {
+				return Ok(Vec::new());
+			};
+			Ok(vec![Packet::new(Bytes::from_static(b"encoded"), timestamp)])
+		}
+
+		fn finish(&mut self) -> Result<Vec<Packet>, Error> {
+			Ok(self
+				.pending
+				.take()
+				.map(|timestamp| vec![Packet::new(Bytes::from_static(b"tail"), timestamp)])
+				.unwrap_or_default())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"delayed"
+		}
+	}
+
+	#[test]
+	fn delayed_packets_keep_their_input_timestamps_through_finish() {
+		let mut encoder = Encoder {
+			backend: Box::new(Delayed { pending: None }),
+			codec: Codec::H264,
+			size: Size::new(2, 2),
+			bitrate: 1,
+		};
+		let frame = gray_rgba(2, 2);
+		let first = Timestamp::from_micros(100).unwrap();
+		let second = Timestamp::from_micros(200).unwrap();
+
+		assert!(
+			encoder
+				.encode_rgba(&frame, Size::new(2, 2), first, true)
+				.unwrap()
+				.is_empty()
+		);
+		let packets = encoder.encode_rgba(&frame, Size::new(2, 2), second, false).unwrap();
+		assert_eq!(packets[0].timestamp, first);
+
+		let tail = encoder.finish().unwrap();
+		assert_eq!(tail[0].timestamp, second);
 	}
 
 	#[test]
@@ -293,7 +389,11 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			packets.extend(
+				encoder
+					.encode_rgba(&frame, Size::new(320, 240), Timestamp::ZERO, i == 0)
+					.unwrap(),
+			);
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -301,7 +401,7 @@ mod tests {
 
 		// The first packet must start with an Annex-B start code so the avc3
 		// importer can find the inline SPS/PPS.
-		let first = &packets[0];
+		let first = &packets[0].payload;
 		let has_start_code = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
 		assert!(
 			has_start_code,
@@ -319,10 +419,14 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		let rgba = gray_rgba(320, 240);
-		let mut packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
+		let timestamp = Timestamp::from_micros(123_456).unwrap();
+		let mut packets = encoder
+			.encode_rgba(&rgba, Size::new(320, 240), timestamp, true)
+			.unwrap();
+		assert!(packets.iter().all(|packet| packet.timestamp == timestamp));
 		packets.extend(encoder.finish().unwrap());
 		assert!(!packets.is_empty());
-		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+		assert!(packets[0].payload.starts_with(&[0, 0, 0, 1]) || packets[0].payload.starts_with(&[0, 0, 1]));
 	}
 
 	#[test]
@@ -335,10 +439,12 @@ mod tests {
 
 		// A mid-gray I420 frame: flat 0x80 across all three planes.
 		let data = vec![0x80u8; I420::len(320, 240)];
-		let mut packets = encoder.encode_i420(&data, Size::new(320, 240), true).unwrap();
+		let mut packets = encoder
+			.encode_i420(&data, Size::new(320, 240), Timestamp::ZERO, true)
+			.unwrap();
 		packets.extend(encoder.finish().unwrap());
 		assert!(!packets.is_empty());
-		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+		assert!(packets[0].payload.starts_with(&[0, 0, 0, 1]) || packets[0].payload.starts_with(&[0, 0, 1]));
 	}
 
 	/// A buffer that doesn't hold one whole frame of the declared size must error
@@ -349,7 +455,7 @@ mod tests {
 			return;
 		};
 		assert!(matches!(
-			encoder.encode_i420(&[0u8; 16], Size::new(320, 240), false),
+			encoder.encode_i420(&[0u8; 16], Size::new(320, 240), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -361,7 +467,7 @@ mod tests {
 		};
 		// Far smaller than 320*240*4: must error, not panic on conversion.
 		assert!(matches!(
-			encoder.encode_rgba(&[0u8; 16], Size::new(320, 240), false),
+			encoder.encode_rgba(&[0u8; 16], Size::new(320, 240), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -375,7 +481,7 @@ mod tests {
 		};
 		let rgba = gray_rgba(640, 480);
 		assert!(matches!(
-			encoder.encode_rgba(&rgba, Size::new(640, 480), false),
+			encoder.encode_rgba(&rgba, Size::new(640, 480), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -389,7 +495,7 @@ mod tests {
 		};
 		let data = vec![0x80u8; I420::len(640, 480)];
 		assert!(matches!(
-			encoder.encode_i420(&data, Size::new(640, 480), false),
+			encoder.encode_i420(&data, Size::new(640, 480), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -406,14 +512,14 @@ mod tests {
 		let rgba = gray_rgba(240, 320);
 		assert_eq!(rgba.len(), gray_rgba(320, 240).len(), "the byte counts must collide");
 		assert!(matches!(
-			encoder.encode_rgba(&rgba, Size::new(240, 320), false),
+			encoder.encode_rgba(&rgba, Size::new(240, 320), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 
 		let i420 = vec![0x80u8; I420::len(240, 320)];
 		assert_eq!(i420.len(), I420::len(320, 240), "the byte counts must collide");
 		assert!(matches!(
-			encoder.encode_i420(&i420, Size::new(240, 320), false),
+			encoder.encode_i420(&i420, Size::new(240, 320), Timestamp::ZERO, false),
 			Err(Error::Codec(_))
 		));
 	}
@@ -451,12 +557,16 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			packets.extend(
+				encoder
+					.encode_rgba(&frame, Size::new(320, 240), Timestamp::ZERO, i == 0)
+					.unwrap(),
+			);
 		}
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty(), "encoder produced no packets");
-		let first = &packets[0];
+		let first = &packets[0].payload;
 		assert!(
 			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
 			"first packet is not Annex-B"
@@ -488,12 +598,16 @@ mod tests {
 		let frame = gray_rgba(320, 240);
 		let mut packets = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			packets.extend(
+				encoder
+					.encode_rgba(&frame, Size::new(320, 240), Timestamp::ZERO, i == 0)
+					.unwrap(),
+			);
 		}
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty(), "encoder produced no packets");
-		let first = &packets[0];
+		let first = &packets[0].payload;
 		assert!(
 			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
 			"first packet is not Annex-B"
@@ -541,12 +655,12 @@ mod tests {
 		let mut packets = Vec::new();
 		for i in 0..10 {
 			let frame = Frame::Surface(nv12_surface(320, 240));
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			packets.extend(encoder.encode_raw(&frame, Timestamp::ZERO, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty());
-		let types = nal_types(&packets[0]);
+		let types = nal_types(&packets[0].payload);
 		assert!(
 			types.contains(&7) && types.contains(&8) && types.contains(&5),
 			"no IDR: {types:?}"
@@ -565,11 +679,11 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		let frame = Frame::Surface(nv12_surface(320, 240));
-		let mut packets = encoder.encode_raw(&frame, true).unwrap();
+		let mut packets = encoder.encode_raw(&frame, Timestamp::ZERO, true).unwrap();
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty());
-		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+		assert!(packets[0].payload.starts_with(&[0, 0, 0, 1]) || packets[0].payload.starts_with(&[0, 0, 1]));
 	}
 
 	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
@@ -645,12 +759,16 @@ mod tests {
 		let frame = gray_rgba(640, 480);
 		let mut packets = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(640, 480), i == 0).unwrap());
+			packets.extend(
+				encoder
+					.encode_rgba(&frame, Size::new(640, 480), Timestamp::ZERO, i == 0)
+					.unwrap(),
+			);
 		}
 		packets.extend(encoder.finish().unwrap());
 
 		assert!(!packets.is_empty(), "encoder produced no packets");
-		let types = nal_types(&packets[0]);
+		let types = nal_types(&packets[0].payload);
 		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
 		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
 		assert!(types.contains(&5), "first packet is not an IDR: {types:?}");
@@ -681,7 +799,7 @@ mod tests {
 			if matches!(frame, Frame::Texture(_)) {
 				textures += 1;
 			}
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			packets.extend(encoder.encode_raw(&frame, Timestamp::ZERO, i == 0).unwrap());
 		}
 		packets.extend(encoder.finish().unwrap());
 
@@ -689,7 +807,7 @@ mod tests {
 		// against silently testing only the CPU fallback.
 		assert!(textures > 0, "capture never produced a GPU texture");
 		assert!(!packets.is_empty(), "encoder produced no packets");
-		let types = nal_types(&packets[0]);
+		let types = nal_types(&packets[0].payload);
 		assert!(
 			types.contains(&7) && types.contains(&8) && types.contains(&5),
 			"no IDR: {types:?}"
@@ -712,16 +830,20 @@ mod tests {
 		assert_eq!(opened, config.resolved_bitrate());
 
 		// Encode first: this is the live-retune path, once the encoder exists.
-		encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
+		encoder
+			.encode_rgba(&rgba, Size::new(320, 240), Timestamp::ZERO, true)
+			.unwrap();
 
 		let halved = opened / 2;
 		encoder.set_bitrate(halved).unwrap();
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The retuned encoder must still emit a decodable keyframe, not wedge.
-		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
+		let packets = encoder
+			.encode_rgba(&rgba, Size::new(320, 240), Timestamp::ZERO, true)
+			.unwrap();
 		assert!(!packets.is_empty(), "encoder produced nothing after a retune");
-		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
+		assert!(packets[0].payload.starts_with(&[0, 0, 0, 1]) || packets[0].payload.starts_with(&[0, 0, 1]));
 	}
 
 	/// Regression: openh264 creates its encoder lazily on the first frame and
@@ -741,12 +863,18 @@ mod tests {
 
 		// The deferred rate is applied during this encode, which must still work.
 		let rgba = gray_rgba(320, 240);
-		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
+		let packets = encoder
+			.encode_rgba(&rgba, Size::new(320, 240), Timestamp::ZERO, true)
+			.unwrap();
 		assert!(!packets.is_empty());
 
 		// And the encoder is live now, so a further retune takes the direct path.
 		encoder.set_bitrate(halved / 2).unwrap();
-		assert!(encoder.encode_rgba(&rgba, Size::new(320, 240), false).is_ok());
+		assert!(
+			encoder
+				.encode_rgba(&rgba, Size::new(320, 240), Timestamp::ZERO, false)
+				.is_ok()
+		);
 	}
 
 	/// Setting the current rate must not reach the backend at all: the control

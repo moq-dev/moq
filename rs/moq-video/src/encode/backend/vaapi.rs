@@ -21,9 +21,10 @@
 //! playback.
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
-use super::super::encoder::Config;
+use super::super::encoder::{Config, Packet};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, I420};
@@ -56,7 +57,7 @@ impl Vaapi {
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
 		let i420 = frame.to_i420()?;
 		let nv12 = i420_to_nv12(&i420);
 		let annexb = self
@@ -67,11 +68,11 @@ impl Backend for Vaapi {
 		Ok(if annexb.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(annexb)]
+			vec![Packet::new(Bytes::from(annexb), timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
 		// The encoder submits and reads back synchronously per frame, so nothing
 		// is buffered at shutdown.
 		Ok(Vec::new())

@@ -193,14 +193,14 @@ mod tests {
 		for sequence in 0..groups {
 			let mut group = track.create_group(sequence.into()).unwrap();
 			for index in 0..frames {
-				let timestamp = (sequence * frames + index) * 33_333;
-				for payload in encoder
-					.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+				let timestamp = moq_net::Timestamp::from_micros((sequence * frames + index) * 33_333).unwrap();
+				for packet in encoder
+					.encode_rgba(&gray, moq_video::Size::new(320, 240), timestamp, index == 0)
 					.unwrap()
 				{
 					let frame = hang::container::Frame {
-						timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
-						payload,
+						timestamp: packet.timestamp,
+						payload: packet.payload,
 					};
 					frame.write_to(&mut group).unwrap();
 				}
@@ -261,14 +261,14 @@ mod tests {
 				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
-					let timestamp = (sequence * frames + index) * 33_333;
-					for payload in encoder
-						.encode_rgba(&gray, moq_video::Size::new(320, 240), index == 0)
+					let timestamp = moq_net::Timestamp::from_micros((sequence * frames + index) * 33_333).unwrap();
+					for packet in encoder
+						.encode_rgba(&gray, moq_video::Size::new(320, 240), timestamp, index == 0)
 						.unwrap()
 					{
 						let frame = hang::container::Frame {
-							timestamp: moq_net::Timestamp::from_micros(timestamp).unwrap(),
-							payload,
+							timestamp: packet.timestamp,
+							payload: packet.payload,
 						};
 						frame.write_to(&mut group).unwrap();
 					}

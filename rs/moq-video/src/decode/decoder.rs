@@ -234,10 +234,10 @@ mod tests {
 			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
 			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
 			for packet in encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
+				.encode_rgba(&frame, crate::Size::new(320, 240), timestamp, keyframe)
 				.unwrap()
 			{
-				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
+				decoded.extend(decoder.decode(packet.payload, packet.timestamp, keyframe).unwrap());
 			}
 		}
 

@@ -13,7 +13,7 @@ use moq_net::Timestamp;
 use crate::Error;
 use crate::capture;
 
-use super::encoder::{self, Codec};
+use super::encoder::{self, Codec, Packet};
 use super::rate::{Control, Policy};
 use super::sink::Sink;
 
@@ -82,19 +82,20 @@ impl Producer {
 		}
 	}
 
-	/// Publish already-encoded packets at the given timestamp. Each packet is one
-	/// whole access unit in the producer's codec framing.
-	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
+	/// Publish already-encoded packets. Each packet is one whole access unit in
+	/// the producer's codec framing with its own presentation timestamp.
+	pub fn publish(&mut self, packets: Vec<Packet>) -> Result<(), Error> {
 		for packet in packets {
+			let Packet { payload, timestamp, .. } = packet;
 			// The encoder emits one whole access unit per packet, so flush to emit it.
 			match &mut self.codecs {
 				Codecs::H264 { split, import } => {
-					let mut frames = split.decode(&packet, Some(timestamp))?;
+					let mut frames = split.decode(&payload, Some(timestamp))?;
 					frames.extend(split.flush(Some(timestamp))?);
 					import.decode(frames)?;
 				}
 				Codecs::H265 { split, import } => {
-					let mut frames = split.decode(&packet, Some(timestamp))?;
+					let mut frames = split.decode(&payload, Some(timestamp))?;
 					frames.extend(split.flush(Some(timestamp))?);
 					import.decode(frames)?;
 				}
@@ -384,12 +385,12 @@ async fn capture_loop(
 			let Some(frame) = frame else { break }; // device stopped producing frames
 
 			let ts = Timestamp::from_micros(clock.micros())?;
-			let packets = encoder.encode(frame, force_keyframe).await?;
+			let packets = encoder.encode(frame, ts, force_keyframe).await?;
 			force_keyframe = false;
 			// Once the encoder emits a frame the importer has parsed the SPS and
 			// the catalog rendition exists, so demand gating can take over.
 			catalog_ready |= !packets.is_empty();
-			producer.publish(packets, ts)?;
+			producer.publish(packets)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
@@ -427,14 +428,14 @@ mod tests {
 
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for i in 0..10u64 {
-			let packets = encoder.encode_rgba(&rgba, crate::Size::new(320, 240), i == 0).unwrap();
 			let ts = Timestamp::from_micros(i * 33_333).unwrap();
-			producer.publish(packets, ts).unwrap();
+			let packets = encoder
+				.encode_rgba(&rgba, crate::Size::new(320, 240), ts, i == 0)
+				.unwrap();
+			producer.publish(packets).unwrap();
 		}
 		let tail = encoder.finish().unwrap();
-		producer
-			.publish(tail, Timestamp::from_micros(10 * 33_333).unwrap())
-			.unwrap();
+		producer.publish(tail).unwrap();
 
 		let snapshot = catalog.snapshot();
 		snapshot

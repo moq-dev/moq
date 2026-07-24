@@ -12,9 +12,9 @@
 //! considered, hardware (platform-gated) before the always-available openh264
 //! software fallback.
 
-use bytes::Bytes;
+use moq_net::Timestamp;
 
-use super::encoder::{Codec, Config, Kind};
+use super::encoder::{Codec, Config, Kind, Packet};
 use crate::Error;
 use crate::frame::Frame;
 
@@ -35,12 +35,12 @@ mod vaapi;
 /// An opened video encoder. Feed it frames at the configured resolution; get
 /// back zero or more packets in the codec's wire framing.
 pub(crate) trait Backend: Send {
-	/// Encode one frame. Set `keyframe` to force an IDR (e.g. on resume so a
-	/// re-subscribing viewer can start decoding at once).
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error>;
+	/// Encode one frame. Every emitted packet keeps `timestamp`, including when
+	/// output was queued by an earlier call. Set `keyframe` to force an IDR.
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error>;
 
 	/// Flush the encoder, returning any buffered packets.
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error>;
+	fn finish(&mut self) -> Result<Vec<Packet>, Error>;
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. Called as the congestion controller's estimate

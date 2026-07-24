@@ -105,9 +105,9 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&msg.rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
+		match enc.encode_rgba(&msg.rgba, moq_video::Size::new(WIDTH, HEIGHT), msg.ts, keyframe) {
 			Ok(packets) => {
-				if let Err(e) = producer.publish(packets, msg.ts) {
+				if let Err(e) = producer.publish(packets) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");

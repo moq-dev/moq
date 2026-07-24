@@ -13,10 +13,12 @@
 //! thread (see `encode::sink`), so its COM apartment stays balanced and its
 //! blocking waits never park a tokio worker.
 
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::ptr;
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use windows::Win32::Foundation::{VARIANT_BOOL, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
@@ -36,7 +38,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Packet};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, interleave_uv};
@@ -45,8 +47,7 @@ use crate::mf::{ComGuard, mf_err, pack_2x32};
 pub(crate) const NAME: &str = "mediafoundation";
 
 /// Stream tick for sample timestamps, in 100ns units (the Media Foundation time
-/// base). Timestamps only need to increase; the moq timestamp is applied
-/// downstream, so a monotonic index over the framerate is enough.
+/// base).
 const HNS_PER_SEC: i64 = 10_000_000;
 
 pub(crate) struct MediaFoundation {
@@ -70,6 +71,8 @@ pub(crate) struct MediaFoundation {
 	/// True once the MFT has asked for input and we haven't fed it since.
 	needs_input: bool,
 	sample_index: i64,
+	/// Original timestamps keyed by the sample time that rides through the MFT.
+	timestamps: HashMap<i64, Timestamp>,
 	/// Kept alive for the MFT's lifetime once a texture frame binds a device.
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
@@ -124,6 +127,7 @@ impl MediaFoundation {
 			output_size: 0,
 			needs_input: false,
 			sample_index: 0,
+			timestamps: HashMap::new(),
 			_manager: None,
 			_com: com,
 		}))
@@ -255,7 +259,7 @@ impl MediaFoundation {
 
 	/// Wrap a captured frame as an input [`IMFSample`]: a zero-copy DXGI surface
 	/// buffer for a texture, or a freshly uploaded NV12 memory buffer for I420.
-	fn build_sample(&self, frame: &Frame) -> Result<IMFSample, Error> {
+	fn build_sample(&self, frame: &Frame) -> Result<(IMFSample, i64), Error> {
 		let buffer = match frame {
 			Frame::Texture(texture) => unsafe {
 				let buffer =
@@ -281,17 +285,18 @@ impl MediaFoundation {
 		};
 
 		let sample = unsafe { MFCreateSample().map_err(|e| mf_err("MFCreateSample", e))? };
+		let tick = (HNS_PER_SEC / self.framerate.max(1) as i64).max(1);
+		let sample_time = self.sample_index * tick;
 		unsafe {
 			sample.AddBuffer(&buffer).map_err(|e| mf_err("AddBuffer", e))?;
-			let tick = HNS_PER_SEC / self.framerate.max(1) as i64;
 			sample
-				.SetSampleTime(self.sample_index * tick)
+				.SetSampleTime(sample_time)
 				.map_err(|e| mf_err("SetSampleTime", e))?;
 			sample
 				.SetSampleDuration(tick)
 				.map_err(|e| mf_err("SetSampleDuration", e))?;
 		}
-		Ok(sample)
+		Ok((sample, sample_time))
 	}
 
 	/// Copy a CPU I420 frame into a system-memory NV12 buffer (the fallback when
@@ -328,7 +333,7 @@ impl MediaFoundation {
 	/// Block on events until the MFT is ready for input, collecting any output
 	/// that arrives meanwhile. Runs on the dedicated encode thread (see
 	/// `encode::sink`), so this blocking wait never parks a tokio worker.
-	fn wait_for_input(&mut self, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn wait_for_input(&mut self, out: &mut Vec<Packet>) -> Result<(), Error> {
 		while !self.needs_input {
 			let event = unsafe {
 				self.events
@@ -341,7 +346,7 @@ impl MediaFoundation {
 	}
 
 	/// Drain events already queued without blocking (called after feeding input).
-	fn drain_ready(&mut self, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn drain_ready(&mut self, out: &mut Vec<Packet>) -> Result<(), Error> {
 		loop {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
 				Ok(event) => self.handle_event(&event, out)?,
@@ -351,7 +356,7 @@ impl MediaFoundation {
 		}
 	}
 
-	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Packet>) -> Result<(), Error> {
 		// Surface an async failure (e.g. an MEError event) instead of looping in
 		// `wait_for_input` forever for an input request that will never come.
 		unsafe { event.GetStatus() }
@@ -376,7 +381,7 @@ impl MediaFoundation {
 
 	/// Pull one encoded access unit. Returns `None` if the MFT had nothing ready
 	/// or asked us to renegotiate the output type.
-	fn process_output(&mut self) -> Result<Option<Bytes>, Error> {
+	fn process_output(&mut self) -> Result<Option<Packet>, Error> {
 		let provided = if self.provides_samples {
 			None
 		} else {
@@ -414,12 +419,18 @@ impl MediaFoundation {
 		}
 
 		let Some(sample) = sample else { return Ok(None) };
-		Ok(Some(sample_to_bytes(&sample)?))
+		let sample_time = unsafe { sample.GetSampleTime().map_err(|e| mf_err("GetSampleTime", e))? };
+		let timestamp = self.timestamps.remove(&sample_time).ok_or_else(|| {
+			Error::Codec(anyhow::anyhow!(
+				"Media Foundation returned unknown sample time {sample_time}"
+			))
+		})?;
+		Ok(Some(Packet::new(sample_to_bytes(&sample)?, timestamp)))
 	}
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
 		if !self.started {
 			self.start(frame)?;
 		}
@@ -431,12 +442,13 @@ impl Backend for MediaFoundation {
 			self.set_codec(&CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1))?;
 		}
 
-		let sample = self.build_sample(frame)?;
+		let (sample, sample_time) = self.build_sample(frame)?;
 		unsafe {
 			self.transform
 				.ProcessInput(0, &sample, 0)
 				.map_err(|e| mf_err("ProcessInput", e))?;
 		}
+		self.timestamps.insert(sample_time, timestamp);
 		self.needs_input = false;
 		self.sample_index += 1;
 
@@ -444,7 +456,7 @@ impl Backend for MediaFoundation {
 		Ok(out)
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
 		if !self.started {
 			return Ok(Vec::new());
 		}

@@ -18,6 +18,7 @@ use std::ptr::{self, NonNull};
 use std::slice;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use moq_net::Timestamp;
 use objc2_core_foundation::{
 	CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse, kCFBooleanTrue,
 };
@@ -38,7 +39,7 @@ use objc2_video_toolbox::{
 	kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
-use super::super::encoder::{Codec, Config};
+use super::super::encoder::{Codec, Config, Packet};
 use super::Backend;
 use crate::Error;
 use crate::frame::{Frame, I420};
@@ -155,7 +156,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Packet>, Error> {
 		self.sink.packets.clear();
 		self.sink.error = None;
 
@@ -203,10 +204,13 @@ impl Backend for VideoToolbox {
 				"VideoToolbox encode callback failed: {status}"
 			)));
 		}
-		Ok(std::mem::take(&mut self.sink.packets))
+		Ok(std::mem::take(&mut self.sink.packets)
+			.into_iter()
+			.map(|payload| Packet::new(payload, timestamp))
+			.collect())
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Packet>, Error> {
 		// complete_frames runs per-encode, so nothing is buffered at shutdown.
 		Ok(Vec::new())
 	}
