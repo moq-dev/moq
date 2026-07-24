@@ -6,12 +6,16 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 
-import type { Sync } from "../sync";
+import { type Bound, latencyBounds, type Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { unlockOnGesture } from "./unlock";
+
+// How long the latency target must hold steady before a floor increase re-anchors. Coalesces a
+// slider drag (many small steps) into a single re-anchor once the user settles on a value.
+const LATENCY_REANCHOR_DEBOUNCE_MS = 150;
 
 export type DecoderInput = {
 	// Enable to download the audio track.
@@ -93,6 +97,10 @@ export class Decoder {
 	// would make the consumer's threshold NaN and skip every group.
 	#consumerLatency = new Signal<Time.Milli>(Time.Milli.zero);
 
+	// The latency floor as of the last settled change, to detect a floor *increase* (needs a deeper
+	// cushion) versus a decrease or a real-time RTT wiggle. See #runLatencyReanchor.
+	#prevFloor?: Bound;
+
 	#signals = new Effect();
 
 	constructor(source: Source, sync: Sync, props?: Inputs<DecoderInput>) {
@@ -110,6 +118,7 @@ export class Decoder {
 		this.#signals.run(this.#runWorklet.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
+		this.#signals.run(this.#runLatencyReanchor.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
 	}
 
@@ -214,6 +223,31 @@ export class Decoder {
 		const latency = effect.get(this.sync.out.buffer);
 		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
 		ring.setLatency(latencySamples);
+	}
+
+	// Re-anchor when the latency floor *increases*. A larger floor needs a deeper cushion: video
+	// rebuilds it implicitly (its per-frame sync.wait() reads the live buffer, so it just holds
+	// longer), but the audio ring keeps draining at its old depth -- resize() (via setLatency) only
+	// re-stalls an *empty* ring, so a mid-playback ring never refills to the new floor and audio runs
+	// ahead of video (the "raise latency, only video re-buffers" desync). reset() re-stalls the ring
+	// so it refills to the new floor. Watch the latency *target* (not the derived buffer) so real-time
+	// RTT jitter never triggers this, and debounce so a slider drag coalesces into one re-anchor.
+	// Decreases are left to natural catch-up.
+	#runLatencyReanchor(effect: Effect): void {
+		const floor = latencyBounds(effect.get(this.sync.in.latency)).min;
+		if (this.#prevFloor === undefined) {
+			// Startup: the initial fill already builds the cushion; just record the baseline.
+			this.#prevFloor = floor;
+			return;
+		}
+		// When the timer fires, the floor read above is still current: any change would have rerun
+		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
+		const baseline = this.#prevFloor;
+		effect.timer(() => {
+			const toMs = (b: Bound): number => (b === "real-time" ? 0 : b);
+			if (toMs(floor) > toMs(baseline)) this.reset();
+			this.#prevFloor = floor;
+		}, LATENCY_REANCHOR_DEBOUNCE_MS);
 	}
 
 	#runDecoder(effect: Effect): void {
