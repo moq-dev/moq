@@ -393,9 +393,12 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer: frames sent to decoder but not yet rendered
+				// Track decode buffer: frames sent to decoder but not yet rendered.
+				// A finished prior group followed by frames from a later group is contiguous in
+				// playback even when group sequence numbers are not +1-adjacent (some encoders
+				// number groups non-sequentially with large gaps), so bridge on `prior.final`, not `+1`.
 				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
+				if (prior && (prior.group === group || (prior.final && group > prior.group))) {
 					const start = Time.Milli.fromMicro(prior.timestamp);
 					const end = Time.Milli.fromMicro(frame.timestamp);
 					this.#addBuffered(start, end);
@@ -471,9 +474,9 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer
+				// Track decode buffer (see #runLegacy: bridge on prior.final, not +1, for non-sequential group ids)
 				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
+				if (prior && (prior.group === group || (prior.final && group > prior.group))) {
 					const start = Time.Milli.fromMicro(prior.timestamp);
 					const end = Time.Milli.fromMicro(frame.timestamp);
 					this.#addBuffered(start, end);

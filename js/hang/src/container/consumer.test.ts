@@ -594,3 +594,66 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
 	consumer.close();
 });
+
+// --- Non-sequential group ids: incremental delivery, CMAF passthrough (regression) ---
+
+test("Consumer delivers a non-sequential-gap group's frames incrementally (CMAF), not batched at group completion", async () => {
+	// Some encoders number groups non-sequentially (large, non-+1 jumps). A prior bug gated per-frame
+	// delivery on `sequence === #active` and fell back to `#active = prevSequence + 1` when the
+	// next group wasn't buffered yet. With non-sequential ids that `+1` is a phantom the real next group
+	// never matches, so its frames were held until the group *closed*, then flushed in a burst
+	// (a ~1s stall-then-dump in the player). Frames must instead surface as they arrive.
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new CmafFormat(TEST_INIT), latency: 500 as Time.Milli });
+
+	// Group A at a large sequence, completed so the cursor advances (arming the old
+	// `+1` phantom on #active).
+	const a = new Group.Producer(1_000_000);
+	a.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x01]),
+			timestamp: 0,
+			duration: 3000,
+			keyframe: true,
+			sequence: 0,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+	a.close();
+	track.writeGroup(a);
+
+	// Drain A: its frame, then its group-done marker.
+	const firstFrame = await consumer.next();
+	expect(firstFrame?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	await consumer.next();
+
+	// Park next() BEFORE the next group's frames arrive. The live streaming case.
+	const pending = consumer.next();
+
+	// Open group B at a large jump (+90_000, NOT +1) and write ONE frame WITHOUT closing it.
+	const b = new Group.Producer(1_090_000);
+	track.writeGroup(b);
+	b.writeFrame({
+		payload: encodeDataSegment({
+			data: new Uint8Array([0x02]),
+			timestamp: 90_000,
+			duration: 3000,
+			keyframe: true,
+			sequence: 1,
+		}),
+		timestamp: Time.Timestamp.now(),
+	});
+
+	// The frame must surface while B is still open. Before the fix, next() stayed parked
+	// (B.sequence !== the phantom #active, and B was never closed, so no notify fired) and this
+	// would time out.
+	const result = await Promise.race([
+		pending,
+		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+	]);
+
+	expect(result).not.toBe("timeout");
+	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x02]));
+
+	consumer.close();
+});
