@@ -212,6 +212,27 @@ impl Producer {
 		state.switch(track, start)
 	}
 
+	/// Drop every segment, releasing the underlying tracks while keeping the
+	/// logical track alive for a later [`Self::takeover`].
+	///
+	/// For a track nobody is reading: releasing the last consumer of a segment lets
+	/// the serving session tear its copy down, so an idle track stops costing an
+	/// upstream subscription and a cached [`track::Info`]. The next takeover starts
+	/// unbounded again, since with no segments there is no boundary to splice
+	/// around.
+	pub(crate) fn release(&mut self) -> Result<()> {
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
+		if state.finished || state.abort.is_some() {
+			return Err(Error::Closed);
+		}
+		if state.segments.is_empty() {
+			return Ok(());
+		}
+		state.segments.clear();
+		state.epoch += 1;
+		Ok(())
+	}
+
 	/// Mark the logical track as complete: no further switches. Subscribers see a
 	/// clean end once the final segment's track finishes.
 	pub fn finish(&mut self) -> Result<()> {
@@ -254,16 +275,17 @@ impl Producer {
 		self.state.is_used()
 	}
 
-	/// Park `waiter` for the next consumer appearing; a no-op once one exists.
-	/// Feeds [`crate::broadcast::Demand`], which recomputes on wake.
-	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_used(waiter);
+	/// Poll for a consumer appearing, parking `waiter` until one does. Ready
+	/// immediately once one exists (or the track closed). Feeds
+	/// [`crate::broadcast::Demand`], which recomputes on wake.
+	pub(crate) fn poll_used(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_used(waiter).map(|_| ())
 	}
 
-	/// Park `waiter` for the last consumer going away; a no-op once none remain.
-	/// Feeds [`crate::broadcast::Demand`].
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) {
-		let _ = self.state.poll_unused(waiter);
+	/// Poll for the last consumer going away, parking `waiter` until it does.
+	/// Ready immediately once none remain (or the track closed).
+	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_unused(waiter).map(|_| ())
 	}
 }
 

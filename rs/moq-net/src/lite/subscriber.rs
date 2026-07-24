@@ -891,6 +891,10 @@ enum Teardown {
 	/// The route or session failed: abort the track so the origin re-splices it
 	/// from another source.
 	GiveBack(Error),
+	/// The origin released this copy: nobody is reading it, so drop it (and the
+	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
+	/// may never come back.
+	Released,
 }
 
 /// One step for the [`TrackServe`] loop, produced by racing track demand, the
@@ -906,6 +910,8 @@ enum Event {
 	SubResponse(lite::SubscribeResponse),
 	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
 	SubClosed(Result<(), Error>),
+	/// Every reader of this copy went away (the origin released it).
+	Unused,
 	/// The whole session died.
 	SessionClosed,
 }
@@ -1002,7 +1008,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						}
 					}
 
-					// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
+					// (3) Nobody reads this copy anymore: the origin released it after its
+					// idle linger, so drop it instead of holding the track state (and its
+					// TRACK_INFO) for a reader that may never return. In-flight fetches
+					// keep it alive: work already accepted still gets finished.
+					if fetches.is_empty() && serving.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Event::Unused);
+					}
+
+					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
 					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
 						return Poll::Ready(match res {
 							Ok(Some(msg)) => Event::SubResponse(msg),
@@ -1011,7 +1025,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						});
 					}
 
-					// (4) The session died: hand the track back for another route.
+					// (5) The session died: hand the track back for another route.
 					if waiter.poll_future(session_closed.as_mut()).is_ready() {
 						return Poll::Ready(Event::SessionClosed);
 					}
@@ -1071,6 +1085,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
 					break Teardown::GiveBack(err);
 				}
+				Event::Unused => {
+					tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "track released (idle)");
+					break Teardown::Released;
+				}
 				Event::SessionClosed => {
 					break Teardown::GiveBack(Error::Dropped);
 				}
@@ -1092,6 +1110,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				// Mark this copy dead: subscribers stall while the origin
 				// re-splices the track from the next source.
 				let _ = serving.abort(err);
+			}
+			Teardown::Released => {
+				// A deliberate end with no reader to observe it, which also drops the
+				// cached groups. The origin re-requests the track from this session if
+				// one comes back.
+				let _ = serving.abort(Error::Cancel);
 			}
 		}
 	}

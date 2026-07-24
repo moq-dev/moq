@@ -219,10 +219,10 @@ impl BroadcastState {
 	fn register_demand(&self, waiter: &kio::Waiter, want: bool) {
 		if let Some(spliced) = &self.spliced {
 			for track in spliced.tracks.values() {
-				match want {
+				let _ = match want {
 					true => track.poll_used(waiter),
 					false => track.poll_unused(waiter),
-				}
+				};
 			}
 			return;
 		}
