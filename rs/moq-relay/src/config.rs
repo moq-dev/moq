@@ -115,6 +115,46 @@ mod tests {
 
 	use super::*;
 
+	/// Clears environment variables for the duration of a test, restoring what
+	/// they held (or their absence) on drop.
+	///
+	/// clap reads the `MOQ_*` vars via `env = ...`, so a value set in the host
+	/// environment would make these assertions pass for the wrong reason. The
+	/// restore keeps the rest of the test process seeing the environment it
+	/// started with, rather than one the suite quietly emptied.
+	struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+	impl EnvGuard {
+		/// Removes each variable, remembering what it held.
+		///
+		/// The caller must hold the matching per-group mutex: the process env is
+		/// shared, and the restore on drop is as racy as the removal here.
+		fn clear(vars: &[&'static str]) -> Self {
+			Self(
+				vars.iter()
+					.map(|&key| {
+						let prev = std::env::var_os(key);
+						// SAFETY: the caller's group mutex serializes env access.
+						unsafe { std::env::remove_var(key) };
+						(key, prev)
+					})
+					.collect(),
+			)
+		}
+	}
+
+	impl Drop for EnvGuard {
+		fn drop(&mut self) {
+			for (key, prev) in &self.0 {
+				// SAFETY: the caller's group mutex is still held; see `clear`.
+				match prev {
+					Some(value) => unsafe { std::env::set_var(key, value) },
+					None => unsafe { std::env::remove_var(key) },
+				}
+			}
+		}
+	}
+
 	/// Serializes tests that touch `MOQ_STATS_*`. Cargo runs tests in parallel
 	/// within a single binary, and `env::set_var` / `remove_var` are not
 	/// thread-safe with concurrent env reads (which is why they're `unsafe` as
@@ -132,13 +172,7 @@ mod tests {
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
 		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// clap reads MOQ_STATS_* via `env = ...`. If the host environment has
-		// one set, the test would pass for the wrong reason. Clear them for the
-		// duration of this test (lock above serializes with sibling tests).
-		// SAFETY: STATS_ENV_LOCK ensures no other test in this binary touches
-		// these env vars concurrently.
-		unsafe { std::env::remove_var("MOQ_STATS_ENABLED") };
-		unsafe { std::env::remove_var("MOQ_STATS_DEPTH") };
+		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH"]);
 
 		let toml = r#"
 [stats]
@@ -180,13 +214,7 @@ depth = 2
 	#[test]
 	fn cli_does_not_clobber_toml_cache() {
 		let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: CACHE_ENV_LOCK ensures no other test in this binary touches
-		// these env vars concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_CACHE_CAPACITY");
-			std::env::remove_var("MOQ_CACHE_HEADROOM");
-			std::env::remove_var("MOQ_CACHE_DURATION");
-		}
+		let _env = EnvGuard::clear(&["MOQ_CACHE_CAPACITY", "MOQ_CACHE_HEADROOM", "MOQ_CACHE_DURATION"]);
 
 		let toml = r#"
 [cache]
@@ -243,11 +271,7 @@ duration = "30s"
 	#[test]
 	fn cli_does_not_clobber_toml_linger() {
 		let _guard = LINGER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: LINGER_ENV_LOCK ensures no other test in this binary touches
-		// this env var concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_CLUSTER_LINGER");
-		}
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
 
 		let toml = r#"
 [cluster]
@@ -282,12 +306,7 @@ linger = "30s"
 	#[test]
 	fn cli_does_not_clobber_toml_preferred_addresses() {
 		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: PREFERRED_ENV_LOCK ensures no other test in this binary
-		// touches these env vars concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_SERVER_PREFERRED_V4");
-			std::env::remove_var("MOQ_SERVER_PREFERRED_V6");
-		}
+		let _env = EnvGuard::clear(&["MOQ_SERVER_PREFERRED_V4", "MOQ_SERVER_PREFERRED_V6"]);
 
 		let toml = r#"
 [server.quic]
@@ -319,11 +338,7 @@ preferred_v6 = "[2001:db8::1]:443"
 	#[test]
 	fn cli_does_not_clobber_toml_qlog() {
 		let _guard = PREFERRED_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: PREFERRED_ENV_LOCK ensures no other test in this binary
-		// touches these env vars concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_SERVER_QUIC_QLOG");
-		}
+		let _env = EnvGuard::clear(&["MOQ_SERVER_QUIC_QLOG"]);
 
 		let toml = r#"
 [server.quic]
@@ -356,12 +371,10 @@ qlog = "/tmp/moq-qlog"
 	#[test]
 	fn cli_does_not_clobber_toml_congestion_control() {
 		let _guard = CONGESTION_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: CONGESTION_ENV_LOCK ensures no other test in this binary
-		// touches these env vars concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_SERVER_QUIC_CONGESTION_CONTROL");
-			std::env::remove_var("MOQ_CLIENT_QUIC_CONGESTION_CONTROL");
-		}
+		let _env = EnvGuard::clear(&[
+			"MOQ_SERVER_QUIC_CONGESTION_CONTROL",
+			"MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
+		]);
 
 		let toml = r#"
 [server.quic]
@@ -397,12 +410,7 @@ congestion_control = "loss"
 	#[test]
 	fn cli_does_not_clobber_toml_web_https_cert_arrays() {
 		let _guard = WEB_HTTPS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: WEB_HTTPS_ENV_LOCK ensures no other test in this binary
-		// touches these env vars concurrently.
-		unsafe {
-			std::env::remove_var("MOQ_WEB_HTTPS_CERT");
-			std::env::remove_var("MOQ_WEB_HTTPS_KEY");
-		}
+		let _env = EnvGuard::clear(&["MOQ_WEB_HTTPS_CERT", "MOQ_WEB_HTTPS_KEY"]);
 
 		let toml = r#"
 [web.https]
@@ -440,9 +448,7 @@ key = ["cdn.key", "moq-pro.key"]
 	#[test]
 	fn cli_flag_overrides_toml_stats_enabled() {
 		let _guard = STATS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: STATS_ENV_LOCK ensures no other test in this binary touches
-		// this env var concurrently.
-		unsafe { std::env::remove_var("MOQ_STATS_ENABLED") };
+		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED"]);
 
 		let toml = "[stats]\nenabled = true\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -467,9 +473,7 @@ key = ["cdn.key", "moq-pro.key"]
 	#[test]
 	fn cli_does_not_clobber_toml_auth_api() {
 		let _guard = AUTH_API_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: AUTH_API_ENV_LOCK serializes this with any sibling test touching
-		// the same env var.
-		unsafe { std::env::remove_var("MOQ_AUTH_API") };
+		let _env = EnvGuard::clear(&["MOQ_AUTH_API"]);
 
 		let toml = r#"
 [auth]
@@ -500,9 +504,7 @@ auth_api = "https://api.moq.dev/cluster/auth"
 	#[test]
 	fn cli_does_not_clobber_toml_system_roots() {
 		let _guard = SYSTEM_ROOTS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: SYSTEM_ROOTS_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_CLIENT_TLS_SYSTEM_ROOTS") };
+		let _env = EnvGuard::clear(&["MOQ_CLIENT_TLS_SYSTEM_ROOTS"]);
 
 		let toml = r#"
 [client.tls]
@@ -533,9 +535,7 @@ system_roots = true
 	#[test]
 	fn cli_does_not_clobber_toml_cluster_id() {
 		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
 
 		let toml = r#"
 [cluster]
@@ -563,12 +563,7 @@ id = 12345
 	#[test]
 	fn cli_does_not_clobber_toml_tiers() {
 		let _guard = TIER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: TIER_ENV_LOCK serializes this with any sibling test touching
-		// the same env vars.
-		unsafe {
-			std::env::remove_var("MOQ_CLUSTER_TIER");
-			std::env::remove_var("MOQ_AUTH_MTLS_TIER");
-		}
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_TIER", "MOQ_AUTH_MTLS_TIER"]);
 
 		let toml = r#"
 [cluster]
@@ -608,12 +603,7 @@ mtls_tier = "edge"
 	#[test]
 	fn cli_does_not_clobber_toml_server_unix() {
 		let _guard = SERVER_UNIX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: SERVER_UNIX_ENV_LOCK serializes this with any sibling test
-		// touching the same env vars.
-		unsafe {
-			std::env::remove_var("MOQ_SERVER_UNIX_BIND");
-			std::env::remove_var("MOQ_SERVER_UNIX_ALLOW_UID");
-		}
+		let _env = EnvGuard::clear(&["MOQ_SERVER_UNIX_BIND", "MOQ_SERVER_UNIX_ALLOW_UID"]);
 
 		let toml = r#"
 [server]
@@ -649,9 +639,7 @@ uid = [1001]
 	#[test]
 	fn cli_flag_overrides_toml_cluster_id() {
 		let _guard = CLUSTER_ID_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: CLUSTER_ID_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_CLUSTER_ID") };
+		let _env = EnvGuard::clear(&["MOQ_CLUSTER_ID"]);
 
 		let toml = "[cluster]\nid = 12345\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -680,9 +668,7 @@ uid = [1001]
 	#[test]
 	fn cli_does_not_clobber_toml_internal_listen() {
 		let _guard = INTERNAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		// SAFETY: INTERNAL_ENV_LOCK serializes this with any sibling test
-		// touching the same env var.
-		unsafe { std::env::remove_var("MOQ_INTERNAL_LISTEN") };
+		let _env = EnvGuard::clear(&["MOQ_INTERNAL_LISTEN"]);
 
 		let toml = "[internal]\nlisten = \"127.0.0.1:9101\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
