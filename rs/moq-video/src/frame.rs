@@ -1101,7 +1101,7 @@ mod tests {
 
 		// Upload as pitched NV12: Y rows, then interleaved UV rows.
 		let pitch = 512u32;
-		let frame = cuda::Surface::alloc(&ctx, w, h, pitch).unwrap();
+		let frame = cuda::Frame::alloc(&ctx, w, h, pitch).unwrap();
 		let mut host = vec![0u8; pitch as usize * h as usize * 3 / 2];
 		for row in 0..h as usize {
 			let dst = row * pitch as usize;
