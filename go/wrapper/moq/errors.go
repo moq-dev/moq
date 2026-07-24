@@ -26,7 +26,7 @@ var (
 var (
 	// ErrProtocol matches a lower-level moq-net transport or protocol error; the underlying detail survives in the message.
 	ErrProtocol = ffi.ErrMoqErrorProtocol
-	// ErrMedia matches a hang media error, such as a malformed catalog or container.
+	// ErrMedia matches a media error from the hang layer, such as a malformed catalog or container.
 	ErrMedia = ffi.ErrMoqErrorMedia
 	// ErrMux matches a muxing or demuxing failure from moq-mux.
 	ErrMux = ffi.ErrMoqErrorMux
