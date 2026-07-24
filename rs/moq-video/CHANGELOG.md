@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/moq-dev/moq/compare/moq-video-v0.0.8...moq-video-v0.0.9) - 2026-07-24
+
+### Added
+
+- *(moq-mux,moq-boy)* mark discontinuities, and never time a sample across one ([#2475](https://github.com/moq-dev/moq/pull/2475))
+
+### Other
+
+- *(moq-video)* bump moq-vaapi to 0.0.3 (dlopen libva) ([#2465](https://github.com/moq-dev/moq/pull/2465))
+
 ## [0.0.8](https://github.com/moq-dev/moq/compare/moq-video-v0.0.7...moq-video-v0.0.8) - 2026-07-23
 
 ### Other
