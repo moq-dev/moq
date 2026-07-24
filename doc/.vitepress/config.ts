@@ -66,6 +66,7 @@ export default defineConfig({
 					items: [
 						{ text: "Development", link: "/setup/dev" },
 						{ text: "Production", link: "/setup/prod" },
+						{ text: "AI Agents", link: "/setup/agent" },
 						{ text: "Linux Packages", link: "/setup/linux" },
 						{ text: "Windows", link: "/setup/windows" },
 					],
