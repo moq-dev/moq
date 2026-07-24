@@ -29,6 +29,10 @@ jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
+# qlog trace capture (`--server-quic-qlog <DIR>`). Off by default: it compiles the
+# qlog machinery into the enabled backends and is only wanted for debugging or
+# congestion-control testing.
+qlog = ["moq-native/qlog"]
 websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
