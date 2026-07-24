@@ -10,7 +10,9 @@ use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
 use crate::container::source::{VideoTransform, build_video_transform};
 
-use super::export::{catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations};
+use super::export::{
+	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
+};
 use super::{Error, synthesize_audio_trak, synthesize_video_trak};
 
 /// The single track id used by a muxer's init segment and fragments.
@@ -52,6 +54,8 @@ pub struct Muxer {
 	/// Fallback duration for frames that carry none (Legacy / LOC sources), derived from the
 	/// catalog framerate / sample rate.
 	default_frame: Duration,
+	/// True for Opus audio, whose packets state their own duration in the TOC byte.
+	opus: bool,
 }
 
 impl Muxer {
@@ -68,6 +72,7 @@ impl Muxer {
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
 			timescale: catalog_timescale_video(config)?,
 			default_frame: Duration::from_secs_f64(1.0 / framerate),
+			opus: false,
 			kind: Kind::Video(config.clone()),
 		})
 	}
@@ -82,6 +87,7 @@ impl Muxer {
 			timescale: catalog_timescale_audio(config)?,
 			// Fallback for a duration-less trailing sample (~1024 samples per frame).
 			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
+			opus: matches!(config.codec, hang::catalog::AudioCodec::Opus),
 			kind: Kind::Audio(config.clone()),
 		})
 	}
@@ -202,8 +208,14 @@ impl Muxer {
 	/// it came from. Frames without a duration get one inferred from the following frame's
 	/// timestamp (falling back to the catalog frame rate / sample rate), so multi-sample
 	/// fragments stay decodable. `sequence` is the moof sequence number, informative only.
+	///
+	/// `frames` may span several groups, and a sample is never timed by one in the next group
+	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
+	/// across the boundary. See [`infer_missing_durations`].
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
-		let frames = infer_missing_durations(frames.to_vec(), None, self.default_frame);
+		let mut frames = frames.to_vec();
+		apply_codec_durations(&mut frames, self.opus);
+		let frames = infer_missing_durations(frames, None, self.default_frame);
 		let timescale = moq_net::Timescale::new(self.timescale).map_err(Error::from)?;
 		Ok(super::encode_fragment(TRACK_ID, timescale, sequence, &frames)?)
 	}
@@ -265,34 +277,65 @@ mod tests {
 	}
 
 	// The HLS origin accumulates every group of a (multi-group) audio segment into ONE fragment,
-	// so per-sample durations are inferred from each frame's real successor. Only the final sample
-	// falls back to the codec frame duration. This is what keeps audio contiguous across the groups
-	// an audio timeline skips.
+	// and for audio those groups are often one packet each -- so every sample sits at a group
+	// boundary and none of them may borrow the next packet's timestamp (consecutive sequence
+	// numbers don't rule out a publisher pausing across the boundary). Opus stating its own
+	// duration is what keeps the whole run exact anyway, rather than dropping every packet onto
+	// the ~21.3 ms 1024/sample_rate fallback.
 	#[tokio::test]
-	async fn audio_fragment_infers_durations_from_successors() {
+	async fn audio_fragment_takes_durations_from_the_codec() {
 		use hang::catalog::AudioCodec;
 
-		// Opus at 48 kHz: default (fallback) frame duration is 1024/48000 = 21_333 us.
 		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		let muxer = Muxer::audio(&config).unwrap();
 
-		// Frames 20 ms apart, none carrying a duration (the Legacy audio wire), as if fetched from
-		// several one-packet groups and concatenated.
-		let frames: Vec<Frame> = (0..4).map(|i| frame(i * 20_000, true)).collect();
+		// 20 ms of 48 kHz Opus: TOC config 15 (SILK wideband, 20 ms), one frame per packet.
+		let packet = Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]);
+		let frames: Vec<Frame> = (0..4)
+			.map(|i| Frame {
+				payload: packet.clone(),
+				..frame(i * 20_000, true)
+			})
+			.collect();
 		let fragment = muxer.fragment(0, &frames).unwrap();
 
 		let timescale = moq_net::Timescale::new(48_000).unwrap();
 		let decoded = super::super::decode(fragment, timescale).unwrap();
 		assert_eq!(decoded.len(), 4);
-		// Interior samples take the real 20 ms gap to their successor, not the codec fallback.
-		for f in &decoded[..3] {
-			assert_eq!(f.duration.unwrap().as_micros(), 20_000, "successor-derived duration");
+		for f in &decoded {
+			assert_eq!(
+				f.duration.unwrap().as_micros(),
+				20_000,
+				"TOC duration, not the fallback"
+			);
 		}
-		// Only the last sample (no successor) falls back to the ~21.3 ms Opus frame duration.
-		let last = decoded[3].duration.unwrap().as_micros();
-		assert!(
-			(21_000..21_400).contains(&last),
-			"last sample uses the codec fallback, got {last}"
-		);
+	}
+
+	// A group boundary is never a duration, even when the groups arrived consecutively: the
+	// publisher may have paused across it (moq-boy runs its PTS on a clock that keeps going
+	// while the encoder is off), which is what produced a 2405 second sample in
+	// moq-dev/moq.pro#814.
+	#[tokio::test]
+	async fn audio_fragment_does_not_absorb_a_pause() {
+		use hang::catalog::AudioCodec;
+
+		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		let muxer = Muxer::audio(&config).unwrap();
+
+		// Two one-packet groups either side of a 40 minute pause, fetched back to back.
+		let packet = Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]);
+		let frames: Vec<Frame> = [63_244, 2_405_070_000]
+			.into_iter()
+			.map(|micros| Frame {
+				payload: packet.clone(),
+				..frame(micros, true)
+			})
+			.collect();
+		let fragment = muxer.fragment(0, &frames).unwrap();
+
+		let timescale = moq_net::Timescale::new(48_000).unwrap();
+		let decoded = super::super::decode(fragment, timescale).unwrap();
+		let first = decoded[0].duration.unwrap().as_micros();
+		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
 	}
 }
