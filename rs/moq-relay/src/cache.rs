@@ -46,11 +46,16 @@ pub struct CacheConfig {
 	/// Maximum age of a non-latest cached group, e.g. "30s" or "500ms".
 	///
 	/// Caps each track's own retention window: a publisher advertising a longer
-	/// window is clamped down to this, so the relay never holds an old group
-	/// longer than this regardless of what upstream asks for. The latest group of
-	/// every track is always retained, as it is the live edge. This bounds memory
-	/// by age where `capacity` bounds it by bytes. Unbounded (each track keeps its
-	/// own window) when unset.
+	/// window is clamped down to this, bounding how much history a track can
+	/// accumulate no matter what upstream asks for. This bounds memory by age
+	/// where `capacity` bounds it by bytes. Unbounded (each track keeps its own
+	/// window) when unset.
+	///
+	/// Two caveats on the ceiling. The latest group of every track is always
+	/// retained, since it is the live edge. And expiry is evaluated when a track
+	/// writes its next group, so a publisher that stops writing without
+	/// disconnecting keeps whatever it had cached until it resumes or the
+	/// broadcast closes; the `capacity` budget is what reclaims those.
 	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
 	#[serde(default, with = "humantime_serde")]
 	pub duration: Option<Duration>,

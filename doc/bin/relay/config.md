@@ -422,17 +422,24 @@ headroom = "2GiB"
 
 # Maximum age of a non-latest cached group ("30s", "500ms"). Caps each track's
 # own retention window: a publisher advertising a longer window is clamped down
-# to this, so the relay never holds an old group longer than this no matter what
-# upstream asks for. The latest group of every track is always retained, as it
-# is the live edge. Unbounded (each track keeps its own window) when unset.
+# to this, bounding how much history a track accumulates no matter what upstream
+# asks for. The latest group of every track is always retained, as it is the
+# live edge. Unbounded (each track keeps its own window) when unset.
 duration = "30s"
 ```
 
 The `capacity` budget counts group payload bytes, not process RSS, so leave
 slack below physical memory (or just use `headroom`, which measures actual
-available memory). `duration` is the age counterpart: it bounds how far back the
-cache reaches, which is what keeps a long-running relay from holding groups from
-hours ago when the byte budget alone leaves room for them.
+available memory). `duration` is the age counterpart: it stops a long-running
+relay from accumulating hours of history per track when the byte budget alone
+leaves room for it.
+
+A track's expiry is evaluated as it writes its next group, so `duration` caps
+how much history an *active* publisher builds up rather than acting as a
+background reaper. A publisher that stops writing but stays connected keeps what
+it had cached until it resumes or the broadcast closes, and a publisher that
+disconnects has its groups released once the broadcast closes (see
+`cluster.linger`). Set `capacity` or `headroom` alongside it to bound those.
 
 All three flags also accept CLI arguments (`--cache-capacity`,
 `--cache-headroom`, `--cache-duration`) and environment variables
