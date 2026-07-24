@@ -7,6 +7,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
@@ -181,20 +182,17 @@ export class Decoder {
 
 		const display = catalog.display;
 		if (display) {
-			effect.set(this.#out.display, {
-				width: display.width,
-				height: display.height,
-			});
+			effect.set(this.#out.display, { width: display.width, height: display.height });
 			return;
 		}
 
 		const frame = effect.get(this.#out.frame);
 		if (!frame) return;
 
-		effect.set(this.#out.display, {
-			width: frame.displayWidth,
-			height: frame.displayHeight,
-		});
+		effect.set(
+			this.#out.display,
+			rotateVideoDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
+		);
 	}
 
 	#runBuffering(effect: Effect): void {

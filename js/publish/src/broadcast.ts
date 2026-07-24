@@ -2,6 +2,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
+import { normalizeVideoRotation } from "./presentation";
 import { type Kind, Rendition } from "./rendition";
 
 // Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
@@ -18,6 +19,9 @@ export type BroadcastInput = {
 	// Catalog video-section display size, shared by all video renditions. Usually wired from a
 	// Video.Capture's `display` output. Omitted from the catalog when undefined.
 	display: Getter<{ width: number; height: number } | undefined>;
+
+	// Clockwise presentation rotation in degrees. Defaults to 0.
+	rotation: Getter<number>;
 
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
@@ -67,6 +71,7 @@ export class Broadcast {
 			enabled: getter(props?.enabled ?? false),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
+			rotation: getter(props?.rotation ?? 0),
 			flip: getter(props?.flip ?? false),
 		};
 
@@ -135,6 +140,7 @@ export class Broadcast {
 		}
 
 		const display = effect.get(this.in.display);
+		const rotation = normalizeVideoRotation(effect.get(this.in.rotation));
 		const flip = effect.get(this.in.flip);
 
 		this.catalog.mutate((catalog) => {
@@ -144,6 +150,7 @@ export class Broadcast {
 				if (display) {
 					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
 				}
+				if (rotation) section.rotation = rotation;
 				if (flip) section.flip = true;
 				catalog.video = section;
 			} else {

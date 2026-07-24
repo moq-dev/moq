@@ -9,11 +9,12 @@ import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast } from "./broadcast";
+import { normalizeVideoRotation, rotateVideoDimensions } from "./presentation";
 import * as Preview from "./preview";
 import * as Source from "./source";
 import * as Video from "./video";
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "announce", "rotation"] as const;
 
 /** How often the encoder's bitrate cap resamples the transport's send estimate. */
 const BANDWIDTH_POLL = 100; // ms
@@ -65,6 +66,14 @@ function parsePreview(value: string | null): Preview.Mode {
 	return "source";
 }
 
+function parseRotation(value: string | null): number | undefined {
+	if (value === null) return undefined;
+	const rotation = Number(value);
+	if (Number.isFinite(rotation)) return rotation;
+	console.warn(`moq-publish: invalid rotation="${value}", expected a finite number`);
+	return undefined;
+}
+
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
@@ -84,6 +93,8 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// When to announce/publish the broadcast: always, never, or only once a source is selected.
 		announce: new Signal<AnnounceMode>("source"),
+		// Clockwise presentation rotation applied by receivers. Undefined means no rotation.
+		rotation: new Signal<number | undefined>(undefined),
 	};
 
 	connection: Moq.Connection.Reload;
@@ -206,12 +217,28 @@ export default class MoqPublish extends HTMLElement {
 		this.capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.capture.close());
 
+		const presentationDisplay = new Signal<{ width: number; height: number } | undefined>(undefined);
+		const presentationRotation = new Signal(0);
+		const presentationFlip = new Signal(false);
+		this.signals.run((effect) => {
+			const sourceDisplay = effect.get(this.capture.out.display);
+			const rotation = normalizeVideoRotation(effect.get(this.controls.rotation) ?? 0);
+			const display = sourceDisplay ? rotateVideoDimensions(sourceDisplay, rotation) : undefined;
+			const flip = effect.get(this.#flip);
+
+			// Update every field before subscribers run so each catalog snapshot describes one presentation.
+			presentationDisplay.set(display);
+			presentationRotation.set(rotation);
+			presentationFlip.set(flip);
+		});
+
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#publishEnabled,
 			name: this.#name,
-			display: this.capture.out.display,
-			flip: this.#flip,
+			display: presentationDisplay,
+			rotation: presentationRotation,
+			flip: presentationFlip,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -248,8 +275,9 @@ export default class MoqPublish extends HTMLElement {
 				const renderer = new Preview.Renderer({
 					canvas: preview,
 					frame: this.capture.out.frame,
-					display: this.capture.out.display,
-					flip: this.#flip,
+					display: presentationDisplay,
+					rotation: presentationRotation,
+					flip: presentationFlip,
 					encoder: this.video,
 					mode: this.controls.preview,
 					enabled: this.#videoEnabled,
@@ -314,6 +342,8 @@ export default class MoqPublish extends HTMLElement {
 			this.controls.invisible.set(parseBoolean(newValue, false));
 		} else if (name === "preview") {
 			this.controls.preview.set(parsePreview(newValue));
+		} else if (name === "rotation") {
+			this.controls.rotation.set(parseRotation(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -457,6 +487,15 @@ export default class MoqPublish extends HTMLElement {
 
 	set announce(value: AnnounceMode) {
 		this.controls.announce.set(value);
+	}
+
+	/** Clockwise video presentation rotation in degrees. */
+	get rotation(): number | undefined {
+		return this.controls.rotation.peek();
+	}
+
+	set rotation(value: number | undefined) {
+		this.controls.rotation.set(value);
 	}
 }
 
