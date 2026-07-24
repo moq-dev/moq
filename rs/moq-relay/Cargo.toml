@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.1"
+version = "0.14.2"
 edition = "2024"
 # sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
 # workspace floor. moq-relay is lib+bin, so this applies to its library target

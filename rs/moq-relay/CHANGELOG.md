@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.1...moq-relay-v0.14.2) - 2026-07-24
+
+### Added
+
+- *(native)* expose a qlog feature on moq-relay and moq-cli ([#2470](https://github.com/moq-dev/moq/pull/2470))
+- *(moq-net)* linger a broadcast across an ungraceful source loss ([#2469](https://github.com/moq-dev/moq/pull/2469))
+
+### Fixed
+
+- *(relay)* keep-alive the server side of a WebSocket session ([#2471](https://github.com/moq-dev/moq/pull/2471))
+
 ## [0.14.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.0...moq-relay-v0.14.1) - 2026-07-23
 
 ### Added

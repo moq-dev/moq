@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/moq-dev/moq/compare/moq-net-v0.2.1...moq-net-v0.2.2) - 2026-07-24
+
+### Added
+
+- *(moq-net)* linger a broadcast across an ungraceful source loss ([#2469](https://github.com/moq-dev/moq/pull/2469))
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-net-v0.2.0...moq-net-v0.2.1) - 2026-07-23
 
 ### Other
