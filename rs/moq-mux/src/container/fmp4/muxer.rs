@@ -211,7 +211,7 @@ impl Muxer {
 	///
 	/// `frames` may span several groups, and a sample is never timed by one in the next group
 	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
-	/// across the boundary. See [`infer_missing_durations`].
+	/// across the boundary.
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
