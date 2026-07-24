@@ -44,6 +44,8 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "url-standard"], default-features = false }
+humantime = "2.3"
+humantime-serde = "1.1"
 jsonwebtoken = "10"
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 moq-net = { workspace = true }

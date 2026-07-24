@@ -208,6 +208,41 @@ headroom = "10%"
 		assert_eq!(config.cache.headroom.as_deref(), Some("10%"));
 	}
 
+	/// Serializes tests that touch `MOQ_CLUSTER_LINGER`. Same rationale as
+	/// `STATS_ENV_LOCK`.
+	static LINGER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the clap+TOML clobber bug applied to `cluster.linger`.
+	/// The field is `Option<Duration>` so a TOML-configured window survives the
+	/// CLI re-parse when no `--cluster-linger` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_linger() {
+		let _guard = LINGER_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: LINGER_ENV_LOCK ensures no other test in this binary touches
+		// this env var concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_CLUSTER_LINGER");
+		}
+
+		let toml = r#"
+[cluster]
+linger = "30s"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("linger-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.linger,
+			Some(std::time::Duration::from_secs(30)),
+			"TOML's cluster.linger must not be clobbered by the CLI re-parse"
+		);
+	}
+
 	/// Serializes tests that touch `MOQ_SERVER_PREFERRED_V4` / `_V6`. Same
 	/// rationale as `STATS_ENV_LOCK`.
 	static PREFERRED_ENV_LOCK: Mutex<()> = Mutex::new(());
