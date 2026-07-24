@@ -48,6 +48,13 @@ impl AudioEncoder {
 		self.producer.reset_epoch();
 	}
 
+	/// Publish an empty group marking the pause, so the gap the re-anchored epoch is about
+	/// to open reads as a break rather than one very long packet.
+	pub fn discontinuity(&mut self) -> Result<()> {
+		self.producer.discontinuity()?;
+		Ok(())
+	}
+
 	/// Push interleaved signed-16-bit stereo PCM captured at `elapsed` (since
 	/// the emulator started, shared with the video clock).
 	pub fn push_samples(&mut self, samples: &[i16], elapsed: Duration) -> Result<()> {

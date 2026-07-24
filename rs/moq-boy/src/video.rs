@@ -27,9 +27,14 @@ pub struct VideoEncoder {
 	_thread: std::thread::JoinHandle<()>,
 }
 
-struct EncoderMsg {
-	rgba: Bytes,
-	ts: hang::container::Timestamp,
+enum EncoderMsg {
+	Frame {
+		rgba: Bytes,
+		ts: hang::container::Timestamp,
+	},
+	/// Publish the pause marker. Goes down the same channel as the frames so it lands
+	/// after the last one encoded, not racing ahead of it.
+	Discontinuity,
 }
 
 impl VideoEncoder {
@@ -60,8 +65,20 @@ impl VideoEncoder {
 	/// Send a frame to the encoder. Non-blocking: drops the frame if the
 	/// channel is full (capacity=4) to keep latency low.
 	pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
-		if self.tx.try_send(EncoderMsg { rgba, ts }).is_err() {
+		if self.tx.try_send(EncoderMsg::Frame { rgba, ts }).is_err() {
 			tracing::warn!("video frame dropped: encoder backpressure");
+		}
+	}
+
+	/// Publish an empty group marking a pause, so the PTS jump on resume reads as a break
+	/// rather than one very long frame, and a viewer arriving mid-pause isn't served the
+	/// pre-pause group as if it were live.
+	///
+	/// Blocks rather than dropping on a full channel: a dropped frame costs one frame, a
+	/// dropped marker silently reinstates the bug it exists to prevent.
+	pub fn discontinuity(&self) {
+		if self.tx.blocking_send(EncoderMsg::Discontinuity).is_err() {
+			tracing::warn!("video discontinuity dropped: encoder gone");
 		}
 	}
 
@@ -86,6 +103,16 @@ fn encoder_thread(
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
+		let msg = match msg {
+			EncoderMsg::Frame { rgba, ts } => (rgba, ts),
+			EncoderMsg::Discontinuity => {
+				if let Err(e) = producer.discontinuity() {
+					tracing::warn!(error = %e, "failed to mark the video discontinuity");
+				}
+				continue;
+			}
+		};
+		let (rgba, ts) = msg;
 		let enc = match encoder.as_mut() {
 			Some(enc) => enc,
 			None => {
@@ -105,9 +132,9 @@ fn encoder_thread(
 
 		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
 		let start = Instant::now();
-		match enc.encode_rgba(&msg.rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
+		match enc.encode_rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
 			Ok(packets) => {
-				if let Err(e) = producer.publish(packets, msg.ts) {
+				if let Err(e) = producer.publish(packets, ts) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");
