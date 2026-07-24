@@ -55,18 +55,19 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// through this handle: tag it with [`origin::Consumer::with_stats`] first.
 	pub origin: origin::Consumer,
 	pub version: Version,
+	/// The peer's SETUP (lite-05+), shared with the subscriber half that reads
+	/// it. Carries the peer's declared origin id for split-horizon serving.
+	pub peer_setup: super::PeerSetup,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: origin::Consumer,
 	self_origin: Origin,
-	// The peer's session-level origin id, learned from its ANNOUNCE_REQUEST
-	// (`exclude_hop`). Zero until the peer opens an announce stream, which it
-	// does before it can see anything to subscribe to. Used to serve the peer
-	// from a source whose chain excludes them, keeping the data plane on the
-	// same split-horizon rule as the announces we send them.
-	peer_origin: std::sync::atomic::AtomicU64,
+	// The peer's SETUP, read for the origin id it declared. Used to serve the
+	// peer from a source whose chain excludes them, keeping the data plane on
+	// the same split-horizon rule as the announces we send them.
+	peer_setup: super::PeerSetup,
 	priority: PriorityQueue,
 	version: Version,
 }
@@ -81,21 +82,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			session: config.session,
 			origin: config.origin,
 			self_origin,
-			peer_origin: std::sync::atomic::AtomicU64::new(0),
+			peer_setup: config.peer_setup,
 			priority: Default::default(),
 			version: config.version,
 		}
 	}
 
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
-	/// through the peer once its origin id is known, so a subscription is never
-	/// served data that flowed through the subscriber.
-	fn serving_origin(&self) -> origin::Consumer {
-		let peer = self.peer_origin.load(std::sync::atomic::Ordering::Relaxed);
-		match Origin::new(peer) {
-			Ok(peer) => self.origin.clone().excluding(peer),
-			// Unknown (the peer never sent an announce request): serve as-is.
-			Err(_) => self.origin.clone(),
+	/// through the peer when its SETUP declared an origin id, so a subscription
+	/// is never served data that flowed through the subscriber. Waits for the
+	/// peer's SETUP, which every lite-05+ endpoint sends at startup, well before
+	/// it could learn of anything to subscribe to.
+	async fn serving_origin(&self) -> origin::Consumer {
+		// Pre-SETUP versions never declare an id; there is nothing to exclude.
+		if !self.version.has_setup_stream() {
+			return self.origin.clone();
+		}
+		match self.peer_setup.origin().await {
+			Some(peer) => self.origin.clone().excluding(peer),
+			None => self.origin.clone(),
 		}
 	}
 
@@ -203,13 +208,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let interest = stream.reader.decode::<lite::AnnounceRequest>().await?;
 		let prefix = interest.prefix.to_owned();
 		let exclude_hop = interest.exclude_hop;
-
-		// The exclude_hop is the peer's session origin id: remember it so the
-		// subscribe path can serve them from a source that avoids their hop.
-		if exclude_hop != 0 {
-			self.peer_origin
-				.store(exclude_hop, std::sync::atomic::Ordering::Relaxed);
-		}
 
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
@@ -794,7 +792,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The peer requested this exact path, so it has already seen an announcement for it.
 		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
-		let broadcast = self.serving_origin().request_broadcast(&request.broadcast).await?;
+		let broadcast = self
+			.serving_origin()
+			.await
+			.request_broadcast(&request.broadcast)
+			.await?;
 		let info = broadcast.track(&request.track)?.info().await?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise), where every
@@ -827,7 +829,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// already seen an announcement for it. `request_broadcast` resolves an announced
 		// broadcast immediately; if it isn't announced it falls back to an `origin::Dynamic`
 		// handler (or resolves to an error when there is none).
-		let broadcast = self.serving_origin().request_broadcast(&subscribe.broadcast);
+		let broadcast = self.serving_origin().await.request_broadcast(&subscribe.broadcast);
 
 		// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 		// the model, through the tagged `origin::Consumer` this broadcast is resolved
@@ -964,7 +966,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The peer fetched this exact path, so it has already seen an announcement for it.
 		// `request_broadcast` resolves it immediately, or falls back to an `origin::Dynamic`
 		// handler (as in recv_subscribe).
-		let broadcast = self.serving_origin().request_broadcast(&fetch.broadcast);
+		let broadcast = self.serving_origin().await.request_broadcast(&fetch.broadcast);
 
 		if let Err(err) = Self::run_fetch(&mut stream, &fetch, broadcast, self.version).await {
 			match &err {
