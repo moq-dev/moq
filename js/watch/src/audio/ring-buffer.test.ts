@@ -735,5 +735,12 @@ describe("latency increase re-anchor", () => {
 		// calls reset() on a latency-floor increase (#runLatencyReanchor) to re-anchor to the cushion.
 		buffer.reset();
 		expect(buffer.stalled).toBe(true);
+
+		// ...and it refills to the *new* 200-sample floor, not the old 100: still stalled at 199,
+		// un-stalls only once the 200th sample lands. This proves resize(200) moved the target.
+		write(buffer, 0 as Time.Milli, 199, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(true);
+		write(buffer, 199 as Time.Milli, 1, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
 	});
 });
