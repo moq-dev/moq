@@ -168,8 +168,8 @@ enum Reader<V: Mergeable> {
 	/// Reading frames. Boxed: the snapshot consumer dwarfs the other variants,
 	/// and one lives per node in a map.
 	Active(Box<moq_json::snapshot::Consumer<BTreeMap<String, V>>>),
-	/// The subscription failed or the track ended; contributes its last value
-	/// (if any) until the node unannounces.
+	/// The subscription failed or the track ended; the node no longer
+	/// contributes and lingers only until it unannounces.
 	Ended,
 }
 
@@ -308,22 +308,28 @@ fn advance<V: Mergeable>(
 					node.last = Some(frame);
 					changed = true;
 				}
-				Poll::Ready(Ok(None)) => {
-					node.reader = Reader::Ended;
-					return changed;
-				}
+				Poll::Ready(Ok(None)) => return terminate(node, changed),
 				Poll::Ready(Err(err)) => {
-					// One bad node must not tear down the whole merged view; keep
-					// its last value and stop reading it.
+					// One bad node must not tear down the whole merged view; drop
+					// just this node and keep folding the rest.
 					tracing::debug!(?err, name, "stats: node read error");
-					node.reader = Reader::Ended;
-					return changed;
+					return terminate(node, changed);
 				}
 				Poll::Pending => return changed,
 			},
 			Reader::Ended => return changed,
 		}
 	}
+}
+
+/// Retire a node whose reader terminated: drop its last frame so it stops
+/// contributing (a still-announced but unreadable node must not pin a stale
+/// gauge into the sum) and mark it ended so it lingers only until it
+/// unannounces. Returns whether the merged view changed.
+fn terminate<V: Mergeable>(node: &mut Node<V>, changed: bool) -> bool {
+	let had_value = node.last.take().is_some();
+	node.reader = Reader::Ended;
+	changed || had_value
 }
 
 #[cfg(test)]
