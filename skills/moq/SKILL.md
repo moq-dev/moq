@@ -10,12 +10,17 @@ It is generic pub/sub over QUIC: video and audio are the flagship use case, but 
 
 This skill is an index of the moq-dev monorepo (https://github.com/moq-dev/moq): what you can build and which pieces to reach for. Fetch the linked docs for details instead of guessing APIs.
 
-## The two layers
+## Layering
 
-- **moq-lite**: generic real-time pub/sub. A *broadcast* contains named *tracks*; tracks carry *groups* of *frames*. Relays cache, deduplicate, and fan out without understanding the payload, so anything can be end-to-end encrypted. Rust `moq-net`, TypeScript `@moq/net`.
-- **hang**: media on top. A catalog track describes codecs/renditions; containers carry timestamped codec bitstream. Rust `hang`, TypeScript `@moq/hang`. Think of hang as HLS/DASH and moq-lite as HTTP.
+The stack from the wire up. Reach for the highest layer that fits and drop down only when you need control:
 
-Everything below builds on these two. Custom applications can extend hang with their own tracks or replace it entirely.
+1. **QUIC**: does all the networking. Provided by the browser or a QUIC library (`moq-native` configures one for you in Rust).
+2. **WebTransport**: a thin layer over QUIC/HTTP3 so browsers can speak it. Provided by the browser or the `web-transport` crates.
+3. **moq-lite** (Rust `moq-net`, TypeScript `@moq/net`): generic real-time pub/sub. A *broadcast* contains named *tracks*; tracks carry *groups* of *frames*. Relays cache, deduplicate, and fan out without understanding the payload, so anything can be end-to-end encrypted. This is the layer CDNs implement.
+4. **hang** (Rust `hang`, TypeScript `@moq/hang`): media on top. A catalog track describes codecs/renditions; containers carry timestamped codec bitstream. Think of hang as HLS/DASH and moq-lite as HTTP.
+5. **Your application**: business logic, auth, custom tracks. Extend hang with your own tracks or replace it entirely.
+
+Everything below builds on these layers.
 
 ## What you can build
 
@@ -23,17 +28,17 @@ Everything below builds on these two. Custom applications can extend hang with t
 
 **Conferencing (Zoom-style)**. Browser capture and playback with `@moq/publish` + `@moq/watch`; each participant is a broadcast, discovered via announcements. Bridge existing WebRTC clients with the WHIP/WHEP gateway (`rs/moq-rtc`). Why MoQ over WebRTC: https://doc.moq.dev/concept/use-case/conferencing
 
-**Voice/video AI agents**. Server-side media without a browser: `rs/moq-video` and `rs/moq-audio` do native capture, hardware encode/decode (VideoToolbox, D3D11, NVENC, VAAPI). Python bindings fit ML stacks. TTS output written faster than real-time plays smoothly via `@moq/watch` buffered playback (`latency-max`). Background: https://moq.dev/blog/webrtc-is-the-problem and https://doc.moq.dev/concept/use-case/ai
+**Voice/video AI agents**. Server-side media without a browser, straight from Rust: `moq-mux` publishes and decodes media containers (fMP4/CMAF, MPEG-TS, FLV), while `rs/moq-video` and `rs/moq-audio` capture/encode and decode/render with hardware codecs (VideoToolbox, D3D11, NVENC, VAAPI). Python bindings fit ML stacks, and the Pipecat voice-agent framework ships MoQ transport support (https://github.com/pipecat-ai/pipecat). TTS output written faster than real-time plays smoothly via `@moq/watch` buffered playback (`latency-max`). Background: https://moq.dev/blog/webrtc-is-the-problem and https://doc.moq.dev/concept/use-case/ai
 
-**Real-time data, no media at all**. Chat, multiplayer game state, telemetry, collaborative apps: publish raw tracks with `@moq/net` or `moq-net`. Helpers: `moq-json` / `@moq/json` (JSON snapshots, merge-patch deltas, append logs) and `moq-flate` / `@moq/flate` (compression). A synchronized-clock example lives in `js/clock`. Same relays, same auth as media.
+**Real-time data, no media at all**. Chat, multiplayer game state, telemetry, collaborative apps: publish raw tracks with `@moq/net` or `moq-net`. Helpers: `moq-json` / `@moq/json` (JSON snapshots, merge-patch deltas, append logs) and `moq-flate` / `@moq/flate` (compression). A synchronized-clock example lives in `js/clock`. Same relays, same auth as media. Rule of thumb: anything that can be delta encoded or dropped when stale is a good fit for MoQ.
 
-**Interactive streams (Twitch-plays)**. Combine both directions: media down, input tracks up. MoQ Boy (`rs/moq-boy`, `demo/boy`) is a crowd-controlled Game Boy doing exactly this: https://moq.dev/blog/moq-boy
+**Interactive streams and teleoperation**. Combine both directions: media down, input tracks up. MoQ Boy (`rs/moq-boy`, `demo/boy`) is a crowd-controlled Game Boy doing exactly this: https://moq.dev/blog/moq-boy. The same shape covers flying drones, controlling robots, and remote vehicle operation; some companies start from MoQ Boy and replace the emulator with a robot.
 
 **Cloud gaming / remote desktop**. Screen capture and low-latency hardware encoding via `rs/moq-video` (camera and display sources on macOS/Windows/Linux, plus window capture), sub-100ms playback in the browser.
 
 **Native and mobile apps**. One Rust core (`rs/moq-ffi`) with idiomatic bindings: Python (asyncio), Kotlin (coroutines/Flow, Android), Swift (async sequences, iOS/macOS), Go, and C (`rs/libmoq` for C/C++ build systems). Index: https://doc.moq.dev/lib/
 
-**Your own CDN**. `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-token`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Or skip self-hosting: moq-lite is forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). Native apps can also connect P2P via Iroh.
+**Global delivery, hosted or self-hosted**. Don't want to run infrastructure? https://moq.pro offers most of these libraries behind an API and a global CDN, with more CDN providers to come; moq-lite is also forwards-compatible with IETF moq-transport, so it runs over third-party CDNs like Cloudflare (https://moq.dev/blog/first-cdn). To self-host: `moq-relay` clusters across regions (https://doc.moq.dev/bin/relay/cluster), authenticates with path-scoped JWTs (`moq-token`, https://doc.moq.dev/bin/relay/auth), and exposes live traffic stats as MoQ tracks (`rs/moq-stats`). Load-test with `rs/moq-bench`. Native apps can also connect P2P via Iroh.
 
 **Web playback/capture on any site**. `<moq-watch>` and `<moq-publish>` are plain web components with optional UI overlays; embeddable with no build step. Docs: https://doc.moq.dev/lib/js/@moq/watch and https://doc.moq.dev/lib/js/@moq/publish
 
@@ -43,11 +48,9 @@ Everything below builds on these two. Custom applications can extend hang with t
 - `js/` TypeScript, published as `@moq/*`: `net`, `hang`, `watch`, `publish`, `token`, `json`, `signals`.
 - `py/`, `swift/`, `kt/`, `go/` bindings; `cpp/obs` OBS plugin; `demo/` runnable demos.
 
-Note: some crates are in-tree but not yet on crates.io (e.g. `moq-video`, `moq-transcode`); check https://crates.io before depending on one, or build from the repo.
-
 ## Getting started
 
-- Every client connects to a relay URL; the path scopes auth and broadcast names append to it. Public dev relay: `https://cdn.moq.dev/anon` (unauthenticated, testing only, pick a unique name). Local: `cargo install moq-relay`, or clone the repo and `nix develop -c just` to run a relay, demo media, and web UI together.
+- Every client connects to a relay URL; the path scopes auth and broadcast names append to it. Public dev relay: `https://cdn.moq.dev/anon` (unauthenticated, testing only, pick a unique name). Hosted production relays: https://moq.pro. Local: `cargo install moq-relay`, or clone the repo and `nix develop -c just` to run a relay, demo media, and web UI together.
 - Media broadcast names end in `.hang` (selects the hang catalog; `.msf` selects the IETF MSF format).
 - Browsers need WebTransport (Chrome/Edge; Firefox/Safari experimental) and, outside localhost, a real TLS certificate.
 - Auth is a JWT in the `?jwt=` query parameter, signed by `moq-token`.
