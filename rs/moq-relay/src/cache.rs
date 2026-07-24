@@ -43,13 +43,14 @@ pub struct CacheConfig {
 	#[arg(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
 
-	/// Maximum age of any cached group, e.g. "30s" or "500ms".
+	/// Maximum age of a non-latest cached group, e.g. "30s" or "500ms".
 	///
 	/// Caps each track's own retention window: a publisher advertising a longer
-	/// window is clamped down to this, so the relay never holds a group longer
-	/// than this regardless of what upstream asks for. This bounds memory by age
-	/// where `capacity` bounds it by bytes. Unbounded (each track keeps its own
-	/// window) when unset.
+	/// window is clamped down to this, so the relay never holds an old group
+	/// longer than this regardless of what upstream asks for. The latest group of
+	/// every track is always retained, as it is the live edge. This bounds memory
+	/// by age where `capacity` bounds it by bytes. Unbounded (each track keeps its
+	/// own window) when unset.
 	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
 	#[serde(default, with = "humantime_serde")]
 	pub duration: Option<Duration>,
@@ -61,8 +62,9 @@ pub struct Cache {
 	/// The shared byte-budget pool every session's groups register with.
 	pub pool: cache::Pool,
 
-	/// Ceiling on how long any cached group is retained. [`Duration::MAX`] imposes
-	/// no ceiling, leaving each track's own window in force.
+	/// Ceiling on how long a non-latest group is retained (the latest group of every
+	/// track is always kept). [`Duration::MAX`] imposes no ceiling, leaving each
+	/// track's own window in force.
 	pub duration: Duration,
 }
 

@@ -215,6 +215,24 @@ duration = "30s"
 		);
 	}
 
+	/// `cache.duration` is an `Option<Duration>` behind plain `humantime_serde`
+	/// (not `humantime_serde::option`), so pin both directions including the
+	/// `None` serialize path, which the merge test above never exercises.
+	#[test]
+	fn cache_duration_serde_round_trip() {
+		let set: CacheConfig = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+
+		let unset: CacheConfig = toml::from_str("").expect("deserialize absent");
+		assert_eq!(unset.duration, None);
+
+		let encoded = toml::to_string(&set).expect("serialize Some");
+		let decoded: CacheConfig = toml::from_str(&encoded).expect("re-deserialize");
+		assert_eq!(decoded.duration, set.duration, "round trip must preserve the duration");
+
+		toml::to_string(&unset).expect("serialize None");
+	}
+
 	/// Serializes tests that touch `MOQ_CLUSTER_LINGER`. Same rationale as
 	/// `STATS_ENV_LOCK`.
 	static LINGER_ENV_LOCK: Mutex<()> = Mutex::new(());

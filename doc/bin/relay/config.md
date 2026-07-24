@@ -420,10 +420,11 @@ capacity = "8GiB"
 # `capacity` to also cap the absolute size.
 headroom = "2GiB"
 
-# Maximum age of any cached group ("30s", "500ms"). Caps each track's own
-# retention window: a publisher advertising a longer window is clamped down to
-# this, so the relay never holds a group longer than this no matter what
-# upstream asks for. Unbounded (each track keeps its own window) when unset.
+# Maximum age of a non-latest cached group ("30s", "500ms"). Caps each track's
+# own retention window: a publisher advertising a longer window is clamped down
+# to this, so the relay never holds an old group longer than this no matter what
+# upstream asks for. The latest group of every track is always retained, as it
+# is the live edge. Unbounded (each track keeps its own window) when unset.
 duration = "30s"
 ```
 
