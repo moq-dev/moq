@@ -240,14 +240,14 @@ export class Decoder {
 			this.#prevFloor = floor;
 			return;
 		}
+		// When the timer fires, the floor read above is still current: any change would have rerun
+		// this effect (tearing down the timer), so compare it against the pre-change baseline directly.
 		const baseline = this.#prevFloor;
-		const timer = setTimeout(() => {
-			const settled = latencyBounds(this.sync.in.latency.peek()).min;
+		effect.timer(() => {
 			const toMs = (b: Bound): number => (b === "real-time" ? 0 : b);
-			if (toMs(settled) > toMs(baseline)) this.reset();
-			this.#prevFloor = settled;
+			if (toMs(floor) > toMs(baseline)) this.reset();
+			this.#prevFloor = floor;
 		}, LATENCY_REANCHOR_DEBOUNCE_MS);
-		effect.cleanup(() => clearTimeout(timer));
 	}
 
 	#runDecoder(effect: Effect): void {
