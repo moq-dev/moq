@@ -20,8 +20,8 @@ use windows::Win32::Graphics::Direct3D11::{
 	ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
-	DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-	IDXGIOutputDuplication, IDXGIResource,
+	DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter,
+	IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -35,6 +35,42 @@ const DEFAULT_FRAMERATE: u32 = 30;
 
 fn err(ctx: &str, e: windows::core::Error) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+}
+
+/// List the outputs on the same adapter [`open`] can capture.
+pub(super) fn displays() -> Result<Vec<super::Display>, Error> {
+	let device = d3d11::create_device()?;
+	let adapter = adapter(&device)?;
+	let mut displays = Vec::new();
+
+	for index in 0.. {
+		let output = match unsafe { adapter.EnumOutputs(index) } {
+			Ok(output) => output,
+			Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+			Err(error) => return Err(err("EnumOutputs", error)),
+		};
+		let desc = unsafe { output.GetDesc().map_err(|error| err("GetDesc", error))? };
+		if !desc.AttachedToDesktop.as_bool() {
+			continue;
+		}
+
+		let name_end = desc
+			.DeviceName
+			.iter()
+			.position(|character| *character == 0)
+			.unwrap_or(desc.DeviceName.len());
+		let name = String::from_utf16_lossy(&desc.DeviceName[..name_end]);
+		let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
+		let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
+		displays.push(super::Display {
+			id: format!("display:{index}"),
+			name,
+			width,
+			height,
+		});
+	}
+
+	Ok(displays)
 }
 
 /// Open a display capture and stream its frames over a pump thread.
@@ -295,10 +331,7 @@ fn select_output(selector: Option<&str>) -> Result<u32, Error> {
 
 /// Get the `index`th output (monitor) attached to the device's adapter.
 fn enumerate_output(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1, Error> {
-	let dxgi = device
-		.cast::<IDXGIDevice>()
-		.map_err(|e| err("device is not a DXGI device", e))?;
-	let adapter: IDXGIAdapter = unsafe { dxgi.GetAdapter().map_err(|e| err("GetAdapter", e))? };
+	let adapter = adapter(device)?;
 	let output = unsafe {
 		adapter
 			.EnumOutputs(index)
@@ -307,6 +340,14 @@ fn enumerate_output(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1, E
 	output
 		.cast::<IDXGIOutput1>()
 		.map_err(|e| err("output is not IDXGIOutput1", e))
+}
+
+/// The DXGI adapter backing a Direct3D device.
+fn adapter(device: &ID3D11Device) -> Result<IDXGIAdapter, Error> {
+	let dxgi = device
+		.cast::<IDXGIDevice>()
+		.map_err(|e| err("device is not a DXGI device", e))?;
+	unsafe { dxgi.GetAdapter().map_err(|e| err("GetAdapter", e)) }
 }
 
 /// Start duplicating `output` on `device`.
