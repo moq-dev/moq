@@ -21,7 +21,7 @@ import asyncio
 import moq
 
 async def main():
-    async with moq.connect("https://relay.quic.video") as client:
+    async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
             catalog = await announcement.broadcast.catalog()
 
@@ -41,7 +41,7 @@ import asyncio
 import moq
 
 async def main():
-    async with moq.Client("https://relay.quic.video") as client:
+    async with moq.Client("https://cdn.moq.dev/anon") as client:
         broadcast = client.create_broadcast("my-stream")
 
         # Publish an Opus audio track (init bytes from your encoder)
@@ -89,7 +89,7 @@ import moq
 
 origin = moq.OriginProducer()
 client = moq.Client(
-    "https://relay.quic.video",
+    "https://cdn.moq.dev/anon",
     publish=origin,
     subscribe=origin,
 )
