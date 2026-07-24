@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(moq-mux,moq-boy)* mark discontinuities, and never time a sample across one ([#2475](https://github.com/moq-dev/moq/pull/2475))
+- List V4L2 and Media Foundation cameras on Linux and Windows, and list DXGI
+  displays on Windows, using identifiers accepted by `capture::Source`.
 
 ### Other
 
