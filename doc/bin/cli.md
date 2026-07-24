@@ -73,7 +73,7 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
 
   Both may be given at once (dial a relay *and* accept incoming sessions).
   `--origin <id>` pins the process's origin id (default: fresh and random per
-  run); see [Redundant Publishers](#redundant-publishers-1-1).
+  run); see [Redundant Publishers](#redundant-publishers-11).
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`

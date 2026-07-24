@@ -85,8 +85,9 @@ impl MoqSide {
 	/// Mint the origin all broadcasts route through: the pinned `--origin` id
 	/// when set, otherwise fresh and random.
 	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
+		use anyhow::Context;
 		Ok(match self.origin {
-			Some(id) => moq_net::Origin::new(id).map_err(|err| anyhow::anyhow!("--origin {id}: {err}"))?,
+			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
 			None => moq_net::Origin::random(),
 		}
 		.produce())
