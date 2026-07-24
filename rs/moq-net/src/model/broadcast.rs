@@ -167,6 +167,16 @@ struct BroadcastState {
 	route: Route,
 	route_epoch: u64,
 
+	// Every route currently attached at this path, in preference order with the
+	// serving (active) route first. Mirrored from the origin's source table for
+	// route-fed broadcasts so sessions can pick a different route per peer; an
+	// ordinary broadcast holds just its own route. `routes_epoch` bumps on any
+	// table change, including ones that leave the active route untouched (a
+	// standby attaching or repricing), which is why it is tracked separately
+	// from `route_epoch`.
+	routes: Vec<Route>,
+	routes_epoch: u64,
+
 	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
 	// tell a deliberate shutdown apart from a producer dropped by accident.
 	closing: bool,
@@ -404,9 +414,30 @@ impl Producer {
 		if state.route == route {
 			return Ok(());
 		}
-		state.route = route;
+		state.route = route.clone();
 		state.route_epoch += 1;
+		// An ordinary broadcast's table is just its own route; a route-fed one is
+		// overwritten by the next `set_routes` from the origin.
+		state.routes = vec![route];
+		state.routes_epoch += 1;
 		Ok(())
+	}
+
+	/// Replace the full route table, in preference order with the active route
+	/// first. Set by the origin's front on every source-table change; the active
+	/// route doubles as the broadcast's advertised [`Route`].
+	pub(crate) fn set_routes(&mut self, routes: Vec<Route>) {
+		let mut state = self.state.lock();
+		if let Some(active) = routes.first()
+			&& state.route != *active
+		{
+			state.route = active.clone();
+			state.route_epoch += 1;
+		}
+		if state.routes != routes {
+			state.routes = routes;
+			state.routes_epoch += 1;
+		}
 	}
 
 	/// Poll for the next spliced track awaiting a serving route, returning its name
@@ -444,6 +475,7 @@ impl Producer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -668,6 +700,7 @@ impl Dynamic {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -735,6 +768,9 @@ pub struct Consumer {
 	// The route epoch last yielded by `route_changed`, so each consumer clone
 	// observes the current route first and every change after it exactly once.
 	route_seen: Option<u64>,
+	// Same cursor for the full route table (`routes_changed`), tracked separately
+	// because the table can change without the active route moving.
+	routes_seen: Option<u64>,
 	// Egress stats scope, set by a tagged `origin::Consumer` at the broadcast
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
@@ -750,6 +786,7 @@ impl Clone for Consumer {
 			// Reset the cursor so the clone observes the current route first,
 			// even if the original already drained `route_changed`.
 			route_seen: None,
+			routes_seen: None,
 			stats: self.stats.clone(),
 		}
 	}
@@ -798,6 +835,34 @@ impl Consumer {
 	/// every update. Returns [`Error::Dropped`] once every producer is gone.
 	pub async fn route_changed(&mut self) -> Result<Route, Error> {
 		kio::wait(|waiter| self.poll_route_changed(waiter)).await
+	}
+
+	/// Every route currently attached at this path, in preference order with the
+	/// serving (active) route first. An ordinary broadcast holds just its own
+	/// route; a route-fed one mirrors the origin's source table so sessions can
+	/// advertise a different route per peer.
+	pub(crate) fn routes(&self) -> Vec<Route> {
+		self.state.read().routes.clone()
+	}
+
+	/// Poll for any change to the route table, including ones that leave the
+	/// active route untouched (a standby attaching, detaching, or repricing).
+	/// The first call is ready immediately; read the table with [`Self::routes`].
+	pub(crate) fn poll_routes_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let seen = self.routes_seen;
+		if let Poll::Ready(state) = self.state.poll(waiter, |state| {
+			if seen != Some(state.routes_epoch) {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			self.routes_seen = Some(state.routes_epoch);
+			return Poll::Ready(Ok(()));
+		}
+		// No pending change: surface the broadcast's end instead of parking forever.
+		ready!(self.alive.poll_closed(waiter));
+		Poll::Ready(Err(Error::Dropped))
 	}
 
 	/// Get a handle to a track on this broadcast.
@@ -950,6 +1015,7 @@ impl WeakConsumer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
 		}
 	}
