@@ -587,14 +587,12 @@ pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -
 	let (codec_id, codec_private) = match &config.codec {
 		AudioCodec::Opus => (
 			"A_OPUS",
-			Some(
-				crate::codec::opus::Config {
-					sample_rate: config.sample_rate,
-					channel_count: config.channel_count,
-				}
-				.encode()?
-				.to_vec(),
-			),
+			Some(match &config.description {
+				Some(description) => description.to_vec(),
+				None => crate::codec::opus::Config::new(config.sample_rate, config.channel_count)
+					.encode()?
+					.to_vec(),
+			}),
 		),
 		AudioCodec::AAC(_) => (
 			"A_AAC",

@@ -204,12 +204,7 @@ const VP9_KEYFRAME: &[u8] = &[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0x
 
 /// Build an enhanced-RTMP FLV: VP9 video + Opus audio via the FourCC payloads.
 fn synth_enhanced_flv() -> Vec<u8> {
-	let head = crate::codec::opus::Config {
-		sample_rate: 48000,
-		channel_count: 2,
-	}
-	.encode()
-	.unwrap();
+	let head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap();
 
 	let mut out = Vec::new();
 	out.extend_from_slice(b"FLV");

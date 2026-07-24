@@ -117,6 +117,7 @@ impl From<Config> for hang::catalog::AudioConfig {
 			config.sample_rate,
 			config.channel_count,
 		);
+		audio.description = config.encode().ok();
 		audio.container = hang::catalog::Container::Legacy;
 		audio
 	}

@@ -55,6 +55,7 @@ import {
 import type * as Catalog from "../../catalog";
 import * as Aac from "../../util/aac";
 import * as Hex from "../../util/hex";
+import * as Opus from "../../util/opus";
 
 // Identity matrix for tkhd/mvhd (stored as 16.16 fixed point)
 const IDENTITY_MATRIX = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];
@@ -839,10 +840,9 @@ function createEsdsBox(sampleRate: number, channelCount: number, description?: s
  * See https://opus-codec.org/docs/opus_in_isobmff.html
  */
 function createDOpsBox(channelCount: number, sampleRate: number, description?: string): Uint8Array {
-	// If description is provided, it's the OpusHead without the magic signature
 	if (description) {
-		const opusHead = Hex.toBytes(description);
-		const dOpsSize = 8 + opusHead.length;
+		const payload = Opus.toDOps(Hex.toBytes(description));
+		const dOpsSize = 8 + payload.length;
 		const dOps = new Uint8Array(dOpsSize);
 		const view = new DataView(dOps.buffer);
 
@@ -851,7 +851,7 @@ function createDOpsBox(channelCount: number, sampleRate: number, description?: s
 		dOps[5] = 0x4f; // 'O'
 		dOps[6] = 0x70; // 'p'
 		dOps[7] = 0x73; // 's'
-		dOps.set(opusHead, 8);
+		dOps.set(payload, 8);
 
 		return dOps;
 	}

@@ -30,7 +30,7 @@ pub struct Config {
 	/// catalog; anything else resamples.
 	pub sample_rate: Option<u32>,
 	/// Channel count to emit. `None` uses the codec's native count; anything
-	/// else is rejected, since remapping isn't implemented.
+	/// else remixes mono and stereo at the decode boundary.
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group.
 	///
@@ -61,6 +61,7 @@ pub struct Decoder {
 	inner: *mut OpusDecoder,
 	sample_rate: u32,
 	channel_count: u32,
+	pre_skip_remaining: usize,
 	max_frame_size: usize,
 }
 
@@ -73,14 +74,14 @@ impl Decoder {
 	/// Parses the OpusHead `description` if present; falls back to the catalog's
 	/// declared sample rate / channel count.
 	pub fn new(catalog: &hang::catalog::AudioConfig) -> Result<Self, Error> {
-		let (sample_rate, channel_count) = if let Some(desc) = &catalog.description {
+		let (sample_rate, channel_count, pre_skip) = if let Some(desc) = &catalog.description {
 			let mut buf = desc.as_ref();
 			match moq_mux::codec::opus::Config::parse(&mut buf) {
-				Ok(head) => (head.sample_rate, head.channel_count),
-				Err(_) => (catalog.sample_rate, catalog.channel_count),
+				Ok(head) => (head.sample_rate, head.channel_count, head.pre_skip),
+				Err(_) => (catalog.sample_rate, catalog.channel_count, 0),
 			}
 		} else {
-			(catalog.sample_rate, catalog.channel_count)
+			(catalog.sample_rate, catalog.channel_count, 0)
 		};
 
 		opus::validate_rate(sample_rate)?;
@@ -94,11 +95,13 @@ impl Decoder {
 		}
 
 		let max_frame_size = (sample_rate as usize * MAX_FRAME_MS) / 1000;
+		let pre_skip_remaining = (pre_skip as usize * sample_rate as usize) / 48_000;
 
 		Ok(Self {
 			inner,
 			sample_rate,
 			channel_count,
+			pre_skip_remaining,
 			max_frame_size,
 		})
 	}
@@ -132,6 +135,13 @@ impl Decoder {
 			return Err(opus::error(samples, "opus_decode_float"));
 		}
 		out.truncate(samples as usize * self.channel_count as usize);
+		let trim_frames = self.pre_skip_remaining.min(samples as usize);
+		if trim_frames > 0 {
+			let trim_samples = trim_frames * self.channel_count as usize;
+			out.copy_within(trim_samples.., 0);
+			out.truncate(out.len() - trim_samples);
+			self.pre_skip_remaining -= trim_frames;
+		}
 		Ok(out)
 	}
 }
