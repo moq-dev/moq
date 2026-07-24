@@ -37,6 +37,10 @@ pub struct Options {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets the codec pick.
 	pub bitrate: Option<u32>,
+	/// Enable Opus in-band forward error correction.
+	pub fec: bool,
+	/// Enable Opus discontinuous transmission during silence.
+	pub dtx: bool,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
 	pub frame_duration: Duration,
 }
@@ -49,6 +53,8 @@ impl Default for Options {
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
+			fec: false,
+			dtx: false,
 			frame_duration: Duration::from_millis(20),
 		}
 	}
@@ -63,6 +69,8 @@ impl Options {
 			sample_rate: self.sample_rate,
 			channels: self.channels,
 			bitrate: self.bitrate,
+			fec: self.fec,
+			dtx: self.dtx,
 			frame_duration: self.frame_duration,
 		}
 	}
@@ -156,6 +164,16 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`used`](moq_net::track::Producer::used) / [`unused`](moq_net::track::Producer::unused).
 	pub fn track(&self) -> &moq_net::track::Producer {
 		self.track.track()
+	}
+
+	/// Current encoder target bitrate in bits per second.
+	pub fn bitrate(&self) -> u64 {
+		self.encoder.bitrate()
+	}
+
+	/// Retune the live encoder to `bitrate` bits per second.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		self.encoder.set_bitrate(bitrate)
 	}
 
 	/// Re-anchor the timeline to the next frame's timestamp, dropping any

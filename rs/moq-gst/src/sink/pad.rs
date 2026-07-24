@@ -140,10 +140,7 @@ impl Pad {
 					"multichannel Opus is not supported yet (channels={channels})"
 				);
 				ensure!(rate > 0, "Opus caps has non-positive sample rate {rate}");
-				let config = moq_mux::codec::opus::Config {
-					sample_rate: rate as u32,
-					channel_count: channels as u32,
-				};
+				let config = moq_mux::codec::opus::Config::new(rate as u32, channels as u32);
 				// Opus builds its config from caps (not an OpusHead init buffer), so it constructs the codec
 				// importer directly and lifts it into a `Track` via `.into()`.
 				let name = broadcast.unique_name(".opus");

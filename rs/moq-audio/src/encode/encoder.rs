@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use unsafe_libopus::{
-	OPUS_APPLICATION_AUDIO, OPUS_OK, OPUS_SET_BITRATE_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
+	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_SET_BITRATE_REQUEST,
+	OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
 	opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
@@ -107,6 +108,10 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// Bitrate in bits per second. `None` lets the codec pick.
 	pub bitrate: Option<u32>,
+	/// Enable Opus in-band forward error correction.
+	pub fec: bool,
+	/// Enable Opus discontinuous transmission during silence.
+	pub dtx: bool,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
 	pub frame_duration: Duration,
 }
@@ -120,6 +125,8 @@ impl Config {
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
+			fec: false,
+			dtx: false,
 			frame_duration: Duration::from_millis(20),
 		}
 	}
@@ -138,6 +145,10 @@ pub struct Encoder {
 	codec_rate: u32,
 	/// Resolved codec channel count (currently always the input's).
 	codec_channels: u32,
+	/// Current libopus target bitrate.
+	bitrate: u64,
+	/// Encoder lookahead expressed in the OpusHead 48 kHz timebase.
+	pre_skip: u16,
 	frame_size: usize,
 	scratch: Vec<u8>,
 }
@@ -179,28 +190,88 @@ impl Encoder {
 			return Err(opus::error(err, "opus_encoder_create"));
 		}
 
-		if let Some(b) = config.bitrate {
-			// SAFETY: `inner` is a freshly-created encoder; varargs! produces
-			// the single i32 the SET_BITRATE request expects.
-			let rc = unsafe { opus_encoder_ctl_impl(inner, OPUS_SET_BITRATE_REQUEST, varargs![b as i32]) };
-			if rc != OPUS_OK {
+		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels);
+		let (bitrate, pre_skip) = match configured {
+			Ok(configured) => configured,
+			Err(err) => {
 				// SAFETY: `inner` was created above and not yet handed out.
 				unsafe { opus_encoder_destroy(inner) };
-				return Err(opus::error(rc, "OPUS_SET_BITRATE"));
+				return Err(err);
 			}
-		}
+		};
 
 		Ok(Self {
 			inner,
 			config,
 			codec_rate,
 			codec_channels,
+			bitrate,
+			pre_skip,
 			frame_size,
 			scratch: vec![0u8; MAX_PACKET_BYTES],
 		})
 	}
 
-	/// The config this encoder opened with.
+	fn configure_opus(
+		inner: *mut OpusEncoder,
+		config: &Config,
+		codec_rate: u32,
+		codec_channels: u32,
+	) -> Result<(u64, u16), Error> {
+		if let Some(bitrate) = config.bitrate {
+			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64)?;
+		}
+		Self::set_opus_ctl(
+			inner,
+			OPUS_SET_INBAND_FEC_REQUEST,
+			i32::from(config.fec),
+			"OPUS_SET_INBAND_FEC",
+		)?;
+		Self::set_opus_ctl(inner, OPUS_SET_DTX_REQUEST, i32::from(config.dtx), "OPUS_SET_DTX")?;
+
+		let bitrate = Self::get_opus_ctl(inner, OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
+		let bitrate = u64::try_from(bitrate)
+			.map_err(|_| Error::Unsupported(format!("Opus reported negative bitrate {bitrate}")))?;
+		let lookahead = Self::get_opus_ctl(inner, OPUS_GET_LOOKAHEAD_REQUEST, "OPUS_GET_LOOKAHEAD")?;
+		let lookahead = u64::try_from(lookahead)
+			.map_err(|_| Error::Unsupported(format!("Opus reported negative lookahead {lookahead}")))?;
+		let pre_skip = u16::try_from((lookahead * 48_000) / codec_rate as u64)
+			.map_err(|_| Error::Unsupported(format!("Opus lookahead {lookahead} does not fit in OpusHead")))?;
+
+		Ok((bitrate, pre_skip))
+	}
+
+	fn set_opus_bitrate(inner: *mut OpusEncoder, channels: u32, bitrate: u64) -> Result<(), Error> {
+		let max = 300_000 * channels as u64;
+		if !(500..=max).contains(&bitrate) {
+			return Err(Error::Unsupported(format!(
+				"Opus bitrate must be between 500 and {max} bits per second for {channels} channel(s), got {bitrate}"
+			)));
+		}
+		Self::set_opus_ctl(inner, OPUS_SET_BITRATE_REQUEST, bitrate as i32, "OPUS_SET_BITRATE")
+	}
+
+	fn set_opus_ctl(inner: *mut OpusEncoder, request: i32, value: i32, name: &'static str) -> Result<(), Error> {
+		// SAFETY: `inner` owns a live encoder and each request here expects one i32.
+		let rc = unsafe { opus_encoder_ctl_impl(inner, request, varargs![value]) };
+		if rc != OPUS_OK {
+			return Err(opus::error(rc, name));
+		}
+		Ok(())
+	}
+
+	fn get_opus_ctl(inner: *mut OpusEncoder, request: i32, name: &'static str) -> Result<i32, Error> {
+		let mut value = 0;
+		// SAFETY: `inner` owns a live encoder and each request here expects one
+		// valid mutable i32 output.
+		let rc = unsafe { opus_encoder_ctl_impl(inner, request, varargs![&mut value]) };
+		if rc != OPUS_OK {
+			return Err(opus::error(rc, name));
+		}
+		Ok(value)
+	}
+
+	/// The encoder config, including the latest accepted runtime bitrate.
 	pub fn config(&self) -> &Config {
 		&self.config
 	}
@@ -227,6 +298,22 @@ impl Encoder {
 	/// [`encode`](Self::encode).
 	pub fn frame_size(&self) -> usize {
 		self.frame_size
+	}
+
+	/// Current target bitrate in bits per second.
+	pub fn bitrate(&self) -> u64 {
+		self.bitrate
+	}
+
+	/// Retune the live Opus encoder to `bitrate` bits per second.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		if bitrate == self.bitrate {
+			return Ok(());
+		}
+		Self::set_opus_bitrate(self.inner, self.codec_channels, bitrate)?;
+		self.bitrate = bitrate;
+		self.config.bitrate = Some(bitrate as u32);
+		Ok(())
 	}
 
 	/// Encode one frame of interleaved `f32` PCM at [`codec_rate`](Self::codec_rate).
@@ -263,16 +350,14 @@ impl Encoder {
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
 		// `codec_channels` is validated to mono/stereo at encoder construction, so the
 		// OpusHead (channel mapping family 0) always encodes.
-		let head = moq_mux::codec::opus::Config {
-			sample_rate: self.codec_rate,
-			channel_count: self.codec_channels,
-		}
-		.encode()
-		.expect("opus encoder channels validated to mono/stereo");
+		let head = moq_mux::codec::opus::Config::new(self.codec_rate, self.codec_channels)
+			.with_pre_skip(self.pre_skip)
+			.encode()
+			.expect("opus encoder channels validated to mono/stereo");
 
 		let mut config =
 			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.codec_rate, self.codec_channels);
-		config.bitrate = self.config.bitrate.map(|b| b as u64);
+		config.bitrate = self.config.bitrate.map(u64::from);
 		config.description = Some(head);
 		config.container = hang::catalog::Container::Legacy;
 		config
@@ -369,6 +454,75 @@ mod tests {
 		assert_eq!(cfg.bitrate, Some(64_000));
 		let desc = cfg.description.expect("OpusHead should be present");
 		assert_eq!(desc.len(), 19);
+		let head = moq_mux::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
+		assert_eq!(head.pre_skip, enc.pre_skip);
+		assert_eq!(head.pre_skip, 312);
+	}
+
+	#[test]
+	fn opus_decoder_trims_encoder_lookahead_once() {
+		let mut enc = Encoder::new(&Config::new(stereo_48k())).unwrap();
+		let mut dec = Decoder::new(&enc.catalog()).unwrap();
+		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
+
+		let first = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
+		assert_eq!(
+			first.len(),
+			(enc.frame_size() - enc.pre_skip as usize) * enc.codec_channels() as usize
+		);
+
+		let second = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
+		assert_eq!(second.len(), frame.len());
+	}
+
+	#[test]
+	fn opus_runtime_bitrate_updates_encoder_state() {
+		let mut enc = Encoder::new(&Config {
+			bitrate: Some(64_000),
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+
+		enc.set_bitrate(32_000).unwrap();
+		assert_eq!(enc.bitrate(), 32_000);
+		assert_eq!(enc.config().bitrate, Some(32_000));
+		assert_eq!(
+			Encoder::get_opus_ctl(enc.inner, unsafe_libopus::OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE").unwrap(),
+			32_000
+		);
+	}
+
+	#[test]
+	fn opus_runtime_bitrate_rejects_values_libopus_would_clamp() {
+		let mut enc = Encoder::new(&Config::new(stereo_48k())).unwrap();
+		let original = enc.bitrate();
+		assert!(enc.set_bitrate(1).is_err());
+		assert!(enc.set_bitrate(600_001).is_err());
+		assert_eq!(enc.bitrate(), original);
+	}
+
+	#[test]
+	fn opus_applies_fec_and_dtx_controls() {
+		let enc = Encoder::new(&Config {
+			fec: true,
+			dtx: true,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+
+		assert_eq!(
+			Encoder::get_opus_ctl(
+				enc.inner,
+				unsafe_libopus::OPUS_GET_INBAND_FEC_REQUEST,
+				"OPUS_GET_INBAND_FEC"
+			)
+			.unwrap(),
+			1
+		);
+		assert_eq!(
+			Encoder::get_opus_ctl(enc.inner, unsafe_libopus::OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX").unwrap(),
+			1
+		);
 	}
 
 	#[test]
@@ -392,5 +546,6 @@ mod tests {
 		.unwrap();
 		assert_eq!(enc.codec_rate(), 24_000);
 		assert_eq!(enc.catalog().sample_rate, 24_000);
+		assert_eq!(enc.pre_skip, 312);
 	}
 }

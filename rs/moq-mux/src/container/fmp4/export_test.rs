@@ -523,6 +523,25 @@ async fn opus_frame_duration_from_toc() {
 	);
 }
 
+#[test]
+fn synthesize_opus_trak_preserves_pre_skip() {
+	use hang::catalog::{AudioCodec, AudioConfig};
+
+	let head = crate::codec::opus::Config::new(48_000, 2)
+		.with_pre_skip(312)
+		.encode()
+		.unwrap();
+	let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+	config.description = Some(head);
+
+	let trak = super::synthesize_audio_trak(1, 48_000, &config).expect("synthesize Opus trak");
+	let opus = match &trak.mdia.minf.stbl.stsd.codecs[0] {
+		mp4_atom::Codec::Opus(opus) => opus,
+		other => panic!("expected Opus sample entry, got {other:?}"),
+	};
+	assert_eq!(opus.dops.pre_skip, 312);
+}
+
 /// A legacy FLAC rendition (no init segment) synthesizes a `fLaC` sample entry
 /// whose `dfLa` STREAMINFO is rebuilt from the catalog description.
 #[test]

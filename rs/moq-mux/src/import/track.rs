@@ -746,10 +746,7 @@ mod tests {
 		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
 		let subscriber = track.subscribe(None);
 
-		let config = crate::codec::opus::Config {
-			sample_rate: 48_000,
-			channel_count: 2,
-		};
+		let config = crate::codec::opus::Config::new(48_000, 2);
 		let mut import = crate::codec::opus::Import::new(track, catalog.reserve(), config.into()).unwrap();
 		assert!(catalog.snapshot().audio.renditions.contains_key("audio"));
 
