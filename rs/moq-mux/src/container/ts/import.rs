@@ -369,10 +369,7 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
 				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
 				let track = crate::import::unique_track(&mut self.broadcast, ".opus")?;
-				let config = opus::Config {
-					sample_rate: 48_000,
-					channel_count,
-				};
+				let config = opus::Config::new(48_000, channel_count);
 				Stream::Opus(Box::new(OpusStream {
 					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
 					unwrap: PtsUnwrap::default(),

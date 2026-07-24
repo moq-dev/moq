@@ -32,17 +32,37 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed Opus configuration mirroring the parsed fields of an OpusHead packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Config {
+	/// Original input sample rate in Hz.
 	pub sample_rate: u32,
+	/// Number of encoded channels.
 	pub channel_count: u32,
+	/// Number of decoded 48 kHz samples to discard at stream start.
+	pub pre_skip: u16,
 }
 
 impl Config {
+	/// Build a mono/stereo Opus config with no pre-skip.
+	pub fn new(sample_rate: u32, channel_count: u32) -> Self {
+		Self {
+			sample_rate,
+			channel_count,
+			pre_skip: 0,
+		}
+	}
+
+	/// Set the number of decoded 48 kHz samples to discard at stream start.
+	pub fn with_pre_skip(mut self, pre_skip: u16) -> Self {
+		self.pre_skip = pre_skip;
+		self
+	}
+
 	/// Parse an OpusHead buffer (RFC 7845 §5.1).
 	///
-	/// Verifies the magic signature; reads channel count and sample rate;
-	/// ignores pre-skip, gain, and channel mapping. Any trailing bytes are
-	/// consumed.
+	/// Verifies the magic signature; reads channel count, pre-skip, and sample
+	/// rate; ignores gain and channel mapping. Any trailing bytes are consumed.
 	pub fn parse<T: Buf>(buf: &mut T) -> Result<Self> {
 		if buf.remaining() < 19 {
 			return Err(Error::HeadTooShort);
@@ -54,7 +74,7 @@ impl Config {
 
 		buf.advance(1); // Skip version
 		let channel_count = buf.get_u8() as u32;
-		buf.advance(2); // Skip pre-skip
+		let pre_skip = buf.get_u16_le();
 		let sample_rate = buf.get_u32_le();
 
 		// Skip gain, channel mapping until if/when we support them.
@@ -65,11 +85,12 @@ impl Config {
 		Ok(Self {
 			sample_rate,
 			channel_count,
+			pre_skip,
 		})
 	}
 
 	/// Encode the minimal OpusHead packet (19 bytes; channel mapping family
-	/// 0, zero pre-skip and gain).
+	/// 0 and zero gain).
 	///
 	/// Errors with [`Error::UnsupportedChannelCount`] unless `channel_count` is 1
 	/// or 2, since mapping family 0 is only defined for mono/stereo per RFC 7845 §5.1.
@@ -83,7 +104,7 @@ impl Config {
 		head.extend_from_slice(b"OpusHead");
 		head.push(1); // version
 		head.push(self.channel_count as u8);
-		head.extend_from_slice(&0u16.to_le_bytes()); // pre-skip
+		head.extend_from_slice(&self.pre_skip.to_le_bytes());
 		head.extend_from_slice(&self.sample_rate.to_le_bytes());
 		head.extend_from_slice(&0i16.to_le_bytes()); // output gain
 		head.push(0); // channel mapping family (0 = mono/stereo)
@@ -147,38 +168,26 @@ mod tests {
 
 	#[test]
 	fn parses_valid_opus_head() {
-		let cfg = Config {
-			sample_rate: 48000,
-			channel_count: 2,
-		};
+		let cfg = Config::new(48_000, 2).with_pre_skip(312);
 		let encoded = cfg.encode().unwrap();
 		assert_eq!(encoded.len(), 19);
 		let parsed = Config::parse(&mut encoded.as_ref()).unwrap();
-		assert_eq!(parsed.sample_rate, 48000);
+		assert_eq!(parsed.sample_rate, 48_000);
 		assert_eq!(parsed.channel_count, 2);
+		assert_eq!(parsed.pre_skip, 312);
+		assert_eq!(parsed, cfg);
 	}
 
 	#[test]
 	fn parse_rejects_invalid_signature() {
-		let mut bytes = Config {
-			sample_rate: 48000,
-			channel_count: 1,
-		}
-		.encode()
-		.unwrap()
-		.to_vec();
+		let mut bytes = Config::new(48_000, 1).encode().unwrap().to_vec();
 		bytes[0] = b'X';
 		assert!(Config::parse(&mut bytes.as_slice()).is_err());
 	}
 
 	#[test]
 	fn encode_rejects_multichannel() {
-		let err = Config {
-			sample_rate: 48000,
-			channel_count: 6,
-		}
-		.encode()
-		.unwrap_err();
+		let err = Config::new(48_000, 6).encode().unwrap_err();
 		assert!(matches!(err, Error::UnsupportedChannelCount(6)));
 	}
 }
