@@ -7,17 +7,17 @@
 //! interleaved-`f32` PCM and publishes it as an encoded track; encoding stays on
 //! `unsafe-libopus`, so audio never touches ffmpeg.
 //!
-//! Both backends deliver buffers from a realtime callback through an async
-//! channel that the on-demand capture loop awaits, so dropping the publish
-//! future (e.g. on Ctrl+C) cancels the read and releases the device.
+//! Both backends deliver buffers from a realtime callback through a bounded
+//! async channel that the on-demand capture loop awaits, so dropping the
+//! publish future (e.g. on Ctrl+C) cancels the read and releases the device.
 
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use tokio::sync::mpsc;
 
 use crate::Error;
 
+mod channel;
 mod permission;
 
 #[cfg(target_os = "macos")]
@@ -137,7 +137,7 @@ pub(crate) async fn open(config: &Config) -> Result<Stream, Error> {
 pub(crate) struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: mpsc::UnboundedReceiver<Vec<f32>>,
+	rx: channel::Receiver<Vec<f32>>,
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -159,10 +159,10 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		let (tx, mut rx) = mpsc::unbounded_channel::<Vec<f32>>();
+		let (tx, mut rx) = channel::bounded::<Vec<f32>>();
 
-		// The callback runs on cpal's realtime audio thread; convert to f32 and
-		// forward. Keep it allocation-light and never block.
+		// The callback runs on cpal's realtime audio thread. Sample conversion
+		// allocates one Vec per callback; the bounded handoff never blocks.
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => device.build_input_stream(
 				stream_config,
@@ -225,10 +225,9 @@ impl Microphone {
 	}
 }
 
-/// Forward a buffer to the reader, ignoring send errors (receiver dropped means
-/// capture is shutting down).
-fn forward(tx: &mpsc::UnboundedSender<Vec<f32>>, samples: Vec<f32>) {
-	let _ = tx.send(samples);
+/// Forward a buffer without blocking, dropping it if the bounded queue is full.
+fn forward(tx: &channel::Sender<Vec<f32>>, samples: Vec<f32>) {
+	tx.push(samples);
 }
 
 /// An audio input reported by [`devices`].
