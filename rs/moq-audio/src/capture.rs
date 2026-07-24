@@ -11,13 +11,17 @@
 //! async channel that the on-demand capture loop awaits, so dropping the
 //! publish future (e.g. on Ctrl+C) cancels the read and releases the device.
 
-use std::time::Duration;
+use std::sync::{
+	Arc,
+	atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio::sync::mpsc;
 
 use crate::Error;
 
-mod channel;
 mod permission;
 
 #[cfg(target_os = "macos")]
@@ -52,6 +56,46 @@ impl Default for Source {
 /// timeout. Without this the capture loop hangs silently forever when macOS TCC
 /// denies microphone access.
 const FIRST_BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Roughly 320 ms at the common 10 ms callback cadence.
+const BUFFER_QUEUE_DEPTH: usize = 32;
+const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+struct DropReporter {
+	dropped: Arc<AtomicU64>,
+	last_report: Option<Instant>,
+}
+
+impl DropReporter {
+	fn new() -> Self {
+		Self {
+			dropped: Arc::new(AtomicU64::new(0)),
+			last_report: None,
+		}
+	}
+
+	fn counter(&self) -> Arc<AtomicU64> {
+		self.dropped.clone()
+	}
+
+	fn report(&mut self) {
+		if self.dropped.load(Ordering::Relaxed) == 0 {
+			return;
+		}
+
+		let now = Instant::now();
+		if self
+			.last_report
+			.is_some_and(|last| now.duration_since(last) < DROP_REPORT_INTERVAL)
+		{
+			return;
+		}
+
+		let dropped = self.dropped.swap(0, Ordering::Relaxed);
+		self.last_report = Some(now);
+		tracing::warn!(dropped, capacity = BUFFER_QUEUE_DEPTH, "dropped audio capture buffers");
+	}
+}
 
 /// Audio capture configuration. All fields are hints; the backend picks the
 /// closest supported mode and the [`encode::Producer`](crate::encode::Producer)
@@ -137,7 +181,8 @@ pub(crate) async fn open(config: &Config) -> Result<Stream, Error> {
 pub(crate) struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: channel::Receiver<Vec<f32>>,
+	rx: mpsc::Receiver<Vec<f32>>,
+	drops: DropReporter,
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -159,26 +204,36 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		let (tx, mut rx) = channel::bounded::<Vec<f32>>();
+		let (tx, mut rx) = mpsc::channel::<Vec<f32>>(BUFFER_QUEUE_DEPTH);
+		let drops = DropReporter::new();
+		let dropped = drops.counter();
 
 		// The callback runs on cpal's realtime audio thread. Sample conversion
 		// allocates one Vec per callback; the bounded handoff never blocks.
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => device.build_input_stream(
 				stream_config,
-				move |data: &[f32], _: &_| forward(&tx, data.to_vec()),
+				move |data: &[f32], _: &_| try_forward(&tx, data.to_vec(), &dropped),
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::I16 => device.build_input_stream(
 				stream_config,
-				move |data: &[i16], _: &_| forward(&tx, data.iter().map(|&s| s as f32 / 32768.0).collect()),
+				move |data: &[i16], _: &_| {
+					try_forward(&tx, data.iter().map(|&s| s as f32 / 32768.0).collect(), &dropped)
+				},
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::U16 => device.build_input_stream(
 				stream_config,
-				move |data: &[u16], _: &_| forward(&tx, data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
+				move |data: &[u16], _: &_| {
+					try_forward(
+						&tx,
+						data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect(),
+						&dropped,
+					)
+				},
 				stream_err,
 				None,
 			),
@@ -211,6 +266,7 @@ impl Microphone {
 		Ok(Self {
 			_stream: stream,
 			rx,
+			drops,
 			pending: Some(pending),
 		})
 	}
@@ -218,16 +274,23 @@ impl Microphone {
 	/// Await the next buffer of interleaved `f32` PCM, or `None` once the stream
 	/// stops. Cancel-safe: drop the future to stop reading.
 	async fn read(&mut self) -> Option<Vec<f32>> {
-		match self.pending.take() {
+		let samples = match self.pending.take() {
 			Some(samples) => Some(samples),
 			None => self.rx.recv().await, // stream dropped / device gone
-		}
+		};
+		self.drops.report();
+		samples
 	}
 }
 
 /// Forward a buffer without blocking, dropping it if the bounded queue is full.
-fn forward(tx: &channel::Sender<Vec<f32>>, samples: Vec<f32>) {
-	tx.push(samples);
+fn try_forward<T>(tx: &mpsc::Sender<T>, item: T, dropped: &AtomicU64) {
+	match tx.try_send(item) {
+		Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+		Err(mpsc::error::TrySendError::Full(_)) => {
+			dropped.fetch_add(1, Ordering::Relaxed);
+		}
+	}
 }
 
 /// An audio input reported by [`devices`].
@@ -322,4 +385,27 @@ fn stream_err(err: cpal::Error) {
 
 fn capture_err(err: impl std::fmt::Display) -> Error {
 	Error::Capture(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn drops_newest_when_full() {
+		let (tx, mut rx) = mpsc::channel(BUFFER_QUEUE_DEPTH);
+		let dropped = AtomicU64::new(0);
+		for id in 0..BUFFER_QUEUE_DEPTH + 2 {
+			try_forward(&tx, id, &dropped);
+		}
+		drop(tx);
+
+		let mut received = Vec::new();
+		while let Some(id) = rx.recv().await {
+			received.push(id);
+		}
+
+		assert_eq!(received, (0..BUFFER_QUEUE_DEPTH).collect::<Vec<_>>());
+		assert_eq!(dropped.load(Ordering::Relaxed), 2);
+	}
 }

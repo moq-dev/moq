@@ -12,6 +12,7 @@
 //! Not covered by tests: this needs the Screen Recording TCC grant and a real
 //! display, so it can't run headless.
 
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 use std::time::Duration;
 
 use block2::RcBlock;
@@ -26,10 +27,11 @@ use objc2_screen_capture_kit::{
 	SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput,
 	SCStreamOutputType, SCWindow,
 };
+use tokio::sync::{mpsc, oneshot};
 
 use crate::Error;
 
-use super::channel;
+use super::{BUFFER_QUEUE_DEPTH, DropReporter, try_forward};
 
 /// SCK's audio defaults, used when the caller doesn't pin a format.
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
@@ -52,7 +54,9 @@ struct Buffer {
 
 /// An open system-audio capture, read buffer-by-buffer via [`read`](Self::read).
 pub(crate) struct SystemAudio {
-	rx: channel::Receiver<Buffer>,
+	rx: mpsc::Receiver<Buffer>,
+	stopped: oneshot::Receiver<()>,
+	drops: DropReporter,
 	/// The first buffer, captured during [`open`](Self::open) so a missing screen
 	/// recording grant is an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -98,8 +102,11 @@ impl SystemAudio {
 			configuration.setMinimumFrameInterval(CMTime::new(1, IDLE_VIDEO_FPS));
 		}
 
-		let (tx, mut rx) = channel::bounded::<Buffer>();
-		let delegate = Delegate::new(tx);
+		let (tx, mut rx) = mpsc::channel::<Buffer>(BUFFER_QUEUE_DEPTH);
+		let drops = DropReporter::new();
+		let dropped = drops.counter();
+		let (stopped_tx, mut stopped) = oneshot::channel();
+		let delegate = Delegate::new(tx, dropped, stopped_tx);
 		let dispatch = DispatchQueue::new("dev.moq.audio.system", None);
 
 		let stream = unsafe {
@@ -120,7 +127,14 @@ impl SystemAudio {
 			_dispatch: dispatch,
 		};
 
-		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, rx.recv()).await {
+		let first = async {
+			tokio::select! {
+				biased;
+				buffer = rx.recv() => buffer,
+				_ = &mut stopped => None,
+			}
+		};
+		let pending = match tokio::time::timeout(FIRST_BUFFER_TIMEOUT, first).await {
 			Ok(Some(buffer)) => buffer,
 			Ok(None) => {
 				return Err(Error::Capture("system audio stopped before any samples".into()));
@@ -146,6 +160,8 @@ impl SystemAudio {
 
 		Ok(Self {
 			rx,
+			stopped,
+			drops,
 			pending: Some(pending.samples),
 			_guard: guard,
 		})
@@ -154,15 +170,23 @@ impl SystemAudio {
 	/// Await the next buffer of interleaved `f32` PCM, or `None` once the stream
 	/// stops. Cancel-safe: drop the future to stop reading.
 	pub(super) async fn read(&mut self) -> Option<Vec<f32>> {
-		match self.pending.take() {
+		let samples = match self.pending.take() {
 			Some(samples) => Some(samples),
-			None => Some(self.rx.recv().await?.samples),
-		}
+			None => {
+				let buffer = tokio::select! {
+					biased;
+					buffer = self.rx.recv() => buffer,
+					_ = &mut self.stopped => None,
+				};
+				buffer.map(|buffer| buffer.samples)
+			}
+		};
+		self.drops.report();
+		samples
 	}
 }
 
-/// Stops the stream on drop, which also ends the delegate callbacks and so
-/// closes the channel.
+/// Stops the stream when the capture owner is dropped.
 struct StreamGuard {
 	stream: Retained<SCStream>,
 	_delegate: Retained<Delegate>,
@@ -273,8 +297,10 @@ fn samples(sample_buffer: &CMSampleBuffer) -> Option<Buffer> {
 }
 
 struct DelegateIvars {
-	/// Closed when the stream stops so a parked `read` returns `None`.
-	tx: channel::Sender<Buffer>,
+	tx: mpsc::Sender<Buffer>,
+	dropped: Arc<AtomicU64>,
+	/// Only the stop callback takes this lock; the audio callback never parks.
+	stopped: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 define_class!(
@@ -289,7 +315,9 @@ define_class!(
 		#[unsafe(method(stream:didStopWithError:))]
 		unsafe fn did_stop(&self, _stream: &SCStream, error: &NSError) {
 			tracing::warn!(error = %error.localizedDescription(), "system audio capture stopped");
-			self.ivars().tx.close();
+			if let Some(stopped) = self.ivars().stopped.lock().unwrap().take() {
+				let _ = stopped.send(());
+			}
 		}
 	}
 
@@ -301,22 +329,26 @@ define_class!(
 				return;
 			}
 			if let Some(buffer) = samples(sample_buffer) {
-				self.ivars().tx.push(buffer);
+				try_forward(&self.ivars().tx, buffer, &self.ivars().dropped);
 			}
 		}
 	}
 );
 
 impl Delegate {
-	fn new(tx: channel::Sender<Buffer>) -> Retained<Self> {
-		let this = Self::alloc().set_ivars(DelegateIvars { tx });
+	fn new(tx: mpsc::Sender<Buffer>, dropped: Arc<AtomicU64>, stopped: oneshot::Sender<()>) -> Retained<Self> {
+		let this = Self::alloc().set_ivars(DelegateIvars {
+			tx,
+			dropped,
+			stopped: Mutex::new(Some(stopped)),
+		});
 		unsafe { msg_send![super(this), init] }
 	}
 }
 
 /// Await the async `getShareableContent` to find a display to attach to.
 async fn shareable_content() -> Result<Retained<SCShareableContent>, Error> {
-	let (tx, rx) = tokio::sync::oneshot::channel::<Result<SendObj<SCShareableContent>, String>>();
+	let (tx, rx) = oneshot::channel::<Result<SendObj<SCShareableContent>, String>>();
 	let tx = std::sync::Mutex::new(Some(tx));
 	let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
 		let result = match unsafe { Retained::retain(content) } {
@@ -341,7 +373,7 @@ async fn shareable_content() -> Result<Retained<SCShareableContent>, Error> {
 
 /// Await the async `startCapture`, surfacing any error.
 async fn start_capture(stream: &SCStream) -> Result<(), Error> {
-	let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
+	let (tx, rx) = oneshot::channel::<Option<String>>();
 	let tx = std::sync::Mutex::new(Some(tx));
 	let handler = RcBlock::new(move |error: *mut NSError| {
 		let result = (!error.is_null()).then(|| error_message(error));
