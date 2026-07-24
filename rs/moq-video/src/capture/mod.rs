@@ -69,7 +69,7 @@ pub enum Source {
 	///
 	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
 	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
-	/// Windows. Bare numeric indices remain accepted on every platform.
+	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
 	Camera(Option<String>),
 
 	/// A whole display. `None` opens the main display.
