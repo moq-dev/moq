@@ -840,47 +840,80 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::lite::publisher::test_transport::SinkSession;
+	use crate::coding::Decode;
+	use crate::lite::test_transport::SinkSession;
 	use crate::util::TaskSet;
 
+	const VERSION: Version = Version::Lite05;
+
+	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
+	/// before any of it reaches the transport.
+	///
+	/// Both halves matter: a second stream re-requests the same id, which the peer is
+	/// free to serve twice, and a late insert loses the race with a publisher that
+	/// serves its first group the instant it reads the request (`recv_group` drops a
+	/// group whose id isn't in the map yet).
 	#[tokio::test]
 	async fn establish_sends_one_registered_subscribe() {
-		let session = SinkSession::with_bi();
+		// Writes park until this opens, so the assertions below run at the exact moment
+		// the request would hit the wire.
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_bi(gate.consume());
+
 		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let (tasks, _task_set) = TaskSet::new();
 		let subscriber = Subscriber::new(SubscriberConfig {
 			session: session.clone(),
 			origin,
 			recv_bandwidth: None,
-			version: Version::Lite05,
+			version: VERSION,
 			peer_setup: Default::default(),
 			cost: None,
 			tasks,
 		});
-		let subscriptions = subscriber.subscribes.clone();
-		session.log.set_on_write(move || {
-			assert!(subscriptions.lock().contains_key(&0));
-		});
+		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
 			subscriber,
-			path: Path::new("rooms/U123/host").to_owned(),
+			path: Path::new("room/host").to_owned(),
 			name: "catalog.json".to_string(),
 		};
 
 		let mut broadcast = crate::broadcast::Info::new().produce();
 		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
 		let mut sub = Sub::None;
-		serve
-			.establish(
-				&mut producer,
-				&mut sub,
-				Subscription::default(),
-				Some(Timescale::default()),
-			)
-			.await
-			.unwrap();
+		let mut establish = std::pin::pin!(serve.establish(
+			&mut producer,
+			&mut sub,
+			Subscription::default(),
+			Some(Timescale::default()),
+		));
 
+		// Parked on the first write: the stream is open and nothing has been sent yet.
+		assert!(futures::poll!(establish.as_mut()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1);
+		assert!(subscribes.lock().contains_key(&0), "registered before the wire");
+
+		let Ok(mut open) = gate.write() else {
+			panic!("gate closed")
+		};
+		*open = true;
+		drop(open);
+
+		establish.await.unwrap();
+
+		// One request, on one stream, and nothing else behind it.
+		assert_eq!(session.log.bi_opens(), 1);
+
+		let writes = session.log.writes.lock().unwrap().clone();
+		let mut wire = writes.as_slice();
+		assert_eq!(
+			lite::ControlType::decode(&mut wire, VERSION).unwrap(),
+			lite::ControlType::Subscribe
+		);
+		let msg = lite::Subscribe::decode(&mut wire, VERSION).unwrap();
+		assert_eq!(msg.id, 0);
+		assert_eq!(msg.track, "catalog.json");
+		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 }
 
