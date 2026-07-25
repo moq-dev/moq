@@ -263,11 +263,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		loop {
 			// Await the next group while driving the in-flight group futures.
 			let group = {
-				let mut recv = std::pin::pin!(track.recv_group());
 				kio::wait(|waiter| {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					while let std::task::Poll::Ready(Some(())) = tasks.poll_next_unpin(&mut cx) {}
-					waiter.poll_future(recv.as_mut())
+					track.poll_recv_group(waiter)
 				})
 				.await
 			};

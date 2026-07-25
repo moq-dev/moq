@@ -163,17 +163,15 @@ impl Driver {
 		Poll::Ready(result)
 	}
 
-	/// Drive the session until `ready` resolves, so `connect` can block on the
+	/// Drive the session until the readiness condition resolves, so `connect` can block on the
 	/// initial announce set.
 	///
-	/// A session that dies first still resolves `ready`: the connecting producers
-	/// live inside the driver, so its completion drops them (waking `ready`) and
-	/// releases the barrier. The error isn't lost, it's cached for whoever drives
-	/// the session next.
-	pub(super) async fn wait_ready(&mut self, ready: impl Future<Output = ()>) {
-		let mut ready = std::pin::pin!(ready);
+	/// A session that dies first still resolves readiness: the connecting producers
+	/// live inside the driver, so its completion drops them and releases the barrier.
+	/// The error isn't lost, it's cached for whoever drives the session next.
+	pub(super) async fn wait_ready(&mut self, poll_ready: impl Fn(&kio::Waiter) -> Poll<()>) {
 		kio::wait(|waiter| {
-			if waiter.poll_future(ready.as_mut()).is_ready() {
+			if poll_ready(waiter).is_ready() {
 				return Poll::Ready(());
 			}
 			let _ = self.poll(waiter);
