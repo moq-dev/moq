@@ -72,13 +72,6 @@ const syncPreview = () => publish.setAttribute("preview", encodedEl.checked ? "e
 encodedEl.addEventListener("change", syncPreview);
 syncPreview();
 
-const rotationEl = $<HTMLSelectElement>("rotation");
-const syncRotation = () => {
-	publish.rotation = Number(rotationEl.value);
-};
-rotationEl.addEventListener("change", syncRotation);
-syncRotation();
-
 // ---------------------------------------------------------------------------
 // Encoder settings - reactive Signals the broadcast's encoders subscribe to.
 // ---------------------------------------------------------------------------

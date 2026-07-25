@@ -1,6 +1,5 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-import { canvasPresentationTransform, normalizeVideoRotation, rotateVideoDimensions } from "./presentation";
 import type * as Video from "./video";
 
 // What the canvas preview renders.
@@ -18,8 +17,6 @@ export type RendererInput = {
 	frame: Getter<VideoFrame | undefined>;
 	// The display size, for sizing the canvas before the first frame.
 	display: Getter<{ width: number; height: number } | undefined>;
-	// Clockwise presentation rotation in degrees.
-	rotation: Getter<number>;
 	// Whether to mirror the video horizontally.
 	flip: Getter<boolean>;
 	// The encoder to re-encode through in `encoded` mode. Falls back to the raw frame when unset.
@@ -52,7 +49,6 @@ export class Renderer {
 			canvas: getter(props?.canvas),
 			frame: getter(props?.frame),
 			display: getter(props?.display),
-			rotation: getter(props?.rotation ?? 0),
 			flip: getter(props?.flip ?? false),
 			encoder: getter(props?.encoder),
 			mode: getter(props?.mode ?? "source"),
@@ -105,22 +101,18 @@ export class Renderer {
 
 		const frame = effect.get(this.#frame);
 		const display = effect.get(this.in.display);
-		const rotation = normalizeVideoRotation(effect.get(this.in.rotation));
 		const flip = effect.get(this.in.flip);
 
-		// Size the canvas to the presented frame so `encoded` mode shows the true transmitted
-		// resolution. Fall back to the supplied final display size until the first frame arrives.
-		const sourceWidth = frame?.displayWidth;
-		const sourceHeight = frame?.displayHeight;
-		const output =
-			sourceWidth && sourceHeight
-				? rotateVideoDimensions({ width: sourceWidth, height: sourceHeight }, rotation)
-				: display;
+		// Size the canvas to the frame we're drawing so `encoded` mode shows the true transmitted
+		// resolution (which can be smaller than the capture). Fall back to the capture dimensions
+		// until the first frame arrives.
+		const width = frame?.displayWidth ?? display?.width;
+		const height = frame?.displayHeight ?? display?.height;
 
 		// Setting width/height clears the canvas, so only resize when the dimensions actually change.
-		if (output && (ctx.canvas.width !== output.width || ctx.canvas.height !== output.height)) {
-			ctx.canvas.width = output.width;
-			ctx.canvas.height = output.height;
+		if (width && height && (ctx.canvas.width !== width || ctx.canvas.height !== height)) {
+			ctx.canvas.width = width;
+			ctx.canvas.height = height;
 		}
 
 		ctx.fillStyle = "#000";
@@ -129,17 +121,11 @@ export class Renderer {
 		if (!frame) return;
 
 		ctx.save();
-		if (!rotation) {
-			if (flip) {
-				ctx.scale(-1, 1);
-				ctx.translate(-ctx.canvas.width, 0);
-			}
-			ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
-		} else {
-			ctx.setTransform(...canvasPresentationTransform(ctx.canvas, rotation, flip));
-			const source = rotateVideoDimensions(ctx.canvas, rotation);
-			ctx.drawImage(frame, 0, 0, source.width, source.height);
+		if (flip) {
+			ctx.scale(-1, 1);
+			ctx.translate(-ctx.canvas.width, 0);
 		}
+		ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
 		ctx.restore();
 	}
 
