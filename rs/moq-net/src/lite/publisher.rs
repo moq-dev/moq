@@ -1027,11 +1027,16 @@ mod test {
 	}
 }
 
-/// Transport doubles shared by the publisher tests: a session whose streams record
+/// Transport doubles shared by the lite tests: a session whose streams record
 /// everything written and every reset code, and peers that never speak.
 #[cfg(test)]
-mod test_transport {
-	use std::sync::{Arc, Mutex};
+pub(crate) mod test_transport {
+	use std::sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+	};
+
+	type OnWrite = Arc<dyn Fn() + Send + Sync>;
 
 	#[derive(Debug, Clone, Default)]
 	pub struct SinkError;
@@ -1056,11 +1061,22 @@ mod test_transport {
 	pub struct Log {
 		pub writes: Arc<Mutex<Vec<u8>>>,
 		pub resets: Arc<Mutex<Vec<u32>>>,
+		bi_enabled: Arc<AtomicBool>,
+		bi_opens: Arc<AtomicUsize>,
+		on_write: Arc<Mutex<Option<OnWrite>>>,
 	}
 
 	impl Log {
 		pub fn resets(&self) -> Vec<u32> {
 			self.resets.lock().unwrap().clone()
+		}
+
+		pub fn bi_opens(&self) -> usize {
+			self.bi_opens.load(Ordering::Relaxed)
+		}
+
+		pub fn set_on_write(&self, callback: impl Fn() + Send + Sync + 'static) {
+			*self.on_write.lock().unwrap() = Some(Arc::new(callback));
 		}
 	}
 
@@ -1072,6 +1088,9 @@ mod test_transport {
 		type Error = SinkError;
 
 		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+			if let Some(callback) = self.log.on_write.lock().unwrap().as_ref() {
+				callback();
+			}
 			self.log.writes.lock().unwrap().extend_from_slice(buf);
 			Ok(buf.len())
 		}
@@ -1109,11 +1128,18 @@ mod test_transport {
 		}
 	}
 
-	/// Only `open_uni` yields; everything else parks. Tests that drive a bidi stream
-	/// build one directly from [`SinkSend`] and [`PendingRecv`] instead.
+	/// Send streams record their bytes while peer reads park forever.
 	#[derive(Clone, Default)]
 	pub struct SinkSession {
 		pub log: Log,
+	}
+
+	impl SinkSession {
+		pub fn with_bi() -> Self {
+			let session = Self::default();
+			session.log.bi_enabled.store(true, Ordering::Relaxed);
+			session
+		}
 	}
 
 	impl web_transport_trait::Session for SinkSession {
@@ -1130,7 +1156,11 @@ mod test_transport {
 		}
 
 		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
+			if !self.log.bi_enabled.load(Ordering::Relaxed) {
+				return std::future::pending().await;
+			}
+			self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
+			Ok((SinkSend { log: self.log.clone() }, PendingRecv))
 		}
 
 		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {

@@ -837,6 +837,53 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::lite::publisher::test_transport::SinkSession;
+	use crate::util::TaskSet;
+
+	#[tokio::test]
+	async fn establish_sends_one_registered_subscribe() {
+		let session = SinkSession::with_bi();
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let (tasks, _task_set) = TaskSet::new();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			session: session.clone(),
+			origin,
+			recv_bandwidth: None,
+			version: Version::Lite05,
+			peer_setup: Default::default(),
+			cost: None,
+			tasks,
+		});
+		let subscriptions = subscriber.subscribes.clone();
+		session.log.set_on_write(move || {
+			assert!(subscriptions.lock().contains_key(&0));
+		});
+		let serve = TrackServe {
+			subscriber,
+			path: Path::new("rooms/U123/host").to_owned(),
+			name: "catalog.json".to_string(),
+		};
+
+		let mut broadcast = crate::broadcast::Info::new().produce();
+		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
+		let mut sub = Sub::None;
+		serve
+			.establish(
+				&mut producer,
+				&mut sub,
+				Subscription::default(),
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+
+		assert_eq!(session.log.bi_opens(), 1);
+	}
+}
+
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
 struct SubStream<S: web_transport_trait::Session> {
@@ -1238,13 +1285,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
-
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
-		stream.writer.encode(&lite::ControlType::Subscribe).await?;
-		stream.writer.encode(&msg).await?;
-
-		// Pre-lite-05 acknowledges with SUBSCRIBE_OK; it arrives on this stream and
-		// is consumed (and logged) by the serve loop's response arm.
 
 		// Register before the SUBSCRIBE hits the wire. `id` is live the moment the peer
 		// reads it, and a publisher may serve its first group immediately, so a late
