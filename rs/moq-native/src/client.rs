@@ -320,7 +320,9 @@ impl Client {
 		feature = "uds"
 	))]
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
-		let pair = self.connect_inner(url).await?;
+		// Each compiled backend adds state to this dispatch future. Keep it off the
+		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
+		let pair = Box::pin(self.connect_inner(url)).await?;
 		tracing::info!(version = %pair.0.version(), "connected");
 		Ok(crate::spawn_session(pair))
 	}
