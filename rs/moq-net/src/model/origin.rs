@@ -1064,7 +1064,13 @@ const MAX_TRACK_RETRIES: u32 = 3;
 /// fetches, reuses the source's copy: no new track request, and no second round
 /// trip for its `TRACK_INFO`. After it, the copy is released so an idle track
 /// costs nothing upstream.
-const TRACK_IDLE_LINGER: Duration = Duration::from_secs(5);
+///
+/// Sized above the fetch cadence of a segmented consumer: HLS polls every
+/// `TARGETDURATION` seconds, commonly 6 or 10, so a shorter window would drop the
+/// copy between every segment and re-request the track each time. A warm copy
+/// holds no upstream subscription (that is canceled as soon as demand ends), so
+/// waiting longer costs cached state, not a viewer.
+const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
 
 /// One attached source in a [`FrontState`] table.
 struct FrontRoute {
