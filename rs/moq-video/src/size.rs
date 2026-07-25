@@ -35,7 +35,7 @@ impl Size {
 				"{what} {self}: dimensions must be non-zero"
 			)));
 		}
-		if self.width % 2 != 0 || self.height % 2 != 0 {
+		if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
 			return Err(Error::Codec(anyhow::anyhow!("{what} {self}: dimensions must be even")));
 		}
 		Ok(())

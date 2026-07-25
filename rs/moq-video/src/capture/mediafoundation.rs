@@ -3,10 +3,10 @@
 //! Drives an [`IMFSourceReader`] over the selected capture device. When a
 //! Direct3D11 device is available the reader runs with that device's DXGI
 //! manager and the advanced video processor, so each sample arrives as a
-//! GPU-resident NV12 texture ([`Frame::Texture`]) that the hardware encoder MFT
+//! GPU-resident NV12 texture ([`Surface::Texture`]) that the hardware encoder MFT
 //! consumes zero-copy. Without a GPU (e.g. a headless VM) it falls back to the
 //! source reader's software video processor, copying each sample to a packed CPU
-//! [`I420`] ([`Frame::I420`]) the encoder uploads.
+//! [`I420`] ([`Surface::I420`]) the encoder uploads.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -16,21 +16,33 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaSource, IMFSample,
 	IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-	MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-	MF_MT_SUBTYPE, MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-	MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-	MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video,
-	MFVideoFormat_NV12,
+	MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+	MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_D3D_MANAGER,
+	MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+	MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes, MFCreateMediaType,
+	MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFVideoFormat_NV12,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
-use windows::core::{Interface, PWSTR};
+use windows::core::{GUID, Interface, PWSTR};
 
 use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
 use super::{Config, FrameStream};
 use crate::Error;
 use crate::frame::d3d11::Texture;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
+
+/// List Media Foundation capture devices by their stable symbolic links.
+pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
+	let _com = ComGuard::new()?;
+	Ok(enumerate_sources()?
+		.into_iter()
+		.map(|source| super::Camera {
+			id: source.id,
+			name: source.name,
+		})
+		.collect())
+}
 
 /// Open a Media Foundation camera and stream its frames over a pump thread.
 pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
@@ -196,8 +208,8 @@ impl Camera {
 		})
 	}
 
-	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Frame::Texture`].
-	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Frame, Error> {
+	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Surface::Texture`].
+	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Surface, Error> {
 		let buffer = unsafe { sample.GetBufferByIndex(0).map_err(|e| mf_err("get buffer", e))? };
 		let dxgi = buffer
 			.cast::<IMFDXGIBuffer>()
@@ -214,7 +226,7 @@ impl Camera {
 				.map_err(|e| mf_err("get subresource index", e))?
 		};
 
-		Ok(Frame::Texture(Texture::new(
+		Ok(Surface::Texture(Texture::new(
 			device.clone(),
 			texture,
 			subresource,
@@ -223,8 +235,8 @@ impl Camera {
 		)))
 	}
 
-	/// Copy a CPU sample's NV12 to a packed [`Frame::I420`] (the fallback path).
-	fn sample_to_i420(&self, sample: &IMFSample) -> Result<Frame, Error> {
+	/// Copy a CPU sample's NV12 to a packed [`Surface::I420`] (the fallback path).
+	fn sample_to_i420(&self, sample: &IMFSample) -> Result<Surface, Error> {
 		let buffer = unsafe {
 			sample
 				.ConvertToContiguousBuffer()
@@ -262,12 +274,12 @@ impl Camera {
 			data
 		};
 
-		Ok(Frame::I420(I420::from_nv12(&nv12, self.width, self.height)?))
+		Ok(Surface::I420(I420::from_nv12(&nv12, self.width, self.height)?))
 	}
 
 	/// Pull the next frame. Blocks per frame; the pump thread calls this in a loop
 	/// and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self) -> Result<Option<Surface>, Error> {
 		loop {
 			let mut flags: u32 = 0;
 			let mut sample: Option<IMFSample> = None;
@@ -322,21 +334,57 @@ fn create_attributes(capacity: u32) -> Result<IMFAttributes, Error> {
 /// Which device to open.
 enum Selector {
 	Index(usize),
-	Name(String),
+	IdOrName(String),
 }
 
 /// Enumerate video capture devices and activate the one matching `selector`
-/// (a bare integer selects by index, anything else is a friendly-name substring;
-/// `None` opens index 0).
+/// (a bare integer selects by index, anything else is an exact symbolic link or
+/// a friendly-name substring; `None` opens index 0).
 fn open_source(selector: Option<&str>) -> Result<(IMFMediaSource, String), Error> {
 	let selector = match selector {
 		None => Selector::Index(0),
 		Some(spec) => match spec.parse::<usize>() {
 			Ok(i) => Selector::Index(i),
-			Err(_) => Selector::Name(spec.to_string()),
+			Err(_) => Selector::IdOrName(spec.to_string()),
 		},
 	};
 
+	let sources = enumerate_sources()?;
+	let count = sources.len();
+	let chosen = sources
+		.into_iter()
+		.enumerate()
+		.find(|(index, source)| match &selector {
+			Selector::Index(want) => *index == *want,
+			Selector::IdOrName(want) => {
+				source.id.eq_ignore_ascii_case(want) || source.name.to_lowercase().contains(&want.to_lowercase())
+			}
+		})
+		.map(|(_, source)| source);
+
+	let source = chosen.ok_or_else(|| match &selector {
+		Selector::Index(i) => Error::Codec(anyhow::anyhow!("camera index {i} out of range ({count} found)")),
+		Selector::IdOrName(value) => Error::Codec(anyhow::anyhow!("no camera matching {value:?} ({count} found)")),
+	})?;
+
+	let media: IMFMediaSource = unsafe {
+		source
+			.activate
+			.ActivateObject()
+			.map_err(|e| mf_err("activate device", e))?
+	};
+	Ok((media, source.name))
+}
+
+/// One Media Foundation capture source and the metadata exposed publicly.
+struct SourceInfo {
+	activate: IMFActivate,
+	id: String,
+	name: String,
+}
+
+/// Enumerate every Media Foundation video-capture source on the current thread.
+fn enumerate_sources() -> Result<Vec<SourceInfo>, Error> {
 	let attrs = create_attributes(1)?;
 	unsafe {
 		attrs
@@ -353,47 +401,35 @@ fn open_source(selector: Option<&str>) -> Result<(IMFMediaSource, String), Error
 		MFEnumDeviceSources(&attrs, &mut activates, &mut count).map_err(|e| mf_err("enumerate devices", e))?;
 	}
 	if count == 0 {
-		return Err(Error::Codec(anyhow::anyhow!("no video capture devices found")));
+		return Ok(Vec::new());
 	}
 
 	// `MFEnumDeviceSources` hands back a CoTaskMemAlloc'd array, each entry holding
-	// one ref we own. `take()` each into an owned handle so the unmatched ones drop
-	// (release) here; the chosen one stays alive. Then free the array itself.
+	// one ref we own. `take()` each into an owned handle, then free the array.
 	let entries = unsafe { slice::from_raw_parts_mut(activates, count as usize) };
-	let mut chosen: Option<(IMFActivate, String)> = None;
+	let mut sources = Vec::with_capacity(count as usize);
 	for (i, slot) in entries.iter_mut().enumerate() {
 		let Some(activate) = slot.take() else { continue };
-		let name = unsafe { friendly_name(&activate) }.unwrap_or_else(|_| format!("camera {i}"));
-		let matched = match &selector {
-			Selector::Index(idx) => i == *idx,
-			Selector::Name(want) => name.to_lowercase().contains(&want.to_lowercase()),
-		};
-		if matched && chosen.is_none() {
-			chosen = Some((activate, name));
-		}
+		let name = unsafe { allocated_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME) }
+			.unwrap_or_else(|_| format!("camera {i}"));
+		let id = unsafe { allocated_string(&activate, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK) }
+			.unwrap_or_else(|_| i.to_string());
+		sources.push(SourceInfo { activate, id, name });
 	}
 	unsafe {
 		CoTaskMemFree(Some(activates as *const c_void));
 	}
-
-	let (activate, name) = chosen.ok_or_else(|| match &selector {
-		Selector::Index(i) => Error::Codec(anyhow::anyhow!("camera index {i} out of range ({count} found)")),
-		Selector::Name(n) => Error::Codec(anyhow::anyhow!("no camera matching {n:?} ({count} found)")),
-	})?;
-
-	let source: IMFMediaSource = unsafe { activate.ActivateObject().map_err(|e| mf_err("activate device", e))? };
-	Ok((source, name))
+	Ok(sources)
 }
 
-/// Read a device's `MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME`, freeing the
-/// COM-allocated string afterward.
-unsafe fn friendly_name(activate: &IMFActivate) -> Result<String, Error> {
+/// Read an allocated string attribute, freeing the COM allocation afterward.
+unsafe fn allocated_string(activate: &IMFActivate, key: &GUID) -> Result<String, Error> {
 	let mut value = PWSTR::null();
 	let mut len: u32 = 0;
 	unsafe {
 		activate
-			.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut value, &mut len)
-			.map_err(|e| mf_err("friendly name", e))?;
+			.GetAllocatedString(key, &mut value, &mut len)
+			.map_err(|e| mf_err("capture source attribute", e))?;
 	}
 	let name = unsafe { value.to_string() }.unwrap_or_default();
 	unsafe {

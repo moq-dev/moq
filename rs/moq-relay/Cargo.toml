@@ -5,9 +5,14 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.14.0"
+version = "0.14.2"
 edition = "2024"
-rust-version.workspace = true
+# sysinfo 0.39 (cache governor cgroup limits) needs 1.95, above the 1.91
+# workspace floor. moq-relay is lib+bin, so this applies to its library target
+# too, but the crate is an application with no external consumers; keeping the
+# bump per-crate holds it off the libraries others build on rather than raising
+# the whole workspace.
+rust-version = "1.95"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -24,6 +29,10 @@ jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
+# qlog trace capture (`--server-quic-qlog <DIR>`). Off by default: it compiles the
+# qlog machinery into the enabled backends and is only wanted for debugging or
+# congestion-control testing.
+qlog = ["moq-native/qlog"]
 websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
@@ -39,6 +48,8 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 http-body = "1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "url-standard"], default-features = false }
+humantime = "2.3"
+humantime-serde = "1.1"
 jsonwebtoken = "10"
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 moq-net = { workspace = true }

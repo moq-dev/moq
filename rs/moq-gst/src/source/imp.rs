@@ -91,10 +91,10 @@ impl SessionController {
 	fn start(settings: ResolvedSettings, element: glib::WeakRef<super::MoqSrc>) -> Self {
 		let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 		let join = RUNTIME.spawn(async move {
-			if let Err(err) = run_session(settings, element.clone(), &mut shutdown_rx).await {
-				if let Some(obj) = element.upgrade() {
-					gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
-				}
+			if let Err(err) = run_session(settings, element.clone(), &mut shutdown_rx).await
+				&& let Some(obj) = element.upgrade()
+			{
+				gst::element_error!(obj, gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 			}
 		});
 

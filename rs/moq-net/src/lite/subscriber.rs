@@ -842,10 +842,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 struct SubStream<S: web_transport_trait::Session> {
 	stream: Stream<S, Version>,
 	id: u64,
-	/// Capped at the latest group and dropped to priority 0 because the last
-	/// downstream subscriber left. The stream stays open during the linger window
-	/// so a returning consumer resumes without a fresh SUBSCRIBE.
-	paused: bool,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	ordered: bool,
@@ -916,9 +912,8 @@ enum Event {
 
 /// Serves one requested track for a relay: owns this session's copy of the
 /// track (spliced into the origin's logical track), driving the single upstream
-/// subscription (opened lazily on the first downstream subscriber,
-/// paused/resumed across consumer churn) concurrently with any number of
-/// one-shot fetches.
+/// subscription (opened lazily on the first downstream subscriber, canceled when
+/// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: web_transport_trait::Session> {
 	subscriber: Subscriber<S>,
@@ -928,7 +923,8 @@ struct TrackServe<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> TrackServe<S> {
 	async fn run(self, request: track::Request) {
-		// SUBSCRIBE_UPDATE (and thus pause/resume) only exists on Lite03+.
+		// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
+		// preference change to an established subscription.
 		let supports_update = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 		let supports_fetch = self.subscriber.version.has_track_stream();
 
@@ -1140,7 +1136,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	}
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
-	/// subscriber, resume/update it while live, or pause it when the last leaves.
+	/// subscriber, update it while live, or cancel it when the last one leaves.
 	async fn handle_subscription(
 		&self,
 		producer: &mut track::Producer,
@@ -1155,16 +1151,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// Open an upstream SUBSCRIBE for the first subscriber.
 					self.establish(producer, sub, subscription, timescale).await?;
 				}
-				Sub::Active(active) if active.paused => {
-					// A consumer returned: resume by uncapping.
-					active.paused = false;
-					active.priority = subscription.priority;
-					active.ordered = subscription.ordered;
-					active.max_latency = subscription.latency_max;
-					active.start_group = subscription.group_start;
-					self.send_update(active, subscription.group_end).await?;
-					tracing::info!(track = %self.name, "subscribe resumed");
-				}
 				Sub::Active(active) => {
 					// Downstream preferences changed: forward them upstream as a
 					// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
@@ -1178,29 +1164,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 			},
 			None => {
-				// Last subscriber left: pause the upstream (cap at the latest cached
-				// group, priority 0) but keep the stream open in case one returns.
-				if supports_update {
-					if let Sub::Active(active) = sub {
-						if !active.paused {
-							active.paused = true;
-							active.start_group = None;
-							let cap = producer.latest().unwrap_or(0);
-							let update = lite::SubscribeUpdate {
-								priority: 0,
-								ordered: active.ordered,
-								max_latency: active.max_latency,
-								start_group: active.start_group,
-								end_group: Some(cap),
-							};
-							active.stream.writer.encode(&update).await?;
-						}
-					}
-				} else if let Sub::Active(active) = sub {
-					// No SUBSCRIBE_UPDATE to pause with (Lite01/02): cancel the
-					// upstream subscription outright, or it streams every group into
-					// the cache with zero consumers. A returning subscriber
-					// re-establishes from the current demand.
+				// Last subscriber left: cancel the upstream subscription outright. An
+				// idle subscription still streams every group into a cache nobody
+				// reads, and the upstream counts it as a live viewer of the broadcast.
+				// A returning subscriber re-establishes from the current demand.
+				if let Sub::Active(active) = sub {
 					self.subscriber.subscribes.lock().remove(&active.id);
 					let _ = active.stream.writer.finish();
 					tracing::info!(track = %self.name, "subscribe canceled (idle)");
@@ -1307,7 +1275,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		*sub = Sub::Active(SubStream {
 			stream,
 			id,
-			paused: false,
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,

@@ -288,16 +288,17 @@ async fn drain(broadcast: broadcast::Consumer, stats: &Stats) -> anyhow::Result<
 		while let Some(frame) = group.read_frame().await? {
 			// The first frame of every group is the JSON keyframe. Parse it once to
 			// learn the publisher's shape (we may be watching a peer, not ourselves).
-			if first && !learned_shape {
-				if let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload) {
-					tracing::debug!(
-						fps = header.fps,
-						frame_size = header.frame_size,
-						group_size = header.group_size,
-						"subscribed broadcast shape"
-					);
-					learned_shape = true;
-				}
+			if first
+				&& !learned_shape
+				&& let Ok(header) = serde_json::from_slice::<RecvHeader>(&frame.payload)
+			{
+				tracing::debug!(
+					fps = header.fps,
+					frame_size = header.frame_size,
+					group_size = header.group_size,
+					"subscribed broadcast shape"
+				);
+				learned_shape = true;
 			}
 			first = false;
 			stats.frame_recv(frame.payload.len());

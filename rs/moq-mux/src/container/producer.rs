@@ -8,14 +8,21 @@ use super::{Container, Frame};
 ///
 /// ## Group Management
 ///
-/// Every group must start with a keyframe. Writing a frame with `keyframe = true`
-/// closes the previous group (if any) and starts a new one. Writing a non-keyframe
-/// frame when no group is open is a protocol violation.
+/// `keyframe = true` means "start a new group": it closes the previous group (if any) and opens a
+/// new one, so every group begins with a keyframe. A non-keyframe extends the current group, and
+/// writing one when no group is open is a protocol violation.
 ///
-/// [`cut`](Self::cut) closes the current group early; the next write
-/// must be a keyframe. This is useful for streams without inherent keyframes
-/// (e.g. audio) that mark every Nth frame as a keyframe but want to flush the
-/// current group immediately rather than waiting for the next keyframe to arrive.
+/// A stream where every frame is independently decodable (e.g. audio) still drives grouping through
+/// this bit: mark only the *first* frame of each group a keyframe and the rest non-keyframes, so the
+/// caller's [`cut`](Self::cut) / [`seek`](Self::seek) boundaries define the groups instead of every
+/// frame opening its own (one QUIC stream per frame). [`needs_keyframe`](Self::needs_keyframe)
+/// reports whether the next frame has to be one.
+///
+/// [`cut`](Self::cut) closes the current group early, ideally saying where its content
+/// ends; the next write must be a keyframe. Reach for it when the following keyframe won't
+/// supply that boundary in time, or to bound each group of an accumulating audio track.
+/// [`discontinuity`](Self::discontinuity) goes further and publishes an empty group, for
+/// when the timeline is about to jump rather than merely continue.
 ///
 /// ## Latency Buffering
 ///
@@ -61,6 +68,16 @@ impl<C: Container> Producer<C> {
 		}
 	}
 
+	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
+	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
+	///
+	/// A stream where every frame is independently decodable (audio) uses this to mark only the first
+	/// frame of each group a keyframe: `write(Frame { keyframe: producer.needs_keyframe(), .. })`, so
+	/// grouping follows the caller's `cut`/`seek` boundaries rather than opening a group per frame.
+	pub fn needs_keyframe(&self) -> bool {
+		self.group.is_none()
+	}
+
 	/// Set the maximum buffering latency.
 	///
 	/// When non-zero, frames are buffered and flushed together when the buffered duration exceeds
@@ -92,9 +109,11 @@ impl<C: Container> Producer<C> {
 
 	/// Write a frame to the track.
 	///
-	/// A keyframe closes any open group and starts a new one. A non-keyframe extends
-	/// the current group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe),
-	/// so a caller joining mid-stream can skip frames until the first keyframe.
+	/// A keyframe closes any open group and starts a new one. A non-keyframe extends the current
+	/// group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe), so a caller
+	/// joining mid-stream can skip frames until the first keyframe. A source where every frame is
+	/// independently decodable (audio) marks only the first frame of each group a keyframe (see
+	/// [`needs_keyframe`](Self::needs_keyframe)) so the group spans more than one frame.
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
 		// A keyframe cuts the previous group, using its timestamp as the boundary
 		// where the previous group's content ends.
@@ -175,10 +194,43 @@ impl<C: Container> Producer<C> {
 	/// Close the current group (if any) and open the next group at the given sequence.
 	///
 	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
-	/// `sequence`. Useful for joining mid-stream or signalling a discontinuity.
+	/// `sequence`. Useful for joining mid-stream.
 	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
 		self.cut(None)?;
 		self.pending_sequence = Some(sequence);
+		Ok(())
+	}
+
+	/// Publish an EMPTY group standing for a break in the timeline: content stopped, and
+	/// whatever comes next does not continue it.
+	///
+	/// Call this whenever the timeline is about to jump -- pausing an encoder, switching
+	/// source, resuming on a re-anchored clock. Without it a break is invisible: the next
+	/// group looks exactly like the one that would have followed, and a consumer bounding a
+	/// sample by the next group's first frame hands it the entire gap as its duration. That
+	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes
+	/// (moq-dev/moq.pro#814). Consecutive sequence numbers can't rule a pause out, so this
+	/// marker is the only thing that can say one happened.
+	///
+	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
+	/// track's latest group, and creating this one advances that -- so a late joiner lands on
+	/// the marker and waits for real media, instead of being served the group from *before*
+	/// the break as though it were live.
+	///
+	/// Carries no timestamp on purpose: a break is a gap between two groups, so any single
+	/// timestamp is ambiguous about which side it belongs to. To bound the closing group's
+	/// final frame, [`cut(end)`](Self::cut) before calling this; the open group is closed
+	/// either way (an unbounded [`cut`](Self::cut) here is a no-op after yours).
+	///
+	/// The marker group carries no frames at all. Ending the closing group with an empty
+	/// frame at `end` is the eventual shape, once decoders are known to skip one.
+	pub fn discontinuity(&mut self) -> Result<(), C::Error> {
+		self.cut(None)?;
+		let mut group = match self.pending_sequence.take() {
+			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
+			None => self.inner.append_group()?,
+		};
+		group.finish()?;
 		Ok(())
 	}
 
@@ -298,6 +350,43 @@ mod tests {
 		groups
 	}
 
+	/// A discontinuity lands as its own empty group between the content either side, so a
+	/// consumer can see the break instead of inferring continuity from adjacent sequences.
+	#[tokio::test]
+	async fn discontinuity_publishes_an_empty_group() {
+		let track = track_producer("test", hang::container::track_info());
+		let consumer = track.subscribe(None);
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(10_000, false)).unwrap();
+		producer.discontinuity().unwrap();
+		// Resumed on a re-anchored clock, 40 minutes later.
+		producer.write(frame(2_405_070_000, true)).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![2, 0, 1]);
+	}
+
+	/// A subscription starts at the track's LATEST group, and the marker advances it even
+	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
+	/// rather than being handed the pre-break group as if it were live -- which is how a
+	/// 40-minute-stale frame reached a VOD recording in moq-dev/moq.pro#814.
+	#[tokio::test]
+	async fn discontinuity_moves_the_live_edge_off_stale_content() {
+		let track = track_producer("test", hang::container::track_info());
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap();
+		let stale = producer.track().latest();
+
+		producer.discontinuity().unwrap();
+		let edge = producer.track().latest();
+
+		assert_ne!(edge, stale, "the empty group is the live edge now");
+		assert_eq!(edge, stale.map(|s| s + 1));
+	}
+
 	/// Explicit keyframe closes the current group and starts a new one.
 	#[tokio::test]
 	async fn keyframe_closes_group_immediately() {
@@ -312,6 +401,33 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![2, 2]);
+	}
+
+	/// `needs_keyframe` tracks whether a group is open, so an audio importer can mark only the first
+	/// frame of each group a keyframe (`keyframe: producer.needs_keyframe()`) and accumulate the rest
+	/// into that group until it cuts or seeks. Regression guard for the "one group (one QUIC stream)
+	/// per audio packet" storm.
+	#[tokio::test]
+	async fn needs_keyframe_drives_audio_grouping() {
+		let track = track_producer("test", hang::container::track_info());
+		let consumer = track.subscribe(None);
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		// Drive grouping off `needs_keyframe`, as the audio importers do: the first frame of each
+		// group is a keyframe, the rest are not, so they accumulate into ONE group...
+		for ts in [0, 10_000, 20_000] {
+			let keyframe = producer.needs_keyframe();
+			producer.write(frame(ts, keyframe)).unwrap();
+		}
+		producer.cut(None).unwrap();
+		// ...until the caller draws a boundary, which opens the next group.
+		for ts in [30_000, 40_000] {
+			let keyframe = producer.needs_keyframe();
+			producer.write(frame(ts, keyframe)).unwrap();
+		}
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![3, 2]);
 	}
 
 	/// `cut()` flushes the current group immediately; the next write must be a keyframe.

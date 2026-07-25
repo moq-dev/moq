@@ -170,10 +170,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					// rung's copy here. A GPU frame resizes on the GPU and feeds
 					// the encoder without touching the CPU.
 					let encoded = if frame.size == rung.info.size {
-						encoder.encode(&frame, keyframe)?
+						encoder.encode(&frame.surface, keyframe)?
 					} else {
 						let scaled = frame.resize(rung.info.size)?;
-						encoder.encode(&scaled, keyframe)?
+						encoder.encode(&scaled.surface, keyframe)?
 					};
 					let timestamp = frame.timestamp;
 					write(output, encoded.into_iter().map(|packet| (timestamp, packet)).collect())?;
@@ -398,9 +398,9 @@ impl Pipeline {
 			let encoded = if raw.size == self.size {
 				// Already at the rung size (the decoder scaled): feed the frame
 				// through as-is, keeping a GPU frame on the GPU.
-				self.encoder.encode(&raw, keyframe)?
+				self.encoder.encode(&raw.surface, keyframe)?
 			} else {
-				self.encoder.encode(&raw.resize(self.size)?, keyframe)?
+				self.encoder.encode(&raw.resize(self.size)?.surface, keyframe)?
 			};
 			for packet in encoded {
 				packets.push((raw_timestamp, packet));

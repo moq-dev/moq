@@ -54,6 +54,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 
 ## Source and issues
 
+- API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [kt/](https://github.com/moq-dev/moq/tree/main/kt) (in the monorepo)
 - README: [kt/README.md](https://github.com/moq-dev/moq/blob/main/kt/README.md)
 - Maven Central: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq)

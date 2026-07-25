@@ -6,8 +6,11 @@ description: Python pub/sub for Media over QUIC
 # moq-rs
 
 [![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
+[![Documentation](https://readthedocs.org/projects/moq-rs/badge/?version=latest)](https://moq-rs.readthedocs.io)
 
 Async pub/sub for [Media over QUIC](/) in Python.
+
+Full API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io), built automatically from the docstrings on each commit.
 
 The underlying transport is the Rust [`moq-net`](/lib/rs/crate/moq-net) crate, exposed through UniFFI (the [`moq-ffi`](https://pypi.org/project/moq-ffi/) package) and wrapped in a Pythonic API: no `Moq` prefixes on user-facing types, async iterators for streams, async context managers for sessions. `moq-rs` is versioned independently of `moq-ffi` and floats to the latest compatible patch.
 
@@ -261,6 +264,7 @@ The repo ships [example scripts](https://github.com/moq-dev/moq/tree/main/py/moq
 
 ## See also
 
+- API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
 - Raw bindings: [moq-ffi](https://pypi.org/project/moq-ffi/)

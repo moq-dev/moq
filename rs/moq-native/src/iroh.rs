@@ -15,6 +15,16 @@ use web_transport_proto::{ConnectRequest, ConnectResponse};
 pub use iroh::Endpoint;
 pub use web_transport_iroh;
 
+/// The congestion control family to install, defaulting to loss-based.
+///
+/// Unlike the other backends we don't default to BBR here: noq's BBRv3 subtracts
+/// without a floor when computing the inflight bytes at the loss event, so a single
+/// packet loss can underflow and panic, taking the whole process with it. Delay-based
+/// stays reachable, but only when an operator asks for it by name.
+fn congestion_control(quic: &crate::quic::Resolved) -> CongestionControl {
+	quic.congestion_control.unwrap_or(CongestionControl::Loss)
+}
+
 /// The iroh controller factory for a congestion control family.
 ///
 /// iroh is built on noq, so its BBR is v3. It re-exports the `ControllerFactory`
@@ -202,10 +212,7 @@ impl EndpointConfig {
 		if !quic.mtu_discovery {
 			transport = transport.mtu_discovery_config(None);
 		}
-		// iroh runs on noq, so match the noq backend's BBR default rather than noq's own CUBIC.
-		transport = transport.congestion_controller_factory(congestion_factory(
-			quic.congestion_control.unwrap_or(CongestionControl::Delay),
-		));
+		transport = transport.congestion_controller_factory(congestion_factory(congestion_control(&quic)));
 
 		let mut builder = if self.disable_relay.unwrap_or(false) {
 			Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
@@ -349,5 +356,17 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+	}
+
+	/// noq's BBRv3 panics on loss, so an unset knob must land on CUBIC here even
+	/// though every other backend defaults to BBR.
+	#[test]
+	fn congestion_control_defaults_to_loss() {
+		let mut quic = crate::quic::Client::default();
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
+
+		// An explicit request still gets through.
+		quic.congestion_control = Some(CongestionControl::Delay);
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
 	}
 }

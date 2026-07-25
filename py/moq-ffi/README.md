@@ -22,7 +22,7 @@ import moq_ffi
 
 async def main() -> None:
     client = moq_ffi.MoqClient()
-    session = await client.connect("https://relay.quic.video")
+    session = await client.connect("https://cdn.moq.dev/anon")
 
 
 asyncio.run(main())

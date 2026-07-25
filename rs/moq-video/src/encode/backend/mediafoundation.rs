@@ -2,9 +2,9 @@
 //!
 //! Enumerates a hardware (`MFT_ENUM_FLAG_HARDWARE`) encoder for the requested
 //! codec and drives it through the async-MFT event model. When capture hands us
-//! a [`Frame::Texture`] the encoder runs on that texture's Direct3D11 device (via
+//! a [`Surface::Texture`] the encoder runs on that texture's Direct3D11 device (via
 //! a DXGI device manager) and consumes the surface zero-copy; a CPU
-//! [`Frame::I420`] is uploaded into a system-memory NV12 sample instead.
+//! [`Surface::I420`] is uploaded into a system-memory NV12 sample instead.
 //!
 //! The MFT emits an Annex-B byte stream with parameter sets inline ahead of each
 //! IDR/IRAP (SPS/PPS for H.264, VPS/SPS/PPS for H.265), which is exactly what
@@ -39,7 +39,7 @@ use windows::core::{GUID, Interface};
 use super::super::encoder::{Codec, Config};
 use super::Backend;
 use crate::Error;
-use crate::frame::{Frame, interleave_uv};
+use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
 
 pub(crate) const NAME: &str = "mediafoundation";
@@ -131,10 +131,10 @@ impl MediaFoundation {
 
 	/// One-time configuration, deferred to the first frame so a texture frame can
 	/// bind its own Direct3D11 device for zero-copy input.
-	fn start(&mut self, frame: &Frame) -> Result<(), Error> {
+	fn start(&mut self, frame: &Surface) -> Result<(), Error> {
 		// Bind the frame's D3D11 device when it's a texture, so the MFT reads the
 		// captured surface directly. A CPU frame runs the MFT in system memory.
-		if let Frame::Texture(texture) = frame {
+		if let Surface::Texture(texture) = frame {
 			let manager = device_manager(&texture.device)?;
 			let raw = manager.as_raw() as usize;
 			unsafe {
@@ -255,9 +255,9 @@ impl MediaFoundation {
 
 	/// Wrap a captured frame as an input [`IMFSample`]: a zero-copy DXGI surface
 	/// buffer for a texture, or a freshly uploaded NV12 memory buffer for I420.
-	fn build_sample(&self, frame: &Frame) -> Result<IMFSample, Error> {
+	fn build_sample(&self, frame: &Surface) -> Result<IMFSample, Error> {
 		let buffer = match frame {
-			Frame::Texture(texture) => unsafe {
+			Surface::Texture(texture) => unsafe {
 				let buffer =
 					MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, texture.subresource, false)
 						.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
@@ -271,7 +271,7 @@ impl MediaFoundation {
 					.map_err(|e| mf_err("set DXGI length", e))?;
 				buffer
 			},
-			Frame::I420(_) => self.upload_nv12(frame)?,
+			Surface::I420(_) => self.upload_nv12(frame)?,
 			#[allow(unreachable_patterns)]
 			_ => {
 				return Err(Error::Codec(anyhow::anyhow!(
@@ -296,7 +296,7 @@ impl MediaFoundation {
 
 	/// Copy a CPU I420 frame into a system-memory NV12 buffer (the fallback when
 	/// capture isn't producing GPU textures).
-	fn upload_nv12(&self, frame: &Frame) -> Result<IMFMediaBuffer, Error> {
+	fn upload_nv12(&self, frame: &Surface) -> Result<IMFMediaBuffer, Error> {
 		let i420 = frame.to_i420()?;
 		let (w, h) = (self.width as usize, self.height as usize);
 		let (cw, ch) = (w / 2, h / 2);
@@ -419,7 +419,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		if !self.started {
 			self.start(frame)?;
 		}

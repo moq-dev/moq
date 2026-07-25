@@ -145,7 +145,7 @@ impl Video {
 				timestamp_us: frame.timestamp.as_micros() as u64,
 				width: frame.size.width,
 				height: frame.size.height,
-				data: frame.into_i420()?,
+				data: frame.surface.into_i420()?,
 			};
 			let frame_id = State::lock().video.frames.insert(frame)?;
 			callback.call(Ok(frame_id));

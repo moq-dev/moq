@@ -4,6 +4,7 @@ import MoqFFI
 public final class Server: Sendable {
     let ffi: MoqServer
 
+    /// Create a server with default settings, ready to configure and `listen()`.
     public init() {
         ffi = MoqServer()
     }

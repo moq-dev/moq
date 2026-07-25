@@ -136,9 +136,9 @@ The video source is one of `--camera`, `--display`, `--window`, or `--app`;
 without one, `capture` opens the default camera. `--camera` and `--display` also
 take no value, meaning "the default one".
 
-`moq devices` lists every source and the id each flag expects, so you can read an
-id off it and paste it straight in. It talks only to the local hardware, so it is
-the one verb that takes no MoQ side:
+`moq devices` lists every source the current platform can enumerate and the id
+each flag expects, so you can read an id off it and paste it straight in. It
+talks only to the local hardware, so it is the one verb that takes no MoQ side:
 
 ```bash
 moq devices

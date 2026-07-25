@@ -3,7 +3,7 @@
 use bytes::Bytes;
 
 use super::decoder::{Config, Decoder};
-use crate::resample::Resampler;
+use crate::resample::{Resampler, remix};
 use crate::{Error, Frame};
 
 /// Subscribe to a moq-mux audio track and emit decoded PCM in the layout
@@ -33,13 +33,7 @@ impl Consumer {
 		let decoder = Decoder::new(catalog)?;
 		let sample_rate = config.sample_rate.unwrap_or_else(|| decoder.sample_rate());
 		let channels = config.channels.unwrap_or_else(|| decoder.channel_count());
-
-		if channels != decoder.channel_count() {
-			return Err(Error::Unsupported(format!(
-				"channel remapping not implemented (decoder {}ch, requested {channels}ch)",
-				decoder.channel_count()
-			)));
-		}
+		crate::opus::validate_channels(channels)?;
 
 		let resampler = if sample_rate == decoder.sample_rate() {
 			None
@@ -101,11 +95,73 @@ impl Consumer {
 			Some(r) => r.process(&decoded)?,
 			None => decoded,
 		};
+		let pcm = if self.decoder.channel_count() == self.resolved_channels {
+			pcm
+		} else {
+			remix(&pcm, self.decoder.channel_count(), self.resolved_channels)?
+		};
 
 		let bytes = self.config.format.from_interleaved_f32(&pcm, self.resolved_channels)?;
 		Ok(Some(Frame {
 			timestamp: mux_frame.timestamp,
 			data: Bytes::from(bytes),
 		}))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use moq_net::Timestamp;
+
+	use super::*;
+	use crate::Format;
+	use crate::encode::{Encoder, Input, Options, Producer};
+
+	#[tokio::test]
+	async fn remixes_mono_stream_to_stereo_output() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let subscriber = broadcast.consume();
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+		let catalog = Encoder::new(&crate::encode::Config::new(input)).unwrap().catalog();
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				channels: Some(2),
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let samples = vec![0.1f32; 960];
+		let mut data = Vec::with_capacity(samples.len() * size_of::<f32>());
+		for sample in samples {
+			data.extend_from_slice(&sample.to_le_bytes());
+		}
+		producer
+			.write(&Frame {
+				timestamp: Timestamp::ZERO,
+				data: data.into(),
+			})
+			.unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
+		assert_eq!(samples.len(), (960 - 312) * 2);
+		for pair in samples.chunks_exact(2) {
+			assert_eq!(pair[0], pair[1]);
+		}
 	}
 }

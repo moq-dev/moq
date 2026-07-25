@@ -97,7 +97,14 @@ where
 	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
 	// forward the negotiated subprotocol explicitly; axum performed the
 	// upgrade, so qmux can't sniff it from the handshake.
-	let upgraded = qmux::ws::Upgraded::new(socket);
+	//
+	// Keep-alive is not optional here. A peer whose host crashes or whose
+	// network drops sends no FIN, so without a Ping/timeout the session stays
+	// open until OS-level TCP keep-alive probes it, typically hours. Every
+	// broadcast it published stays announced for that entire window and the
+	// announce propagates to the rest of the cluster. QUIC gets this from its
+	// idle timeout; WebSocket has no equivalent of its own.
+	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::KeepAlive::default());
 	let upgraded = match alpn.as_deref() {
 		Some(alpn) => upgraded.with_alpn(alpn),
 		None => upgraded,
@@ -245,7 +252,7 @@ mod tests {
 	use crate::AuthConfig;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
 	use futures::SinkExt;
-	use std::{io, time::Duration};
+	use std::{io, sync::atomic::AtomicBool, time::Duration};
 	use tokio::sync::mpsc;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;
@@ -526,5 +533,116 @@ mod tests {
 			observed.wire,
 		);
 		drop(session);
+	}
+
+	/// One leg of an in-memory WebSocket pair.
+	///
+	/// Reading can be frozen: once the flag is set the stream parks forever
+	/// instead of yielding `None`. That is the failure this is here to model --
+	/// a peer whose host or network vanished sends no close frame and no FIN, so
+	/// the socket stays readable-but-silent indefinitely.
+	struct Pipe {
+		incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
+		outgoing: mpsc::UnboundedSender<tungstenite::Message>,
+		frozen: Arc<AtomicBool>,
+	}
+
+	impl Pipe {
+		fn new(
+			incoming: mpsc::UnboundedReceiver<tungstenite::Message>,
+			outgoing: mpsc::UnboundedSender<tungstenite::Message>,
+			frozen: Arc<AtomicBool>,
+		) -> Self {
+			Self {
+				incoming,
+				outgoing,
+				frozen,
+			}
+		}
+	}
+
+	impl Stream for Pipe {
+		type Item = Result<tungstenite::Message, tungstenite::Error>;
+
+		fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+			if self.frozen.load(Ordering::Relaxed) {
+				return Poll::Pending;
+			}
+			self.incoming.poll_recv(cx).map(|msg| msg.map(Ok))
+		}
+	}
+
+	impl Sink<tungstenite::Message> for Pipe {
+		type Error = tungstenite::Error;
+
+		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn start_send(self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
+			// A receiver that went away is the peer hanging up, not an error we
+			// need to surface: the read half reports the close.
+			let _ = self.outgoing.send(message);
+			Ok(())
+		}
+
+		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+	}
+
+	/// Regression: a WebSocket peer that goes silent without closing must be
+	/// reaped by the keep-alive, not held open forever.
+	///
+	/// Without `with_keep_alive` on the server's upgrade, nothing in the stack
+	/// bounds this: qmux's handshake timeout has already passed, WebSocket has no
+	/// idle timeout of its own, and the OS won't probe for hours. The session --
+	/// and every broadcast announced through it -- would live until the process
+	/// restarts. Time is paused, so the 5s ping / 30s deadline elapse instantly.
+	#[tokio::test(start_paused = true)]
+	async fn keep_alive_reaps_a_silent_peer() {
+		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
+		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
+		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let frozen = Arc::new(AtomicBool::new(false));
+
+		let server = tokio::spawn(handle_socket(
+			0,
+			Pipe::new(server_incoming, server_to_client, frozen.clone()),
+			Some(alpn.clone()),
+			None,
+			None,
+			Session::default(),
+		));
+
+		// A real qmux peer, so the transport handshake completes and its 10s
+		// timeout is out of the picture before we go silent. It never speaks moq,
+		// so the server is parked awaiting SETUP -- exactly where an idle
+		// publisher's session sits between groups.
+		let client = qmux::ws::Upgraded::new(Pipe::new(
+			client_incoming,
+			client_to_server,
+			Arc::new(AtomicBool::new(false)),
+		))
+		.with_alpn(&alpn)
+		.connect();
+
+		// Paused time only advances once every task is idle, so this resolves
+		// exactly when both ends have settled.
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		frozen.store(true, Ordering::Relaxed);
+
+		// Generous versus the 30s deadline: this asserts termination, not timing.
+		tokio::time::timeout(Duration::from_secs(300), server)
+			.await
+			.expect("a silent WebSocket peer must be reaped by the keep-alive")
+			.expect("server task panicked")
+			.expect_err("the session ends on the keep-alive timeout, never cleanly");
+
+		drop(client);
 	}
 }

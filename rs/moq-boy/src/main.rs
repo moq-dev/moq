@@ -330,6 +330,16 @@ fn run_emulator(
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
 		if session.paused.load(Ordering::Acquire) {
+			// Mark the break BEFORE parking, not after resuming. Our PTS is the emulator
+			// clock, which keeps running while we sleep, so the next frame lands however
+			// long the pause was into the future. Published as an empty group that gap
+			// reads as a discontinuity rather than one enormous frame duration, and the
+			// marker becomes the live edge -- so a viewer arriving mid-pause waits for real
+			// media instead of being served the pre-pause group as if it were live
+			// (moq-dev/moq.pro#814).
+			session.video_encoder.discontinuity();
+			audio_encoder.discontinuity()?;
+
 			session.wait_for_resume();
 
 			// Don't try to catch up after a pause.
@@ -433,10 +443,10 @@ fn run_emulator(
 				audio_encoder.reset_epoch();
 			}
 			let samples = emu.audio_samples();
-			if !samples.is_empty() {
-				if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
-					tracing::warn!(error = %e, "audio encode error");
-				}
+			if !samples.is_empty()
+				&& let Err(e) = audio_encoder.push_samples(&samples, elapsed)
+			{
+				tracing::warn!(error = %e, "audio encode error");
 			}
 		} else {
 			// Drain audio buffer even when not encoding to prevent buildup.

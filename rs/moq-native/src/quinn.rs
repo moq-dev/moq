@@ -67,10 +67,15 @@ fn apply_transport(transport: &mut quinn::TransportConfig, quic: &Resolved) {
 		transport.enable_segmentation_offload(gso);
 	}
 
-	// quinn defaults to CUBIC, so an unset knob leaves the factory alone.
-	if let Some(family) = quic.congestion_control {
-		transport.congestion_controller_factory(congestion_factory(family));
-	}
+	transport.congestion_controller_factory(congestion_factory(congestion_control(quic)));
+}
+
+/// The congestion control family to install, defaulting to delay-based.
+///
+/// Live media wants a steady send rate an encoder can track, not CUBIC's sawtooth,
+/// so override quinn's own CUBIC default.
+fn congestion_control(quic: &Resolved) -> CongestionControl {
+	quic.congestion_control.unwrap_or(CongestionControl::Delay)
 }
 
 /// The quinn controller factory for a congestion control family. quinn's BBR is v1.
@@ -659,6 +664,17 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<quinn::congestion::Bbr>().is_ok());
+	}
+
+	/// An unset knob must land on BBR rather than quinn's own CUBIC default.
+	#[test]
+	fn congestion_control_defaults_to_delay() {
+		let mut quic = crate::quic::Client::default();
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Delay);
+
+		// An explicit request still gets through.
+		quic.congestion_control = Some(CongestionControl::Loss);
+		assert_eq!(congestion_control(&quic.resolve()), CongestionControl::Loss);
 	}
 
 	/// Loopback regression test: a config selecting BBR must produce live

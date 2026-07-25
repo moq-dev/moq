@@ -584,10 +584,10 @@ async fn serve_session(request: Request) -> crate::Result<()> {
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 	let mut versions: Vec<moq_net::Version> = base.iter().copied().collect();
-	if let Ok(lite05) = "moq-lite-05".parse::<moq_net::Version>() {
-		if !versions.contains(&lite05) {
-			versions.push(lite05);
-		}
+	if let Ok(lite05) = "moq-lite-05".parse::<moq_net::Version>()
+		&& !versions.contains(&lite05)
+	{
+		versions.push(lite05);
 	}
 	moq_net::Versions::from(versions)
 }

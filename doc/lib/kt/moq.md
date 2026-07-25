@@ -7,6 +7,10 @@ description: Kotlin Multiplatform library for Media over QUIC
 
 The ergonomic Kotlin wrapper for [Media over QUIC](/), layered on the [`dev.moq:moq-ffi`](https://central.sonatype.com/artifact/dev.moq/moq-ffi) bindings. Both publish JVM and Android variants under one coordinate; Gradle metadata picks the right one for your target.
 
+[![javadoc](https://javadoc.io/badge2/dev.moq/moq/javadoc.svg)](https://javadoc.io/doc/dev.moq/moq)
+
+Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq), the KDoc rendered from each release's Dokka javadoc jar.
+
 ## Install
 
 ```kotlin
@@ -302,6 +306,7 @@ Android targets are opt-in via `-Pandroid.enabled=true`. Local builds without th
 
 ## See also
 
+- API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/moq)
 - Source: [kt/](https://github.com/moq-dev/moq/tree/main/kt)
 - README: [kt/README.md](https://github.com/moq-dev/moq/blob/main/kt/README.md)
 - Maven Central: [dev.moq:moq](https://central.sonatype.com/artifact/dev.moq/moq)

@@ -1,0 +1,11 @@
+# Swift Package Index config. Tells SPI to build and host DocC documentation
+# for the `Moq` target (generated from the `///` doc comments in Sources/Moq),
+# served at https://swiftpackageindex.com/moq-dev/moq-swift/documentation.
+#
+# This file is copied into the published moq-dev/moq-swift mirror by
+# swift/scripts/package.sh, since SPI reads it from the package root.
+version: 1
+builder:
+  configs:
+    - documentation_targets:
+        - Moq

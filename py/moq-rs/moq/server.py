@@ -12,6 +12,7 @@ from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
 
+# The wire transport carrying a session: raw QUIC, iroh's peer-to-peer QUIC, or WebSocket.
 Transport = Literal["quic", "iroh", "websocket"]
 
 
@@ -30,10 +31,12 @@ class Request:
 
     @property
     def url(self) -> str | None:
+        """The URL the client connected to, or `None` if the transport carries none."""
         return self._inner.url()
 
     @property
     def transport(self) -> Transport:
+        """The wire transport carrying this session (`"quic"`, `"iroh"`, or `"websocket"`)."""
         return self._inner.transport()  # type: ignore[return-value]
 
     def set_publish(self, origin: OriginProducer | None) -> None:
@@ -71,13 +74,13 @@ class Request:
 class Server:
     """High-level MoQ server with automatic origin wiring.
 
-    In simple mode (no origin provided), creates an internal origin automatically:
+    In simple mode (no origin provided), creates an internal origin automatically::
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             broadcast = server.create_broadcast("live")
             await server.serve()
 
-    Or hand-roll the accept loop if you need per-request control:
+    Or hand-roll the accept loop if you need per-request control::
 
         async with Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
             async for request in server:
@@ -90,7 +93,7 @@ class Server:
     close in-flight sessions; those stay alive until their handles are
     dropped or `Session.cancel()` is called.
 
-    In advanced mode, provide your own origins for full control:
+    In advanced mode, provide your own origins for full control::
 
         origin = OriginProducer()
         server = Server(

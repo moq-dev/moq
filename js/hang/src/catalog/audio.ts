@@ -19,7 +19,8 @@ export const AudioConfigSchema = z.object({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 
-	// See: https://w3c.github.io/webcodecs/codec_registry.html
+	// Registered WebCodecs codec string, or Hang's "pcm" extension for
+	// interleaved little-endian IEEE-754 binary32 samples.
 	codec: z.string(),
 
 	// The container format, used to decode the timestamp and more.

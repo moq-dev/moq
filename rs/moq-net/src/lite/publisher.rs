@@ -1027,18 +1027,14 @@ mod test {
 	}
 }
 
-/// The announce loop's demand/linger state machine: a drained broadcast keeps
-/// advertising zero for `COST_LINGER` before the restart that restores its cold
-/// cost, demand returning in the window cancels the restore, and a route change
-/// supersedes it. Time is paused, so the 5s linger is deterministic.
+/// Transport doubles shared by the publisher tests: a session whose streams record
+/// everything written and every reset code, and peers that never speak.
 #[cfg(test)]
-mod announce_test {
-	use super::*;
-	use crate::coding::{Decode, Reader};
-	use std::sync::Mutex;
+mod test_transport {
+	use std::sync::{Arc, Mutex};
 
 	#[derive(Debug, Clone, Default)]
-	struct SinkError;
+	pub struct SinkError;
 
 	impl std::fmt::Display for SinkError {
 		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1054,18 +1050,29 @@ mod announce_test {
 		}
 	}
 
-	/// Captures everything the announce loop writes, so tests decode it back
-	/// into announce messages.
+	/// What the session's send streams recorded. Resets are a list, not a last-value, so a
+	/// stray second reset (a drop fallback firing behind an abort) is visible.
 	#[derive(Clone, Default)]
-	struct SinkSend {
-		writes: Arc<Mutex<Vec<u8>>>,
+	pub struct Log {
+		pub writes: Arc<Mutex<Vec<u8>>>,
+		pub resets: Arc<Mutex<Vec<u32>>>,
+	}
+
+	impl Log {
+		pub fn resets(&self) -> Vec<u32> {
+			self.resets.lock().unwrap().clone()
+		}
+	}
+
+	pub struct SinkSend {
+		pub log: Log,
 	}
 
 	impl web_transport_trait::SendStream for SinkSend {
 		type Error = SinkError;
 
 		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-			self.writes.lock().unwrap().extend_from_slice(buf);
+			self.log.writes.lock().unwrap().extend_from_slice(buf);
 			Ok(buf.len())
 		}
 
@@ -1075,16 +1082,18 @@ mod announce_test {
 			Ok(())
 		}
 
-		fn reset(&mut self, _code: u32) {}
+		fn reset(&mut self, code: u32) {
+			self.log.resets.lock().unwrap().push(code);
+		}
 
 		async fn closed(&mut self) -> Result<(), Self::Error> {
 			std::future::pending().await
 		}
 	}
 
-	/// A peer that never speaks and never closes, so the announce loop only ever
-	/// acts on model-side events (announces, routes, demand, the linger timer).
-	struct PendingRecv;
+	/// A peer that never speaks and never closes, so a test only ever acts on
+	/// model-side events.
+	pub struct PendingRecv;
 
 	impl web_transport_trait::RecvStream for PendingRecv {
 		type Error = SinkError;
@@ -1100,10 +1109,12 @@ mod announce_test {
 		}
 	}
 
-	/// Only names the stream types for `Stream<S, Version>`; `run_announce`
-	/// never touches the session itself.
-	#[derive(Clone)]
-	struct SinkSession;
+	/// Only `open_uni` yields; everything else parks. Tests that drive a bidi stream
+	/// build one directly from [`SinkSend`] and [`PendingRecv`] instead.
+	#[derive(Clone, Default)]
+	pub struct SinkSession {
+		pub log: Log,
+	}
 
 	impl web_transport_trait::Session for SinkSession {
 		type SendStream = SinkSend;
@@ -1123,7 +1134,7 @@ mod announce_test {
 		}
 
 		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
+			Ok(SinkSend { log: self.log.clone() })
 		}
 
 		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
@@ -1153,13 +1164,25 @@ mod announce_test {
 		}
 	}
 
-	struct SinkStats;
+	pub struct SinkStats;
 
 	impl web_transport_trait::Stats for SinkStats {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			None
 		}
 	}
+}
+
+/// The announce loop's demand/linger state machine: a drained broadcast keeps
+/// advertising zero for `COST_LINGER` before the restart that restores its cold
+/// cost, demand returning in the window cancels the restore, and a route change
+/// supersedes it. Time is paused, so the 5s linger is deterministic.
+#[cfg(test)]
+mod announce_test {
+	use super::test_transport::*;
+	use super::*;
+	use crate::coding::{Decode, Reader};
+	use std::sync::Mutex;
 
 	const VERSION: Version = Version::Lite06Wip;
 
@@ -1294,10 +1317,11 @@ mod announce_test {
 		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
 		let track = demand.then(|| downstream.track("video").unwrap());
 
-		let writes = Arc::new(Mutex::new(Vec::new()));
+		let log = Log::default();
+		let writes = log.writes.clone();
 		let consumer = origin.consume();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend { writes: writes.clone() }, VERSION),
+			writer: Writer::new(SinkSend { log }, VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
@@ -1783,25 +1807,44 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			sequence,
 		};
 		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
-
 		let mut stream = Writer::new(stream, self.version);
-		stream.set_priority(priority.current());
-		stream.encode(&lite::DataType::Group).await?;
-		stream.encode(&msg).await?;
 
-		// Lite05+ delta-encodes per-frame timestamps within the group. The first
-		// frame's delta is absolute (against an implicit prev value of 0), every
-		// subsequent delta is signed against the previous frame.
-		let mut prev_ts: u64 = 0;
-		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
-				.await?;
+		if let Err(err) = self.write_group(&mut stream, &msg, &mut priority, &mut group).await {
+			// Reset with the real reason (Old, Lagged, Evicted, ...) so the subscriber can
+			// tell a truncated group from a routine cancel. Without this the Writer's Drop
+			// fallback reports every failure as Cancel.
+			stream.abort(&err);
+			return Err(err);
 		}
 
 		stream.finish()?;
 		stream.closed().await?;
 
 		tracing::debug!(sequence, "finished group");
+
+		Ok(())
+	}
+
+	/// Write the group header and every frame, leaving the stream open for the caller to
+	/// finish or abort.
+	async fn write_group(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &lite::Group,
+		priority: &mut PriorityHandle,
+		group: &mut group::Consumer,
+	) -> Result<(), Error> {
+		stream.set_priority(priority.current());
+		stream.encode(&lite::DataType::Group).await?;
+		stream.encode(msg).await?;
+
+		// Lite05+ delta-encodes per-frame timestamps within the group. The first
+		// frame's delta is absolute (against an implicit prev value of 0), every
+		// subsequent delta is signed against the previous frame.
+		let mut prev_ts: u64 = 0;
+		while let Some(frame) = self.next_frame(stream, priority, group).await? {
+			self.serve_frame(stream, priority, frame, &mut prev_ts).await?;
+		}
 
 		Ok(())
 	}
@@ -1973,5 +2016,51 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let track_priority = self.track_priority_current();
 		priority.set_track(track_priority);
 		stream.set_priority(priority.current());
+	}
+}
+
+/// A group that fails mid-stream must reset with its own error code. The subscriber uses
+/// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
+/// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
+#[cfg(test)]
+mod serve_group_test {
+	use super::test_transport::*;
+	use super::*;
+	use crate::{Timestamp, broadcast};
+
+	#[tokio::test]
+	async fn resets_with_the_abort_code() {
+		let log = Log::default();
+		let session = SinkSession { log: log.clone() };
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+
+		// Drain the frame, leaving the task parked awaiting the next one.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		// The group is dropped from the cache mid-stream: a truncated group, not a cancel.
+		group.abort(Error::Old).unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
 	}
 }

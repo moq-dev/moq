@@ -57,7 +57,7 @@ fn telemetry(tick: u64) -> Value {
 			"temp_c": ((4.0 + (t * 0.05).sin() * 1.5) * 100.0).round() / 100.0,
 			"humidity": 60 + (tick % 10),
 			"shock_g": (((t * 0.3).sin().abs()) * 100.0).round() / 100.0,
-			"door_open": tick % 30 == 0,
+			"door_open": tick.is_multiple_of(30),
 		},
 		"power": {
 			"battery_pct": 100 - (tick / 6) % 100,

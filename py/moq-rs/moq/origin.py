@@ -18,7 +18,10 @@ from .subscribe import BroadcastConsumer
 
 
 class Announcement:
-    """Wraps MoqAnnouncement, a discovered broadcast."""
+    """A single broadcast discovered via :meth:`OriginConsumer.announced`.
+
+    Read its :attr:`path` and get a :attr:`broadcast` consumer to subscribe to it.
+    """
 
     def __init__(self, inner: MoqAnnouncement) -> None:
         self._inner = inner
@@ -26,6 +29,7 @@ class Announcement:
 
     @property
     def path(self) -> str:
+        """The path this broadcast is announced at."""
         return self._inner.path()
 
     @property
@@ -41,7 +45,11 @@ class Announcement:
 
 
 class Announced:
-    """Wraps MoqAnnounced as an async iterator of Announcement."""
+    """Async-iterable stream of :class:`Announcement` broadcasts as they appear.
+
+    Usable as an async context manager; iterate with ``async for`` and it keeps
+    yielding new broadcasts until cancelled.
+    """
 
     def __init__(self, inner: MoqAnnounced) -> None:
         self._inner = inner
@@ -62,11 +70,16 @@ class Announced:
         return Announcement(result)
 
     def cancel(self) -> None:
+        """Stop iterating and release the underlying announcement stream."""
         self._inner.cancel()
 
 
 class AnnouncedBroadcast:
-    """Wraps MoqAnnouncedBroadcast, awaitable for a specific broadcast."""
+    """Awaitable that resolves when the broadcast at a specific path is announced.
+
+    ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
+    once the broadcast becomes available. Usable as an async context manager.
+    """
 
     def __init__(self, inner: MoqAnnouncedBroadcast) -> None:
         self._inner = inner
@@ -78,12 +91,14 @@ class AnnouncedBroadcast:
         self.cancel()
 
     async def available(self) -> BroadcastConsumer:
+        """Await the broadcast becoming available and return its consumer."""
         return BroadcastConsumer(await self._inner.available())
 
     def __await__(self):
         return self.available().__await__()
 
     def cancel(self) -> None:
+        """Stop waiting for the broadcast and release the underlying handle."""
         self._inner.cancel()
 
 
@@ -120,22 +135,31 @@ class OriginDynamic:
         return await self.requested_broadcast()
 
     async def requested_broadcast(self) -> BroadcastRequest:
+        """Await the next broadcast a consumer requested but that isn't published yet."""
         return BroadcastRequest(await self._inner.requested_broadcast())
 
     def cancel(self) -> None:
+        """Stop serving dynamic requests and release the underlying handle."""
         self._inner.cancel()
 
 
 class OriginConsumer:
-    """Wraps MoqOriginConsumer for discovering broadcasts."""
+    """The discovery side of an origin: find and subscribe to broadcasts.
+
+    Iterate :meth:`announced` to watch broadcasts appear, await
+    :meth:`announced_broadcast` for a specific path, or :meth:`request_broadcast`
+    to resolve one as soon as it can be served.
+    """
 
     def __init__(self, inner: MoqOriginConsumer) -> None:
         self._inner = inner
 
     def announced(self, prefix: str = "") -> Announced:
+        """Async-iterate broadcasts announced under ``prefix`` (empty matches all)."""
         return Announced(self._inner.announced(prefix))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
+        """Await announcement of the broadcast at exactly ``path``."""
         return AnnouncedBroadcast(self._inner.announced_broadcast(path))
 
     async def request_broadcast(self, path: str) -> BroadcastConsumer:
@@ -150,7 +174,11 @@ class OriginConsumer:
 
 
 class OriginProducer:
-    """Wraps MoqOriginProducer for publishing broadcasts."""
+    """The publishing side of an origin: announce broadcasts for consumers to discover.
+
+    Call :meth:`create_broadcast` to publish at a path, :meth:`consume` for a
+    matching :class:`OriginConsumer`, or :meth:`dynamic` to serve on-demand requests.
+    """
 
     def __init__(self, *, cache_capacity_bytes: int | None = None) -> None:
         self._inner = MoqOriginProducer(MoqOriginOptions(cache_capacity_bytes=cache_capacity_bytes))
@@ -163,6 +191,7 @@ class OriginProducer:
         return self
 
     def consume(self) -> OriginConsumer:
+        """Create a consumer that discovers the broadcasts this origin publishes."""
         return OriginConsumer(self._inner.consume())
 
     def dynamic(self) -> OriginDynamic:

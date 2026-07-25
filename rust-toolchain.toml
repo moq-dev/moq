@@ -1,2 +1,6 @@
 [toolchain]
+# Pinned to the build toolchain: moq-relay's 1.95 (the highest crate MSRV), so
+# the whole workspace compiles. NOT the 1.91 workspace library floor in
+# Cargo.toml. Keep in sync with flake.nix / nix/overlay.nix.
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]

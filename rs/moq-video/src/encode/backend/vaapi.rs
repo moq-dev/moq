@@ -4,14 +4,11 @@
 //! cros-libva + discord/cros-codecs. It takes tightly-packed NV12 and emits an
 //! Annex-B elementary stream with in-band SPS/PPS, matching avc3 mode.
 //!
-//! As of moq-vaapi 0.0.2 libva is dynamically *linked* (the binary carries
-//! `NEEDED libva.so.2` / `libva-drm.so.2`), so a VAAPI-enabled Linux build needs
-//! libva present at runtime: a libva-less host fails to load the binary, before
-//! [`backend::open`](super::open) can fall back. A present-but-unusable VA stack
-//! (no render node, no usable driver) *does* fall back: `Encoder::new` returns an
-//! error and `backend::open` moves on to openh264. Making moq-vaapi `dlopen` libva
-//! (one portable binary that loads and falls back on a libva-less box, like the
-//! NVENC backend) is tracked in #1837.
+//! As of moq-vaapi 0.0.3 libva is `dlopen`'d at runtime, so a VAAPI-enabled build
+//! needs no libva at build time and the binary carries no `NEEDED libva`. A
+//! libva-less host, or a present-but-unusable VA stack (no render node, no usable
+//! driver), makes `Encoder::new` return an error; under automatic selection
+//! [`backend::open`](super::open) then moves on to openh264, like the NVENC backend.
 //!
 //! Our captures hand us CPU I420 (webcams deliver YUYV/MJPEG, decoded to I420),
 //! so each frame is interleaved to NV12 before encoding.
@@ -26,7 +23,7 @@ use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 use super::super::encoder::Config;
 use super::Backend;
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 pub(crate) const NAME: &str = "vaapi";
 
@@ -56,7 +53,7 @@ impl Vaapi {
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
 		let i420 = frame.to_i420()?;
 		let nv12 = i420_to_nv12(&i420);
 		let annexb = self
@@ -80,7 +77,7 @@ impl Backend for Vaapi {
 	fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
 		// moq-vaapi rebuilds its rate control parameter from `Config::bitrate` on
 		// every frame, so this needs nothing more than a setter on that config to
-		// work. It doesn't have one as of 0.0.2 and the field is private, so the
+		// work. It doesn't have one as of 0.0.3 and the field is private, so the
 		// rate is fixed at open until moq-vaapi exposes one. Rebuilding the
 		// session per estimate isn't worth it: that forces an IDR on a link that
 		// just told us it's congested.

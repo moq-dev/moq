@@ -170,6 +170,15 @@ struct BroadcastState {
 	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
 	// tell a deliberate shutdown apart from a producer dropped by accident.
 	closing: bool,
+
+	// Set only by `Producer::finish()`: the broadcast ended deliberately, as
+	// opposed to aborting or losing its producer. The origin reads this to decide
+	// whether a detached source may linger for a replacement.
+	finished: bool,
+
+	// The error passed to `Producer::abort()`, reported by `Consumer::closed`.
+	// `None` for a finish or a dropped producer (reported as `Error::Dropped`).
+	abort: Option<Error>,
 }
 
 /// The spliced (route-fed) half of a broadcast: logical tracks that outlive any
@@ -453,18 +462,39 @@ impl Producer {
 	/// declares the end, so it must not depend on the caller also surrendering the
 	/// handle.
 	pub fn finish(&mut self) {
-		self.state.lock().closing = true;
+		{
+			let mut state = self.state.lock();
+			state.closing = true;
+			state.finished = true;
+		}
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
 		let _ = self.alive.close();
 	}
 
-	/// Mark the broadcast as deliberately ended so the drop path doesn't warn, without
-	/// ending it for consumers the way [`Self::finish`] does. Used by sessions tearing
-	/// down announced broadcasts when the connection dies, where the broadcast may
-	/// still linger for a reconnect.
-	pub(crate) fn abort(&self) {
-		self.state.lock().closing = true;
+	/// Abort the broadcast, ending it for consumers with `err`.
+	///
+	/// Like [`finish`](Self::finish) the end is immediate, whether or not other
+	/// producer clones are still alive, and existing tracks stay readable so
+	/// consumers can drain what they already have (an abort does not cascade into
+	/// the tracks). Unlike a finish, consumers observe `err` from
+	/// [`Consumer::closed`], and an origin treats the source as ungracefully lost,
+	/// so the path may linger for a replacement (see
+	/// [`origin::Info::linger`](crate::origin::Info::linger)).
+	///
+	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
+	/// already finished or aborted.
+	pub fn abort(self, err: Error) -> Result<(), Error> {
+		{
+			let mut state = self.state.lock();
+			if state.closing {
+				return Err(Error::Closed);
+			}
+			state.closing = true;
+			state.abort = Some(err);
+		}
+		let _ = self.alive.close();
+		Ok(())
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -505,10 +535,9 @@ impl Producer {
 
 /// A session-owned handle to a source broadcast created via
 /// [`crate::origin::Producer::create_broadcast`]: [`Self::finish`] ends it
-/// deliberately, while dropping the guard marks the source aborted (keeping the
-/// dropped-without-finish warning quiet). Either way the origin unannounces once
-/// the last source detaches. Shared by the lite and IETF subscribers so the
-/// drop-vs-finish contract lives in one place.
+/// deliberately, while dropping the guard aborts it as [`Error::Dropped`] (a dead
+/// session), letting the origin linger the path for a reconnect. Shared by the
+/// lite and IETF subscribers so the drop-vs-finish contract lives in one place.
 pub(crate) struct SourceGuard {
 	// `Option` so `finish` can consume the producer while `Drop` aborts it.
 	producer: Option<Producer>,
@@ -544,8 +573,8 @@ impl SourceGuard {
 
 impl Drop for SourceGuard {
 	fn drop(&mut self) {
-		if let Some(producer) = &self.producer {
-			producer.abort();
+		if let Some(producer) = self.producer.take() {
+			let _ = producer.abort(Error::Dropped);
 		}
 	}
 }
@@ -643,16 +672,18 @@ impl Dynamic {
 		}
 	}
 
-	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
-	/// dropping, returning the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`],
+	/// [`Producer::abort`], or every producer dropping, returning the cause.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until the broadcast closes; ready with the cause (always [`Error::Dropped`],
-	/// whether it ended via [`Producer::finish`] or by every producer dropping).
+	/// Poll until the broadcast closes; ready with the cause: the error passed to
+	/// [`Producer::abort`], or [`Error::Dropped`] for a [`Producer::finish`] or a
+	/// dropped producer (check [`Consumer::is_finished`] to tell those apart).
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.alive.poll_closed(waiter).map(|()| Error::Dropped)
+		ready!(self.alive.poll_closed(waiter));
+		Poll::Ready(self.state.read().abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	/// Return true if this is the same broadcast instance.
@@ -839,14 +870,15 @@ impl Consumer {
 		}
 	}
 
-	/// Block until the broadcast is closed, by [`Producer::finish`] or by every producer
-	/// dropping, and return the cause.
+	/// Block until the broadcast is closed, by [`Producer::finish`],
+	/// [`Producer::abort`], or every producer dropping, and return the cause.
 	///
-	/// Always returns [`Error::Dropped`]: a broadcast is just a collection of tracks, so it
-	/// only ends when every producer is gone. There is no way to abort it with a code.
+	/// Returns the error passed to [`Producer::abort`], or [`Error::Dropped`] for a
+	/// [`Producer::finish`] or a dropped producer (check [`Self::is_finished`] to
+	/// tell those apart).
 	pub async fn closed(&self) -> Error {
 		self.alive.closed().await;
-		Error::Dropped
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
 	/// Returns true if every [`Producer`] has been dropped.
@@ -860,6 +892,14 @@ impl Consumer {
 	/// than a strike.
 	pub(crate) fn is_closing(&self) -> bool {
 		self.is_closed() || self.state.read().closing
+	}
+
+	/// Whether the broadcast ended via a deliberate [`Producer::finish`], as opposed
+	/// to aborting or losing its producer. `false` while the broadcast is still live;
+	/// an origin uses this to close a front immediately on a deliberate end instead
+	/// of lingering for a replacement.
+	pub fn is_finished(&self) -> bool {
+		self.state.read().finished
 	}
 
 	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
@@ -1144,6 +1184,33 @@ mod test {
 		// track1's producer is held outside the broadcast, so it survives.
 		assert!(!track1.is_closed());
 		track1c.assert_not_closed();
+	}
+
+	/// `closed()` reports the cause: the abort error, or `Dropped` for a finish or
+	/// a dropped producer, with `is_finished` telling the latter two apart.
+	#[tokio::test]
+	async fn closed_cause() {
+		// Abort: the error comes through, and it isn't a finish.
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		producer.abort(Error::Timeout).unwrap();
+		assert!(matches!(consumer.closed().await, Error::Timeout));
+		assert!(!consumer.is_finished());
+
+		// Finish: a deliberate clean end.
+		let mut producer = Info::new().produce();
+		let consumer = producer.consume();
+		producer.finish();
+		assert!(matches!(consumer.closed().await, Error::Dropped));
+		assert!(consumer.is_finished());
+
+		// Plain drop: neither aborted nor finished.
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		// Deliberate for the test: exercises the accidental-drop path (warns).
+		drop(producer);
+		assert!(matches!(consumer.closed().await, Error::Dropped));
+		assert!(!consumer.is_finished());
 	}
 
 	#[tokio::test]

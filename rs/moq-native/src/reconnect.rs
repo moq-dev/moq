@@ -65,6 +65,20 @@ impl Default for Backoff {
 	}
 }
 
+impl Backoff {
+	/// How long broadcasts fed by a reconnecting session should outlive a session
+	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
+	/// [`timeout`](Self::timeout), so when the loop does give up its error surfaces
+	/// before the broadcasts tear down. A zero timeout retries forever, so the
+	/// broadcasts linger forever too.
+	pub fn linger(&self) -> Duration {
+		match self.timeout.is_zero() {
+			true => Duration::MAX,
+			false => self.timeout.saturating_add(Duration::from_secs(1)),
+		}
+	}
+}
+
 /// A connection lifecycle transition reported by [`Reconnect::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -403,6 +417,20 @@ mod tests {
 		assert_eq!(backoff.multiplier, 2);
 		assert_eq!(backoff.max, Duration::from_secs(30));
 		assert_eq!(backoff.timeout, Duration::from_secs(300));
+	}
+
+	/// The linger outlives the give-up timeout (so the reconnect error surfaces
+	/// first), and an unlimited-retry timeout lingers forever.
+	#[test]
+	fn test_backoff_linger() {
+		let backoff = Backoff::default();
+		assert_eq!(backoff.linger(), backoff.timeout + Duration::from_secs(1));
+
+		let unlimited = Backoff {
+			timeout: Duration::ZERO,
+			..Backoff::default()
+		};
+		assert_eq!(unlimited.linger(), Duration::MAX);
 	}
 
 	#[test]

@@ -387,7 +387,10 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 
 	/// Record one frame (presentation timestamp + encoded size), auto-filling the jitter if the
 	/// config didn't provide it and the detected value changed.
-	pub fn record_frame(&mut self, ts: Timestamp, bytes: usize) {
+	///
+	/// Crate-internal: the codec importers feed the catalog's bitrate/jitter estimator as they
+	/// publish. Not a knob for external callers.
+	pub(crate) fn record_frame(&mut self, ts: Timestamp, bytes: usize) {
 		if self.metrics.record_frame(ts, bytes).is_some() && self.supplied.jitter.is_none() {
 			self.refresh();
 		}
@@ -395,7 +398,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 
 	/// Record a frame's reorder delay (`PTS - DTS`), auto-filling the jitter as for
 	/// [`record_frame`](Self::record_frame).
-	pub fn record_reorder(&mut self, reorder: Timestamp) {
+	pub(crate) fn record_reorder(&mut self, reorder: Timestamp) {
 		if self.metrics.record_reorder(reorder).is_some() && self.supplied.jitter.is_none() {
 			self.refresh();
 		}
@@ -403,7 +406,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 
 	/// Close the current group (`next` is its end timestamp when known), auto-filling the bitrate
 	/// if the config didn't provide it and the detected maximum rose.
-	pub fn record_group_end(&mut self, next: Option<Timestamp>) {
+	pub(crate) fn record_group_end(&mut self, next: Option<Timestamp>) {
 		if self.metrics.finish_group(next).is_some() && self.supplied.bitrate.is_none() {
 			self.refresh();
 		}

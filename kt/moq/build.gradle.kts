@@ -22,6 +22,8 @@
 // is present (see mavenPublishing below), so keyless local and fork-PR builds work.
 
 import com.android.build.gradle.LibraryExtension
+import com.vanniktech.maven.publish.JavadocJar
+import com.vanniktech.maven.publish.KotlinMultiplatform
 import com.vanniktech.maven.publish.SonatypeHost
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -33,6 +35,8 @@ plugins {
     kotlin("plugin.serialization")
     id("com.android.library") apply false
     id("com.vanniktech.maven.publish")
+    // Builds the KDoc HTML bundled as the javadoc jar (see mavenPublishing below).
+    id("org.jetbrains.dokka")
 }
 
 version = providers.gradleProperty("moq.version").get()
@@ -133,6 +137,11 @@ if (androidEnabled) {
 }
 
 mavenPublishing {
+    // Bundle the Dokka-generated KDoc HTML as the javadoc jar. Without this the
+    // KMP default is an empty javadoc jar, so javadoc.io (which mirrors whatever
+    // Maven Central holds) would serve a docless page.
+    configure(KotlinMultiplatform(javadocJar = JavadocJar.Dokka("dokkaHtml")))
+
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
     // Only sign when a key is actually configured. signAllPublications() registers a
     // *required* sign task, so calling it unconditionally makes publishToMavenLocal

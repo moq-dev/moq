@@ -45,7 +45,7 @@ use windows::core::{GUID, Interface};
 use super::{Backend, Codec, Config, Decoded};
 use crate::Error;
 use crate::frame::d3d11::Texture;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 use crate::mf::{ComGuard, create_d3d_device, mf_err, unpack_2x32};
 
 pub(crate) const NAME: &str = "mediafoundation";
@@ -390,7 +390,7 @@ impl Backend for MediaFoundation {
 			.into_iter()
 			.map(|i420| Decoded {
 				timestamp,
-				frame: Frame::I420(i420),
+				frame: Surface::I420(i420),
 			})
 			.collect())
 	}

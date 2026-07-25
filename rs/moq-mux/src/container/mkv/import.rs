@@ -227,10 +227,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	fn handle_tracks(&mut self, entries: Vec<MatroskaSpec>) -> Result<()> {
 		for entry in entries {
-			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
-				if let Err(e) = self.add_track(children) {
-					tracing::warn!(error = ?e, "skipping MKV track");
-				}
+			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
+				&& let Err(e) = self.add_track(children)
+			{
+				tracing::warn!(error = ?e, "skipping MKV track");
 			}
 		}
 		Ok(())
@@ -375,10 +375,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Manage groups: new group on video keyframe; audio always finishes its group immediately.
 		match track.kind {
 			TrackKind::Video => {
-				if keyframe {
-					if let Some(mut prev) = track.group.take() {
-						prev.finish()?;
-					}
+				if keyframe && let Some(mut prev) = track.group.take() {
+					prev.finish()?;
 				}
 				track.track.write(frame)?;
 			}
@@ -541,6 +539,7 @@ fn build_audio_config(
 				if cfg_rate > 0 { cfg_rate } else { sample_rate },
 				if cfg_channels > 0 { cfg_channels } else { channels },
 			);
+			config.description = codec_private.cloned();
 			config.container = Container::Legacy;
 			Ok(config)
 		}

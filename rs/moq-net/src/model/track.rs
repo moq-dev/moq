@@ -131,6 +131,17 @@ impl Info {
 		self.ordered = ordered;
 		self
 	}
+
+	/// Bind this track to its parent `broadcast`, the moment groups gain a shared
+	/// cache pool to register with. Also clamps [`Self::latency_max`] down to the
+	/// origin's [`cache_duration`](crate::origin::Info::cache_duration) ceiling, so a
+	/// group is never retained longer than the origin allows regardless of the window
+	/// the publisher advertised. Every bind path funnels through here, so the clamp
+	/// covers local publishers and relayed (lite / IETF) tracks alike.
+	pub(crate) fn bind(&mut self, broadcast: Arc<broadcast::Info>) {
+		self.latency_max = self.latency_max.min(broadcast.origin.cache_duration);
+		self.broadcast = broadcast;
+	}
 }
 
 #[derive(Default)]
@@ -578,7 +589,7 @@ impl TrackState {
 			.info
 			.get_or_insert_with(|| {
 				let mut info = info.unwrap_or_default();
-				info.broadcast = broadcast;
+				info.bind(broadcast);
 				info
 			})
 			.clone();
@@ -629,7 +640,7 @@ impl Producer {
 		info: impl Into<Option<Info>>,
 	) -> Self {
 		let mut info = info.into().unwrap_or_default();
-		info.broadcast = broadcast.clone();
+		info.bind(broadcast.clone());
 		Self {
 			name: name.into(),
 			state: kio::Producer::new(TrackState {
@@ -1210,6 +1221,11 @@ fn combined_subscription(subs: &Subscriptions, bound: Option<Duration>, waiter: 
 		if sub.is_closed() {
 			continue;
 		}
+		// Arm the closed waiter explicitly. `poll` below registers on the value
+		// channel only when it returns Pending, so a subscriber that contributes
+		// demand (always the case for the first one) would leave nothing watching
+		// for its departure, and the last one leaving would never wake this poll.
+		let _ = sub.poll_closed(waiter);
 		if let Poll::Ready(Ok(sub)) = sub.poll(waiter, |sub| sub.poll_combined(&combined)) {
 			combined = Some(sub);
 		}
@@ -2296,7 +2312,7 @@ impl Request {
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		let mut info = info.into().unwrap_or_default();
-		info.broadcast = self.broadcast.clone();
+		info.bind(self.broadcast.clone());
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
 		if let Ok(mut state) = self.state.write() {
@@ -2687,6 +2703,30 @@ mod test {
 		}
 	}
 
+	/// A group whose frames outlive `latency_max` is aged out when the next group starts, but
+	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
+	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
+	#[tokio::test]
+	async fn aging_out_a_finished_group_keeps_the_clean_end() {
+		tokio::time::pause();
+
+		let mut producer = track_producer("test", None);
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut consumer = group.consume();
+
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		assert_eq!(consumer.next_frame().await.unwrap().unwrap().size, 5);
+
+		// The group stays open well past latency_max, then the next period starts.
+		tokio::time::advance(DEFAULT_LATENCY_MAX * 12).await;
+		group.finish().unwrap();
+		let _next = producer.create_group(group::Info { sequence: 1 }).unwrap();
+
+		assert!(consumer.next_frame().await.unwrap().is_none());
+	}
+
 	#[tokio::test]
 	async fn evict_keeps_max_sequence() {
 		tokio::time::pause();
@@ -2782,6 +2822,54 @@ mod test {
 		assert_eq!(producer.subscription().unwrap().latency_max, Duration::ZERO);
 	}
 
+	/// Mint a track under an origin whose retention ceiling is `cap`, so the
+	/// track's own window is clamped down to it on bind.
+	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
+		let origin = crate::origin::Info::default().with_cache_duration(cap);
+		Producer::new(Arc::new(broadcast::Info { origin }), name, info)
+	}
+
+	#[test]
+	fn origin_cache_duration_clamps_latency_max() {
+		// A publisher asking to keep groups for a minute is capped to the origin's 1s
+		// ceiling; a publisher already below the ceiling is left alone (it's a min).
+		let capped = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_secs(60)),
+			Duration::from_secs(1),
+		);
+		assert_eq!(capped.state.read().latency_bound(), Some(Duration::from_secs(1)));
+
+		let under = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_millis(500)),
+			Duration::from_secs(1),
+		);
+		assert_eq!(under.state.read().latency_bound(), Some(Duration::from_millis(500)));
+	}
+
+	#[tokio::test]
+	async fn origin_cache_duration_caps_eviction() {
+		tokio::time::pause();
+
+		// The publisher wants a 60s window, but the origin caps retention at 1s.
+		let mut producer = track_producer_capped(
+			"test",
+			Info::default().with_latency_max(Duration::from_secs(60)),
+			Duration::from_secs(1),
+		);
+		producer.append_group().unwrap(); // seq 0
+
+		// Past the origin ceiling but far within the publisher's own 60s window.
+		tokio::time::advance(Duration::from_secs(2)).await;
+		producer.append_group().unwrap(); // seq 1
+
+		// Seq 0 is evicted anyway: the origin ceiling wins over the larger publisher window.
+		let state = producer.state.read();
+		assert_eq!(live_groups(&state), 1);
+		assert_eq!(first_live_sequence(&state), 1);
+	}
+
 	#[test]
 	fn latency_max_clamped_via_every_update_path() {
 		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
@@ -2859,6 +2947,49 @@ mod test {
 			producer.subscription().is_none(),
 			"snapshot must exclude a dropped subscriber",
 		);
+	}
+
+	#[test]
+	fn dropped_subscriber_wakes_the_aggregate() {
+		// The value being right isn't enough: nothing re-polls the aggregate on its
+		// own, so the drop has to wake the waiter. A subscriber contributing demand
+		// takes `kio::Consumer::poll`'s Ready path, which registers no waiter, so
+		// the departure needs the closed waiter armed explicitly. Without it a relay
+		// never learns the last viewer left and holds the upstream subscription (and
+		// the upstream's viewer count) open forever.
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer("test", None);
+		let a = producer.subscribe(Subscription::default().with_priority(5));
+
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+
+		// Prime the cursor, then confirm the next poll parks.
+		assert!(matches!(
+			producer.poll_subscription_changed(&waiter),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert!(
+			producer.poll_subscription_changed(&waiter).is_pending(),
+			"the aggregate is unchanged, so this poll must park",
+		);
+		assert!(!woken.load(Ordering::SeqCst), "nothing happened yet");
+
+		drop(a);
+		assert!(
+			woken.load(Ordering::SeqCst),
+			"the last subscriber leaving must wake the aggregate watcher",
+		);
+	}
+
+	/// An [`ArcWake`] that just records that it was woken.
+	struct FlagWake(Arc<std::sync::atomic::AtomicBool>);
+
+	impl futures::task::ArcWake for FlagWake {
+		fn wake_by_ref(arc_self: &Arc<Self>) {
+			arc_self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
 	}
 
 	#[tokio::test]

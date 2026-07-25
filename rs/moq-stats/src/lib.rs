@@ -8,6 +8,9 @@
 //!   as JSON tracks on an origin.
 //! - [`Consumer`] subscribes to one published stats broadcast and yields typed
 //!   frames, for aggregators, dashboards, and billing meters.
+//! - [`aggregate::Consumer`] folds a whole group's per-node broadcasts into one
+//!   merged view, so a downstream sees a project's total live traffic as if it
+//!   came from a single node.
 //!
 //! # Wire format
 //!
@@ -48,6 +51,7 @@
 //! restarted or the entry was garbage collected and re-created, so consumers
 //! should treat a decrease as a fresh segment.
 
+pub mod aggregate;
 mod consume;
 mod produce;
 

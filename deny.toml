@@ -23,7 +23,7 @@ ignore = [
     "RUSTSEC-2024-0320",
 
     # gstreamer 0.23 pulls paste (proc-macro). gstreamer 0.25 drops it but
-    # requires Rust 1.92; workspace MSRV is 1.85. Build-time only.
+    # needs Rust 1.92, above the 1.91 workspace MSRV. Build-time only.
     "RUSTSEC-2024-0436",
 
 ]

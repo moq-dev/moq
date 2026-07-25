@@ -5,6 +5,8 @@ import MoqFFI
 public final class OriginProducer: Sendable {
     let ffi: MoqOriginProducer
 
+    /// Create a standalone origin, optionally capping its cache at `cacheCapacityBytes`
+    /// (nil uses the default capacity).
     public init(cacheCapacityBytes: UInt64? = nil) {
         ffi = MoqOriginProducer(options: MoqOriginOptions(cacheCapacityBytes: cacheCapacityBytes))
     }
@@ -63,6 +65,7 @@ public final class BroadcastRequest: Sendable {
 /// `for try await request in dynamic { ... }`. Hold this while missing
 /// broadcasts should be served; cancelling the consuming task stops serving.
 public final class OriginDynamic: AsyncSequence, Sendable {
+    /// The broadcast request emitted by this sequence.
     public typealias Element = BroadcastRequest
 
     let ffi: MoqOriginDynamic
@@ -81,6 +84,7 @@ public final class OriginDynamic: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native waits when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<BroadcastRequest, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             BroadcastRequest(try await ffi.requestedBroadcast())
@@ -119,6 +123,7 @@ public final class OriginConsumer: Sendable {
 /// `for try await announcement in announced { ... }`. The sequence ends when the
 /// origin closes; cancelling the consuming task cancels the subscription.
 public final class Announced: AsyncSequence, Sendable {
+    /// The broadcast announcement emitted by this sequence.
     public typealias Element = Announcement
 
     let ffi: MoqAnnounced
@@ -137,6 +142,7 @@ public final class Announced: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Announcement, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.next()).map(Announcement.init)

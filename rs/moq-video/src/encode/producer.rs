@@ -103,6 +103,21 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Mark a break in the published timeline: whatever is published next does not continue
+	/// what came before.
+	///
+	/// Call this when the encoder stops rather than merely pausing between frames -- a
+	/// capture that goes idle, a source switch, anything that will resume on a re-anchored
+	/// clock. See [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity)
+	/// for what the marker buys a consumer.
+	pub fn discontinuity(&mut self) -> Result<(), Error> {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.discontinuity()?,
+			Codecs::H265 { import, .. } => import.discontinuity()?,
+		}
+		Ok(())
+	}
+
 	/// Finalize the track.
 	///
 	/// Consumes the producer: nothing can be published after the track ends, so
