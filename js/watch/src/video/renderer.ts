@@ -1,3 +1,4 @@
+import type * as Catalog from "@moq/hang/catalog";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
@@ -140,11 +141,12 @@ export class Renderer {
 		if (!ctx) return;
 
 		const frame = effect.get(this.decoder.out.frame);
+		const video = effect.get(this.decoder.source.out.catalog);
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
 		// Always render, even when paused (to show last frame).
 		let animate: number | undefined = requestAnimationFrame(() => {
-			this.#render(ctx, frame);
+			this.#render(ctx, frame, video);
 
 			if (frame) {
 				this.#out.frame.update((current) => {
@@ -169,7 +171,7 @@ export class Renderer {
 		});
 	}
 
-	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
+	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame, video?: Catalog.Video) {
 		if (!frame) {
 			// Clear canvas when no frame
 			ctx.fillStyle = "#000";
@@ -182,8 +184,7 @@ export class Renderer {
 		ctx.fillStyle = "#000";
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-		// Apply rotation and horizontal flip from the latest video config.
-		const video = this.decoder.source.out.catalog.peek();
+		// Apply rotation and horizontal flip from the video config.
 		if (!video?.rotation) {
 			if (video?.flip) {
 				ctx.scale(-1, 1);

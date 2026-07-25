@@ -82,7 +82,7 @@ export const VideoSchema = z.union([
 			}),
 		),
 
-		// The clockwise rotation of the video in degrees, normalized to the nearest multiple of 90 degrees.
+		// The rotation of the video in degrees.
 		// Default: 0
 		rotation: z.optional(z.number()),
 
