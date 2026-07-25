@@ -161,6 +161,22 @@ mod tests {
 		_track: moq_net::track::Producer,
 	}
 
+	/// H.264 NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
+	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
+	fn nal_types(annexb: &[u8]) -> Vec<u8> {
+		let mut types = Vec::new();
+		let mut i = 0;
+		while i + 3 < annexb.len() {
+			if annexb[i..i + 3] == [0, 0, 1] {
+				types.push(annexb[i + 3] & 0x1f);
+				i += 3;
+			} else {
+				i += 1;
+			}
+		}
+		types
+	}
+
 	/// Wrap a gray 320x240 RGBA buffer as a raw frame at `timestamp` microseconds.
 	fn gray_frame(rgba: &[u8], timestamp: u64) -> moq_video::Frame {
 		let surface = moq_video::Surface::rgba(rgba, moq_video::Size::new(320, 240)).unwrap();
@@ -523,11 +539,23 @@ mod tests {
 			.await
 			.unwrap();
 		let mut timestamps = Vec::new();
+		let mut first_payload = None;
 		while let Some(payload) = fetched.read_frame().await.unwrap() {
 			let frame = hang::container::Frame::decode(payload.payload).unwrap();
 			assert!(!frame.payload.is_empty());
 			timestamps.push(frame.timestamp.as_micros());
+			first_payload = first_payload.or(Some(frame.payload));
 		}
+
+		// The group has to open on an IDR, or a subscriber starting here decodes
+		// nothing: the rung asks its encoder for one at every group boundary. An
+		// Annex-B start code alone doesn't prove it, since a delta frame has one too,
+		// so check the NAL types: SPS (7) and PPS (8) inline ahead of an IDR (5),
+		// which is what avc3 promises.
+		let types = nal_types(&first_payload.expect("the group had no frames"));
+		assert!(types.contains(&7), "group does not open with an SPS: {types:?}");
+		assert!(types.contains(&8), "group does not open with a PPS: {types:?}");
+		assert!(types.contains(&5), "group does not open with an IDR: {types:?}");
 		// Each output frame keeps the presentation time of the source frame it was
 		// transcoded from, including the tail the encoder drains at the end of the
 		// group. Collapsing them onto one instant would stall playback here.

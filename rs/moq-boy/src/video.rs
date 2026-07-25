@@ -130,7 +130,13 @@ fn encoder_thread(
 			}
 		};
 
-		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
+		// Asked for before the conversion below, which can fail: the encoder holds the
+		// request until a frame actually arrives, so dropping this frame delays the
+		// keyframe rather than losing it. A viewer needs a decodable starting point;
+		// otherwise the encoder's own GOP keys the stream.
+		if force_keyframe.swap(false, Ordering::AcqRel) {
+			enc.keyframe();
+		}
 		let start = Instant::now();
 		let surface = match moq_video::Surface::rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT)) {
 			Ok(surface) => surface,
@@ -140,11 +146,6 @@ fn encoder_thread(
 				continue;
 			}
 		};
-		// The emulator asks for one when a viewer needs a decodable starting point;
-		// otherwise the encoder's own GOP keys the stream.
-		if keyframe {
-			enc.keyframe();
-		}
 		match enc.encode(&moq_video::Frame::new(surface, ts)) {
 			Ok(encoded) => {
 				if let Err(e) = producer.publish(&encoded) {

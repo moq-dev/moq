@@ -222,9 +222,12 @@ impl Encoder {
 				self.size
 			)));
 		}
-		// Take it: the request belongs to this frame, and holding it would key the
-		// next one too.
-		self.backend.encode(frame, std::mem::take(&mut self.pending_keyframe))
+		let encoded = self.backend.encode(frame, self.pending_keyframe)?;
+		// Cleared only once the frame is through: a failed encode produced no
+		// picture, so the request still belongs to whatever comes next rather than
+		// being swallowed. The size check above returns early for the same reason.
+		self.pending_keyframe = false;
+		Ok(encoded)
 	}
 
 	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
@@ -588,7 +591,6 @@ mod tests {
 
 	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
 	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
-	#[cfg(any(target_os = "macos", target_os = "windows"))]
 	fn nal_types(annexb: &[u8]) -> Vec<u8> {
 		let mut types = Vec::new();
 		let mut i = 0;
@@ -850,6 +852,95 @@ mod tests {
 		encoder.encode(&gray_frame(320, 240, 2)).unwrap();
 
 		assert_eq!(*log.lock().unwrap(), vec![false, true, false]);
+	}
+
+	/// `keyframe()` has to reach the codec on a *warm* encoder, which is the case
+	/// that matters: a fresh one emits an IDR on its first frame regardless, so only
+	/// a mid-stream request proves the plumbing works. Runs on openh264, so this
+	/// holds on every platform rather than only where hardware exists.
+	#[test]
+	fn a_mid_stream_keyframe_request_emits_an_idr() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		// A GOP far longer than the run, so any IDR here was asked for rather than
+		// inserted on schedule.
+		let mut encoder = Encoder::new(&Config { gop: 1000, ..config }).unwrap();
+
+		let mut per_frame = Vec::new();
+		for i in 0..6 {
+			// Frame 0 opens the stream; ask again at frame 3, mid-stream.
+			if i == 3 {
+				encoder.keyframe();
+			}
+			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
+			per_frame.push(nal_types(&joined));
+		}
+
+		// The requested frame is a self-contained IDR: SPS (7) and PPS (8) inline
+		// ahead of an IDR slice (5), which is what avc3 promises a joining subscriber.
+		let asked = &per_frame[3];
+		assert!(asked.contains(&5), "the requested frame is not an IDR: {asked:?}");
+		assert!(asked.contains(&7), "no SPS with the requested IDR: {asked:?}");
+		assert!(asked.contains(&8), "no PPS with the requested IDR: {asked:?}");
+
+		// And the frames around it stay delta frames, so the request keyed exactly
+		// one: keying every frame would pass the assertions above while destroying
+		// the bitrate.
+		for i in [1, 2, 4, 5] {
+			assert!(
+				!per_frame[i].contains(&5),
+				"frame {i} was keyed without being asked: {:?}",
+				per_frame[i]
+			);
+		}
+	}
+
+	/// A backend whose every encode fails, to pin what survives one.
+	struct Failing;
+
+	impl Backend for Failing {
+		fn encode(&mut self, _frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			Err(Error::Codec(anyhow::anyhow!("no")))
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"failing"
+		}
+	}
+
+	/// A request outlives an encode that produced no picture, whether it was
+	/// rejected up front (wrong size) or failed in the backend. Dropping it would
+	/// leave the next frame unkeyed, so a subscriber waits out a whole GOP for a
+	/// starting point the caller already asked for.
+	#[test]
+	fn a_failed_encode_keeps_the_keyframe_request() {
+		let config = Config::new(320, 240, 30);
+
+		let mut encoder = encoder_with(Box::new(Failing), &config);
+		encoder.keyframe();
+		assert!(encoder.encode(&gray_frame(320, 240, 0)).is_err());
+		assert!(encoder.pending_keyframe, "the backend error swallowed the request");
+
+		// Rejected before the backend ever sees it, for the same reason.
+		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+		encoder.keyframe();
+		assert!(encoder.encode(&gray_frame(640, 480, 0)).is_err());
+		assert!(encoder.pending_keyframe, "the size check swallowed the request");
+
+		// ...and the next frame that does go through claims it.
+		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		assert!(!encoder.pending_keyframe);
 	}
 
 	/// Regression: a backend that buffers hands back an earlier frame's access

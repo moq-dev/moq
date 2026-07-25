@@ -69,7 +69,6 @@ impl Backend for Openh264 {
 			height as u32,
 		);
 		// openh264 is one-in one-out, so the input timestamp is the output's.
-		// `keyframe` is an encoder input, so a decoded picture leaves it unset.
 		Ok(vec![Frame::new(Surface::I420(frame), timestamp)])
 	}
 

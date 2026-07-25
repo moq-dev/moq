@@ -58,8 +58,7 @@ pub(crate) trait Backend: Send {
 	/// backend can split codec units without copying.
 	/// Backends that decode one-in one-out echo the input timestamp; NVDEC threads
 	/// timestamps through its parser, so they survive decoder delay and frame
-	/// reordering. [`Frame::keyframe`] is an encoder input, so decoded frames leave
-	/// it unset.
+	/// reordering.
 	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
