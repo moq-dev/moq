@@ -60,7 +60,7 @@ done
 [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="dist"
 
 # Default the moq-ffi pin to the crate's current version. This is the SPM analog
-# of py's `moq-ffi ~= 0.2.x`: the wrapper floats to the latest compatible patch.
+# of py's `moq-ffi ~= 0.3.x`: the wrapper floats to the latest compatible patch.
 if [[ -z "$FFI_VERSION" ]]; then
     FFI_VERSION=$(grep '^version' "$WORKSPACE_DIR/rs/moq-ffi/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
     [[ -n "$FFI_VERSION" ]] || {

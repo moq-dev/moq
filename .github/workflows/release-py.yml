@@ -8,7 +8,7 @@ name: Release Py
 # py/moq-rs/pyproject.toml by hand in a normal PR. On merge to main this reads
 # that version and publishes only if it isn't already on PyPI. That registry
 # check is the release gate (the same model release-plz uses for crates), so
-# there's no separate tag to remember. The wrapper depends on `moq-ffi ~= 0.2.x`
+# there's no separate tag to remember. The wrapper depends on `moq-ffi ~= 0.3.x`
 # and floats to the latest compatible moq-ffi patch, so a moq-ffi patch needs no
 # wrapper re-release.
 
