@@ -68,6 +68,9 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
+	// The excluded origin handle, resolved once: the peer sends exactly one
+	// SETUP, so its declared id never changes for the session.
+	serving: std::sync::OnceLock<origin::Consumer>,
 	priority: PriorityQueue,
 	version: Version,
 }
@@ -83,6 +86,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			origin: config.origin,
 			self_origin,
 			peer_setup: config.peer_setup,
+			serving: std::sync::OnceLock::new(),
 			priority: Default::default(),
 			version: config.version,
 		}
@@ -90,18 +94,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer when its SETUP declared an origin id, so a subscription
-	/// is never served data that flowed through the subscriber. Waits for the
-	/// peer's SETUP, which every lite-05+ endpoint sends at startup, well before
-	/// it could learn of anything to subscribe to.
+	/// is never served data that flowed through the subscriber. The first call
+	/// waits for the peer's SETUP (sent at startup on every lite-05+ session,
+	/// well before it could learn of anything to subscribe to); the result is
+	/// cached, since the peer sends exactly one SETUP per session.
 	async fn serving_origin(&self) -> origin::Consumer {
+		if let Some(origin) = self.serving.get() {
+			return origin.clone();
+		}
 		// Pre-SETUP versions never declare an id; there is nothing to exclude.
-		if !self.version.has_setup_stream() {
-			return self.origin.clone();
-		}
-		match self.peer_setup.origin().await {
-			Some(peer) => self.origin.clone().excluding(peer),
-			None => self.origin.clone(),
-		}
+		let origin = if !self.version.has_setup_stream() {
+			self.origin.clone()
+		} else {
+			match self.peer_setup.origin().await {
+				Some(peer) => self.origin.clone().excluding(peer),
+				None => self.origin.clone(),
+			}
+		};
+		// A concurrent first call may have won the race; either value is
+		// identical, so keep whichever landed.
+		self.serving.get_or_init(|| origin).clone()
 	}
 
 	pub async fn run(self) -> Result<(), Error> {

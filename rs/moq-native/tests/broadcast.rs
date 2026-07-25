@@ -714,10 +714,20 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 async fn broadcast_route_migration() {
 	use moq_net::Timestamp;
 
+	// The original publisher's identity, shared by both routes: the first hop is
+	// the broadcast's content identity, so only same-first-hop routes are
+	// interchangeable enough to migrate across without a re-announce.
+	let publisher = Origin::new(0x42).unwrap();
+
 	// ── publisher A: the preferred route (shorter hop chain) ────────
 	let origin_a = Origin::random().produce();
+	let mut hops_a = moq_net::OriginList::new();
+	hops_a.push(publisher).unwrap();
 	let mut broadcast_a = origin_a
-		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.create_broadcast(
+			"test",
+			moq_net::broadcast::Route::new().with_hops(hops_a).with_announce(true),
+		)
 		.expect("create broadcast");
 	let mut track_a = broadcast_a.create_track("video", None).expect("create track");
 	for sequence in 0..2u64 {
@@ -733,6 +743,7 @@ async fn broadcast_route_migration() {
 	// ── publisher B: the standby, carrying an extra hop so A wins ───
 	let origin_b = Origin::random().produce();
 	let mut hops_b = moq_net::OriginList::new();
+	hops_b.push(publisher).unwrap();
 	hops_b.push(Origin::new(0x1234).unwrap()).unwrap();
 	let mut broadcast_b = origin_b
 		.create_broadcast(
