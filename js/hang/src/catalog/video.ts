@@ -26,7 +26,7 @@ export const VideoConfigSchema = z.object({
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is (repeated) before each key-frame.
-	description: z.optional(hexSchema), // TODO use base64
+	description: z.optional(hexSchema),
 
 	// The width and height of the video in pixels.
 	// NOTE: formats that don't use a description can adjust these values in-band.

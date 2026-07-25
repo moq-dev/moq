@@ -30,7 +30,7 @@ export const AudioConfigSchema = z.object({
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is in-band.
-	description: z.optional(hexSchema), // TODO use base64
+	description: z.optional(hexSchema),
 
 	// The sample rate of the audio in Hz
 	sampleRate: u53Schema,
