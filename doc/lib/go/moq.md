@@ -136,6 +136,18 @@ media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHin
 }))
 ```
 
+Properties that apply to every video rendition are updated together. Nil fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```go
+rotation := 90.0
+flip := false
+err := broadcast.SetVideoProperties(moq.VideoProperties{
+    Display:  &moq.Dimensions{Width: 1080, Height: 1920},
+    Rotation: &rotation,
+    Flip:     &flip,
+})
+```
+
 ## Error handling
 
 A server can reject the connection on auth grounds: `ErrMoqErrorUnauthorized` (HTTP 401) or `ErrMoqErrorForbidden` (HTTP 403). These are terminal: retrying without new credentials won't help, so handle them separately from a transient transport failure. The `moq.IsAuthError` helper catches both:

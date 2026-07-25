@@ -55,7 +55,7 @@ pub enum Error {
 	#[error("duplicate track: {0}")]
 	Duplicate(String),
 
-	/// The video presentation rotation is not a finite number.
+	/// The shared video rotation is not a finite number.
 	#[error("video rotation must be finite")]
 	InvalidVideoRotation,
 }

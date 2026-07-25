@@ -162,15 +162,11 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Replace the video presentation metadata as one catalog update.
-	pub fn video_presentation(
-		&mut self,
-		broadcast: Id,
-		presentation: hang::catalog::VideoPresentation,
-	) -> Result<(), Error> {
+	/// Replace the properties shared by every video rendition as one catalog update.
+	pub fn video_properties(&mut self, broadcast: Id, properties: hang::catalog::VideoProperties) -> Result<(), Error> {
 		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
 		let mut catalog = catalog.lock();
-		catalog.video.set_presentation(presentation)?;
+		catalog.video.set_properties(properties)?;
 		catalog.commit()?;
 		Ok(())
 	}

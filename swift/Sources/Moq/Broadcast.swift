@@ -166,9 +166,9 @@ public final class BroadcastProducer: Sendable {
         try ffi.setAnnounce(announce: announce)
     }
 
-    /// Replace the video presentation metadata in the catalog.
-    public func setVideoPresentation(_ presentation: VideoPresentation) throws {
-        try ffi.setVideoPresentation(presentation: presentation)
+    /// Replace the catalog properties shared by every video rendition.
+    public func setVideoProperties(_ properties: VideoProperties) throws {
+        try ffi.setVideoProperties(properties: properties)
     }
 
     /// Open a media track. `format` controls how `initData` and frame payloads

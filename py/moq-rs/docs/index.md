@@ -121,6 +121,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Datagram
    Video
    VideoHint
+   VideoProperties
    Dimensions
    Audio
    AudioFrame

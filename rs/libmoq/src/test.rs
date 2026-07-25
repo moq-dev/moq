@@ -217,6 +217,7 @@ fn publish_catalog_config_invalid_broadcast() {
 		coded_height: std::ptr::null(),
 	};
 	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
+	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
 
 	let audio_codec = "opus";
 	let audio = moq_audio_config {
@@ -243,6 +244,11 @@ fn publish_catalog_config_null_pointer() {
 		unsafe { moq_publish_video_config(broadcast, std::ptr::null()) },
 		-6,
 		"null config should return InvalidPointer (-6)"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_properties(broadcast, std::ptr::null()) },
+		-6,
+		"null properties should return InvalidPointer (-6)"
 	);
 	assert_eq!(
 		unsafe { moq_publish_audio_config(broadcast, std::ptr::null()) },
@@ -275,6 +281,16 @@ fn publish_catalog_roundtrip() {
 		coded_height: &height,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let properties = moq_video_properties {
+		display_width: 1080,
+		display_height: 1920,
+		has_display: true,
+		rotation: 315.0,
+		has_rotation: true,
+		flip: true,
+		has_flip: true,
+	};
+	assert_eq!(unsafe { moq_publish_video_properties(broadcast, &properties) }, 0);
 
 	let audio_name = "audio";
 	let audio_codec = "opus";
@@ -318,6 +334,16 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(codec, "vp8");
 	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
 	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+
+	let mut properties = moq_video_properties::default();
+	assert_eq!(unsafe { moq_consume_video_properties(catalog_id, &mut properties) }, 0);
+	assert!(properties.has_display);
+	assert_eq!(properties.display_width, 1080);
+	assert_eq!(properties.display_height, 1920);
+	assert!(properties.has_rotation);
+	assert_eq!(properties.rotation, 0.0);
+	assert!(properties.has_flip);
+	assert!(properties.flip);
 
 	// And so does the audio rendition.
 	let mut audio_cfg = moq_audio_config {

@@ -120,6 +120,26 @@ A server can reject the connection on auth grounds: unauthorized (HTTP 401) or f
 
 Failed calls are reported only through the return code and `moq_error()`, not logged. To surface libmoq's internal logs (moq-net / QUIC activity), call `moq_log_level("debug")` (or `"trace"`, `"info"`, etc.) to install a tracing subscriber.
 
+## Shared video properties
+
+`moq_publish_video_properties` replaces the catalog properties shared by every video rendition in one update. A false `has_*` flag clears that property, and rotation is normalized to the nearest clockwise quarter turn. Read the same snapshot with `moq_consume_video_properties`:
+
+```c
+moq_video_properties properties = {
+    .display_width = 1080,
+    .display_height = 1920,
+    .has_display = true,
+    .rotation = 90.0,
+    .has_rotation = true,
+    .flip = false,
+    .has_flip = true,
+};
+
+if (moq_publish_video_properties(broadcast, &properties) < 0) {
+    fprintf(stderr, "video properties failed: %s\n", moq_error());
+}
+```
+
 ## Raw Tracks
 
 Raw tracks carry arbitrary byte payloads without catalog or codec parsing. Use

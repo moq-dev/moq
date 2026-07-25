@@ -32,7 +32,7 @@ from .types import (
     Subscription,
     TrackInfo,
     VideoHint,
-    VideoPresentation,
+    VideoProperties,
 )
 
 if TYPE_CHECKING:
@@ -395,9 +395,9 @@ class BroadcastProducer:
         """
         self._inner.set_announce(announce)
 
-    def set_video_presentation(self, presentation: VideoPresentation) -> None:
-        """Replace the video presentation metadata in the catalog."""
-        self._inner.set_video_presentation(presentation)
+    def set_video_properties(self, properties: VideoProperties) -> None:
+        """Replace the catalog properties shared by every video rendition."""
+        self._inner.set_video_properties(properties)
 
     def publish_media(
         self,

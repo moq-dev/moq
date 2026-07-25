@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::ffi::OnStatus;
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_section, moq_string,
-	moq_video_config, moq_video_presentation,
+	moq_video_config, moq_video_properties,
 };
 
 struct ConsumeCatalog {
@@ -218,12 +218,12 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Fill `dst` with the video presentation metadata from the catalog.
-	pub fn video_presentation(&self, catalog: Id, dst: &mut moq_video_presentation) -> Result<(), Error> {
+	/// Fill `dst` with the properties shared by every video rendition.
+	pub fn video_properties(&self, catalog: Id, dst: &mut moq_video_properties) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let display = consume.catalog.video.display.as_ref();
 
-		*dst = moq_video_presentation {
+		*dst = moq_video_properties {
 			display_width: display.map_or(0, |display| display.width),
 			display_height: display.map_or(0, |display| display.height),
 			has_display: display.is_some(),

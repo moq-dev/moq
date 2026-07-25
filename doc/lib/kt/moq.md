@@ -120,6 +120,18 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
+Properties that apply to every video rendition are updated together. `null` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```kotlin
+broadcast.setVideoProperties(
+    VideoProperties(
+        display = Dimensions(width = 1080u, height = 1920u),
+        rotation = 90.0,
+        flip = false,
+    )
+)
+```
+
 ## Serve
 
 `Server.listen(bind)` binds a listener, wires an internal origin for both directions, and returns an `AutoCloseable` `Server`. `serve()` accepts every session and holds it alive until it closes:
