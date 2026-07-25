@@ -2,9 +2,9 @@
 //!
 //! Enumerates a hardware (`MFT_ENUM_FLAG_HARDWARE`) encoder for the requested
 //! codec and drives it through the async-MFT event model. When capture hands us
-//! a [`Frame::Texture`] the encoder runs on that texture's Direct3D11 device (via
+//! a [`Surface::Texture`] the encoder runs on that texture's Direct3D11 device (via
 //! a DXGI device manager) and consumes the surface zero-copy; a CPU
-//! [`Frame::I420`] is uploaded into a system-memory NV12 sample instead.
+//! [`Surface::I420`] is uploaded into a system-memory NV12 sample instead.
 //!
 //! The MFT emits an Annex-B byte stream with parameter sets inline ahead of each
 //! IDR/IRAP (SPS/PPS for H.264, VPS/SPS/PPS for H.265), which is exactly what
@@ -13,10 +13,12 @@
 //! thread (see `encode::sink`), so its COM apartment stays balanced and its
 //! blocking waits never park a tokio worker.
 
+use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::ptr;
 
 use bytes::Bytes;
+use moq_net::Timestamp;
 use windows::Win32::Foundation::{VARIANT_BOOL, VARIANT_TRUE};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
@@ -37,16 +39,17 @@ use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
 use super::super::encoder::{Codec, Config};
-use super::Backend;
-use crate::Error;
-use crate::frame::{Frame, interleave_uv};
+use super::{Backend, Encoded};
+use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
 
 /// Stream tick for sample timestamps, in 100ns units (the Media Foundation time
-/// base). Timestamps only need to increase; the moq timestamp is applied
-/// downstream, so a monotonic index over the framerate is enough.
+/// base). The codec only needs a clock that increases, so a monotonic index over
+/// the framerate is enough; the moq timestamp rides alongside in `pending` and the
+/// MFT echoes the sample time on its output, which is what pairs the two back up.
 const HNS_PER_SEC: i64 = 10_000_000;
 
 pub(crate) struct MediaFoundation {
@@ -70,6 +73,16 @@ pub(crate) struct MediaFoundation {
 	/// True once the MFT has asked for input and we haven't fed it since.
 	needs_input: bool,
 	sample_index: i64,
+	/// Frames handed to the MFT that haven't come back out, oldest first: the
+	/// sample time we gave the codec paired with the frame's real timestamp. This
+	/// MFT buffers (output for frame N typically arrives while N+1 goes in), so its
+	/// output has to be matched against this rather than stamped with whatever is
+	/// being fed at the time.
+	pending: VecDeque<(i64, Timestamp)>,
+	/// The last timestamp paired with an output, reused if the MFT ever hands back
+	/// more access units than we fed it frames. Repeating a time is far kinder to a
+	/// consumer than the jump to zero the alternative would produce.
+	last_timestamp: Option<Timestamp>,
 	/// Kept alive for the MFT's lifetime once a texture frame binds a device.
 	_manager: Option<IMFDXGIDeviceManager>,
 	_com: ComGuard,
@@ -124,6 +137,8 @@ impl MediaFoundation {
 			output_size: 0,
 			needs_input: false,
 			sample_index: 0,
+			pending: VecDeque::new(),
+			last_timestamp: None,
 			_manager: None,
 			_com: com,
 		}))
@@ -131,10 +146,10 @@ impl MediaFoundation {
 
 	/// One-time configuration, deferred to the first frame so a texture frame can
 	/// bind its own Direct3D11 device for zero-copy input.
-	fn start(&mut self, frame: &Frame) -> Result<(), Error> {
+	fn start(&mut self, frame: &Surface) -> Result<(), Error> {
 		// Bind the frame's D3D11 device when it's a texture, so the MFT reads the
 		// captured surface directly. A CPU frame runs the MFT in system memory.
-		if let Frame::Texture(texture) = frame {
+		if let Surface::Texture(texture) = frame {
 			let manager = device_manager(&texture.device)?;
 			let raw = manager.as_raw() as usize;
 			unsafe {
@@ -255,9 +270,9 @@ impl MediaFoundation {
 
 	/// Wrap a captured frame as an input [`IMFSample`]: a zero-copy DXGI surface
 	/// buffer for a texture, or a freshly uploaded NV12 memory buffer for I420.
-	fn build_sample(&self, frame: &Frame) -> Result<IMFSample, Error> {
+	fn build_sample(&self, frame: &Surface) -> Result<IMFSample, Error> {
 		let buffer = match frame {
-			Frame::Texture(texture) => unsafe {
+			Surface::Texture(texture) => unsafe {
 				let buffer =
 					MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, texture.subresource, false)
 						.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
@@ -271,7 +286,7 @@ impl MediaFoundation {
 					.map_err(|e| mf_err("set DXGI length", e))?;
 				buffer
 			},
-			Frame::I420(_) => self.upload_nv12(frame)?,
+			Surface::I420(_) => self.upload_nv12(frame)?,
 			#[allow(unreachable_patterns)]
 			_ => {
 				return Err(Error::Codec(anyhow::anyhow!(
@@ -283,20 +298,29 @@ impl MediaFoundation {
 		let sample = unsafe { MFCreateSample().map_err(|e| mf_err("MFCreateSample", e))? };
 		unsafe {
 			sample.AddBuffer(&buffer).map_err(|e| mf_err("AddBuffer", e))?;
-			let tick = HNS_PER_SEC / self.framerate.max(1) as i64;
 			sample
-				.SetSampleTime(self.sample_index * tick)
+				.SetSampleTime(self.sample_time())
 				.map_err(|e| mf_err("SetSampleTime", e))?;
 			sample
-				.SetSampleDuration(tick)
+				.SetSampleDuration(self.tick())
 				.map_err(|e| mf_err("SetSampleDuration", e))?;
 		}
 		Ok(sample)
 	}
 
+	/// One frame's worth of the Media Foundation sample clock, in 100ns units.
+	fn tick(&self) -> i64 {
+		HNS_PER_SEC / self.framerate.max(1) as i64
+	}
+
+	/// The sample time for the frame currently going in.
+	fn sample_time(&self) -> i64 {
+		self.sample_index * self.tick()
+	}
+
 	/// Copy a CPU I420 frame into a system-memory NV12 buffer (the fallback when
 	/// capture isn't producing GPU textures).
-	fn upload_nv12(&self, frame: &Frame) -> Result<IMFMediaBuffer, Error> {
+	fn upload_nv12(&self, frame: &Surface) -> Result<IMFMediaBuffer, Error> {
 		let i420 = frame.to_i420()?;
 		let (w, h) = (self.width as usize, self.height as usize);
 		let (cw, ch) = (w / 2, h / 2);
@@ -328,7 +352,7 @@ impl MediaFoundation {
 	/// Block on events until the MFT is ready for input, collecting any output
 	/// that arrives meanwhile. Runs on the dedicated encode thread (see
 	/// `encode::sink`), so this blocking wait never parks a tokio worker.
-	fn wait_for_input(&mut self, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn wait_for_input(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
 		while !self.needs_input {
 			let event = unsafe {
 				self.events
@@ -341,7 +365,7 @@ impl MediaFoundation {
 	}
 
 	/// Drain events already queued without blocking (called after feeding input).
-	fn drain_ready(&mut self, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn drain_ready(&mut self, out: &mut Vec<Encoded>) -> Result<(), Error> {
 		loop {
 			match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
 				Ok(event) => self.handle_event(&event, out)?,
@@ -351,7 +375,7 @@ impl MediaFoundation {
 		}
 	}
 
-	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Bytes>) -> Result<(), Error> {
+	fn handle_event(&mut self, event: &IMFMediaEvent, out: &mut Vec<Encoded>) -> Result<(), Error> {
 		// Surface an async failure (e.g. an MEError event) instead of looping in
 		// `wait_for_input` forever for an input request that will never come.
 		unsafe { event.GetStatus() }
@@ -374,9 +398,10 @@ impl MediaFoundation {
 		Ok(())
 	}
 
-	/// Pull one encoded access unit. Returns `None` if the MFT had nothing ready
-	/// or asked us to renegotiate the output type.
-	fn process_output(&mut self) -> Result<Option<Bytes>, Error> {
+	/// Pull one encoded access unit, stamped with the timestamp of the frame it was
+	/// encoded from. Returns `None` if the MFT had nothing ready or asked us to
+	/// renegotiate the output type.
+	fn process_output(&mut self) -> Result<Option<Encoded>, Error> {
 		let provided = if self.provides_samples {
 			None
 		} else {
@@ -414,14 +439,56 @@ impl MediaFoundation {
 		}
 
 		let Some(sample) = sample else { return Ok(None) };
-		Ok(Some(sample_to_bytes(&sample)?))
+		let sample_time = unsafe { sample.GetSampleTime() }.ok();
+		Ok(Some(Encoded::new(
+			sample_to_bytes(&sample)?,
+			self.take_timestamp(sample_time),
+		)))
+	}
+
+	/// The timestamp of the frame this output belongs to, found by the sample time
+	/// the MFT echoed back and removed from `pending`.
+	///
+	/// Falls back to the oldest frame still outstanding when the MFT reports no
+	/// usable sample time: the encoder emits access units in the order it was fed
+	/// (low-latency CBR, no reordering), so oldest-first is the right pairing, and
+	/// dropping the packet or stamping it with the wrong frame would both be worse.
+	fn take_timestamp(&mut self, sample_time: Option<i64>) -> Timestamp {
+		let found = sample_time.and_then(|time| self.pending.iter().position(|(fed, _)| *fed == time));
+
+		let matched = match found {
+			// `remove` rather than `pop_front`: with reordering off these coincide, but
+			// a reordering MFT would otherwise pair every later packet wrongly.
+			Some(index) => self.pending.remove(index),
+			None => {
+				let oldest = self.pending.pop_front();
+				if oldest.is_some() {
+					tracing::debug!(?sample_time, "encoder output did not match a fed sample time");
+				}
+				oldest
+			}
+		};
+
+		match matched {
+			Some((_, timestamp)) => {
+				self.last_timestamp = Some(timestamp);
+				timestamp
+			}
+			// Nothing outstanding: the MFT produced more access units than we fed it
+			// frames, which shouldn't happen. Repeat the last frame's time so the
+			// stream keeps flowing in order rather than jumping backwards.
+			None => {
+				tracing::warn!("encoder produced output with no frame outstanding");
+				self.last_timestamp.unwrap_or(Timestamp::ZERO)
+			}
+		}
 	}
 }
 
 impl Backend for MediaFoundation {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 		if !self.started {
-			self.start(frame)?;
+			self.start(&frame.surface)?;
 		}
 
 		let mut out = Vec::new();
@@ -431,20 +498,24 @@ impl Backend for MediaFoundation {
 			self.set_codec(&CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1))?;
 		}
 
-		let sample = self.build_sample(frame)?;
+		let sample = self.build_sample(&frame.surface)?;
 		unsafe {
 			self.transform
 				.ProcessInput(0, &sample, 0)
 				.map_err(|e| mf_err("ProcessInput", e))?;
 		}
 		self.needs_input = false;
+		// Record the pairing before advancing the index, so this is the sample time
+		// `build_sample` just stamped the sample with.
+		let sample_time = self.sample_time();
+		self.pending.push_back((sample_time, frame.timestamp));
 		self.sample_index += 1;
 
 		self.drain_ready(&mut out)?;
 		Ok(out)
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		if !self.started {
 			return Ok(Vec::new());
 		}

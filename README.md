@@ -28,6 +28,7 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 
 - **[Run the demo](https://doc.moq.dev/setup/demo/web)** - try MoQ locally with a relay, demo media, and the web UI.
+- **[Agent setup](https://doc.moq.dev/setup/agent)** - teach your AI coding agent (Claude Code, Cursor, etc.) how to build with MoQ.
 - **[Linux packages](https://doc.moq.dev/setup/linux)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
 - **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
 

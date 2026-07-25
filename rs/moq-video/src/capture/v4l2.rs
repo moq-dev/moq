@@ -7,6 +7,7 @@
 //! NVENC / VAAPI / openh264; there's no GPU surface here.
 
 use v4l::buffer::Type as BufType;
+use v4l::capability::Flags;
 use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
@@ -18,7 +19,43 @@ use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
+
+/// List V4L2 capture nodes using paths that [`open_device`] accepts.
+pub(super) fn cameras() -> Result<Vec<super::Camera>, Error> {
+	let mut nodes = v4l::context::enum_devices();
+	nodes.sort_by_key(v4l::context::Node::index);
+
+	let cameras = nodes
+		.into_iter()
+		.filter_map(|node| {
+			let path = node.path().to_string_lossy().into_owned();
+			let device = match Device::with_path(node.path()) {
+				Ok(device) => device,
+				Err(err) => {
+					tracing::debug!(device = %path, error = %err, "could not inspect V4L2 node");
+					return None;
+				}
+			};
+			let capabilities = match device.query_caps() {
+				Ok(capabilities) => capabilities,
+				Err(err) => {
+					tracing::debug!(device = %path, error = %err, "could not query V4L2 node");
+					return None;
+				}
+			};
+			if !capabilities.capabilities.contains(Flags::VIDEO_CAPTURE)
+				|| !capabilities.capabilities.contains(Flags::STREAMING)
+			{
+				return None;
+			}
+
+			let name = node.name().filter(|name| !name.is_empty()).unwrap_or(capabilities.card);
+			Some(super::Camera { id: path, name })
+		})
+		.collect();
+	Ok(cameras)
+}
 
 /// Open a V4L2 camera and stream its frames over a pump thread.
 pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<FrameStream, Error> {
@@ -138,7 +175,7 @@ impl Camera {
 
 	/// Pull the next frame. Blocks one frame interval; the pump thread calls this
 	/// in a loop and checks its stop flag between calls.
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self) -> Result<Option<Surface>, Error> {
 		let (buf, meta) =
 			CaptureStream::next(&mut self.stream).map_err(|e| Error::Codec(anyhow::anyhow!("V4L2 capture: {e}")))?;
 
@@ -158,7 +195,7 @@ impl Camera {
 				I420::from_rgb(&rgb, w as u32, h as u32)?
 			}
 		};
-		Ok(Some(Frame::I420(i420)))
+		Ok(Some(Surface::I420(i420)))
 	}
 }
 

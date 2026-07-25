@@ -41,6 +41,7 @@ cgo picks the right `libmoq_ffi.a` automatically via build tags; no `LD_LIBRARY_
 
 ## Source and issues
 
+- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
 - Source: [go/](https://github.com/moq-dev/moq/tree/main/go) (in the monorepo)
 - Wrapper mirror (what `go get` resolves): [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
 - Raw bindings mirror: [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi)

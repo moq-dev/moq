@@ -10,9 +10,9 @@ use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
 use openh264::formats::YUVSource;
 
-use super::{Backend, Codec, Config, Decoded};
-use crate::Error;
-use crate::frame::{Frame, I420};
+use super::{Backend, Codec, Config};
+use crate::frame::{I420, Surface};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -39,7 +39,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		let decoded = self
 			.decoder
 			.decode(&access_unit)
@@ -69,10 +69,7 @@ impl Backend for Openh264 {
 			height as u32,
 		);
 		// openh264 is one-in one-out, so the input timestamp is the output's.
-		Ok(vec![Decoded {
-			timestamp,
-			frame: Frame::I420(frame),
-		}])
+		Ok(vec![Frame::new(Surface::I420(frame), timestamp)])
 	}
 
 	fn name(&self) -> &str {

@@ -3,6 +3,7 @@ import MoqFFI
 /// Read side of a raw-audio track. Iterating yields decoded PCM frames in the
 /// layout declared by the `AudioDecoderOutput` passed at subscribe time.
 public final class AudioConsumer: AsyncSequence, Sendable {
+    /// The decoded PCM audio frame emitted by this sequence.
     public typealias Element = AudioFrame
 
     let ffi: MoqAudioConsumer
@@ -21,6 +22,7 @@ public final class AudioConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<AudioFrame, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.next()

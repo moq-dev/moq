@@ -49,14 +49,14 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 #[command(group = clap::ArgGroup::new("audio-source").multiple(false))]
 pub struct CaptureArgs {
 	/// Capture a camera, by the id `moq devices` reports (an AVFoundation
-	/// `uniqueID` on macOS, a camera index / `/dev/videoN` path elsewhere).
+	/// `uniqueID`, `/dev/videoN` path, or Media Foundation symbolic link).
 	/// Bare `--camera`, or no source flag at all, opens the default camera.
 	#[arg(long, num_args = 0..=1, group = "video-source")]
 	pub camera: Option<Option<String>>,
 
-	/// Capture a whole display, by the index `moq devices` reports. Bare
+	/// Capture a whole display, by the id `moq devices` reports. Bare
 	/// `--display` captures the main display. On Linux the desktop portal opens a
-	/// picker dialog and the index is ignored.
+	/// picker dialog and the id is ignored.
 	#[arg(long, num_args = 0..=1, group = "video-source", alias = "screen")]
 	pub display: Option<Option<String>>,
 

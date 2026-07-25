@@ -25,6 +25,11 @@ Per-platform, picked at compile time:
   Desktop Duplication (display; BGRA -> CPU I420). Display capture is
   whole-monitor; select one with a bare index or `display:{index}`.
 
+`capture::cameras()` lists AVFoundation, V4L2, or Media Foundation cameras with
+identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
+the same for macOS and Windows displays. Linux display selection stays in the
+desktop portal picker, which does not expose a stable display identifier.
+
 ## Encode
 
 The codec is chosen via `encode::Codec`. Backends are tried in order (hardware
@@ -40,13 +45,26 @@ Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
 H.265), so the matching `moq_mux::codec` importer handles framing and catalog
 registration directly. There is no software H.265 encoder (it's hardware-only).
 
+`encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
+holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
+carrying the timestamp of the picture it was encoded from. That matters for a
+backend that buffers, which hands back an earlier frame's access unit while a
+later one goes in, and for the tail `finish()` drains. Bring your own pixels with
+`Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
+
+Keyframes are automatic, at the `Config::gop` interval, so an application never
+has to think about them. `Encoder::keyframe()` asks for one at the next frame when
+something outside the encoder needs a decodable starting point there: opening a
+new group, or resuming after an idle gap. The request is held until a frame
+arrives, so it is safe to call before you have one.
+
 Two public entry points:
 
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Producer` publishes packets you encoded yourself, handling the catalog
-  and framing.
+- `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
+  handling the catalog and framing. Each is published at its own timestamp.
 
 The NVENC and VAAPI backends are Linux-only and gated behind their respective
 features. Both `dlopen` the vendor driver at runtime (and fall back to software
@@ -56,8 +74,17 @@ GPU-less builder and still starts on a GPU-less machine.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw I420 frames. Backends are tried
-hardware-first, like encode:
+H.264, H.265, or AV1 track and returns raw `Frame`s. A hardware-decoded frame stays
+on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
+same device keeps it there (the transcode path), while `into_i420()` downloads
+it. An encoder that can't take that surface (openh264, or a different device)
+downloads it through I420 for you. Every frame carries a `Surface`, a
+`#[non_exhaustive]` enum naming where the pixels live (`PixelBuffer` on macOS,
+`Texture` on Windows, `Cuda` on Linux, or CPU `I420`). Match it to take a
+zero-copy path for a representation you recognize, and fall back to
+`Surface::into_i420()`, which always works. On macOS `Surface::into_pixel_buffer()`
+is the mirror: free for a hardware-decoded frame, an upload for a CPU one.
+Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux |
 |---|---|---|---|---|

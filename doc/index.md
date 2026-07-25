@@ -91,6 +91,7 @@ If everything works, a browser window will pop up demoing how to both publish an
 
 - Keep reading the [development guide](/setup/dev) to run more advanced demos.
 - Skip ahead to the [production guide](/setup/prod) to see what it takes to deploy this bad boy.
+- Using an AI coding agent? [Teach it MoQ](/setup/agent) with a one-line prompt.
 
 ## Applications
 

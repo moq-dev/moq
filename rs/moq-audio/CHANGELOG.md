@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.11...moq-audio-v0.0.12) - 2026-07-24
+
+### Added
+
+- *(moq-mux,moq-boy)* mark discontinuities, and never time a sample across one ([#2475](https://github.com/moq-dev/moq/pull/2475))
+
 ## [0.0.11](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.10...moq-audio-v0.0.11) - 2026-07-23
 
 ### Other

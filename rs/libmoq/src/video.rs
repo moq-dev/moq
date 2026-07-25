@@ -139,13 +139,14 @@ impl Video {
 
 			// Flatten to CPU bytes outside the lock (a GPU frame downloads here),
 			// then hold the lock only to buffer it; release before the callback.
+			let size = frame.size();
 			let frame = VideoFrame {
 				// The C ABI carries microseconds; the decoded frame's Timestamp is
 				// constrained to a QUIC VarInt, so the microsecond value fits a u64.
 				timestamp_us: frame.timestamp.as_micros() as u64,
-				width: frame.size.width,
-				height: frame.size.height,
-				data: frame.into_i420()?,
+				width: size.width,
+				height: size.height,
+				data: frame.surface.into_i420()?,
 			};
 			let frame_id = State::lock().video.frames.insert(frame)?;
 			callback.call(Ok(frame_id));

@@ -4,6 +4,7 @@ import MoqFFI
 /// Read side of a raw track. Iterating yields groups in sequence order, skipping
 /// forward if the reader falls behind: `for try await group in track { ... }`.
 public final class TrackConsumer: AsyncSequence, Sendable {
+    /// The group emitted by this sequence, in sequence order.
     public typealias Element = GroupConsumer
 
     let ffi: MoqTrackConsumer
@@ -66,6 +67,7 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         }
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<GroupConsumer, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             (try await ffi.nextGroup()).map(GroupConsumer.init)
@@ -75,6 +77,7 @@ public final class TrackConsumer: AsyncSequence, Sendable {
 
 /// Read side of a single group. Iterating yields timestamped raw frames.
 public final class GroupConsumer: AsyncSequence, Sendable {
+    /// The timestamped frame emitted by this sequence.
     public typealias Element = Frame
 
     let ffi: MoqGroupConsumer
@@ -98,6 +101,7 @@ public final class GroupConsumer: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native reads when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<Frame, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             try await ffi.readFrame()

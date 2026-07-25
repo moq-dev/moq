@@ -10,9 +10,8 @@ use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
 use super::super::encoder::Config;
-use super::Backend;
-use crate::Error;
-use crate::frame::Frame;
+use super::{Backend, Encoded};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -97,7 +96,7 @@ impl Openh264 {
 }
 
 impl Backend for Openh264 {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 		// A rate deferred from before the encoder existed lands here, ahead of the
 		// frame rather than after it, so a rejected rate can't cost us a frame's
 		// packets on the way out.
@@ -112,7 +111,7 @@ impl Backend for Openh264 {
 		}
 
 		// Software path: needs CPU I420, downloading a GPU surface if necessary.
-		let i420 = frame.to_i420()?;
+		let i420 = frame.surface.to_i420()?;
 		let (w, h) = (i420.width as usize, i420.height as usize);
 		let yuv = YUVSlices::new((i420.y(), i420.u(), i420.v()), (w, h), (w, w / 2, w / 2));
 
@@ -128,14 +127,15 @@ impl Backend for Openh264 {
 		// The encode above built the underlying encoder, so any pending rate can
 		// be set from the next frame on.
 		self.started = true;
+		// One access unit out per frame in, so it carries that frame's timestamp.
 		Ok(if bytes.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(bytes)]
+			vec![Encoded::new(Bytes::from(bytes), frame.timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// Low-delay: nothing is buffered, so there's nothing to flush.
 		Ok(Vec::new())
 	}
@@ -162,7 +162,7 @@ impl Backend for Openh264 {
 mod tests {
 	use super::super::super::encoder::Kind;
 	use super::*;
-	use crate::frame::I420;
+	use crate::frame::{I420, Surface};
 
 	fn config() -> Config {
 		Config {
@@ -171,12 +171,11 @@ mod tests {
 		}
 	}
 
+	/// A mid-gray frame at an arbitrary time; these tests only exercise the rate
+	/// controls, so the timestamp is never read back.
 	fn gray() -> Frame {
-		Frame::I420(I420 {
-			width: 320,
-			height: 240,
-			data: vec![0x80u8; I420::len(320, 240)],
-		})
+		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap())
 	}
 
 	/// The rate reaches the encoder, verified by reading it back rather than by

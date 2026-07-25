@@ -539,6 +539,7 @@ fn build_audio_config(
 				if cfg_rate > 0 { cfg_rate } else { sample_rate },
 				if cfg_channels > 0 { cfg_channels } else { channels },
 			);
+			config.description = codec_private.cloned();
 			config.container = Container::Legacy;
 			Ok(config)
 		}

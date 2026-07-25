@@ -35,7 +35,7 @@ use super::channel::FrameChannel;
 use super::pump::Geometry;
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 /// The compositor sends the negotiated format right after the stream connects;
@@ -403,7 +403,7 @@ fn run_loop(
 
 				match convert(state.format.format(), bytes, stride, width, height) {
 					Ok(i420) => {
-						chan.push(Frame::I420(i420.clone()));
+						chan.push(Surface::I420(i420.clone()));
 						state.last = Some(i420);
 						state.fresh = true;
 					}
@@ -446,7 +446,7 @@ fn run_loop(
 				return;
 			}
 			if let Some(last) = &state.last {
-				chan.push(Frame::I420(last.clone()));
+				chan.push(Surface::I420(last.clone()));
 			}
 		}
 	});

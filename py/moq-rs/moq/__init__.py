@@ -64,6 +64,7 @@ from .types import (
     TrackInfo,
     Video,
     VideoHint,
+    VideoProperties,
 )
 
 __all__ = [
@@ -120,6 +121,7 @@ __all__ = [
     "Transport",
     "Video",
     "VideoHint",
+    "VideoProperties",
     "connect",
     "is_auth",
     "is_shutdown",

@@ -74,8 +74,13 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	}
 
 	/// Abort the stream with the given error.
-	pub fn abort(&mut self, err: &Error) {
-		self.stream.as_mut().unwrap().reset(err.to_code());
+	///
+	/// Consumes the writer: a later write won't compile, and the [`Drop`] fallback can't
+	/// reset a second time and overwrite the reason with a plain [`Error::Cancel`].
+	pub fn abort(mut self, err: &Error) {
+		if let Some(mut stream) = self.stream.take() {
+			stream.reset(err.to_code());
+		}
 	}
 
 	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.

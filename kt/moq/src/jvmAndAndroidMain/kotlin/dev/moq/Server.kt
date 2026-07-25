@@ -90,6 +90,7 @@ class Server internal constructor(
         }
     }
 
+    /** Stop accepting new sessions and release the native server handle; in-flight sessions stay alive. */
     override fun close() {
         server.cancel()
     }

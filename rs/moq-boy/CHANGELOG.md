@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/moq-boy-v0.3.1...moq-boy-v0.3.2) - 2026-07-24
+
+### Added
+
+- *(moq-mux,moq-boy)* mark discontinuities, and never time a sample across one ([#2475](https://github.com/moq-dev/moq/pull/2475))
+
 ## [0.3.1](https://github.com/moq-dev/moq/compare/moq-boy-v0.3.0...moq-boy-v0.3.1) - 2026-07-23
 
 ### Other

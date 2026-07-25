@@ -21,9 +21,9 @@ use bytes::Bytes;
 use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
 use super::super::encoder::Config;
-use super::Backend;
-use crate::Error;
-use crate::frame::{Frame, I420};
+use super::{Backend, Encoded};
+use crate::frame::I420;
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "vaapi";
 
@@ -53,22 +53,23 @@ impl Vaapi {
 }
 
 impl Backend for Vaapi {
-	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let i420 = frame.to_i420()?;
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		let i420 = frame.surface.to_i420()?;
 		let nv12 = i420_to_nv12(&i420);
 		let annexb = self
 			.encoder
 			.encode_nv12(&nv12, keyframe)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI encode: {e:?}")))?;
 
+		// Submitted and read back within the call, so this is that frame's output.
 		Ok(if annexb.is_empty() {
 			Vec::new()
 		} else {
-			vec![Bytes::from(annexb)]
+			vec![Encoded::new(Bytes::from(annexb), frame.timestamp)]
 		})
 	}
 
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error> {
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// The encoder submits and reads back synchronously per frame, so nothing
 		// is buffered at shutdown.
 		Ok(Vec::new())

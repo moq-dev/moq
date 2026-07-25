@@ -17,8 +17,7 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::decoder::{Config, Kind};
-use crate::Error;
-use crate::frame::Frame;
+use crate::{Error, Frame};
 
 mod openh264;
 
@@ -50,17 +49,6 @@ impl Codec {
 	}
 }
 
-/// One decoded picture: the raw frame plus its presentation timestamp.
-pub(crate) struct Decoded {
-	/// Presentation timestamp. Backends that decode one-in one-out echo the input
-	/// timestamp; NVDEC threads timestamps through its parser, so they survive
-	/// decoder delay and frame reordering.
-	pub timestamp: Timestamp,
-	/// The decoded picture: CPU I420, or a GPU frame the encode side can consume
-	/// without a CPU round trip.
-	pub frame: Frame,
-}
-
 /// An opened decoder. Feed it prepared access units in decode order; get back
 /// zero or more decoded frames (zero while the decoder is still buffering, e.g.
 /// before the first keyframe's parameter sets).
@@ -68,7 +56,10 @@ pub(crate) trait Backend: Send {
 	/// Decode one access unit stamped with its presentation `timestamp`.
 	/// `keyframe` marks a random-access frame. Takes an owned [`Bytes`] so a
 	/// backend can split codec units without copying.
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Decoded>, Error>;
+	/// Backends that decode one-in one-out echo the input timestamp; NVDEC threads
+	/// timestamps through its parser, so they survive decoder delay and frame
+	/// reordering.
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, keyframe: bool) -> Result<Vec<Frame>, Error>;
 
 	/// The decoder name in use, e.g. `"videotoolbox"` (for logging).
 	fn name(&self) -> &str;

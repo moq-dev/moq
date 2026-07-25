@@ -20,8 +20,8 @@ use windows::Win32::Graphics::Direct3D11::{
 	ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
-	DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-	IDXGIOutputDuplication, IDXGIResource,
+	DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter,
+	IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -29,12 +29,48 @@ use super::channel::FrameChannel;
 use super::pump::{self, Geometry};
 use super::{Config, FrameStream};
 use crate::Error;
-use crate::frame::{Frame, I420, d3d11};
+use crate::frame::{I420, Surface, d3d11};
 
 const DEFAULT_FRAMERATE: u32 = 30;
 
 fn err(ctx: &str, e: windows::core::Error) -> Error {
 	Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
+}
+
+/// List the outputs on the same adapter [`open`] can capture.
+pub(super) fn displays() -> Result<Vec<super::Display>, Error> {
+	let device = d3d11::create_device()?;
+	let adapter = adapter(&device)?;
+	let mut displays = Vec::new();
+
+	for index in 0.. {
+		let output = match unsafe { adapter.EnumOutputs(index) } {
+			Ok(output) => output,
+			Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+			Err(error) => return Err(err("EnumOutputs", error)),
+		};
+		let desc = unsafe { output.GetDesc().map_err(|error| err("GetDesc", error))? };
+		if !desc.AttachedToDesktop.as_bool() {
+			continue;
+		}
+
+		let name_end = desc
+			.DeviceName
+			.iter()
+			.position(|character| *character == 0)
+			.unwrap_or(desc.DeviceName.len());
+		let name = String::from_utf16_lossy(&desc.DeviceName[..name_end]);
+		let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
+		let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
+		displays.push(super::Display {
+			id: format!("display:{index}"),
+			name,
+			width,
+			height,
+		});
+	}
+
+	Ok(displays)
 }
 
 /// Open a display capture and stream its frames over a pump thread.
@@ -246,7 +282,7 @@ impl Duplicator {
 	/// Capture the next frame, paced to the target frame rate. Coalesces a burst
 	/// of desktop updates into the latest frame, and re-emits the last frame when
 	/// the screen hasn't changed, so the output rate stays steady.
-	fn read(&mut self) -> Result<Option<Frame>, Error> {
+	fn read(&mut self) -> Result<Option<Surface>, Error> {
 		let deadline = *self.next_deadline.get_or_insert_with(|| Instant::now() + self.interval);
 
 		loop {
@@ -265,7 +301,7 @@ impl Duplicator {
 		let next = deadline + self.interval;
 		self.next_deadline = Some(next.max(Instant::now()));
 
-		Ok(self.last.clone().map(Frame::I420))
+		Ok(self.last.clone().map(Surface::I420))
 	}
 }
 
@@ -295,10 +331,7 @@ fn select_output(selector: Option<&str>) -> Result<u32, Error> {
 
 /// Get the `index`th output (monitor) attached to the device's adapter.
 fn enumerate_output(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1, Error> {
-	let dxgi = device
-		.cast::<IDXGIDevice>()
-		.map_err(|e| err("device is not a DXGI device", e))?;
-	let adapter: IDXGIAdapter = unsafe { dxgi.GetAdapter().map_err(|e| err("GetAdapter", e))? };
+	let adapter = adapter(device)?;
 	let output = unsafe {
 		adapter
 			.EnumOutputs(index)
@@ -307,6 +340,14 @@ fn enumerate_output(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1, E
 	output
 		.cast::<IDXGIOutput1>()
 		.map_err(|e| err("output is not IDXGIOutput1", e))
+}
+
+/// The DXGI adapter backing a Direct3D device.
+fn adapter(device: &ID3D11Device) -> Result<IDXGIAdapter, Error> {
+	let dxgi = device
+		.cast::<IDXGIDevice>()
+		.map_err(|e| err("device is not a DXGI device", e))?;
+	unsafe { dxgi.GetAdapter().map_err(|e| err("GetAdapter", e)) }
 }
 
 /// Start duplicating `output` on `device`.
@@ -318,7 +359,7 @@ fn duplicate(output: &IDXGIOutput1, device: &ID3D11Device) -> Result<IDXGIOutput
 mod tests {
 	use super::*;
 	use crate::capture::Config;
-	use crate::frame::Frame;
+	use crate::frame::Surface;
 
 	/// Open the primary display, grab a few frames, and check geometry + frame
 	/// size. Ignored because Desktop Duplication needs an interactive desktop
@@ -339,7 +380,7 @@ mod tests {
 
 		for i in 0..5 {
 			let frame = cap.read().expect("read frame");
-			let Some(Frame::I420(i420)) = frame else {
+			let Some(Surface::I420(i420)) = frame else {
 				panic!("frame {i} was not I420");
 			};
 			assert_eq!(i420.width, cap.width);

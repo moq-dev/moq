@@ -52,7 +52,7 @@ import asyncio
 import moq
 
 async def main():
-    async with moq.Client("https://relay.quic.video") as client:
+    async with moq.Client("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
             catalog = await announcement.broadcast.catalog()
 
@@ -70,7 +70,7 @@ import asyncio
 import moq
 
 async def main():
-    async with moq.Client("https://relay.quic.video") as client:
+    async with moq.Client("https://cdn.moq.dev/anon") as client:
         broadcast = client.create_broadcast("my-stream")
         audio = broadcast.publish_media("opus", opus_init_bytes)
 
@@ -85,6 +85,7 @@ asyncio.run(main())
 
 ## Source and issues
 
+- API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
 - Source: [py/moq-rs](https://github.com/moq-dev/moq/tree/main/py/moq-rs) (wrapper), [py/moq-ffi](https://github.com/moq-dev/moq/tree/main/py/moq-ffi) (raw bindings)
 - README: [py/moq-rs/README.md](https://github.com/moq-dev/moq/blob/main/py/moq-rs/README.md)
 - Example scripts: [py/moq-rs/examples](https://github.com/moq-dev/moq/tree/main/py/moq-rs/examples)

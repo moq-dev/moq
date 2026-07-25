@@ -9,6 +9,10 @@ The ergonomic Go module for [Media over QUIC](/). This is the package most calle
 
 It wraps the raw [moq-ffi](/lib/go/moq-ffi) bindings in idiomatic Go: `context.Context` cancellation, Go `error` returns (with an `IsShutdown` helper for graceful Cancelled/Closed), and Go 1.23 range-over-func iterators (`iter.Seq2`) for live streams. The record and enum types are re-exported without the `Moq` prefix, so most programs never import the ffi package directly.
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/moq-dev/moq-go.svg)](https://pkg.go.dev/github.com/moq-dev/moq-go)
+
+Full API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go), generated automatically from the godoc.
+
 ## Install
 
 ```bash
@@ -130,6 +134,18 @@ with `WithVideoHint`:
 media, err := broadcast.PublishMedia("avc3", nil, moq.WithVideoHint(moq.VideoHint{
     Coded: &moq.Dimensions{Width: 1920, Height: 1080},
 }))
+```
+
+Properties that apply to every video rendition are updated together. Nil fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```go
+rotation := 90.0
+flip := false
+err := broadcast.SetVideoProperties(moq.VideoProperties{
+    Display:  &moq.Dimensions{Width: 1080, Height: 1920},
+    Rotation: &rotation,
+    Flip:     &flip,
+})
 ```
 
 ## Error handling
@@ -367,6 +383,7 @@ The committed `go/wrapper/go.mod` carries a `require github.com/moq-dev/moq-go-f
 
 ## See also
 
+- API reference: [pkg.go.dev/github.com/moq-dev/moq-go](https://pkg.go.dev/github.com/moq-dev/moq-go)
 - Source: [go/wrapper](https://github.com/moq-dev/moq/tree/main/go/wrapper)
 - Mirror repo: [moq-dev/moq-go](https://github.com/moq-dev/moq-go)
 - Raw bindings it builds on: [moq-ffi](/lib/go/moq-ffi)

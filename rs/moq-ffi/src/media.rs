@@ -6,6 +6,24 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
+/// Catalog properties shared by every video rendition.
+///
+/// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
+#[derive(Clone, Default, uniffi::Record)]
+pub struct MoqVideoProperties {
+	/// Final rendered size after rotation, or absent to clear the explicit display size.
+	#[uniffi(default = None)]
+	pub display: Option<MoqDimensions>,
+
+	/// Clockwise rotation in degrees, or absent to clear the explicit rotation.
+	#[uniffi(default = None)]
+	pub rotation: Option<f64>,
+
+	/// Whether to flip horizontally after rotation, or absent to clear the explicit value.
+	#[uniffi(default = None)]
+	pub flip: Option<bool>,
+}
+
 /// How a track's frames are packaged, as advertised in the catalog.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqContainer {

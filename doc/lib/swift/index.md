@@ -84,6 +84,7 @@ Cancelling the surrounding Swift `Task` propagates through to the underlying `ca
 
 ## Source and issues
 
+- API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
 - Source: [swift/](https://github.com/moq-dev/moq/tree/main/swift) (in the monorepo)
 - Mirrors (what SPM resolves): [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift) (wrapper), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi) (raw bindings)
 - README: [swift/README.md](https://github.com/moq-dev/moq/blob/main/swift/README.md)

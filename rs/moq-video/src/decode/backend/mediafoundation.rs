@@ -42,11 +42,11 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::core::{GUID, Interface};
 
-use super::{Backend, Codec, Config, Decoded};
-use crate::Error;
+use super::{Backend, Codec, Config};
 use crate::frame::d3d11::Texture;
-use crate::frame::{Frame, I420};
+use crate::frame::{I420, Surface};
 use crate::mf::{ComGuard, create_d3d_device, mf_err, unpack_2x32};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
 
@@ -359,7 +359,7 @@ impl MediaFoundation {
 }
 
 impl Backend for MediaFoundation {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		let mut out = Vec::new();
 
 		let sample = self.build_sample(&access_unit)?;
@@ -388,10 +388,7 @@ impl Backend for MediaFoundation {
 		// belongs to the access unit just submitted.
 		Ok(out
 			.into_iter()
-			.map(|i420| Decoded {
-				timestamp,
-				frame: Frame::I420(i420),
-			})
+			.map(|i420| Frame::new(Surface::I420(i420), timestamp))
 			.collect())
 	}
 

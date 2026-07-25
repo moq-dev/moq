@@ -41,6 +41,9 @@ pub enum Error {
 	#[error("flac: {0}")]
 	Flac(#[from] crate::codec::flac::Error),
 
+	#[error("opus: {0}")]
+	Opus(#[from] crate::codec::opus::Error),
+
 	#[error("missing keyframe: a group must open on a keyframe")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
@@ -496,16 +499,25 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 	};
 
 	let sample_entry = match &config.codec {
-		AudioCodec::Opus => mp4_atom::Codec::from(mp4_atom::Opus {
-			audio,
-			dops: mp4_atom::Dops {
-				output_channel_count: config.channel_count as u8,
-				pre_skip: 0,
-				input_sample_rate: config.sample_rate,
-				output_gain: 0,
-			},
-			btrt: None,
-		}),
+		AudioCodec::Opus => {
+			let pre_skip = match &config.description {
+				Some(description) => {
+					let mut description = description.as_ref();
+					crate::codec::opus::Config::parse(&mut description)?.pre_skip
+				}
+				None => 0,
+			};
+			mp4_atom::Codec::from(mp4_atom::Opus {
+				audio,
+				dops: mp4_atom::Dops {
+					output_channel_count: config.channel_count as u8,
+					pre_skip,
+					input_sample_rate: config.sample_rate,
+					output_gain: 0,
+				},
+				btrt: None,
+			})
+		}
 		AudioCodec::AAC(_) => {
 			// The catalog `description` is the AudioSpecificConfig (set by the TS
 			// importer via aac::Config::encode, or carried over from a CMAF source).

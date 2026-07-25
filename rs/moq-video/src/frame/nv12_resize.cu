@@ -1,4 +1,4 @@
-// Box-average NV12 resize, the GPU half of decode::Frame::resize.
+// Box-average NV12 resize, the GPU half of Frame::resize.
 //
 // One thread per destination pixel (luma) or destination UV pair (chroma).
 // Each destination pixel averages its full source box, so arbitrary downscale

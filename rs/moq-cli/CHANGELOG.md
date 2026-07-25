@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.1...moq-cli-v0.9.2) - 2026-07-24
+
+### Added
+
+- *(capture)* enumerate Linux and Windows sources ([#2486](https://github.com/moq-dev/moq/pull/2486))
+- *(native)* expose a qlog feature on moq-relay and moq-cli ([#2470](https://github.com/moq-dev/moq/pull/2470))
+
 ## [0.9.1](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.0...moq-cli-v0.9.1) - 2026-07-23
 
 ### Other

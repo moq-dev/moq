@@ -1,4 +1,4 @@
-//! Frame capture. [`Config`] is shared; the implementation is per-platform and
+//! Surface capture. [`Config`] is shared; the implementation is per-platform and
 //! per-source:
 //! - macOS camera -> AVFoundation, screen -> ScreenCaptureKit, both yielding
 //!   zero-copy `CVPixelBuffer` surfaces straight to VideoToolbox.
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use crate::Error;
-use crate::frame::Frame;
+use crate::frame::Surface;
 
 mod channel;
 use channel::FrameChannel;
@@ -67,8 +67,9 @@ mod pump;
 pub enum Source {
 	/// A camera / webcam. `None` opens the default camera.
 	///
-	/// macOS takes an AVFoundation `uniqueID`; other platforms take a bare
-	/// integer (`"0"`) as an index, else a device path/name.
+	/// The identifiers from [`cameras`] are an AVFoundation `uniqueID` on macOS,
+	/// a `/dev/videoN` path on Linux, and a Media Foundation symbolic link on
+	/// Windows. Bare numeric indices remain accepted on Linux and Windows.
 	Camera(Option<String>),
 
 	/// A whole display. `None` opens the main display.
@@ -136,10 +137,10 @@ pub struct Display {
 	pub id: String,
 	/// Human-readable name, e.g. "Display 1".
 	pub name: String,
-	/// Width in points, i.e. the logical size, which is what capture defaults to.
-	/// A 2x retina display reports half its native pixel width.
+	/// Width in the platform's desktop coordinate space. This is points on
+	/// macOS and desktop pixels on Windows.
 	pub width: u32,
-	/// Height in points. See [`width`](Self::width).
+	/// Height in the platform's desktop coordinate space.
 	pub height: u32,
 }
 
@@ -235,7 +236,7 @@ pub(crate) struct FrameStream {
 	device: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
-	pending: Option<Frame>,
+	pending: Option<Surface>,
 	/// Keeps the backend alive and releases it on drop. Type-erased because it
 	/// differs per platform (objc session + delegate, or pump-thread guard).
 	_backend: Keepalive,
@@ -249,7 +250,7 @@ impl FrameStream {
 		height: u32,
 		framerate: Option<u32>,
 		device: String,
-		pending: Option<Frame>,
+		pending: Option<Surface>,
 		backend: Keepalive,
 	) -> Self {
 		Self {
@@ -265,7 +266,7 @@ impl FrameStream {
 
 	/// Await the next frame, or `None` once the source ends. Cancel-safe: drop
 	/// the future to stop reading and release the device.
-	pub(crate) async fn read(&mut self) -> Option<Frame> {
+	pub(crate) async fn read(&mut self) -> Option<Surface> {
 		if let Some(frame) = self.pending.take() {
 			return Some(frame);
 		}
@@ -362,26 +363,40 @@ pub(crate) async fn open(config: &Config) -> Result<FrameStream, Error> {
 	}
 }
 
-/// List the available cameras. macOS only for now.
+/// List the available cameras and the identifiers [`Source::Camera`] accepts.
 pub async fn cameras() -> Result<Vec<Camera>, Error> {
 	#[cfg(target_os = "macos")]
 	{
 		avfoundation::cameras()
 	}
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(target_os = "linux")]
+	{
+		blocking(v4l2::cameras).await
+	}
+	#[cfg(target_os = "windows")]
+	{
+		blocking(mediafoundation::cameras).await
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 	{
 		Err(Error::Unsupported("listing cameras".to_string()))
 	}
 }
 
-/// List the available displays. macOS only for now: on Linux the
-/// xdg-desktop-portal picker owns display selection.
+/// List the available displays and the identifiers [`Source::Display`] accepts.
+///
+/// On Linux the xdg-desktop-portal picker owns display selection, so there is no
+/// list or stable identifier to expose.
 pub async fn displays() -> Result<Vec<Display>, Error> {
 	#[cfg(target_os = "macos")]
 	{
 		screencapture::displays().await
 	}
-	#[cfg(not(target_os = "macos"))]
+	#[cfg(target_os = "windows")]
+	{
+		blocking(desktopduplication::displays).await
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 	{
 		Err(Error::Unsupported("listing displays".to_string()))
 	}
@@ -409,4 +424,16 @@ pub async fn apps() -> Result<Vec<App>, Error> {
 	{
 		Err(Error::Unsupported("listing applications".to_string()))
 	}
+}
+
+/// Run synchronous platform enumeration off the async runtime's worker threads.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+async fn blocking<T, F>(f: F) -> Result<T, Error>
+where
+	F: FnOnce() -> Result<T, Error> + Send + 'static,
+	T: Send + 'static,
+{
+	tokio::task::spawn_blocking(f)
+		.await
+		.map_err(|err| Error::Codec(anyhow::anyhow!("capture enumeration thread failed: {err}")))?
 }

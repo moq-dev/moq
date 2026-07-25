@@ -1,29 +1,95 @@
-//! The frame handed from capture to an encoder backend.
+//! [`Frame`]: one raw picture, and [`Surface`]: its pixels and where they live.
 //!
 //! Representations chosen so the common path stays zero-copy:
-//! - [`Frame::Surface`] is a macOS `CVPixelBuffer` (IOSurface-backed NV12). The
-//!   capture source produces it and VideoToolbox consumes it directly, no copy
-//!   and no color conversion.
-//! - [`Frame::Texture`] is a Windows Direct3D11 NV12 texture. Media Foundation
+//! - `Surface::PixelBuffer` is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
+//!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
+//!   encoder consumes it directly, no copy and no color conversion.
+//! - `Surface::Texture` is a Windows Direct3D11 NV12 texture. Media Foundation
 //!   capture produces it on a shared D3D11 device and the hardware encoder MFT
 //!   consumes it on that same device, also zero-copy.
-//! - [`Frame::I420`] is CPU-resident planar I420, for the CPU encode path and
+//! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
 //! A backend that consumes a GPU surface takes the frame as-is; a CPU encoder
-//! asks for I420 via [`Frame::to_i420`], which downloads the GPU frame only when
+//! asks for I420 via [`Surface::into_i420`], which downloads the GPU frame only when
 //! needed.
 
 use std::borrow::Cow;
 
+use bytes::Bytes;
+use moq_net::Timestamp;
+
 use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix, rgba_to_yuv420};
 
-use crate::Error;
+use crate::{Error, Size};
 
-pub(crate) enum Frame {
-	/// Zero-copy GPU surface (macOS `CVPixelBuffer`).
+/// One raw (uncompressed) video frame: the pixels plus when they are shown.
+///
+/// The currency of the crate's raw side: [`capture`](crate::capture) and
+/// [`decode`](crate::decode) produce these, and
+/// [`encode::Encoder::encode`](crate::encode::Encoder::encode) consumes them,
+/// handing back the compressed [`encode::Encoded`](crate::encode::Encoded).
+pub struct Frame {
+	/// Presentation timestamp. It rides through the encoder with the picture, so a
+	/// backend that buffers or reorders still stamps each packet with the time of
+	/// the frame it actually encoded.
+	pub timestamp: Timestamp,
+	/// The pixels, and where they currently live.
+	pub surface: Surface,
+}
+
+impl Frame {
+	/// A frame shown at `timestamp`.
+	pub fn new(surface: Surface, timestamp: Timestamp) -> Self {
+		Self { timestamp, surface }
+	}
+
+	/// The frame resolution, from the surface itself.
+	pub fn size(&self) -> Size {
+		Size::new(self.surface.width(), self.surface.height())
+	}
+
+	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
+	/// preserving the timestamp. A CUDA frame scales on the GPU
+	/// (a box filter, correct at any downscale factor) and stays there, so resize ->
+	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU. Every
+	/// other frame scales on the CPU, which for a `CVPixelBuffer` means a download
+	/// first. When one output size is enough, prefer decoding straight to it
+	/// ([`decode::Config::resize`](crate::decode::Config)), which is free on
+	/// decoders with a hardware scaler; this method is for fanning one decoded
+	/// stream out to several sizes.
+	pub fn resize(&self, size: Size) -> Result<Frame, Error> {
+		Ok(Frame {
+			timestamp: self.timestamp,
+			surface: self.surface.resize(size)?,
+		})
+	}
+}
+
+/// Where a frame's pixels currently live.
+///
+/// Decoders and capture sources hand these out; encoders and renderers consume
+/// them. Match to take a zero-copy fast path for the representation you can use,
+/// and fall back to [`into_i420`](Self::into_i420) for everything else, which is
+/// always available:
+///
+/// ```ignore
+/// match surface {
+///     #[cfg(target_os = "macos")]
+///     Surface::PixelBuffer(buffer) => draw_metal(buffer),
+///     other => upload(other.into_i420()?),
+/// }
+/// ```
+///
+/// Variants are platform-gated, and the enum is `#[non_exhaustive]` so new
+/// representations stay additive: write that `other` arm and your code keeps
+/// building everywhere.
+#[non_exhaustive]
+pub enum Surface {
+	/// Zero-copy GPU surface (macOS `CVPixelBuffer`), from capture or a
+	/// VideoToolbox decode.
 	#[cfg(target_os = "macos")]
-	Surface(macos::Surface),
+	PixelBuffer(macos::PixelBuffer),
 	/// Zero-copy GPU texture (Windows Direct3D11 NV12).
 	#[cfg(target_os = "windows")]
 	Texture(d3d11::Texture),
@@ -35,28 +101,118 @@ pub(crate) enum Frame {
 	I420(I420),
 }
 
-impl Frame {
-	pub(crate) fn width(&self) -> u32 {
+impl Surface {
+	/// The frame width in pixels.
+	pub fn width(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => s.width,
+			Surface::PixelBuffer(s) => s.width,
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => t.width,
+			Surface::Texture(t) => t.width,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => c.width,
-			Frame::I420(i) => i.width,
+			Surface::Cuda(c) => c.width,
+			Surface::I420(i) => i.width,
 		}
 	}
 
-	pub(crate) fn height(&self) -> u32 {
+	/// The frame height in pixels.
+	pub fn height(&self) -> u32 {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => s.height,
+			Surface::PixelBuffer(s) => s.height,
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => t.height,
+			Surface::Texture(t) => t.height,
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => c.height,
-			Frame::I420(i) => i.height,
+			Surface::Cuda(c) => c.height,
+			Surface::I420(i) => i.height,
+		}
+	}
+
+	/// Convert tightly-packed RGBA (`width * height * 4` bytes, no row padding) to
+	/// a CPU I420 surface, BT.601 limited range (what H.264 decoders expect by
+	/// default).
+	///
+	/// The bring-your-own-pixels entry point: wrap the result in a [`Frame`] to
+	/// encode it. A capture source or decoder hands you a surface directly, often a
+	/// GPU one, so don't route those through here.
+	pub fn rgba(rgba: &[u8], size: Size) -> Result<Self, Error> {
+		size.validate("RGBA frame")?;
+		let expected = size.pixels() as usize * 4;
+		if rgba.len() != expected {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"RGBA buffer is {} bytes, expected {expected} for {size}",
+				rgba.len()
+			)));
+		}
+		Ok(Surface::I420(I420::from_rgba(
+			rgba,
+			size.width * 4,
+			size.width,
+			size.height,
+		)?))
+	}
+
+	/// A copy scaled to `size`, staying on the GPU where the platform can (CUDA
+	/// today). The pixel half of [`Frame::resize`], which is what you usually want
+	/// since it carries the timestamp across too.
+	pub fn resize(&self, size: Size) -> Result<Surface, Error> {
+		size.validate("resize to")?;
+		let Size { width, height } = size;
+
+		Ok(match self {
+			Surface::I420(i420) => Surface::I420(i420.resize(width, height)?),
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Surface::Cuda(cuda) => match cuda.resize(width, height) {
+				Ok(scaled) => Surface::Cuda(scaled),
+				// E.g. the driver rejected the vendored PTX: degrade to a CPU
+				// resize (download once) instead of killing the stream.
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					Surface::I420(cuda.download_i420()?.resize(width, height)?)
+				}
+			},
+			// CVPixelBuffer (the VideoToolbox decoder's output) and D3D11 textures
+			// have no GPU scaler wired up yet: download, then scale on the CPU.
+			#[allow(unreachable_patterns)]
+			other => Surface::I420(other.to_i420()?.into_owned().resize(width, height)?),
+		})
+	}
+
+	/// The pixels as tightly-packed I420 (YUV 4:2:0, BT.601 limited range): Y
+	/// (`width * height` bytes), then U, then V (`width/2 * height/2` each), no row
+	/// padding.
+	///
+	/// Always available, whichever variant you hold, so it is the universal arm of
+	/// a `match`. Free for `Surface::I420`; downloads any GPU surface.
+	pub fn into_i420(self) -> Result<Bytes, Error> {
+		match self {
+			Surface::I420(i420) => Ok(Bytes::from(i420.data)),
+			#[allow(unreachable_patterns)]
+			other => Ok(Bytes::from(other.to_i420()?.into_owned().data)),
+		}
+	}
+
+	/// The pixels as a CoreVideo pixel buffer, the mirror of
+	/// [`into_i420`](Self::into_i420) pointing the other way.
+	///
+	/// Free for `Surface::PixelBuffer` (a retain, staying on the GPU);
+	/// a CPU frame is uploaded into a fresh buffer, so this always yields something
+	/// drawable rather than making you write the upload. Wrap it in a
+	/// `CVMetalTextureCache` to render it.
+	///
+	/// Check `CVPixelBufferGetPixelFormatType` before sampling: a hardware decode
+	/// gives NV12 (bi-planar), an uploaded CPU frame planar I420.
+	///
+	/// A decoded buffer comes from the decoder's pool, so holding many frames holds
+	/// pool slots and eventually stalls decoding. Draw and drop.
+	#[cfg(target_os = "macos")]
+	pub fn into_pixel_buffer(
+		self,
+	) -> Result<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>, Error> {
+		match self {
+			Surface::PixelBuffer(pixels) => Ok(pixels.buffer),
+			Surface::I420(i420) => macos::upload_i420(&i420),
 		}
 	}
 
@@ -64,12 +220,12 @@ impl Frame {
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
 			#[cfg(target_os = "macos")]
-			Frame::Surface(s) => Ok(Cow::Owned(s.download_i420()?)),
+			Surface::PixelBuffer(s) => Ok(Cow::Owned(s.download_i420()?)),
 			#[cfg(target_os = "windows")]
-			Frame::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
+			Surface::Texture(t) => Ok(Cow::Owned(t.download_i420()?)),
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
-			Frame::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
-			Frame::I420(i) => Ok(Cow::Borrowed(i)),
+			Surface::Cuda(c) => Ok(Cow::Owned(c.download_i420()?)),
+			Surface::I420(i) => Ok(Cow::Borrowed(i)),
 		}
 	}
 }
@@ -77,23 +233,56 @@ impl Frame {
 /// A raw video frame in planar I420 (YUV 4:2:0), tightly packed (no padding),
 /// at the encoder resolution. Width and height are even (chroma is 2x2).
 #[derive(Clone)]
-pub(crate) struct I420 {
-	pub width: u32,
-	pub height: u32,
+pub struct I420 {
+	pub(crate) width: u32,
+	pub(crate) height: u32,
 	/// Y plane (`width * height`) then U then V (`width/2 * height/2` each).
-	pub data: Vec<u8>,
+	pub(crate) data: Vec<u8>,
 }
 
 impl I420 {
+	/// Wrap tightly-packed I420 planes: Y (`width * height`), then U, then V
+	/// (`width/2 * height/2` each), no row padding.
+	///
+	/// Both dimensions must be even and non-zero (4:2:0 chroma is 2x2), and `data`
+	/// must be exactly [`I420::len`] bytes. Checked here so a short buffer can't
+	/// reach a plane split and panic downstream.
+	pub fn new(width: u32, height: u32, data: Vec<u8>) -> Result<Self, Error> {
+		crate::Size::new(width, height).validate("I420")?;
+		let expected = Self::len(width, height);
+		if data.len() != expected {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"I420 {width}x{height} needs {expected} bytes, got {}",
+				data.len()
+			)));
+		}
+		Ok(Self { width, height, data })
+	}
+
+	/// The frame width in pixels.
+	pub fn width(&self) -> u32 {
+		self.width
+	}
+
+	/// The frame height in pixels.
+	pub fn height(&self) -> u32 {
+		self.height
+	}
+
+	/// The packed planes, Y then U then V.
+	pub fn data(&self) -> &[u8] {
+		&self.data
+	}
+
 	/// Tightly-packed I420 byte length for the given even dimensions.
-	pub(crate) fn len(width: u32, height: u32) -> usize {
+	pub fn len(width: u32, height: u32) -> usize {
 		let luma = width as usize * height as usize;
 		luma + luma / 2
 	}
 
 	/// Convert RGBA (`stride` bytes per row, >= `width * 4`) to I420, BT.601
 	/// limited range (studio swing, what H.264 decoders expect by default). Used
-	/// by [`Encoder::encode_rgba`](crate::encode::Encoder) (tightly packed) and
+	/// by [`Surface::rgba`] (tightly packed) and
 	/// the screen-capture paths, whose surfaces carry a driver-chosen row pitch.
 	pub(crate) fn from_rgba(rgba: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
@@ -226,7 +415,7 @@ impl I420 {
 
 	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
 	/// convolution: Y at full size, U/V at quarter size. The CPU half of
-	/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+	/// [`Frame::resize`].
 	pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 		use std::cell::RefCell;
 
@@ -295,16 +484,19 @@ impl I420 {
 		self.luma_len() / 4
 	}
 
-	pub(crate) fn y(&self) -> &[u8] {
+	/// The Y (luma) plane, `width * height` bytes.
+	pub fn y(&self) -> &[u8] {
 		&self.data[..self.luma_len()]
 	}
 
-	pub(crate) fn u(&self) -> &[u8] {
+	/// The U (chroma) plane, `width/2 * height/2` bytes.
+	pub fn u(&self) -> &[u8] {
 		let start = self.luma_len();
 		&self.data[start..start + self.chroma_len()]
 	}
 
-	pub(crate) fn v(&self) -> &[u8] {
+	/// The V (chroma) plane, `width/2 * height/2` bytes.
+	pub fn v(&self) -> &[u8] {
 		let start = self.luma_len() + self.chroma_len();
 		&self.data[start..start + self.chroma_len()]
 	}
@@ -331,15 +523,20 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) mod macos {
+pub mod macos {
+	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
+	//! `Surface::PixelBuffer`, plus the download/upload between it and CPU I420.
+
 	use std::ptr;
+
+	use std::ptr::NonNull;
 
 	use objc2_core_foundation::CFRetained;
 	use objc2_core_video::{
-		CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
 		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
 		CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 
 	use super::I420;
@@ -350,7 +547,7 @@ pub(crate) mod macos {
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
 	/// is what keeps the capture -> encode path zero-copy.
-	pub(crate) struct Surface {
+	pub struct PixelBuffer {
 		pub(crate) buffer: CFRetained<CVPixelBuffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
@@ -360,15 +557,31 @@ pub(crate) mod macos {
 	// an IOSurface. Retain/release are thread-safe, every &self access is a
 	// plain field read or a read-only CVPixelBufferLockBaseAddress, and no code
 	// path write-locks a shared surface, so the handle can move between threads
-	// (capture delegate -> encode loop) and be shared by reference. objc2
-	// leaves CoreVideo types !Send/!Sync out of conservatism. Sync exists for
-	// the enum-level bound: moq-transcode shares Arc<decode::Frame>, which
-	// needs every variant Sync even though macOS decoded frames are always
-	// downloaded to I420 before they reach that fanout.
-	unsafe impl Send for Surface {}
-	unsafe impl Sync for Surface {}
+	// (capture delegate -> encode loop, decode callback -> consumer) and be
+	// shared by reference. objc2 leaves CoreVideo types !Send/!Sync out of
+	// conservatism. Sync is load-bearing: the VideoToolbox decoder hands these
+	// out as decoded frames, and moq-transcode shares them as Arc<Frame>
+	// across its rung fanout.
+	unsafe impl Send for PixelBuffer {}
+	unsafe impl Sync for PixelBuffer {}
 
-	impl Surface {
+	impl PixelBuffer {
+		/// The underlying CoreVideo buffer, to hand to Metal or another CoreVideo
+		/// consumer. Borrowing keeps it on the GPU.
+		pub fn buffer(&self) -> &CVPixelBuffer {
+			&self.buffer
+		}
+
+		/// The buffer width in pixels.
+		pub fn width(&self) -> u32 {
+			self.width
+		}
+
+		/// The buffer height in pixels.
+		pub fn height(&self) -> u32 {
+			self.height
+		}
+
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
 			Self { buffer, width, height }
 		}
@@ -436,10 +649,67 @@ pub(crate) mod macos {
 			unsafe { CVPixelBufferUnlockBaseAddress(self.0, LOCK_READ_ONLY) };
 		}
 	}
+
+	/// Allocate a planar I420 `CVPixelBuffer` and copy the frame into it: the
+	/// upload half of [`Surface::into_i420`], for when the pixels are on the
+	/// CPU but a CoreVideo consumer (the VideoToolbox encoder, a renderer) needs a
+	/// buffer. Note the format is planar I420, not the NV12 a hardware decode
+	/// hands back, so callers query `CVPixelBufferGetPixelFormatType`.
+	pub(crate) fn upload_i420(frame: &I420) -> Result<CFRetained<CVPixelBuffer>, Error> {
+		let (w, h) = (frame.width as usize, frame.height as usize);
+		let (cw, ch) = (w / 2, h / 2);
+
+		let mut ptr: *mut CVPixelBuffer = std::ptr::null_mut();
+		let status = unsafe {
+			CVPixelBufferCreate(
+				None,
+				w,
+				h,
+				kCVPixelFormatType_420YpCbCr8Planar,
+				None,
+				NonNull::new(&mut ptr).unwrap(),
+			)
+		};
+		let buffer = NonNull::new(ptr)
+			.filter(|_| status == 0)
+			.map(|p| unsafe { CFRetained::from_raw(p) })
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferCreate failed: {status}")))?;
+
+		let flags = CVPixelBufferLockFlags(0);
+		let status = unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) };
+		if status != 0 {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"CVPixelBufferLockBaseAddress failed: {status}"
+			)));
+		}
+
+		copy_plane(&buffer, 0, frame.y(), w, h);
+		copy_plane(&buffer, 1, frame.u(), cw, ch);
+		copy_plane(&buffer, 2, frame.v(), cw, ch);
+
+		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+		Ok(buffer)
+	}
+
+	/// Copy a tightly-packed source plane into a pixel-buffer plane, honoring its
+	/// (possibly padded) row stride.
+	fn copy_plane(buffer: &CVPixelBuffer, plane: usize, src: &[u8], row_bytes: usize, rows: usize) {
+		let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) as *mut u8;
+		let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+		for y in 0..rows {
+			unsafe {
+				let dst = base.add(y * stride);
+				std::ptr::copy_nonoverlapping(src[y * row_bytes..].as_ptr(), dst, row_bytes);
+			}
+		}
+	}
 }
 
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
-pub(crate) mod cuda {
+pub mod cuda {
+	//! Linux CUDA device memory: the NV12 [`Frame`] behind `Surface::Cuda`, which
+	//! NVDEC produces and NVENC consumes in place.
+
 	use std::sync::{Arc, OnceLock};
 
 	use cudarc::driver::{CudaContext, CudaFunction, LaunchConfig, PushKernelArg, result};
@@ -506,7 +776,7 @@ pub(crate) mod cuda {
 	/// Both codecs use the device's primary CUDA context (`CudaContext::new`
 	/// retains it), so a frame decoded by NVDEC is directly addressable by NVENC.
 	#[derive(Clone)]
-	pub(crate) struct Frame {
+	pub struct Frame {
 		buf: Arc<Buffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
@@ -586,7 +856,7 @@ pub(crate) mod cuda {
 
 		/// Resize to `width` x `height` (both even) with the box-filter kernel,
 		/// staying in device memory. The GPU half of
-		/// [`decode::Frame::resize`](crate::decode::Frame::resize).
+		/// [`Frame::resize`].
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let ctx = &self.buf.ctx;
 			let kernels = kernels(ctx)?;
@@ -662,7 +932,10 @@ pub(crate) mod cuda {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) mod d3d11 {
+pub mod d3d11 {
+	//! Windows Direct3D11 surfaces: the NV12 [`Texture`] behind
+	//! `Surface::Texture`, shared by Media Foundation capture and encode.
+
 	use std::ptr;
 
 	use windows::Win32::Foundation::HMODULE;
@@ -718,7 +991,7 @@ pub(crate) mod d3d11 {
 	/// hardware encoder run on the same device that owns the texture. Cloning the
 	/// COM handles is a cheap `AddRef`, which is what keeps capture -> encode
 	/// zero-copy.
-	pub(crate) struct Texture {
+	pub struct Texture {
 		pub(crate) device: ID3D11Device,
 		pub(crate) texture: ID3D11Texture2D,
 		/// The texture-array slice this frame lives in. Media Foundation pools the
@@ -839,7 +1112,65 @@ pub(crate) mod d3d11 {
 
 #[cfg(test)]
 mod tests {
-	use super::I420;
+	/// A short buffer is rejected at construction rather than panicking later: the
+	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
+	/// a public `I420` has to be impossible to build malformed.
+	#[test]
+	fn i420_new_rejects_a_short_buffer() {
+		use super::I420;
+
+		assert!(I420::new(64, 32, vec![0; I420::len(64, 32)]).is_ok());
+		assert!(I420::new(64, 32, vec![0; I420::len(64, 32) - 1]).is_err());
+		assert!(I420::new(64, 32, Vec::new()).is_err());
+		// Odd and zero dimensions have no valid 4:2:0 chroma.
+		assert!(I420::new(63, 32, vec![0; I420::len(63, 32)]).is_err());
+		assert!(I420::new(0, 32, Vec::new()).is_err());
+	}
+
+	use super::{Frame, I420, Surface};
+	use crate::Size;
+
+	/// The counterpart for the RGBA entry point: a buffer that isn't exactly one
+	/// frame of the declared size is a caller mistake, not slack to truncate.
+	#[test]
+	fn surface_rgba_rejects_a_mismatched_buffer() {
+		let ok = vec![0x80u8; 64 * 32 * 4];
+		assert!(Surface::rgba(&ok, Size::new(64, 32)).is_ok());
+		assert!(Surface::rgba(&ok[..ok.len() - 4], Size::new(64, 32)).is_err());
+		assert!(Surface::rgba(&ok, Size::new(32, 32)).is_err());
+		assert!(Surface::rgba(&ok, Size::new(0, 32)).is_err());
+	}
+
+	/// The frame's size comes from the surface rather than a field alongside it,
+	/// so the two cannot drift apart, and a resize carries the timing across.
+	#[test]
+	fn frame_size_follows_the_surface() {
+		let rgba = vec![0x80u8; 64 * 32 * 4];
+		let surface = Surface::rgba(&rgba, Size::new(64, 32)).unwrap();
+
+		let frame = Frame::new(surface, moq_net::Timestamp::from_micros(1234).unwrap());
+		assert_eq!(frame.size(), Size::new(64, 32));
+
+		let scaled = frame.resize(Size::new(32, 16)).unwrap();
+		assert_eq!(scaled.size(), Size::new(32, 16));
+		assert_eq!(scaled.timestamp, frame.timestamp);
+	}
+
+	/// `into_pixel_buffer` is total: a CPU frame uploads rather than failing, so a
+	/// renderer never has to write the upload itself. Software-decoded frames take
+	/// this path.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn into_pixel_buffer_uploads_a_cpu_frame() {
+		use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+
+		let i420 = I420::new(64, 32, vec![0x80; I420::len(64, 32)]).unwrap();
+		let frame = Frame::new(Surface::I420(i420), moq_net::Timestamp::from_micros(0).unwrap());
+
+		let buffer = frame.surface.into_pixel_buffer().expect("upload a CPU frame");
+		assert_eq!(CVPixelBufferGetWidth(&buffer), 64);
+		assert_eq!(CVPixelBufferGetHeight(&buffer), 32);
+	}
 
 	/// A gradient I420 frame with structure in every plane, so resize bugs
 	/// (plane swaps, stride mistakes) shift the averages measurably.

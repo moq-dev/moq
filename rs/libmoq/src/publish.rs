@@ -162,6 +162,15 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Replace the properties shared by every video rendition as one catalog update.
+	pub fn video_properties(&mut self, broadcast: Id, properties: hang::catalog::VideoProperties) -> Result<(), Error> {
+		let (_, catalog) = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let mut catalog = catalog.lock();
+		catalog.video.set_properties(properties)?;
+		catalog.commit()?;
+		Ok(())
+	}
+
 	/// Insert or replace a top-level application catalog section by name.
 	///
 	/// `value` is any JSON document. Errors if `name` is reserved (`video`/`audio`).

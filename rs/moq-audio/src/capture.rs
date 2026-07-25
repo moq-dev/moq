@@ -7,17 +7,19 @@
 //! interleaved-`f32` PCM and publishes it as an encoded track; encoding stays on
 //! `unsafe-libopus`, so audio never touches ffmpeg.
 //!
-//! Both backends deliver buffers from a realtime callback through an async
-//! channel that the on-demand capture loop awaits, so dropping the publish
-//! future (e.g. on Ctrl+C) cancels the read and releases the device.
+//! Both backends deliver buffers from a realtime callback through a bounded
+//! async channel that the on-demand capture loop awaits, so dropping the
+//! publish future (e.g. on Ctrl+C) cancels the read and releases the device. A
+//! reader that falls behind loses buffers rather than growing the queue, and
+//! each read reports whether that happened so the encoder can re-anchor.
 
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use tokio::sync::mpsc;
 
 use crate::Error;
 
+mod channel;
 mod permission;
 
 #[cfg(target_os = "macos")]
@@ -70,6 +72,19 @@ pub struct Config {
 	pub channels: Option<u32>,
 }
 
+/// One buffer read from a capture source.
+pub(crate) struct Samples {
+	/// Interleaved `f32` PCM.
+	pub data: Vec<f32>,
+
+	/// Set when buffers were dropped before this one, because the reader fell
+	/// behind. The samples are not contiguous with the previous read, so the
+	/// caller must re-anchor its timeline rather than encode straight across:
+	/// PTS advances by sample count, so a swallowed gap becomes permanent drift
+	/// behind wall clock.
+	pub gap: bool,
+}
+
 /// An open capture source, read buffer-by-buffer via [`read`](Self::read).
 ///
 /// `pub(crate)`: [`encode::publish_capture`](crate::encode::publish_capture) is
@@ -81,9 +96,9 @@ pub(crate) enum Stream {
 }
 
 impl Stream {
-	/// Await the next buffer of interleaved `f32` PCM, or `None` once the source
-	/// stops. Cancel-safe: drop the future to release the device.
-	pub(crate) async fn read(&mut self) -> Option<Vec<f32>> {
+	/// Await the next buffer, or `None` once the source stops. Cancel-safe: drop
+	/// the future to release the device.
+	pub(crate) async fn read(&mut self) -> Option<Samples> {
 		match self {
 			Self::Microphone(mic) => mic.read().await,
 			#[cfg(target_os = "macos")]
@@ -137,7 +152,7 @@ pub(crate) async fn open(config: &Config) -> Result<Stream, Error> {
 pub(crate) struct Microphone {
 	// Kept alive to keep capturing; dropping it stops the stream.
 	_stream: cpal::Stream,
-	rx: mpsc::UnboundedReceiver<Vec<f32>>,
+	rx: channel::Receiver<Vec<f32>>,
 	/// The first buffer, captured during `open` to surface a permission failure
 	/// as an error rather than a silent hang.
 	pending: Option<Vec<f32>>,
@@ -159,26 +174,26 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
-		let (tx, mut rx) = mpsc::unbounded_channel::<Vec<f32>>();
+		let (tx, mut rx) = channel::bounded::<Vec<f32>>();
 
-		// The callback runs on cpal's realtime audio thread; convert to f32 and
-		// forward. Keep it allocation-light and never block.
+		// The callback runs on cpal's realtime audio thread. Sample conversion
+		// allocates one Vec per callback; the bounded handoff never blocks.
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => device.build_input_stream(
 				stream_config,
-				move |data: &[f32], _: &_| forward(&tx, data.to_vec()),
+				move |data: &[f32], _: &_| tx.push(data.to_vec()),
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::I16 => device.build_input_stream(
 				stream_config,
-				move |data: &[i16], _: &_| forward(&tx, data.iter().map(|&s| s as f32 / 32768.0).collect()),
+				move |data: &[i16], _: &_| tx.push(data.iter().map(|&s| s as f32 / 32768.0).collect()),
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::U16 => device.build_input_stream(
 				stream_config,
-				move |data: &[u16], _: &_| forward(&tx, data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
+				move |data: &[u16], _: &_| tx.push(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
 				stream_err,
 				None,
 			),
@@ -215,20 +230,19 @@ impl Microphone {
 		})
 	}
 
-	/// Await the next buffer of interleaved `f32` PCM, or `None` once the stream
-	/// stops. Cancel-safe: drop the future to stop reading.
-	async fn read(&mut self) -> Option<Vec<f32>> {
-		match self.pending.take() {
-			Some(samples) => Some(samples),
-			None => self.rx.recv().await, // stream dropped / device gone
+	/// Await the next buffer, or `None` once the stream stops. Cancel-safe: drop
+	/// the future to stop reading.
+	async fn read(&mut self) -> Option<Samples> {
+		if let Some(data) = self.pending.take() {
+			return Some(Samples { data, gap: false });
 		}
-	}
-}
 
-/// Forward a buffer to the reader, ignoring send errors (receiver dropped means
-/// capture is shutting down).
-fn forward(tx: &mpsc::UnboundedSender<Vec<f32>>, samples: Vec<f32>) {
-	let _ = tx.send(samples);
+		let data = self.rx.recv().await?; // stream dropped / device gone
+		Some(Samples {
+			data,
+			gap: self.rx.gap(),
+		})
+	}
 }
 
 /// An audio input reported by [`devices`].

@@ -95,6 +95,7 @@ public final class TrackDynamic: AsyncSequence, Sendable {
 /// while such requests should be served; the sequence ends (throwing `Closed`)
 /// when the broadcast closes, and cancelling the consuming task stops serving.
 public final class BroadcastDynamic: AsyncSequence, Sendable {
+    /// The track request emitted by this sequence.
     public typealias Element = TrackRequest
 
     let ffi: MoqBroadcastDynamic
@@ -113,6 +114,7 @@ public final class BroadcastDynamic: AsyncSequence, Sendable {
         ffi.cancel()
     }
 
+    /// Create an iterator that cancels native waits when iteration ends.
     public func makeAsyncIterator() -> AsyncThrowingStream<TrackRequest, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
             TrackRequest(try await ffi.requestedTrack())

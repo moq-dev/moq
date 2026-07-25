@@ -43,7 +43,7 @@ pub struct Video {
 	#[serde(default)]
 	pub display: Option<Display>,
 
-	/// The rotation of the video in degrees.
+	/// The clockwise rotation of the video in degrees.
 	/// Default: 0
 	#[serde(default)]
 	pub rotation: Option<f64>,
@@ -52,6 +52,41 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
+}
+
+/// Catalog properties shared by every video rendition.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct VideoProperties {
+	/// Render the video at this final size after rotation, or clear the explicit size when absent.
+	pub display: Option<Display>,
+
+	/// Apply this clockwise rotation before rendering, or clear it when absent. Values are normalized to the nearest quarter turn.
+	pub rotation: Option<f64>,
+
+	/// Flip horizontally after rotation, or clear the explicit value when absent.
+	pub flip: Option<bool>,
+}
+
+impl VideoProperties {
+	fn normalized(mut self) -> crate::Result<Self> {
+		self.rotation = self.rotation.map(normalize_video_rotation).transpose()?;
+		Ok(self)
+	}
+}
+
+const FULL_TURN_DEGREES: f64 = 360.0;
+const QUARTER_TURN_DEGREES: f64 = 90.0;
+const QUARTER_TURNS_PER_FULL_TURN: u16 = 4;
+
+fn normalize_video_rotation(rotation: f64) -> crate::Result<f64> {
+	if !rotation.is_finite() {
+		return Err(crate::Error::InvalidVideoRotation);
+	}
+
+	let normalized = rotation.rem_euclid(FULL_TURN_DEGREES);
+	let quarter_turns = (normalized / QUARTER_TURN_DEGREES).round() as u16 % QUARTER_TURNS_PER_FULL_TURN;
+	Ok(quarter_turns as f64 * QUARTER_TURN_DEGREES)
 }
 
 impl Video {
@@ -67,6 +102,15 @@ impl Video {
 	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<VideoConfig> {
 		self.renditions.remove(name)
+	}
+
+	/// Normalize and replace the properties shared by every video rendition.
+	pub fn set_properties(&mut self, properties: VideoProperties) -> crate::Result<()> {
+		let properties = properties.normalized()?;
+		self.display = properties.display;
+		self.rotation = properties.rotation;
+		self.flip = properties.flip;
+		Ok(())
 	}
 }
 
@@ -240,5 +284,101 @@ mod test {
 		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode legacy keys");
 		assert_eq!(config.display_aspect_width, Some(16));
 		assert_eq!(config.display_aspect_height, Some(9));
+	}
+
+	#[test]
+	fn normalizes_video_rotation_to_quarter_turns() {
+		for (rotation, expected) in [
+			(0.0, 0.0),
+			(44.9, 0.0),
+			(45.0, 90.0),
+			(134.9, 90.0),
+			(135.0, 180.0),
+			(225.0, 270.0),
+			(315.0, 0.0),
+			(360.0, 0.0),
+			(-45.0, 0.0),
+		] {
+			assert_eq!(normalize_video_rotation(rotation).unwrap(), expected);
+		}
+	}
+
+	#[test]
+	fn rejects_non_finite_video_rotation() {
+		for rotation in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+			assert!(matches!(
+				normalize_video_rotation(rotation),
+				Err(crate::Error::InvalidVideoRotation)
+			));
+		}
+	}
+
+	#[test]
+	fn invalid_rotation_does_not_replace_video_properties() {
+		let mut video = Video {
+			display: Some(Display {
+				width: 640,
+				height: 480,
+			}),
+			rotation: Some(90.0),
+			flip: Some(true),
+			..Default::default()
+		};
+		let expected = video.clone();
+
+		assert!(matches!(
+			video.set_properties(VideoProperties {
+				display: None,
+				rotation: Some(f64::NAN),
+				flip: None,
+			}),
+			Err(crate::Error::InvalidVideoRotation)
+		));
+		assert_eq!(video, expected);
+	}
+
+	#[test]
+	fn video_properties_replace_shared_fields_without_touching_renditions() {
+		let mut video = Video::default();
+		video
+			.insert(
+				"video",
+				VideoConfig::new(H264 {
+					profile: 0x64,
+					constraints: 0,
+					level: 0x1f,
+					inline: false,
+				}),
+			)
+			.unwrap();
+		video.display = Some(Display {
+			width: 640,
+			height: 480,
+		});
+		video.rotation = Some(90.0);
+		video.flip = Some(true);
+		let renditions = video.renditions.clone();
+
+		video
+			.set_properties(VideoProperties {
+				display: Some(Display {
+					width: 1920,
+					height: 1080,
+				}),
+				rotation: Some(315.0),
+				flip: None,
+			})
+			.unwrap();
+
+		assert_eq!(video.renditions, renditions);
+		assert_eq!(
+			video.display,
+			Some(Display {
+				width: 1920,
+				height: 1080
+			})
+		);
+		assert_eq!(video.rotation, Some(0.0));
+		assert_eq!(video.flip, None);
 	}
 }

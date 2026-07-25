@@ -63,7 +63,7 @@ Build a transport `Session` with `web-transport`, then hand it to
 From there the pub/sub API is identical to [native](/lib/rs/env/native):
 
 ```rust
-let url = url::Url::parse("https://relay.moq.dev/anon")?;
+let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 
 // On wasm this wraps the browser's native WebTransport.
 let transport = web_transport::ClientBuilder::new()

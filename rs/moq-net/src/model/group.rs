@@ -105,8 +105,9 @@ pub(crate) struct GroupState {
 	// pool can evict the least-recently-read groups under memory pressure.
 	charge: cache::Charge,
 
-	// Whether the group has been finalized (no more frames).
-	pub(crate) fin: bool,
+	// Once finalized, the total number of frames the group will ever contain. Recorded
+	// at finish so the count outlives an abort that clears the cache.
+	pub(crate) fin: Option<usize>,
 
 	// The error that caused the group to be aborted, if any.
 	pub(crate) abort: Option<Error>,
@@ -138,25 +139,32 @@ impl GroupState {
 			};
 			return Poll::Ready(Ok(Some((info, frame::Source::Partial(p.buf.clone())))));
 		}
-		// `abort` is checked before `fin`: an evicted group is both finished and
-		// aborted with its frames cleared, and the reader must see the abort rather
-		// than a clean end-of-group at the wrong index.
-		if let Some(err) = &self.abort {
-			return Poll::Ready(Err(err.clone()));
+		ready!(self.poll_terminal(index))?;
+		Poll::Ready(Ok(None))
+	}
+
+	/// Resolve the group's terminal state for a reader positioned at `index`.
+	///
+	/// A finished group is still aborted once its frames are released to free memory
+	/// (aged out of the track's latency window, or evicted by the cache pool). A reader
+	/// that already consumed every frame is missing nothing, so it gets the clean end of
+	/// group; one that fell short sees the abort rather than a silently truncated stream.
+	fn poll_terminal(&self, index: usize) -> Poll<Result<()>> {
+		match (self.fin, &self.abort) {
+			(Some(total), Some(err)) if index < total => Poll::Ready(Err(err.clone())),
+			(Some(_), _) => Poll::Ready(Ok(())),
+			(None, Some(err)) => Poll::Ready(Err(err.clone())),
+			(None, None) => Poll::Pending,
 		}
-		if self.fin {
-			return Poll::Ready(Ok(None));
-		}
-		Poll::Pending
 	}
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
-		if let Some(err) = &self.abort {
-			// Checked before `fin`: an evicted group is both finished and aborted,
-			// and its cleared frames would report a bogus count.
+		// The count is recorded at finish, so a later abort that cleared the cache
+		// doesn't turn a complete group into an error.
+		if let Some(total) = self.fin {
+			Poll::Ready(Ok(total as u64))
+		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
-		} else if self.fin {
-			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
 		} else {
 			Poll::Pending
 		}
@@ -293,7 +301,7 @@ impl Producer {
 		}
 
 		let mut state = modify(&self.state)?;
-		if state.fin {
+		if state.fin.is_some() {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
@@ -333,7 +341,7 @@ impl Producer {
 		let buf = FrameBuf::new(frame.size as usize);
 
 		let mut state = modify(&self.state)?;
-		if state.fin {
+		if state.fin.is_some() {
 			return Err(Error::Closed);
 		}
 		debug_assert!(state.partial.is_none(), "a frame is already open");
@@ -396,7 +404,7 @@ impl Producer {
 	/// [`abort`](Self::abort). The handle also keeps the cached frames readable.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;
-		state.fin = true;
+		state.fin = Some(state.offset + state.frames.len());
 		Ok(())
 	}
 
@@ -480,7 +488,7 @@ impl Drop for Producer {
 			return;
 		}
 		if let Ok(mut state) = modify(&self.state)
-			&& !state.fin
+			&& state.fin.is_none()
 		{
 			// Dropped without finish() or abort(), so consumers will see
 			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
@@ -705,13 +713,7 @@ impl Consumer {
 			}
 			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve
 			// the terminal state (whole-frame reads never stream the partial).
-			if let Some(err) = &state.abort {
-				return Poll::Ready(Err(err.clone()));
-			}
-			if state.fin {
-				return Poll::Ready(Ok(()));
-			}
-			Poll::Pending
+			state.poll_terminal(index)
 		});
 
 		match ready!(res) {
@@ -1048,6 +1050,47 @@ mod test {
 			assert_eq!(frame.payload, Bytes::from(vec![i as u8; 4]));
 		}
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A finished group is still aborted once its frames are released to free memory (the
+	/// track's latency window, or the cache pool). A reader that already drained every frame
+	/// is missing nothing, so it must see the clean end of group rather than the abort.
+	#[test]
+	fn abort_after_finish_keeps_the_clean_end_for_a_drained_reader() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
+			.unwrap();
+		producer.finish().unwrap();
+
+		let mut drained = producer.consume();
+		let mut behind = producer.consume();
+		let frame = drained.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
+
+		producer.abort(Error::Old).unwrap();
+
+		// Drained everything before the abort: nothing is missing.
+		assert!(drained.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(drained.next_frame().now_or_never().unwrap().unwrap().is_none());
+
+		// Never read the frame, and its bytes are gone: a truncated stream, not a clean end.
+		assert!(matches!(behind.read_frame().now_or_never().unwrap(), Err(Error::Old)));
+	}
+
+	/// The frame count is fixed at finish, so an abort that clears the cache can't turn a
+	/// complete group into an error.
+	#[test]
+	fn finished_survives_a_later_abort() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"b")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		producer.abort(Error::Old).unwrap();
+
+		assert_eq!(consumer.finished().now_or_never().unwrap().unwrap(), 2);
 	}
 
 	/// `next_frame` drains frames a prior `read_frame` prefetched, preserving order.

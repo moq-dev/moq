@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/moq-dev/moq/compare/moq-stats-v0.1.1...moq-stats-v0.1.2) - 2026-07-24
+
+### Added
+
+- *(moq-stats)* add aggregating Consumer folding per-node broadcasts ([#2476](https://github.com/moq-dev/moq/pull/2476))
+
 ## [0.1.1](https://github.com/moq-dev/moq/compare/moq-stats-v0.1.0...moq-stats-v0.1.1) - 2026-07-23
 
 ### Other

@@ -1,15 +1,13 @@
 //! Video encoder front end.
 //!
-//! Accepts raw RGBA frames, converts them to I420, and delegates the actual
-//! encode to a [`Backend`](super::backend::Backend). The resulting packets are
-//! Annex-B in the framing the catalog importer for [`Config::codec`] expects:
-//! H.264 (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
+//! Accepts raw [`Frame`]s and delegates the actual encode to a
+//! [`Backend`](super::backend::Backend). The resulting frames carry Annex-B in
+//! the framing the catalog importer for [`Config::codec`] expects: H.264
+//! (`moq_mux::codec::h264`) or H.265 (`moq_mux::codec::h265`).
 
-use bytes::Bytes;
-
+use super::Encoded;
 use super::backend::{self, Backend};
-use crate::frame::{Frame, I420};
-use crate::{Error, Size};
+use crate::{Error, Frame, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -100,14 +98,18 @@ impl Config {
 	}
 }
 
-/// Video encoder. Build one with [`Encoder::new`], feed it raw RGBA frames via
-/// [`encode_rgba`](Self::encode_rgba), and publish the resulting packets through
-/// a [`Producer`](super::Producer) built for the same [`Codec`].
+/// Video encoder. Build one with [`Encoder::new`], feed it raw [`Frame`]s via
+/// [`encode`](Self::encode), and publish the resulting [`Encoded`] access units
+/// through a [`Producer`](super::Producer) built for the same [`Codec`].
 pub struct Encoder {
 	backend: Box<dyn Backend>,
 	codec: Codec,
 	size: Size,
 	bitrate: u64,
+	/// A keyframe asked for by [`Encoder::keyframe`], applied to the next frame.
+	/// Held rather than applied immediately because the caller decides a group
+	/// boundary before it has the frame that opens it.
+	pending_keyframe: bool,
 }
 
 impl Encoder {
@@ -129,6 +131,7 @@ impl Encoder {
 			codec: config.codec,
 			size,
 			bitrate: config.resolved_bitrate(),
+			pending_keyframe: false,
 		})
 	}
 
@@ -180,94 +183,60 @@ impl Encoder {
 		self.codec
 	}
 
-	/// Encode one tightly-packed RGBA frame of `size`, returning zero or more
-	/// encoded packets in the codec's framing. Set `keyframe` to force an IDR
-	/// (e.g. on resume so a re-subscribing viewer can start decoding at once).
+	/// Ask for the next frame to be encoded as a keyframe (an IDR), on top of the
+	/// ones [`Config::gop`] already inserts on its own.
 	///
-	/// `size` must equal the encoder's [`size`](Self::size), and `rgba` must hold
-	/// exactly `width * height * 4` bytes with no row padding.
-	pub fn encode_rgba(&mut self, rgba: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		// The encoder resolution is validated even and non-zero in `new`, so a
-		// frame matching it is even too and the conversion below can't fail on odd
-		// dimensions.
-		self.check_frame(size, rgba.len(), size.pixels() as usize * 4, "RGBA")?;
-
-		let frame = Frame::I420(I420::from_rgba(rgba, size.width * 4, size.width, size.height)?);
-		self.encode_raw(&frame, keyframe)
+	/// Rarely needed: the encoder keys frames automatically, so reach for this only
+	/// when something outside the encoder needs a decodable starting point at a
+	/// specific frame. Opening a new group is the usual reason (a subscriber has to
+	/// be able to start there); resuming after an idle gap is another.
+	///
+	/// The request waits for the next [`encode`](Self::encode) rather than applying
+	/// at once, so it is safe to call before the frame exists. Calling it repeatedly
+	/// before a frame arrives asks for one keyframe, not several.
+	pub fn keyframe(&mut self) {
+		self.pending_keyframe = true;
 	}
 
-	/// Encode one tightly-packed I420 frame of `size` (Y then U then V, no row
-	/// padding, BT.601 limited range), returning zero or more encoded packets in
-	/// the codec's framing. Set `keyframe` to force an IDR.
+	/// Encode one raw [`Frame`], whether it came from capture, a decoder (the
+	/// transcode input path), or your own pixels via
+	/// [`Surface::rgba`](crate::Surface::rgba).
 	///
-	/// `size` must equal the encoder's [`size`](Self::size), and `i420` must hold
-	/// exactly `width * height * 3 / 2` bytes.
+	/// Returns zero or more encoded access units, each carrying the timestamp of the
+	/// raw frame it came from: a backend that buffers hands back an earlier frame's
+	/// output, so the two don't always line up.
 	///
-	/// The bring-your-own-I420 path, which copies the buffer to take ownership of
-	/// it. A transcoder should prefer [`encode`](Self::encode): it takes a decoded
-	/// frame directly and keeps a GPU one on the GPU, so it neither copies nor
-	/// round-trips through system memory.
-	pub fn encode_i420(&mut self, i420: &[u8], size: Size, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		self.check_frame(size, i420.len(), I420::len(size.width, size.height), "I420")?;
-
-		let frame = Frame::I420(I420 {
-			width: size.width,
-			height: size.height,
-			data: i420.to_vec(),
-		});
-		self.encode_raw(&frame, keyframe)
-	}
-
-	/// Reject a frame the encoder can't encode: the wrong shape, or a buffer that
-	/// doesn't hold exactly one frame of that shape.
-	///
-	/// Both halves are load-bearing. `size` catches a transposed frame, which the
-	/// byte count alone cannot: 240x320 and 320x240 are the same number of bytes.
-	/// The exact length then catches a buffer that doesn't match the shape it
-	/// claims, rather than encoding its first frame's worth and ignoring the rest.
-	fn check_frame(&self, size: Size, got: usize, expected: usize, what: &str) -> Result<(), Error> {
+	/// A GPU surface feeds a hardware encoder on the same device directly
+	/// (NVDEC -> NVENC never leaves the GPU, a `CVPixelBuffer` goes straight to
+	/// VideoToolbox); anything else falls back to a CPU I420 upload. The frame must
+	/// already be at the encoder's resolution: decode with
+	/// [`decode::Config::resize`](crate::decode::Config), or scale first with
+	/// [`Frame::resize`](crate::Frame::resize).
+	pub fn encode(&mut self, frame: &Frame) -> Result<Vec<Encoded>, Error> {
+		// A transposed frame is why this compares the shape rather than a byte
+		// count: 240x320 and 320x240 hold the same number of bytes.
+		let size = frame.size();
 		if size != self.size {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"frame {size} does not match encoder {}",
 				self.size
 			)));
 		}
-		if got != expected {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"{what} buffer is {got} bytes, expected {expected} for {size}"
-			)));
-		}
-		Ok(())
+		let encoded = self.backend.encode(frame, self.pending_keyframe)?;
+		// Cleared only once the frame is through: a failed encode produced no
+		// picture, so the request still belongs to whatever comes next rather than
+		// being swallowed. The size check above returns early for the same reason.
+		self.pending_keyframe = false;
+		Ok(encoded)
 	}
 
-	/// Encode a decoded [`Frame`](crate::decode::Frame), the transcode input
-	/// path: a hardware frame feeds a hardware encoder on the same device
-	/// directly (NVDEC -> NVENC stays on the GPU); everything else falls back to
-	/// a CPU I420 upload. The frame must already be at the encoder's resolution;
-	/// decode with [`decode::Config::resize`](crate::decode::Config) (or scale
-	/// yourself) first.
-	pub fn encode(&mut self, frame: &crate::decode::Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		self.encode_raw(&frame.inner, keyframe)
-	}
-
-	/// Encode a captured [`Frame`] (a GPU surface or CPU I420). The frame must
-	/// already be at the encoder's resolution.
-	pub(crate) fn encode_raw(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-		let size = Size::new(frame.width(), frame.height());
-		if size != self.size {
-			return Err(Error::Codec(anyhow::anyhow!(
-				"frame {size} does not match encoder {}",
-				self.size
-			)));
-		}
-		self.backend.encode(frame, keyframe)
-	}
-
-	/// Flush the encoder, returning any buffered packets.
+	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
+	/// of the raw frame it was encoded from, so a drained tail stays in step with
+	/// what was published before it.
 	///
 	/// Consumes the encoder: nothing can be encoded after a flush, so this is the
 	/// last call rather than one leaving a drained encoder in your hands.
-	pub fn finish(mut self) -> Result<Vec<Bytes>, Error> {
+	pub fn finish(mut self) -> Result<Vec<Encoded>, Error> {
 		self.backend.finish()
 	}
 }
@@ -276,9 +245,28 @@ impl Encoder {
 mod tests {
 	use super::*;
 
-	/// A mid-gray RGBA frame: encodable without a camera.
+	use crate::{I420, Surface};
+
+	/// A mid-gray RGBA buffer: encodable without a camera.
 	fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 		vec![0x80u8; width as usize * height as usize * 4]
+	}
+
+	/// The `index`th frame of a mid-gray 30fps stream, so a round-tripped
+	/// timestamp identifies the frame it came from.
+	fn gray_frame(width: u32, height: u32, index: u64) -> Frame {
+		let surface = Surface::rgba(&gray_rgba(width, height), Size::new(width, height)).unwrap();
+		Frame::new(surface, at(index))
+	}
+
+	/// The presentation time of frame `index` at 30fps.
+	fn at(index: u64) -> moq_net::Timestamp {
+		moq_net::Timestamp::from_micros(index * 33_333).unwrap()
+	}
+
+	/// The payloads of some encoded frames, for the Annex-B assertions.
+	fn payloads(frames: &[Encoded]) -> Vec<bytes::Bytes> {
+		frames.iter().map(|f| f.payload.clone()).collect()
 	}
 
 	#[test]
@@ -290,17 +278,32 @@ mod tests {
 		let mut encoder = Encoder::new(&config).expect("openh264 is vendored, always available");
 		assert_eq!(encoder.name(), "openh264");
 
-		let frame = gray_rgba(320, 240);
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty(), "encoder produced no packets");
+		assert!(!frames.is_empty(), "encoder produced no packets");
+
+		// Every encoded frame carries the timestamp of the raw frame it came from,
+		// so the stream stays in step even if a backend buffers.
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert!(
+			micros.windows(2).all(|w| w[0] < w[1]),
+			"encoded timestamps not strictly increasing: {micros:?}"
+		);
+		assert!(
+			micros.iter().all(|&t| t % 33_333 == 0 && t < 30 * 33_333),
+			"encoded timestamp outside the fed set: {micros:?}"
+		);
 
 		// The first packet must start with an Annex-B start code so the avc3
 		// importer can find the inline SPS/PPS.
+		let packets = payloads(&frames);
 		let first = &packets[0];
 		let has_start_code = first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]);
 		assert!(
@@ -310,23 +313,25 @@ mod tests {
 		);
 	}
 
+	/// The bring-your-own-pixels path: RGBA in through `Surface::rgba`, Annex-B out.
 	#[test]
-	fn encode_rgba_emits_annexb() {
+	fn encode_rgba_surface_emits_annexb() {
 		let config = Config {
 			kind: Kind::Software,
 			..Config::new(320, 240, 30)
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let rgba = gray_rgba(320, 240);
-		let mut packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
-		packets.extend(encoder.finish().unwrap());
-		assert!(!packets.is_empty());
+		let mut frames = encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		frames.extend(encoder.finish().unwrap());
+		assert!(!frames.is_empty());
+		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
 
+	/// The same path starting from planar I420 the caller already has.
 	#[test]
-	fn encode_i420_emits_annexb() {
+	fn encode_i420_surface_emits_annexb() {
 		let config = Config {
 			kind: Kind::Software,
 			..Config::new(320, 240, 30)
@@ -334,88 +339,41 @@ mod tests {
 		let mut encoder = Encoder::new(&config).unwrap();
 
 		// A mid-gray I420 frame: flat 0x80 across all three planes.
-		let data = vec![0x80u8; I420::len(320, 240)];
-		let mut packets = encoder.encode_i420(&data, Size::new(320, 240), true).unwrap();
-		packets.extend(encoder.finish().unwrap());
-		assert!(!packets.is_empty());
+		let i420 = I420::new(320, 240, vec![0x80u8; I420::len(320, 240)]).unwrap();
+		let frame = Frame::new(Surface::I420(i420), at(0));
+		let mut frames = encoder.encode(&frame).unwrap();
+		frames.extend(encoder.finish().unwrap());
+		assert!(!frames.is_empty());
+		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
-	}
-
-	/// A buffer that doesn't hold one whole frame of the declared size must error
-	/// rather than reach a backend short.
-	#[test]
-	fn encode_i420_rejects_wrong_size() {
-		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
-			return;
-		};
-		assert!(matches!(
-			encoder.encode_i420(&[0u8; 16], Size::new(320, 240), false),
-			Err(Error::Codec(_))
-		));
-	}
-
-	#[test]
-	fn encode_rgba_rejects_short_buffer() {
-		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
-			return;
-		};
-		// Far smaller than 320*240*4: must error, not panic on conversion.
-		assert!(matches!(
-			encoder.encode_rgba(&[0u8; 16], Size::new(320, 240), false),
-			Err(Error::Codec(_))
-		));
 	}
 
 	/// A frame that isn't the encoder's size must error rather than encode its
 	/// top-left corner.
 	#[test]
-	fn encode_rgba_rejects_dimension_mismatch() {
+	fn encode_rejects_dimension_mismatch() {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
 			return;
 		};
-		let rgba = gray_rgba(640, 480);
-		assert!(matches!(
-			encoder.encode_rgba(&rgba, Size::new(640, 480), false),
-			Err(Error::Codec(_))
-		));
+		assert!(matches!(encoder.encode(&gray_frame(640, 480, 0)), Err(Error::Codec(_))));
 	}
 
-	/// The I420 counterpart: an oversized buffer is a mis-sized frame, not slack
-	/// to truncate.
-	#[test]
-	fn encode_i420_rejects_oversized_buffer() {
-		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
-			return;
-		};
-		let data = vec![0x80u8; I420::len(640, 480)];
-		assert!(matches!(
-			encoder.encode_i420(&data, Size::new(640, 480), false),
-			Err(Error::Codec(_))
-		));
-	}
-
-	/// A transposed frame is exactly why `size` is still a parameter: 240x320 and
-	/// 320x240 hold the same number of bytes, so a length check alone would accept
-	/// this and encode garbage. Both entry points must reject it.
+	/// A transposed frame is why the encoder compares the shape rather than the
+	/// byte count: 240x320 and 320x240 hold the same number of bytes, so a length
+	/// check alone would accept this and encode garbage.
 	#[test]
 	fn encode_rejects_transposed_frame() {
 		let Ok(mut encoder) = Encoder::new(&Config::new(320, 240, 30)) else {
 			return;
 		};
 
-		let rgba = gray_rgba(240, 320);
-		assert_eq!(rgba.len(), gray_rgba(320, 240).len(), "the byte counts must collide");
-		assert!(matches!(
-			encoder.encode_rgba(&rgba, Size::new(240, 320), false),
-			Err(Error::Codec(_))
-		));
-
-		let i420 = vec![0x80u8; I420::len(240, 320)];
-		assert_eq!(i420.len(), I420::len(320, 240), "the byte counts must collide");
-		assert!(matches!(
-			encoder.encode_i420(&i420, Size::new(240, 320), false),
-			Err(Error::Codec(_))
-		));
+		let transposed = gray_frame(240, 320, 0);
+		assert_eq!(
+			gray_rgba(240, 320).len(),
+			gray_rgba(320, 240).len(),
+			"the byte counts must collide"
+		);
+		assert!(matches!(encoder.encode(&transposed), Err(Error::Codec(_))));
 	}
 
 	#[test]
@@ -448,14 +406,25 @@ mod tests {
 		let mut encoder = Encoder::new(&config).expect("videotoolbox is available on macOS");
 		assert_eq!(encoder.name(), "videotoolbox");
 
-		let frame = gray_rgba(320, 240);
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty(), "encoder produced no packets");
+		assert!(!frames.is_empty(), "encoder produced no packets");
+		// VideoToolbox completes each frame before returning, so the timestamps come
+		// back one per input frame, in order.
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert!(
+			micros.windows(2).all(|w| w[0] < w[1]),
+			"encoded timestamps not strictly increasing: {micros:?}"
+		);
+
+		let packets = payloads(&frames);
 		let first = &packets[0];
 		assert!(
 			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
@@ -485,14 +454,17 @@ mod tests {
 		assert_eq!(encoder.name(), "videotoolbox");
 		assert_eq!(encoder.codec(), Codec::H265);
 
-		let frame = gray_rgba(320, 240);
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		for i in 0..10 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(320, 240), i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			frames.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty(), "encoder produced no packets");
+		assert!(!frames.is_empty(), "encoder produced no packets");
+		let packets = payloads(&frames);
 		let first = &packets[0];
 		assert!(
 			first.starts_with(&[0, 0, 0, 1]) || first.starts_with(&[0, 0, 1]),
@@ -538,14 +510,18 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		for i in 0..10 {
-			let frame = Frame::Surface(nv12_surface(320, 240));
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(i));
+			frames.extend(encoder.encode(&frame).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty());
+		assert!(!frames.is_empty());
+		let packets = payloads(&frames);
 		let types = nal_types(&packets[0]);
 		assert!(
 			types.contains(&7) && types.contains(&8) && types.contains(&5),
@@ -564,18 +540,20 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 
-		let frame = Frame::Surface(nv12_surface(320, 240));
-		let mut packets = encoder.encode_raw(&frame, true).unwrap();
-		packets.extend(encoder.finish().unwrap());
+		encoder.keyframe();
+		let frame = Frame::new(Surface::PixelBuffer(nv12_surface(320, 240)), at(0));
+		let mut frames = encoder.encode(&frame).unwrap();
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty());
+		assert!(!frames.is_empty());
+		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
 
 	/// A mid-gray NV12 `CVPixelBuffer`, the format AVFoundation/ScreenCaptureKit
 	/// hand us. Y and interleaved UV planes filled with 128.
 	#[cfg(target_os = "macos")]
-	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::Surface {
+	fn nv12_surface(width: u32, height: u32) -> crate::frame::macos::PixelBuffer {
 		use std::ptr::{self, NonNull};
 
 		use objc2_core_foundation::CFRetained;
@@ -608,12 +586,11 @@ mod tests {
 		}
 		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 
-		crate::frame::macos::Surface::new(buffer, width, height)
+		crate::frame::macos::PixelBuffer::new(buffer, width, height)
 	}
 
 	/// NAL unit types in an Annex-B buffer, found via 3-byte start codes (a
 	/// 4-byte `00 00 00 01` code contains `00 00 01` too, so this catches both).
-	#[cfg(any(target_os = "macos", target_os = "windows"))]
 	fn nal_types(annexb: &[u8]) -> Vec<u8> {
 		let mut types = Vec::new();
 		let mut i = 0;
@@ -642,14 +619,29 @@ mod tests {
 		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
 		assert_eq!(encoder.name(), "mediafoundation");
 
-		let frame = gray_rgba(640, 480);
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		for i in 0..30 {
-			packets.extend(encoder.encode_rgba(&frame, Size::new(640, 480), i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			frames.extend(encoder.encode(&gray_frame(640, 480, i)).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
-		assert!(!packets.is_empty(), "encoder produced no packets");
+		assert!(!frames.is_empty(), "encoder produced no packets");
+		// The MFT buffers, so packets come back stamped with the frame they were
+		// encoded from rather than whichever frame was going in at the time.
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert!(
+			micros.windows(2).all(|w| w[0] < w[1]),
+			"encoded timestamps not strictly increasing: {micros:?}"
+		);
+		assert!(
+			micros.iter().all(|&t| t % 33_333 == 0 && t < 30 * 33_333),
+			"encoded timestamp outside the fed set: {micros:?}"
+		);
+
+		let packets = payloads(&frames);
 		let types = nal_types(&packets[0]);
 		assert!(types.contains(&7), "no SPS in first packet: {types:?}");
 		assert!(types.contains(&8), "no PPS in first packet: {types:?}");
@@ -674,21 +666,25 @@ mod tests {
 		};
 		let mut encoder = Encoder::new(&config).expect("hardware H.264 encoder available");
 
-		let mut packets = Vec::new();
+		let mut frames = Vec::new();
 		let mut textures = 0;
 		for i in 0..30 {
-			let frame = camera.read().await.expect("frame, not end of stream");
-			if matches!(frame, Frame::Texture(_)) {
+			let surface = camera.read().await.expect("frame, not end of stream");
+			if matches!(surface, Surface::Texture(_)) {
 				textures += 1;
 			}
-			packets.extend(encoder.encode_raw(&frame, i == 0).unwrap());
+			if i == 0 {
+				encoder.keyframe();
+			}
+			frames.extend(encoder.encode(&Frame::new(surface, at(i))).unwrap());
 		}
-		packets.extend(encoder.finish().unwrap());
+		frames.extend(encoder.finish().unwrap());
 
 		// On a GPU this exercises the zero-copy texture path; the assert guards
 		// against silently testing only the CPU fallback.
 		assert!(textures > 0, "capture never produced a GPU texture");
-		assert!(!packets.is_empty(), "encoder produced no packets");
+		assert!(!frames.is_empty(), "encoder produced no packets");
+		let packets = payloads(&frames);
 		let types = nal_types(&packets[0]);
 		assert!(
 			types.contains(&7) && types.contains(&8) && types.contains(&5),
@@ -706,21 +702,21 @@ mod tests {
 			..Config::new(320, 240, 30)
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
-		let rgba = gray_rgba(320, 240);
 
 		let opened = encoder.bitrate();
 		assert_eq!(opened, config.resolved_bitrate());
 
 		// Encode first: this is the live-retune path, once the encoder exists.
-		encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
+		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
 
 		let halved = opened / 2;
 		encoder.set_bitrate(halved).unwrap();
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The retuned encoder must still emit a decodable keyframe, not wedge.
-		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
-		assert!(!packets.is_empty(), "encoder produced nothing after a retune");
+		let frames = encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		assert!(!frames.is_empty(), "encoder produced nothing after a retune");
+		let packets = payloads(&frames);
 		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
 
@@ -740,13 +736,12 @@ mod tests {
 		assert_eq!(encoder.bitrate(), halved);
 
 		// The deferred rate is applied during this encode, which must still work.
-		let rgba = gray_rgba(320, 240);
-		let packets = encoder.encode_rgba(&rgba, Size::new(320, 240), true).unwrap();
-		assert!(!packets.is_empty());
+		let frames = encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+		assert!(!frames.is_empty());
 
 		// And the encoder is live now, so a further retune takes the direct path.
 		encoder.set_bitrate(halved / 2).unwrap();
-		assert!(encoder.encode_rgba(&rgba, Size::new(320, 240), false).is_ok());
+		assert!(encoder.encode(&gray_frame(320, 240, 1)).is_ok());
 	}
 
 	/// Setting the current rate must not reach the backend at all: the control
@@ -770,5 +765,220 @@ mod tests {
 		let large = Config::new(1920, 1080, 30).resolved_bitrate();
 		assert!(large > small);
 		assert!(small > 0);
+	}
+
+	/// A backend that holds each frame back by one, like the Media Foundation MFT:
+	/// `encode` returns the *previous* frame's access unit and `finish` drains the
+	/// last. The payload is the frame's timestamp in microseconds, so a test can
+	/// tell which frame a packet came from independently of what it's stamped with.
+	struct Delayed {
+		pending: Option<Encoded>,
+	}
+
+	impl Backend for Delayed {
+		fn encode(&mut self, frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			let payload = bytes::Bytes::from(frame.timestamp.as_micros().to_string());
+			let previous = self.pending.replace(Encoded::new(payload, frame.timestamp));
+			Ok(previous.into_iter().collect())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(self.pending.take().into_iter().collect())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"delayed"
+		}
+	}
+
+	/// An encoder over a hand-built backend, so a test can pick the buffering
+	/// behavior rather than take whatever this machine's hardware does.
+	fn encoder_with(backend: Box<dyn Backend>, config: &Config) -> Encoder {
+		Encoder {
+			backend,
+			codec: config.codec,
+			size: config.size(),
+			bitrate: config.resolved_bitrate(),
+			pending_keyframe: false,
+		}
+	}
+
+	/// Records the keyframe flag each frame reached the codec with, so a test can
+	/// check what the encoder actually asked for.
+	struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<bool>>>);
+
+	impl Backend for Recorder {
+		fn encode(&mut self, _frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			self.0.lock().unwrap().push(keyframe);
+			Ok(Vec::new())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"recorder"
+		}
+	}
+
+	/// Keyframes are automatic, so an untouched encoder forces none. A request is
+	/// held until a frame arrives (callers decide a group boundary before they have
+	/// the frame that opens it), collapses if made twice, and clears afterwards
+	/// rather than keying every frame from then on.
+	#[test]
+	fn a_keyframe_request_waits_for_the_next_frame_then_clears() {
+		let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let config = Config::new(320, 240, 30);
+		let mut encoder = encoder_with(Box::new(Recorder(log.clone())), &config);
+
+		// Nothing asked for: `Config::gop` keys the stream on its own.
+		encoder.encode(&gray_frame(320, 240, 0)).unwrap();
+
+		// Asked twice before a frame exists: one keyframe, on the next frame.
+		encoder.keyframe();
+		encoder.keyframe();
+		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+
+		// And it does not carry into the frame after.
+		encoder.encode(&gray_frame(320, 240, 2)).unwrap();
+
+		assert_eq!(*log.lock().unwrap(), vec![false, true, false]);
+	}
+
+	/// `keyframe()` has to reach the codec on a *warm* encoder, which is the case
+	/// that matters: a fresh one emits an IDR on its first frame regardless, so only
+	/// a mid-stream request proves the plumbing works. Runs on openh264, so this
+	/// holds on every platform rather than only where hardware exists.
+	#[test]
+	fn a_mid_stream_keyframe_request_emits_an_idr() {
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(320, 240, 30)
+		};
+		// A GOP far longer than the run, so any IDR here was asked for rather than
+		// inserted on schedule.
+		let mut encoder = Encoder::new(&Config { gop: 1000, ..config }).unwrap();
+
+		let mut per_frame = Vec::new();
+		for i in 0..6 {
+			// Frame 0 opens the stream; ask again at frame 3, mid-stream.
+			if i == 3 {
+				encoder.keyframe();
+			}
+			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			let joined: Vec<u8> = encoded.iter().flat_map(|f| f.payload.iter()).copied().collect();
+			per_frame.push(nal_types(&joined));
+		}
+
+		// The requested frame is a self-contained IDR: SPS (7) and PPS (8) inline
+		// ahead of an IDR slice (5), which is what avc3 promises a joining subscriber.
+		let asked = &per_frame[3];
+		assert!(asked.contains(&5), "the requested frame is not an IDR: {asked:?}");
+		assert!(asked.contains(&7), "no SPS with the requested IDR: {asked:?}");
+		assert!(asked.contains(&8), "no PPS with the requested IDR: {asked:?}");
+
+		// And the frames around it stay delta frames, so the request keyed exactly
+		// one: keying every frame would pass the assertions above while destroying
+		// the bitrate.
+		for i in [1, 2, 4, 5] {
+			assert!(
+				!per_frame[i].contains(&5),
+				"frame {i} was keyed without being asked: {:?}",
+				per_frame[i]
+			);
+		}
+	}
+
+	/// A backend whose every encode fails, to pin what survives one.
+	struct Failing;
+
+	impl Backend for Failing {
+		fn encode(&mut self, _frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			Err(Error::Codec(anyhow::anyhow!("no")))
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
+		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
+			Ok(())
+		}
+
+		fn name(&self) -> &str {
+			"failing"
+		}
+	}
+
+	/// A request outlives an encode that produced no picture, whether it was
+	/// rejected up front (wrong size) or failed in the backend. Dropping it would
+	/// leave the next frame unkeyed, so a subscriber waits out a whole GOP for a
+	/// starting point the caller already asked for.
+	#[test]
+	fn a_failed_encode_keeps_the_keyframe_request() {
+		let config = Config::new(320, 240, 30);
+
+		let mut encoder = encoder_with(Box::new(Failing), &config);
+		encoder.keyframe();
+		assert!(encoder.encode(&gray_frame(320, 240, 0)).is_err());
+		assert!(encoder.pending_keyframe, "the backend error swallowed the request");
+
+		// Rejected before the backend ever sees it, for the same reason.
+		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+		encoder.keyframe();
+		assert!(encoder.encode(&gray_frame(640, 480, 0)).is_err());
+		assert!(encoder.pending_keyframe, "the size check swallowed the request");
+
+		// ...and the next frame that does go through claims it.
+		encoder.encode(&gray_frame(320, 240, 1)).unwrap();
+		assert!(!encoder.pending_keyframe);
+	}
+
+	/// Regression: a backend that buffers hands back an earlier frame's access
+	/// unit, so the timestamp has to ride through the encoder with the picture.
+	/// Stamping output with whatever frame is going in at the time (or the tail
+	/// with one arbitrary time) shifts every packet by the encoder delay and
+	/// collapses the drained tail onto a single instant.
+	#[test]
+	fn a_buffering_backend_keeps_each_frames_timestamp() {
+		let config = Config::new(320, 240, 30);
+		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+
+		// The packet handed back while frame `i` goes in belongs to frame `i - 1`, so
+		// it has to be stamped one frame back. Stamping at the call site (the only
+		// option when encode just returned bytes) would shift the whole stream.
+		for i in 0..5 {
+			let encoded = encoder.encode(&gray_frame(320, 240, i)).unwrap();
+			if i == 0 {
+				assert!(encoded.is_empty(), "the first frame is still buffered");
+				continue;
+			}
+			assert_eq!(encoded.len(), 1);
+			assert_eq!(encoded[0].timestamp, at(i - 1));
+			// And the packet really is the earlier frame's, not a mis-stamped copy of
+			// the one going in.
+			assert_eq!(&encoded[0].payload[..], at(i - 1).as_micros().to_string().as_bytes());
+		}
+
+		// The tail: frame 4 never came back from an encode call, so `finish` drains
+		// it, still carrying its own time rather than one the caller picks.
+		let tail = encoder.finish().unwrap();
+		assert_eq!(tail.len(), 1);
+		assert_eq!(tail[0].timestamp, at(4));
+		assert!(
+			encoder_with(Box::new(Delayed { pending: None }), &config)
+				.finish()
+				.unwrap()
+				.is_empty()
+		);
 	}
 }

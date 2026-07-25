@@ -9,8 +9,9 @@
 //!   they change;
 //! - repackage the slice NALs as AVCC/HVCC (4-byte length-prefixed) in a
 //!   `CMSampleBuffer`, the form VideoToolbox decodes;
-//! - request NV12 output and download it to packed I420 (reusing the same
-//!   `CVPixelBuffer` download as the capture path).
+//! - request NV12 output and hand the `CVPixelBuffer` back as-is, so a decoded
+//!   frame stays GPU-resident. It is downloaded to I420 only when a consumer
+//!   asks, via the same path the capture surfaces use.
 //!
 //! Hand-written on the raw `objc2-video-toolbox` bindings; there's no
 //! higher-level crate we trust. Decoding is synchronous (no async flag), so the
@@ -36,9 +37,9 @@ use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 
-use super::{Backend, Codec, Config, Decoded};
-use crate::Error;
-use crate::frame::{Frame, I420};
+use super::{Backend, Codec, Config};
+use crate::frame::{Surface, macos::PixelBuffer};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -55,7 +56,7 @@ enum NalKind {
 /// `decode_frame`. Boxed so its address is a stable refcon for the session.
 #[derive(Default)]
 struct Sink {
-	frames: Vec<I420>,
+	frames: Vec<PixelBuffer>,
 	error: Option<String>,
 }
 
@@ -171,7 +172,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
 		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
 		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
@@ -234,10 +235,7 @@ impl Backend for VideoToolbox {
 		// every output frame belongs to the access unit just submitted.
 		Ok(std::mem::take(&mut self.sink.frames)
 			.into_iter()
-			.map(|i420| Decoded {
-				timestamp,
-				frame: Frame::I420(i420),
-			})
+			.map(|surface| Frame::new(Surface::PixelBuffer(surface), timestamp))
 			.collect())
 	}
 
@@ -247,7 +245,7 @@ impl Backend for VideoToolbox {
 }
 
 /// C callback VideoToolbox invokes (synchronously, from `decode_frame`) for each
-/// decoded frame. Downloads the NV12 pixel buffer to packed I420.
+/// decoded frame. Retains the NV12 pixel buffer so the picture stays on the GPU.
 unsafe extern "C-unwind" fn output_callback(
 	refcon: *mut c_void,
 	_source_frame_refcon: *mut c_void,
@@ -267,16 +265,15 @@ unsafe extern "C-unwind" fn output_callback(
 	};
 
 	// The decoded image buffer is a CVPixelBuffer; retain it (the callback only
-	// borrows) and download NV12 -> I420 with the shared capture-path code.
+	// borrows) and keep it as-is rather than downloading here. The retain is also
+	// what stops VideoToolbox handing this buffer back out of its pool while a
+	// consumer still holds the frame. The flip side: a consumer that hoards frames
+	// holds pool buffers, so the pool (not CPU memory) is the pressure point now.
 	let pixel_buffer = unsafe { CFRetained::retain(image.cast::<CVPixelBuffer>()) };
 	let width = CVPixelBufferGetWidth(&pixel_buffer) as u32;
 	let height = CVPixelBufferGetHeight(&pixel_buffer) as u32;
-	let surface = crate::frame::macos::Surface::new(pixel_buffer, width, height);
 
-	match surface.download_i420() {
-		Ok(i420) => sink.frames.push(i420),
-		Err(e) => sink.error = Some(e.to_string()),
-	}
+	sink.frames.push(PixelBuffer::new(pixel_buffer, width, height));
 }
 
 /// Build a `CMVideoFormatDescription` from the ordered parameter-set NAL units

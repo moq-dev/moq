@@ -1,0 +1,7 @@
+# Doc-build dependencies for the moq API reference. Used by both Read the Docs
+# (.readthedocs.yaml) and `just py docs`. The wrapper itself is installed
+# separately with --no-deps so the native moq_ffi is never built (it is mocked
+# in conf.py).
+sphinx>=8.1
+myst-parser>=4.0
+furo>=2024.8.6
