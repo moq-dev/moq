@@ -41,9 +41,9 @@ mod test {
 		let err = Catalog::from_str(json).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");
 
-		// Also via `from_value`, which is how a consumer reaches this: moq-json reconstructs a
-		// Value from the frames and deserializes that. It carries no line or column, so the
-		// message is all a consumer gets (moq-json prefixes the field path on its own side).
+		// Also from an already-parsed Value, which is what a consumer deserializes: moq-json
+		// reconstructs one from the frames. That carries no line or column, so this message is
+		// all a consumer gets (moq-json prefixes the field path on its own side).
 		let value: serde_json::Value = serde_json::from_str(json).unwrap();
 		let err = serde_json::from_value::<Catalog>(value).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");
