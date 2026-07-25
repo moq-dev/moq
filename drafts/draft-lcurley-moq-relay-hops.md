@@ -70,7 +70,7 @@ RELAY_HOPS Setup Option {
 
 **Hop ID**:
 The sender's own Hop ID (see [Hop IDs](#hop-ids)): the identity it appends to HOP_PATH when forwarding advertisements.
-An endpoint that never forwards advertisements (a leaf) MAY send an empty value (`Option Value Length` 0), declaring no identity; there is nothing of its own to exclude from a path.
+An endpoint that never forwards advertisements (a leaf) MAY send an empty value (`Option Value Length` 0), declaring no identity; there is nothing of its own to exclude from a path, and the peer applies no exclusion when selecting advertisements or serving subscriptions for that session.
 
 The extension applies to a single hop (one MOQT session) and is negotiated independently for each session; a relay MUST NOT assume that because one of its sessions negotiated Relay Hops, another did.
 

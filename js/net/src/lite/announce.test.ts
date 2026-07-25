@@ -113,11 +113,13 @@ test("AnnounceRequest carries exclude_hop only on draft-04/05", async () => {
 		const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
 		const got = await AnnounceRequest.decode(reader, version);
 		expect(got.excludeHop).toBe(7n);
+		expect(await reader.done()).toBe(true);
 	}
 
 	// Draft-06 moved the identity to the SETUP Origin parameter, so the field is
-	// gone from its wire image and decodes back to zero.
+	// gone from its wire image and decodes back to zero, with nothing left over.
 	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_06)));
 	const got = await AnnounceRequest.decode(reader, Version.DRAFT_06);
 	expect(got.excludeHop).toBe(0n);
+	expect(await reader.done()).toBe(true);
 });

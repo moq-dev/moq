@@ -107,12 +107,13 @@ share an id are treated as interchangeable sources: relays hold both routes
 and fail over between them at a group boundary, so killing one leaves viewers
 running off the other.
 
-Sharing an id is a promise: the publishers MUST produce exactly the same
-broadcast, meaning the same track names carrying the same content, with group
-sequences aligned on the same boundaries. Relays splice between same-id
-sources at any moment, so encoders that drift (for example segment-numbered
-tracks from processes started at different times) tear down subscribers
-mid-splice. Independent publishers with different tracks or timelines MUST use
+Sharing an id is a promise: the publishers MUST produce the same broadcast,
+meaning the same track names carrying the same content, with group sequences
+aligned on the same boundaries. Relays may switch between same-id sources
+whenever routing prefers another (not only on failure), splicing at the next
+group boundary, so encoders that drift (for example segment-numbered tracks
+from processes started at different times) tear down subscribers on the
+switch. Independent publishers with different tracks or timelines MUST use
 different origin ids; the newcomer then waits as a replacement instead of
 joining. Run the same command from two aligned encoders, pinning the same id
 on both:

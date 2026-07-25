@@ -291,6 +291,7 @@ Each broadcast starts unavailable.
 An ANNOUNCE_START makes the broadcast available; a subsequent ANNOUNCE_END makes it unavailable again and retires its Announce ID.
 
 A publisher SHOULD advertise, for each broadcast, the best path it knows whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)); when every known path contains it, the publisher SHOULD advertise nothing for that broadcast.
+A subscriber that declared no origin is subject to no exclusion and receives the best path outright; an unknown Hop ID of 0 in a path never matches anything.
 Selection is per stream: two subscribers can legitimately receive different paths for the same broadcast, and in particular a subscriber that the serving path flows through receives the best standby path instead of nothing, which is what lets it fail over to that standby if its own copy dies.
 The per-subscriber winner changing travels as an ANNOUNCE_RESTART; it swinging into or out of existence (the last qualifying path appearing or disappearing) travels as a fresh ANNOUNCE_START or an ANNOUNCE_END.
 If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send an ANNOUNCE_RESTART referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
@@ -304,8 +305,9 @@ Cooperating redundant publishers MAY share a Hop ID to opt into this.
 Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD keep serving the earlier one, treating the later as a replacement only once the earlier ends.
 
 When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
+A subscriber that declared no origin is served from the publisher's preferred source as usual.
 If only excluded sources remain, the subscription is unroutable; serving it would hand the subscriber data that already flowed through itself.
-Advertisement and dispatch being one selection keeps advertised paths truthful, which is what makes the Exclude-Hop filter sufficient to prevent subscription cycles of any length: any would-be cycle surfaces the subscriber's own Hop ID inside the candidate path, where the filter removes it.
+Advertisement and dispatch being one selection keeps advertised paths truthful, which is what makes the declared-origin filter sufficient to prevent subscription cycles of any length: any would-be cycle surfaces the subscriber's own Hop ID inside the candidate path, where the filter removes it.
 
 The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
@@ -701,7 +703,7 @@ ANNOUNCE_REQUEST Message {
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
 
-The publisher SHOULD skip announcements for broadcasts whose reconstructed path (including the publisher's own `Hop ID` from ANNOUNCE_OK) contains the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
+The publisher SHOULD skip announcements for broadcasts whose reconstructed path (including the publisher's own `Hop ID` from ANNOUNCE_OK) contains the origin the subscriber declared in its SETUP, when it declared one (see [Origin Parameter](#origin-parameter)).
 This is used by relays to avoid routing loops in a cluster; earlier versions carried the identity here as a per-stream `Exclude Hop` field.
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_RESTART messages for any future updates.

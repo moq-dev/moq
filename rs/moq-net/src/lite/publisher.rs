@@ -1621,9 +1621,10 @@ mod announce_test {
 		consumer: origin::Consumer,
 		exclude_hop: u64,
 	) -> (Wire, tokio::task::JoinHandle<Result<(), Error>>) {
-		let writes = Arc::new(Mutex::new(Vec::new()));
+		let log = Log::default();
+		let writes = log.writes.clone();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend { writes: writes.clone() }, VERSION),
+			writer: Writer::new(SinkSend { log }, VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
