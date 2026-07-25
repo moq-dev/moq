@@ -9260,9 +9260,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quiche"
-version = "0.4.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fea3eb47ecea9f8b748d57349c0697742581e43dadd4715650ba5d8119f81bd2"
+checksum = "3599414f964f4f1132dc8bd8f6c497b7a7b97043e4d5de53abbc155527d48fdf"
 dependencies = [
  "boring",
  "bytes",
@@ -9274,6 +9274,7 @@ dependencies = [
  "tokio",
  "tokio-quiche",
  "tracing",
+ "url",
  "web-transport-proto",
  "web-transport-trait",
 ]

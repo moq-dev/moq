@@ -113,7 +113,7 @@ web-transport-iroh = "0.6"
 # 0.2.1 for the `qlog` passthrough feature moq-native's `qlog` forwards to.
 web-transport-noq = { version = "0.2.1", default-features = false }
 web-transport-proto = "0.6"
-web-transport-quiche = "0.4"
+web-transport-quiche = "0.5"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3.4"
 
