@@ -241,7 +241,7 @@ For example:
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
-A publisher SHOULD emit lowercase digits and MUST NOT emit a `0x` prefix or any separators.
+A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
 A consumer MUST accept either case.
 
 Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
