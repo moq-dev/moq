@@ -42,8 +42,8 @@ pipewire = ["dep:pipewire", "dep:ashpd"]
 [dependencies]
 anyhow = "1"
 bytes = "1"
-# CPU I420 resize (SIMD per-plane convolution), the software half of
-# decode::Frame::resize; CUDA frames resize on the GPU instead.
+# CPU I420 resize (SIMD per-plane convolution), the software fallback for
+# Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
