@@ -138,6 +138,11 @@ moq_video_properties properties = {
 if (moq_publish_video_properties(broadcast, &properties) < 0) {
     fprintf(stderr, "video properties failed: %s\n", moq_error());
 }
+
+moq_video_properties snapshot = {0};
+if (moq_consume_video_properties(catalog, &snapshot) < 0) {
+    fprintf(stderr, "video properties failed: %s\n", moq_error());
+}
 ```
 
 ## Raw Tracks

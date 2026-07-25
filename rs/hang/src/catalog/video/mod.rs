@@ -314,6 +314,30 @@ mod test {
 	}
 
 	#[test]
+	fn invalid_rotation_does_not_replace_video_properties() {
+		let mut video = Video {
+			display: Some(Display {
+				width: 640,
+				height: 480,
+			}),
+			rotation: Some(90.0),
+			flip: Some(true),
+			..Default::default()
+		};
+		let expected = video.clone();
+
+		assert!(matches!(
+			video.set_properties(VideoProperties {
+				display: None,
+				rotation: Some(f64::NAN),
+				flip: None,
+			}),
+			Err(crate::Error::InvalidVideoRotation)
+		));
+		assert_eq!(video, expected);
+	}
+
+	#[test]
 	fn video_properties_replace_shared_fields_without_touching_renditions() {
 		let mut video = Video::default();
 		video

@@ -147,7 +147,7 @@ jobs:
 
       - name: Skip notice
         if: needs.build.outputs.ffi_changed == 'true'
-        run: echo "::notice::moq-ffi changed in this PR; the local Swift check validates the wrapper against freshly generated bindings."
+        run: echo "::notice::moq-ffi changed in this PR; skipping the published-package cross-resolve. The required Swift workflow validates the wrapper against freshly generated bindings."
 
       - name: Unpublished FFI notice
         if: (needs.build.outputs.publish == 'true' || github.event_name == 'pull_request') && needs.build.outputs.ffi_changed != 'true' && steps.ffi.outputs.exists != 'true'
