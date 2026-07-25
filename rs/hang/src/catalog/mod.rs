@@ -6,6 +6,7 @@
 
 mod audio;
 mod container;
+mod hex;
 mod priority;
 mod root;
 mod timeline;

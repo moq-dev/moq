@@ -20,7 +20,7 @@ moq-net = { workspace = true }
 regex = "1"
 serde = { workspace = true }
 serde_json = "1"
-serde_with = { version = "3", features = ["base64", "hex"] }
+serde_with = { version = "3", features = ["base64"] }
 thiserror = "2"
 url = "2"
 

@@ -1,5 +1,6 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
+import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 import { TimelineSchema } from "./timeline";
@@ -29,7 +30,7 @@ export const AudioConfigSchema = z.object({
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is in-band.
-	description: z.optional(z.string()), // hex encoded TODO use base64
+	description: z.optional(hexSchema), // TODO use base64
 
 	// The sample rate of the audio in Hz
 	sampleRate: u53Schema,

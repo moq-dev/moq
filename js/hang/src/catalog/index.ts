@@ -8,6 +8,7 @@
 export * from "./audio";
 export * from "./container";
 export * from "./format";
+export * from "./hex";
 export * from "./integers";
 export * from "./path";
 export * from "./priority";
