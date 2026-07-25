@@ -65,17 +65,17 @@ pub enum AudioCodec {
 #[non_exhaustive]
 pub enum AudioCodecKind {
 	/// Advanced Audio Coding.
-	AAC = 0,
+	AAC,
 	/// Opus.
-	Opus = 1,
+	Opus,
 	/// Unknown or unsupported codec.
-	Unknown = 2,
+	Unknown,
 	/// Free Lossless Audio Codec.
-	Flac = 3,
+	Flac,
 	/// MPEG-1/2 Audio Layer III.
-	Mp3 = 4,
+	Mp3,
 	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
-	Pcm = 5,
+	Pcm,
 }
 
 impl AudioCodec {
