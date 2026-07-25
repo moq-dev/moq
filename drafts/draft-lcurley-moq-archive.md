@@ -56,7 +56,7 @@ Recording by transmuxing into a presentation-ordered media format at write time 
 
 moq-archive instead records at the track layer: groups of opaque frames, in arrival order, bundled into chunks on a flush interval.
 The format is deliberately dumb.
-All media semantics (codec configuration, timestamps-to-wall-clock mapping, rendition relationships) live in the recorded tracks themselves — a catalog or timeline track {{hang}} is archived like any other track.
+All media semantics (codec configuration, timestamps-to-wall-clock mapping, rendition relationships) live in the recorded tracks themselves: a catalog or timeline track {{hang}} is archived like any other track.
 
 
 # Terminology
@@ -81,16 +81,16 @@ broadcast.json
 `<track>` is the track's name, percent-encoded: every byte outside `A-Z a-z 0-9 _ -` is escaped, so an encoded name can never contain a dot and can never collide with `broadcast.json`.
 `<c>` is a chunk number, sequential from 0 within its track.
 
-Metadata is stored exactly once, in the index: chunks are pure payload — concatenated frames with no header, no magic, and no internal structure — the same split as an MP4 file's `moov` and `mdat`.
+Metadata is stored exactly once, in the index: chunks are pure payload (concatenated frames with no header, no magic, and no internal structure), the same split as an MP4 file's `moov` and `mdat`.
 Chunks are immutable and stored raw (media payloads do not compress).
-Each track's index is a binary log, append-only in content — a record, once written, never changes — though the object is rewritten as the archive grows; it is uncompressed and records are length-prefixed, so a reader refreshes with a plain ranged GET and needs no earlier bytes to decode the new ones.
+Each track's index is a binary log, append-only in content (a record, once written, never changes) though the object is rewritten as the archive grows; it is uncompressed and records are length-prefixed, so a reader refreshes with a plain ranged GET and needs no earlier bytes to decode the new ones.
 `broadcast.json` is rewritten only when a track is added and once at sealing: tracks can appear mid-broadcast, and re-reading `broadcast.json` is how a storage-only follower discovers them.
 
 The writer subscribes to a track and buffers groups as they arrive.
 On each flush it writes one chunk containing every group completed since the previous flush, plus a span for any group that has remained open longer than the flush interval, then appends the chunk's record to the track's index.
 A group that arrives late is simply written to whichever chunk is open when it completes; ordering across chunks is arrival order, and only ordering *within* a chunk is by group sequence.
 
-The reader inverts this: given a group sequence, it finds the chunk record(s) listing that group, computes byte offsets from the record alone, and range-reads the payload — one request, no intermediate hop.
+The reader inverts this: given a group sequence, it finds the chunk record(s) listing that group, computes byte offsets from the record alone, and range-reads the payload: one request, no intermediate hop.
 Span payloads are stored in a frame encoding designed to match FETCH, so concatenating a group's spans *is* the FETCH response for that group.
 
 
@@ -124,13 +124,16 @@ Informative for reading, but they tell a live follower how often new chunks can 
 Once complete, every object in the archive is immutable, this file included.
 
 **tracks**:
-A map from track name to the track's immutable publisher properties; `timescale` is REQUIRED, since frame timestamps are meaningless without it.
+A map from track name to the track's immutable publisher properties, copied from the transport at recording time.
+`timescale` is REQUIRED: a positive integer, the number of timestamp units per second, and the only property this format itself consumes.
+The remaining properties are OPTIONAL copies whose semantics belong to the transport that recorded them: `priority` (integer), `ordered` (boolean), and `latency_max_ms` (non-negative integer, milliseconds) mirror moq-lite's TRACK_INFO, defaulting per that transport when absent.
+A writer MAY store additional properties; a reader MUST ignore properties it does not understand and SHOULD preserve them when copying an archive.
 Entries are added as tracks are discovered and never removed; the percent-encoded name is the track's path prefix.
-A track whose payload is itself a description of other tracks — the catalog track of {{hang}} — is listed and recorded like any other track; the archive deliberately carries no media semantics.
+A track whose payload is itself a description of other tracks, such as the catalog track of {{hang}}, is listed and recorded like any other track; the archive deliberately carries no media semantics.
 
 
 # Track Index
-`<track>/index.bin` is the track's index: a binary log, one record per chunk, in chunk order — the `i`-th record describes chunk `i`.
+`<track>/index.bin` is the track's index: a binary log, one record per chunk, in chunk order; the `i`-th record describes chunk `i`.
 It holds ALL of the archive's structure for the track; losing it loses the track (see [Writer Behavior](#writer)).
 
 ~~~
@@ -162,26 +165,30 @@ A chunk MUST NOT contain two spans for the same group.
 
 **Sizes**:
 One per group, in run-expansion order: the byte size of that span's payload.
-Payloads are stored in this same order, so span `i` begins at the sum of the sizes before it — every byte offset in the chunk is computable from the record alone.
+Payloads are stored in this same order, so span `i` begins at the sum of the sizes before it. Every byte offset in the chunk is computable from the record alone.
 An empty group (zero frames, potentially indicating a gap in the track) has size 0.
 
 **Partials**:
 Present for continuation spans: this chunk's span for `Group` starts at `Frame Offset` rather than at 0.
 A group split across chunks has one span in each, listed in every corresponding record; a reader concatenates them in frame-offset order.
-Within one group, data arrives as an ordered stream, so spans are contiguous continuations — never overlapping, never leaving holes within the recorded prefix.
+Within one group, data arrives as an ordered stream, so spans are contiguous continuations, never overlapping and never leaving holes within the recorded prefix.
 If a writer nevertheless records overlapping frame ranges for a group (for example after crash recovery re-fetched a group it had partially written), the later chunk wins for the overlapping frames, and readers MUST resolve overlaps in favor of the higher chunk number.
+Concretely: process the group's spans in ascending chunk order and, for any frame index covered by more than one span, take the frame from the span in the highest-numbered chunk, skipping the duplicates in earlier spans (frames are length-prefixed, so skipping is a parse, not a copy).
+The reconstructed group contains each frame index exactly once.
 
 ## Append and refresh
 The log has no header: the format version lives in `broadcast.json`, and the first record starts at byte 0.
 Its content is append-only: bytes once written never change.
-A reader refreshes incrementally — over HTTP, a ranged GET from its previous offset, with the ETag (`If-Range`) guarding against a replaced object; on a filesystem, by watching the file size — and parses only the new records.
+A reader refreshes incrementally and parses only the new records: over HTTP, a ranged GET from its previous offset, with the ETag (`If-Range`) guarding against a replaced object; on a filesystem, by watching the file size.
 The index is stored uncompressed precisely so that a ranged read is decodable without any earlier bytes; storage- or transport-layer compression MAY apply transparently.
 
 The writer SHOULD rewrite the index object on every flush: it is the only durable record of the chunk's structure, and until it lands the chunk is unreadable.
+On object storage each rewrite is an atomic PUT.
+On a filesystem the writer appends in place rather than rewriting, and the record length prefix shields a concurrent reader from an incompletely written tail; if a rewrite is ever necessary, it replaces the file atomically (write-temporary-then-rename).
 
 
 # Chunk Format
-A chunk, `<track>/<c>.dat`, is the concatenated span payloads of one flush — nothing else.
+A chunk, `<track>/<c>.dat`, is the concatenated span payloads of one flush, nothing else.
 There is no header, no magic, and no per-span framing: all structure lives in the chunk's index record, and a chunk is unreadable without it (deliberately, the `mdat` model).
 
 Payloads appear in `groups` expansion order (ascending group sequence).
@@ -232,7 +239,7 @@ On each flush interval (or earlier, when buffered bytes reach `flush_bytes`, or 
 `broadcast.json` is written when the archive is created, rewritten when a track is discovered, and rewritten once more at sealing with `complete: true` (after every track's final chunks and index rewrites).
 
 A writer that restarts simply opens the next chunk of each track and continues; the format is append-only and needs no repair step.
-A crash between a chunk write and its index rewrite orphans that chunk: the bytes exist but their structure was never recorded, so they are unreadable — the same way an MP4 without its `moov` is unreadable.
+A crash between a chunk write and its index rewrite orphans that chunk: the bytes exist but their structure was never recorded, so they are unreadable, the same way an MP4 without its `moov` is unreadable.
 This loss is bounded by the flush interval and is the accepted cost of storing metadata exactly once.
 If a restarted writer re-receives groups it already wrote, it SHOULD skip the frames it already recorded and write only the missing suffix; if it cannot know (lost state), it MAY rewrite the group in full, relying on the later-chunk-wins rule.
 
@@ -252,7 +259,7 @@ A reader presenting the archive as a track (for example when deriving a presenta
 ## HTTP access
 Chunks are immutable and SHOULD be served with long-lived caching.
 The track indexes change while the archive is live and SHOULD be served with short TTLs, as should `broadcast.json`; everything becomes immutable once `complete`.
-Group reconstruction over HTTP costs one range request per span — usually exactly one — and sequential playback amortizes further by fetching whole chunks.
+Group reconstruction over HTTP costs one range request per span (usually exactly one), and sequential playback amortizes further by fetching whole chunks.
 A relay serving FETCH from an archive keeps the parsed indexes in memory and caches hot chunks rather than re-reading them.
 
 ## Following a live archive {#following}
@@ -261,7 +268,9 @@ In order of preference:
 
 1. **A live index track.**
    A writer MAY publish each track's records on a live MoQ track (one record per flush) so a MoQ-connected follower is pushed each record and never polls storage.
-   The track conventions (for example a single group carrying one record per frame) are out of scope here; only the record encoding is normative.
+   Records carry no chunk number (numbering is positional), so the live track must preserve ordinal position: for example a single group replayed from its start, whose `n`-th frame is chunk `n`'s record.
+   A follower that cannot receive the track from its start instead bootstraps from the persisted index and applies live records only past its refresh offset.
+   The track conventions are otherwise out of scope here; only the record encoding is normative.
 2. **A blocking origin.**
    An origin smarter than raw object storage MAY offer blocking reads: a request for an index range (or chunk) that does not yet exist is held until it does, turning polling into long-polling.
    This is the same shape as blocking playlist reload in low-latency HLS and requires no changes to the stored format.
@@ -349,7 +358,7 @@ audio    record 2: runs=[312+1, 500+250]  sizes=[160, ...]
 
 Reads, using only the records above:
 
-- **Video group 1**: listed by chunk 0 at expansion position 1, so its payload is bytes `[1310720, 2621440)` of `video/0.dat` — one range request, straight from the record.
+- **Video group 1**: listed by chunk 0 at expansion position 1, so its payload is bytes `[1310720, 2621440)` of `video/0.dat`: one range request, straight from the record.
 - **Audio group 312** (late): listed only by chunk 2's record, at position 0: bytes `[0, 160)` of `audio/2.dat`.
   Chunk 1 was ruled out from its record alone.
 - **Timeline group 0** (split): listed by every timeline record; concatenate the spans in frame-offset order (the partials give each continuation's frame offset) for the group's complete frame sequence.
