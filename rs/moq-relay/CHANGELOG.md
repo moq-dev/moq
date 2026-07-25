@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.2...moq-relay-v0.14.3) - 2026-07-25
+
+### Added
+
+- *(relay)* add --cache-duration ceiling on cached group age ([#2494](https://github.com/moq-dev/moq/pull/2494))
+
+### Other
+
+- *(relay)* restore env vars and serialize them on one lock ([#2499](https://github.com/moq-dev/moq/pull/2499))
+
 ## [0.14.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.1...moq-relay-v0.14.2) - 2026-07-24
 
 ### Added

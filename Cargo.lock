@@ -2183,9 +2183,9 @@ dependencies = [
 
 [[package]]
 name = "fast_image_resize"
-version = "6.0.0"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12dd43e5011e8d8411a3215a0d57a2ec5c68282fb90eb5d7221fab0113442174"
+checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
 dependencies = [
  "cfg-if",
  "document-features",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3930,7 +3930,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "block2",
  "bytes",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4242,7 +4242,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hang",
@@ -4299,7 +4299,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4372,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4403,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.2"
+version = "0.19.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "criterion",
@@ -4475,7 +4475,7 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "cudarc",
  "lazy_static",
@@ -4484,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4547,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4571,7 +4571,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4620,7 +4620,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.38"
+version = "0.5.39"
 dependencies = [
  "anyhow",
  "clap",
@@ -4629,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4662,7 +4662,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4928,12 +4928,13 @@ dependencies = [
 
 [[package]]
 name = "netlink-proto"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b65d130ee111430e47eed7896ea43ca693c387f097dd97376bffafbf25812128"
+checksum = "e6f7398dddf5f152d2a91a2921a134c6097056e292c0d4b9906007855e7cece6"
 dependencies = [
  "bytes",
- "futures",
+ "futures-channel",
+ "futures-util",
  "log",
  "netlink-packet-core",
  "netlink-sys",

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.1...moq-rtc-v0.2.2) - 2026-07-25
+
+### Added
+
+- *(moq-mux)* caller-driven audio grouping via dumb importers ([#2496](https://github.com/moq-dev/moq/pull/2496))
+
+### Fixed
+
+- *(opus)* propagate pre-skip and encoder controls ([#2492](https://github.com/moq-dev/moq/pull/2492))
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.0...moq-rtc-v0.2.1) - 2026-07-24
 
 ### Other
