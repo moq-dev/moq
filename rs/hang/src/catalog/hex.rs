@@ -1,3 +1,5 @@
+//! Hex encoding for the catalog's binary fields.
+
 use bytes::Bytes;
 use serde::de::{Deserializer, Error as _};
 use serde::{Deserialize, Serialize, Serializer};
@@ -39,7 +41,9 @@ mod test {
 		let err = Catalog::from_str(json).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");
 
-		// The path a consumer takes, via moq-json's snapshot reconstruction.
+		// Also via `from_value`, which is how a consumer reaches this: moq-json reconstructs a
+		// Value from the frames and deserializes that. It carries no line or column, so the
+		// message is all a consumer gets (moq-json prefixes the field path on its own side).
 		let value: serde_json::Value = serde_json::from_str(json).unwrap();
 		let err = serde_json::from_value::<Catalog>(value).unwrap_err().to_string();
 		assert!(err.contains("expected hex"), "{err}");

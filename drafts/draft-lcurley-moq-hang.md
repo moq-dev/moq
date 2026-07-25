@@ -134,7 +134,7 @@ type VideoSchema = {
 
 The `renditions` field contains a map of track names to video decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#video-decoder-config) for specifics and registered codecs.
-Any Uint8Array field, notably `description`, is a hex string ({{binary}}).
+Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
 The `display` field is the size to render the video at, in pixels.
 It is separate from a rendition's `displayAspectWidth`/`displayAspectHeight` because changing it does not require reinitializing the decoder.
@@ -197,7 +197,7 @@ type AudioSchema = {
 
 The `renditions` field contains a map of track names to audio decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
-Any Uint8Array field, notably `description`, is a hex string ({{binary}}).
+Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
 In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}).
 
@@ -240,12 +240,12 @@ For example:
 ~~~
 
 ## Binary Fields {#binary}
-A decoder config field typed as a `Uint8Array` in WebCodecs, notably `description`, is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
+A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
 A publisher SHOULD emit lowercase digits and MUST NOT emit a `0x` prefix or any separators.
 A consumer MUST accept either case.
 
 Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
-A publisher that encodes `description` as base64 produces a catalog that consumers reject.
+Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
 
 ## Common Rendition Fields {#common}
 Audio and video renditions share the following fields, extending the WebCodecs decoder config:
