@@ -1,3 +1,4 @@
+import { fromTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import * as Varint from "./varint.ts";
@@ -82,7 +83,12 @@ export class Reader {
 			return false;
 		}
 
-		const result = await this.#reader.read();
+		// Every read of this stream funnels through here, so decoding the peer's reset code
+		// once is enough to keep the raw transport error out of every caller (and every app).
+		const result = await this.#reader.read().catch((err: unknown) => {
+			throw fromTransport(err);
+		});
+
 		if (result.done) {
 			return false;
 		}
@@ -328,7 +334,11 @@ export class Writer {
 	}
 
 	async write(v: Uint8Array) {
-		await this.#writer.write(v);
+		// Mirrors Reader.#fill: every write funnels through here, so a STOP_SENDING from the
+		// peer surfaces as a typed code rather than the transport's own error shape.
+		await this.#writer.write(v).catch((err: unknown) => {
+			throw fromTransport(err);
+		});
 	}
 
 	async string(str: string) {
