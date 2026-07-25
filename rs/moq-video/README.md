@@ -45,13 +45,26 @@ Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
 H.265), so the matching `moq_mux::codec` importer handles framing and catalog
 registration directly. There is no software H.265 encoder (it's hardware-only).
 
+`encode::Encoder::encode` takes a raw `Frame` (a timestamp plus a `Surface`
+holding the pixels) and returns `encode::Encoded`s: one whole access unit each,
+carrying the timestamp of the picture it was encoded from. That matters for a
+backend that buffers, which hands back an earlier frame's access unit while a
+later one goes in, and for the tail `finish()` drains. Bring your own pixels with
+`Surface::rgba(...)`, or feed a frame straight from capture or `decode`.
+
+Keyframes are automatic, at the `Config::gop` interval, so an application never
+has to think about them. `Encoder::keyframe()` asks for one at the next frame when
+something outside the encoder needs a decodable starting point there: opening a
+new group, or resuming after an idle gap. The request is held until a frame
+arrives, so it is safe to call before you have one.
+
 Two public entry points:
 
 - `encode::publish_capture(...)` captures a webcam, encodes it, and publishes on
   demand: the track and catalog are advertised up front, but the camera opens
   only while a subscriber is watching and is released when the last one leaves.
-- `encode::Producer` publishes packets you encoded yourself, handling the catalog
-  and framing.
+- `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
+  handling the catalog and framing. Each is published at its own timestamp.
 
 The NVENC and VAAPI backends are Linux-only and gated behind their respective
 features. Both `dlopen` the vendor driver at runtime (and fall back to software
@@ -61,7 +74,7 @@ GPU-less builder and still starts on a GPU-less machine.
 ## Decode
 
 `decode::Consumer` (the mirror of `moq_audio::decode::Consumer`) subscribes to an
-H.264, H.265, or AV1 track and returns raw frames. A hardware-decoded frame stays
+H.264, H.265, or AV1 track and returns raw `Frame`s. A hardware-decoded frame stays
 on the GPU: feeding it back to a compatible hardware `encode::Encoder` on the
 same device keeps it there (the transcode path), while `into_i420()` downloads
 it. An encoder that can't take that surface (openh264, or a different device)

@@ -3,7 +3,7 @@ use crate::Error;
 /// A frame resolution in pixels.
 ///
 /// Names the pair that [`decode::Config::resize`](crate::decode::Config::resize)
-/// and [`decode::Frame::resize`](crate::decode::Frame::resize) both take, so
+/// and [`Frame::resize`](crate::Frame::resize) both take, so
 /// width and height can't be swapped at a call site.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Size {

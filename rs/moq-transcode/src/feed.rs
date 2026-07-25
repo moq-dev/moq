@@ -30,9 +30,9 @@ const CAPACITY: usize = 16;
 pub(crate) enum Item {
 	/// A new source group started; the frames that follow belong to it.
 	Group(u64),
-	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a
-	/// GPU frame stays on the GPU for every receiving rung.
-	Frame(Arc<moq_video::decode::Frame>),
+	/// A decoded frame of the current group. Cloning is cheap (`Arc`), and a GPU
+	/// frame stays on the GPU for every receiving rung.
+	Frame(Arc<moq_video::Frame>),
 	/// The current group ended cleanly.
 	End,
 	/// The source track ended cleanly; no more items follow.
@@ -183,7 +183,9 @@ async fn decode(inner: &Inner, sender: &broadcast::Sender<Item>) -> Result<(), E
 		while let Some(frames) = container.read(&mut group).await? {
 			for frame in frames {
 				let timestamp = frame.timestamp;
-				// The first frame of a group is a keyframe by construction.
+				// The first frame of a group is a keyframe by construction. This drives
+				// the decoder's gating and parameter-set injection; each rung asks its
+				// own encoder for an output IDR when it opens a group.
 				let keyframe = frame.keyframe || first;
 				first = false;
 

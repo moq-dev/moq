@@ -15,9 +15,8 @@ use hang::catalog::{AV1, VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
-use super::Frame;
 use super::backend::{self, Backend, Codec};
-use crate::{Error, Size};
+use crate::{Error, Frame, Size};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -52,7 +51,7 @@ pub struct Config {
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a
 	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
-	/// Check each [`Frame`](super::Surface)'s dimensions and scale the remainder
+	/// Check each [`Frame`](crate::Frame)'s dimensions and scale the remainder
 	/// yourself.
 	pub resize: Option<Size>,
 }
@@ -171,16 +170,7 @@ impl Decoder {
 			}
 		};
 
-		Ok(self
-			.backend
-			.decode(access_unit, timestamp, keyframe)?
-			.into_iter()
-			.map(|decoded| Frame {
-				timestamp: decoded.timestamp,
-				size: Size::new(decoded.frame.width(), decoded.frame.height()),
-				surface: decoded.frame,
-			})
-			.collect())
+		self.backend.decode(access_unit, timestamp, keyframe)
 	}
 }
 
@@ -195,10 +185,13 @@ mod tests {
 	use super::backend::{self, Codec};
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind};
 	use crate::frame::I420;
+	use crate::{Frame, Surface};
 
-	/// A mid-gray RGBA frame: encodable without a camera.
-	fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
-		vec![0x80u8; width as usize * height as usize * 4]
+	/// The `index`th frame of a mid-gray 320x240 stream, at 30fps.
+	fn gray_frame(index: u64) -> Frame {
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+		let surface = Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+		Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap())
 	}
 
 	/// Assert a decoded picture is the expected size and looks like the gray frame
@@ -227,23 +220,21 @@ mod tests {
 	fn round_trip(mut encoder: Encoder, mut decoder: Box<dyn backend::Backend>, expect_name: &str) {
 		assert_eq!(decoder.name(), expect_name);
 
-		let frame = gray_rgba(320, 240);
 		let mut decoded = Vec::new();
 		for i in 0..10u64 {
 			let keyframe = i == 0;
+			if keyframe {
+				encoder.keyframe();
+			}
 			// Distinct, spread-apart timestamps so a round-tripped value is unambiguous.
-			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder
-				.encode_rgba(&frame, crate::Size::new(320, 240), keyframe)
-				.unwrap()
-			{
-				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
+			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
+				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
 			}
 		}
 
 		assert!(!decoded.is_empty(), "decoder produced no frames");
 		for out in &decoded {
-			assert_gray(&out.frame.to_i420().unwrap(), 320, 240);
+			assert_gray(&out.surface.to_i420().unwrap(), 320, 240);
 		}
 
 		// The timestamp rides through the codec and comes back on each picture. These
@@ -318,21 +309,19 @@ mod tests {
 	/// Encode `count` gray frames and decode them, returning the decoded pictures.
 	/// The shared setup for the residency and re-encode tests below.
 	#[cfg(target_os = "macos")]
-	fn decode_gray(count: u64) -> Vec<backend::Decoded> {
+	fn decode_gray(count: u64) -> Vec<Frame> {
 		let mut encoder = h264_software_encoder();
 		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
 			.expect("videotoolbox decoder");
 
-		let rgba = gray_rgba(320, 240);
 		let mut decoded = Vec::new();
 		for i in 0..count {
 			let keyframe = i == 0;
-			let timestamp = Timestamp::from_micros(i * 33_333).unwrap();
-			for packet in encoder
-				.encode_rgba(&rgba, crate::Size::new(320, 240), keyframe)
-				.unwrap()
-			{
-				decoded.extend(decoder.decode(packet, timestamp, keyframe).unwrap());
+			if keyframe {
+				encoder.keyframe();
+			}
+			for encoded in encoder.encode(&gray_frame(i)).unwrap() {
+				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
 			}
 		}
 
@@ -349,23 +338,34 @@ mod tests {
 	fn videotoolbox_decode_stays_gpu_resident() {
 		for out in &decode_gray(3) {
 			assert!(
-				matches!(out.frame, crate::frame::Surface::PixelBuffer(_)),
+				matches!(out.surface, Surface::PixelBuffer(_)),
 				"VideoToolbox decode downloaded to the CPU instead of keeping its surface"
 			);
 		}
 	}
 
-	/// A decoded surface feeds the hardware encoder as-is, which is the zero-copy
-	/// transcode path (`moq-transcode` re-encodes what it decodes). On macOS that
-	/// only became reachable once decode stopped downloading to I420.
+	/// The multi-rung transcode path stays on hardware through decode, resize, and
+	/// encode. The residency assertion catches a CPU fallback even when the pixels
+	/// and dimensions still look right.
 	#[cfg(target_os = "macos")]
 	#[test]
-	fn videotoolbox_surface_reencodes_in_place() {
+	fn videotoolbox_resized_surface_reencodes_in_place() {
 		let decoded = decode_gray(3);
+		let resized: Vec<_> = decoded
+			.iter()
+			.map(|frame| frame.resize(crate::Size::new(160, 120)).unwrap())
+			.collect();
+		for frame in &resized {
+			assert_eq!(frame.size(), crate::Size::new(160, 120));
+			assert!(
+				matches!(frame.surface, Surface::PixelBuffer(_)),
+				"VideoToolbox resize downloaded to the CPU"
+			);
+		}
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
-			..EncodeConfig::new(320, 240, 30)
+			..EncodeConfig::new(160, 120, 30)
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
@@ -373,8 +373,11 @@ mod tests {
 		};
 
 		let mut packets = 0;
-		for (i, out) in decoded.iter().enumerate() {
-			packets += encoder.encode(&out.frame, i == 0).unwrap().len();
+		for (i, out) in resized.iter().enumerate() {
+			if i == 0 {
+				encoder.keyframe();
+			}
+			packets += encoder.encode(out).unwrap().len();
 		}
 		packets += encoder.finish().unwrap().len();
 

@@ -1525,13 +1525,14 @@ fn video_raw_decode() {
 	config.kind = moq_video::encode::Kind::Software;
 	let mut encoder = moq_video::encode::Encoder::new(&config).expect("openh264 encoder");
 	let gray = vec![0x80u8; 320 * 240 * 4];
-	let mut frames: Vec<bytes::Bytes> = Vec::new();
-	for i in 0..5 {
-		frames.extend(
-			encoder
-				.encode_rgba(&gray, moq_video::Size::new(320, 240), i == 0)
-				.unwrap(),
-		);
+	let mut frames: Vec<moq_video::encode::Encoded> = Vec::new();
+	for i in 0..5u64 {
+		if i == 0 {
+			encoder.keyframe();
+		}
+		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
+		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
+		frames.extend(encoder.encode(&frame).unwrap());
 	}
 	frames.extend(encoder.finish().unwrap());
 	assert!(!frames.is_empty(), "encoder produced no frames");
@@ -1566,7 +1567,7 @@ fn video_raw_decode() {
 
 	for (i, frame) in frames.iter().enumerate() {
 		assert_eq!(
-			unsafe { moq_publish_media_frame(media, frame.as_ptr(), frame.len(), (i as u64) * 33_000) },
+			unsafe { moq_publish_media_frame(media, frame.payload.as_ptr(), frame.payload.len(), (i as u64) * 33_000) },
 			0
 		);
 	}

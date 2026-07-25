@@ -30,6 +30,14 @@ pub enum Error {
 	#[error("invalid DNS name")]
 	InvalidDnsName,
 
+	/// DNS lookup failed for the URL's host.
+	#[error("DNS lookup failed")]
+	DnsLookup(#[source] std::io::Error),
+
+	/// DNS lookup succeeded but returned no usable address.
+	#[error("no DNS entries found")]
+	NoDnsEntries,
+
 	#[doc(hidden)]
 	#[deprecated(note = "fingerprint verification over http:// is now supported; this is never returned")]
 	#[error("fingerprint verification (http:// scheme) is not supported with the quiche backend")]
@@ -59,12 +67,13 @@ pub enum Error {
 	#[error("url scheme must be 'https', 'moqt', or 'moql'")]
 	InvalidScheme,
 
-	/// quiche resolves the dial target and the TLS SNI from the same host, so the
-	/// two cannot be decoupled. Drop the override or use the quinn backend.
+	#[doc(hidden)]
+	#[deprecated(note = "TLS hostname overrides are now supported; this is never returned")]
 	#[error("client tls host_name override is not supported with the quiche backend")]
 	HostNameUnsupported,
 
-	/// quiche probes GSO from the socket and offers no knob to force it off.
+	#[doc(hidden)]
+	#[deprecated(note = "GSO can now be disabled; this is never returned")]
 	#[error("the quiche backend cannot disable GSO; drop --*-quic-gso=false or use the quinn backend")]
 	GsoUnsupported,
 
@@ -140,10 +149,10 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Apply the resolved quic knobs quiche can honor to its settings.
+/// Apply the resolved QUIC settings that live in quiche's transport configuration.
 ///
-/// quiche has no keep-alive interval knob, so [`Resolved::keep_alive`] is ignored;
-/// GSO is probed from the socket and rejected up front (see [`Error::GsoUnsupported`]).
+/// Keep-alive and GSO are socket-driver settings, so they are applied to the
+/// client/server builders instead.
 fn apply_settings(settings: &mut web_transport_quiche::Settings, quic: &Resolved) -> Result<()> {
 	settings.initial_max_streams_bidi = quic.max_streams;
 	settings.initial_max_streams_uni = quic.max_streams;
@@ -183,29 +192,34 @@ pub(crate) struct QuicheClient {
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Client::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	pub quic: Resolved,
+	pub host_name: Option<String>,
+	identity: Option<Arc<ClientIdentity>>,
+}
+
+struct ClientIdentity {
+	chain: Vec<CertificateDer<'static>>,
+	key: PrivateKeyDer<'static>,
 }
 
 impl QuicheClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
-		// web-transport-quiche's ClientBuilder::connect(host, port) uses `host` for BOTH
-		// DNS resolution (the dial target) AND the TLS SNI, so a host_name override that
-		// decouples them can't be applied without an upstream API change. Fail fast at
-		// init rather than silently ignoring the override on the first connect.
-		if config.tls.host_name.is_some() {
-			return Err(Error::HostNameUnsupported);
-		}
-
 		let quic = config.quic.resolve();
-		// quiche probes GSO from the socket and has no knob to force it off.
-		if quic.gso_disabled() {
-			return Err(Error::GsoUnsupported);
-		}
+		let identity = match (&config.tls.cert, &config.tls.key) {
+			(Some(cert), Some(key)) => {
+				let (chain, key) = load_quiche_cert(cert, key)?;
+				Some(Arc::new(ClientIdentity { chain, key }))
+			}
+			(None, None) => None,
+			_ => return Err(crate::tls::Error::IncompleteClientAuth.into()),
+		};
 
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			quic,
+			host_name: config.tls.host_name.clone(),
+			identity,
 		})
 	}
 
@@ -248,9 +262,29 @@ impl QuicheClient {
 		settings.alpn = alpns;
 		apply_settings(&mut settings, &self.quic)?;
 
+		let socket = crate::bind::udp(self.bind)?;
+		let local = socket.local_addr()?;
+		let addrs = tokio::net::lookup_host((host.as_str(), port))
+			.await
+			.map_err(Error::DnsLookup)?;
+		let remote = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
+
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
-			.with_bind(self.bind)?;
+			.with_gso(self.quic.gso.unwrap_or(true))
+			.with_socket(socket)?;
+
+		if let Some(interval) = self.quic.keep_alive {
+			builder = builder.with_keep_alive(interval);
+		}
+
+		// The builder dials the resolved IP below, so always set the original
+		// hostname explicitly for SNI and verification unless the caller overrides it.
+		builder = builder.with_server_name(self.host_name.as_deref().unwrap_or(&host));
+
+		if let Some(identity) = &self.identity {
+			builder = builder.with_single_cert(identity.chain.clone(), identity.key.clone_key());
+		}
 
 		match verification {
 			// No hook: tokio-quiche's default config with verify_peer = false.
@@ -289,7 +323,7 @@ impl QuicheClient {
 			"https" => {
 				// WebTransport over HTTP/3
 				let conn = builder
-					.connect(&host, port)
+					.connect(&remote.ip().to_string(), remote.port())
 					.await
 					.map_err(Error::Connect)?
 					.established()
@@ -303,7 +337,7 @@ impl QuicheClient {
 			"moqt" | "moql" => {
 				// Raw QUIC mode
 				let conn = builder
-					.connect(&host, port)
+					.connect(&remote.ip().to_string(), remote.port())
 					.await
 					.map_err(Error::Connect)?
 					.established()
@@ -400,13 +434,10 @@ impl QuicheServer {
 		}
 
 		let quic = config.quic.resolve();
-		// quiche probes GSO from the socket and has no knob to force it off.
-		if quic.gso_disabled() {
-			return Err(Error::GsoUnsupported);
-		}
 
 		let listen =
 			crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND).map_err(Error::ResolveBind)?;
+		let socket = crate::bind::udp(listen)?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?
@@ -448,9 +479,29 @@ impl QuicheServer {
 		settings.alpn = alpns;
 		apply_settings(&mut settings, &quic)?;
 
-		let server = web_transport_quiche::ez::ServerBuilder::default()
+		let mut builder = web_transport_quiche::ez::ServerBuilder::default()
 			.with_settings(settings)
-			.with_bind(listen)?
+			.with_gso(quic.gso.unwrap_or(true));
+
+		if let Some(interval) = quic.keep_alive {
+			builder = builder.with_keep_alive(interval);
+		}
+
+		if !config.tls.root.is_empty() {
+			let roots = config
+				.tls
+				.root
+				.iter()
+				.map(|path| crate::tls::read_certs(path))
+				.collect::<crate::tls::Result<Vec<_>>>()?
+				.into_iter()
+				.flatten()
+				.collect();
+			builder = builder.with_client_auth(web_transport_quiche::ClientAuth::Optional(roots));
+		}
+
+		let server = builder
+			.with_socket(socket)?
 			.with_single_cert(chain, key)
 			.map_err(Error::ServerBuild)?;
 
@@ -521,8 +572,8 @@ fn generate_quiche_cert(
 /// A raw QUIC connection request via the quiche backend (not using HTTP/3).
 /// Accept a quiche QUIC connection, negotiate WebTransport or raw moq, and complete the
 /// handshake (a `200 OK` for WebTransport). Returns the established connection plus the
-/// request URL. The quiche backend exposes no client-cert identity, so the identity is
-/// always `None`; raw QUIC carries no request URL (the path rides the SETUP instead).
+/// request URL and any validated client identity. Raw QUIC carries no request URL
+/// because the path rides the SETUP instead.
 pub(crate) async fn accept(
 	incoming: web_transport_quiche::ez::Incoming,
 	alpns: Vec<&'static str>,
@@ -539,6 +590,7 @@ pub(crate) async fn accept(
 	// Get the negotiated ALPN from the established connection
 	let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
 	let alpn = std::str::from_utf8(&alpn)?;
+	let identity = conn.peer_certificates().map(crate::tls::PeerIdentity::from_chain);
 	tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
 
 	match alpn {
@@ -556,7 +608,7 @@ pub(crate) async fn accept(
 				response = response.with_protocol(protocol);
 			}
 			let session = request.respond(response).await.map_err(Error::Accept)?;
-			Ok((session, url, None))
+			Ok((session, url, identity))
 		}
 		// Recognize any moq ALPN this server actually offered (its configured versions),
 		// not the global default set, so opt-in / work-in-progress versions (e.g.
@@ -566,7 +618,7 @@ pub(crate) async fn accept(
 			let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
 			// Raw QUIC carries no request URL; the path rides the SETUP.
 			let session = web_transport_quiche::Connection::raw(conn, request, response);
-			Ok((session, None, None))
+			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),
 	}

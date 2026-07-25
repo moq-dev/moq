@@ -234,7 +234,7 @@ impl Client {
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
 				let (session, mut driver) = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
-				driver.wait_ready(start.connecting.ready()).await;
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
 				return Ok((session, driver));
 			}
@@ -260,7 +260,7 @@ impl Client {
 					start.recv_bandwidth,
 					start.driver,
 				);
-				driver.wait_ready(start.connecting.ready()).await;
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
 				return Ok((session, driver));
 			}
@@ -287,7 +287,7 @@ impl Client {
 					start.recv_bandwidth,
 					start.driver,
 				);
-				driver.wait_ready(start.connecting.ready()).await;
+				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
 				return Ok((session, driver));
 			}
@@ -372,7 +372,7 @@ impl Client {
 		if let Some(connecting) = connecting {
 			// Block until the initial announce set has landed (for versions that
 			// report one); resolves immediately otherwise.
-			driver.wait_ready(connecting.ready()).await;
+			driver.wait_ready(|waiter| connecting.poll_ready(waiter)).await;
 		}
 
 		Ok((session, driver))

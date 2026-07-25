@@ -1027,161 +1027,15 @@ mod test {
 	}
 }
 
-/// Transport doubles shared by the publisher tests: a session whose streams record
-/// everything written and every reset code, and peers that never speak.
-#[cfg(test)]
-mod test_transport {
-	use std::sync::{Arc, Mutex};
-
-	#[derive(Debug, Clone, Default)]
-	pub struct SinkError;
-
-	impl std::fmt::Display for SinkError {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "sink transport error")
-		}
-	}
-
-	impl std::error::Error for SinkError {}
-
-	impl web_transport_trait::Error for SinkError {
-		fn session_error(&self) -> Option<(u32, String)> {
-			Some((0, "closed".to_string()))
-		}
-	}
-
-	/// What the session's send streams recorded. Resets are a list, not a last-value, so a
-	/// stray second reset (a drop fallback firing behind an abort) is visible.
-	#[derive(Clone, Default)]
-	pub struct Log {
-		pub writes: Arc<Mutex<Vec<u8>>>,
-		pub resets: Arc<Mutex<Vec<u32>>>,
-	}
-
-	impl Log {
-		pub fn resets(&self) -> Vec<u32> {
-			self.resets.lock().unwrap().clone()
-		}
-	}
-
-	pub struct SinkSend {
-		pub log: Log,
-	}
-
-	impl web_transport_trait::SendStream for SinkSend {
-		type Error = SinkError;
-
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-			self.log.writes.lock().unwrap().extend_from_slice(buf);
-			Ok(buf.len())
-		}
-
-		fn set_priority(&mut self, _order: u8) {}
-
-		fn finish(&mut self) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		fn reset(&mut self, code: u32) {
-			self.log.resets.lock().unwrap().push(code);
-		}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	/// A peer that never speaks and never closes, so a test only ever acts on
-	/// model-side events.
-	pub struct PendingRecv;
-
-	impl web_transport_trait::RecvStream for PendingRecv {
-		type Error = SinkError;
-
-		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn stop(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	/// Only `open_uni` yields; everything else parks. Tests that drive a bidi stream
-	/// build one directly from [`SinkSend`] and [`PendingRecv`] instead.
-	#[derive(Clone, Default)]
-	pub struct SinkSession {
-		pub log: Log,
-	}
-
-	impl web_transport_trait::Session for SinkSession {
-		type SendStream = SinkSend;
-		type RecvStream = PendingRecv;
-		type Error = SinkError;
-
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			Ok(SinkSend { log: self.log.clone() })
-		}
-
-		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn max_datagram_size(&self) -> usize {
-			0
-		}
-
-		fn protocol(&self) -> Option<&str> {
-			None
-		}
-
-		fn close(&self, _code: u32, _reason: &str) {}
-
-		async fn closed(&self) -> Self::Error {
-			std::future::pending().await
-		}
-
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			SinkStats
-		}
-	}
-
-	pub struct SinkStats;
-
-	impl web_transport_trait::Stats for SinkStats {
-		fn estimated_send_rate(&self) -> Option<u64> {
-			None
-		}
-	}
-}
-
 /// The announce loop's demand/linger state machine: a drained broadcast keeps
 /// advertising zero for `COST_LINGER` before the restart that restores its cold
 /// cost, demand returning in the window cancels the restore, and a route change
 /// supersedes it. Time is paused, so the 5s linger is deterministic.
 #[cfg(test)]
 mod announce_test {
-	use super::test_transport::*;
 	use super::*;
 	use crate::coding::{Decode, Reader};
+	use crate::lite::test_transport::*;
 	use std::sync::Mutex;
 
 	const VERSION: Version = Version::Lite06Wip;
@@ -1321,7 +1175,7 @@ mod announce_test {
 		let writes = log.writes.clone();
 		let consumer = origin.consume();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend { log }, VERSION),
+			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
@@ -2024,14 +1878,14 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 /// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
 #[cfg(test)]
 mod serve_group_test {
-	use super::test_transport::*;
 	use super::*;
+	use crate::lite::test_transport::*;
 	use crate::{Timestamp, broadcast};
 
 	#[tokio::test]
 	async fn resets_with_the_abort_code() {
 		let log = Log::default();
-		let session = SinkSession { log: log.clone() };
+		let session = SinkSession::new(log.clone());
 
 		let track_priority = kio::Producer::new(0u8);
 		let subscription = Subscription {

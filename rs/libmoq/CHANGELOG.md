@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/moq-dev/moq/compare/libmoq-v0.4.2...libmoq-v0.5.0) - 2026-07-25
+
+### Added
+
+- *(bindings)* expose shared video properties ([#2457](https://github.com/moq-dev/moq/pull/2457))
+
+### Other
+
+- *(moq-video)* [**breaking**] one raw Frame type, and carry timestamps through encode ([#2503](https://github.com/moq-dev/moq/pull/2503))
+
 ## [0.4.2](https://github.com/moq-dev/moq/compare/libmoq-v0.4.1...libmoq-v0.4.2) - 2026-07-24
 
 ### Other

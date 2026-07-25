@@ -21,6 +21,8 @@ mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
+#[cfg(test)]
+pub(crate) mod test_transport;
 mod track;
 mod version;
 

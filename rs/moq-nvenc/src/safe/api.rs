@@ -201,7 +201,7 @@ impl EncodeAPI {
 			unsafe {
 				let library = CANDIDATES
 					.iter()
-					.find_map(|name| libloading::Library::new(name).ok())
+					.find_map(|name| libloading::Library::new(*name).ok())
 					.unwrap_or_else(|| {
 						panic!("failed to dlopen the NVIDIA encode library (tried {CANDIDATES:?}); is the NVIDIA driver installed?")
 					});

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.2...moq-ffi-v0.3.3) - 2026-07-25
+
+### Added
+
+- *(bindings)* expose shared video properties ([#2457](https://github.com/moq-dev/moq/pull/2457))
+
 ## [0.3.2](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.1...moq-ffi-v0.3.2) - 2026-07-24
 
 ### Fixed

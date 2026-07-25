@@ -10,9 +10,10 @@ use std::time::Instant;
 
 use moq_net::Timestamp;
 
-use crate::Error;
 use crate::capture;
+use crate::{Error, Frame};
 
+use super::Encoded;
 use super::encoder::{self, Codec};
 use super::rate::{Control, Policy};
 use super::sink::Sink;
@@ -46,7 +47,7 @@ pub struct Producer {
 
 impl Producer {
 	/// Publish a track for `codec` into `broadcast`, registering its rendition
-	/// in `catalog`. The packets fed to [`publish`](Self::publish) must be in
+	/// in `catalog`. The frames fed to [`publish`](Self::publish) must be in
 	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
@@ -82,20 +83,21 @@ impl Producer {
 		}
 	}
 
-	/// Publish already-encoded packets at the given timestamp. Each packet is one
+	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
 	/// whole access unit in the producer's codec framing.
-	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		for packet in packets {
-			// The encoder emits one whole access unit per packet, so flush to emit it.
+	pub fn publish(&mut self, encoded: &[Encoded]) -> Result<(), Error> {
+		for frame in encoded {
+			let timestamp = Some(frame.timestamp);
+			// The encoder emits one whole access unit per frame, so flush to emit it.
 			match &mut self.codecs {
 				Codecs::H264 { split, import } => {
-					let mut frames = split.decode(&packet, Some(timestamp))?;
-					frames.extend(split.flush(Some(timestamp))?);
+					let mut frames = split.decode(&frame.payload, timestamp)?;
+					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
 				}
 				Codecs::H265 { split, import } => {
-					let mut frames = split.decode(&packet, Some(timestamp))?;
-					frames.extend(split.flush(Some(timestamp))?);
+					let mut frames = split.decode(&frame.payload, timestamp)?;
+					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
 				}
 			}
@@ -396,15 +398,17 @@ async fn capture_loop(
 				camera.read().await
 			};
 
-			let Some(frame) = frame else { break }; // device stopped producing frames
+			let Some(surface) = frame else { break }; // device stopped producing frames
 
-			let ts = Timestamp::from_micros(clock.micros())?;
-			let packets = encoder.encode(frame, force_keyframe).await?;
+			// Stamp at capture, so a backend that buffers still publishes each
+			// access unit at the time the picture was grabbed.
+			let frame = Frame::new(surface, Timestamp::from_micros(clock.micros())?);
+			let encoded = encoder.encode(frame, force_keyframe).await?;
 			force_keyframe = false;
 			// Once the encoder emits a frame the importer has parsed the SPS and
 			// the catalog rendition exists, so demand gating can take over.
-			catalog_ready |= !packets.is_empty();
-			producer.publish(packets, ts)?;
+			catalog_ready |= !encoded.is_empty();
+			producer.publish(&encoded)?;
 		}
 
 		// Drop the camera (LED off) and encoder before waiting for the next viewer.
@@ -442,14 +446,11 @@ mod tests {
 
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for i in 0..10u64 {
-			let packets = encoder.encode_rgba(&rgba, crate::Size::new(320, 240), i == 0).unwrap();
-			let ts = Timestamp::from_micros(i * 33_333).unwrap();
-			producer.publish(packets, ts).unwrap();
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+			let frame = Frame::new(surface, Timestamp::from_micros(i * 33_333).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
 		}
-		let tail = encoder.finish().unwrap();
-		producer
-			.publish(tail, Timestamp::from_micros(10 * 33_333).unwrap())
-			.unwrap();
+		producer.publish(&encoder.finish().unwrap()).unwrap();
 
 		let snapshot = catalog.snapshot();
 		snapshot

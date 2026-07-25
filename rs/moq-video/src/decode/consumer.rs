@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
 
-use super::Frame;
 use super::decoder::{Config, Decoder};
 use crate::Error;
+use crate::Frame;
 
 /// Subscribe to a moq-mux video track and emit decoded I420.
 ///

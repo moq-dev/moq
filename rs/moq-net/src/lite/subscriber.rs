@@ -837,6 +837,86 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::coding::Decode;
+	use crate::lite::test_transport::SinkSession;
+	use crate::util::TaskSet;
+
+	const VERSION: Version = Version::Lite05;
+
+	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
+	/// before any of it reaches the transport.
+	///
+	/// Both halves matter: a second stream re-requests the same id, which the peer is
+	/// free to serve twice, and a late insert loses the race with a publisher that
+	/// serves its first group the instant it reads the request (`recv_group` drops a
+	/// group whose id isn't in the map yet).
+	#[tokio::test]
+	async fn establish_sends_one_registered_subscribe() {
+		// Writes park until this opens, so the assertions below run at the exact moment
+		// the request would hit the wire.
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_bi(gate.consume());
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let (tasks, _task_set) = TaskSet::new();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			session: session.clone(),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			tasks,
+		});
+		let subscribes = subscriber.subscribes.clone();
+		let serve = TrackServe {
+			subscriber,
+			path: Path::new("room/host").to_owned(),
+			name: "catalog.json".to_string(),
+		};
+
+		let mut broadcast = crate::broadcast::Info::new().produce();
+		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
+		let mut sub = Sub::None;
+		let mut establish = std::pin::pin!(serve.establish(
+			&mut producer,
+			&mut sub,
+			Subscription::default(),
+			Some(Timescale::default()),
+		));
+
+		// Parked on the first write: the stream is open and nothing has been sent yet.
+		assert!(futures::poll!(establish.as_mut()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1);
+		assert!(subscribes.lock().contains_key(&0), "registered before the wire");
+
+		let Ok(mut open) = gate.write() else {
+			panic!("gate closed")
+		};
+		*open = true;
+		drop(open);
+
+		establish.await.unwrap();
+
+		// One request, on one stream, and nothing else behind it.
+		assert_eq!(session.log.bi_opens(), 1);
+
+		let writes = session.log.writes.lock().unwrap().clone();
+		let mut wire = writes.as_slice();
+		assert_eq!(
+			lite::ControlType::decode(&mut wire, VERSION).unwrap(),
+			lite::ControlType::Subscribe
+		);
+		let msg = lite::Subscribe::decode(&mut wire, VERSION).unwrap();
+		assert_eq!(msg.id, 0);
+		assert_eq!(msg.track, "catalog.json");
+		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
+	}
+}
+
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
 struct SubStream<S: web_transport_trait::Session> {
@@ -891,6 +971,10 @@ enum Teardown {
 	/// The route or session failed: abort the track so the origin re-splices it
 	/// from another source.
 	GiveBack(Error),
+	/// The origin released this copy: nobody is reading it, so drop it (and the
+	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
+	/// may never come back.
+	Released,
 }
 
 /// One step for the [`TrackServe`] loop, produced by racing track demand, the
@@ -906,6 +990,8 @@ enum Event {
 	SubResponse(lite::SubscribeResponse),
 	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
 	SubClosed(Result<(), Error>),
+	/// Every reader of this copy went away (the origin released it).
+	Unused,
 	/// The whole session died.
 	SessionClosed,
 }
@@ -1002,7 +1088,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						}
 					}
 
-					// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
+					// (3) Nobody reads this copy anymore: the origin released it after its
+					// idle linger, so drop it instead of holding the track state (and its
+					// TRACK_INFO) for a reader that may never return. In-flight fetches
+					// keep it alive: work already accepted still gets finished.
+					if fetches.is_empty() && serving.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Event::Unused);
+					}
+
+					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
 					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
 						return Poll::Ready(match res {
 							Ok(Some(msg)) => Event::SubResponse(msg),
@@ -1011,7 +1105,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						});
 					}
 
-					// (4) The session died: hand the track back for another route.
+					// (5) The session died: hand the track back for another route.
 					if waiter.poll_future(session_closed.as_mut()).is_ready() {
 						return Poll::Ready(Event::SessionClosed);
 					}
@@ -1071,6 +1165,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
 					break Teardown::GiveBack(err);
 				}
+				Event::Unused => {
+					tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "track released (idle)");
+					break Teardown::Released;
+				}
 				Event::SessionClosed => {
 					break Teardown::GiveBack(Error::Dropped);
 				}
@@ -1092,6 +1190,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				// Mark this copy dead: subscribers stall while the origin
 				// re-splices the track from the next source.
 				let _ = serving.abort(err);
+			}
+			Teardown::Released => {
+				// A deliberate end with no reader to observe it, which also drops the
+				// cached groups. The origin re-requests the track from this session if
+				// one comes back.
+				let _ = serving.abort(Error::Cancel);
 			}
 		}
 	}
@@ -1214,13 +1318,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
-
-		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
-		stream.writer.encode(&lite::ControlType::Subscribe).await?;
-		stream.writer.encode(&msg).await?;
-
-		// Pre-lite-05 acknowledges with SUBSCRIBE_OK; it arrives on this stream and
-		// is consumed (and logged) by the serve loop's response arm.
 
 		// Register before the SUBSCRIBE hits the wire. `id` is live the moment the peer
 		// reads it, and a publisher may serve its first group immediately, so a late

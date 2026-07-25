@@ -332,9 +332,21 @@ Where the implementation differs from the plan above:
   RGBA -> I420 path (only BGRA/ARGB/BGR), and dcv 1.0 needs rustc 1.87 > our
   pinned 1.85. `yuv::rgba_to_yuv420` does it directly (BT.601, limited range).
 - **No scaler.** The camera is opened first and the encoder is sized to its
-  negotiated resolution, so capture frames already match the encoder; `encode_rgba`
-  now requires input dims == encoder dims (it errors otherwise) instead of
-  rescaling. This dropped swscale entirely.
+  negotiated resolution, so capture frames already match the encoder; `encode`
+  requires input dims == encoder dims (it errors otherwise) instead of rescaling.
+  This dropped swscale entirely.
+- **One raw frame type, one encoded one.** The plan's `Nv12` input and `Vec<Bytes>`
+  output became `moq_video::Frame` (timestamp + `Surface`) in and
+  `moq_video::encode::Encoded` (timestamp + payload) out, with the pixel
+  representations public in `Surface` so a caller can render or re-encode without a
+  CPU round trip. Timestamps ride through the codec rather than being attached at
+  publish time, so a buffering backend and the `finish()` tail stay in step. The
+  separate `encode_rgba` / `encode_i420` entry points collapsed into
+  `Surface::rgba` plus the single `Encoder::encode`.
+- **Keyframes are the encoder's, not the application's.** `Config::gop` keys the
+  stream on its own and `encode` takes no per-frame flag; `Encoder::keyframe()`
+  requests one at the next frame for the callers that genuinely need a decodable
+  starting point (a new output group, a resume after idle).
 - **Capture is per-platform native (nokhwa fully removed).** Each platform's
   `Camera::read` yields a `Frame` the encoder can take: macOS hands VideoToolbox a
   zero-copy `CVPixelBuffer` surface, Linux V4L2 and Windows Media Foundation hand

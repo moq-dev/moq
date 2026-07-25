@@ -155,6 +155,8 @@ impl Server {
 				QuicBackend::Quinn => true,
 				#[cfg(feature = "noq")]
 				QuicBackend::Noq => true,
+				#[cfg(feature = "quiche")]
+				QuicBackend::Quiche => true,
 				#[allow(unreachable_patterns)]
 				_ => false,
 			};

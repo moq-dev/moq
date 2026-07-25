@@ -1058,6 +1058,20 @@ impl Producer {
 /// rejecting one track.
 const MAX_TRACK_RETRIES: u32 = 3;
 
+/// How long a spliced track stays warm after its last reader leaves.
+///
+/// Within the window a returning viewer, or the next of a run of back-to-back
+/// fetches, reuses the source's copy: no new track request, and no second round
+/// trip for its `TRACK_INFO`. After it, the copy is released so an idle track
+/// costs nothing upstream.
+///
+/// Sized above the fetch cadence of a segmented consumer: HLS polls every
+/// `TARGETDURATION` seconds, commonly 6 or 10, so a shorter window would drop the
+/// copy between every segment and re-request the track each time. A warm copy
+/// holds no upstream subscription (that is canceled as soon as demand ends), so
+/// waiting longer costs cached state, not a viewer.
+const TRACK_IDLE_LINGER: Duration = Duration::from_secs(30);
+
 /// One attached source in a [`FrontState`] table.
 struct FrontRoute {
 	id: u64,
@@ -1508,6 +1522,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		Splice(u64, broadcast::Consumer),
 		Complete,
 		Failed,
+		/// The linger expired with the track still unread: release the segment.
+		Idle,
+		/// A reader arrived or the last one left: recompute the demand gate.
+		Demand,
 	}
 
 	let mut fails = 0u32;
@@ -1517,51 +1535,101 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	// about to detach it, so wait for the table to move on rather than burning
 	// the strike budget on a corpse (ids are never reused, so this cannot wedge).
 	let mut dead: Option<u64> = None;
+	// When the spliced segment stopped being read, starting the release countdown.
+	let mut idle_since: Option<web_async::time::Instant> = None;
 
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
-		let step = kio::wait(|waiter| {
-			// Watch the source table: the front closing, or the active source
-			// moving away from the one currently spliced in (skipping one whose
-			// closure we already observed).
-			match state.poll(waiter, |s| {
-				if s.closed || matches!(s.active, Some(active) if Some(active) != serving_id && Some(active) != dead) {
-					Poll::Ready(())
-				} else {
-					Poll::Pending
-				}
-			}) {
-				Poll::Ready(Ok(guard)) => {
-					if guard.closed {
-						return Poll::Ready(Step::Closed);
-					}
-					let active = guard.active.expect("predicate guaranteed an active source");
-					let source = guard
-						.routes
-						.iter()
-						.find(|r| r.id == active)
-						.expect("active source in table")
-						.source
-						.clone();
-					return Poll::Ready(Step::Splice(active, source));
-				}
-				Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
-				Poll::Pending => {}
-			}
 
-			// Watch the spliced copy for its end: complete means the logical
-			// track is over; anything else means the serving source died.
-			if let Some((_, track)) = &serving
-				&& let Poll::Ready(result) = track.poll_complete(waiter)
-			{
-				return Poll::Ready(match result {
-					Ok(()) => Step::Complete,
-					Err(_) => Step::Failed,
-				});
-			}
-			Poll::Pending
-		})
-		.await;
+		// Demand gates both directions: an unread track never splices a source in,
+		// and a spliced one is released once the linger expires. Both sides use the
+		// same signal, so a release can't immediately re-splice and spin.
+		let used = resume.is_used();
+		idle_since = match (serving.is_some(), used) {
+			(true, false) => idle_since.or_else(|| Some(web_async::time::Instant::now())),
+			_ => None,
+		};
+		let deadline = idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER));
+
+		let step = {
+			// Pinned outside the closure: a future re-created on every poll would
+			// restart the countdown each time and never fire. Fused via `fired`: a
+			// completed future must not be polled again.
+			let mut sleep = std::pin::pin!(async {
+				match deadline {
+					Some(at) => {
+						web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
+					}
+					None => std::future::pending().await,
+				}
+			});
+			let mut fired = false;
+
+			kio::wait(|waiter| {
+				// Watch the source table: the front closing, or the active source
+				// moving away from the one currently spliced in (skipping one whose
+				// closure we already observed). Splicing waits for a reader.
+				match state.poll(waiter, |s| {
+					if s.closed
+						|| (used
+							&& matches!(s.active, Some(active) if Some(active) != serving_id && Some(active) != dead))
+					{
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				}) {
+					Poll::Ready(Ok(guard)) => {
+						if guard.closed {
+							return Poll::Ready(Step::Closed);
+						}
+						let active = guard.active.expect("predicate guaranteed an active source");
+						let source = guard
+							.routes
+							.iter()
+							.find(|r| r.id == active)
+							.expect("active source in table")
+							.source
+							.clone();
+						return Poll::Ready(Step::Splice(active, source));
+					}
+					Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
+					Poll::Pending => {}
+				}
+
+				// Watch the demand edge in whichever direction is unmet. This has to end
+				// the wait, not just wake it: `used` and the countdown are computed by
+				// the outer loop, so a wake that stayed inside would re-poll with the
+				// stale value and never arm (or cancel) the linger.
+				let edge = match used {
+					true => resume.poll_unused(waiter),
+					false => resume.poll_used(waiter),
+				};
+				if edge.is_ready() {
+					return Poll::Ready(Step::Demand);
+				}
+
+				// Watch the spliced copy for its end: complete means the logical
+				// track is over; anything else means the serving source died.
+				if let Some((_, track)) = &serving
+					&& let Poll::Ready(result) = track.poll_complete(waiter)
+				{
+					return Poll::Ready(match result {
+						Ok(()) => Step::Complete,
+						Err(_) => Step::Failed,
+					});
+				}
+
+				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
+					fired = true;
+				}
+				if fired {
+					return Poll::Ready(Step::Idle);
+				}
+				Poll::Pending
+			})
+			.await
+		};
 
 		match step {
 			// The front's teardown aborts the logical track.
@@ -1573,6 +1641,19 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			Step::Failed => {
 				// The spliced copy died mid-serve: failover, not a strike.
 				// Re-splice from the (possibly same) active source.
+				serving = None;
+			}
+			// The outer loop recomputes `used` and the countdown on the next pass.
+			Step::Demand => {}
+			Step::Idle => {
+				// Nobody has read the track for the linger: drop the source's copy so
+				// its session can release the track (and the cached `track::Info` that
+				// came with it). The logical track stays alive and re-splices on the
+				// next reader, so a returning viewer or a follow-up fetch resumes.
+				if resume.release().is_err() {
+					// Finished or aborted meanwhile; the track is over either way.
+					return;
+				}
 				serving = None;
 			}
 			Step::Splice(id, source) => {
@@ -3409,6 +3490,121 @@ mod tests {
 			!fresh.is_clone(&broadcast),
 			"re-create must not splice the old broadcast"
 		);
+	}
+
+	/// A track nobody reads keeps the source's copy for [`TRACK_IDLE_LINGER`], then
+	/// releases it. Crucially, the release must not immediately re-splice: the same
+	/// demand signal gates both directions, so an idle track settles instead of
+	/// re-requesting the track (and its info) every linger.
+	#[tokio::test(start_paused = true)]
+	async fn test_idle_track_releases_without_respinning() {
+		let origin = Info::new(Origin::random()).produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let sub = subscribing.await.unwrap();
+
+		// The reader leaves, but the copy stays warm inside the window so a viewer
+		// coming back (or a follow-up fetch) reuses it.
+		drop(sub);
+		tokio::time::sleep(TRACK_IDLE_LINGER / 2).await;
+		settle().await;
+		assert!(
+			producer.poll_unused(&kio::Waiter::noop()).is_pending(),
+			"the copy must stay spliced inside the linger",
+		);
+
+		// Past the window the segment is released, so the serving session sees its
+		// copy go unused and can drop it (along with the track info).
+		tokio::time::sleep(TRACK_IDLE_LINGER).await;
+		settle().await;
+		assert!(
+			producer.poll_unused(&kio::Waiter::noop()).is_ready(),
+			"an idle copy must be released after the linger",
+		);
+
+		// The anti-spin property: the release must not re-arm the splice. Ungated,
+		// the loop re-attaches the copy immediately and drops it again every linger,
+		// re-requesting the track (and its info) from the session each time it dies.
+		for _ in 0..3 {
+			tokio::time::sleep(TRACK_IDLE_LINGER).await;
+			settle().await;
+			assert!(
+				producer.poll_unused(&kio::Waiter::noop()).is_ready(),
+				"an unread copy must stay released, not be re-spliced",
+			);
+		}
+		assert!(
+			dynamic.requested_track().now_or_never().is_none(),
+			"an unread track must not be re-requested",
+		);
+		drop(producer);
+
+		// A returning reader re-splices: the origin asks the source for a fresh copy.
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+	}
+
+	/// Back-to-back fetches reuse the source's copy: only the first asks the source
+	/// for the track, so a fetch-driven consumer (HLS pulling segment after segment)
+	/// doesn't re-request the track, and its `TRACK_INFO`, for every group.
+	#[tokio::test(start_paused = true)]
+	async fn test_back_to_back_fetches_reuse_the_track() {
+		let origin = Info::new(Origin::random()).produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		// The first fetch has to ask the source for the track.
+		let fetching = broadcast.track("video").unwrap().fetch_group(0, None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		producer.append_group().unwrap().finish().unwrap();
+		settle().await;
+		let first = fetching.await.expect("first fetch");
+		drop(first);
+
+		// A second fetch inside the linger reuses the copy already spliced in.
+		settle().await;
+		let fetching = broadcast.track("video").unwrap().fetch_group(0, None);
+		settle().await;
+		assert!(
+			dynamic.requested_track().now_or_never().is_none(),
+			"a fetch inside the linger must reuse the track, not re-request it",
+		);
+		drop(fetching.await.expect("second fetch"));
+
+		// Once the fetches stop, the copy is released like any other idle track.
+		tokio::time::sleep(TRACK_IDLE_LINGER * 2).await;
+		settle().await;
+		assert!(
+			producer.poll_unused(&kio::Waiter::noop()).is_ready(),
+			"the copy must be released once the fetches stop",
+		);
+		drop(producer);
+
+		// And a later fetch re-requests it: `accept_track` times out if it doesn't.
+		settle().await;
+		let fetching = broadcast.track("video").unwrap().fetch_group(0, None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		producer.append_group().unwrap().finish().unwrap();
+		settle().await;
+		fetching.await.expect("fetch after the linger");
 	}
 
 	/// With a linger configured, an ungraceful source loss keeps the broadcast
