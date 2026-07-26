@@ -13,7 +13,6 @@ use crate::frame::{self, Frame, FrameBuf};
 use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -101,8 +100,8 @@ pub(crate) struct GroupState {
 	// The total size (in bytes) of all cached frames plus any in-flight frame.
 	pub(crate) cache: u64,
 
-	// This group's registration in the track's cache pool; mirrors `cache` so the
-	// pool can evict the least-recently-read groups under memory pressure.
+	// Mirrors `cache` into the track's shared cache pool, so the group's bytes count
+	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
 	// Once finalized, the total number of frames the group will ever contain. Recorded
@@ -122,7 +121,6 @@ impl GroupState {
 		}
 		let local = index - self.offset;
 		if let Some(f) = self.frames.get(local) {
-			self.charge.touch();
 			let info = frame::Info {
 				size: f.payload.len() as u64,
 				timestamp: f.timestamp,
@@ -132,7 +130,6 @@ impl GroupState {
 		if local == self.frames.len()
 			&& let Some(p) = &self.partial
 		{
-			self.charge.touch();
 			let info = frame::Info {
 				size: p.buf.capacity() as u64,
 				timestamp: p.timestamp,
@@ -196,20 +193,6 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
-/// The pool's eviction hook: abort the group with [`Error::Evicted`], freeing its
-/// frames immediately. A no-op once the group is already aborted or fully dropped.
-fn evict(weak: &kio::ProducerWeak<GroupState>) {
-	// Upgrade to write; a closed (finished or fully dropped) group has nothing to free.
-	let Some(producer) = weak.produce() else { return };
-	let Ok(mut state) = producer.write() else { return };
-	if state.abort.is_some() {
-		return;
-	}
-	state.abort = Some(Error::Evicted);
-	state.release();
-	state.close();
-}
-
 /// Writes frames to a group in order.
 ///
 /// Each group is delivered independently over a QUIC stream.
@@ -250,14 +233,13 @@ impl Producer {
 	/// rather than passed in. Every frame added to this group is normalized to the
 	/// track's timescale by [`Self::create_frame`].
 	///
-	/// Registers the group in the shared cache pool reached through the track's
+	/// Charges the group into the shared cache pool reached through the track's
 	/// broadcast (`track.broadcast.origin.pool`), so its cached bytes count against
-	/// the budget and it can be evicted under memory pressure.
+	/// the budget the track evicts toward under memory pressure.
 	pub(crate) fn new(info: Info, track: track::Info) -> Self {
 		let state = kio::Producer::<GroupState>::default();
-		let weak = state.weak();
-		let charge = track.broadcast.origin.pool.register(Box::new(move || evict(&weak)));
-		state.write().ok().expect("a new group is open").charge = charge;
+		state.write().ok().expect("a new group is open").charge =
+			cache::Charge::new(track.broadcast.origin.pool.clone());
 		Self {
 			info,
 			state,
@@ -310,11 +292,7 @@ impl Producer {
 		state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.evict();
-
-		// The pool evicts other groups' state, so trigger it only after releasing our
-		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		self.track.broadcast.origin.pool.evict();
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -352,11 +330,7 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.evict();
-
-		// The pool evicts other groups' state, so trigger it only after releasing our
-		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		self.track.broadcast.origin.pool.evict();
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.
@@ -427,10 +401,10 @@ impl Producer {
 		self.state.read().abort.is_some()
 	}
 
-	/// This group's cache pool registration, used by the track to pin the latest
-	/// group. `None` when the pool is detached (the unbounded default).
-	pub(crate) fn cache_entry(&self) -> Option<Arc<cache::Entry>> {
-		self.state.read().charge.entry()
+	/// The group's currently cached payload bytes, used by the track to size this
+	/// group as an eviction victim.
+	pub(crate) fn cached_bytes(&self) -> u64 {
+		self.state.read().cache
 	}
 
 	/// Create a new consumer for the group.
@@ -705,10 +679,6 @@ impl Consumer {
 			let local = (index - state.offset).min(state.frames.len());
 			prefetch.fill(state.frames.range(local..).cloned());
 			if prefetch.len > 0 {
-				// Mark the group recently read so the cache pool keeps it over staler
-				// groups. Touching once per batch fill is enough; the drained pops that
-				// follow serve from the prefetch without re-locking.
-				state.charge.touch();
 				return Poll::Ready(Ok(()));
 			}
 			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve

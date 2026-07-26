@@ -130,9 +130,9 @@ pub enum Error {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
-	/// The group was evicted from the cache under memory pressure (see
-	/// [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`], the group was
-	/// still within the publisher's window; it can be re-fetched.
+	/// The group was evicted by its own track to pay eviction debt under memory
+	/// pressure (see [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`],
+	/// the group was still within the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 

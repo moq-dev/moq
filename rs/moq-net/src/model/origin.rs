@@ -89,7 +89,7 @@ impl Origin {
 ///
 /// Doubles as the construction config for an [origin `Producer`](Producer) and as the
 /// parent handle every broadcast carries ([`broadcast::Info::origin`]): the origin owns
-/// the [`cache::Pool`] every group in the tree registers with, so a relay configures one
+/// the [`cache::Pool`] every group in the tree charges into, so a relay configures one
 /// bounded pool here and every broadcast, track, and group beneath it reaches that single
 /// budget by walking up the ownership chain. Defaults to an unbounded pool
 /// ([`Origin::produce`] is the shorthand for that). Cheap to clone (a `Copy` id plus an
@@ -101,7 +101,7 @@ pub struct Info {
 	/// detection and shortest-path routing.
 	pub id: Origin,
 
-	/// The cache pool broadcasts under this origin register their groups with. It
+	/// The cache pool broadcasts under this origin charge their groups into. It
 	/// flows down the ownership chain (origin -> broadcast -> track -> group), so a
 	/// group reaches it via `track.broadcast.origin.pool`. Unbounded by default; a
 	/// relay sets a bounded one (via [`Self::with_pool`]) so cached groups across the

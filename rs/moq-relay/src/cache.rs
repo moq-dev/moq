@@ -55,7 +55,8 @@ pub struct CacheConfig {
 	/// retained, since it is the live edge. And expiry is evaluated when a track
 	/// writes its next group, so a publisher that stops writing without
 	/// disconnecting keeps whatever it had cached until it resumes or the
-	/// broadcast closes; the `capacity` budget is what reclaims those.
+	/// broadcast closes; under memory pressure the `capacity` budget is repaid by
+	/// the tracks that are still writing.
 	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
 	#[serde(default, with = "humantime_serde")]
 	pub duration: Option<Duration>,
@@ -133,8 +134,8 @@ fn total_memory() -> u64 {
 }
 
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
-/// stay available: the cache grows into idle memory and shrinks (evicting LRU
-/// groups) when the rest of the system needs it.
+/// stay available: the cache grows into idle memory and shrinks (tracks evict
+/// their oldest groups as they write) when the rest of the system needs it.
 async fn governor(pool: cache::Pool, capacity: Option<u64>, headroom: u64) {
 	let mut sys = sysinfo::System::new();
 	let mut interval = tokio::time::interval(GOVERNOR_INTERVAL);
