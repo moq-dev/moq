@@ -33,7 +33,9 @@ const ENTRY_OVERHEAD: u64 = 256;
 /// The pool tracks how many payload bytes are cached across every registered group.
 /// It never evicts on its own: tracks accrue eviction debt as they write and evict
 /// their own oldest groups to pay it, so every operation here is a few atomics with
-/// no lock.
+/// no lock. The capacity is therefore a target usage converges toward, not a hard
+/// limit: carried debt, capped payments, and the always-protected live edge all let
+/// usage transiently exceed it.
 #[derive(Clone, Default)]
 pub struct Pool {
 	inner: Arc<Inner>,
@@ -60,10 +62,11 @@ impl Default for Inner {
 }
 
 impl Pool {
-	/// Create a pool with a byte budget that tracks evict toward as they write.
+	/// Create a pool with a byte target that tracks evict toward as they write.
 	///
 	/// The budget counts frame payload bytes (plus a small fixed overhead per
-	/// group), not process RSS; leave headroom when sizing it from real memory.
+	/// group), not process RSS, and is a convergence target rather than a hard
+	/// limit; leave headroom when sizing it from real memory.
 	pub fn new(capacity: u64) -> Self {
 		let pool = Self::default();
 		pool.inner.capacity.store(capacity, Ordering::Relaxed);
@@ -75,7 +78,7 @@ impl Pool {
 		Self::default()
 	}
 
-	/// The configured capacity in bytes, or `None` when unbounded.
+	/// The configured byte target, or `None` when unbounded.
 	pub fn capacity(&self) -> Option<u64> {
 		match self.inner.capacity.load(Ordering::Relaxed) {
 			u64::MAX => None,

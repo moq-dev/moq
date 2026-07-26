@@ -588,22 +588,18 @@ impl TrackState {
 	/// the current latest is never enqueued, which is what protects it from
 	/// eviction. `visible` controls arrival-order delivery: publisher-produced
 	/// groups reach subscribers, fetched backfill is served by sequence only.
-	/// Returns the demoted group's cached bytes, the write this insert owes
-	/// eviction debt for.
-	fn insert_group(&mut self, group: &group::Producer, now: web_async::time::Instant, visible: bool) -> u64 {
+	fn insert_group(&mut self, group: &group::Producer, now: web_async::time::Instant, visible: bool) {
 		let sequence = group.sequence;
 		self.next_epoch = self.next_epoch.wrapping_add(1);
 		let epoch = self.next_epoch;
 
-		let mut written = 0;
 		if self.max_sequence.is_none_or(|max| sequence >= max) {
 			// Demote the previous latest: it joins the eviction order like any other
-			// cached group, sized at what the publisher wrote into it.
+			// cached group.
 			if let Some(max) = self.max_sequence
 				&& sequence > max
 				&& let Some(prev) = self.lookup.get(&max)
 			{
-				written = prev.group.cached_bytes();
 				self.evict.push_back((max, prev.epoch));
 			}
 			self.max_sequence = Some(sequence);
@@ -623,38 +619,56 @@ impl TrackState {
 		if visible {
 			self.arrival.push_back(sequence);
 		}
-		written
 	}
 
-	/// Write-path cache upkeep, run after inserting a group: accrue and pay
-	/// eviction debt while the shared pool is over capacity, then expire groups
-	/// past the track's age window.
-	fn maintain(&mut self, written: u64, now: web_async::time::Instant, max_age: Duration) {
+	/// The cached bytes of the group that inserting `sequence` would demote from
+	/// the live edge: the inflow this insert accrues eviction debt for. Zero when
+	/// `sequence` isn't a new maximum (a straggler or backfill).
+	fn demotion_bytes(&self, sequence: u64) -> u64 {
+		if let Some(max) = self.max_sequence
+			&& sequence > max
+			&& let Some(prev) = self.lookup.get(&max)
+		{
+			prev.group.cached_bytes()
+		} else {
+			0
+		}
+	}
+
+	/// Accrue and pay eviction debt for `written` fresh bytes.
+	///
+	/// Runs BEFORE the new group is inserted, so a brand-new entry is never a
+	/// victim of the very write that created it.
+	fn charge_debt(&mut self, written: u64) {
 		let pool = self.broadcast.origin.pool.clone();
 		match pool.accrue(written) {
 			Some(accrued) => {
 				// `used` bounds what eviction could ever free, keeping a track that
 				// can't pay (everything protected) from hoarding a stale schedule.
 				self.debt = self.debt.saturating_add(accrued).min(pool.used());
-				self.pay_debt(&pool);
+				// Cap each payment at twice what was written so one write never dumps
+				// a deep backlog at once; the remainder carries to the next write.
+				self.pay_debt(&pool, written.saturating_mul(2));
 			}
 			// Under capacity there is nothing to work off, and stale debt would
 			// cause a spurious eviction burst at the next pressure spike.
 			None => self.debt = 0,
 		}
-		self.evict_expired(now, max_age);
 	}
 
-	/// Abort this track's oldest groups until the outstanding debt is paid.
+	/// Abort this track's oldest groups until the outstanding debt is paid, or
+	/// `cap` bytes have been freed by this call.
 	///
 	/// Pops the eviction order from the front, validating every entry against
 	/// `lookup`. When the next victim is larger than the remaining debt it is left
-	/// alone and the debt carries over, so a small write never evicts a huge group.
+	/// alone and the debt carries over, so a small write never evicts a huge group
+	/// (once the debt does cover it, that one victim may overshoot `cap`).
 	/// A FETCH-touched group is spared: its bytes count as paid (re-billed to every
 	/// writer through the pool's credit) and it re-queues at the back.
-	fn pay_debt(&mut self, pool: &cache::Pool) {
+	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) {
+		let mut paid = 0u64;
 		for _ in 0..self.evict.len() {
-			if self.debt == 0 {
+			if self.debt == 0 || paid >= cap {
 				return;
 			}
 			let Some((sequence, epoch)) = self.evict.pop_front() else {
@@ -698,6 +712,7 @@ impl TrackState {
 			}
 
 			self.debt -= size;
+			paid = paid.saturating_add(size);
 			let slot = self.lookup.remove(&sequence).unwrap();
 			let _ = slot.group.abort(Error::Evicted);
 		}
@@ -772,13 +787,15 @@ impl TrackState {
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence)?;
+		let written = self.demotion_bytes(sequence);
+		self.charge_debt(written);
 
 		let latency_max = info.latency_max;
 		let group = group::Producer::new(group::Info { sequence }, info);
 		// Backfill is invisible to arrival-order subscribers: it was fetched on
 		// demand, not produced live by the publisher.
-		let written = self.insert_group(&group, now, false);
-		self.maintain(written, now, latency_max);
+		self.insert_group(&group, now, false);
+		self.evict_expired(now, latency_max);
 		Ok(group)
 	}
 }
@@ -860,10 +877,12 @@ impl Producer {
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence)?;
+		let written = state.demotion_bytes(group.sequence);
+		state.charge_debt(written);
 
 		let group = group::Producer::new(group, track).with_meter(self.stats.meter());
-		let written = state.insert_group(&group, now, true);
-		state.maintain(written, now, latency_max);
+		state.insert_group(&group, now, true);
+		state.evict_expired(now, latency_max);
 
 		Ok(group)
 	}
@@ -885,11 +904,13 @@ impl Producer {
 		let track = info.clone();
 		let latency_max = info.latency_max;
 
-		let group = group::Producer::new(group::Info { sequence }, track).with_meter(self.stats.meter());
-
 		let now = web_async::time::Instant::now();
-		let written = state.insert_group(&group, now, true);
-		state.maintain(written, now, latency_max);
+		let written = state.demotion_bytes(sequence);
+		state.charge_debt(written);
+
+		let group = group::Producer::new(group::Info { sequence }, track).with_meter(self.stats.meter());
+		state.insert_group(&group, now, true);
+		state.evict_expired(now, latency_max);
 
 		Ok(group)
 	}
@@ -4127,13 +4148,15 @@ mod test {
 		let (mut producer, pool) = pooled_producer(10_000);
 
 		finished_group(&mut producer, 10_000); // seq 0
-		finished_group(&mut producer, 10_000); // seq 1: over budget, accrues and pays
-		finished_group(&mut producer, 10_000); // seq 2
+		finished_group(&mut producer, 10_000); // seq 1: over budget, debt starts accruing
+		finished_group(&mut producer, 10_000); // seq 2: pays by evicting seq 0
 
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_none(), "oldest group is evicted");
 		assert!(consumer.peek_group(2).is_some(), "latest group survives");
-		assert!(pool.used() <= 12_000, "usage hovers near capacity: {}", pool.used());
+		// Steady state carries the protected live edge plus the just-demoted group
+		// (debt is charged before the demotion, so eviction lags one append).
+		assert!(pool.used() <= 21_000, "usage hovers near capacity: {}", pool.used());
 
 		// A fresh subscriber skips the evicted groups entirely.
 		let mut subscriber = producer.subscribe(None);
@@ -4150,12 +4173,13 @@ mod test {
 		finished_group(&mut producer, 1000); // seq 0
 		assert!(pool.used() > 100, "the latest may exceed the budget");
 
-		// Another write evicts the demoted seq 0, but seq 1 is untouchable in turn.
-		finished_group(&mut producer, 1000); // seq 1
+		// Later writes evict the demoted seq 0; each new latest is untouchable in turn.
+		finished_group(&mut producer, 1000); // seq 1: demotes seq 0
+		finished_group(&mut producer, 1000); // seq 2: pays by evicting seq 0
 
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_none());
-		let mut group = consumer.peek_group(1).expect("latest survives");
+		let mut group = consumer.peek_group(2).expect("latest survives");
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
@@ -4197,7 +4221,8 @@ mod test {
 		finished_group(&mut producer, 10_000); // seq 0
 		let mut group0 = subscriber.assert_group();
 
-		finished_group(&mut producer, 10_000); // seq 1: evicts seq 0
+		finished_group(&mut producer, 10_000); // seq 1: demotes seq 0
+		finished_group(&mut producer, 10_000); // seq 2: pays by evicting seq 0
 
 		let read = group0.read_frame().await;
 		assert!(matches!(read, Err(Error::Evicted)), "expected Evicted, got {read:?}");
@@ -4233,6 +4258,32 @@ mod test {
 		// Steady state hovers within about one group of capacity: a victim smaller
 		// than the outstanding debt is never evicted, so the excess stays bounded.
 		assert!(pool.used() <= 24_000, "usage hovers near capacity: {}", pool.used());
+	}
+
+	/// One write pays at most twice what it produced, so a capacity shrink (or one
+	/// track's burst) drains gradually instead of one writer dumping its whole
+	/// backlog in a single call.
+	#[tokio::test]
+	async fn payment_capped_per_write() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		for _ in 0..10 {
+			finished_group(&mut producer, 1_000);
+		}
+
+		// The governor slashes the target; nothing is reclaimed synchronously.
+		pool.resize(100);
+		let before = pool.used();
+
+		// One 1k write may evict at most ~2k of backlog, not all ten groups.
+		finished_group(&mut producer, 1_000);
+
+		let consumer = producer.consume();
+		assert!(consumer.peek_group(0).is_none(), "the oldest groups are evicted");
+		assert!(consumer.peek_group(1).is_none());
+		assert!(consumer.peek_group(2).is_some(), "the backlog drains gradually");
+		assert!(pool.used() > before - 4_000, "one write must not dump the backlog");
 	}
 
 	/// A refetched group that reclaims max_sequence is the live edge again: it must
@@ -4289,7 +4340,8 @@ mod test {
 		let dynamic = producer.dynamic();
 
 		finished_group(&mut producer, 10_000); // seq 0
-		finished_group(&mut producer, 10_000); // seq 1: evicts seq 0
+		finished_group(&mut producer, 10_000); // seq 1: demotes seq 0
+		finished_group(&mut producer, 10_000); // seq 2: pays by evicting seq 0
 
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_none());

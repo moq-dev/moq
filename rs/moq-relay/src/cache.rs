@@ -25,12 +25,13 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 #[non_exhaustive]
 #[group(id = "cache-config")]
 pub struct CacheConfig {
-	/// Maximum bytes of cached group payload, e.g. "8GiB", "512MB", or a
+	/// Target bytes of cached group payload, e.g. "8GiB", "512MB", or a
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
 	/// Unbounded when unset.
 	///
-	/// The budget counts payload bytes, not process RSS; leave some slack below
-	/// physical memory or combine with `headroom`.
+	/// A target usage converges toward as tracks write, not a hard limit, and it
+	/// counts payload bytes, not process RSS; leave some slack below physical
+	/// memory or combine with `headroom`.
 	#[arg(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
 	pub capacity: Option<String>,
 

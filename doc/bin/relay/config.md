@@ -410,9 +410,10 @@ track's own window limits memory.
 
 ```toml
 [cache]
-# Maximum bytes of cached group payload. Accepts absolute sizes ("8GiB",
-# "512MB") or a percentage of memory ("75%", respecting the cgroup limit
-# inside containers). Unbounded when unset.
+# Target bytes of cached group payload, converged toward as tracks write (not
+# a hard limit). Accepts absolute sizes ("8GiB", "512MB") or a percentage of
+# memory ("75%", respecting the cgroup limit inside containers). Unbounded
+# when unset.
 capacity = "8GiB"
 
 # Keep at least this much system memory available ("2GiB" or "10%"). Enables a
