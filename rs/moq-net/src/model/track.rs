@@ -23,7 +23,7 @@ pub use super::subscription::Subscription;
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
-	sync::atomic::{AtomicBool, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -41,6 +41,11 @@ const MAX_DATAGRAM_AGE: Duration = Duration::from_millis(50);
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
 const EVICT_SLACK: usize = 64;
+
+/// How many live eviction candidates one debt payment examines (Redis-style
+/// bounded sampling): enough to step over a few protected (recently accessed)
+/// groups, small enough that a write never scans a long queue.
+const EVICT_SCAN: usize = 4;
 
 /// Publisher-side properties of a track.
 ///
@@ -172,18 +177,18 @@ struct TrackState {
 
 	// Eviction order under memory pressure: every cached group except the current
 	// max_sequence, so the live edge is protected by omission rather than pinning.
-	// `pay_debt` pops victims from the front; a FETCH-refreshed group re-queues at
-	// the back instead of dying, decoupling eviction order from arrival order.
-	evict: VecDeque<(u64, u32)>,
+	// `pay_debt` scans victims from the front; groups accessed more recently than
+	// the pool-wide average rotate to the back instead of dying, decoupling
+	// eviction order from arrival order. Entries are hints validated against
+	// `lookup` on pop, and eviction is deliberately approximate: a bounded scan
+	// per write, sometimes out of order.
+	evict: VecDeque<u64>,
 
 	// Outstanding eviction debt in bytes, accrued by writes while the shared pool
 	// is over capacity (see `cache::Pool::accrue`) and paid by aborting this
 	// track's own oldest groups. Per track, so eviction lands proportionally to
 	// what each track writes and never touches another track's cache.
 	debt: u64,
-
-	// Incarnation counter for `Slot::epoch`.
-	next_epoch: u32,
 
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
@@ -221,19 +226,22 @@ struct TrackState {
 struct Slot {
 	group: group::Producer,
 
-	// When the group was inserted, driving age expiry.
+	// When the group was inserted. Only the arrival-order expiry walk uses this,
+	// for its early exit; the expiry itself keys off `accessed`.
 	created_at: web_async::time::Instant,
 
-	// Identity of this (sequence, group) incarnation. Eviction-order entries carry
-	// the epoch they were enqueued with, so an entry left over from a replaced
-	// incarnation (an evicted sequence served again) is recognized and discarded.
-	epoch: u32,
+	// Coarse tick of the last FETCH cache hit, initially the insert tick. Age
+	// expiry and eviction protection both key off this: a group accessed more
+	// recently than the pool-wide average is never evicted. Atomic because the
+	// FETCH hit runs under the track's read lock.
+	accessed: AtomicU64,
 
-	// Set by a FETCH cache hit, which runs under the track's read lock (hence
-	// atomic). The eviction walk spares a touched group once: its bytes count as
-	// debt paid (re-billed through the pool's credit) and it re-queues at the back,
-	// so a refresh buys a full trip through the eviction order.
-	touched: AtomicBool,
+	// Whether this slot is in the evictable population: enqueued in the eviction
+	// order and counted in the pool's access average. The latest group stays out,
+	// which is what protects the live edge (and keeps stalled tracks' immortal
+	// latest groups from dragging the average into the past). Atomic so the FETCH
+	// refresh can check it under the read lock.
+	counted: AtomicBool,
 }
 
 /// The registered subscriptions, aggregated by the producer.
@@ -469,9 +477,15 @@ impl TrackState {
 		if let Some(slot) = self.lookup.get(&sequence)
 			&& !slot.group.is_aborted()
 		{
-			// A cache hit refreshes the group: the next eviction walk spares it and
-			// re-queues it at the back instead (see `pay_debt`).
-			slot.touched.store(true, Ordering::Relaxed);
+			// A cache hit refreshes the group: it resets both its age (expiry keys
+			// off the last access) and its standing against the pool-wide average,
+			// so the eviction walk keeps it over never-read groups.
+			let pool = &self.broadcast.origin.pool;
+			let now = pool.now();
+			let old = slot.accessed.swap(now, Ordering::Relaxed);
+			if slot.counted.load(Ordering::Relaxed) {
+				pool.access_refresh(old, now);
+			}
 			return Poll::Ready(Ok(slot.group.consume()));
 		}
 
@@ -487,14 +501,22 @@ impl TrackState {
 		Poll::Pending
 	}
 
-	/// Evict groups older than `max_age`, never evicting the max_sequence group.
+	/// Evict groups whose last access is older than `max_age`, never evicting the
+	/// max_sequence group.
 	///
 	/// Publisher-produced groups are walked in arrival order, which matches creation
-	/// order, so the walk stops early at the first fresh group. Slots whose group was
-	/// already aborted (evicted under memory pressure, or upstream) are reclaimed on
-	/// the way so the sequence can be re-fetched. Fetched backfill isn't in arrival
-	/// order; it ages out from the front of the eviction order instead.
+	/// order, so the walk stops early at the first created-fresh group (a group is
+	/// never accessed before it is created, so everything deeper is fresh too).
+	/// Slots whose group was already aborted (evicted under memory pressure, or
+	/// upstream) are reclaimed on the way so the sequence can be re-fetched. Fetched
+	/// backfill isn't in arrival order; it ages out from the front of the eviction
+	/// order instead.
 	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
+		let pool = self.broadcast.origin.pool.clone();
+		let now_ticks = pool.now();
+		let max_ticks = cache::Pool::ticks(max_age);
+		let expired = |slot: &Slot| now_ticks.saturating_sub(slot.accessed.load(Ordering::Relaxed)) > max_ticks;
+
 		for i in 0..self.arrival.len() {
 			let sequence = self.arrival[i];
 			let Some(slot) = self.lookup.get(&sequence) else {
@@ -504,7 +526,7 @@ impl TrackState {
 			// Already aborted: the frames are gone, reclaim the slot so a later
 			// fetch can serve the sequence again.
 			if slot.group.is_aborted() {
-				self.lookup.remove(&sequence);
+				self.remove_slot(sequence);
 				continue;
 			}
 
@@ -516,11 +538,16 @@ impl TrackState {
 				break;
 			}
 
+			// Created long ago but fetched recently: expiry keys off the last access.
+			if !expired(slot) {
+				continue;
+			}
+
 			// Take the group out of the cache and abort it, so any consumer still reading
 			// surfaces `Error::Old` instead of blocking forever on a frame that will never
 			// arrive. Without this a reader parked on an aged-out group hangs indefinitely,
 			// since the group is neither finished nor aborted.
-			let slot = self.lookup.remove(&sequence).unwrap();
+			let slot = self.remove_slot(sequence).unwrap();
 			let _ = slot.group.abort(Error::Old);
 		}
 
@@ -536,24 +563,20 @@ impl TrackState {
 		// The eviction order is roughly enqueue order: drop dead entries and age out
 		// expired groups (the only expiry that reaches fetched backfill) from the
 		// front, stopping at the first live fresh entry.
-		while let Some(&(sequence, epoch)) = self.evict.front() {
+		while let Some(&sequence) = self.evict.front() {
 			let Some(slot) = self.lookup.get(&sequence) else {
 				self.evict.pop_front();
 				continue;
 			};
-			if slot.epoch != epoch {
-				self.evict.pop_front();
-				continue;
-			}
 			if slot.group.is_aborted() {
-				self.lookup.remove(&sequence);
+				self.remove_slot(sequence);
 				self.evict.pop_front();
 				continue;
 			}
-			if now.duration_since(slot.created_at) <= max_age {
+			if !expired(slot) {
 				break;
 			}
-			let slot = self.lookup.remove(&sequence).unwrap();
+			let slot = self.remove_slot(sequence).unwrap();
 			let _ = slot.group.abort(Error::Old);
 			self.evict.pop_front();
 		}
@@ -562,9 +585,35 @@ impl TrackState {
 		// outnumber the live slots.
 		if self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK {
 			let lookup = &self.lookup;
-			self.evict
-				.retain(|(sequence, epoch)| lookup.get(sequence).is_some_and(|slot| slot.epoch == *epoch));
+			self.evict.retain(|sequence| lookup.contains_key(sequence));
 		}
+	}
+
+	/// Remove a slot from the cache, releasing its share of the pool's access
+	/// average if it was in the evictable population.
+	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
+		let slot = self.lookup.remove(&sequence)?;
+		if slot.counted.load(Ordering::Relaxed) {
+			self.broadcast
+				.origin
+				.pool
+				.access_remove(slot.accessed.load(Ordering::Relaxed));
+		}
+		Some(slot)
+	}
+
+	/// Drop every cached group and reset the eviction bookkeeping, releasing the
+	/// evictable population's share of the pool's access average.
+	fn clear_cache(&mut self) {
+		let pool = self.broadcast.origin.pool.clone();
+		for (_, slot) in self.lookup.drain() {
+			if slot.counted.load(Ordering::Relaxed) {
+				pool.access_remove(slot.accessed.load(Ordering::Relaxed));
+			}
+		}
+		self.arrival.clear();
+		self.evict.clear();
+		self.debt = 0;
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -577,7 +626,7 @@ impl TrackState {
 			if !slot.group.is_aborted() {
 				return Err(Error::Duplicate);
 			}
-			self.lookup.remove(&sequence);
+			self.remove_slot(sequence);
 		}
 		Ok(())
 	}
@@ -589,33 +638,35 @@ impl TrackState {
 	/// eviction. `visible` controls arrival-order delivery: publisher-produced
 	/// groups reach subscribers, fetched backfill is served by sequence only.
 	fn insert_group(&mut self, group: &group::Producer, now: web_async::time::Instant, visible: bool) {
+		let pool = &self.broadcast.origin.pool;
 		let sequence = group.sequence;
-		self.next_epoch = self.next_epoch.wrapping_add(1);
-		let epoch = self.next_epoch;
+		let ticks = pool.now();
+		let slot = Slot {
+			group: group.clone(),
+			created_at: now,
+			accessed: AtomicU64::new(ticks),
+			counted: AtomicBool::new(false),
+		};
 
 		if self.max_sequence.is_none_or(|max| sequence >= max) {
-			// Demote the previous latest: it joins the eviction order like any other
-			// cached group.
+			// Demote the previous latest: it joins the eviction order (and the
+			// pool's access average) like any other cached group.
 			if let Some(max) = self.max_sequence
 				&& sequence > max
 				&& let Some(prev) = self.lookup.get(&max)
 			{
-				self.evict.push_back((max, prev.epoch));
+				prev.counted.store(true, Ordering::Relaxed);
+				pool.access_insert(prev.accessed.load(Ordering::Relaxed));
+				self.evict.push_back(max);
 			}
 			self.max_sequence = Some(sequence);
 		} else {
-			self.evict.push_back((sequence, epoch));
+			slot.counted.store(true, Ordering::Relaxed);
+			pool.access_insert(ticks);
+			self.evict.push_back(sequence);
 		}
 
-		self.lookup.insert(
-			sequence,
-			Slot {
-				group: group.clone(),
-				created_at: now,
-				epoch,
-				touched: AtomicBool::new(false),
-			},
-		);
+		self.lookup.insert(sequence, slot);
 		if visible {
 			self.arrival.push_back(sequence);
 		}
@@ -638,11 +689,16 @@ impl TrackState {
 	/// Accrue and pay eviction debt for `written` fresh bytes.
 	///
 	/// Runs BEFORE the new group is inserted, so a brand-new entry is never a
-	/// victim of the very write that created it.
+	/// victim of the very write that created it. A track whose oldest content is
+	/// staler than the pool-wide average access time accrues at double rate, so
+	/// stale-heavy tracks drain first.
 	fn charge_debt(&mut self, written: u64) {
 		let pool = self.broadcast.origin.pool.clone();
 		match pool.accrue(written) {
-			Some(accrued) => {
+			Some(mut accrued) => {
+				if self.oldest_is_stale(&pool) {
+					accrued = accrued.saturating_mul(2);
+				}
 				// `used` bounds what eviction could ever free, keeping a track that
 				// can't pay (everything protected) from hoarding a stale schedule.
 				self.debt = self.debt.saturating_add(accrued).min(pool.used());
@@ -656,64 +712,85 @@ impl TrackState {
 		}
 	}
 
-	/// Abort this track's oldest groups until the outstanding debt is paid, or
+	/// Whether this track's oldest evictable group was accessed at or before the
+	/// pool-wide average, doubling the debt it accrues. Dead entries encountered at
+	/// the front are dropped along the way.
+	fn oldest_is_stale(&mut self, pool: &cache::Pool) -> bool {
+		let Some(average) = pool.average() else {
+			return false;
+		};
+		loop {
+			let Some(&sequence) = self.evict.front() else {
+				return false;
+			};
+			let Some(slot) = self.lookup.get(&sequence) else {
+				self.evict.pop_front();
+				continue;
+			};
+			if slot.group.is_aborted() {
+				self.remove_slot(sequence);
+				self.evict.pop_front();
+				continue;
+			}
+			return slot.accessed.load(Ordering::Relaxed) <= average;
+		}
+	}
+
+	/// Abort this track's stalest groups until the outstanding debt is paid, or
 	/// `cap` bytes have been freed by this call.
 	///
-	/// Pops the eviction order from the front, validating every entry against
-	/// `lookup`. When the next victim is larger than the remaining debt it is left
-	/// alone and the debt carries over, so a small write never evicts a huge group
-	/// (once the debt does cover it, that one victim may overshoot `cap`).
-	/// A FETCH-touched group is spared: its bytes count as paid (re-billed to every
-	/// writer through the pool's credit) and it re-queues at the back.
+	/// Deliberately approximate, Redis-style: at most a handful of live candidates
+	/// are examined per call, from the front of the eviction order. A group
+	/// accessed more recently than the pool-wide average is protected and rotates
+	/// to the back, so fresh content in this track never dies while staler content
+	/// survives elsewhere; the unfreed bytes keep the pool over budget, shifting
+	/// the debt onto the tracks holding that staler content. When the next victim
+	/// is larger than the remaining debt it is left in place and the debt carries
+	/// over, so a small write never evicts a huge group (once the debt does cover
+	/// it, that one victim may overshoot `cap`).
 	fn pay_debt(&mut self, pool: &cache::Pool, cap: u64) {
+		let average = pool.average().unwrap_or(0);
 		let mut paid = 0u64;
+		let mut scanned = 0usize;
 		for _ in 0..self.evict.len() {
-			if self.debt == 0 || paid >= cap {
+			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
 				return;
 			}
-			let Some((sequence, epoch)) = self.evict.pop_front() else {
+			let Some(sequence) = self.evict.pop_front() else {
 				return;
 			};
 			let Some(slot) = self.lookup.get(&sequence) else {
 				// Evicted or expired; discard the dead entry.
 				continue;
 			};
-			if slot.epoch != epoch {
-				// A replaced incarnation; the live entry is elsewhere in the queue.
-				continue;
-			}
 			if slot.group.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.lookup.remove(&sequence);
+				self.remove_slot(sequence);
 				continue;
 			}
 			if Some(sequence) == self.max_sequence {
 				// The live edge is never enqueued, but tolerate finding it anyway.
-				self.evict.push_back((sequence, epoch));
+				self.evict.push_back(sequence);
 				continue;
 			}
 
+			scanned += 1;
 			let size = slot.group.cached_bytes();
-			if size == 0 {
-				// An empty group (e.g. a backfill still being filled) frees nothing;
-				// evicting it would only destroy a fresh fetch. Send it to the back.
-				self.evict.push_back((sequence, epoch));
-				continue;
-			}
-			if slot.touched.swap(false, Ordering::Relaxed) {
-				pool.credit(size);
-				self.debt = self.debt.saturating_sub(size);
-				self.evict.push_back((sequence, epoch));
+			// Protected: accessed more recently than the average (a fresh insert or
+			// a FETCH hit), or empty (a backfill still being filled, which eviction
+			// would destroy while freeing nothing). Rotate to the back.
+			if size == 0 || slot.accessed.load(Ordering::Relaxed) > average {
+				self.evict.push_back(sequence);
 				continue;
 			}
 			if size > self.debt {
-				self.evict.push_front((sequence, epoch));
+				self.evict.push_front(sequence);
 				return;
 			}
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			let slot = self.lookup.remove(&sequence).unwrap();
+			let slot = self.remove_slot(sequence).unwrap();
 			let _ = slot.group.abort(Error::Evicted);
 		}
 	}
@@ -1047,11 +1124,8 @@ impl Producer {
 	pub fn abort(self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
 		guard.abort = Some(err);
-		guard.lookup.clear();
-		guard.arrival.clear();
-		guard.evict.clear();
+		guard.clear_cache();
 		guard.datagrams.clear();
-		guard.debt = 0;
 		guard.close();
 		Ok(())
 	}
@@ -1383,11 +1457,8 @@ impl Drop for Producer {
 				track = %self.name(),
 				"track::Producer dropped without finish() or abort()"
 			);
-			state.lookup.clear();
-			state.arrival.clear();
-			state.evict.clear();
+			state.clear_cache();
 			state.datagrams.clear();
-			state.debt = 0;
 		}
 	}
 }
@@ -4183,8 +4254,9 @@ mod test {
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 1000);
 	}
 
-	/// A FETCH cache hit refreshes the group: the eviction walk spares it (re-queued
-	/// at the back, bytes credited) and evicts unread groups instead.
+	/// A FETCH cache hit refreshes the group's access time: anything accessed more
+	/// recently than the pool-wide average is protected, so the eviction walk skips
+	/// it and evicts a never-read group instead, even one that arrived later.
 	#[tokio::test]
 	async fn fetch_refresh_survives_eviction() {
 		tokio::time::pause();
@@ -4192,18 +4264,23 @@ mod test {
 		let (mut producer, _pool) = pooled_producer(10_000);
 		let consumer = producer.consume();
 
-		finished_group(&mut producer, 5_000); // seq 0
-		finished_group(&mut producer, 5_000); // seq 1
+		finished_group(&mut producer, 3_000); // seq 0
+		tokio::time::advance(Duration::from_secs(1)).await;
+		finished_group(&mut producer, 3_000); // seq 1
+		tokio::time::advance(Duration::from_secs(1)).await;
+		finished_group(&mut producer, 3_000); // seq 2
+		tokio::time::advance(Duration::from_millis(500)).await;
 
-		// FETCH seq 0: the cache hit marks it refreshed.
+		// FETCH seq 0: the cache hit lifts its access time above the average.
 		let mut fetched = consumer.fetch_group(0, None).await.unwrap();
-		assert_eq!(fetched.read_frame().await.unwrap().unwrap().payload.len(), 5_000);
+		assert_eq!(fetched.read_frame().await.unwrap().unwrap().payload.len(), 3_000);
+		tokio::time::advance(Duration::from_millis(500)).await;
 
-		// Pressure. seq 0 is first in eviction order but refreshed, so it is spared;
-		// the debt carries and lands on seq 1 at the next write.
-		finished_group(&mut producer, 5_000); // seq 2
-		consumer.fetch_group(0, None).await.unwrap(); // keep seq 0 hot
-		finished_group(&mut producer, 5_000); // seq 3
+		// Pressure: seq 0 is first in eviction order but freshly accessed, so it
+		// rotates to the back and the never-read seq 1 dies instead.
+		finished_group(&mut producer, 3_000); // seq 3
+		tokio::time::advance(Duration::from_secs(1)).await;
+		finished_group(&mut producer, 3_000); // seq 4
 
 		assert!(consumer.peek_group(0).is_some(), "refreshed group survives");
 		assert!(consumer.peek_group(1).is_none(), "unread group is evicted instead");
@@ -4317,13 +4394,13 @@ mod test {
 		group.finish().unwrap();
 		pending.await.unwrap();
 
-		// The refetched latest is protected by omission: it has no live entry in the
+		// The refetched latest is protected by omission: it has no entry in the
 		// eviction order, so no amount of debt can select it.
 		{
 			let state = producer.state.read();
-			let slot = state.lookup.get(&1).expect("refetched group is cached");
+			assert!(state.lookup.contains_key(&1), "refetched group is cached");
 			assert!(
-				!state.evict.iter().any(|(seq, epoch)| *seq == 1 && *epoch == slot.epoch),
+				!state.evict.contains(&1),
 				"the live edge must not be an eviction candidate"
 			);
 		}

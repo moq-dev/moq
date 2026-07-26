@@ -423,11 +423,13 @@ capacity = "8GiB"
 # with `capacity` to also cap the absolute size.
 headroom = "2GiB"
 
-# Maximum age of a non-latest cached group ("30s", "500ms"). Caps each track's
-# own retention window: a publisher advertising a longer window is clamped down
-# to this, bounding how much history a track accumulates no matter what upstream
-# asks for. The latest group of every track is always retained, as it is the
-# live edge. Unbounded (each track keeps its own window) when unset.
+# Maximum time a non-latest cached group is retained since it was last written
+# or served from cache by a FETCH ("30s", "500ms"). Caps each track's own
+# retention window: a publisher advertising a longer window is clamped down to
+# this, bounding how much history a track accumulates no matter what upstream
+# asks for. A FETCH cache hit restarts the clock, so actively-read history
+# stays cached. The latest group of every track is always retained, as it is
+# the live edge. Unbounded (each track keeps its own window) when unset.
 duration = "30s"
 ```
 

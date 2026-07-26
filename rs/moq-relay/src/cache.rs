@@ -44,13 +44,15 @@ pub struct CacheConfig {
 	#[arg(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
 
-	/// Maximum age of a non-latest cached group, e.g. "30s" or "500ms".
+	/// Maximum time a non-latest cached group is retained since it was last
+	/// written or served from cache by a FETCH, e.g. "30s" or "500ms".
 	///
 	/// Caps each track's own retention window: a publisher advertising a longer
 	/// window is clamped down to this, bounding how much history a track can
-	/// accumulate no matter what upstream asks for. This bounds memory by age
-	/// where `capacity` bounds it by bytes. Unbounded (each track keeps its own
-	/// window) when unset.
+	/// accumulate no matter what upstream asks for. A FETCH cache hit restarts
+	/// the clock, so actively-read history stays cached. This bounds memory by
+	/// age where `capacity` bounds it by bytes. Unbounded (each track keeps its
+	/// own window) when unset.
 	///
 	/// Two caveats on the ceiling. The latest group of every track is always
 	/// retained, since it is the live edge. And expiry is evaluated when a track

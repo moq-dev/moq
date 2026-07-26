@@ -8,10 +8,13 @@
 //! distributed across every writing track and converges on the capacity without any
 //! global lock, registry, or background task.
 //!
-//! A group that a FETCH refreshed is spared by its track and its bytes are put back
-//! into the pool as `credit`; the credit is re-billed to all writers on top of their
-//! base debt, so protecting hot groups never lowers the total eviction rate, it only
-//! shifts it toward tracks whose content goes unread.
+//! Cross-track ordering comes from one statistic: the mean last-access time of the
+//! evictable population (every cached group except each track's protected latest).
+//! A group accessed more recently than that mean is never evicted, so a fresh fetch
+//! in one track can't die while another track holds staler content, and a track
+//! whose oldest group is staler than the mean accrues debt at double rate. Evicting
+//! old entries and inserting new ones both advance the mean, so the eviction
+//! frontier moves with cache turnover on its own.
 //!
 //! A pool is inert by default ([`Pool::unbounded`]): publishers and subscribers that
 //! never set a capacity pay only a couple of atomic counters. A relay creates one
@@ -20,22 +23,34 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
 /// Covers the group/track slot allocations so a track producing many tiny groups
 /// (e.g. one frame per group) is billed roughly for its real footprint instead of
-/// just its payload bytes.
+/// just its payload bytes. Also bounds the live group count (`used / 256`), which
+/// keeps the access-time sum below u64 (see [`TICK_MS`]).
 const ENTRY_OVERHEAD: u64 = 256;
+
+/// Milliseconds per tick of the coarse clock behind access timestamps.
+///
+/// Coarse ticks keep the count-weighted timestamp sum far from u64 overflow: the
+/// sum is bounded by `elapsed_ticks * live_groups`, live groups are bounded by
+/// `used / ENTRY_OVERHEAD`, and twenty years of ticks (6.3e9) times a 64 GiB
+/// target's worst-case ~270M groups is ~1.7e18, a tenth of `u64::MAX`. A
+/// byte-weighted mean would overflow u64 even at whole-second ticks, which is why
+/// the mean is count-weighted.
+const TICK_MS: u64 = 100;
 
 /// A shared byte budget that caches charge into; cloning shares the same budget.
 ///
-/// The pool tracks how many payload bytes are cached across every registered group.
-/// It never evicts on its own: tracks accrue eviction debt as they write and evict
-/// their own oldest groups to pay it, so every operation here is a few atomics with
-/// no lock. The capacity is therefore a target usage converges toward, not a hard
-/// limit: carried debt, capped payments, and the always-protected live edge all let
-/// usage transiently exceed it.
+/// The pool tracks how many payload bytes are cached across every registered group,
+/// plus the mean last-access time of the evictable ones. It never evicts on its own:
+/// tracks accrue eviction debt as they write and evict their own oldest groups to
+/// pay it, so every operation here is a few atomics with no lock. The capacity is
+/// therefore a target usage converges toward, not a hard limit: carried debt, capped
+/// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone, Default)]
 pub struct Pool {
 	inner: Arc<Inner>,
@@ -46,9 +61,13 @@ struct Inner {
 	used: AtomicU64,
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
-	// Bytes spared from eviction because a FETCH refreshed them, awaiting re-billing
-	// through `accrue` so the total eviction rate is conserved.
-	credit: AtomicU64,
+	// Reference point for the coarse tick clock.
+	epoch: web_async::time::Instant,
+	// Sum and count of last-access ticks across the evictable population, giving a
+	// count-weighted mean. Tracks add a group when it becomes evictable (demoted
+	// from the live edge, or inserted behind it) and remove it when it leaves.
+	access_sum: AtomicU64,
+	access_count: AtomicU64,
 }
 
 impl Default for Inner {
@@ -56,7 +75,9 @@ impl Default for Inner {
 		Self {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
-			credit: AtomicU64::new(0),
+			epoch: web_async::time::Instant::now(),
+			access_sum: AtomicU64::new(0),
+			access_count: AtomicU64::new(0),
 		}
 	}
 }
@@ -115,48 +136,60 @@ impl Pool {
 		self.inner.used.fetch_sub(n, Ordering::Relaxed);
 	}
 
+	/// Coarse ticks since the pool was created: the clock access timestamps use.
+	pub(crate) fn now(&self) -> u64 {
+		self.inner.epoch.elapsed().as_millis() as u64 / TICK_MS
+	}
+
+	/// Convert a duration into coarse ticks, saturating.
+	pub(crate) fn ticks(duration: Duration) -> u64 {
+		u64::try_from(duration.as_millis() / TICK_MS as u128).unwrap_or(u64::MAX)
+	}
+
+	/// Mean last-access tick across the evictable population, or `None` when it is
+	/// empty. The sum and count are read separately, so the mean is approximate
+	/// under concurrent updates; eviction only needs a rough frontier.
+	pub(crate) fn average(&self) -> Option<u64> {
+		let count = self.inner.access_count.load(Ordering::Relaxed);
+		if count == 0 {
+			return None;
+		}
+		Some(self.inner.access_sum.load(Ordering::Relaxed) / count)
+	}
+
+	/// A group with last-access tick `ts` joined the evictable population.
+	pub(crate) fn access_insert(&self, ts: u64) {
+		self.inner.access_sum.fetch_add(ts, Ordering::Relaxed);
+		self.inner.access_count.fetch_add(1, Ordering::Relaxed);
+	}
+
+	/// A group with last-access tick `ts` left the evictable population.
+	pub(crate) fn access_remove(&self, ts: u64) {
+		self.inner.access_sum.fetch_sub(ts, Ordering::Relaxed);
+		self.inner.access_count.fetch_sub(1, Ordering::Relaxed);
+	}
+
+	/// An evictable group's last-access tick moved from `old` to `new` (a FETCH hit).
+	pub(crate) fn access_refresh(&self, old: u64, new: u64) {
+		// A single wrapping add keeps the sum exact even under racing refreshes.
+		self.inner
+			.access_sum
+			.fetch_add(new.wrapping_sub(old), Ordering::Relaxed);
+	}
+
 	/// The eviction debt a track takes on by writing `written` bytes, or `None` while
 	/// the pool is under capacity (the caller should forget any outstanding debt).
 	///
-	/// The base debt is `written * used / capacity`, so paying it evicts slightly
-	/// more than was written and the overshoot decays toward the capacity. On top of
-	/// that, a proportional share of the outstanding [`credit`](Self::credit) is
-	/// drained and re-billed, conserving the total eviction rate when hot groups are
-	/// being spared.
+	/// The debt is `written * used / capacity`, so paying it evicts slightly more
+	/// than was written and the overshoot decays toward the capacity. Tracks double
+	/// it when their oldest content is staler than [`Self::average`].
 	pub(crate) fn accrue(&self, written: u64) -> Option<u64> {
 		let used = self.inner.used.load(Ordering::Relaxed);
 		let capacity = self.inner.capacity.load(Ordering::Relaxed);
 		if used <= capacity {
 			return None;
 		}
-
-		let capacity = capacity.max(1) as u128;
-		let base = (written as u128 * used as u128 / capacity) as u64;
-
-		// Drain credit over roughly one capacity turnover of writes, claiming only
-		// what's actually left so racing writers never re-bill the same bytes twice.
-		let credit = self.inner.credit.load(Ordering::Relaxed);
-		let mut drain = (written as u128 * credit as u128 / capacity) as u64;
-		if drain > 0 {
-			let claimed = self
-				.inner
-				.credit
-				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-					Some(cur.saturating_sub(drain))
-				})
-				.unwrap_or(0);
-			drain = drain.min(claimed);
-		}
-
-		Some(base.saturating_add(drain))
-	}
-
-	/// Report `n` bytes spared from eviction because a FETCH refreshed them.
-	///
-	/// The spared bytes count as debt paid for the sparing track and are re-billed to
-	/// all writers through [`Self::accrue`].
-	pub(crate) fn credit(&self, n: u64) {
-		self.inner.credit.fetch_add(n, Ordering::Relaxed);
+		Some((written as u128 * used as u128 / capacity.max(1) as u128) as u64)
 	}
 }
 
@@ -260,22 +293,22 @@ mod test {
 	}
 
 	#[test]
-	fn accrue_drains_credit() {
+	fn average_tracks_evictable_population() {
 		let pool = Pool::new(1000);
-		let mut charge = Charge::new(pool.clone());
-		charge.add(2000 - ENTRY_OVERHEAD); // used = 2000
+		assert_eq!(pool.average(), None);
 
-		// A spared group re-bills its bytes on top of the base debt: base 200 plus
-		// 100 * 500/1000 = 50 of the credit.
-		pool.credit(500);
-		assert_eq!(pool.accrue(100), Some(250));
+		pool.access_insert(10);
+		pool.access_insert(20);
+		assert_eq!(pool.average(), Some(15));
 
-		// The drained share is claimed, not copied: repeated accruals exhaust it.
-		let mut total = 250u64;
-		for _ in 0..100 {
-			total += pool.accrue(100).unwrap() - 200;
-		}
-		assert!(total <= 250 + 500, "drained more credit than was granted");
+		// A refresh moves one member's contribution, exactly.
+		pool.access_refresh(10, 40);
+		assert_eq!(pool.average(), Some(30));
+
+		pool.access_remove(40);
+		assert_eq!(pool.average(), Some(20));
+		pool.access_remove(20);
+		assert_eq!(pool.average(), None);
 	}
 
 	#[test]
