@@ -3676,6 +3676,65 @@ mod tests {
 		sub.assert_not_closed();
 	}
 
+	/// A replacement source that RESTARTS its group numbering (a fresh session's
+	/// fresh producer beginning at sequence 0, which is what a real reconnecting
+	/// publisher does) must still reach the spliced consumer. The resume hint
+	/// (`group_start`) is advisory for a source that resumes; it must not filter
+	/// a restarted source's groups into a permanent stall.
+	#[tokio::test(start_paused = true)]
+	async fn test_linger_reconnect_restarted_sequences_still_deliver() {
+		let origin = Info::new(Origin::random())
+			.with_linger(Duration::from_secs(5))
+			.produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next_some("test");
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+		assert_eq!(sub.assert_group().sequence, 1);
+
+		// The session dies without unannouncing: the broadcast lingers.
+		drop(producer);
+		source.abort(Error::Dropped).unwrap();
+		drop(dynamic);
+		settle().await;
+		sub.assert_no_group();
+		sub.assert_not_closed();
+
+		// The publisher reconnects as a NEW session: fresh broadcast, fresh
+		// producer, group numbering restarted from zero.
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+
+		// The restarted source publishes an event the consumer must see.
+		producer.append_group().unwrap();
+		settle().await;
+		let group = sub.assert_group();
+		assert_eq!(group.sequence, 0, "the restarted source's first group is delivered");
+		sub.assert_not_closed();
+	}
+
 	/// The linger window expiring without a replacement closes the broadcast: the
 	/// path unannounces, tracks abort, and a later re-create is a fresh broadcast.
 	#[tokio::test(start_paused = true)]
