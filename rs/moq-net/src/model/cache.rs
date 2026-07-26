@@ -182,14 +182,16 @@ impl Pool {
 	///
 	/// The debt is `written * used / capacity`, so paying it evicts slightly more
 	/// than was written and the overshoot decays toward the capacity. Tracks double
-	/// it when their oldest content is staler than [`Self::average`].
+	/// it when their oldest content is staler than [`Self::average`]. Saturates: a
+	/// tiny capacity must not wrap a huge debt into a small one.
 	pub(crate) fn accrue(&self, written: u64) -> Option<u64> {
 		let used = self.inner.used.load(Ordering::Relaxed);
 		let capacity = self.inner.capacity.load(Ordering::Relaxed);
 		if used <= capacity {
 			return None;
 		}
-		Some((written as u128 * used as u128 / capacity.max(1) as u128) as u64)
+		let debt = written as u128 * used as u128 / capacity.max(1) as u128;
+		Some(u64::try_from(debt).unwrap_or(u64::MAX))
 	}
 }
 
@@ -205,31 +207,51 @@ impl std::fmt::Debug for Pool {
 /// The RAII byte accounting for one cached group, owned by the group's state.
 ///
 /// `add`/`sub` mirror the group's cached payload bytes into the pool with plain
-/// atomics. Dropping (or [`clear`](Self::clear)ing) the charge releases everything it
-/// holds. The default charge is detached: it belongs to no pool and every operation
-/// is a no-op.
+/// atomics, and every charged byte (overhead included) is also accumulated into the
+/// track's gross-write counter, which the track drains into eviction debt on its
+/// next write. The charge also owns the group's sample in the pool's access mean,
+/// so the sample lives exactly as long as the cached bytes do: aborting or dropping
+/// the group removes both, no matter who does it or when. The default charge is
+/// detached: it belongs to no pool and every operation is a no-op.
 #[derive(Default)]
 pub(crate) struct Charge {
 	pool: Option<Pool>,
+	// The owning track's gross-write counter (see `track::Info`); never decremented
+	// here, the track swaps it out as it accrues debt.
+	written: Option<Arc<AtomicU64>>,
 	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
 	bytes: u64,
+	// Tick of the last cache access: creation, a FETCH hit, or a fetched backfill's
+	// birth. Eviction protection and age expiry key off this.
+	last: u64,
+	// Whether `last` is currently a sample in the pool's access mean, i.e. the
+	// group is in the evictable population.
+	counted: bool,
 }
 
 impl Charge {
-	/// Charge a new group's fixed overhead into `pool`.
-	pub(crate) fn new(pool: Pool) -> Self {
+	/// Charge a new group's fixed overhead into `pool`, counting it as written.
+	pub(crate) fn new(pool: Pool, written: Arc<AtomicU64>) -> Self {
 		pool.add(ENTRY_OVERHEAD);
+		written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
+		let last = pool.now();
 		Self {
 			pool: Some(pool),
+			written: Some(written),
 			bytes: ENTRY_OVERHEAD,
+			last,
+			counted: false,
 		}
 	}
 
-	/// Charge `n` more payload bytes.
+	/// Charge `n` more payload bytes, counting them as written.
 	pub(crate) fn add(&mut self, n: u64) {
 		if let Some(pool) = &self.pool {
 			pool.add(n);
 			self.bytes += n;
+		}
+		if let Some(written) = &self.written {
+			written.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
@@ -241,12 +263,56 @@ impl Charge {
 		}
 	}
 
-	/// Release everything this charge holds (bytes and overhead). Idempotent; used
-	/// when the group aborts and clears its frames.
+	/// The group's full cached footprint: payload bytes plus overhead.
+	pub(crate) fn size(&self) -> u64 {
+		self.bytes
+	}
+
+	/// Tick of the group's last cache access.
+	pub(crate) fn accessed(&self) -> u64 {
+		self.last
+	}
+
+	/// Enter the group into the evictable population (demoted from the live edge,
+	/// or inserted behind it), sampling its access time into the pool's mean.
+	/// Idempotent.
+	pub(crate) fn demote(&mut self) {
+		if let Some(pool) = &self.pool
+			&& !self.counted
+		{
+			pool.access_insert(self.last);
+			self.counted = true;
+		}
+	}
+
+	/// Record a cache access (a FETCH hit, or a fetched backfill's birth).
+	///
+	/// Stamps one tick past the current one, so an access within the same coarse
+	/// tick as the population mean still reads as strictly newer and protects the
+	/// group. Idempotent within a tick, so repeated hits can't run ahead of the
+	/// clock.
+	pub(crate) fn refresh(&mut self) {
+		let Some(pool) = &self.pool else { return };
+		let now = pool.now().saturating_add(1);
+		if now <= self.last {
+			return;
+		}
+		if self.counted {
+			pool.access_refresh(self.last, now);
+		}
+		self.last = now;
+	}
+
+	/// Release everything this charge holds: bytes, overhead, and the access
+	/// sample. Idempotent; used when the group aborts and clears its frames.
 	pub(crate) fn clear(&mut self) {
 		if let Some(pool) = &self.pool {
 			pool.sub(self.bytes);
 			self.bytes = 0;
+			if self.counted {
+				pool.access_remove(self.last);
+				self.counted = false;
+			}
 		}
 	}
 }
@@ -261,10 +327,14 @@ impl Drop for Charge {
 mod test {
 	use super::*;
 
+	fn charge(pool: &Pool) -> Charge {
+		Charge::new(pool.clone(), Arc::new(AtomicU64::new(0)))
+	}
+
 	#[test]
 	fn unbounded_never_accrues() {
 		let pool = Pool::unbounded();
-		let mut charge = Charge::new(pool.clone());
+		let mut charge = charge(&pool);
 		charge.add(1 << 40);
 		assert_eq!(pool.accrue(1 << 30), None);
 		assert_eq!(pool.used(), (1 << 40) + ENTRY_OVERHEAD);
@@ -275,7 +345,7 @@ mod test {
 	#[test]
 	fn accrue_none_under_capacity() {
 		let pool = Pool::new(1000);
-		let mut charge = Charge::new(pool.clone());
+		let mut charge = charge(&pool);
 		charge.add(500);
 		assert_eq!(pool.accrue(100), None);
 	}
@@ -283,7 +353,7 @@ mod test {
 	#[test]
 	fn accrue_proportional_over_capacity() {
 		let pool = Pool::new(1000);
-		let mut charge = Charge::new(pool.clone());
+		let mut charge = charge(&pool);
 		charge.add(2000 - ENTRY_OVERHEAD); // used = 2000, twice the capacity
 
 		// Debt exceeds what was written by the overshoot ratio, so the pool drains.
@@ -314,7 +384,7 @@ mod test {
 	#[test]
 	fn charge_raii() {
 		let pool = Pool::new(1000);
-		let mut charge = Charge::new(pool.clone());
+		let mut charge = charge(&pool);
 		assert_eq!(pool.used(), ENTRY_OVERHEAD);
 
 		charge.add(100);
@@ -339,11 +409,62 @@ mod test {
 	}
 
 	#[test]
+	fn accrue_saturates() {
+		// A huge overshoot against a tiny capacity must saturate, not wrap.
+		let pool = Pool::new(1);
+		let mut c = charge(&pool);
+		c.add(1 << 40);
+		assert_eq!(pool.accrue(1 << 40), Some(u64::MAX));
+	}
+
+	#[test]
+	fn charge_counts_gross_writes() {
+		let pool = Pool::new(1000);
+		let written = Arc::new(AtomicU64::new(0));
+		let mut c = Charge::new(pool.clone(), written.clone());
+		c.add(100);
+		c.sub(40); // releases don't refund the gross counter
+		assert_eq!(written.load(Ordering::Relaxed), ENTRY_OVERHEAD + 100);
+	}
+
+	#[test]
+	fn charge_owns_access_sample() {
+		let pool = Pool::new(1000);
+		let mut c = charge(&pool);
+		assert_eq!(pool.average(), None, "not evictable until demoted");
+
+		c.demote();
+		c.demote(); // idempotent
+		assert!(pool.average().is_some());
+
+		// Clearing (an abort, from anyone) removes the sample with the bytes.
+		c.clear();
+		assert_eq!(pool.average(), None, "aborted groups leave no ghost sample");
+		drop(c);
+		assert_eq!(pool.average(), None);
+	}
+
+	#[test]
+	fn refresh_protects_within_a_tick() {
+		let pool = Pool::new(1000);
+		let mut c = charge(&pool);
+		c.demote();
+		let average = pool.average().unwrap();
+		// A refresh in the same coarse tick still lifts the group above the mean.
+		c.refresh();
+		assert!(c.accessed() > average);
+		// Repeated same-tick refreshes are idempotent, not runaway.
+		let stamped = c.accessed();
+		c.refresh();
+		assert_eq!(c.accessed(), stamped);
+	}
+
+	#[test]
 	fn resize() {
 		let pool = Pool::unbounded();
 		assert_eq!(pool.capacity(), None);
 
-		let mut charge = Charge::new(pool.clone());
+		let mut charge = charge(&pool);
 		charge.add(1000);
 
 		// Shrinking doesn't reclaim anything synchronously; writers accrue debt instead.

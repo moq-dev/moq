@@ -23,7 +23,7 @@ pub use super::subscription::Subscription;
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	sync::atomic::{AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -89,6 +89,12 @@ pub struct Info {
 	// to reach the shared cache pool (`track.broadcast.origin.pool`), which stays
 	// crate-private.
 	pub(crate) broadcast: Arc<broadcast::Info>,
+
+	// Gross bytes charged by this track's groups (payload plus overhead), shared
+	// with every group via its `cache::Charge`. Drained by `charge_debt` on each
+	// group insert, so eviction debt observes actual writes, including growth on
+	// already-demoted groups and backfill, not just group transitions.
+	pub(crate) written: Arc<AtomicU64>,
 }
 
 /// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an
@@ -108,6 +114,7 @@ impl Default for Info {
 			priority: 0,
 			ordered: false,
 			broadcast: default_broadcast(),
+			written: Arc::default(),
 		}
 	}
 }
@@ -203,8 +210,15 @@ struct TrackState {
 	// absolute cursor to an index.
 	offset: usize,
 
-	// The highest sequence number successfully appended to the track.
+	// The highest sequence number successfully appended to the track. Shared with
+	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
+
+	// The sequence of the newest cached group: the live edge, protected from
+	// eviction by never entering the eviction order. Tracked separately from
+	// `max_sequence` because datagrams advance that shared counter, and the live
+	// edge must still demote correctly when the next group lands past one.
+	latest_group: Option<u64>,
 
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
@@ -223,25 +237,22 @@ struct TrackState {
 }
 
 /// A cached group plus its bookkeeping in the track's `lookup` map.
+///
+/// Access times and the evictable-population sample live in the group's own
+/// `cache::Charge`, so they share the group's lifecycle exactly: an abort from any
+/// handle releases the bytes and the sample together.
 struct Slot {
 	group: group::Producer,
 
 	// When the group was inserted. Only the arrival-order expiry walk uses this,
-	// for its early exit; the expiry itself keys off `accessed`.
+	// for its early exit; the expiry itself keys off the group's last access.
 	created_at: web_async::time::Instant,
 
-	// Coarse tick of the last FETCH cache hit, initially the insert tick. Age
-	// expiry and eviction protection both key off this: a group accessed more
-	// recently than the pool-wide average is never evicted. Atomic because the
-	// FETCH hit runs under the track's read lock.
-	accessed: AtomicU64,
-
-	// Whether this slot is in the evictable population: enqueued in the eviction
-	// order and counted in the pool's access average. The latest group stays out,
-	// which is what protects the live edge (and keeps stalled tracks' immortal
-	// latest groups from dragging the average into the past). Atomic so the FETCH
-	// refresh can check it under the read lock.
-	counted: AtomicBool,
+	// Whether arrival-order subscribers may deliver this slot. False for fetched
+	// backfill, and checked on every resolution: a stale arrival entry whose
+	// sequence was later re-served by a fetch must not leak the replacement into
+	// a subscription.
+	visible: bool,
 }
 
 /// The registered subscriptions, aggregated by the producer.
@@ -289,6 +300,7 @@ impl TrackState {
 		for (i, sequence) in self.arrival.iter().enumerate().skip(start) {
 			if *sequence >= min_sequence
 				&& let Some(slot) = self.lookup.get(sequence)
+				&& slot.visible
 				&& !slot.group.is_aborted()
 			{
 				return Poll::Ready(Ok(Some((slot.group.consume(), self.offset + i))));
@@ -357,6 +369,11 @@ impl TrackState {
 			let Some(slot) = self.lookup.get(sequence) else {
 				continue;
 			};
+			if !slot.visible {
+				// A stale arrival entry resolving to fetched backfill that later
+				// re-served this sequence; backfill is never delivered in arrival order.
+				continue;
+			}
 
 			let mut consumer = slot.group.consume();
 			match consumer.poll_read_frame(waiter) {
@@ -480,12 +497,7 @@ impl TrackState {
 			// A cache hit refreshes the group: it resets both its age (expiry keys
 			// off the last access) and its standing against the pool-wide average,
 			// so the eviction walk keeps it over never-read groups.
-			let pool = &self.broadcast.origin.pool;
-			let now = pool.now();
-			let old = slot.accessed.swap(now, Ordering::Relaxed);
-			if slot.counted.load(Ordering::Relaxed) {
-				pool.access_refresh(old, now);
-			}
+			slot.group.cache_refresh();
 			return Poll::Ready(Ok(slot.group.consume()));
 		}
 
@@ -512,10 +524,9 @@ impl TrackState {
 	/// backfill isn't in arrival order; it ages out from the front of the eviction
 	/// order instead.
 	fn evict_expired(&mut self, now: web_async::time::Instant, max_age: Duration) {
-		let pool = self.broadcast.origin.pool.clone();
-		let now_ticks = pool.now();
+		let now_ticks = self.broadcast.origin.pool.now();
 		let max_ticks = cache::Pool::ticks(max_age);
-		let expired = |slot: &Slot| now_ticks.saturating_sub(slot.accessed.load(Ordering::Relaxed)) > max_ticks;
+		let expired = |group: &group::Producer| now_ticks.saturating_sub(group.cache_accessed()) > max_ticks;
 
 		for i in 0..self.arrival.len() {
 			let sequence = self.arrival[i];
@@ -526,11 +537,11 @@ impl TrackState {
 			// Already aborted: the frames are gone, reclaim the slot so a later
 			// fetch can serve the sequence again.
 			if slot.group.is_aborted() {
-				self.remove_slot(sequence);
+				self.lookup.remove(&sequence);
 				continue;
 			}
 
-			if Some(sequence) == self.max_sequence {
+			if Some(sequence) == self.latest_group {
 				continue;
 			}
 
@@ -539,7 +550,7 @@ impl TrackState {
 			}
 
 			// Created long ago but fetched recently: expiry keys off the last access.
-			if !expired(slot) {
+			if !expired(&slot.group) {
 				continue;
 			}
 
@@ -547,7 +558,7 @@ impl TrackState {
 			// surfaces `Error::Old` instead of blocking forever on a frame that will never
 			// arrive. Without this a reader parked on an aged-out group hangs indefinitely,
 			// since the group is neither finished nor aborted.
-			let slot = self.remove_slot(sequence).unwrap();
+			let slot = self.lookup.remove(&sequence).unwrap();
 			let _ = slot.group.abort(Error::Old);
 		}
 
@@ -560,28 +571,35 @@ impl TrackState {
 			self.offset += 1;
 		}
 
-		// The eviction order is roughly enqueue order: drop dead entries and age out
-		// expired groups (the only expiry that reaches fetched backfill) from the
-		// front, stopping at the first live fresh entry.
-		while let Some(&sequence) = self.evict.front() {
+		// The only expiry that reaches fetched backfill (it isn't in arrival order).
+		// The eviction order isn't sorted by access time (FETCH hits refresh entries
+		// in place), so scan a bounded prefix instead of stopping at the first fresh
+		// entry: an expired group can't hide behind a refreshed one for long.
+		for i in 0..self.evict.len().min(EVICT_SCAN) {
+			let sequence = self.evict[i];
 			let Some(slot) = self.lookup.get(&sequence) else {
-				self.evict.pop_front();
 				continue;
 			};
 			if slot.group.is_aborted() {
-				self.remove_slot(sequence);
-				self.evict.pop_front();
+				self.lookup.remove(&sequence);
 				continue;
 			}
-			if !expired(slot) {
+			if Some(sequence) == self.latest_group || !expired(&slot.group) {
+				continue;
+			}
+			let slot = self.lookup.remove(&sequence).unwrap();
+			let _ = slot.group.abort(Error::Old);
+		}
+
+		// Drop dead leading entries so the scan window stays over live candidates.
+		while let Some(sequence) = self.evict.front() {
+			if self.lookup.contains_key(sequence) {
 				break;
 			}
-			let slot = self.remove_slot(sequence).unwrap();
-			let _ = slot.group.abort(Error::Old);
 			self.evict.pop_front();
 		}
 
-		// Dead entries behind a fresh front can linger; rebuild once they clearly
+		// Dead entries behind a live front can linger; rebuild once they clearly
 		// outnumber the live slots.
 		if self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK {
 			let lookup = &self.lookup;
@@ -589,30 +607,13 @@ impl TrackState {
 		}
 	}
 
-	/// Remove a slot from the cache, releasing its share of the pool's access
-	/// average if it was in the evictable population.
-	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
-		let slot = self.lookup.remove(&sequence)?;
-		if slot.counted.load(Ordering::Relaxed) {
-			self.broadcast
-				.origin
-				.pool
-				.access_remove(slot.accessed.load(Ordering::Relaxed));
-		}
-		Some(slot)
-	}
-
-	/// Drop every cached group and reset the eviction bookkeeping, releasing the
-	/// evictable population's share of the pool's access average.
+	/// Drop every cached group and reset the eviction bookkeeping. Each group's
+	/// access sample lives in its own charge, released when the group itself dies.
 	fn clear_cache(&mut self) {
-		let pool = self.broadcast.origin.pool.clone();
-		for (_, slot) in self.lookup.drain() {
-			if slot.counted.load(Ordering::Relaxed) {
-				pool.access_remove(slot.accessed.load(Ordering::Relaxed));
-			}
-		}
+		self.lookup.clear();
 		self.arrival.clear();
 		self.evict.clear();
+		self.latest_group = None;
 		self.debt = 0;
 	}
 
@@ -626,7 +627,7 @@ impl TrackState {
 			if !slot.group.is_aborted() {
 				return Err(Error::Duplicate);
 			}
-			self.remove_slot(sequence);
+			self.lookup.remove(&sequence);
 		}
 		Ok(())
 	}
@@ -638,61 +639,52 @@ impl TrackState {
 	/// eviction. `visible` controls arrival-order delivery: publisher-produced
 	/// groups reach subscribers, fetched backfill is served by sequence only.
 	fn insert_group(&mut self, group: &group::Producer, now: web_async::time::Instant, visible: bool) {
-		let pool = &self.broadcast.origin.pool;
 		let sequence = group.sequence;
-		let ticks = pool.now();
-		let slot = Slot {
-			group: group.clone(),
-			created_at: now,
-			accessed: AtomicU64::new(ticks),
-			counted: AtomicBool::new(false),
-		};
 
-		if self.max_sequence.is_none_or(|max| sequence >= max) {
+		// The live edge is tracked separately from `max_sequence`, which datagrams
+		// share and can push past any cached group: demotion must still fire when
+		// the next group lands beyond a datagram-advanced counter.
+		if self.latest_group.is_none_or(|latest| sequence >= latest) {
 			// Demote the previous latest: it joins the eviction order (and the
 			// pool's access average) like any other cached group.
-			if let Some(max) = self.max_sequence
-				&& sequence > max
-				&& let Some(prev) = self.lookup.get(&max)
+			if let Some(latest) = self.latest_group
+				&& sequence > latest
+				&& let Some(prev) = self.lookup.get(&latest)
 			{
-				prev.counted.store(true, Ordering::Relaxed);
-				pool.access_insert(prev.accessed.load(Ordering::Relaxed));
-				self.evict.push_back(max);
+				prev.group.cache_demote();
+				self.evict.push_back(latest);
 			}
-			self.max_sequence = Some(sequence);
+			self.latest_group = Some(sequence);
 		} else {
-			slot.counted.store(true, Ordering::Relaxed);
-			pool.access_insert(ticks);
+			group.cache_demote();
 			self.evict.push_back(sequence);
 		}
 
-		self.lookup.insert(sequence, slot);
+		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		self.lookup.insert(
+			sequence,
+			Slot {
+				group: group.clone(),
+				created_at: now,
+				visible,
+			},
+		);
 		if visible {
 			self.arrival.push_back(sequence);
 		}
 	}
 
-	/// The cached bytes of the group that inserting `sequence` would demote from
-	/// the live edge: the inflow this insert accrues eviction debt for. Zero when
-	/// `sequence` isn't a new maximum (a straggler or backfill).
-	fn demotion_bytes(&self, sequence: u64) -> u64 {
-		if let Some(max) = self.max_sequence
-			&& sequence > max
-			&& let Some(prev) = self.lookup.get(&max)
-		{
-			prev.group.cached_bytes()
-		} else {
-			0
-		}
-	}
-
-	/// Accrue and pay eviction debt for `written` fresh bytes.
+	/// Accrue and pay eviction debt for everything written since the last charge:
+	/// the track's gross-write counter, which the groups' charges feed on every
+	/// frame (so growth on already-demoted groups and backfill is billed too).
 	///
 	/// Runs BEFORE the new group is inserted, so a brand-new entry is never a
 	/// victim of the very write that created it. A track whose oldest content is
 	/// staler than the pool-wide average access time accrues at double rate, so
 	/// stale-heavy tracks drain first.
-	fn charge_debt(&mut self, written: u64) {
+	fn charge_debt(&mut self) {
+		let Some(info) = &self.info else { return };
+		let written = info.written.swap(0, Ordering::Relaxed);
 		let pool = self.broadcast.origin.pool.clone();
 		match pool.accrue(written) {
 			Some(mut accrued) => {
@@ -728,11 +720,11 @@ impl TrackState {
 				continue;
 			};
 			if slot.group.is_aborted() {
-				self.remove_slot(sequence);
+				self.lookup.remove(&sequence);
 				self.evict.pop_front();
 				continue;
 			}
-			return slot.accessed.load(Ordering::Relaxed) <= average;
+			return slot.group.cache_accessed() <= average;
 		}
 	}
 
@@ -765,24 +757,26 @@ impl TrackState {
 			};
 			if slot.group.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.remove_slot(sequence);
+				self.lookup.remove(&sequence);
 				continue;
 			}
-			if Some(sequence) == self.max_sequence {
+			if Some(sequence) == self.latest_group {
 				// The live edge is never enqueued, but tolerate finding it anyway.
 				self.evict.push_back(sequence);
 				continue;
 			}
 
 			scanned += 1;
-			let size = slot.group.cached_bytes();
 			// Protected: accessed more recently than the average (a fresh insert or
-			// a FETCH hit), or empty (a backfill still being filled, which eviction
-			// would destroy while freeing nothing). Rotate to the back.
-			if size == 0 || slot.accessed.load(Ordering::Relaxed) > average {
+			// a FETCH hit, which also covers a backfill still being filled). Rotate
+			// to the back.
+			if slot.group.cache_accessed() > average {
 				self.evict.push_back(sequence);
 				continue;
 			}
+			// The full footprint including overhead, so even empty groups repay
+			// their share of the budget when evicted.
+			let size = slot.group.cache_size();
 			if size > self.debt {
 				self.evict.push_front(sequence);
 				return;
@@ -790,7 +784,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			let slot = self.remove_slot(sequence).unwrap();
+			let slot = self.lookup.remove(&sequence).unwrap();
 			let _ = slot.group.abort(Error::Evicted);
 		}
 	}
@@ -864,11 +858,13 @@ impl TrackState {
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence)?;
-		let written = self.demotion_bytes(sequence);
-		self.charge_debt(written);
+		self.charge_debt();
 
 		let latency_max = info.latency_max;
 		let group = group::Producer::new(group::Info { sequence }, info);
+		// A backfill exists because someone is fetching it right now: stamp that
+		// access so the eviction walk can't kill it before the fetch resolves.
+		group.cache_refresh();
 		// Backfill is invisible to arrival-order subscribers: it was fetched on
 		// demand, not produced live by the publisher.
 		self.insert_group(&group, now, false);
@@ -954,8 +950,7 @@ impl Producer {
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence)?;
-		let written = state.demotion_bytes(group.sequence);
-		state.charge_debt(written);
+		state.charge_debt();
 
 		let group = group::Producer::new(group, track).with_meter(self.stats.meter());
 		state.insert_group(&group, now, true);
@@ -982,8 +977,7 @@ impl Producer {
 		let latency_max = info.latency_max;
 
 		let now = web_async::time::Instant::now();
-		let written = state.demotion_bytes(sequence);
-		state.charge_debt(written);
+		state.charge_debt();
 
 		let group = group::Producer::new(group::Info { sequence }, track).with_meter(self.stats.meter());
 		state.insert_group(&group, now, true);
@@ -4361,6 +4355,182 @@ mod test {
 		assert!(consumer.peek_group(1).is_none());
 		assert!(consumer.peek_group(2).is_some(), "the backlog drains gradually");
 		assert!(pool.used() > before - 4_000, "one write must not dump the backlog");
+	}
+
+	/// Datagrams share `max_sequence` but must not break group demotion: the live
+	/// edge is tracked per group, so interleaving datagrams can't strand groups
+	/// outside the eviction order and bypass the budget.
+	#[tokio::test]
+	async fn datagrams_do_not_block_eviction() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(1_000);
+		for _ in 0..10 {
+			finished_group(&mut producer, 1_000);
+			producer.append_datagram(Timestamp::ZERO, &b"beat"[..]).unwrap();
+		}
+
+		let consumer = producer.consume();
+		assert!(consumer.peek_group(0).is_none(), "old groups still evict");
+		assert!(
+			pool.used() < 4 * 1_256,
+			"interleaved datagrams must not bypass the budget: {}",
+			pool.used()
+		);
+	}
+
+	/// An aborted group releases its access sample along with its bytes, from any
+	/// handle: ghost samples must not linger in the pool mean where they'd hold it
+	/// in the past and over-protect every live group.
+	#[tokio::test]
+	async fn aborted_group_leaves_no_ghost_sample() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		let group0 = producer.append_group().unwrap();
+		producer.append_group().unwrap(); // demotes seq 0 into the mean
+
+		assert!(pool.average().is_some(), "demoted group is sampled");
+		group0.abort(Error::Cancel).unwrap();
+		assert_eq!(pool.average(), None, "the abort must remove the sample");
+	}
+
+	/// Empty groups still carry fixed overhead; they must repay the budget when
+	/// evicted rather than being unevictable freeloaders.
+	#[tokio::test]
+	async fn empty_groups_repay_overhead() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(1_000);
+		for _ in 0..100 {
+			let mut group = producer.append_group().unwrap();
+			group.finish().unwrap();
+		}
+
+		assert!(
+			pool.used() <= 3_000,
+			"empty-group overhead must stay near the budget: {}",
+			pool.used()
+		);
+	}
+
+	/// Late growth on an already-demoted group is billed: the gross-write counter
+	/// feeds debt on the next append, so a straggler can't grow unbounded.
+	#[tokio::test]
+	async fn growth_on_demoted_group_is_billed() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(2_000);
+		let mut straggler = producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
+
+		// The demoted group balloons: no eviction yet (nothing ran), but billed.
+		straggler
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 10_000]))
+			.unwrap();
+
+		// The next append observes the growth and evicts the straggler.
+		producer.append_group().unwrap().finish().unwrap(); // seq 2
+
+		let consumer = producer.consume();
+		assert!(consumer.peek_group(0).is_none(), "the ballooned group is evicted");
+		assert!(pool.used() <= 3_000, "growth is reclaimed: {}", pool.used());
+	}
+
+	/// A stale arrival entry whose sequence was later re-served by fetched backfill
+	/// must not leak the replacement into arrival-order subscriptions.
+	#[tokio::test]
+	async fn refilled_sequence_stays_out_of_subscriptions() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		producer.create_group(0u64.into()).unwrap().finish().unwrap();
+		let aborted = producer.create_group(1u64.into()).unwrap();
+		aborted.abort(Error::Cancel).unwrap();
+		producer.create_group(2u64.into()).unwrap().finish().unwrap();
+
+		// Re-serve seq 1 as backfill; its slot replaces the aborted one, and the
+		// old arrival entry for seq 1 now resolves to it.
+		let pending = consumer.fetch_group(1, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut group = req.accept(None).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"backfill"))
+			.unwrap();
+		group.finish().unwrap();
+		pending.await.unwrap();
+
+		// The backfill serves by sequence, but never in arrival order.
+		assert!(consumer.peek_group(1).is_some());
+		let mut subscriber = producer.subscribe(None);
+		assert_eq!(subscriber.assert_group().sequence, 0);
+		assert_eq!(subscriber.assert_group().sequence, 2);
+		subscriber.assert_no_group();
+	}
+
+	/// An expired backfill can't hide behind a refreshed one: the eviction-order
+	/// expiry scans a bounded prefix instead of stopping at the first fresh entry.
+	#[tokio::test]
+	async fn expired_backfill_behind_refreshed_reclaimed() {
+		tokio::time::pause();
+
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		producer.create_group(5u64.into()).unwrap().finish().unwrap();
+		for sequence in [2u64, 3u64] {
+			let pending = consumer.fetch_group(sequence, None);
+			let req = dynamic
+				.requested_group()
+				.now_or_never()
+				.expect("should not block")
+				.unwrap();
+			let mut group = req.accept(None).unwrap();
+			group
+				.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 100]))
+				.unwrap();
+			group.finish().unwrap();
+			pending.await.unwrap();
+		}
+
+		// Keep seq 2 fresh while seq 3 (behind it in eviction order) expires.
+		tokio::time::advance(Duration::from_secs(4)).await;
+		consumer.fetch_group(2, None).await.unwrap();
+		tokio::time::advance(DEFAULT_LATENCY_MAX - Duration::from_secs(2)).await;
+		producer.create_group(6u64.into()).unwrap().finish().unwrap();
+
+		let consumer = producer.consume();
+		assert!(consumer.peek_group(2).is_some(), "refreshed backfill survives");
+		assert!(consumer.peek_group(3).is_none(), "expired backfill is reclaimed");
+	}
+
+	/// A FETCH hit within the same coarse clock tick still protects the group: the
+	/// refresh stamps one tick ahead, so it reads strictly newer than the mean.
+	#[tokio::test]
+	async fn same_tick_fetch_protects() {
+		tokio::time::pause();
+
+		// No time advances at all: every timestamp lands in the same tick.
+		let (mut producer, _pool) = pooled_producer(10_000);
+		let consumer = producer.consume();
+
+		finished_group(&mut producer, 3_000); // seq 0
+		finished_group(&mut producer, 3_000); // seq 1
+		finished_group(&mut producer, 3_000); // seq 2
+
+		consumer.fetch_group(0, None).await.unwrap();
+
+		finished_group(&mut producer, 3_000); // seq 3
+		finished_group(&mut producer, 3_000); // seq 4
+
+		assert!(consumer.peek_group(0).is_some(), "same-tick refresh protects");
+		assert!(consumer.peek_group(1).is_none(), "the unread group dies instead");
 	}
 
 	/// A refetched group that reclaims max_sequence is the live edge again: it must

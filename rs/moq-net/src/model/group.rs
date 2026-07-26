@@ -239,7 +239,7 @@ impl Producer {
 	pub(crate) fn new(info: Info, track: track::Info) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		state.write().ok().expect("a new group is open").charge =
-			cache::Charge::new(track.broadcast.origin.pool.clone());
+			cache::Charge::new(track.broadcast.origin.pool.clone(), track.written.clone());
 		Self {
 			info,
 			state,
@@ -401,10 +401,33 @@ impl Producer {
 		self.state.read().abort.is_some()
 	}
 
-	/// The group's currently cached payload bytes, used by the track to size this
-	/// group as an eviction victim.
-	pub(crate) fn cached_bytes(&self) -> u64 {
-		self.state.read().cache
+	/// The group's full cached footprint (payload plus fixed overhead), used by the
+	/// track to size this group as an eviction victim.
+	pub(crate) fn cache_size(&self) -> u64 {
+		self.state.read().charge.size()
+	}
+
+	/// Tick of the group's last cache access, driving eviction protection and age
+	/// expiry (see [`cache::Pool::average`]).
+	pub(crate) fn cache_accessed(&self) -> u64 {
+		self.state.read().charge.accessed()
+	}
+
+	/// Enter the group into the evictable population: demoted from the live edge,
+	/// or inserted behind it. Idempotent; a no-op once the group is closed.
+	pub(crate) fn cache_demote(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.demote();
+		}
+	}
+
+	/// Record a cache access (a FETCH hit, or a fetched backfill's birth),
+	/// protecting the group from eviction and restarting its expiry clock. A no-op
+	/// once the group is closed.
+	pub(crate) fn cache_refresh(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.refresh();
+		}
 	}
 
 	/// Create a new consumer for the group.
