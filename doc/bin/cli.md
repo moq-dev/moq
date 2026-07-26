@@ -56,6 +56,20 @@ cargo build --release --bin moq-cli
 
 The binary will be in `target/release/moq-cli`.
 
+### Heap profiling
+
+The Nix package includes jemalloc profiling support. Source builds can opt in
+with `--features jemalloc`. Start `moq` with profiling enabled, then send
+`SIGUSR1` whenever a heap snapshot is needed:
+
+```bash
+MALLOC_CONF=prof:true,prof_active:true,prof_prefix:/tmp/moq.heap moq ...
+kill -USR1 <pid>
+```
+
+Each signal writes a numbered `/tmp/moq.heap.*.heap` profile for analysis with
+`jeprof`.
+
 ## The grammar
 
 ```
