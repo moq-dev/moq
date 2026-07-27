@@ -16,18 +16,6 @@ async fn main() -> anyhow::Result<()> {
 
 	let mut config = Config::load()?;
 
-	// Runtime deprecation warning for the renamed cluster drain key.
-	if std::env::var_os("MOQ_CLUSTER_DRAIN_TIMEOUT").is_some() {
-		tracing::warn!("MOQ_CLUSTER_DRAIN_TIMEOUT is deprecated; use MOQ_CLUSTER_DRAIN (a humantime duration, e.g. \"10s\") instead");
-		if config.cluster.drain.is_none() {
-			if let Ok(val) = std::env::var("MOQ_CLUSTER_DRAIN_TIMEOUT") {
-				if let Ok(secs) = val.parse::<u64>() {
-					config.cluster.drain = Some(std::time::Duration::from_secs(secs));
-				}
-			}
-		}
-	}
-
 	config.client.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 	config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 

@@ -356,11 +356,10 @@ pub struct ClusterConfig {
 	#[arg(
 		id = "cluster-drain",
 		long = "cluster-drain",
-		alias = "cluster-drain-timeout",
 		env = "MOQ_CLUSTER_DRAIN",
 		value_parser = humantime::parse_duration,
 	)]
-	#[serde(default, with = "humantime_serde", alias = "drain_timeout")]
+	#[serde(default, with = "humantime_serde")]
 	pub drain: Option<Duration>,
 }
 
