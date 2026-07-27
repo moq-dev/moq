@@ -88,6 +88,7 @@ impl Estimator {
 	/// Observe a frame of `bytes` encoded bytes at presentation time `timestamp`, as written by
 	/// [`container::Producer::write`](crate::container::Producer::write).
 	pub fn write(&mut self, timestamp: Timestamp, bytes: usize) {
+		let timestamp = nanos(timestamp);
 		self.bitrate.write(timestamp, bytes);
 		self.jitter.write(timestamp);
 	}
@@ -99,7 +100,7 @@ impl Estimator {
 	/// bitrate on its own. A boundary with no usable duration (an unbounded cut, a span holding one
 	/// frame) leaves the span open to fold into the next one, so nothing is lost by cutting often.
 	pub fn cut(&mut self, end: Option<Timestamp>) {
-		self.bitrate.cut(end);
+		self.bitrate.cut(end.map(nanos));
 	}
 
 	/// Discard the open span and the last frame time, so nothing is measured across a break in the
@@ -126,6 +127,26 @@ impl Estimator {
 	}
 }
 
+/// A frame time as scale-free nanoseconds.
+///
+/// Timestamps reaching an estimator can carry different timescales: a track normalizes them into
+/// its own on the way to the wire, but only there. `Timestamp` arithmetic refuses to mix scales, so
+/// a span anchored on one scale could never be timed against a frame on another. Since a span now
+/// survives a boundary it can't time, that would block the bitrate for the life of the track rather
+/// than for one group. Normalizing on the way in is what makes the carry-forward safe.
+fn nanos(timestamp: Timestamp) -> u128 {
+	timestamp.as_nanos()
+}
+
+/// The time from `start` to `end`, or `None` if it didn't advance (a B-frame presenting earlier, a
+/// span holding a single frame).
+fn elapsed(start: u128, end: u128) -> Option<Duration> {
+	let delta = end.checked_sub(start).filter(|delta| *delta > 0)?;
+	// Saturating rather than wrapping. A frame gap over 584 years is nonsense either way, and the
+	// clamp keeps this total instead of silently dropping the span.
+	Some(Duration::from_nanos(u64::try_from(delta).unwrap_or(u64::MAX)))
+}
+
 /// Tracks the maximum bitrate in bits per second, averaged over whole spans.
 ///
 /// A span's bytes are only counted once it is closed, and the average is taken over at least
@@ -139,36 +160,26 @@ struct Bitrate {
 }
 
 impl Bitrate {
-	fn write(&mut self, ts: Timestamp, bytes: usize) {
+	fn write(&mut self, ts: u128, bytes: usize) {
 		let span = self.span.get_or_insert(Span {
 			start: ts,
 			max: ts,
 			bytes: 0,
 		});
 
-		if ts < span.start {
-			span.start = ts;
-		}
-		if ts > span.max {
-			span.max = ts;
-		}
+		span.start = span.start.min(ts);
+		span.max = span.max.max(ts);
 		span.bytes = span.bytes.saturating_add(bytes as u64);
 	}
 
-	fn cut(&mut self, end: Option<Timestamp>) {
+	fn cut(&mut self, end: Option<u128>) {
 		let Some(span) = self.span.as_ref() else {
 			return;
 		};
 
 		let duration = end
-			.and_then(|end| end.checked_sub(span.start).ok())
-			.filter(|duration| !duration.is_zero())
-			.or_else(|| {
-				span.max
-					.checked_sub(span.start)
-					.ok()
-					.filter(|duration| !duration.is_zero())
-			});
+			.and_then(|end| elapsed(span.start, end))
+			.or_else(|| elapsed(span.start, span.max));
 
 		// Nothing to divide by yet. Leave the span open so its bytes join the next one rather than
 		// vanishing: a track cut after every frame (the one-group-per-packet audio shape) reaches
@@ -179,7 +190,7 @@ impl Bitrate {
 
 		let span = self.span.take().expect("span is present");
 		self.window_bytes = self.window_bytes.saturating_add(span.bytes);
-		self.window_duration += Duration::from(duration);
+		self.window_duration += duration;
 
 		if self.window_duration < BITRATE_WINDOW {
 			return;
@@ -205,8 +216,9 @@ impl Bitrate {
 
 /// An open run of frames: everything written since the last boundary that could be timed.
 struct Span {
-	start: Timestamp,
-	max: Timestamp,
+	/// Scale-free nanoseconds, per [`nanos`].
+	start: u128,
+	max: u128,
 	bytes: u64,
 }
 
@@ -231,12 +243,12 @@ fn bits_per_second(bytes: u64, duration: Duration) -> u64 {
 /// A non-reordered stream reports the frame duration; a B-frame stream reports the deeper
 /// reorder delay (e.g. up to 3 consecutive B-frames is 3x the frame duration).
 ///
-/// Both contributions are kept as scale-free [`Duration`]s: the inputs are `Timestamp`s that
-/// may carry different timescales (frame PTS vs a 90 kHz reorder delay), and `Timestamp`
-/// arithmetic is scale-checked, so they are converted at the boundary before comparison.
+/// Both contributions are kept as [`Duration`]s, since the two inputs are independently scaled
+/// (frame PTS vs a 90 kHz reorder delay) and only compare once normalized. See [`nanos`].
 #[derive(Default)]
 struct Jitter {
-	last: Option<Timestamp>,
+	/// Scale-free nanoseconds, per [`nanos`].
+	last: Option<u128>,
 	min_duration: Option<Duration>,
 	max_reorder: Duration,
 }
@@ -244,12 +256,10 @@ struct Jitter {
 impl Jitter {
 	/// Record a frame's presentation timestamp (decode order), updating the minimum frame duration.
 	/// The first observation and non-monotonic timestamps (B-frames) only update state.
-	fn write(&mut self, ts: Timestamp) {
+	fn write(&mut self, ts: u128) {
 		if let Some(last) = self.last.replace(ts)
-			&& let Ok(duration) = ts.checked_sub(last)
-			&& !duration.is_zero()
+			&& let Some(duration) = elapsed(last, ts)
 		{
-			let duration = Duration::from(duration);
 			self.min_duration = Some(match self.min_duration {
 				Some(min) => min.min(duration),
 				None => duration,
@@ -361,6 +371,27 @@ mod tests {
 		}
 
 		assert_eq!(estimator.estimate().bitrate, Some(1_000_000));
+	}
+
+	/// A track whose timestamps change scale mid-stream still measures. `Timestamp` arithmetic
+	/// refuses to mix scales, and since a span now survives a boundary it can't time, an unnormalized
+	/// anchor would block the bitrate for the life of the track instead of for one group.
+	#[test]
+	fn mixed_timescales_still_measure() {
+		let mut estimator = Estimator::new();
+
+		// The opening frame is millisecond-scale (a clock stamp standing in for a missing PTS); the
+		// rest are microsecond-scale, as a parsed elementary stream would be.
+		estimator.write(Timestamp::from_millis(0).unwrap(), 5_000);
+		for i in 1..40u64 {
+			let ts = micros(i * 40_000);
+			estimator.cut(Some(ts));
+			estimator.write(ts, 5_000);
+		}
+
+		let estimate = estimator.estimate();
+		assert_eq!(estimate.bitrate, Some(1_000_000));
+		assert_eq!(estimate.jitter, Some(Duration::from_millis(40)));
 	}
 
 	/// A break in the timeline discards the open span rather than timing it across the gap, and

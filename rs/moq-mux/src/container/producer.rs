@@ -171,15 +171,20 @@ impl<C: Container> Producer<C> {
 			self.group = Some(group);
 		}
 
-		// Measure the frame once it's committed to a group, so a write rejected above (a delta
-		// before the first keyframe) doesn't count toward the catalog.
-		self.estimator.write(frame.timestamp, frame.payload.len());
-
 		// Buffer or write the frame.
 		if self.latency.is_zero() {
 			let group = self.group.as_mut().unwrap();
+			let (timestamp, bytes) = (frame.timestamp, frame.payload.len());
 			self.container.write(group, &[frame])?;
+
+			// Only what the container accepted is measured. A rejected frame (too large for the
+			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
+			// extrema never fall, so counting one would inflate the catalog for good.
+			self.estimator.write(timestamp, bytes);
 		} else {
+			// Buffered frames are measured on the way in instead. The flush that eventually writes
+			// them takes the track down with it when it fails, so there is nothing to unwind.
+			self.estimator.write(frame.timestamp, frame.payload.len());
 			self.buffer.push(frame);
 
 			// Flush if the buffered span has reached the latency budget. Compute
@@ -428,6 +433,48 @@ mod tests {
 
 		assert_eq!(producer.estimate().jitter, None);
 		assert_eq!(producer.estimate().bitrate, None);
+	}
+
+	/// Write-only container that rejects the frame at a given timestamp, standing in for one the
+	/// container can't encode (over the group size limit, a timestamp that won't convert).
+	#[derive(Clone)]
+	struct RejectAt(u64);
+
+	impl super::Container for RejectAt {
+		type Error = crate::Error;
+
+		fn write(&self, _group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
+			match frames.iter().any(|f| f.timestamp.as_micros() == self.0 as u128) {
+				true => Err(moq_net::Error::FrameTooLarge.into()),
+				false => Ok(()),
+			}
+		}
+
+		fn poll_read(
+			&self,
+			_group: &mut moq_net::group::Consumer,
+			_waiter: &kio::Waiter,
+		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+			unreachable!("RejectAt is write-only")
+		}
+	}
+
+	/// A rejected frame leaves the producer usable, so the caller can carry on. Its bytes never
+	/// reached the wire, and the estimate's maximum never falls, so counting them would pin an
+	/// inflated bitrate on the catalog permanently.
+	#[tokio::test]
+	async fn a_rejected_frame_is_not_measured() {
+		let track = track_producer("test", hang::container::track_info());
+		let mut producer = Producer::new(track, RejectAt(40_000));
+
+		// 40ms frames of 5 kB (1 Mbps), except one 500 kB frame the container turns away.
+		for i in 0..40u64 {
+			let bytes = if i == 1 { 500_000 } else { 5_000 };
+			let result = producer.write(sized_frame(i * 40_000, true, bytes));
+			assert_eq!(result.is_err(), i == 1, "only the rejected frame fails");
+		}
+
+		assert_eq!(producer.estimate().bitrate, Some(1_000_000));
 	}
 
 	/// Reorder delay is the one input the writes can't reveal, since frames carry no decode time.
