@@ -501,3 +501,71 @@ fn test_flac_catalog() {
 	let desc = a.description.as_ref().expect("flac description");
 	assert_eq!(&desc[..4], b"fLaC");
 }
+
+/// Feed every fragment of bbb.mp4 through the importer with no explicit seek and return how many
+/// groups the audio track produced. Grouping is then driven purely by policy: one group per
+/// fragment (default) versus accumulate (manual).
+#[cfg(test)]
+async fn fmp4_audio_group_count(manual_grouping: bool) -> usize {
+	use mp4_atom::{Any, DecodeMaybe};
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast_consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.set_manual_grouping(manual_grouping);
+
+	let data = include_bytes!("test_data/bbb.mp4");
+	let mut init_buf = bytes::BytesMut::new();
+	let mut frag_buf = bytes::BytesMut::new();
+	let mut cursor = std::io::Cursor::new(&data[..]);
+	let mut position = 0;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap_or(None) {
+		let end = cursor.position() as usize;
+		let bytes = &data[position..end];
+		match atom {
+			Any::Ftyp(_) | Any::Styp(_) | Any::Moov(_) => init_buf.extend_from_slice(bytes),
+			_ => frag_buf.extend_from_slice(bytes),
+		}
+		position = end;
+	}
+
+	fmp4.decode(&init_buf).unwrap();
+
+	let snap = catalog.snapshot();
+	let audio_name = snap.audio.renditions.keys().next().expect("audio track").clone();
+	let mut audio_track = broadcast_consumer
+		.track(&audio_name)
+		.unwrap()
+		.subscribe(None)
+		.await
+		.expect("audio track should exist");
+
+	// Trailing partial fragments may error; ignore.
+	let _ = fmp4.decode(&frag_buf);
+	fmp4.finish().unwrap();
+
+	drain_group_sequences(&mut audio_track).len()
+}
+
+/// Default: the CMAF passthrough opens a MoQ group per audio fragment (audio samples are all
+/// flagged keyframes), so many fragments yield many groups.
+#[tokio::test]
+async fn fmp4_audio_groups_per_fragment_by_default() {
+	let count = fmp4_audio_group_count(false).await;
+	assert!(
+		count > 1,
+		"default should open a group per audio fragment (got {count})"
+	);
+}
+
+/// With manual grouping and no explicit seek, audio fragments accumulate into a single group
+/// instead of one per fragment. This is what lets an origin align audio to a segment cadence.
+#[tokio::test]
+async fn fmp4_manual_grouping_accumulates_audio() {
+	let count = fmp4_audio_group_count(true).await;
+	assert_eq!(
+		count, 1,
+		"manual grouping should accumulate audio fragments into one group (got {count})"
+	);
+}

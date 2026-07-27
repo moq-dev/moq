@@ -58,6 +58,10 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// Bytes carried across calls: a partial atom at the tail of one `decode` waits
 	// here for the rest to arrive on the next call.
 	buffer: BytesMut,
+
+	// When set, audio fragments accumulate into the caller's current group instead of opening a
+	// group per fragment; the caller bounds groups via seek. Video still groups on its keyframes.
+	manual_grouping: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -118,7 +122,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			moof_size: 0,
 			broadcast,
 			buffer: BytesMut::new(),
+			manual_grouping: false,
 		}
+	}
+
+	/// Enable caller-driven grouping: audio fragments accumulate into the current group instead of
+	/// opening one per fragment (the caller bounds groups via [`seek`](Self::seek)). Video is
+	/// unaffected (it groups on its own keyframes). Default false (one group per fragment).
+	pub fn set_manual_grouping(&mut self, enabled: bool) {
+		self.manual_grouping = enabled;
 	}
 
 	/// Restrict which track roles are published.
@@ -530,6 +542,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
 		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
+		let manual_grouping = self.manual_grouping;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
 
@@ -752,7 +765,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let fragment_bytes = Bytes::from(moof_buf);
 
 			// Write the per-track fragment as a single MoQ frame (passthrough).
-			let mut g = if contains_keyframe {
+			//
+			// Default: a keyframe fragment opens a new group. With manual grouping the group opens only
+			// at an explicit caller boundary (`pending_sequence` from a seek), a video keyframe, or when
+			// none is open yet. Audio samples are all flagged keyframes (for the consumer's
+			// independent-decode path), so that must NOT open a group per audio fragment: audio frames
+			// belong to the segment's group, which the caller opens at its own cadence.
+			let start_group = if manual_grouping {
+				track.pending_sequence.is_some()
+					|| track.group.is_none()
+					|| (contains_keyframe && matches!(track.kind, TrackKind::Video))
+			} else {
+				contains_keyframe
+			};
+			let mut g = if start_group {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 				}

@@ -157,6 +157,10 @@ enum TrackKind<E: CatalogExt = ()> {
 /// `seek` rather than going through this facade.
 pub struct Track<E: CatalogExt = ()> {
 	kind: TrackKind<E>,
+	/// When set, decode() stops cutting a group after each audio frame, so frames accumulate into
+	/// the current group and the caller bounds groups via cut()/seek(). Lets an origin drive its own
+	/// audio grouping through this facade. Default false (one group per audio frame).
+	manual_grouping: bool,
 }
 
 impl<E: CatalogExt> Track<E> {
@@ -229,11 +233,15 @@ impl<E: CatalogExt> Track<E> {
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
 
-		Ok(Self { kind })
+		Ok(Self {
+			kind,
+			manual_grouping: false,
+		})
 	}
 
 	/// Decode one whole frame.
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> Result<()> {
+		let manual_grouping = self.manual_grouping;
 		match self.kind {
 			TrackKind::Avc3 {
 				ref mut split,
@@ -283,19 +291,27 @@ impl<E: CatalogExt> Track<E> {
 			// waiting. A caller wanting multi-frame audio groups drives a codec importer directly.
 			TrackKind::Aac(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				if !manual_grouping {
+					import.cut(None)?;
+				}
 			}
 			TrackKind::Opus(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				if !manual_grouping {
+					import.cut(None)?;
+				}
 			}
 			TrackKind::Mp3(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				if !manual_grouping {
+					import.cut(None)?;
+				}
 			}
 			TrackKind::Flac(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				if !manual_grouping {
+					import.cut(None)?;
+				}
 			}
 		}
 
@@ -335,6 +351,14 @@ impl<E: CatalogExt> Track<E> {
 			TrackKind::Mp3(import) => import.abort(err),
 			TrackKind::Flac(import) => import.abort(err),
 		}
+	}
+
+	/// Opt out of the per-frame audio grouping this facade does by default. When enabled, decode()
+	/// stops cutting a group after each audio frame; frames accumulate into the current group and the
+	/// caller bounds groups explicitly via [`cut`](Self::cut) / [`seek`](Self::seek) (a segment
+	/// cadence). No effect on video, which groups by its own keyframes. Default false.
+	pub fn set_manual_grouping(&mut self, enabled: bool) {
+		self.manual_grouping = enabled;
 	}
 
 	/// Cut the current group at `end` without finishing the track.
@@ -419,6 +443,7 @@ impl<E: CatalogExt> From<crate::codec::opus::Import<E>> for Track<E> {
 	fn from(opus: crate::codec::opus::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Opus(opus),
+			manual_grouping: false,
 		}
 	}
 }
@@ -427,6 +452,7 @@ impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
 	fn from(aac: crate::codec::aac::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Aac(aac),
+			manual_grouping: false,
 		}
 	}
 }
@@ -438,6 +464,7 @@ impl<E: CatalogExt> From<crate::codec::mp3::Import<E>> for Track<E> {
 	fn from(mp3: crate::codec::mp3::Import<E>) -> Self {
 		Self {
 			kind: TrackKind::Mp3(mp3),
+			manual_grouping: false,
 		}
 	}
 }
@@ -830,6 +857,28 @@ mod tests {
 		import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![1, 1, 1]);
+	}
+
+	/// With manual grouping the facade stops cutting per frame, so audio accumulates into a single
+	/// group until the caller cuts or seeks. This is how an origin drives aligned audio groups
+	/// (a segment cadence) through the facade instead of one group per packet.
+	#[tokio::test(start_paused = true)]
+	async fn manual_grouping_accumulates_audio() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+		import.set_manual_grouping(true);
+
+		import.decode(b"a", Some(Timestamp::from_micros(0).unwrap())).unwrap();
+		import
+			.decode(b"b", Some(Timestamp::from_micros(10_000).unwrap()))
+			.unwrap();
+		import
+			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
+			.unwrap();
+		import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![3]);
 	}
 
 	/// Driven directly (not through the facade), the codec importer accumulates audio frames into the

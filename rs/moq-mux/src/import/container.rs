@@ -70,6 +70,12 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 			ContainerImpl::Flv(decoder) => decoder.seek(sequence),
 		}
 	}
+
+	fn set_manual_grouping(&mut self, enabled: bool) {
+		if let ContainerImpl::Fmp4(decoder) = self {
+			decoder.set_manual_grouping(enabled);
+		}
+	}
 }
 
 /// A container importer for whole chunks.
@@ -118,6 +124,13 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
+	}
+
+	/// Enable caller-driven grouping (fMP4): audio fragments accumulate into the current group
+	/// instead of opening one per fragment; the caller bounds groups via [`seek`](Self::seek).
+	/// No-op for other container formats.
+	pub fn set_manual_grouping(&mut self, enabled: bool) {
+		self.inner.set_manual_grouping(enabled)
 	}
 }
 
@@ -169,5 +182,12 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
+	}
+
+	/// Enable caller-driven grouping (fMP4): audio fragments accumulate into the current group
+	/// instead of opening one per fragment; the caller bounds groups via [`seek`](Self::seek).
+	/// No-op for other container formats.
+	pub fn set_manual_grouping(&mut self, enabled: bool) {
+		self.inner.set_manual_grouping(enabled)
 	}
 }
