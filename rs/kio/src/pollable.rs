@@ -81,7 +81,7 @@ impl<P: Pollable> Future for Pending<P> {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
 	use crate::Producer;

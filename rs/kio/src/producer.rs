@@ -1,6 +1,6 @@
 use std::{
 	ops::{Deref, DerefMut},
-	sync::{Arc, atomic::Ordering},
+	sync::atomic::Ordering,
 	task::Poll,
 };
 
@@ -8,6 +8,7 @@ use crate::{
 	Closed, Counts, State,
 	consumer::Consumer,
 	lock::*,
+	sync::Arc,
 	waiter::*,
 	weak::{ProducerWeak, Weak},
 };
@@ -415,7 +416,7 @@ impl<T> Deref for Ref<'_, T> {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
 

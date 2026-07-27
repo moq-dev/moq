@@ -102,6 +102,20 @@ fix:
 test *args:
     cargo test --all-targets {{ args }}
 
+# Permutation-test the concurrent handoffs with loom.
+#
+# `--cfg loom` swaps kio's Arc/Mutex/atomics for loom's instrumented ones, so it
+# rebuilds the world and can't share artifacts with a normal `cargo test`. It's
+# kept out of `check`/`ci` for that reason plus the runtime: even bounded, the
+# search is minutes, not seconds. Run it after touching kio's refcount/waiter
+# plumbing or moq-net's model layer.
+#
+# kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
+# outside `loom::model`, which panics.
+loom *args:
+    RUSTFLAGS="--cfg loom" cargo test -p kio --lib loom:: {{ args }}
+    RUSTFLAGS="--cfg loom" cargo test -p moq-net --test loom {{ args }}
+
 build:
     cargo build
 

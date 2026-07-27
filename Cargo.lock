@@ -3859,6 +3859,7 @@ dependencies = [
 name = "kio"
 version = "0.5.1"
 dependencies = [
+ "loom",
  "smallvec",
  "tokio",
  "web-async",
@@ -4043,6 +4044,7 @@ checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
 dependencies = [
  "cfg-if",
  "generator",
+ "pin-utils",
  "scoped-tls",
  "tracing",
  "tracing-subscriber",
@@ -4466,6 +4468,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "kio",
+ "loom",
  "num_enum",
  "rand 0.10.2",
  "serde",

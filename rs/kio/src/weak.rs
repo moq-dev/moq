@@ -1,13 +1,11 @@
-use std::{
-	sync::{Arc, atomic::Ordering},
-	task::Poll,
-};
+use std::{sync::atomic::Ordering, task::Poll};
 
 use crate::{
 	Closed, Counts, State,
 	consumer::Consumer,
 	lock::*,
 	producer::{Producer, Ref},
+	sync::Arc,
 	waiter::*,
 };
 
@@ -313,7 +311,7 @@ impl<T> Clone for ConsumerWeak<T> {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
 

@@ -36,7 +36,7 @@ impl Sleep {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 #[allow(deprecated)]
 mod tests {
 	use super::*;
