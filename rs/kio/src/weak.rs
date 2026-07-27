@@ -91,16 +91,15 @@ pub struct ProducerWeak<T> {
 impl<T> ProducerWeak<T> {
 	/// Upgrade to a [`Producer`], returning `None` if the channel is already closed.
 	pub fn produce(&self) -> Option<Producer<T>> {
-		// Increment first to prevent the last Producer::drop from
-		// closing the state between our check and the return.
-		self.counts.producers.fetch_add(1, Ordering::Relaxed);
-
 		{
+			// Registering under the same lock that guards `closed` is what makes the
+			// returned producer keep the channel open: a concurrent last-producer drop
+			// either closes first (and we bail) or sees our count and doesn't close.
 			let state = self.state.lock();
 			if state.closed {
-				self.counts.producers.fetch_sub(1, Ordering::Relaxed);
 				return None;
 			}
+			self.counts.producers.fetch_add(1, Ordering::Relaxed);
 		}
 
 		Some(Producer {
@@ -393,6 +392,44 @@ mod test {
 
 		drop(consumer);
 		assert!(weak.upgrade().is_none());
+	}
+
+	/// An upgrade racing the last producer's drop either loses (no handle) or wins
+	/// (a handle that is genuinely open). It must never hand back a producer for a
+	/// channel that the drop is about to close.
+	///
+	/// A smoke test, not a reproducer: the window is a few instructions wide and this
+	/// doesn't trip on the unsynchronized ordering even with the barrier. What rules
+	/// the interleaving out is doing the count transition under the state lock.
+	#[test]
+	fn upgrade_never_wins_a_closing_channel() {
+		for _ in 0..2_000 {
+			let producer = Producer::new(0u32);
+			let weak = producer.downgrade();
+			// Keeps the state allocated so the upgrade is about the channel, not the
+			// allocation.
+			let consumer = producer.consume();
+
+			// Line both threads up on the drop/upgrade window.
+			let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+			let dropper = {
+				let gate = gate.clone();
+				std::thread::spawn(move || {
+					gate.wait();
+					drop(producer);
+				})
+			};
+
+			gate.wait();
+			if let Some(upgraded) = weak.upgrade() {
+				assert!(
+					upgraded.write().is_ok(),
+					"an upgrade must not resolve a closing channel"
+				);
+			}
+			dropper.join().expect("dropper panicked");
+			drop(consumer);
+		}
 	}
 
 	/// An upgrade counts as a producer for as long as it lives, so the channel can't

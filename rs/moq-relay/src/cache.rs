@@ -29,8 +29,8 @@ pub struct CacheConfig {
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
 	/// Unbounded when unset.
 	///
-	/// A target usage converges toward as tracks write, not a hard limit, and it
-	/// counts payload bytes, not process RSS; leave some slack below physical
+	/// A target that usage converges toward as tracks write, not a hard limit, and
+	/// it counts payload bytes, not process RSS; leave some slack below physical
 	/// memory or combine with `headroom`.
 	#[arg(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
 	pub capacity: Option<String>,
@@ -138,7 +138,7 @@ fn total_memory() -> u64 {
 
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
 /// stay available: the cache grows into idle memory and shrinks (tracks evict
-/// their oldest groups as they write) when the rest of the system needs it.
+/// their stalest groups as they write) when the rest of the system needs it.
 async fn governor(pool: cache::Pool, capacity: Option<u64>, headroom: u64) {
 	let mut sys = sysinfo::System::new();
 	let mut interval = tokio::time::interval(GOVERNOR_INTERVAL);

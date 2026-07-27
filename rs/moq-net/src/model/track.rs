@@ -54,7 +54,11 @@ const EVICT_SCAN: usize = 4;
 /// while the track is alive. A subscriber learns them via
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
-#[derive(Clone, Copy, Debug)]
+//
+// Deliberately not `Copy`, even though it's now a plain value: adding `Copy` turns
+// every existing `info.clone()` in a consumer's code into a `clippy::clone_on_copy`
+// error under `-D warnings`.
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -257,7 +261,7 @@ struct FetchOutcome {
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
-			Poll::Ready(Ok(*info))
+			Poll::Ready(Ok(info.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -830,7 +834,7 @@ impl TrackState {
 		if self.info.is_none() {
 			self.install(info.unwrap_or_default());
 		}
-		let info = self.info.unwrap();
+		let info = self.info.clone().unwrap();
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence)?;
@@ -923,7 +927,7 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		let track = state.info.unwrap();
+		let track = state.info.clone().unwrap();
 		let latency_max = track.latency_max;
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
@@ -948,7 +952,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 
-		let track = state.info.unwrap();
+		let track = state.info.clone().unwrap();
 		let latency_max = track.latency_max;
 
 		let group =
@@ -1177,7 +1181,7 @@ impl Producer {
 		// requiring a live producer state. If the track already ended, the returned
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
-		let info = *self.state.read().info.as_ref().expect("producer always has info");
+		let info = self.state.read().info.clone().expect("producer always has info");
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -2963,8 +2967,9 @@ mod test {
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
 
-		// Groups 0, 1, 2 are expired but seq 3 (max_sequence) is kept.
-		// Leading tombstones are trimmed, so only seq 3 remains.
+		// Groups 0, 1, 2 are expired but seq 3 (the live edge) is kept. Their arrival
+		// entries no longer resolve, so the leading ones are trimmed and the offset
+		// advances past them.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
@@ -3330,10 +3335,10 @@ mod test {
 		// Seq 2 arrives late, triggering eviction.
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 
-		// Seq 5 is still max_sequence (protected, at front, blocks trim).
-		// Seq 3 is expired → tombstoned.
-		// Seq 2 is fresh → kept.
-		// VecDeque: [Some(5), None, Some(2)]. Leading entry is Some, so offset stays.
+		// Seq 5 is the live edge (protected) and still resolves at the front of
+		// `arrival`, so nothing is trimmed and the offset stays. Seq 3 expired out of
+		// `lookup`, leaving a hole its arrival entry no longer resolves; seq 2 is
+		// fresh and kept.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
@@ -3346,7 +3351,7 @@ mod test {
 		// Consumer should still be able to read through the hole.
 		let mut consumer = producer.subscribe(None);
 		let group = consumer.assert_group();
-		// consume() starts at index 0, first non-tombstoned group is seq 5.
+		// consume() starts at index 0; the first arrival entry that still resolves is seq 5.
 		assert_eq!(group.sequence, 5);
 	}
 
@@ -4489,7 +4494,7 @@ mod test {
 	async fn each_track_owns_its_account() {
 		let broadcast = Arc::new(broadcast::Info::default());
 		let info = Info::default();
-		let a = Producer::new(broadcast.clone(), "a", info);
+		let a = Producer::new(broadcast.clone(), "a", info.clone());
 		let b = Producer::new(broadcast, "b", info);
 
 		let a = a.state.read().cache.clone();

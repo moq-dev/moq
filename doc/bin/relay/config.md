@@ -402,16 +402,17 @@ environment variable (`MOQ_STATS_ENABLED`, `MOQ_STATS_PREFIX`,
 Memory budget for cached groups. Old (non-latest) groups stay cached until their
 track's retention window expires, the `duration` ceiling is reached, or the pool
 runs out of room, whichever comes first. Under memory pressure each track evicts
-its own oldest groups as it writes, proportional to how much it writes, so usage
-converges on the budget without any global scan; groups that FETCH requests keep
-hitting are retained over ones nobody reads. The latest group of every track is
+its own stalest groups as it writes, ordered by when each was last written or
+served from cache, and proportional to how much it writes, so usage converges on
+the budget without any global scan; groups that FETCH requests keep hitting are
+retained over ones nobody reads. The latest group of every track is
 always retained. With none of the knobs set the cache is unbounded and only each
 track's own window limits memory.
 
 ```toml
 [cache]
-# Target bytes of cached group payload, converged toward as tracks write (not
-# a hard limit). Accepts absolute sizes ("8GiB", "512MB") or a percentage of
+# Target bytes of cached group payload, which usage converges toward as tracks
+# write (not a hard limit). Accepts absolute sizes ("8GiB", "512MB") or a percentage of
 # memory ("75%", respecting the cgroup limit inside containers). Unbounded
 # when unset.
 capacity = "8GiB"
@@ -420,7 +421,7 @@ capacity = "8GiB"
 # background governor that re-sizes the cache every few seconds: it grows into
 # idle memory and shrinks (evicting as tracks write) when the rest of the system
 # needs it, so the cache is effectively the lowest-priority user of RAM. Combine
-# with `capacity` to also cap the absolute size.
+# with `capacity` to also bound the target from above.
 headroom = "2GiB"
 
 # Maximum time a non-latest cached group is retained since it was last written

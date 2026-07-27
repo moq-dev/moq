@@ -296,21 +296,22 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		// Atomically decrement and check if we were the last producer
-		let prev = self.counts.producers.fetch_sub(1, Ordering::AcqRel);
-		if prev > 1 {
-			return;
-		}
-
-		// We were the last producer, need to close. Every waiter reacts to
-		// closure (value/closed resolve, `used`/`unused` resolve to `None`),
-		// so wake all the lists.
 		let mut waiters = {
+			// The count moves under the state lock, in step with the closed flag it
+			// decides. Decrementing outside it would let `ProducerWeak::produce` slip
+			// between the decrement and the close, handing back a producer for a
+			// channel that is about to close.
 			let mut state = self.state.lock();
+			if self.counts.producers.fetch_sub(1, Ordering::AcqRel) > 1 {
+				return;
+			}
 			if state.closed {
 				return;
 			}
 
+			// We were the last producer, so close. Every waiter reacts to closure
+			// (value/closed resolve, `used`/`unused` resolve to `None`), so drain
+			// every list and wake them once the lock is released.
 			state.closed = true;
 			state.take_close_waiters()
 		};

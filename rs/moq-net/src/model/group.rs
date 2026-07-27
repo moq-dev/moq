@@ -489,7 +489,7 @@ impl Producer {
 		Consumer {
 			info: self.info,
 			state: self.state.consume(),
-			track: self.track,
+			track: self.track.clone(),
 			index: 0,
 			prefetch: Prefetch::default(),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
@@ -524,7 +524,7 @@ impl Clone for Producer {
 		Self {
 			info: self.info,
 			state: self.state.clone(),
-			track: self.track,
+			track: self.track.clone(),
 			cache: self.cache.clone(),
 			stats: self.stats.clone(),
 			alive: self.alive.clone(),
@@ -633,7 +633,7 @@ impl Clone for Consumer {
 		Self {
 			state: self.state.clone(),
 			info: self.info,
-			track: self.track,
+			track: self.track.clone(),
 			index: self.index,
 			prefetch: Prefetch::default(),
 			// Inherit the meter without re-counting the group: the original already
