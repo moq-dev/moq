@@ -10,6 +10,8 @@
 
 use std::{pin::Pin, task::Poll};
 
+/// Re-exported from `web-async`, so a major bump of that crate is a breaking change
+/// for these types.
 pub use web_async::time::{Duration, Instant};
 
 use crate::Waiter;
@@ -51,8 +53,14 @@ impl Deadline {
 	}
 
 	/// A deadline armed for `duration` from now.
+	///
+	/// A duration the clock cannot represent (e.g. [`Duration::MAX`]) leaves the deadline
+	/// disarmed, so it never fires rather than panicking on the overflow.
 	pub fn after(duration: Duration) -> Self {
-		Self::at(Instant::now() + duration)
+		Self {
+			at: Instant::now().checked_add(duration),
+			sleep: None,
+		}
 	}
 
 	/// Arm, re-arm, or disarm (`None`) the deadline.
@@ -134,6 +142,13 @@ mod tests {
 
 		deadline.wait().await;
 		assert!(Instant::now() >= at, "returned before the deadline");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_unrepresentable_duration_disarms_instead_of_panicking() {
+		let mut deadline = Deadline::after(Duration::MAX);
+		assert_eq!(deadline.deadline(), None);
+		assert!(poll_once(&mut deadline).is_pending());
 	}
 
 	#[tokio::test(start_paused = true)]
