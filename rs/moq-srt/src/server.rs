@@ -509,13 +509,18 @@ mod tests {
 		);
 	}
 
+	/// Regression: srt-tokio's 32-packet default sender buffer evicts unsent packets
+	/// once a burst overflows it, wedging the connection within the first few messages
+	/// (see [`configure_buffers`]).
 	#[tokio::test]
 	async fn accepted_socket_sends_a_burst_larger_than_srt_tokio_default() {
 		let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let addr: SocketAddr = probe.local_addr().unwrap();
 		drop(probe);
 
-		let mut server = Server::bind(addr, None).await.unwrap();
+		// TSBPD holds every payload for the negotiated latency before releasing it, so
+		// ask for a short one: this asserts buffering, not delay.
+		let mut server = Server::bind(addr, Duration::from_millis(50)).await.unwrap();
 		let caller = tokio::spawn(async move {
 			SrtSocket::builder()
 				.call(addr, Some("#!::r=buffer-test,m=request"))
@@ -530,7 +535,12 @@ mod tests {
 		let mut sender = subscribe.0.request.accept(None).await.unwrap();
 		let mut receiver = caller.await.unwrap();
 
-		const MESSAGES: usize = 1024;
+		// Several times srt-tokio's 32-packet default, which stalls before the tenth
+		// message. Keep it well under the ~1000 packets the sender paces out per second
+		// while its send buffer ages: past that, SRT drops the tail of the burst as too
+		// late and (silently, in srt-tokio) never retransmits it, which is a property of
+		// the burst size rather than of the buffer under test.
+		const MESSAGES: usize = 128;
 		for sequence in 0..MESSAGES {
 			sender
 				.send((Instant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
