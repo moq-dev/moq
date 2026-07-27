@@ -967,6 +967,8 @@ mod tests {
 			peer_setup: Default::default(),
 			cost: None,
 			tasks,
+			going_away: Default::default(),
+			goaway_received: kio::Producer::new(None).consume(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {

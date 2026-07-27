@@ -66,11 +66,10 @@ pub struct Config {
 	#[arg(
 		id = "drain",
 		long = "drain",
-		alias = "drain-timeout",
 		env = "MOQ_DRAIN",
 		value_parser = humantime::parse_duration,
 	)]
-	#[serde(default, with = "humantime_serde", alias = "drain_timeout")]
+	#[serde(default, with = "humantime_serde")]
 	pub drain: Option<Duration>,
 
 	/// If provided, load the configuration from this file.
@@ -128,6 +127,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::sync::Mutex;
+
 	use crate::test_env::EnvGuard;
 
 	/// Regression test for the clap+TOML interaction documented on
