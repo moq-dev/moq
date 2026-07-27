@@ -1,3 +1,4 @@
+import * as Util from "@moq/hang/util";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import {
@@ -147,6 +148,11 @@ export class File {
 		}
 
 		const [video, audio] = await Promise.all([input.getPrimaryVideoTrack(), input.getPrimaryAudioTrack()]);
+
+		// Install the WebCodecs polyfill before probing: canDecode() reports false when AudioDecoder
+		// is missing rather than throwing, so probing first would drop the audio track on an engine
+		// the polyfill could have covered. A no-op wherever WebCodecs is native.
+		if (audio) await Util.Libav.polyfill();
 
 		// A codec this browser can't decode drops just its own track: the other one is usually still
 		// publishable, and a video-only publish beats failing outright.

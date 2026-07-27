@@ -8,7 +8,7 @@ const micro = (value: number): Time.Micro => value as Time.Micro;
 // A chunk of `samples` frames of a sine at `freq` Hz, starting at input sample `offset`.
 function tone(samples: number, rate: number, freq: number, offset: number, channels = 1): AudioFrame {
 	return {
-		timestamp: micro(Math.round(((offset / rate) * 1_000_000) / 1)),
+		timestamp: micro(Math.round((offset / rate) * 1_000_000)),
 		channels: Array.from({ length: channels }, () =>
 			Float32Array.from({ length: samples }, (_, i) => Math.sin((2 * Math.PI * freq * (offset + i)) / rate)),
 		),
