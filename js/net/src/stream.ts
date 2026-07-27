@@ -65,6 +65,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
+	#closed?: Promise<void>;
 	version?: IetfVersion;
 
 	// Either stream or buffer MUST be provided.
@@ -265,8 +266,13 @@ export class Reader {
 		this.#reader?.cancel(reason).catch(() => void 0);
 	}
 
+	// Decoded like #fill: a caller racing this against a read must not get a different error
+	// shape depending on which one won. Derived once, so racing it per frame doesn't allocate.
 	get closed(): Promise<void> {
-		return this.#reader?.closed ?? Promise.resolve();
+		this.#closed ??= (this.#reader?.closed ?? Promise.resolve()).catch((err: unknown) => {
+			throw fromTransport(err);
+		});
+		return this.#closed;
 	}
 }
 
@@ -274,6 +280,7 @@ export class Reader {
 export class Writer {
 	#writer: WritableStreamDefaultWriter<Uint8Array>;
 	#stream: WritableStream<Uint8Array>;
+	#closed?: Promise<void>;
 
 	// Scratch buffer for writing varints.
 	// Fixed at 9 bytes (leading-ones max).
@@ -351,8 +358,13 @@ export class Writer {
 		this.#writer.close().catch(() => void 0);
 	}
 
+	// Mirrors Reader.closed: a STOP_SENDING reaches a caller racing this with the same
+	// typed code it would get from a write.
 	get closed(): Promise<void> {
-		return this.#writer.closed;
+		this.#closed ??= this.#writer.closed.catch((err: unknown) => {
+			throw fromTransport(err);
+		});
+		return this.#closed;
 	}
 
 	reset(reason: unknown) {
