@@ -27,7 +27,8 @@
 	"dependencies": {
 		"@moq/hang": "workspace:^",
 		"@moq/net": "workspace:^",
-		"@moq/signals": "workspace:^"
+		"@moq/signals": "workspace:^",
+		"mediabunny": "^1.51.0"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",

@@ -37,9 +37,13 @@ export class Renderer {
 	// Whether we've already warned about `encoded` mode without an encoder, so it fires at most once.
 	#warnedNoEncoder = false;
 
-	// The frame to draw. Just a pointer to a frame owned elsewhere (the capture pipeline or the
-	// transcoder), so we never close it ourselves.
-	#frame = new Signal<VideoFrame | undefined>(undefined);
+	// Where to read the frame from: the capture pipeline, or the transcoder in `encoded` mode.
+	//
+	// This holds the signal rather than the frame itself so #runRender always reads the *current*
+	// frame. Copying the frame across would leave us holding one its owner has already closed,
+	// since a signal write reaches us a microtask after the owner moved on. Capture only closes a
+	// frame when replacing it, so whatever is current is always safe to draw.
+	#source = new Signal<Getter<VideoFrame | undefined> | undefined>(undefined);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
@@ -68,7 +72,7 @@ export class Renderer {
 	#runSelect(effect: Effect): void {
 		const mode = effect.get(this.in.mode);
 		if (mode === "none" || !effect.get(this.in.enabled)) {
-			effect.set(this.#frame, undefined);
+			effect.set(this.#source, undefined);
 			return;
 		}
 
@@ -81,7 +85,7 @@ export class Renderer {
 					settings: encoder.config,
 				});
 				effect.cleanup(() => transcode.close());
-				effect.proxy(this.#frame, transcode.out.frame);
+				effect.set(this.#source, transcode.out.frame, undefined);
 				return;
 			}
 
@@ -92,14 +96,15 @@ export class Renderer {
 			}
 		}
 
-		effect.proxy(this.#frame, this.in.frame);
+		effect.set(this.#source, this.in.frame, undefined);
 	}
 
 	#runRender(effect: Effect): void {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const frame = effect.get(this.#frame);
+		const source = effect.get(this.#source);
+		const frame = source ? effect.get(source) : undefined;
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
 

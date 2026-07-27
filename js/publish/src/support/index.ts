@@ -107,7 +107,6 @@ export async function isSupported(): Promise<Full> {
 			capture:
 				// Chrome has MediaStreamTrackProcessor on the window; Safari and Firefox only in a
 				// worker, which we hop through. Either way it's the native pipeline, so full points.
-				// @ts-expect-error No typescript types yet.
 				typeof MediaStreamTrackProcessor !== "undefined" || (await workerSupported())
 					? "full"
 					: // The fallback drives a <video> element via requestVideoFrameCallback, which is

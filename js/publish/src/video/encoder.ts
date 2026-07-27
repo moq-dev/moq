@@ -6,7 +6,7 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type { Capture } from "./capture";
-import type { Source } from "./types";
+import { isStreamTrack, type Source } from "./types";
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -266,13 +266,11 @@ export class Encoder {
 		const dimensions = effect.get(this.#dimensions);
 		if (!dimensions) return;
 
-		const settings = source.getSettings();
-
 		// Get the user provided config.
 		const user = effect.get(this.config) ?? {};
 
 		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
-		const framerate = user.frameRate ?? settings.frameRate ?? 30;
+		const framerate = user.frameRate ?? sourceFrameRate(source) ?? 30;
 
 		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
 		const bitrateScale = user.bitrateScale ?? 0.07;
@@ -512,7 +510,16 @@ export class Encoder {
 	}
 }
 
+// The source's nominal frame rate: what the capture device settled on, or what a frame stream
+// declared. Undefined when nothing reports one.
+function sourceFrameRate(source: Source): number | undefined {
+	return isStreamTrack(source) ? source.getSettings().frameRate : source.frameRate;
+}
+
 function sourceConstraintPixels(source: Source): number | undefined {
+	// Only a capture track has constraints; a frame stream is whatever size it produces.
+	if (!isStreamTrack(source)) return undefined;
+
 	const constraints = source.getConstraints();
 	const width = constraintMax(constraints.width);
 	const height = constraintMax(constraints.height);

@@ -1,6 +1,6 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { TrackProcessor } from "./processor";
-import type { Source } from "./types";
+import { isStreamTrack, type Source } from "./types";
 
 // The raw capture source to pump frames from.
 export type CaptureInput = {
@@ -43,9 +43,11 @@ export class Capture {
 		const source = effect.get(this.in.source);
 		if (!source) return;
 
-		// NOTE: We modify the stock MediaStreamTrackProcessor so timestamps use our wall clock time.
-		// This is so even when the source is changed or encoder reloaded, the timestamps will be consistent.
-		const reader = TrackProcessor(source).getReader();
+		// A capture track goes through MediaStreamTrackProcessor, which rewrites timestamps onto our
+		// wall clock so they stay consistent when the source changes or the encoder reloads. A
+		// FrameSource already stamps against that clock, so take its frames as they are.
+		const stream = isStreamTrack(source) ? TrackProcessor(source) : source.frames;
+		const reader = stream.getReader();
 		effect.cleanup(() => reader.cancel());
 
 		effect.spawn(async () => {

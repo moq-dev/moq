@@ -270,6 +270,14 @@ export default class MoqPublish extends HTMLElement {
 				return;
 			}
 
+			// srcObject only takes a MediaStream, so a source that hands us frames directly (a
+			// decoded file, an image) has nothing to show here. A <canvas> renders those.
+			if (!Video.isStreamTrack(source)) {
+				preview.style.display = "none";
+				console.warn("moq-publish: this source needs a <canvas> preview; a <video> can't show it.");
+				return;
+			}
+
 			preview.srcObject = new MediaStream([source]);
 			preview.style.display = "block";
 
