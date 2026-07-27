@@ -28,6 +28,17 @@ const RETRY_MAX: Duration = Duration::from_secs(4);
 const UNDERRUN_LIMIT: u32 = 20;
 const UNDERRUN_WINDOW: Duration = Duration::from_secs(5);
 
+/// Sink updates the mixer's command queue holds. Preallocated, since draining it
+/// happens on the audio thread. Deep enough that only a burst of registrations
+/// between two device periods can fill it, and [`Driver::sync`] covers that.
+const COMMAND_QUEUE: usize = 2 * mixer::MAX_SINKS;
+
+/// How hard the driver tries to push a sink update the mixer's command queue was
+/// too full to take. It drains every callback, so a couple of device periods is
+/// already generous.
+const SYNC_ATTEMPTS: u32 = 8;
+const SYNC_DELAY: Duration = Duration::from_millis(4);
+
 /// Frames the sample-format conversion buffer holds. Comfortably more than any
 /// host's period, so the loop over it almost always runs once.
 const SCRATCH_FRAMES: usize = 2048;
@@ -54,6 +65,9 @@ struct State {
 	/// Every live sink, so a rebuild can re-create their channels at the new
 	/// device rate.
 	sinks: Vec<Registration>,
+	/// Sinks the mixer has not been told to drop yet, because its command queue
+	/// was full. Retried by [`Shared::sync`].
+	detaching: Vec<u64>,
 	next_id: u64,
 }
 
@@ -69,6 +83,16 @@ impl Shared {
 		F: FnOnce(u64, u32) -> Result<(Sink, Registration), Error>,
 	{
 		let mut state = self.state.lock().unwrap();
+
+		// The mixer sizes its entry list once so it never allocates on the audio
+		// thread, so the limit has to be refused here, loudly, rather than
+		// discovered there as a sink that plays nothing.
+		if state.sinks.len() >= mixer::MAX_SINKS {
+			return Err(Error::Unsupported(format!(
+				"at most {} playback sinks per device",
+				mixer::MAX_SINKS
+			)));
+		}
 
 		// 48 kHz stands in until a device opens and the channel is rebuilt at
 		// the real rate.
@@ -88,9 +112,38 @@ impl Shared {
 	pub(super) fn remove(&self, id: u64) {
 		let mut state = self.state.lock().unwrap();
 		state.sinks.retain(|s| s.id != id);
-		if let Some(mixer) = &state.mixer {
-			let _ = mixer.try_send(mixer::Command::Remove { id });
+
+		let Some(mixer) = &state.mixer else { return };
+		if mixer.try_send(mixer::Command::Remove { id }).is_err() {
+			// Queue full. Remember it: dropping it here would leave the mixer
+			// reading a sink nobody owns for the life of the stream.
+			state.detaching.push(id);
 		}
+	}
+
+	/// Re-send whatever the mixer's command queue was too full to take.
+	///
+	/// Returns whether everything is now through. The driver calls this after a
+	/// sink is added or dropped, so a full queue costs a retry rather than a
+	/// sink that is silent (or one that never stops) until the next device
+	/// restart.
+	pub(super) fn sync(&self) -> bool {
+		let mut state = self.state.lock().unwrap();
+		let Some(mixer) = state.mixer.clone() else {
+			// No stream to talk to. Registrations stay pending and `rebind`
+			// picks them up when one opens.
+			state.detaching.clear();
+			return true;
+		};
+
+		state
+			.detaching
+			.retain(|id| mixer.try_send(mixer::Command::Remove { id: *id }).is_err());
+		for sink in &mut state.sinks {
+			sink.attach(&mixer);
+		}
+
+		state.detaching.is_empty() && state.sinks.iter().all(|s| s.attached())
 	}
 
 	/// Point every sink at a freshly opened stream: rebuild each channel at
@@ -103,6 +156,8 @@ impl Shared {
 		}
 		state.rate = rate;
 		state.mixer = Some(mixer);
+		// The old mixer is gone, and with it every sink it was told about.
+		state.detaching.clear();
 	}
 
 	/// Forget the running stream, so sinks registered while the device is down
@@ -121,7 +176,14 @@ pub(super) enum Command {
 	},
 	/// The audio thread reported a problem. Sent from cpal's error callback,
 	/// which is why the driver wakes on it instead of polling.
-	Failed(cpal::Error),
+	///
+	/// `generation` is the stream that raised it. A stream that has already been
+	/// replaced can still have an error sitting in this queue, and acting on it
+	/// would tear down the healthy stream that replaced it.
+	Failed { generation: u64, error: cpal::Error },
+	/// A sink was added or dropped. Drops whatever the mixer retired and retries
+	/// anything its command queue was too full to take.
+	Sync,
 	/// The last [`Engine`](super::Engine) and [`Sink`] are gone.
 	///
 	/// An explicit message rather than watching the channel disconnect: every
@@ -148,6 +210,8 @@ pub(super) fn run(
 		failures,
 		device,
 		stream: None,
+		retired: None,
+		generation: 0,
 		retry: RETRY_MIN,
 		underruns: 0,
 		window: Instant::now(),
@@ -180,12 +244,13 @@ pub(super) fn run(
 				retry_at = result.is_err().then(|| driver.schedule());
 				let _ = reply.send(result);
 			}
-			Ok(Command::Failed(err)) => {
-				if driver.fatal(&err) {
+			Ok(Command::Failed { generation, error }) => {
+				if driver.should_restart(generation, &error) {
 					driver.stop();
 					retry_at = driver.start().err().map(|_| driver.schedule());
 				}
 			}
+			Ok(Command::Sync) => driver.sync(),
 			Ok(Command::Shutdown) => break,
 			Err(Timeout::Elapsed) => {
 				retry_at = match driver.start() {
@@ -216,6 +281,12 @@ struct Driver {
 	device: Option<String>,
 	/// The live stream. Dropping it stops the audio thread.
 	stream: Option<cpal::Stream>,
+	/// Sinks the mixer has finished with, dropped here so the audio thread never
+	/// has to free one.
+	retired: Option<Receiver<mixer::Entry>>,
+	/// Bumped on every stream, so an error from a retired one can be told apart
+	/// from one the live stream raised.
+	generation: u64,
 	retry: Duration,
 	underruns: u32,
 	window: Instant,
@@ -249,9 +320,13 @@ impl Driver {
 		// Build with an empty mixer, then hand it the sinks: the callback drains
 		// its command channel on every pass, so registration does not race the
 		// build.
-		let (tx, rx) = sync_channel(64);
-		let mixer = Mixer::new(rx, rate, channels);
+		let (tx, rx) = sync_channel(COMMAND_QUEUE);
+		// One slot per sink the mixer can hold, so a burst of removals has
+		// somewhere to go even if this thread is slow to drain them.
+		let (retired_tx, retired_rx) = sync_channel(mixer::MAX_SINKS);
+		let mixer = Mixer::new(rx, retired_tx, rate, channels);
 
+		self.generation += 1;
 		let stream = self.build(&device, config, format, mixer)?;
 		stream
 			.play()
@@ -259,6 +334,9 @@ impl Driver {
 
 		self.shared.rebind(rate, tx);
 		self.stream = Some(stream);
+		// Replaces the previous receiver, dropping anything the old stream
+		// retired and never got drained.
+		self.retired = Some(retired_rx);
 		self.retry = RETRY_MIN;
 
 		tracing::info!(rate, channels, ?format, "opened audio output");
@@ -293,6 +371,7 @@ impl Driver {
 		T: cpal::SizedSample + cpal::FromSample<f32>,
 	{
 		let failures = self.failures.clone();
+		let generation = self.generation;
 
 		// The mixer works in `f32`, so anything else needs a staging buffer.
 		// Allocated once and a whole number of frames long, so however big a
@@ -313,10 +392,10 @@ impl Driver {
 						}
 					}
 				},
-				move |err| {
+				move |error| {
 					// This is cpal's error callback, not the audio callback, so
 					// an allocating send is fine here.
-					let _ = failures.send(Command::Failed(err));
+					let _ = failures.send(Command::Failed { generation, error });
 				},
 				None,
 			)
@@ -327,6 +406,29 @@ impl Driver {
 	fn stop(&mut self) {
 		self.shared.unbind();
 		self.stream = None;
+		// Dropping the receiver drops whatever the mixer retired, here rather
+		// than on the audio thread.
+		self.retired = None;
+	}
+
+	/// Catch the mixer up after a sink was added or dropped.
+	fn sync(&mut self) {
+		if let Some(retired) = &self.retired {
+			// Each of these frees a ring buffer, which is exactly why the mixer
+			// handed it over instead of dropping it itself.
+			while retired.try_recv().is_ok() {}
+		}
+
+		for _ in 0..SYNC_ATTEMPTS {
+			if self.shared.sync() {
+				return;
+			}
+			// The mixer's queue is full, which takes a burst far larger than a
+			// device period. Give it a period to drain and try again.
+			std::thread::sleep(SYNC_DELAY);
+		}
+
+		tracing::warn!("audio output is not keeping up with sink changes");
 	}
 
 	/// When the next restart may be attempted, doubling the backoff.
@@ -334,6 +436,22 @@ impl Driver {
 		let at = Instant::now() + self.retry;
 		self.retry = (self.retry * 2).min(RETRY_MAX);
 		at
+	}
+
+	/// Whether a failure reported by stream `generation` should rebuild the
+	/// stream.
+	///
+	/// Errors outlive the stream that raised them: cpal's error callback posts
+	/// into the same queue the driver reads, so a switch or a restart can leave
+	/// one behind. Acting on it would tear down the healthy stream that replaced
+	/// it, which is a dropout caused entirely by our own bookkeeping.
+	fn should_restart(&mut self, generation: u64, error: &cpal::Error) -> bool {
+		if generation != self.generation {
+			tracing::debug!(%error, generation, "ignoring an error from a replaced audio output");
+			return false;
+		}
+
+		self.fatal(error)
 	}
 
 	/// Whether this error means the stream has to be rebuilt.
@@ -363,5 +481,150 @@ impl Driver {
 				false
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::mpsc::channel;
+
+	use super::*;
+	use crate::playback::sink::{self, Input};
+
+	/// Everything a `Shared` needs without a device: a mixer command queue of
+	/// `depth` (so a test decides when the mixer drains) and the driver's own
+	/// queue (so a test can see what would have woken it).
+	struct Wired {
+		shared: Arc<Shared>,
+		handle: Arc<super::super::Handle>,
+		mixer: Receiver<mixer::Command>,
+		driver: Receiver<Command>,
+	}
+
+	fn wired(depth: usize) -> Wired {
+		let shared = Arc::new(Shared::default());
+		let (commands, driver) = channel();
+		let handle = Arc::new(super::super::Handle { commands });
+
+		let (tx, mixer) = sync_channel(depth);
+		shared.rebind(48_000, tx);
+
+		Wired {
+			shared,
+			handle,
+			mixer,
+			driver,
+		}
+	}
+
+	fn add(shared: &Arc<Shared>, handle: &Arc<super::super::Handle>) -> Result<Sink, Error> {
+		shared.add(|id, rate| sink::new(id, rate, Input::default(), shared.clone(), handle.clone()))
+	}
+
+	fn syncs(driver: &Receiver<Command>) -> usize {
+		std::iter::from_fn(|| driver.try_recv().ok())
+			.filter(|c| matches!(c, Command::Sync))
+			.count()
+	}
+
+	/// A registration the mixer's queue was too full to take must not be
+	/// forgotten: without the retry it stayed silent until the next device
+	/// restart.
+	#[test]
+	fn registrations_survive_a_full_mixer_queue() {
+		let depth = 4;
+		let w = wired(depth);
+
+		let sinks: Vec<_> = (0..depth + 1).map(|_| add(&w.shared, &w.handle).unwrap()).collect();
+		assert_eq!(sinks.len(), depth + 1);
+
+		// One more sink than the queue holds, so the last one could not attach.
+		assert!(!w.shared.sync(), "expected a sink to be waiting on the queue");
+
+		// The mixer drains, which is what the driver's retry waits for.
+		while w.mixer.try_recv().is_ok() {}
+		assert!(w.shared.sync(), "the waiting sink was never re-sent");
+
+		let state = w.shared.state.lock().unwrap();
+		assert!(state.sinks.iter().all(|s| s.attached()), "a sink is still unattached");
+	}
+
+	/// `sync` only helps if something calls it, so adding or dropping a sink has
+	/// to wake the driver.
+	#[test]
+	fn adding_and_dropping_a_sink_wakes_the_driver() {
+		let w = wired(8);
+
+		let engine = super::super::Engine {
+			shared: w.shared.clone(),
+			handle: w.handle.clone(),
+		};
+
+		let sink = engine.sink(Input::default()).unwrap();
+		assert_eq!(syncs(&w.driver), 1, "adding a sink did not wake the driver");
+
+		drop(sink);
+		assert_eq!(syncs(&w.driver), 1, "dropping a sink did not wake the driver");
+	}
+
+	/// Same for removals. Dropping one would leave the mixer reading a sink
+	/// nobody owns for the life of the stream.
+	#[test]
+	fn removals_survive_a_full_mixer_queue() {
+		let w = wired(1);
+
+		let sink = add(&w.shared, &w.handle).unwrap();
+		let id = w.shared.state.lock().unwrap().sinks[0].id;
+
+		// The add filled the single queue slot, so the remove cannot get through.
+		drop(sink);
+		assert_eq!(w.shared.state.lock().unwrap().detaching, vec![id]);
+
+		while w.mixer.try_recv().is_ok() {}
+		assert!(w.shared.sync());
+		assert!(
+			w.shared.state.lock().unwrap().detaching.is_empty(),
+			"the removal was lost"
+		);
+	}
+
+	/// The mixer sizes its entry list once, so the cap has to be refused here
+	/// rather than discovered on the audio thread.
+	#[test]
+	fn refuses_more_sinks_than_the_mixer_can_hold() {
+		let w = wired(4 * mixer::MAX_SINKS);
+
+		let sinks: Vec<_> = (0..mixer::MAX_SINKS)
+			.map(|_| add(&w.shared, &w.handle).unwrap())
+			.collect();
+		assert!(matches!(add(&w.shared, &w.handle), Err(Error::Unsupported(_))));
+
+		// Dropping one makes room again.
+		drop(sinks.into_iter().next_back());
+		add(&w.shared, &w.handle).expect("a slot freed by the dropped sink");
+	}
+
+	/// A stream that has already been replaced can still have an error queued.
+	/// Acting on it tears down the healthy stream that replaced it.
+	#[test]
+	fn ignores_errors_from_a_replaced_stream() {
+		let w = wired(8);
+		let (failures, _requests) = channel();
+
+		let mut driver = Driver {
+			shared: w.shared,
+			failures,
+			device: None,
+			stream: None,
+			retired: None,
+			generation: 7,
+			retry: RETRY_MIN,
+			underruns: 0,
+			window: Instant::now(),
+		};
+
+		let lost = cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable);
+		assert!(!driver.should_restart(6, &lost), "acted on a retired stream's error");
+		assert!(driver.should_restart(7, &lost), "ignored the live stream's error");
 	}
 }

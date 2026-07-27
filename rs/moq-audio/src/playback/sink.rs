@@ -79,7 +79,7 @@ pub struct Sink {
 	shared: Arc<Shared>,
 	/// Keeps the driver thread running while this sink is alive, so dropping the
 	/// [`Engine`](super::Engine) that made it doesn't cut playback short.
-	_engine: Arc<super::Handle>,
+	engine: Arc<super::Handle>,
 }
 
 impl Sink {
@@ -155,6 +155,9 @@ impl Sink {
 impl Drop for Sink {
 	fn drop(&mut self) {
 		self.shared.remove(self.id);
+		// The mixer hands the retired sink back rather than dropping it on the
+		// audio thread, so somebody has to come collect it.
+		self.engine.wake();
 	}
 }
 
@@ -207,6 +210,11 @@ pub(super) struct Registration {
 }
 
 impl Registration {
+	/// Whether the mixer has taken this sink's consumer.
+	pub(super) fn attached(&self) -> bool {
+		self.pending.is_none()
+	}
+
 	/// Hand the consumer to a running mixer, if it hasn't been already.
 	pub(super) fn attach(&mut self, mixer: &SyncSender<mixer::Command>) {
 		let Some(cons) = self.pending.take() else { return };
@@ -257,7 +265,7 @@ pub(super) fn new(
 		prod: prod.clone(),
 		control: Control { gain: gain.clone() },
 		shared,
-		_engine: engine,
+		engine,
 	};
 
 	let registration = Registration {

@@ -1,12 +1,19 @@
 //! The output callback: sum every registered sink into one device buffer.
 //!
-//! Everything here runs on the OS audio thread, so it must not allocate, lock,
-//! or log. Buffers are sized once at construction and commands arrive over a
-//! lock-free channel the driver writes to.
+//! Everything here runs on the OS audio thread, so it must not allocate, free,
+//! lock, or log. That shapes the whole module:
+//!
+//! - Buffers and the entry list are sized once, at construction. [`MAX_SINKS`]
+//!   is what makes that possible: the driver refuses to register more, so the
+//!   entry list never has to grow.
+//! - Commands arrive over a bounded channel, whose slots are also allocated up
+//!   front, so draining it never touches the allocator.
+//! - A removed sink owns a heap-backed `ResamplingCons`, so it is handed back to
+//!   the driver to drop rather than dropped here.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 
 use fixed_resample::ResamplingCons;
 
@@ -21,6 +28,13 @@ const RAMP: f32 = 0.003;
 /// The mix bus is stereo: sinks resample into it and it fans out to however many
 /// channels the device wants.
 pub(super) const BUS_CHANNELS: usize = 2;
+
+/// Sinks one device will mix. The entry list is allocated to this up front and
+/// never grows, which is what keeps registration off the allocator.
+///
+/// Far more than a call mixes client-side in practice, and a caller that hits it
+/// gets an error from [`Engine::sink`](super::Engine::sink) rather than silence.
+pub(super) const MAX_SINKS: usize = 64;
 
 /// The volume and level of one sink, shared between the caller and the audio
 /// thread.
@@ -82,8 +96,8 @@ pub(super) enum Command {
 	Remove { id: u64 },
 }
 
-/// One sink being mixed, owned by the audio thread.
-struct Entry {
+/// One sink being mixed, owned by the audio thread until it is retired.
+pub(super) struct Entry {
 	id: u64,
 	cons: ResamplingCons<f32>,
 	gain: Arc<Gain>,
@@ -95,6 +109,9 @@ struct Entry {
 pub(super) struct Mixer {
 	entries: Vec<Entry>,
 	commands: Receiver<Command>,
+	/// Where removed sinks go to be dropped, since dropping one here would free
+	/// on the audio thread.
+	retired: SyncSender<Entry>,
 	/// Channels the device takes.
 	channels: usize,
 	/// Per-frame gain step, so any change spans [`RAMP`] regardless of rate.
@@ -108,14 +125,28 @@ pub(super) struct Mixer {
 impl Mixer {
 	/// `rate` and `channels` describe the device, not the sinks: each sink
 	/// resamples into the bus on its way here.
-	pub(super) fn new(commands: Receiver<Command>, rate: u32, channels: usize) -> Self {
+	pub(super) fn new(commands: Receiver<Command>, retired: SyncSender<Entry>, rate: u32, channels: usize) -> Self {
 		Self {
-			entries: Vec::with_capacity(8),
+			entries: Vec::with_capacity(MAX_SINKS),
 			commands,
+			retired,
 			channels,
 			step: 1.0 / (rate as f32 * RAMP),
 			bus: vec![0.0; CHUNK * BUS_CHANNELS],
 			scratch: vec![0.0; CHUNK * BUS_CHANNELS],
+		}
+	}
+
+	/// Hand a removed sink back to the driver to drop.
+	///
+	/// The channel holds [`MAX_SINKS`] entries and the driver drains it every
+	/// time a sink is dropped, so filling it takes a driver that has stopped
+	/// running entirely. Dropping in place then costs one free on the audio
+	/// thread, which beats leaking the entry for the life of the stream.
+	fn retire(&mut self, entry: Entry) {
+		if let Err(err) = self.retired.try_send(entry) {
+			let (TrySendError::Full(entry) | TrySendError::Disconnected(entry)) = err;
+			drop(entry);
 		}
 	}
 
@@ -126,14 +157,28 @@ impl Mixer {
 				Ok(Command::Add { id, cons, gain }) => {
 					// Start silent and ramp up, so a sink joining mid-playback
 					// doesn't click.
-					self.entries.push(Entry {
+					let entry = Entry {
 						id,
 						cons,
 						gain,
 						applied: 0.0,
-					});
+					};
+
+					// The driver caps registrations at MAX_SINKS, so this is
+					// unreachable. Retire rather than push anyway: growing the
+					// list would allocate right here on the audio thread.
+					debug_assert!(self.entries.len() < MAX_SINKS, "more sinks than the driver allows");
+					match self.entries.len() < MAX_SINKS {
+						true => self.entries.push(entry),
+						false => self.retire(entry),
+					}
 				}
-				Ok(Command::Remove { id }) => self.entries.retain(|e| e.id != id),
+				Ok(Command::Remove { id }) => {
+					if let Some(index) = self.entries.iter().position(|e| e.id == id) {
+						let entry = self.entries.swap_remove(index);
+						self.retire(entry);
+					}
+				}
 				Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
 			}
 		}
@@ -211,7 +256,7 @@ impl Mixer {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::mpsc::{SyncSender, sync_channel};
+	use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 	use fixed_resample::{PushStatus, ResamplingChannelConfig, ResamplingProd, resampling_channel};
 
@@ -226,15 +271,25 @@ mod tests {
 	struct Harness {
 		mixer: Mixer,
 		commands: SyncSender<Command>,
+		/// Sinks the mixer has finished with. A test asserts on this rather than
+		/// on the absence of a `free`, since the point of retirement is that the
+		/// audio thread never drops one.
+		retired: Receiver<Entry>,
 		next: u64,
 	}
 
 	impl Harness {
 		fn new(channels: usize) -> Self {
-			let (commands, rx) = sync_channel(8);
+			Self::with_depth(channels, 8)
+		}
+
+		fn with_depth(channels: usize, depth: usize) -> Self {
+			let (commands, rx) = sync_channel(depth);
+			let (retired_tx, retired) = sync_channel(MAX_SINKS);
 			Self {
-				mixer: Mixer::new(rx, RATE, channels),
+				mixer: Mixer::new(rx, retired_tx, RATE, channels),
 				commands,
+				retired,
 				next: 0,
 			}
 		}
@@ -387,6 +442,43 @@ mod tests {
 		harness.commands.send(Command::Remove { id }).unwrap();
 		harness.fill(&mut out);
 		assert!(out.iter().all(|s| *s == 0.0), "removed sink still audible");
+	}
+
+	/// A removed sink owns a heap-backed ring buffer. Dropping it in the
+	/// callback would free on the audio thread, so it goes back to the driver.
+	#[test]
+	fn removed_sinks_are_handed_back_rather_than_dropped() {
+		let mut harness = Harness::new(2);
+		let mut out = vec![0.0f32; 512];
+
+		let (id, _prod) = harness.add(Arc::new(Gain::new()));
+		harness.fill(&mut out);
+
+		harness.commands.send(Command::Remove { id }).unwrap();
+		harness.fill(&mut out);
+
+		let entry = harness
+			.retired
+			.try_recv()
+			.expect("the removed sink was dropped in the callback");
+		assert_eq!(entry.id, id);
+	}
+
+	/// The entry list is allocated once. Growing it would allocate on the audio
+	/// thread, which is why the driver caps registrations at MAX_SINKS.
+	#[test]
+	fn the_entry_list_never_grows() {
+		let mut harness = Harness::with_depth(2, MAX_SINKS);
+		let mut out = vec![0.0f32; 512];
+
+		let capacity = harness.mixer.entries.capacity();
+		assert_eq!(capacity, MAX_SINKS);
+
+		let _prods: Vec<_> = (0..MAX_SINKS).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+		harness.fill(&mut out);
+
+		assert_eq!(harness.mixer.entries.len(), MAX_SINKS);
+		assert_eq!(harness.mixer.entries.capacity(), capacity, "the entry list reallocated");
 	}
 
 	#[test]

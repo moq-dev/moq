@@ -73,6 +73,14 @@ pub(crate) struct Handle {
 	commands: Sender<driver::Command>,
 }
 
+impl Handle {
+	/// Nudge the driver to collect retired sinks and retry anything the mixer's
+	/// command queue was too full to take.
+	pub(crate) fn wake(&self) {
+		let _ = self.commands.send(driver::Command::Sync);
+	}
+}
+
 impl Drop for Handle {
 	fn drop(&mut self) {
 		let _ = self.commands.send(driver::Command::Shutdown);
@@ -114,10 +122,18 @@ impl Engine {
 	/// Add a stream to the mix, taking PCM in the layout `input` describes.
 	///
 	/// Independent of the device: several sinks can play at different rates and
-	/// channel counts, and each is resampled on its way to the mix.
+	/// channel counts, and each is resampled on its way to the mix. One device
+	/// mixes up to 64 of them, past which this returns an error rather than
+	/// handing back a sink that plays nothing.
 	pub fn sink(&self, input: Input) -> Result<Sink, Error> {
-		self.shared
-			.add(|id, rate| sink::new(id, rate, input, self.shared.clone(), self.handle.clone()))
+		let sink = self
+			.shared
+			.add(|id, rate| sink::new(id, rate, input, self.shared.clone(), self.handle.clone()))?;
+
+		// Covers the case where the mixer's command queue was momentarily full,
+		// so a sink is never left silently unmixed.
+		self.handle.wake();
+		Ok(sink)
 	}
 
 	/// Move playback to another output device, or back to the system default
