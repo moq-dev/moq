@@ -52,6 +52,47 @@ function supportsTrackStream(version: Version): boolean {
  *
  * @internal
  */
+/**
+ * The frame bounds a subscription placed on its start and end group, as they stand
+ * after any SUBSCRIBE_UPDATE.
+ */
+type FrameBounds = {
+	startGroup?: number;
+	startFrame: number;
+	endGroup?: number;
+	endFrame?: number;
+};
+
+/**
+ * The frames of `sequence` a subscription asked for, as a start index and an inclusive
+ * end, or `undefined` when the group falls outside the subscription entirely.
+ *
+ * The frame bounds qualify the start and end group only; every group between them is
+ * served whole. A group outside `[startGroup, endGroup]` was never asked for, and
+ * serving it would also let SUBSCRIBE_START report a group below the requested start.
+ */
+function frameRange(bounds: FrameBounds, sequence: number): { start: number; end?: number } | undefined {
+	if (bounds.startGroup !== undefined && sequence < bounds.startGroup) return;
+	if (bounds.endGroup !== undefined && sequence > bounds.endGroup) return;
+
+	return {
+		start: bounds.startGroup === sequence ? bounds.startFrame : 0,
+		end: bounds.endGroup === sequence ? bounds.endFrame : undefined,
+	};
+}
+
+/** What serving one group needs beyond the group itself. */
+type ServeGroup = {
+	/** The Subscribe ID the GROUP message references. */
+	sub: bigint;
+	/** The track's advertised timescale, which every frame timestamp is converted to. */
+	timescale: Timescale;
+	/** First frame to send; anything below it was excluded by the subscription. */
+	start: number;
+	/** Last frame to send (inclusive), or undefined for the rest of the group. */
+	end?: number;
+};
+
 export class Publisher {
 	// The version of the connection.
 	readonly version: Version;
@@ -251,6 +292,15 @@ export class Publisher {
 
 		const track = broadcast.subscribe(msg.track, { priority: msg.priority });
 
+		// Frame bounds qualify the start and end group only, and SUBSCRIBE_UPDATE can move
+		// them, so the serving loop reads them from here rather than closing over `msg`.
+		const bounds: FrameBounds = {
+			startGroup: msg.startGroup,
+			startFrame: msg.startFrame,
+			endGroup: msg.endGroup,
+			endFrame: msg.endFrame,
+		};
+
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
@@ -279,7 +329,12 @@ export class Publisher {
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
-			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer, timescale);
+			const serving = this.#runTrack(track, stream.writer, {
+				sub: msg.id,
+				broadcast: msg.broadcast,
+				timescale,
+				bounds,
+			});
 
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
@@ -298,6 +353,10 @@ export class Publisher {
 						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
 					);
 					track.update({ priority: result.priority });
+					bounds.startGroup = result.startGroup;
+					bounds.startFrame = result.startFrame;
+					bounds.endGroup = result.endGroup;
+					bounds.endFrame = result.endFrame;
 				}
 			}
 
@@ -338,7 +397,7 @@ export class Publisher {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.
 			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
 			group = await broadcast.track(msg.track).fetchGroup(msg.group, { priority: msg.priority });
-			await this.#runFetchGroup(group, stream.writer, Timescale(info.timescale));
+			await this.#runFetchGroup(group, stream.writer, Timescale(info.timescale), msg.startFrame, msg.endFrame);
 			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 			stream.close();
 			group.close();
@@ -361,7 +420,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runTrack(sub: bigint, broadcast: Path.Valid, track: track.Subscriber, stream: Writer, timescale: Timescale) {
+	async #runTrack(
+		track: track.Subscriber,
+		stream: Writer,
+		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale; bounds: FrameBounds },
+	) {
+		const { sub, broadcast, timescale, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -381,13 +445,22 @@ export class Publisher {
 					break;
 				}
 
+				const range = frameRange(bounds, group.sequence);
+				if (!range) {
+					// Outside the subscription's group range, so it was never asked for.
+					// Serving it would also let SUBSCRIBE_START name a group below the
+					// requested start.
+					group.close();
+					continue;
+				}
+
 				if (emitRange && !startSent) {
 					startSent = true;
 					await encodeSubscribeResponse(stream, { start: new SubscribeStart(group.sequence) }, this.version);
 				}
 				end = Math.max(end, group.sequence + 1);
 
-				void this.#runGroup(sub, group, timescale);
+				void this.#runGroup(group, { sub, timescale, start: range.start, end: range.end });
 			}
 
 			if (emitRange) {
@@ -501,9 +574,24 @@ export class Publisher {
 	 */
 	// Serialize a fetched group's frames onto the FETCH stream as bare records: each a
 	// zigzag-delta timestamp (at the track's advertised timescale) followed by size + bytes.
-	async #runFetchGroup(group: group.Consumer, stream: Writer, timescale: Timescale) {
+	async #runFetchGroup(
+		group: group.Consumer,
+		stream: Writer,
+		timescale: Timescale,
+		startFrame: number,
+		endFrame?: number,
+	) {
+		// The response carries no header, so the receiver numbers the first frame it gets
+		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
+		// honest; a group that ends before we reach it can't be served at all.
+		for (let i = 0; i < startFrame; i++) {
+			if (!(await Promise.race([group.readFrame(), stream.closed]))) {
+				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
+			}
+		}
+
 		let prevTs = 0n;
-		for (;;) {
+		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
 			const frame = await Promise.race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
@@ -516,22 +604,40 @@ export class Publisher {
 		}
 	}
 
-	async #runGroup(sub: bigint, group: group.Consumer, timescale: Timescale) {
-		const msg = new GroupMessage(sub, group.sequence);
+	async #runGroup(group: group.Consumer, { sub, timescale, start: startFrame, end: endFrame }: ServeGroup) {
+		// This model holds whole groups, so frame `startFrame` is always reachable unless
+		// the group ends first. Declaring it up front keeps the stream self-describing.
+		const msg = new GroupMessage(sub, group.sequence, startFrame);
 		try {
 			const stream = await Writer.open(this.#quic);
 			await stream.u53(0); // stream type
-			await msg.encode(stream);
+			await msg.encode(stream, this.version);
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
 			// advertised timescale; older drafts omit it.
 			const timestamps = supportsTrackStream(this.version);
 			let prevTs = 0n;
+			// Whether the cursor ever reached the requested start, which decides how the
+			// end of the group is read below.
+			let reached = startFrame === 0;
 
 			try {
 				for (;;) {
-					const frame = await Promise.race([group.readFrame(), stream.closed]);
-					if (!frame) break;
+					const frame = await Promise.race([group.readFrameSequence(), stream.closed]);
+					if (!frame) {
+						// The group ended before the frame the subscriber asked to start
+						// at, so this publisher can't serve the range at all. FINning here
+						// would claim an empty group under that index; reset so it reads
+						// as the gap it is.
+						if (!reached) throw new Error(`group ended before frame ${startFrame}`);
+						break;
+					}
+
+					// Frames below the requested start were excluded, and the receiver
+					// numbers what it gets from `startFrame`.
+					if (frame.sequence < startFrame) continue;
+					if (endFrame !== undefined && frame.sequence > endFrame) break;
+					reached = true;
 
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.

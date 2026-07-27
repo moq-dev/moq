@@ -7,6 +7,13 @@
 //! A [Consumer] reads an ordered stream of frames.
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
+//! Frames are numbered from 0 in write order. A group can be short at its front or its
+//! back but never in the middle: [Producer::start_at] starts it later, so a handle can
+//! carry the tail of a group whose leading frames came from somewhere else, and
+//! [Producer::finish] ends it wherever writing stopped. [Consumer::start_at] /
+//! [Consumer::end_at] bound a reader to a sub-range the same way [`track::Subscriber`]
+//! bounds group sequences.
+//!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use crate::cache;
 use crate::frame::{self, Frame, FrameBuf};
@@ -95,8 +102,20 @@ pub(crate) struct GroupState {
 	// The single in-flight frame, if one is open.
 	pub(crate) partial: Option<Partial>,
 
-	// The number of frames evicted from the front of the group.
+	// Index of the first frame this handle holds: frames evicted from the front, plus any
+	// the group deliberately started past (see [`Producer::start_at`]). Reading below it
+	// is [`Error::Lagged`] either way; the frames are not here.
 	pub(crate) offset: usize,
+
+	// The index the next frame written will get. Tracked separately from `frames` so it
+	// survives the cache being released: a route taking the track over needs to know where
+	// production stopped, and an abort is exactly when it asks.
+	next_index: usize,
+
+	// One past the last frame that was fully written. Trails `next_index` while a chunked
+	// frame is in flight, which is the frame a replacement route has to redeliver: only
+	// its opener saw the payload, and only partly.
+	committed: usize,
 
 	// The total size (in bytes) of all cached frames plus any in-flight frame.
 	pub(crate) cache: u64,
@@ -312,6 +331,34 @@ impl Producer {
 		self.track.timescale
 	}
 
+	/// Start the group at frame `index` rather than 0, so the first frame written lands
+	/// there.
+	///
+	/// A group can be short at its front or its back, never in the middle: this trims
+	/// the front, and simply stopping (then [`finish`](Self::finish)ing) trims the back.
+	/// The frames below `index` are not a gap this handle will ever fill, so a reader
+	/// positioned below it gets [`Error::Lagged`], the same as one that fell behind an
+	/// eviction. They belong to whoever produced the head of the group, typically
+	/// another route serving the same track (see [`crate::track::Subscriber`]).
+	///
+	/// The counterpart of [`Consumer::start_at`], which positions a *reader* the same
+	/// way. Where the group begins is part of its shape, so this must come before the
+	/// first frame; afterwards it returns [`Error::Closed`].
+	pub fn start_at(&mut self, index: u64) -> Result<()> {
+		let index = usize::try_from(index).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+
+		let mut state = modify(&self.state)?;
+		// Every write advances `next_index` past `offset`, so this is "nothing written
+		// yet" in a way a front eviction can't fake.
+		if state.fin.is_some() || state.next_index != state.offset {
+			return Err(Error::Closed);
+		}
+		state.offset = index;
+		state.next_index = index;
+		state.committed = index;
+		Ok(())
+	}
+
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
@@ -337,6 +384,8 @@ impl Producer {
 		state.cache += size;
 		state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
+		state.next_index += 1;
+		state.committed = state.next_index;
 		state.evict();
 		drop(state);
 
@@ -379,6 +428,7 @@ impl Producer {
 			timestamp,
 			buf: buf.clone(),
 		});
+		state.next_index += 1;
 		state.evict();
 		drop(state);
 
@@ -411,6 +461,7 @@ impl Producer {
 		// frame was created; committing just moves the tail into the completed set.
 		state.partial = None;
 		state.frames.push_back(frame);
+		state.committed = state.next_index;
 		Ok(())
 	}
 
@@ -420,10 +471,13 @@ impl Producer {
 		let _ = self.clone().abort(err);
 	}
 
-	/// Return the number of frames written so far (completed plus any in-flight).
+	/// One past the index of the last frame written (completed or in-flight), which is
+	/// also the index the next frame will get.
+	///
+	/// Counts any frames the group [started past](Self::start_at) or evicted, so it's the
+	/// group's logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
-		let state = self.state.read();
-		state.offset + state.frames.len() + state.partial.is_some() as usize
+		self.state.read().next_index
 	}
 
 	/// Mark the group as complete; no more frames will be written.
@@ -432,7 +486,7 @@ impl Producer {
 	/// [`abort`](Self::abort). The handle also keeps the cached frames readable.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;
-		state.fin = Some(state.offset + state.frames.len());
+		state.fin = Some(state.next_index);
 		Ok(())
 	}
 
@@ -453,6 +507,28 @@ impl Producer {
 	/// read paths treat an aborted cached group as absent.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.state.read().abort.is_some()
+	}
+
+	/// Whether the group was cleanly finished, so no further frame can be appended.
+	pub(crate) fn is_finished(&self) -> bool {
+		self.state.read().fin.is_some()
+	}
+
+	/// The index of the first frame this group still holds: what a reader positioned
+	/// below it would be [`Error::Lagged`] on. Non-zero when the group started later
+	/// (see [`Self::start_at`]) or its head was evicted.
+	pub(crate) fn first_frame(&self) -> usize {
+		self.state.read().offset
+	}
+
+	/// One past the last frame that was fully written.
+	///
+	/// Trails [`Self::frame_count`] while a chunked frame is open, and stops there if
+	/// that frame never completes. This is the boundary a replacement route resumes
+	/// from: an incomplete frame has to be redelivered whole, since a reader can only
+	/// use it whole.
+	pub(crate) fn committed_frames(&self) -> usize {
+		self.state.read().committed
 	}
 
 	/// The group's full cached footprint (payload plus fixed overhead), used by the
@@ -488,10 +564,13 @@ impl Producer {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info,
-			state: self.state.consume(),
 			track: self.track.clone(),
-			index: 0,
-			prefetch: Prefetch::default(),
+			inner: ConsumerKind::Plain(Plain {
+				state: self.state.consume(),
+				index: 0,
+				end: None,
+				prefetch: Prefetch::default(),
+			}),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
 			// when it hands the consumer to a subscriber/fetch.
 			stats: stats::Meter::default(),
@@ -603,9 +682,12 @@ impl Drop for Prefetch {
 }
 
 /// Consume a group, frame-by-frame.
+///
+/// Usually a view of one [`Producer`], but a group served across a route change is
+/// *spliced*: it reads each contributing route's copy in turn, joined at the frame the
+/// takeover happened on, so the reader never sees the seam.
 pub struct Consumer {
-	// Shared state with the producer.
-	state: kio::Consumer<GroupState>,
+	inner: ConsumerKind,
 
 	// Immutable stream state.
 	info: Info,
@@ -614,28 +696,58 @@ pub struct Consumer {
 	// wire publisher emit per-frame timestamps at the right scale for a fetched group.
 	track: track::Info,
 
-	// The number of frames we've read.
-	// NOTE: Cloned readers inherit this offset, but then run in parallel.
-	index: usize,
-
-	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
-	prefetch: Prefetch,
-
 	// Egress payload meter, set by a tagged track via [`Self::with_meter`]. Empty
 	// (no-op) for an untagged group.
 	stats: stats::Meter,
 }
 
-impl Clone for Consumer {
+// `Plain` is the hot path and carries an inline frame prefetch, so boxing it to even the
+// variants out would cost an allocation per group to save a pointer chase on the rare one.
+#[expect(clippy::large_enum_variant)]
+enum ConsumerKind {
+	Plain(Plain),
+	// Boxed: the spliced cursor set dwarfs the plain one, and splicing is the rare case.
+	Spliced(Box<super::resume::Group>),
+}
+
+/// The cursor state for a group backed by a single [`Producer`].
+struct Plain {
+	// Shared state with the producer.
+	state: kio::Consumer<GroupState>,
+
+	// The index of the next frame to read.
+	// NOTE: Cloned readers inherit this offset, but then run in parallel.
+	index: usize,
+
+	// Inclusive cap on `index`, set by [`Consumer::end_at`]. Reads end cleanly past it.
+	end: Option<usize>,
+
+	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
+	prefetch: Prefetch,
+}
+
+impl Clone for Plain {
 	fn clone(&self) -> Self {
 		// A clone shares the channel and inherits `index`, but starts with an empty
 		// prefetch: it re-reads its batch from the shared state, in parallel.
 		Self {
 			state: self.state.clone(),
+			index: self.index,
+			end: self.end,
+			prefetch: Prefetch::default(),
+		}
+	}
+}
+
+impl Clone for Consumer {
+	fn clone(&self) -> Self {
+		Self {
+			inner: match &self.inner {
+				ConsumerKind::Plain(plain) => ConsumerKind::Plain(plain.clone()),
+				ConsumerKind::Spliced(spliced) => ConsumerKind::Spliced(Box::new((**spliced).clone())),
+			},
 			info: self.info,
 			track: self.track.clone(),
-			index: self.index,
-			prefetch: Prefetch::default(),
 			// Inherit the meter without re-counting the group: the original already
 			// counted it when the track handed it out.
 			stats: self.stats.clone(),
@@ -652,6 +764,17 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
+	/// Rebuild this consumer as the head of a group assembled across route changes,
+	/// keeping the group's identity and its track's properties. See [`super::resume`].
+	pub(crate) fn into_spliced(self, spliced: super::resume::Group) -> Self {
+		Self {
+			inner: ConsumerKind::Spliced(Box::new(spliced)),
+			info: self.info,
+			track: self.track,
+			stats: self.stats,
+		}
+	}
+
 	/// Attach an egress payload meter, counting this as one delivered group.
 	/// Called by a tagged track when it hands the consumer to a subscriber or fetch.
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
@@ -665,6 +788,118 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The index of the next frame this consumer will return.
+	///
+	/// Starts at 0, or at the group's first available frame once [`Self::start_at`] has
+	/// clamped it, and advances by one per frame read.
+	pub fn index(&self) -> u64 {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.index as u64,
+			ConsumerKind::Spliced(spliced) => spliced.index(),
+		}
+	}
+
+	/// Skip ahead so the next frame returned is `index`, discarding anything buffered
+	/// below it.
+	///
+	/// Clamped *up* to the group's first available frame: frames the group never held
+	/// (see [`Producer::start_at`]) or has since evicted can't be returned, so asking
+	/// for one just starts at the first that exists. Read [`Self::index`] back to learn
+	/// where the cursor actually landed.
+	/// Only moves forward; a lower `index` is ignored, since the frames behind the
+	/// cursor may already have been handed out.
+	pub fn start_at(&mut self, index: u64) {
+		match &mut self.inner {
+			ConsumerKind::Plain(plain) => plain.start_at(index),
+			ConsumerKind::Spliced(spliced) => spliced.start_at(index),
+		}
+	}
+
+	/// Stop after frame `index` (inclusive), or remove the cap.
+	///
+	/// Reads past the cap end cleanly (`None`), as if the group finished there. Unlike
+	/// [`Self::start_at`] this can move in either direction: raising it re-offers frames
+	/// that are still cached.
+	pub fn end_at(&mut self, index: impl Into<Option<u64>>) {
+		let index = index.into();
+		match &mut self.inner {
+			ConsumerKind::Plain(plain) => {
+				plain.end = index.map(|index| usize::try_from(index).unwrap_or(usize::MAX));
+			}
+			ConsumerKind::Spliced(spliced) => spliced.end_at(index),
+		}
+	}
+
+	/// Return a consumer for the next frame for chunked reading.
+	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
+		kio::wait(|waiter| self.poll_next_frame(waiter)).await
+	}
+
+	/// Poll for the next frame, without blocking.
+	///
+	/// Returns None if the group is finished and the index is out of range, or the cursor
+	/// passed the [`Self::end_at`] cap.
+	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		let stats = self.stats.clone();
+		match &mut self.inner {
+			ConsumerKind::Plain(plain) => plain.poll_next_frame(waiter, &stats),
+			ConsumerKind::Spliced(spliced) => {
+				// The per-route copies underneath are untagged, so meter the spliced
+				// stream here: it is the one the subscriber actually reads.
+				let res = ready!(spliced.poll_next_frame(waiter))?;
+				if res.is_some() {
+					stats.frames(1);
+				}
+				Poll::Ready(Ok(res.map(|frame| frame.with_meter(stats))))
+			}
+		}
+	}
+
+	/// Read the next frame (timestamp and payload) all at once, without blocking.
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		let stats = self.stats.clone();
+		match &mut self.inner {
+			ConsumerKind::Plain(plain) => plain.poll_read_frame(waiter, &stats),
+			ConsumerKind::Spliced(spliced) => {
+				let res = ready!(spliced.poll_read_frame(waiter))?;
+				if let Some(frame) = &res {
+					stats.frames(1);
+					stats.bytes(frame.payload.len() as u64);
+				}
+				Poll::Ready(Ok(res))
+			}
+		}
+	}
+
+	/// Read the next frame (timestamp and payload) all at once.
+	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
+		if let ConsumerKind::Plain(plain) = &mut self.inner {
+			// Serve from the prefetched batch without building a future or allocating a waker.
+			if !plain.capped()
+				&& let Some(frame) = plain.prefetch.pop()
+			{
+				plain.index += 1;
+				return Ok(Some(frame));
+			}
+		}
+		kio::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// Poll for the final number of frames in the group.
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		match &mut self.inner {
+			ConsumerKind::Plain(plain) => plain.poll(waiter, |state| state.poll_finished()),
+			ConsumerKind::Spliced(spliced) => spliced.poll_finished(waiter),
+		}
+	}
+
+	/// Block until the group is finished, returning the number of frames in the group.
+	pub async fn finished(&mut self) -> Result<u64> {
+		kio::wait(|waiter| self.poll_finished(waiter)).await
+	}
+}
+
+impl Plain {
 	// A helper to automatically apply Dropped if the state is closed without an error.
 	fn poll<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R>>
 	where
@@ -677,15 +912,27 @@ impl Consumer {
 		})
 	}
 
-	/// Return a consumer for the next frame for chunked reading.
-	pub async fn next_frame(&mut self) -> Result<Option<frame::Consumer>> {
-		kio::wait(|waiter| self.poll_next_frame(waiter)).await
+	/// Whether the cursor has passed the `end_at` cap.
+	fn capped(&self) -> bool {
+		self.end.is_some_and(|end| self.index > end)
 	}
 
-	/// Poll for the next frame, without blocking.
-	///
-	/// Returns None if the group is finished and the index is out of range.
-	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+	fn start_at(&mut self, index: u64) {
+		let index = usize::try_from(index).unwrap_or(usize::MAX);
+		let index = index.max(self.state.read().offset);
+		if index <= self.index {
+			return;
+		}
+		self.index = index;
+		// The batch was drained from below the new cursor, so it can't be reused.
+		self.prefetch = Prefetch::default();
+	}
+
+	fn poll_next_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Consumer>>> {
+		if self.capped() {
+			return Poll::Ready(Ok(None));
+		}
+
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
@@ -707,14 +954,17 @@ impl Consumer {
 		self.index += 1;
 		// A direct read (not prefetched): count the frame here; the frame::Consumer
 		// counts its bytes per chunk as they're read out.
-		self.stats.frames(1);
+		stats.frames(1);
 		Poll::Ready(Ok(Some(
-			frame::Consumer::new(self.state.clone(), info, source).with_meter(self.stats.clone()),
+			frame::Consumer::new(self.state.clone(), info, source).with_meter(stats.clone()),
 		)))
 	}
 
-	/// Read the next frame (timestamp and payload) all at once, without blocking.
-	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<frame::Frame>>> {
+		if self.capped() {
+			return Poll::Ready(Ok(None));
+		}
+
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
 		if let Some(frame) = self.prefetch.pop() {
 			self.index += 1;
@@ -724,6 +974,9 @@ impl Consumer {
 		// The batch is drained: refill it under a single lock, registering the waiter if
 		// nothing is ready. Borrow the two fields disjointly so the closure can fill.
 		let index = self.index;
+		// Never buffer past the cap: `end_at` can be raised later, and those frames must
+		// come from the shared state then, not from a batch drained under the old cap.
+		let budget = self.end.map_or(usize::MAX, |end| (end - index).saturating_add(1));
 		let prefetch = &mut self.prefetch;
 		let res = self.state.poll(waiter, |state| {
 			if index < state.offset {
@@ -734,7 +987,7 @@ impl Consumer {
 			// panics on an out-of-bounds start. `fill` always resets the batch, so an empty
 			// range leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
 			let local = (index - state.offset).min(state.frames.len());
-			prefetch.fill(state.frames.range(local..).cloned());
+			prefetch.fill(state.frames.range(local..).take(budget).cloned());
 			if prefetch.len > 0 {
 				return Poll::Ready(Ok(()));
 			}
@@ -752,32 +1005,12 @@ impl Consumer {
 		// A fresh batch was just filled (empty only on a clean end). Count the whole
 		// batch once here, under no lock, so the drained pops that follow stay free.
 		let (frames, bytes) = self.prefetch.buffered();
-		self.stats.frames(frames);
-		self.stats.bytes(bytes);
+		stats.frames(frames);
+		stats.bytes(bytes);
 
 		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
 			self.index += 1;
 		})))
-	}
-
-	/// Read the next frame (timestamp and payload) all at once.
-	pub async fn read_frame(&mut self) -> Result<Option<frame::Frame>> {
-		// Serve from the prefetched batch without building a future or allocating a waker.
-		if let Some(frame) = self.prefetch.pop() {
-			self.index += 1;
-			return Ok(Some(frame));
-		}
-		kio::wait(|waiter| self.poll_read_frame(waiter)).await
-	}
-
-	/// Poll for the final number of frames in the group.
-	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		self.poll(waiter, |state| state.poll_finished())
-	}
-
-	/// Block until the group is finished, returning the number of frames in the group.
-	pub async fn finished(&mut self) -> Result<u64> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 }
 
@@ -787,12 +1020,30 @@ impl Consumer {
 pub struct Fetch {
 	/// Delivery priority for the fetched group's stream. Defaults to 0.
 	pub priority: u8,
+
+	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
+	///
+	/// Use this to fill a hole left by a route change: the group's head is already
+	/// cached locally and only the tail is missing.
+	///
+	/// There is no matching end: a fetch always runs to the end of the group, and a
+	/// caller wanting less caps the returned consumer with [`Consumer::end_at`]. Stopping
+	/// the *fetch* short would put a group in the cache that is indistinguishable from a
+	/// complete one, so a later fetch of the whole group would resolve from it and come
+	/// up short.
+	pub frame_start: u64,
 }
 
 impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
+		self
+	}
+
+	/// Set the first frame to fetch, returning `self` for chaining.
+	pub fn with_frame_start(mut self, frame_start: u64) -> Self {
+		self.frame_start = frame_start;
 		self
 	}
 }
@@ -1217,6 +1468,97 @@ mod test {
 			.unwrap();
 		assert_eq!(writer.timestamp.scale(), Timescale::MICRO);
 		assert!(!writer.timestamp.is_zero(), "local clock should be non-zero");
+	}
+
+	/// A group can start partway in, so a route can serve the tail of a group whose
+	/// head came from somewhere else.
+	#[test]
+	fn start_at_starts_the_group_later() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.start_at(3).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"d")).unwrap();
+		producer.finish().unwrap();
+
+		// The frame landed at index 3, so the group's length counts the missing head.
+		assert_eq!(producer.frame_count(), 4);
+
+		let mut consumer = producer.consume();
+		assert_eq!(consumer.finished().now_or_never().unwrap().unwrap(), 4);
+
+		// A reader positioned at the start is missing the head, exactly like one that
+		// fell behind an eviction.
+		assert!(matches!(
+			consumer.read_frame().now_or_never().unwrap(),
+			Err(Error::Lagged)
+		));
+	}
+
+	/// Seeking to the group's first available frame is how a spliced reader picks up
+	/// the tail; a lower index clamps up rather than failing.
+	#[test]
+	fn start_at_clamps_up_to_the_first_frame() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.start_at(3).unwrap();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"d")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		consumer.start_at(1);
+		assert_eq!(consumer.index(), 3, "clamped up to the first frame that exists");
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			Bytes::from_static(b"d")
+		);
+	}
+
+	/// `end_at` ends the read cleanly at the cap, and raising it re-offers the frames
+	/// still cached behind it.
+	#[test]
+	fn end_at_caps_and_reopens() {
+		let mut producer = Info { sequence: 0 }.produce();
+		for i in 0..4u8 {
+			producer.write_frame(Timestamp::ZERO, Bytes::from(vec![i])).unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		consumer.end_at(1);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			0
+		);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			1
+		);
+		assert!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
+			"capped reads end cleanly"
+		);
+
+		consumer.end_at(None);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			2
+		);
+	}
+
+	/// Where the group begins is part of its shape, so it can't move once frames exist.
+	#[test]
+	fn start_at_rejected_after_a_frame() {
+		let mut producer = Info { sequence: 0 }.produce();
+		// Re-declaring before the first frame is fine; the shape isn't committed yet.
+		producer.start_at(2).unwrap();
+		producer.start_at(3).unwrap();
+
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		assert!(matches!(producer.start_at(4), Err(Error::Closed)));
+		assert_eq!(producer.frame_count(), 4, "the frame landed at index 3");
+
+		// Finishing likewise settles the shape.
+		let mut producer = Info { sequence: 1 }.produce();
+		producer.finish().unwrap();
+		assert!(matches!(producer.start_at(1), Err(Error::Closed)));
 	}
 
 	/// The per-frame size cap (the group byte budget) is enforced before allocating.

@@ -101,6 +101,18 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		self.pending.remove(key)
 	}
 
+	/// Whether `key`'s request is still queued, i.e. no handler has popped it yet.
+	///
+	/// A popped request can still be joined, but it can no longer be *changed*: the
+	/// handler already has whatever it needs to serve it.
+	pub(crate) fn is_queued<Q>(&self, key: &Q) -> bool
+	where
+		K: std::borrow::Borrow<Q>,
+		Q: std::hash::Hash + Eq + ?Sized,
+	{
+		self.order.iter().any(|queued| queued.borrow() == key)
+	}
+
 	/// Returns `true` if a queued (not yet popped) request exists.
 	pub fn has_queued(&self) -> bool {
 		!self.order.is_empty()
@@ -161,10 +173,15 @@ mod test {
 		let mut requests = Requests::<u64, &str>::default();
 		requests.add_handler();
 		assert!(requests.insert(1, "a").is_ok());
+		assert!(requests.is_queued(&1));
 
+		// Popping hands the request to a handler: still joinable, no longer queued.
+		// That distinction is what decides whether a joiner may still widen it, since
+		// the handler already holds a copy of whatever it was popped with.
 		assert_eq!(requests.pop(), Some(1));
 		assert_eq!(requests.join(&1), Some(&mut "a"));
 		assert!(!requests.has_queued());
+		assert!(!requests.is_queued(&1));
 
 		assert_eq!(requests.remove(&1), Some("a"));
 		assert!(requests.is_empty());

@@ -86,7 +86,11 @@ Conceptually, these are join points, and new subscriptions will always start at 
 Groups are delivered independently and potentially out of order, so you should have some logic to reorder or skip during congestion.
 A group is closed when finished or aborted with an error (ex. during congestion).
 
-Each group consists of one or more **frames**.
+A subscription starts at the latest group by default, but can name any (group, frame) position instead.
+That is how a subscriber follows a track to a different publisher partway through a group, which matters when the current group may stay open indefinitely (a JSON append log, or a catalog that keeps appending deltas).
+A group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
+
+Each group consists of one or more **frames**, numbered from 0 in the order they were produced.
 Frames within a group are delivered reliably and in order.
 You can and should take advantage of this, for example using delta encoding.
 If frames within a group are actually independent, you should probably split them into individual groups!
@@ -163,8 +167,8 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
-- **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
-- **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame.
+- **Single-group FETCH only (lite-05+)**: Fetch one group by sequence, optionally bounded to a range of frames within it. Fetching across groups is not supported.
+- **No Joining Fetch**: A subscription resumes by asking for the missing range directly, rather than by pairing a fetch with a subscribe.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.

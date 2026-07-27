@@ -725,7 +725,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group_info = group::Info { sequence: hdr.sequence };
 			// Stats (groups/frames/bytes) are counted in the model as the group is
 			// written, through the tagged `track::Producer`.
-			let group = entry.producer.create_group(group_info)?;
+			let mut group = entry.producer.create_group(group_info)?;
+			// The stream may carry only the tail of the group; number the frames from
+			// where the publisher said they start so a reader splicing across routes
+			// lines them up.
+			group.start_at(hdr.frame_start)?;
 			(group, entry.producer.clone(), entry.timescale)
 		};
 
@@ -929,6 +933,7 @@ struct SubStream<S: web_transport_trait::Session> {
 	ordered: bool,
 	max_latency: Duration,
 	start_group: Option<u64>,
+	start_frame: u64,
 	priority: u8,
 }
 
@@ -1264,8 +1269,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					active.ordered = subscription.ordered;
 					active.max_latency = subscription.latency_max;
 					active.start_group = subscription.group_start;
+					active.start_frame = subscription.frame_start;
 					if supports_update {
-						self.send_update(active, subscription.group_end).await?;
+						self.send_update(active, subscription.group_end, subscription.frame_end)
+							.await?;
 					}
 				}
 			},
@@ -1317,6 +1324,8 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,
 			end_group: subscription.group_end,
+			start_frame: subscription.frame_start,
+			end_frame: subscription.frame_end,
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
@@ -1377,20 +1386,29 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,
+			start_frame: subscription.frame_start,
 			priority: subscription.priority,
 		});
 
 		Ok(())
 	}
 
-	/// Echo the current params upstream as a SUBSCRIBE_UPDATE, varying only `end_group`.
-	async fn send_update(&self, active: &mut SubStream<S>, end_group: Option<u64>) -> Result<(), Error> {
+	/// Echo the current params upstream as a SUBSCRIBE_UPDATE, varying only the end bound
+	/// (`end_group` and the `end_frame` qualifying it).
+	async fn send_update(
+		&self,
+		active: &mut SubStream<S>,
+		end_group: Option<u64>,
+		end_frame: Option<u64>,
+	) -> Result<(), Error> {
 		let update = lite::SubscribeUpdate {
 			priority: active.priority,
 			ordered: active.ordered,
 			max_latency: active.max_latency,
 			start_group: active.start_group,
 			end_group,
+			start_frame: active.start_frame,
+			end_frame,
 		};
 		active.stream.writer.encode(&update).await
 	}
@@ -1425,6 +1443,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				track: name.as_str().into(),
 				priority: request.priority(),
 				group,
+				start_frame: request.frame_start(),
+				// Always through the end of the group: a fetch that stopped short would
+				// cache a group indistinguishable from a complete one. A downstream cap
+				// is applied when serving, not when fetching.
+				end_frame: None,
 			};
 			stream.writer.encode(&lite::ControlType::Fetch).await?;
 			stream.writer.encode(&msg).await
@@ -1441,6 +1464,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
 		// default scale defensively rather than panicking.
 		let group_info = track::Info::default().with_timescale(timescale.unwrap_or_default());
+		let frame_start = request.frame_start();
 		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {
@@ -1450,6 +1474,14 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				return;
 			}
 		};
+
+		// The response starts at the requested frame, so number it from there rather
+		// than restarting the group at 0.
+		if let Err(err) = producer.start_at(frame_start) {
+			stream.writer.abort(&err);
+			let _ = producer.abort(err);
+			return;
+		}
 
 		let res = subscriber
 			.run_group(&mut stream.reader, producer.clone(), timescale)

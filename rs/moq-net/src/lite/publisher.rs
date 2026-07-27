@@ -894,6 +894,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			latency_max: subscribe.max_latency,
 			group_start: subscribe.start_group,
 			group_end: subscribe.end_group,
+			frame_start: subscribe.start_frame,
+			frame_end: subscribe.end_frame,
+			..Default::default()
 		};
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
@@ -956,8 +959,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// run_track serves groups and best-effort datagrams off the one subscriber.
 		sub.run_track(
 			track,
-			subscribe.start_group,
-			subscribe.end_group,
+			Bounds::from(subscribe),
 			&mut stream.reader,
 			&mut stream.writer,
 			&track_priority_tx,
@@ -1016,9 +1018,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				fetch.group,
 				group::Fetch {
 					priority: fetch.priority,
+					frame_start: fetch.start_frame,
+					..Default::default()
 				},
 			)
 			.await?;
+
+		// The response carries no header, so a short run is indistinguishable from one
+		// that started elsewhere: only serve a range we can cover exactly. `fetch_group`
+		// already positions the consumer, so this is a belt-and-braces check on a
+		// promise the wire can't restate.
+		if group.index() != fetch.start_frame {
+			return Err(Error::Lagged);
+		}
+		// The end is a serving cap only: the cached group runs to the end of the group
+		// so it stays usable for anyone else (see `group::Fetch::frame_start`).
+		group.end_at(fetch.end_frame);
 
 		// FETCH is gated to lite-05+, which learned the track timescale via TRACK_INFO.
 		let timescale = if version.has_track_stream() {
@@ -1792,6 +1807,83 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 	kio::wait(|waiter| poll_recv_next(track, datagrams, emit_boundary, waiter)).await
 }
 
+/// Bound `group` to what this subscription asked for, reporting whether it can be served
+/// at all.
+///
+/// Frame bounds qualify the start and end group only; everything in between is served
+/// whole. `false` means the group's head is missing and the subscriber never asked for a
+/// partial group, so it must be skipped: a group is the unit of decodability, and only
+/// the subscriber knows whether a partial one is any use to it.
+fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> bool {
+	let expected = match start {
+		Some((sequence, frame)) if sequence == group.sequence => frame,
+		_ => 0,
+	};
+
+	// `start_at` clamps up to the first frame the group still holds, so landing higher
+	// than asked means the frames below it are gone.
+	group.start_at(expected);
+	if group.index() != expected {
+		return false;
+	}
+
+	if let Some((sequence, frame)) = end
+		&& sequence == group.sequence
+	{
+		group.end_at(frame);
+	}
+
+	true
+}
+
+/// A subscription's requested delivery range, exactly as it arrived on the wire.
+///
+/// The frame bounds qualify the start and end group, so they only mean anything paired
+/// with one; [`Self::start_frame`] / [`Self::end_frame`] hand back that pairing.
+struct Bounds {
+	start_group: Option<u64>,
+	start_frame: u64,
+	end_group: Option<u64>,
+	end_frame: Option<u64>,
+}
+
+impl Bounds {
+	/// The group to apply a frame offset to and the offset itself, or `None` when
+	/// delivery starts on a group boundary.
+	fn start_frame(&self) -> Option<(u64, u64)> {
+		self.start_group
+			.map(|group| (group, self.start_frame))
+			.filter(|(_, frame)| *frame != 0)
+	}
+
+	/// The group to cap and the last frame to serve within it (inclusive).
+	fn end_frame(&self) -> Option<(u64, u64)> {
+		self.end_group.zip(self.end_frame)
+	}
+}
+
+impl From<&lite::Subscribe<'_>> for Bounds {
+	fn from(msg: &lite::Subscribe<'_>) -> Self {
+		Self {
+			start_group: msg.start_group,
+			start_frame: msg.start_frame,
+			end_group: msg.end_group,
+			end_frame: msg.end_frame,
+		}
+	}
+}
+
+impl From<&lite::SubscribeUpdate> for Bounds {
+	fn from(msg: &lite::SubscribeUpdate) -> Self {
+		Self {
+			start_group: msg.start_group,
+			start_frame: msg.start_frame,
+			end_group: msg.end_group,
+			end_frame: msg.end_frame,
+		}
+	}
+}
+
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed for each in-flight serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
@@ -1815,8 +1907,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
 		mut track: track::Subscriber,
-		start_group: Option<u64>,
-		initial_end_group: Option<u64>,
+		bounds: Bounds,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
 		writer: &mut Writer<S::SendStream, Version>,
 		track_priority_tx: &kio::Producer<u8>,
@@ -1824,13 +1915,18 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = start_group.or_else(|| track.latest()) {
+		if let Some(start_group) = bounds.start_group.or_else(|| track.latest()) {
 			track.start_at(start_group);
 		}
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SubscribeUpdate select arm below.
-		track.end_at(initial_end_group);
+		track.end_at(bounds.end_group);
+
+		// Frame bounds qualify the start and end group only; everything in between is
+		// served whole. Each is `(group, frame)`, or `None` for no offset at all.
+		let mut start_frame = bounds.start_frame();
+		let mut end_frame = bounds.end_frame();
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
 		// once the first group is known, SUBSCRIBE_END as soon as the track declares its
@@ -1882,12 +1978,22 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 			match event {
 				Event::Recv(res) => match res? {
-					Recv::Group(group) => {
+					Recv::Group(mut group) => {
+						let sequence = group.sequence;
+						if !position_group(&mut group, start_frame, end_frame) {
+							// Its head is gone, and this subscriber didn't ask for a
+							// partial group. Skip it rather than open a stream that can
+							// only be reset; the next servable group resolves the start.
+							tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "skipping group with a missing head");
+							continue;
+						}
 						if emit_range && !start_sent {
 							start_sent = true;
+							// Only the group: the subscriber derives the start frame from
+							// its own request (see `lite::SubscribeStart`).
 							writer
 								.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-									group: group.sequence,
+									group: sequence,
 								}))
 								.await?;
 						}
@@ -1929,12 +2035,17 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 						latency_max: upd.max_latency,
 						group_start: upd.start_group,
 						group_end: upd.end_group,
+						frame_start: upd.start_frame,
+						frame_end: upd.end_frame,
 						..Default::default()
 					});
 					if let Some(start_group) = upd.start_group {
 						track.start_at(start_group);
 					}
 					track.end_at(upd.end_group);
+					let bounds = Bounds::from(&upd);
+					start_frame = bounds.start_frame();
+					end_frame = bounds.end_frame();
 				}
 			}
 		}
@@ -1942,24 +2053,27 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 	fn queue_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
+		let frame_start = group.index();
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let current_priority = self.track_priority_current();
 		let handle = self.priority.insert(Priority::new(current_priority, sequence));
-		let fut = self.clone().serve_group(sequence, handle, group);
+		let fut = self.clone().serve_group(sequence, frame_start, handle, group);
 		tasks.push(fut.map(|_| ()).maybe_boxed());
 	}
 
 	async fn serve_group(
 		mut self,
 		sequence: u64,
+		frame_start: u64,
 		mut priority: PriorityHandle,
 		mut group: group::Consumer,
 	) -> Result<(), Error> {
 		let msg = lite::Group {
 			subscribe: self.id,
 			sequence,
+			frame_start,
 		};
 		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
 		let mut stream = Writer::new(stream, self.version);
@@ -2183,6 +2297,72 @@ mod serve_group_test {
 	use crate::lite::test_transport::*;
 	use crate::{Timestamp, broadcast};
 
+	/// A group whose head the publisher no longer holds is skipped, not served short:
+	/// only a subscriber that asked for a partial group may receive one.
+	#[test]
+	fn position_group_skips_a_missing_head() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
+		group.start_at(5).unwrap();
+		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
+
+		// Asked for whole groups, so the missing frames 0..5 make this unservable.
+		let mut consumer = group.consume();
+		assert!(!position_group(&mut consumer, None, None));
+
+		// Asked for exactly where it starts: servable, and positioned there.
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		assert_eq!(consumer.index(), 5);
+
+		// Asked for an earlier frame than the group holds: still a hole, still skipped.
+		let mut consumer = group.consume();
+		assert!(!position_group(&mut consumer, Some((3, 2)), None));
+
+		// The offset belongs to the start group only; a later group is served whole.
+		let mut other = track.create_group(group::Info { sequence: 4 }).unwrap();
+		other.write_frame(Timestamp::ZERO, b"whole".to_vec()).unwrap();
+		let mut consumer = other.consume();
+		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		assert_eq!(consumer.index(), 0);
+	}
+
+	/// The end bound caps the end group and leaves the others whole.
+	#[test]
+	fn position_group_caps_the_end_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
+		for i in 0..4u8 {
+			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, None, Some((7, 1))));
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			0
+		);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			1
+		);
+		assert!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
+			"capped"
+		);
+
+		// A cap naming another group leaves this one uncapped.
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, None, Some((8, 1))));
+		for i in 0..4u8 {
+			assert_eq!(
+				consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+				i
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn resets_with_the_abort_code() {
 		let log = Log::default();
@@ -2207,7 +2387,7 @@ mod serve_group_test {
 			.unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group.consume()));
 
 		// Drain the frame, leaving the task parked awaiting the next one.
 		assert!(futures::poll!(serve.as_mut()).is_pending());

@@ -273,7 +273,7 @@ export class Connection implements Established {
 	async #runUni(stream: Reader) {
 		const typ = await stream.u53();
 		if (typ === DataType.Group) {
-			const msg = await Group.decode(stream);
+			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
 		} else if (typ === DataType.Setup) {
 			// The peer sends exactly one SETUP, then FINs. Record it so capability-gated

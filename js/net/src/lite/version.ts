@@ -7,6 +7,7 @@ export const Version = {
 	/// Work-in-progress lite-06, advertised as the preferred WebTransport subprotocol.
 	/// Adds announce ids: each active ANNOUNCE_BROADCAST implicitly assigns the next
 	/// ordinal, and ended/restart reference that id instead of repeating the path.
+	/// Also adds frame-precise subscribe/fetch bounds and a GROUP frame offset.
 	DRAFT_06: 0xff0dad06,
 } as const;
 
@@ -99,6 +100,24 @@ export function hasExcludeHop(version: Version): boolean {
  * Added in lite-06. Older versions carry nothing, so a received route stays at
  * zero and routing falls back to the hop-count tie-break. */
 export function hasRouteCost(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-06+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, SUBSCRIBE_OK, and GROUP carry frame
+ * indices alongside their group sequences, so a subscription or fetch can start and end
+ * partway through a group. Added in lite-06. Older versions only address whole groups,
+ * so a route change has to wait for the next group before it can resume. */
+export function hasFrameBounds(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-06+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

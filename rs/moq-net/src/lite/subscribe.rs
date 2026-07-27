@@ -20,6 +20,12 @@ pub struct Subscribe<'a> {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// First frame to deliver within `start_group`'s group; 0 is the whole group.
+	/// Lite06+ only, and meaningless without an explicit `start_group`.
+	pub start_frame: u64,
+	/// Last frame to deliver (inclusive) within `end_group`'s group, or `None` for the
+	/// whole group. Lite06+ only, and meaningless without an explicit `end_group`.
+	pub end_frame: Option<u64>,
 }
 
 impl Message for Subscribe<'_> {
@@ -40,6 +46,8 @@ impl Message for Subscribe<'_> {
 			}
 		};
 
+		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
+
 		Ok(Self {
 			id,
 			broadcast,
@@ -49,6 +57,8 @@ impl Message for Subscribe<'_> {
 			max_latency,
 			start_group,
 			end_group,
+			start_frame,
+			end_frame,
 		})
 	}
 
@@ -68,8 +78,56 @@ impl Message for Subscribe<'_> {
 			}
 		}
 
+		encode_frame_bounds(w, version, self.start_frame, self.end_frame)?;
+
 		Ok(())
 	}
+}
+
+/// Decode the trailing `Frame Start` / `Frame End` pair shared by SUBSCRIBE,
+/// SUBSCRIBE_UPDATE, and FETCH.
+///
+/// Older versions carry no such fields, so they decode as the whole group. A frame bound
+/// without the group bound it qualifies is a protocol violation: frames are numbered per
+/// group, so there is nothing to count from.
+fn decode_frame_bounds<R: bytes::Buf>(
+	r: &mut R,
+	version: Version,
+	start_group: Option<u64>,
+	end_group: Option<u64>,
+) -> Result<(u64, Option<u64>), DecodeError> {
+	if !version.has_frame_bounds() {
+		return Ok((0, None));
+	}
+
+	let start_frame = u64::decode(r, version)?;
+	let end_frame = Option::<u64>::decode(r, version)?;
+
+	if (start_frame != 0 && start_group.is_none()) || (end_frame.is_some() && end_group.is_none()) {
+		return Err(DecodeError::InvalidSubscribeLocation);
+	}
+
+	Ok((start_frame, end_frame))
+}
+
+/// Encode the trailing `Frame Start` / `Frame End` pair, a no-op before lite-06.
+fn encode_frame_bounds<W: bytes::BufMut>(
+	w: &mut W,
+	version: Version,
+	start_frame: u64,
+	end_frame: Option<u64>,
+) -> Result<(), EncodeError> {
+	if !version.has_frame_bounds() {
+		// Nothing carries the bounds, so silently widening to the whole group would
+		// deliver frames the caller excluded. Refuse instead.
+		if start_frame != 0 || end_frame.is_some() {
+			return Err(EncodeError::Version);
+		}
+		return Ok(());
+	}
+
+	start_frame.encode(w, version)?;
+	end_frame.encode(w, version)
 }
 
 /// Publisher's acknowledgement on the Subscribe Stream for drafts 01-04.
@@ -145,6 +203,11 @@ impl Message for SubscribeOk {
 /// Resolves the absolute start group of a Lite05+ subscription. The first message
 /// the publisher sends, once the start group is known. A value greater than the
 /// requested start implicitly drops the leading range.
+///
+/// There is no start *frame*: a partial group is only served to a subscriber that asked
+/// for one, so delivery begins either at the requested `Frame Start` (when this is the
+/// requested group) or at frame 0 (when the publisher resolved to a later one). A
+/// subscriber that asked for group 5 frame 15 and receives group 6 starts at frame 0.
 #[derive(Clone, Debug)]
 pub struct SubscribeStart {
 	pub group: u64,
@@ -206,6 +269,10 @@ pub struct SubscribeUpdate {
 	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
+	/// See [`Subscribe::start_frame`].
+	pub start_frame: u64,
+	/// See [`Subscribe::end_frame`].
+	pub end_frame: Option<u64>,
 }
 
 impl Message for SubscribeUpdate {
@@ -229,12 +296,16 @@ impl Message for SubscribeUpdate {
 			group => Some(group - 1),
 		};
 
+		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
+
 		Ok(Self {
 			priority,
 			ordered,
 			max_latency,
 			start_group,
 			end_group,
+			start_frame,
+			end_frame,
 		})
 	}
 
@@ -265,6 +336,8 @@ impl Message for SubscribeUpdate {
 				.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
 		}
+
+		encode_frame_bounds(w, version, self.start_frame, self.end_frame)?;
 
 		Ok(())
 	}
@@ -462,6 +535,77 @@ mod test {
 		let mut buf = Vec::new();
 		resp.encode(&mut buf, Version::Lite04).unwrap();
 		assert_eq!(buf[0], 1);
+	}
+
+	fn subscribe_sample() -> Subscribe<'static> {
+		Subscribe {
+			id: 1,
+			broadcast: Path::new("room").to_owned(),
+			track: Cow::Borrowed("video"),
+			priority: 3,
+			ordered: true,
+			max_latency: std::time::Duration::from_millis(250),
+			start_group: Some(7),
+			end_group: Some(9),
+			start_frame: 4,
+			end_frame: Some(2),
+		}
+	}
+
+	#[test]
+	fn subscribe_frame_bounds_roundtrip() {
+		let msg = subscribe_sample();
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
+		let got = Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip).unwrap();
+		assert_eq!((got.start_group, got.start_frame), (Some(7), 4));
+		assert_eq!((got.end_group, got.end_frame), (Some(9), Some(2)));
+	}
+
+	/// The whole-group defaults are what a version without the fields decodes to, so
+	/// lite-05 stays byte-identical.
+	#[test]
+	fn subscribe_without_frame_bounds_is_unchanged_on_lite05() {
+		let mut msg = subscribe_sample();
+		msg.start_frame = 0;
+		msg.end_frame = None;
+
+		let mut lite05 = Vec::new();
+		msg.encode_msg(&mut lite05, Version::Lite05).unwrap();
+		let mut lite06 = Vec::new();
+		msg.encode_msg(&mut lite06, Version::Lite06Wip).unwrap();
+
+		// Lite06 appends the two defaulted varints and nothing else.
+		assert_eq!(&lite06[..lite05.len()], &lite05[..]);
+		assert_eq!(&lite06[lite05.len()..], &[0, 0]);
+
+		let got = Subscribe::decode_msg(&mut lite05.as_slice(), Version::Lite05).unwrap();
+		assert_eq!((got.start_frame, got.end_frame), (0, None));
+	}
+
+	/// Silently widening to the whole group would deliver frames the caller excluded.
+	#[test]
+	fn subscribe_frame_bounds_rejected_before_lite06() {
+		let mut buf = Vec::new();
+		assert!(subscribe_sample().encode_msg(&mut buf, Version::Lite05).is_err());
+	}
+
+	/// Frames are numbered per group, so a frame bound without its group bound has
+	/// nothing to count from.
+	#[test]
+	fn subscribe_frame_bound_without_group_bound_is_invalid() {
+		let mut msg = subscribe_sample();
+		msg.start_group = None;
+		msg.start_frame = 4;
+		msg.end_group = None;
+		msg.end_frame = None;
+
+		let mut buf = Vec::new();
+		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
+		assert!(matches!(
+			Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip),
+			Err(DecodeError::InvalidSubscribeLocation)
+		));
 	}
 
 	#[test]
