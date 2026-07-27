@@ -26,9 +26,12 @@ enum PadState {
 }
 
 /// Where a pad's buffers land: a codec importer, or a subtitle track written as WebVTT cues.
+///
+/// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
+/// enum small.
 enum Sink {
-	Media(import::Track),
-	Text(Text),
+	Media(Box<import::Track>),
+	Text(Box<Text>),
 }
 
 /// A subtitle pad. GStreamer hands us one decoded cue per buffer (`text/x-raw`, UTF-8) with the
@@ -144,7 +147,11 @@ impl Pad {
 		// Subtitles skip the codec importers entirely: the demuxer already resolved each cue to UTF-8
 		// text with a presentation time, so there is nothing to parse, only a text rendition to declare.
 		if structure.name().as_str() == "text/x-raw" {
-			self.track = Some(Sink::Text(Self::reserve_text(&mut broadcast, catalog, structure)?));
+			self.track = Some(Sink::Text(Box::new(Self::reserve_text(
+				&mut broadcast,
+				catalog,
+				structure,
+			)?)));
 			self.caps = Some(caps.clone());
 			return Ok(());
 		}
@@ -205,7 +212,7 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(Sink::Media(track));
+		self.track = Some(Sink::Media(Box::new(track)));
 		self.caps = Some(caps.clone());
 		Ok(())
 	}
@@ -526,11 +533,11 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &h264_caps());
 		// No observe_segment: the pad stays in NoSegment.
 		assert!(
-			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None),
 			"first no-segment buffer is reported"
 		);
 		assert!(
-			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None),
 			"subsequent no-segment buffers are not re-reported"
 		);
 	}
@@ -554,7 +561,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-raw").build());
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO), None);
 	}
 
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).
@@ -565,7 +572,7 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, &h264_caps());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None);
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");

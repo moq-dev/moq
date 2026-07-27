@@ -1,5 +1,6 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
+import { u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 import { TimelineSchema } from "./timeline";
 
@@ -41,6 +42,10 @@ export const TextConfigSchema = z.object({
 
 	// The container format, used to decode the timestamp and frame the payload.
 	container: ContainerSchema,
+
+	// The maximum jitter before the next cue is flushed, in milliseconds. The player's jitter buffer
+	// should be at least this large; absent means each cue is flushed immediately.
+	jitter: z.optional(u53Schema),
 
 	// The companion timeline track indexing this rendition's groups, if the publisher offers one.
 	timeline: z.optional(TimelineSchema),

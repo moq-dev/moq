@@ -3,8 +3,15 @@ import * as Container from "@moq/hang/container";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import { CaptionsRenderer, parseText, VTTCue, type VTTRegion } from "media-captions";
+// media-captions positions and styles cues purely through these stylesheets (via `[part]`
+// attributes and CSS variables it sets); without them the overlay renders nothing visible.
+import captionsCss from "media-captions/styles/captions.css?inline";
+import regionsCss from "media-captions/styles/regions.css?inline";
 import type { Sync } from "../sync";
 import type { Source } from "./source";
+
+// The renderer positions cues relative to a `[part="captions"]` box using the stylesheets above.
+const OVERLAY_CSS = `${captionsCss}\n${regionsCss}`;
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
 const PRUNE_BEHIND = Time.Milli(30_000);
@@ -62,6 +69,26 @@ export class Renderer {
 		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
 
+		// Pick the frame container. Text uses the timestamped `legacy` container or LOC; anything else
+		// (e.g. `cmaf`) would misread the cue payload, so skip it rather than render garbage.
+		let format: Container.Format;
+		if (config.container.kind === "legacy") {
+			format = new Container.Legacy.Format();
+		} else if (config.container.kind === "loc") {
+			format = new Container.Loc.Format();
+		} else {
+			console.warn(`captions: unsupported container "${config.container.kind}" for track ${track}`);
+			return;
+		}
+
+		// The media-captions stylesheet, mounted as a sibling of the overlay (its `[part]` selectors are
+		// global). It can't live inside the overlay: the renderer clears `overlay.textContent` on every
+		// track change, which would wipe it.
+		const style = document.createElement("style");
+		style.textContent = OVERLAY_CSS;
+		container.appendChild(style);
+		effect.cleanup(() => style.remove());
+
 		// A fresh overlay per selection, so cleanup is just removing it.
 		const overlay = document.createElement("div");
 		overlay.style.position = "absolute";
@@ -71,11 +98,12 @@ export class Renderer {
 		effect.cleanup(() => overlay.remove());
 
 		const renderer = new CaptionsRenderer(overlay);
+		// The renderer installs a ResizeObserver; destroy() disconnects it (removing the overlay alone
+		// does not), so a track switch or reconnect doesn't leak an observer.
+		effect.cleanup(() => renderer.destroy());
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.text });
 		effect.cleanup(() => sub.close());
-
-		const format = new Container.Legacy.Format();
 		const cues: VTTCue[] = [];
 		const regions = new Map<string, VTTRegion>();
 		const commit = () => renderer.changeTrack({ cues: [...cues], regions: [...regions.values()] });

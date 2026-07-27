@@ -5,7 +5,7 @@ pub use format::*;
 use std::collections::{BTreeMap, btree_map};
 
 use serde::{Deserialize, Serialize};
-use serde_with::DisplayFromStr;
+use serde_with::{DisplayFromStr, DurationMilliSeconds};
 
 use crate::catalog::Container;
 
@@ -93,6 +93,14 @@ pub struct TextConfig {
 	#[serde(default)]
 	pub container: Container,
 
+	/// The maximum delay, in milliseconds, before the publisher flushes the next cue. A consumer's
+	/// jitter buffer should be at least this large. Absent means each cue is flushed immediately.
+	///
+	/// Serialized as an integer number of milliseconds (sub-ms precision is truncated).
+	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
+	#[serde(default)]
+	pub jitter: Option<std::time::Duration>,
+
 	/// The companion timeline track indexing this rendition's groups, if the publisher offers one.
 	/// See [`Timeline`](crate::catalog::Timeline).
 	#[serde(default)]
@@ -114,6 +122,7 @@ impl TextConfig {
 			lang: None,
 			label: None,
 			container: Container::default(),
+			jitter: None,
 			timeline: None,
 		}
 	}
