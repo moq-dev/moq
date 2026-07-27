@@ -1,0 +1,62 @@
+name: macOS
+
+permissions:
+  contents: read
+
+# The main gate (check.yml) runs on Linux only, so `#[cfg(target_os = "macos")]`
+# code compiles nowhere in CI: moq-video's VideoToolbox and ScreenCaptureKit
+# backends and moq-audio's system-audio capture rest on a maintainer running
+# `just check` on a Mac. This job compiles them.
+#
+# macOS runners are the expensive ones, so the trigger is deliberately tighter
+# than windows.yml: only the two crates that hold Apple-gated code, and
+# the lockfile (an objc2 bump inside an existing version range is exactly the
+# kind of change that breaks these bindings and nothing else). Everything else
+# shipping on macOS already compiles in swift.yml.
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "rs/moq-video/**"
+      - "rs/moq-audio/**"
+      - "rs/justfile"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/macos.yml"
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: macOS
+    if: github.event.action != 'closed'
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No toolchain step: rust-toolchain.toml pins the version and the runner's
+      # rustup installs it on the first cargo call, so this gate compiles with
+      # the same rustc as the Nix-pinned Linux one. No Nix either, since
+      # installing it costs more than the check saves.
+
+      - name: Install just
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: just
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Check
+        run: just rs macos

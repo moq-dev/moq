@@ -21,6 +21,37 @@ check *args:
     cargo shear
     cargo sort --workspace --check --no-format
 
+# Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
+# Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
+# gate skips entirely. Cross-compiling can't stand in, because openh264-sys2
+# builds vendored C++ that needs an MSVC toolchain and openh264 is a
+# non-optional dependency.
+#
+# Default features rather than `--all-features`: jemalloc and the quiche
+# backend don't build on MSVC, while moq-video's Linux-only nvenc/vaapi/nvdec
+# defaults are already no-ops off Linux. moq-gst is excluded because it links
+# GStreamer via pkg-config, which the Windows runner doesn't have.
+
+# Compile the whole workspace on a Windows host. Must run ON Windows.
+windows *args:
+    cargo check --workspace --exclude moq-gst --all-targets {{ args }}
+
+# Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
+# VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
+# plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
+#
+# Scoped to those two crates instead of the workspace, because they hold all
+# the Apple-gated code the Linux gate misses. moq-ffi (and through it the
+# Swift/Kotlin/Go wrappers) already compiles on macOS in swift.yml.
+# `--all-features` is required, not just tidy: moq-audio's capture backend sits
+# behind an off-by-default feature, so a plain check would skip the very code
+# this recipe exists for. moq-video's Linux-only nvenc/vaapi/nvdec/pipewire
+# deps are no-ops here.
+
+# Compile the Apple-only code paths. Must run ON macOS.
+macos *args:
+    cargo check -p moq-video -p moq-audio --all-targets --all-features {{ args }}
+
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty
 # and none match the Rust scope. Run `just rs ci` (no FILES) to

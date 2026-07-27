@@ -143,3 +143,9 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 - Rust tests are `#[cfg(test)] mod tests` inline in the source file.
 - Async tests that depend on time call `tokio::time::pause()` first so timers fire instantly and deterministically (e.g. the tests in `moq-net/src/model/origin.rs`).
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
+- **`just check` only compiles the host's platform.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Each platform has its own gate, and each only runs on that platform's runner:
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, via `.github/workflows/windows.yml`. You can't reproduce it off Windows, since cross-compiling dies in openh264-sys2's vendored C++.
+  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, via `.github/workflows/macos.yml`. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
+  - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+
+  Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
