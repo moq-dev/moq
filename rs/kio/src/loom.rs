@@ -21,17 +21,6 @@ use loom::{future::block_on, thread};
 
 use crate::{Producer, Ref, Shared};
 
-/// Model a three-thread test with a preemption bound.
-///
-/// The two-thread tests below search exhaustively in well under a second. Adding a
-/// third thread blows that up to minutes, and the bugs these catch are all short
-/// interleavings, so bound the search rather than pay for the tail.
-fn bounded(f: impl Fn() + Sync + Send + 'static) {
-	let mut builder = loom::model::Builder::new();
-	builder.preemption_bound = Some(3);
-	builder.check(f);
-}
-
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
 	move |v: &Ref<'_, u32>| if **v == n { Poll::Ready(()) } else { Poll::Pending }
@@ -59,7 +48,7 @@ fn write_wakes_a_parked_consumer() {
 /// Two writers racing through that window must still leave the consumer woken.
 #[test]
 fn concurrent_writes_never_lose_a_wakeup() {
-	bounded(|| {
+	loom::model(|| {
 		let producer = Producer::new(0u32);
 		let consumer = producer.consume();
 		let second = producer.clone();
@@ -77,7 +66,7 @@ fn concurrent_writes_never_lose_a_wakeup() {
 /// the consumer parked on `closed()` must be woken by whichever it was.
 #[test]
 fn racing_last_producer_drops_still_close() {
-	bounded(|| {
+	loom::model(|| {
 		let producer = Producer::new(0u32);
 		let second = producer.clone();
 		let consumer = producer.consume();

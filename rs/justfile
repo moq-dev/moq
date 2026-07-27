@@ -104,11 +104,13 @@ test *args:
 
 # Permutation-test the concurrent handoffs with loom.
 #
-# `--cfg loom` swaps kio's Arc/Mutex/atomics for loom's instrumented ones, so it
-# rebuilds the world and can't share artifacts with a normal `cargo test`. It's
-# kept out of `check`/`ci` for that reason plus the runtime: even bounded, the
-# search is minutes, not seconds. Run it after touching kio's refcount/waiter
-# plumbing or moq-net's model layer.
+# `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, so it
+# rebuilds the world and can't share artifacts with a normal `cargo test`. That
+# plus a ~6 minute exhaustive search is why it's a manual gate rather than part
+# of `check`/`ci`; see the Testing section of rs/CLAUDE.md for when to run it.
+#
+# The search is deliberately unbounded (no `preemption_bound`), so it covers
+# every interleaving rather than just the short ones.
 #
 # kio's own unit tests are `cfg(not(loom))`: they'd construct loom primitives
 # outside `loom::model`, which panics.

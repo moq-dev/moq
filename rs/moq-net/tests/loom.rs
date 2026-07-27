@@ -17,21 +17,11 @@ use bytes::Bytes;
 use loom::{future::block_on, thread};
 use moq_net::{Timestamp, broadcast, cache, origin};
 
-/// moq-net does far more atomic work per operation than kio does, so an
-/// unbounded search doesn't terminate in a useful amount of time. Bounding
-/// preemptions keeps the search to the short interleavings, which is where
-/// handoff bugs live.
-fn model(f: impl Fn() + Sync + Send + 'static) {
-	let mut builder = loom::model::Builder::new();
-	builder.preemption_bound = Some(3);
-	builder.check(f);
-}
-
 /// A frame written on the publisher thread must reach a subscriber parked on
 /// `next_frame`, however the write interleaves with the reader's parking.
 #[test]
 fn frame_reaches_a_parked_subscriber() {
-	model(|| {
+	loom::model(|| {
 		let mut broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut track = broadcast.create_track("video", None).expect("create track");
@@ -62,7 +52,7 @@ fn frame_reaches_a_parked_subscriber() {
 /// the lock while group 2 is already being written.
 #[test]
 fn back_to_back_groups_arrive_in_order() {
-	model(|| {
+	loom::model(|| {
 		let mut broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut track = broadcast.create_track("video", None).expect("create track");
@@ -89,7 +79,7 @@ fn back_to_back_groups_arrive_in_order() {
 /// appearing on another thread must always wake it.
 #[test]
 fn subscriber_wakes_parked_demand() {
-	model(|| {
+	loom::model(|| {
 		let mut broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
@@ -114,7 +104,7 @@ fn subscriber_wakes_parked_demand() {
 /// cache leaks.
 #[test]
 fn concurrent_tracks_drain_a_shared_pool() {
-	model(|| {
+	loom::model(|| {
 		let pool = cache::Pool::new(512);
 		let mut info = broadcast::Info::new();
 		info.origin = origin::Info::default().with_pool(pool.clone());
@@ -149,7 +139,7 @@ fn concurrent_tracks_drain_a_shared_pool() {
 /// than leaving it waiting for a group that will never come.
 #[test]
 fn publisher_drop_resolves_a_parked_subscriber() {
-	model(|| {
+	loom::model(|| {
 		let mut broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
