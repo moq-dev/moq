@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
 
 use fixed_resample::ResamplingCons;
+#[cfg(feature = "aec")]
+use fixed_resample::ResamplingProd;
 
 /// Frames mixed per pass. The callback buffer is chunked to this so the scratch
 /// buffers stay a fixed size no matter what period the device asks for.
@@ -27,7 +29,7 @@ const RAMP: f32 = 0.003;
 
 /// The mix bus is stereo: sinks resample into it and it fans out to however many
 /// channels the device wants.
-pub(super) const BUS_CHANNELS: usize = 2;
+pub(crate) const BUS_CHANNELS: usize = 2;
 
 /// Sinks one device will mix. The entry list is allocated to this up front and
 /// never grows, which is what keeps registration off the allocator.
@@ -102,6 +104,9 @@ pub(super) enum Command {
 	/// Stop mixing a sink, because it was dropped or is being rebuilt for a new
 	/// device.
 	Remove { id: u64 },
+	/// Copy the mix into an echo-cancellation reference, or stop with `None`.
+	#[cfg(feature = "aec")]
+	Reference(Option<ResamplingProd<f32>>),
 }
 
 /// One sink being mixed, owned by the audio thread until it is retired.
@@ -113,13 +118,26 @@ pub(super) struct Entry {
 	applied: f32,
 }
 
+/// Something the audio thread is done with and must not free itself.
+///
+/// Nothing reads these payloads, which is the point: they exist so the driver
+/// thread is the one that drops them.
+#[allow(dead_code)]
+pub(super) enum Retired {
+	/// A sink that was removed or rebuilt.
+	Sink(Entry),
+	/// The echo reference a canceller replaced or gave up.
+	#[cfg(feature = "aec")]
+	Reference(ResamplingProd<f32>),
+}
+
 /// The state behind the output callback.
 pub(super) struct Mixer {
 	entries: Vec<Entry>,
 	commands: Receiver<Command>,
-	/// Where removed sinks go to be dropped, since dropping one here would free
-	/// on the audio thread.
-	retired: SyncSender<Entry>,
+	/// Where anything the mixer is done with goes to be dropped, since dropping
+	/// it here would free on the audio thread.
+	retired: SyncSender<Retired>,
 	/// Channels the device takes.
 	channels: usize,
 	/// Per-frame gain step, so any change spans [`RAMP`] regardless of rate.
@@ -128,12 +146,17 @@ pub(super) struct Mixer {
 	bus: Vec<f32>,
 	/// Stereo scratch for the sink being read.
 	scratch: Vec<f32>,
+	/// Where echo cancellation reads what was played. Fed the mix after
+	/// clipping but before it fans out, since that is the signal the speaker
+	/// gets and therefore the one the microphone hears back.
+	#[cfg(feature = "aec")]
+	reference: Option<ResamplingProd<f32>>,
 }
 
 impl Mixer {
 	/// `rate` and `channels` describe the device, not the sinks: each sink
 	/// resamples into the bus on its way here.
-	pub(super) fn new(commands: Receiver<Command>, retired: SyncSender<Entry>, rate: u32, channels: usize) -> Self {
+	pub(super) fn new(commands: Receiver<Command>, retired: SyncSender<Retired>, rate: u32, channels: usize) -> Self {
 		Self {
 			entries: Vec::with_capacity(MAX_SINKS),
 			commands,
@@ -142,19 +165,21 @@ impl Mixer {
 			step: 1.0 / (rate as f32 * RAMP),
 			bus: vec![0.0; CHUNK * BUS_CHANNELS],
 			scratch: vec![0.0; CHUNK * BUS_CHANNELS],
+			#[cfg(feature = "aec")]
+			reference: None,
 		}
 	}
 
-	/// Hand a removed sink back to the driver to drop.
+	/// Hand something the mixer is done with back to the driver to drop.
 	///
 	/// The channel holds [`MAX_SINKS`] entries and the driver drains it every
 	/// time a sink is dropped, so filling it takes a driver that has stopped
 	/// running entirely. Dropping in place then costs one free on the audio
 	/// thread, which beats leaking the entry for the life of the stream.
-	fn retire(&mut self, entry: Entry) {
-		if let Err(err) = self.retired.try_send(entry) {
-			let (TrySendError::Full(entry) | TrySendError::Disconnected(entry)) = err;
-			drop(entry);
+	fn retire(&mut self, item: Retired) {
+		if let Err(err) = self.retired.try_send(item) {
+			let (TrySendError::Full(item) | TrySendError::Disconnected(item)) = err;
+			drop(item);
 		}
 	}
 
@@ -179,13 +204,21 @@ impl Mixer {
 					if self.entries.len() < MAX_SINKS {
 						self.entries.push(entry);
 					} else {
-						self.retire(entry);
+						self.retire(Retired::Sink(entry));
 					}
 				}
 				Ok(Command::Remove { id }) => {
 					if let Some(index) = self.entries.iter().position(|e| e.id == id) {
 						let entry = self.entries.swap_remove(index);
-						self.retire(entry);
+						self.retire(Retired::Sink(entry));
+					}
+				}
+				#[cfg(feature = "aec")]
+				Ok(Command::Reference(reference)) => {
+					// The old tap owns a heap ring, so it leaves the same way a
+					// removed sink does rather than being freed here.
+					if let Some(previous) = std::mem::replace(&mut self.reference, reference) {
+						self.retire(Retired::Reference(previous));
 					}
 				}
 				Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -199,6 +232,8 @@ impl Mixer {
 			step,
 			bus,
 			scratch,
+			#[cfg(feature = "aec")]
+			reference,
 			..
 		} = self;
 		let channels = *channels;
@@ -238,6 +273,14 @@ impl Mixer {
 			// Summing sinks can exceed full scale; clip rather than wrap.
 			for sample in &mut bus[..samples] {
 				*sample = sample.clamp(-1.0, 1.0);
+			}
+
+			// Tap the mix on its way out. Overflow means the microphone stopped
+			// draining, which the canceller notices on its own; there is nothing
+			// useful to do about it from here and nothing may be logged.
+			#[cfg(feature = "aec")]
+			if let Some(reference) = reference.as_mut() {
+				reference.push_interleaved(&bus[..samples]);
 			}
 
 			let out = &mut out[done * channels..(done + frames) * channels];
@@ -283,7 +326,7 @@ mod tests {
 		/// Sinks the mixer has finished with. A test asserts on this rather than
 		/// on the absence of a `free`, since the point of retirement is that the
 		/// audio thread never drops one.
-		retired: Receiver<Entry>,
+		retired: Receiver<Retired>,
 		next: u64,
 	}
 
@@ -500,11 +543,100 @@ mod tests {
 		harness.commands.send(Command::Remove { id }).unwrap();
 		harness.fill(&mut out);
 
-		let entry = harness
+		let retired = harness
 			.retired
 			.try_recv()
 			.expect("the removed sink was dropped in the callback");
-		assert_eq!(entry.id, id);
+		match retired {
+			Retired::Sink(entry) => assert_eq!(entry.id, id),
+			#[cfg(feature = "aec")]
+			Retired::Reference(_) => panic!("the mixer retired the echo reference instead"),
+		}
+	}
+
+	/// Echo cancellation reads what the speaker was given, so the tap has to see
+	/// the summed and clipped mix rather than any one sink.
+	#[cfg(feature = "aec")]
+	#[test]
+	fn the_echo_reference_gets_the_mix() {
+		let mut harness = Harness::new(2);
+		let mut out = vec![0.0f32; 2048];
+
+		let (reference, mut tap) = reference_channel();
+		harness.commands.send(Command::Reference(Some(reference))).unwrap();
+
+		let mut prods: Vec<_> = (0..3).map(|_| harness.add(Arc::new(Gain::new())).1).collect();
+		harness.fill(&mut out);
+
+		// The tap discards until the canceller has read once, the same way a sink
+		// does, so that nothing queues up while nobody is listening. That first
+		// read also primes the channel with its configured latency in silence,
+		// which is why the buffer below is read past it rather than at it.
+		let mut heard = vec![0.0f32; 2048 * BUS_CHANNELS];
+		tap.read_interleaved(&mut heard, false);
+
+		for prod in &mut prods {
+			push(prod, 0.5, FRAMES);
+		}
+
+		harness.settle(&mut out);
+		tap.read_interleaved(&mut heard, false);
+		let tail = &heard[heard.len() - 64..];
+		assert!(
+			tail.iter().all(|s| (*s - 1.0).abs() < 1e-5),
+			"the tap saw {:?}, not the clipped mix",
+			&tail[..4]
+		);
+	}
+
+	/// The tap owns a heap ring, so replacing or clearing it must leave by the
+	/// same route a removed sink does.
+	#[cfg(feature = "aec")]
+	#[test]
+	fn a_replaced_echo_reference_is_handed_back() {
+		let mut harness = Harness::new(2);
+		let mut out = vec![0.0f32; 512];
+
+		harness
+			.commands
+			.send(Command::Reference(Some(reference_channel().0)))
+			.unwrap();
+		harness.fill(&mut out);
+		assert!(harness.retired.try_recv().is_err(), "nothing to retire yet");
+
+		harness
+			.commands
+			.send(Command::Reference(Some(reference_channel().0)))
+			.unwrap();
+		harness.fill(&mut out);
+		assert!(
+			matches!(harness.retired.try_recv(), Ok(Retired::Reference(_))),
+			"the replaced tap was dropped in the callback"
+		);
+
+		harness.commands.send(Command::Reference(None)).unwrap();
+		harness.fill(&mut out);
+		assert!(
+			matches!(harness.retired.try_recv(), Ok(Retired::Reference(_))),
+			"the cleared tap was dropped in the callback"
+		);
+	}
+
+	/// A tap running at the device rate, so the assertions see the mix untouched
+	/// by resampling.
+	#[cfg(feature = "aec")]
+	fn reference_channel() -> (ResamplingProd<f32>, ResamplingCons<f32>) {
+		resampling_channel::<f32>(
+			BUS_CHANNELS,
+			RATE,
+			RATE,
+			true,
+			ResamplingChannelConfig {
+				latency_seconds: 0.02,
+				capacity_seconds: 0.2,
+				..Default::default()
+			},
+		)
 	}
 
 	/// The entry list is allocated once. Growing it would allocate on the audio

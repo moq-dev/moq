@@ -6,6 +6,8 @@
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 
+#[cfg(feature = "aec")]
+use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,7 +57,7 @@ const SCRATCH_FRAMES: usize = 2048;
 /// call. That keeps [`Engine::sink`](super::Engine::sink) synchronous and quick
 /// even while the driver is opening a device.
 #[derive(Default)]
-pub(super) struct Shared {
+pub(crate) struct Shared {
 	state: Mutex<State>,
 }
 
@@ -74,6 +76,14 @@ struct State {
 	/// was full. Retried by [`Shared::sync`].
 	detaching: Vec<u64>,
 	next_id: u64,
+	/// The echo-cancellation tap, rebuilt alongside the sinks. At most one:
+	/// there is one mix, and one microphone hearing it.
+	#[cfg(feature = "aec")]
+	reference: Option<crate::aec::Reference>,
+	/// Set when the mixer has not been told to drop the tap yet, because its
+	/// command queue was full. Retried by [`Shared::sync`].
+	#[cfg(feature = "aec")]
+	detaching_reference: bool,
 }
 
 impl Shared {
@@ -126,6 +136,47 @@ impl Shared {
 		}
 	}
 
+	/// Start feeding an echo canceller the mix, replacing any previous one.
+	///
+	/// Registers with no device open too: the tap waits for the next restart,
+	/// exactly as a sink does.
+	#[cfg(feature = "aec")]
+	pub(crate) fn set_reference(&self, mut reference: crate::aec::Reference) {
+		let mut state = self.state.lock().unwrap();
+		if let Some(mixer) = &state.mixer
+			&& state.rate != 0
+			&& reference.rebuild(state.rate)
+		{
+			attach_reference(&mut reference, mixer);
+		}
+
+		// A replaced canceller is already detached: the mixer takes whichever
+		// producer arrives last.
+		state.detaching_reference = false;
+		state.reference = Some(reference);
+	}
+
+	/// Stop feeding the canceller with this id, called when its last clone drops.
+	///
+	/// A no-op once a newer canceller has taken the slot: the one going away is
+	/// already detached, and taking the tap with it would silently break the one
+	/// that replaced it.
+	#[cfg(feature = "aec")]
+	pub(crate) fn clear_reference(&self, id: u64) {
+		let mut state = self.state.lock().unwrap();
+		if !state.reference.as_ref().is_some_and(|r| r.owned_by(id)) {
+			return;
+		}
+
+		state.reference = None;
+		let Some(mixer) = &state.mixer else { return };
+		if mixer.try_send(mixer::Command::Reference(None)).is_err() {
+			// Queue full. Remember it: dropping it here would leave the mixer
+			// filling a ring nobody reads for the life of the stream.
+			state.detaching_reference = true;
+		}
+	}
+
 	/// Re-send whatever the mixer's command queue was too full to take.
 	///
 	/// Returns whether everything is now through. The driver calls this after a
@@ -138,6 +189,10 @@ impl Shared {
 			// No stream to talk to. Registrations stay pending and `rebind`
 			// picks them up when one opens.
 			state.detaching.clear();
+			#[cfg(feature = "aec")]
+			{
+				state.detaching_reference = false;
+			}
 			return true;
 		};
 
@@ -148,7 +203,20 @@ impl Shared {
 			sink.attach(&mixer);
 		}
 
-		state.detaching.is_empty() && state.sinks.iter().all(|s| s.attached())
+		#[cfg(feature = "aec")]
+		{
+			if state.detaching_reference {
+				state.detaching_reference = mixer.try_send(mixer::Command::Reference(None)).is_err();
+			}
+			if let Some(reference) = &mut state.reference {
+				attach_reference(reference, &mixer);
+			}
+		}
+
+		let done = state.detaching.is_empty() && state.sinks.iter().all(|s| s.attached());
+		#[cfg(feature = "aec")]
+		let done = done && !state.detaching_reference && state.reference.as_ref().is_none_or(|r| r.attached());
+		done
 	}
 
 	/// Point every sink at a freshly opened stream: rebuild each channel at
@@ -159,16 +227,51 @@ impl Shared {
 			sink.rebuild(rate);
 			sink.attach(&mixer);
 		}
+
+		#[cfg(feature = "aec")]
+		if let Some(reference) = &mut state.reference {
+			if reference.rebuild(rate) {
+				attach_reference(reference, &mixer);
+			} else {
+				// The canceller went away without us noticing.
+				state.reference = None;
+			}
+		}
+
 		state.rate = rate;
 		state.mixer = Some(mixer);
 		// The old mixer is gone, and with it every sink it was told about.
 		state.detaching.clear();
+		#[cfg(feature = "aec")]
+		{
+			state.detaching_reference = false;
+		}
 	}
 
 	/// Forget the running stream, so sinks registered while the device is down
 	/// wait for the next one instead of writing into a dead mixer.
 	fn unbind(&self) {
 		self.state.lock().unwrap().mixer = None;
+	}
+
+	/// Whether an echo canceller is registered, for the tests in [`crate::aec`].
+	#[cfg(all(test, feature = "aec"))]
+	pub(crate) fn has_reference(&self) -> bool {
+		self.state.lock().unwrap().reference.is_some()
+	}
+}
+
+/// Hand the tap's producer to a running mixer, keeping it if the mixer is
+/// backed up so the next attach retries. The sink-side equivalent lives on
+/// [`Registration::attach`].
+#[cfg(feature = "aec")]
+fn attach_reference(reference: &mut crate::aec::Reference, mixer: &SyncSender<mixer::Command>) {
+	let Some(prod) = reference.take() else { return };
+	if let Err(err) = mixer.try_send(mixer::Command::Reference(Some(prod))) {
+		let (TrySendError::Full(rejected) | TrySendError::Disconnected(rejected)) = err;
+		if let mixer::Command::Reference(Some(prod)) = rejected {
+			reference.restore(prod);
+		}
 	}
 }
 
@@ -275,7 +378,7 @@ struct Driver {
 	stream: Option<cpal::Stream>,
 	/// Sinks the mixer has finished with, dropped here so the audio thread never
 	/// has to free one.
-	retired: Option<Receiver<mixer::Entry>>,
+	retired: Option<Receiver<mixer::Retired>>,
 	/// Bumped on every stream, so an error from a retired one can be told apart
 	/// from one the live stream raised.
 	generation: u64,

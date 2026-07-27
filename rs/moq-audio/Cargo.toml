@@ -37,6 +37,10 @@ capture = [
 # `capture`: a consumer that only encodes shouldn't pull cpal, or the ALSA build
 # dependency on Linux.
 playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
+# Acoustic echo cancellation: subtract what `playback` is playing from what
+# `capture` hears, so a speakerphone doesn't send its own output back. Needs
+# both halves, since the canceller taps the output mix as its reference.
+aec = ["capture", "dep:sonora", "playback"]
 
 [dependencies]
 bytes = "1"
@@ -57,6 +61,18 @@ moq-net = { workspace = true }
 # We only use the sinc resampler (Async::new_sinc), so skip the default
 # fft_resampler feature and its RustFFT/realfft dependencies.
 rubato = { version = "4.0", default-features = false }
+# Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
+# AGC2). The reason the `aec` feature can exist at all: every other option is a
+# C++ build (webrtc-audio-processing wants CMake and abseil), which is the same
+# trade we refused for Opus. Optional, and BSD-3-Clause like the upstream it was
+# ported from.
+#
+# Caveat, and why `aec` is not on by default: 0.1.0 is the only release, and it
+# panics when the adaptive filter shrinks (dignifiedquire/sonora#14), which a
+# long call on real hardware does hit. The one-line fix is upstream but
+# unreleased (#15, tracked in #24), and this workspace builds `panic = "abort"`,
+# so there is nothing to catch. Bump to 0.1.1 the moment it exists.
+sonora = { version = "0.1", optional = true }
 thiserror = "2"
 # Only the device features need an async runtime: the on-demand capture loop
 # awaits frames and demand transitions, and playback awaits the driver thread.

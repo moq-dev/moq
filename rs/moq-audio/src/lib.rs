@@ -24,6 +24,11 @@
 //!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
+//! - `aec` keeps the speaker out of the microphone, which is what a conference
+//!   on a laptop needs to not send itself back. `playback::Engine::canceller`
+//!   builds an `aec::Canceller` from the mix it is playing and
+//!   `capture::Config::aec` hands it to the microphone. Requires the `aec`
+//!   feature, which implies both of the above.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -38,6 +43,8 @@ mod opus;
 mod pcm;
 mod resample;
 
+#[cfg(feature = "aec")]
+pub mod aec;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod decode;
