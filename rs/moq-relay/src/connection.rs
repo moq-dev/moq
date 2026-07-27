@@ -23,23 +23,49 @@ impl From<AuthError> for StatusError {
 
 /// An incoming connection that has not yet been authenticated.
 ///
-/// Call [`run`](Self::run) to authenticate the request, wire up
-/// publish/subscribe origins, and serve the session until it closes.
+/// Build with [`new`](Self::new), attach the optional knobs, then call
+/// [`run`](Self::run) to authenticate the request, wire up publish/subscribe
+/// origins, and serve the session until it closes.
 pub struct Connection {
 	/// A numeric identifier for logging.
-	pub id: u64,
+	id: u64,
 	/// The raw QUIC/WebTransport request to accept or reject.
-	pub request: Request,
+	request: Request,
 	/// The cluster state used to resolve origins.
-	pub cluster: Cluster,
+	cluster: Cluster,
 	/// The authenticator used to verify credentials.
-	pub auth: Auth,
+	auth: Auth,
 	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
 	/// a GOAWAY instead of being cut off.
-	pub shutdown: crate::Shutdown,
+	shutdown: crate::Shutdown,
 }
 
 impl Connection {
+	/// Wrap an accepted request, resolving origins through `cluster` and
+	/// credentials through `auth`.
+	pub fn new(request: Request, cluster: Cluster, auth: Auth) -> Self {
+		Self {
+			id: 0,
+			request,
+			cluster,
+			auth,
+			shutdown: crate::Shutdown::disabled(),
+		}
+	}
+
+	/// Set the identifier this connection logs under. Defaults to 0.
+	pub fn with_id(mut self, id: u64) -> Self {
+		self.id = id;
+		self
+	}
+
+	/// Attach the relay-wide shutdown broadcast so the session drains with a
+	/// GOAWAY when it fires. Without it the session is cut off on process exit.
+	pub fn with_shutdown(mut self, shutdown: crate::Shutdown) -> Self {
+		self.shutdown = shutdown;
+		self
+	}
+
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {

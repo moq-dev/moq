@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -57,12 +59,18 @@ pub struct Config {
 	#[serde(default)]
 	pub internal: InternalConfig,
 
-	/// How long (in seconds) accepted sessions may keep running after a shutdown
-	/// signal. The first signal sends every session a GOAWAY and waits this long
-	/// for clients to reconnect elsewhere before force-closing them; a second
-	/// signal exits immediately. Defaults to 10 seconds.
-	#[arg(id = "drain-timeout", long = "drain-timeout", env = "MOQ_DRAIN_TIMEOUT")]
-	pub drain_timeout: Option<u64>,
+	/// How long accepted sessions may keep running after a shutdown signal, e.g.
+	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
+	/// this long for clients to reconnect elsewhere before force-closing them; a
+	/// second signal exits immediately. Defaults to 10 seconds.
+	#[arg(
+		id = "drain-timeout",
+		long = "drain-timeout",
+		env = "MOQ_DRAIN_TIMEOUT",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(default, with = "humantime_serde")]
+	pub drain_timeout: Option<Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]

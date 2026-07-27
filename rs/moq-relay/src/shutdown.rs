@@ -46,7 +46,7 @@ impl Shutdown {
 		drop(tx);
 		Self {
 			rx,
-			drain_timeout: Duration::from_secs(crate::DEFAULT_DRAIN_TIMEOUT_SECS),
+			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT,
 		}
 	}
 
@@ -61,20 +61,30 @@ impl Shutdown {
 	}
 
 	/// Drain `session` with an empty-URI GOAWAY ("reconnect to me"), waiting for
-	/// the peer to leave and force-closing after [`Self::drain_timeout`].
+	/// the peer to leave.
 	///
+	/// The driver force-closes with [`moq_net::Error::GoawayTimeout`] once
+	/// [`drain_timeout`](Self::drain_timeout) passes, so this resolves either way.
 	/// Sessions on versions without GOAWAY (moq-lite-03 and earlier) are closed
-	/// immediately with [`moq_net::Error::GoingAway`]; there is no wire message
-	/// to warn them with.
+	/// immediately with [`moq_net::Error::GoingAway`]; there is no wire message to
+	/// warn them with.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
-		match session.drain() {
-			Some(drain) => drain.start_with_timeout("", self.drain_timeout).complete().await,
-			// `drain()` is None either because the version has no GOAWAY, or
-			// because a drain is already in flight. Force-close only the former
-			// (no wire message can warn it); an already-draining session is left
-			// to its existing drain rather than being force-closed twice.
-			None if !session.version().has_goaway() => session.abort(moq_net::Error::GoingAway),
-			None => {}
+		match session.send_goaway() {
+			Some(goaway) => {
+				// "Reconnect to me": the relay is restarting, not moving.
+				let sent = goaway.send(moq_net::goaway::Goaway::new().with_timeout(self.drain_timeout));
+				// An empty URI is legal from either side, so this cannot fail today.
+				// Close rather than hang if that ever changes.
+				if let Err(err) = sent {
+					session.abort(err);
+					return;
+				}
+				session.closed().await;
+			}
+			// No GOAWAY on this version, so there is no way to warn the peer.
+			// A session already drained (the handle was taken) can only happen if
+			// shutdown ran twice, where force-closing is the intent anyway.
+			None => session.abort(moq_net::Error::GoingAway),
 		}
 	}
 }

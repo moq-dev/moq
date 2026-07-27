@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
 	// Graceful shutdown: the first signal drains every accepted session with a
 	// GOAWAY; a second signal (or the drain window elapsing) exits.
-	let drain_timeout = std::time::Duration::from_secs(config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT_SECS));
+	let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
 	let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
@@ -151,13 +151,9 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth, shu
 	let mut conn_id = 0;
 
 	while let Some(request) = server.accept().await {
-		let conn = Connection {
-			id: conn_id,
-			request,
-			cluster: cluster.clone(),
-			auth: auth.clone(),
-			shutdown: shutdown.clone(),
-		};
+		let conn = Connection::new(request, cluster.clone(), auth.clone())
+			.with_id(conn_id)
+			.with_shutdown(shutdown.clone());
 
 		conn_id += 1;
 		tokio::spawn(async move {

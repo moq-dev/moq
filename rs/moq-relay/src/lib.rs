@@ -26,10 +26,10 @@ mod websocket;
 /// to handle many concurrent subscriptions across connections.
 pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
-/// Default drain window in seconds for a GOAWAY without its own deadline: how
-/// long an old session keeps serving after its replacement connects, before
-/// being force-closed with [`moq_net::Error::GoawayTimeout`].
-pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 10;
+/// Default drain window for a shutdown GOAWAY: how long an accepted session may
+/// keep running after being told to leave, before being force-closed with
+/// [`moq_net::Error::GoawayTimeout`].
+pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
