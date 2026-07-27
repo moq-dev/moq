@@ -283,6 +283,8 @@ impl Track {
 		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
 			return;
 		}
+		// Counts as a producer while it lives, which is why `track::Producer` gates
+		// its teardown on its own clone count rather than the state's.
 		let Some(state) = self.state.upgrade() else { return };
 		if let Ok(mut state) = state.write() {
 			state.charge_debt();

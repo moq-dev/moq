@@ -854,6 +854,11 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
+	// Counts the producer clones, and only them, so teardown fires exactly when the
+	// publisher lets go. The track state's own producer count is a different
+	// question: a group settling its eviction debt upgrades the account's weak
+	// handle, which momentarily counts there (see `cache::Track::settle`).
+	alive: kio::Producer<()>,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
 	// one subscription on tag and closed when the last producer clone drops. Empty
 	// (no-op) for an untagged broadcast.
@@ -884,6 +889,7 @@ impl Producer {
 			state,
 			broadcast,
 			prev_subscription: None,
+			alive: Default::default(),
 			stats: stats::Scope::default(),
 		}
 	}
@@ -1394,7 +1400,7 @@ impl Drop for Producer {
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		if !self.state.is_last() {
+		if !self.alive.is_last() {
 			return;
 		}
 		// The last ingress producer closing the track ends its subscription.
@@ -2530,6 +2536,7 @@ impl Request {
 			broadcast: self.broadcast,
 			state: self.state,
 			prev_subscription: None,
+			alive: Default::default(),
 			stats: self.stats,
 		}
 	}
@@ -4448,6 +4455,22 @@ mod test {
 
 		assert!(state.upgrade().is_none(), "the track state is freed");
 		assert_eq!(pool.used(), 0, "so are its cached bytes");
+	}
+
+	/// A group settling its eviction debt upgrades the account's weak handle, which
+	/// counts as a producer on the track state. Teardown must not mistake that for a
+	/// surviving publisher, or an abrupt drop silently behaves like a clean finish.
+	#[tokio::test]
+	async fn teardown_ignores_a_settling_group() {
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		finished_group(&mut producer, 100);
+
+		// Stand in for a concurrent `cache::Track::settle`, mid-upgrade.
+		let settling = producer.state.downgrade().upgrade().expect("open");
+		drop(producer);
+
+		assert_eq!(pool.used(), 0, "the abrupt teardown still released the cache");
+		drop(settling);
 	}
 
 	/// A subscriber holding one cached group must not pin the whole track: a group
