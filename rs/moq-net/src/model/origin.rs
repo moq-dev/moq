@@ -553,6 +553,22 @@ impl NotifyNode {
 	}
 }
 
+/// How a path resolves against the announce tree for one consumer.
+///
+/// `Excluded` is deliberately not folded into `Missing`: they mean opposite
+/// things to a caller holding a dynamic handler. Missing is "nobody here, go
+/// ask"; excluded is "here, but not for you", and asking a handler to route it
+/// anyway is how a split-horizon violation gets in through the back door.
+enum Resolved {
+	/// A broadcast this consumer may read: the shared front, or a single source
+	/// pinned because the front holds a route back through the requester.
+	Found(broadcast::Consumer),
+	/// The path is live, but every route to it flows through the requester.
+	Excluded,
+	/// Nothing is published at the path, or it is outside the consumer's scope.
+	Missing,
+}
+
 struct OriginNode {
 	// The origin-owned broadcast published at this node, if any (see
 	// [`Producer::create_broadcast`]).
@@ -631,34 +647,46 @@ impl OriginNode {
 		}
 	}
 
-	fn consume_broadcast(&self, rest: impl AsPath, exclude: Option<Origin>) -> Option<broadcast::Consumer> {
+	fn resolve_broadcast(&self, rest: impl AsPath, exclude: Option<Origin>) -> Resolved {
 		let rest = rest.as_path();
 
 		if let Some((dir, rest)) = rest.next_part() {
-			let node = self.nested.get(dir)?.lock();
-			node.consume_broadcast(&rest, exclude)
-		} else {
-			let broadcast = self.broadcast.as_ref()?;
-			let Some(origin) = exclude else {
-				return Some(broadcast.broadcast.consume());
+			let Some(node) = self.nested.get(dir) else {
+				return Resolved::Missing;
 			};
+			let node = node.lock();
+			return node.resolve_broadcast(&rest, exclude);
+		}
 
-			// Data-plane split horizon: never serve a requester from a source
-			// whose chain flows through them (they'd receive their own bytes
-			// back, or worse, a subscription cycle). The shared spliced front is
-			// fed from the active source, so it's safe whenever that chain
-			// avoids the requester; otherwise hand out the best clean source
-			// directly. Such a pinned broadcast skips the front's re-splicing,
-			// which is fine: the requester is itself a relay (only a forwarder's
-			// origin can appear in a chain) and re-splices via its own front
-			// when the pinned source dies.
-			let state = broadcast.state.read();
-			let active = state.active.and_then(|id| state.routes.iter().find(|r| r.id == id));
-			if !active.is_some_and(|r| r.route.hops.contains(&origin)) {
-				return Some(broadcast.broadcast.consume());
-			}
-			let clean = state.dispatch(Some(origin))?;
-			state.routes.iter().find(|r| r.id == clean).map(|r| r.source.clone())
+		let Some(broadcast) = self.broadcast.as_ref() else {
+			return Resolved::Missing;
+		};
+		let Some(origin) = exclude else {
+			return Resolved::Found(broadcast.broadcast.consume());
+		};
+
+		// Data-plane split horizon: never serve a requester from a source whose
+		// chain flows through them (they'd receive their own bytes back, or worse,
+		// a subscription cycle).
+		//
+		// The shared spliced front is safe only while *no* attached route is
+		// tainted for the requester: the front picks per track and re-picks on
+		// failover, so a tainted route anywhere in the table is one the front may
+		// serve them from. Checking the whole table rather than just the active
+		// route is what keeps that honest. Otherwise pin them to the best clean
+		// source. A pinned broadcast skips the front's re-splicing, which is fine:
+		// the requester is itself a relay (only a forwarder's origin can appear in
+		// a chain) and re-splices via its own front when the pinned source dies.
+		let state = broadcast.state.read();
+		if !state.routes.iter().any(|r| r.route.hops.contains(&origin)) {
+			return Resolved::Found(broadcast.broadcast.consume());
+		}
+		match state
+			.dispatch(Some(origin))
+			.and_then(|clean| state.routes.iter().find(|r| r.id == clean))
+		{
+			Some(route) => Resolved::Found(route.source.clone()),
+			None => Resolved::Excluded,
 		}
 	}
 
@@ -2387,17 +2415,30 @@ impl Consumer {
 		self.clone()
 	}
 
-	/// Internal synchronous peek: the broadcast at `path` if it is *already* announced.
+	/// Internal synchronous lookup: how the broadcast at `path` resolves for this
+	/// consumer, telling "announced but every route loops back through you" apart
+	/// from "nothing here".
 	///
-	/// Races announcement gossip (a freshly-connected consumer sees `None` even when the
-	/// broadcast is about to arrive), so it is not public. [`Self::request_broadcast`] is the
-	/// public lookup: it builds on this for the announced case, then falls back to a dynamic
-	/// handler. [`Self::announced_broadcast`] waits for a future announcement.
-	fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
+	/// Races announcement gossip (a freshly-connected consumer sees `Missing` even when
+	/// the broadcast is about to arrive), so it is not public. [`Self::request_broadcast`]
+	/// is the public lookup: it builds on this for the announced case, then falls back to
+	/// a dynamic handler. [`Self::announced_broadcast`] waits for a future announcement.
+	fn resolve(&self, path: impl AsPath) -> Resolved {
 		let path = path.as_path();
-		let (root, rest) = self.nodes.get(&path)?;
+		let Some((root, rest)) = self.nodes.get(&path) else {
+			return Resolved::Missing;
+		};
 		let state = root.lock();
-		state.consume_broadcast(&rest, self.exclude)
+		state.resolve_broadcast(&rest, self.exclude)
+	}
+
+	/// [`Self::resolve`] reduced to "can I read it": the peek the tests assert on.
+	#[cfg(test)]
+	fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
+		match self.resolve(path) {
+			Resolved::Found(broadcast) => Some(broadcast),
+			Resolved::Excluded | Resolved::Missing => None,
+		}
 	}
 
 	/// Block until a broadcast with the given path is announced and return it.
@@ -2487,9 +2528,15 @@ impl Consumer {
 		let absolute = self.root.join(&path).to_owned();
 		let scope = self.stats.egress(&absolute);
 
-		// Prefer a live announcement when one is present; the dynamic queue is only a fallback.
-		if let Some(broadcast) = self.get_broadcast(&path) {
-			return kio::Pending::new(Requesting::ready(broadcast).with_stats(scope));
+		// Prefer a live announcement when one is present; the dynamic queue is only a
+		// fallback for a path we hold nothing for. A broadcast we do hold but cannot
+		// serve this requester is unroutable, not missing: a handler resolves paths
+		// with no route chain to check, so falling through would let it route around
+		// the split horizon and rebuild the loop.
+		match self.resolve(&path) {
+			Resolved::Found(broadcast) => return kio::Pending::new(Requesting::ready(broadcast).with_stats(scope)),
+			Resolved::Excluded => return kio::Pending::new(Requesting::failed(Error::Unroutable)),
+			Resolved::Missing => {}
 		}
 
 		let mut state = self.dynamic.lock();
@@ -4356,6 +4403,128 @@ mod tests {
 		let mut sub = retry.await.expect("a fresh request must reach the source");
 		producer.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
+	}
+
+	/// The front picks a source per track and re-picks on failover, so a route
+	/// tainted for a peer is one the front may serve them from even when the
+	/// active route is clean. Sharing the front therefore has to check the whole
+	/// table, not just the active route: here the clean route is active but cannot
+	/// carry the track, and the fallback is the peer's own route.
+	#[tokio::test]
+	async fn test_per_track_fallback_respects_exclusion() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		// The route through the peer has the track.
+		let source_tainted = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_tainted = source_tainted.dynamic();
+		settle().await;
+		settle().await;
+
+		// The clean route is cheaper, so it is active, but its publisher has not
+		// created the track yet.
+		let source_clean = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_clean = source_clean.dynamic();
+		settle().await;
+
+		let scoped = consumer.clone().excluding(peer);
+		let broadcast = scoped.request_broadcast("test").await.unwrap();
+		let _subscribing = broadcast.track("video").unwrap().subscribe(None);
+		settle().await;
+
+		// The peer is pinned to the clean source, so the fallback the front would
+		// take for everyone else is not reachable from their subscription.
+		for _ in 0..2 * MAX_TRACK_RETRIES {
+			if let Some(Ok(request)) = dynamic_clean.requested_track().now_or_never() {
+				request.reject(Error::NotFound);
+			}
+			settle().await;
+		}
+		dynamic_tainted.assert_no_request();
+	}
+
+	/// The same guarantee under failover: the peer resolves while a clean route is
+	/// active, then that route dies. Its subscription must not migrate onto the
+	/// route that flows back through it.
+	#[tokio::test]
+	async fn test_exclusion_survives_failover_onto_a_tainted_route() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		let source_tainted = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_tainted = source_tainted.dynamic();
+		settle().await;
+		settle().await;
+		let source_clean = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_clean = source_clean.dynamic();
+		settle().await;
+
+		let scoped = consumer.clone().excluding(peer);
+		let broadcast = scoped.request_broadcast("test").await.unwrap();
+		let _subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let _clean = accept_track(&mut dynamic_clean, "video").await;
+		settle().await;
+
+		// The clean route dies, so the front's only remaining route is the peer's.
+		source_clean.abort(Error::Dropped).unwrap();
+		settle().await;
+		settle().await;
+		dynamic_tainted.assert_no_request();
+
+		// A fresh request now has nowhere clean to go, and says so rather than
+		// silently serving the peer their own route.
+		assert!(matches!(scoped.request_broadcast("test").await, Err(Error::Unroutable)));
+	}
+
+	/// An announced path every route of which loops through the requester is
+	/// unroutable, not missing: the dynamic handler resolves paths with no route
+	/// chain to check, so consulting it would route around the split horizon.
+	#[tokio::test]
+	async fn test_excluded_path_never_reaches_the_dynamic_handler() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut dynamic = origin.dynamic();
+
+		let peer = Origin::new(5).unwrap();
+		let tainted = OriginList::try_from(vec![Origin::new(1).unwrap(), peer]).unwrap();
+		let _source = origin.create_broadcast("test", announce().with_hops(tainted)).unwrap();
+		settle().await;
+		settle().await;
+
+		let scoped = consumer.clone().excluding(peer);
+		assert!(matches!(scoped.request_broadcast("test").await, Err(Error::Unroutable)));
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_none(),
+			"the dynamic handler was asked to route around the exclusion"
+		);
+
+		// An unannounced path still reaches the handler, exclusion or not.
+		let _pending = scoped.request_broadcast("other");
+		settle().await;
+		assert!(
+			dynamic.requested_broadcast().now_or_never().is_some(),
+			"a genuinely missing path must still fall back"
+		);
 	}
 
 	/// When every route flows through the requester, the path is unroutable for
