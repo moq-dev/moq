@@ -30,11 +30,9 @@ struct Segment {
 	/// newest segment.
 	end: Option<u64>,
 	/// A takeover splice whose source has not yet proven it resumes the old
-	/// group numbering. The boundary binds the read cursor but stays out of
-	/// wire demand: a floored subscription would ask a RESTARTED source
-	/// (fresh session, numbering from zero) for groups it will never number,
-	/// starving it silently. Resolved by `Producer::reanchor_restarted` on
-	/// the source's first production.
+	/// numbering: the boundary binds the read cursor but stays out of wire
+	/// demand (a floored subscription would starve a source that restarted
+	/// from zero). Resolved by [`Producer::reanchor_restarted`].
 	provisional: bool,
 	/// The underlying per-session track.
 	track: track::Consumer,
@@ -57,8 +55,7 @@ impl Segment {
 		})
 	}
 
-	/// The lower bound to fold into wire demand: the segment's start, unless
-	/// the splice is still provisional (see the field doc).
+	/// The segment's start, unless the splice is still provisional.
 	fn demand_start(&self) -> Option<u64> {
 		match self.provisional {
 			true => None,
@@ -68,12 +65,8 @@ impl Segment {
 }
 
 /// The demand to register on an underlying track: the subscriber's own
-/// preferences intersected with a segment's bounds.
-///
-/// Callers pass a PROVISIONAL segment's start as `None` (see
-/// [`Segment::demand_start`]): its boundary is enforced on the read cursor
-/// only, never in wire demand, until the source proves it resumed the old
-/// numbering.
+/// preferences intersected with a segment's bounds (`start` comes from
+/// [`Segment::demand_start`], so a provisional boundary stays out of it).
 fn slice(prefs: &Subscription, start: Option<u64>, end: Option<u64>) -> Subscription {
 	let mut sub = prefs.clone();
 	sub.group_start = match (prefs.group_start, start) {
@@ -90,6 +83,9 @@ struct ResumeState {
 	segments: Vec<Segment>,
 	/// Bumped on every mutation so subscribers know to reconcile.
 	epoch: u64,
+	/// The sequence-numbering era, bumped only by a restart reanchor:
+	/// cursors anchored in the old numbering reset with it.
+	era: u64,
 	/// No more switches will happen; the logical track ends with its last segment.
 	finished: bool,
 	/// The logical track was aborted; surfaced to every subscriber.
@@ -101,6 +97,7 @@ impl Default for ResumeState {
 		Self {
 			segments: Vec::new(),
 			epoch: 1,
+			era: 0,
 			finished: false,
 			abort: None,
 		}
@@ -155,17 +152,13 @@ impl ResumeState {
 	}
 }
 
-/// Outcome of [`Producer::reanchor_restarted`]: whether the newest spliced
-/// segment's source proved itself resumed, restarted, or undecided.
+/// Outcome of [`Producer::reanchor_restarted`].
 pub(crate) enum Reanchor {
-	/// The source produced below the splice boundary: it restarted its group
-	/// numbering, and the splice was reset onto it alone (unbounded), so
-	/// subscribers reconcile onto the restarted sequence space.
+	/// The source restarted its numbering; the splice was reset onto it.
 	Restarted,
-	/// The source produced at or past the boundary: it genuinely resumed the
-	/// old numbering, and the splice stands.
+	/// The source resumed the old numbering; the splice stands.
 	Resumed,
-	/// The source has not produced anything yet; check again on production.
+	/// Nothing decisive produced yet; check again on production.
 	Pending,
 }
 
@@ -245,29 +238,16 @@ impl Producer {
 				None => Some(0),
 			}
 		};
-		// Provisional: the replacement reacted to a route LOSS, so whether it
-		// resumes the old numbering or restarted its own is unknown until it
-		// produces (`Self::reanchor_restarted`). Until then the boundary binds
-		// the read cursor only, keeping wire demand open so a restarted
-		// source's groups still arrive.
+		// Provisional: whether the replacement resumes the old numbering or
+		// restarted its own is unknown until it produces.
 		state.switch(track, start, true)
 	}
 
-	/// Reconcile a takeover whose replacement source RESTARTED its group
-	/// numbering instead of resuming the old one.
-	///
-	/// [`Self::takeover`] splices the replacement at one past the newest
-	/// delivered group, assuming the source shares the old sequence space. A
-	/// source that restarted (a reconnecting publisher with a fresh session
-	/// numbers from zero) only ever produces below that boundary, and the
-	/// splice would filter every group it publishes forever. Once the source's
-	/// first production shows which case this is, a restart drops the stale
-	/// history segments and re-splices the source unbounded: subscribers
-	/// reconcile onto its own numbering (a sequence regression, surfaced like
-	/// any other new-segment switch).
-	///
-	/// Idempotent and cheap; the serving loop calls it on every production
-	/// edge of a freshly spliced track until it returns a decided value.
+	/// Resolve a provisional takeover off its source's first production: a
+	/// resume promotes the boundary into wire demand, a restart (a fresh
+	/// session numbering from zero) resets the splice onto the source alone
+	/// so subscribers reconcile onto its own numbering. Idempotent; the
+	/// serving loop calls it on each production edge until decided.
 	pub(crate) fn reanchor_restarted(&mut self) -> Result<Reanchor> {
 		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
 		if state.finished || state.abort.is_some() {
@@ -280,36 +260,26 @@ impl Producer {
 			return Ok(Reanchor::Resumed);
 		}
 		let Some(start) = newest.start else {
-			// Unbounded (the first splice): whatever the source numbers is
-			// what subscribers get, so there is nothing to resolve.
+			// Unbounded: nothing to resolve.
 			return Ok(Reanchor::Resumed);
 		};
 		let Some(latest) = newest.track.latest() else {
 			return Ok(Reanchor::Pending);
 		};
 		if latest >= start {
-			// The source resumed the old numbering: the boundary is real, so
-			// promote it into wire demand (subscribers re-slice on the epoch
-			// bump).
+			// Proven resume: promote the boundary into wire demand.
 			state.segments.last_mut().expect("checked above").provisional = false;
 			state.epoch += 1;
 			return Ok(Reanchor::Resumed);
 		}
 		if latest != 0 || start < 2 {
-			// Below the boundary but not numbering from zero: a resumed source
-			// re-delivering history it already produced (an unfloored
-			// subscription joins at the source's own latest). The cursor
-			// filters it; keep watching for the deciding production. A
-			// boundary of one is the ambiguous corner (sequence zero is both
-			// "restarted" and "re-delivered"), resolved as a resume: a
-			// genuinely restarted source recovers at its next group anyway,
-			// which lands on the boundary.
+			// Re-delivered history from a resumed source, or the ambiguous
+			// boundary-of-one corner (a restarted source recovers at its next
+			// group there anyway). The cursor filters it; keep watching.
 			return Ok(Reanchor::Pending);
 		}
-		// Restarted numbering (a fresh session counts from zero): reset the
-		// splice onto the new source alone. A fresh segment id (not a mutated
-		// bound) makes every subscriber drop its old cursors and subscribe
-		// this one without a floor.
+		// Restarted numbering: reset the splice onto the new source alone. A
+		// fresh segment id makes every subscriber re-subscribe unfloored.
 		let track = newest.track.clone();
 		state.segments.clear();
 		let id = state.epoch;
@@ -321,6 +291,7 @@ impl Producer {
 			track,
 		});
 		state.epoch += 1;
+		state.era += 1;
 		Ok(Reanchor::Restarted)
 	}
 
@@ -429,6 +400,7 @@ impl Consumer {
 			prefs,
 			last_prefs,
 			epoch: 0,
+			era: 0,
 			finished: false,
 			abort: None,
 			segments: Vec::new(),
@@ -552,8 +524,7 @@ struct SegmentSub {
 	id: u64,
 	start: Option<u64>,
 	end: Option<u64>,
-	/// The wire-demand floor: `start` once the segment is authoritative,
-	/// `None` while a takeover splice is provisional (see `Segment`).
+	/// The wire-demand floor: `None` while the splice is provisional.
 	demand_start: Option<u64>,
 	sub: SubState,
 	/// A received group held back by the subscriber's [`Subscriber::end_at`] cap,
@@ -590,6 +561,8 @@ pub struct Subscriber {
 
 	/// Last observed producer epoch; a mismatch triggers a reconcile.
 	epoch: u64,
+	/// Last observed numbering era; a change resets the sequence cursors.
+	era: u64,
 	finished: bool,
 	abort: Option<Error>,
 
@@ -640,7 +613,13 @@ impl Subscriber {
 			// the poll so its state borrow ends with this statement.
 			let (snapshot, closed) = match self.state.poll(waiter, |state| {
 				if state.epoch != epoch {
-					Poll::Ready((state.epoch, state.finished, state.abort.clone(), state.segments.clone()))
+					Poll::Ready((
+						state.epoch,
+						state.era,
+						state.finished,
+						state.abort.clone(),
+						state.segments.clone(),
+					))
 				} else {
 					Poll::Pending
 				}
@@ -649,8 +628,15 @@ impl Subscriber {
 				// The producer is gone; the state is frozen, so reconcile one last
 				// time and stop watching (existing segments can still drain).
 				Poll::Ready(Err(state)) => {
-					let snapshot = (state.epoch != epoch)
-						.then(|| (state.epoch, state.finished, state.abort.clone(), state.segments.clone()));
+					let snapshot = (state.epoch != epoch).then(|| {
+						(
+							state.epoch,
+							state.era,
+							state.finished,
+							state.abort.clone(),
+							state.segments.clone(),
+						)
+					});
 					(snapshot, true)
 				}
 				// Unchanged, and the waiter is now registered for the next switch.
@@ -669,11 +655,19 @@ impl Subscriber {
 
 	/// Apply a producer snapshot: move boundaries on known segments and subscribe
 	/// to new ones.
-	fn apply(&mut self, snapshot: (u64, bool, Option<Error>, Vec<Segment>)) {
-		let (epoch, finished, abort, segments) = snapshot;
+	fn apply(&mut self, snapshot: (u64, u64, bool, Option<Error>, Vec<Segment>)) {
+		let (epoch, era, finished, abort, segments) = snapshot;
 		self.epoch = epoch;
 		self.finished = finished;
 		self.abort = abort;
+		if era != self.era {
+			// The numbering restarted: floors anchored in the old numbering
+			// (like a late-join start resolved against the previous latest)
+			// would filter the new sequence space forever.
+			self.era = era;
+			self.next_sequence = 0;
+			self.min_sequence = 0;
+		}
 
 		// Segments removed by the producer (replaced before producing anything).
 		self.segments.retain(|s| segments.iter().any(|n| n.id == s.id));
@@ -687,9 +681,8 @@ impl Subscriber {
 						existing.demand_start = demand_start;
 						if let SubState::Active(sub) = &mut existing.sub {
 							sub.end_at(min_some(segment.end, self.end_sequence));
-							// Also re-shape the demand: a moved cap shrinks it,
-							// and a resolved provisional splice promotes the
-							// boundary upstream.
+							// Re-shape the demand: a moved cap shrinks it, a
+							// resolved splice promotes the boundary upstream.
 							let _ = sub.update(slice(&self.last_prefs, demand_start, segment.end));
 						}
 						// A still-pending subscription picks the moved boundary up

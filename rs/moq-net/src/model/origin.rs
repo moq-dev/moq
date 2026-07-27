@@ -1526,17 +1526,14 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		Idle,
 		/// A reader arrived or the last one left: recompute the demand gate.
 		Demand,
-		/// The freshly spliced copy produced a group: decide whether its source
-		/// resumed the old numbering or restarted its own.
+		/// The freshly spliced copy produced: resolve resumed vs restarted.
 		Produced(Option<u64>),
 	}
 
 	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
-	// Restart watch over the newest splice: the last production edge observed
-	// on the serving copy, and whether the resumed-vs-restarted question is
-	// already settled (see resume::Producer::reanchor_restarted).
+	// Restart watch over the newest splice (resume::Producer::reanchor_restarted).
 	let mut splice_latest: Option<u64> = None;
 	let mut splice_settled = true;
 	// A source whose splice failed because it had already closed. Its watcher is
@@ -1628,10 +1625,8 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 					});
 				}
 
-				// Watch the spliced copy's production while the takeover boundary
-				// is still provisional: a replacement source that restarted its
-				// group numbering produces below the boundary, which the splice
-				// would otherwise filter forever.
+				// While the takeover boundary is provisional, watch the copy's
+				// production to resolve resumed vs restarted.
 				if let Some((_, track)) = &serving
 					&& !splice_settled
 					&& let Poll::Ready(latest) = track.poll_latest_changed(splice_latest, waiter)
@@ -1732,9 +1727,8 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							// aborted); nothing left to serve.
 							return;
 						}
-						// Arm the restart watch: the source may have produced
-						// before the splice (decide now) or produce later
-						// (decide on the production edge).
+						// The source may have produced before the splice;
+						// otherwise the production watch decides later.
 						splice_latest = track.latest();
 						splice_settled = match resume.reanchor_restarted() {
 							Ok(super::resume::Reanchor::Pending) => false,
@@ -3800,6 +3794,66 @@ mod tests {
 		let group = sub.assert_group();
 		assert_eq!(group.sequence, 0, "the restarted source's first group is delivered");
 		sub.assert_not_closed();
+	}
+
+	/// A subscriber that late-joins between the takeover and the restarted
+	/// source's first production carries a floor resolved against the old
+	/// numbering; the era bump must reset it or the restarted groups are
+	/// filtered forever.
+	#[tokio::test(start_paused = true)]
+	async fn test_linger_restart_resets_late_join_floors() {
+		let origin = Info::new(Origin::random())
+			.with_linger(Duration::from_secs(5))
+			.produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		announced.assert_next_some("test");
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// The session dies without unannouncing: the broadcast lingers.
+		drop(producer);
+		source.abort(Error::Dropped).unwrap();
+		drop(dynamic);
+		settle().await;
+
+		// The publisher reconnects as a NEW session with restarted numbering,
+		// and a LATE subscriber joins with a floor resolved against the old
+		// numbering (what a relay's run_subscribe computes from `latest()`).
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let mut late = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		late.start_at(3);
+
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		producer.append_group().unwrap();
+		settle().await;
+
+		// The era change resets the stale floor: the restarted source's first
+		// group reaches the late subscriber instead of being filtered below it.
+		let group = late.assert_group();
+		assert_eq!(group.sequence, 0, "the restarted numbering resets late-join floors");
+		late.assert_not_closed();
 	}
 
 	/// The linger window expiring without a replacement closes the broadcast: the

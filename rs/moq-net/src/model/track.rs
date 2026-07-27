@@ -1558,11 +1558,8 @@ impl Consumer {
 	}
 
 	/// Poll until the latest appended sequence differs from `known` (or the
-	/// track closes); ready with the current value. Registers the waiter, so a
-	/// caller can watch production without holding a subscription and therefore
-	/// without registering demand. The origin's dispatcher uses this to decide
-	/// whether a takeover's replacement source resumed the old group numbering
-	/// or restarted its own.
+	/// track closes); ready with the current value. Watches production without
+	/// registering demand; the dispatcher's restart watch rides it.
 	pub(crate) fn poll_latest_changed(&self, known: Option<u64>, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let ConsumerKind::Plain(state) = &self.inner else {
 			// Spliced tracks are compositions; the dispatcher never monitors one.
