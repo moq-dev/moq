@@ -1526,11 +1526,19 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		Idle,
 		/// A reader arrived or the last one left: recompute the demand gate.
 		Demand,
+		/// The freshly spliced copy produced a group: decide whether its source
+		/// resumed the old numbering or restarted its own.
+		Produced(Option<u64>),
 	}
 
 	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
+	// Restart watch over the newest splice: the last production edge observed
+	// on the serving copy, and whether the resumed-vs-restarted question is
+	// already settled (see resume::Producer::reanchor_restarted).
+	let mut splice_latest: Option<u64> = None;
+	let mut splice_settled = true;
 	// A source whose splice failed because it had already closed. Its watcher is
 	// about to detach it, so wait for the table to move on rather than burning
 	// the strike budget on a corpse (ids are never reused, so this cannot wedge).
@@ -1620,6 +1628,17 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 					});
 				}
 
+				// Watch the spliced copy's production while the takeover boundary
+				// is still provisional: a replacement source that restarted its
+				// group numbering produces below the boundary, which the splice
+				// would otherwise filter forever.
+				if let Some((_, track)) = &serving
+					&& !splice_settled
+					&& let Poll::Ready(latest) = track.poll_latest_changed(splice_latest, waiter)
+				{
+					return Poll::Ready(Step::Produced(latest));
+				}
+
 				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
 					fired = true;
 				}
@@ -1645,6 +1664,14 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			}
 			// The outer loop recomputes `used` and the countdown on the next pass.
 			Step::Demand => {}
+			Step::Produced(latest) => {
+				splice_latest = latest;
+				splice_settled = match resume.reanchor_restarted() {
+					Ok(super::resume::Reanchor::Pending) => false,
+					Ok(_) => true,
+					Err(_) => return,
+				};
+			}
 			Step::Idle => {
 				// Nobody has read the track for the linger: drop the source's copy so
 				// its session can release the track (and the cached `track::Info` that
@@ -1705,6 +1732,15 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							// aborted); nothing left to serve.
 							return;
 						}
+						// Arm the restart watch: the source may have produced
+						// before the splice (decide now) or produce later
+						// (decide on the production edge).
+						splice_latest = track.latest();
+						splice_settled = match resume.reanchor_restarted() {
+							Ok(super::resume::Reanchor::Pending) => false,
+							Ok(_) => true,
+							Err(_) => return,
+						};
 						// A successful splice proves the track servable: reset
 						// the strike budget.
 						fails = 0;
@@ -3152,16 +3188,24 @@ mod tests {
 		settle().await;
 		announced.assert_next_wait();
 
-		// The new copy resumes one past the spliced groups: its demand starts at
-		// the boundary, and groups the old source already delivered are filtered.
+		// The new copy resumes one past the spliced groups. Its floor is
+		// provisional until it produces in range (a reconnecting source may
+		// have restarted its numbering), so demand stays open; the read
+		// cursor still filters groups the old source already delivered.
 		let mut producer = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer.subscription().unwrap().group_start, None);
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
 		sub.assert_not_closed();
+
+		// The in-range production resolved the splice: the boundary is
+		// promoted into wire demand.
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// `route_changed` yields the current route first, then each change; equal
@@ -3250,13 +3294,20 @@ mod tests {
 
 		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
-		// Demand registers as the subscriber polls; the new segment starts at the
-		// splice boundary.
+		// Demand registers as the subscriber polls. The new segment's floor is
+		// provisional until it produces in range (a reconnecting source may
+		// have restarted its numbering), so demand stays open at first.
 		sub.assert_no_group();
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
+		assert_eq!(producer_b.subscription().unwrap().group_start, None);
 		producer_b.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();
+
+		// The in-range production resolved the splice: the boundary is
+		// promoted into wire demand.
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
 
 		// The active source updating its own metadata re-advertises in place.
 		source_b
@@ -3396,11 +3447,14 @@ mod tests {
 		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 
-		// The old copy's demand is capped at the boundary; the new copy's starts
-		// there. Both propagate as the subscriber polls.
+		// The old copy's demand is capped at the boundary. The new copy's
+		// splice is PROVISIONAL: its floor stays out of wire demand until the
+		// source's first production proves it resumes the old numbering (a
+		// restarted source would never number past the boundary and a floored
+		// subscription would starve it; see resume::Producer::reanchor_restarted).
 		sub.assert_no_group();
 		assert_eq!(producer_a.subscription().unwrap().group_end, Some(1));
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer_b.subscription().unwrap().group_start, None);
 
 		// The old copy racing past its cap is filtered; the new copy serves on.
 		producer_a.create_group(group::Info { sequence: 2 }).unwrap();
@@ -3410,6 +3464,12 @@ mod tests {
 		assert_eq!(sub.assert_group().sequence, 3);
 		sub.assert_no_group();
 		sub.assert_not_closed();
+
+		// Producing at the boundary resolved the splice: the boundary is
+		// promoted into wire demand.
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// A graceful detach (deliberate unannounce) closes immediately: no linger, so
@@ -3665,15 +3725,22 @@ mod tests {
 		assert!(again.is_clone(&broadcast), "the reconnect must splice, not replace");
 
 		// The pending track re-splices from the new source and resumes one past
-		// the groups the old source already delivered. Demand registers as the
-		// subscriber polls.
+		// the groups the old source already delivered. The floor is provisional
+		// (a reconnecting source may have restarted its numbering), so demand
+		// stays open until the first production proves the resume.
 		let mut producer = accept_track(&mut dynamic, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer.subscription().unwrap().group_start, None);
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2);
 		sub.assert_not_closed();
+
+		// The in-range production resolved the splice: the boundary is
+		// promoted into wire demand.
+		settle().await;
+		sub.assert_no_group();
+		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// A replacement source that RESTARTS its group numbering (a fresh session's
