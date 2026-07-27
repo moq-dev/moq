@@ -59,6 +59,14 @@ impl Gain {
 	}
 
 	pub(super) fn set_volume(&self, volume: f32) {
+		// `clamp` propagates NaN rather than clamping it, and the ramp below
+		// would then carry it into `applied`, which never recovers: every sample
+		// this sink contributes is NaN for the life of the stream. A non-finite
+		// request leaves the volume where it was.
+		if !volume.is_finite() {
+			return;
+		}
+
 		self.target.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 	}
 
@@ -409,6 +417,40 @@ mod tests {
 		{
 			assert!(frame[1][0] <= frame[0][0] + 1e-6, "ramp was not monotonic");
 		}
+	}
+
+	/// `f32::clamp` propagates NaN, so an unguarded setter would put NaN into
+	/// the ramp, where it never washes out.
+	#[test]
+	fn a_non_finite_volume_is_ignored() {
+		let gain = Gain::new();
+
+		for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+			gain.set_volume(bad);
+			assert_eq!(gain.volume(), 1.0, "{bad} changed the volume");
+		}
+
+		gain.set_volume(0.5);
+		gain.set_volume(f32::NAN);
+		assert_eq!(gain.volume(), 0.5, "NaN clobbered a good volume");
+	}
+
+	/// The whole point of the guard: a poisoned gain would silently turn the
+	/// device buffer into NaN.
+	#[test]
+	fn output_stays_finite_after_a_non_finite_volume() {
+		let mut harness = Harness::new(2);
+		let mut out = vec![0.0f32; 2048];
+
+		let gain = Arc::new(Gain::new());
+		let (_, mut prod) = harness.add(gain.clone());
+		harness.fill(&mut out);
+		push(&mut prod, 0.5, FRAMES);
+
+		gain.set_volume(f32::NAN);
+		harness.settle(&mut out);
+
+		assert!(out.iter().all(|s| s.is_finite()), "NaN reached the device buffer");
 	}
 
 	#[test]

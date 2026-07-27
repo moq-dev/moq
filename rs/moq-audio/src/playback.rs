@@ -136,17 +136,24 @@ impl Engine {
 		Ok(sink)
 	}
 
-	/// Move playback to another output device, or back to the system default
-	/// with `None`.
+	/// Move playback to the device `config` names, or back to the system default
+	/// when [`Config::device`] is `None`.
+	///
+	/// Takes the same [`Config`] as [`open`](Self::open) rather than a bare
+	/// device id, so a future playback option applies to a switch without
+	/// changing this signature.
 	///
 	/// Sinks survive the move: they keep the same handles and resample to the
 	/// new device's rate. Returns an error, and stays on no device, if the
 	/// requested one can't be opened.
-	pub async fn switch(&self, device: Option<String>) -> Result<(), Error> {
+	pub async fn switch(&self, config: Config) -> Result<(), Error> {
 		let (reply, response) = tokio::sync::oneshot::channel();
 		self.handle
 			.commands
-			.send(driver::Command::Switch { device, reply })
+			.send(driver::Command::Switch {
+				device: config.device,
+				reply,
+			})
 			.map_err(|_| Error::Playback("the playback thread stopped".into()))?;
 
 		response

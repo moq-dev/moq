@@ -23,10 +23,15 @@ use crate::Error;
 const RETRY_MIN: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(4);
 
-/// Underruns tolerated in [`UNDERRUN_WINDOW`] before the stream is rebuilt. A
-/// few are normal under load; a stream of them means the device is wedged.
+/// Problems tolerated in [`ERROR_WINDOW`] before the stream is rebuilt.
+///
+/// Underruns get a long rope because a few are normal under load. Errors we
+/// can't classify get a short one: they may well be terminal, and without an
+/// escalation the stream would sit dead with nothing but a warning to show for
+/// it, since nothing else wakes the driver.
 const UNDERRUN_LIMIT: u32 = 20;
-const UNDERRUN_WINDOW: Duration = Duration::from_secs(5);
+const ERROR_LIMIT: u32 = 3;
+const ERROR_WINDOW: Duration = Duration::from_secs(5);
 
 /// Sink updates the mixer's command queue holds. Preallocated, since draining it
 /// happens on the audio thread. Deep enough that only a burst of registrations
@@ -213,7 +218,9 @@ pub(super) fn run(
 		retired: None,
 		generation: 0,
 		retry: RETRY_MIN,
+		retry_at: None,
 		underruns: 0,
+		unclassified: 0,
 		window: Instant::now(),
 	};
 
@@ -225,11 +232,9 @@ pub(super) fn run(
 		return;
 	}
 
-	// A failed start schedules a retry; until then the thread just blocks.
-	let mut retry_at: Option<Instant> = None;
-
 	loop {
-		let command = match retry_at {
+		// A failed start leaves a deadline to wake on; otherwise just block.
+		let command = match driver.retry_at {
 			Some(at) => driver.commands_until(&commands, at),
 			None => commands.recv().map_err(|_| Timeout::Disconnected),
 		};
@@ -237,32 +242,19 @@ pub(super) fn run(
 		match command {
 			Ok(Command::Switch { device, reply }) => {
 				driver.device = device;
-				// Drop the old stream first: some hosts refuse to open a second
-				// stream while one is live, and the caller asked to leave anyway.
-				driver.stop();
-				let result = driver.start();
-				retry_at = result.is_err().then(|| driver.schedule());
-				let _ = reply.send(result);
+				let _ = reply.send(driver.restart());
 			}
 			Ok(Command::Failed { generation, error }) => {
 				if driver.should_restart(generation, &error) {
-					driver.stop();
-					retry_at = driver.start().err().map(|_| driver.schedule());
+					let _ = driver.restart();
 				}
 			}
 			Ok(Command::Sync) => driver.sync(),
 			Ok(Command::Shutdown) => break,
 			Err(Timeout::Elapsed) => {
-				retry_at = match driver.start() {
-					Ok(()) => {
-						tracing::info!("audio output recovered");
-						None
-					}
-					Err(err) => {
-						tracing::debug!(%err, "audio output still unavailable");
-						Some(driver.schedule())
-					}
-				};
+				if driver.restart().is_ok() {
+					tracing::info!("audio output recovered");
+				}
 			}
 			Err(Timeout::Disconnected) => break,
 		}
@@ -288,7 +280,12 @@ struct Driver {
 	/// from one the live stream raised.
 	generation: u64,
 	retry: Duration,
+	/// When a failed start may be retried, and what the command wait times out
+	/// against. `None` while the stream is healthy.
+	retry_at: Option<Instant>,
 	underruns: u32,
+	/// Errors whose kind we have no rule for, counted over the same window.
+	unclassified: u32,
 	window: Instant,
 }
 
@@ -402,6 +399,29 @@ impl Driver {
 			.map_err(|err| Error::Playback(format!("cannot open output stream: {err}")))
 	}
 
+	/// Rebuild the stream on the current device, scheduling a retry if it will
+	/// not open.
+	///
+	/// The single path for every reason a stream gets replaced (a switch, a
+	/// fault, a scheduled retry), so the backoff and the sink hand-off can't
+	/// drift between them.
+	fn restart(&mut self) -> Result<(), Error> {
+		// Drop the old stream first: some hosts refuse to open a second while
+		// one is live, and every caller here is leaving it behind anyway.
+		self.stop();
+
+		let result = self.start();
+		self.retry_at = match &result {
+			Ok(()) => None,
+			Err(err) => {
+				tracing::debug!(%err, "audio output unavailable");
+				Some(self.schedule())
+			}
+		};
+
+		result
+	}
+
 	/// Tear the stream down and detach every sink from it.
 	fn stop(&mut self) {
 		self.shared.unbind();
@@ -456,14 +476,22 @@ impl Driver {
 
 	/// Whether this error means the stream has to be rebuilt.
 	fn fatal(&mut self, err: &cpal::Error) -> bool {
+		self.roll_window();
+
 		match err.kind() {
+			cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+				tracing::warn!(%err, "audio output lost");
+				true
+			}
+			// cpal documents both as survivable: the stream keeps running and
+			// needs no rebuild.
+			cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {
+				tracing::debug!(%err, "audio output changed underneath us");
+				false
+			}
 			// One underrun is a glitch, not a broken device. Only a sustained
 			// run of them is worth interrupting playback to fix.
 			cpal::ErrorKind::Xrun => {
-				if self.window.elapsed() > UNDERRUN_WINDOW {
-					self.underruns = 0;
-					self.window = Instant::now();
-				}
 				self.underruns += 1;
 				let restart = self.underruns > UNDERRUN_LIMIT;
 				if restart {
@@ -472,14 +500,25 @@ impl Driver {
 				}
 				restart
 			}
-			cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
-				tracing::warn!(%err, "audio output lost");
-				true
-			}
 			_ => {
 				tracing::warn!(%err, "audio output error");
-				false
+				self.unclassified += 1;
+				let restart = self.unclassified >= ERROR_LIMIT;
+				if restart {
+					self.unclassified = 0;
+					tracing::warn!("restarting audio output after repeated unclassified errors");
+				}
+				restart
 			}
+		}
+	}
+
+	/// Start a fresh counting window once the old one has run out.
+	fn roll_window(&mut self) {
+		if self.window.elapsed() > ERROR_WINDOW {
+			self.underruns = 0;
+			self.unclassified = 0;
+			self.window = Instant::now();
 		}
 	}
 }
@@ -619,7 +658,9 @@ mod tests {
 			retired: None,
 			generation: 7,
 			retry: RETRY_MIN,
+			retry_at: None,
 			underruns: 0,
+			unclassified: 0,
 			window: Instant::now(),
 		};
 

@@ -76,6 +76,9 @@ pub struct Sink {
 	input: Input,
 	prod: Arc<Mutex<ResamplingProd<f32>>>,
 	control: Control,
+	/// Whether the last write overflowed, so a writer that stays ahead of the
+	/// device logs once rather than on every write.
+	overflowing: bool,
 	shared: Arc<Shared>,
 	/// Keeps the driver thread running while this sink is alive, so dropping the
 	/// [`Engine`](super::Engine) that made it doesn't cut playback short.
@@ -101,11 +104,20 @@ impl Sink {
 		};
 
 		match self.prod.lock().unwrap().push_interleaved(&pcm) {
-			PushStatus::Ok | PushStatus::OutputNotReady => {}
+			// OutputNotReady means the device has not read yet, so these samples
+			// are dropped rather than queued to play late.
+			PushStatus::Ok | PushStatus::OutputNotReady => self.overflowing = false,
 			PushStatus::OverflowOccurred { num_frames_pushed } => {
-				tracing::warn!(num_frames_pushed, "audio playback overflow, dropping samples");
+				// Once per spell, not once per write: a writer that stays ahead
+				// of the device would otherwise warn every frame for as long as
+				// it lasts.
+				if !self.overflowing {
+					tracing::warn!(num_frames_pushed, "audio playback overflow, dropping samples");
+					self.overflowing = true;
+				}
 			}
 			PushStatus::UnderflowCorrected { num_zero_frames_pushed } => {
+				self.overflowing = false;
 				tracing::debug!(num_zero_frames_pushed, "audio playback underflow, padded with silence");
 			}
 		}
@@ -171,7 +183,9 @@ pub struct Control {
 }
 
 impl Control {
-	/// Set the playback volume, `0.0` (silent) to `1.0` (unchanged), clamped.
+	/// Set the playback volume, `0.0` (silent) to `1.0` (unchanged), clamped. A
+	/// non-finite volume is ignored rather than clamped, since NaN would ride
+	/// the ramp into every sample this sink contributes.
 	///
 	/// The change ramps in over a few milliseconds rather than landing on one
 	/// sample, so muting mid-stream does not click. A muted sink keeps
@@ -264,6 +278,7 @@ pub(super) fn new(
 		input,
 		prod: prod.clone(),
 		control: Control { gain: gain.clone() },
+		overflowing: false,
 		shared,
 		engine,
 	};

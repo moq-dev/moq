@@ -2,7 +2,14 @@
 //!
 //! Ignored by default: these open the real output device, which CI runners
 //! don't have (and which would make noise if they did). Run them on a machine
-//! with speakers via `cargo test -p moq-audio --features playback -- --ignored`.
+//! with speakers via:
+//!
+//! ```text
+//! nix develop --command cargo test -p moq-audio --features playback -- --ignored
+//! ```
+//!
+//! Through the dev shell, not bare `cargo`: reaching the default device needs
+//! the ALSA plugin path the shell sets (see `alsaPlugins` in `flake.nix`).
 //! Nothing here asserts on what you hear, so muting the system volume is fine:
 //! the mix is metered before it reaches the device.
 
@@ -124,8 +131,11 @@ async fn mixes_two_sinks_and_honors_volume() {
 	assert!(quiet_peak < 0.1, "the muted sink was still audible: {quiet_peak}");
 }
 
-/// Every device the machine reports should be openable by the id it hands back,
-/// and switching between them must not disturb a sink that is already playing.
+/// Switching devices must not disturb a sink that is already playing.
+///
+/// Walks everything [`devices`] reports, skipping the ones that won't open:
+/// enumeration is not a promise, since a device can be listed but held
+/// exclusively or backed by nothing.
 #[tokio::test]
 #[ignore]
 async fn switches_devices_without_dropping_sinks() {
@@ -140,7 +150,10 @@ async fn switches_devices_without_dropping_sinks() {
 	let mut switched = 0;
 
 	for device in devices {
-		if engine.switch(Some(device.id.clone())).await.is_err() {
+		let mut config = playback::Config::default();
+		config.device = Some(device.id.clone());
+
+		if engine.switch(config).await.is_err() {
 			// Devices can be listed but unopenable (exclusive use, a virtual
 			// node with no backing hardware). Enumeration is not a promise.
 			continue;
