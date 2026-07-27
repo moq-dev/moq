@@ -245,10 +245,21 @@ impl Charge {
 	}
 
 	/// Charge `n` more payload bytes, counting them as written.
+	///
+	/// A write is also an access: it restarts the retention clock and keeps an
+	/// actively-growing group (a straggler or backfill still being filled) from
+	/// being evicted or expired mid-write.
 	pub(crate) fn add(&mut self, n: u64) {
 		if let Some(pool) = &self.pool {
 			pool.add(n);
 			self.bytes += n;
+			let now = pool.now();
+			if now > self.last {
+				if self.counted {
+					pool.access_refresh(self.last, now);
+				}
+				self.last = now;
+			}
 		}
 		if let Some(written) = &self.written {
 			written.fetch_add(n, Ordering::Relaxed);
