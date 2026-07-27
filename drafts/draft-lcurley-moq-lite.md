@@ -1138,6 +1138,15 @@ The URI MUST NOT exceed 8,192 bytes; a receiver MUST treat a longer URI as a pro
 A recipient MUST validate the URI against local policy before reconnecting, including verifying the scheme, authority, and port are permitted.
 If validation fails, the recipient MUST close the session without reconnecting.
 
+A client MUST send an empty New Session URI, as it cannot instruct a server to establish connections.
+A server that receives a non-empty New Session URI MUST close the session with a protocol violation.
+
+The new session URI SHOULD use the same scheme as the current session's URI.
+
+An endpoint MUST close the session with a protocol violation if it receives more than one GOAWAY.
+
+A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original.
+
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
@@ -1203,6 +1212,7 @@ The `Message Length` describes the payload size on the wire.
 - Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
 - Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the earlier is served until it ends.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
+- Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

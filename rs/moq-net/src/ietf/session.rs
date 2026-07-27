@@ -32,7 +32,9 @@ pub fn start<S: web_transport_trait::Session>(
 ) -> Result<(MaybeSendBox<'static, Result<(), Error>>, crate::goaway::Handle), Error> {
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
-	let (goaway_handle, goaway) = crate::goaway::Handle::new();
+	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
+	// server to open connections (draft-19 sect 10.4).
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
@@ -84,6 +86,7 @@ pub fn start<S: web_transport_trait::Session>(
 						};
 						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 						adapter.send_goaway(&payload.uri, timeout_ms, version);
+						crate::goaway::enforce(&session, payload.timeout).await;
 					});
 				}
 				drop(tasks);
@@ -358,6 +361,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 		writer.encode(&size).await?;
 		writer.write_all(&mut std::io::Cursor::new(body)).await?;
 
+		crate::goaway::enforce(&session, payload.timeout).await;
 		session.closed().await;
 		writer.finish().ok();
 	} else {
@@ -505,13 +509,11 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(
 	tracing::info!(message = ?msg, "received GOAWAY");
 
 	let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
-	let received = crate::GoawayReceived {
-		uri: std::sync::Arc::from(msg.new_session_uri.as_ref()),
+	// A second GOAWAY is a protocol violation the draft requires we close over.
+	goaway.record(crate::goaway::Goaway {
+		uri: msg.new_session_uri.into_owned(),
 		timeout,
-	};
-	if !goaway.record(received) {
-		tracing::warn!("duplicate GOAWAY received; ignoring");
-	}
+	})?;
 
 	// Keep the reader alive until the peer FINs or the session closes. Dropping
 	// it here would STOP_SENDING the peer's SETUP uni stream, which draft-19

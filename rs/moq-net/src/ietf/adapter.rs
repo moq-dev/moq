@@ -510,7 +510,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	/// Run the control stream read + write tasks.
 	/// This reads from the control stream and routes messages to virtual streams,
 	/// and also drains the write queue to the control stream writer. A decoded
-	/// GOAWAY is surfaced through `goaway` so [`crate::Session::goaway`] resolves
+	/// GOAWAY is surfaced through `goaway` so [`crate::Session::recv_goaway`] resolves
 	/// instead of the session tearing down.
 	pub async fn run(
 		&self,
@@ -640,17 +640,12 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					tracing::info!(message = ?msg, "received GOAWAY");
 
 					// Draft-14-16 have no timeout field.
-					let received = crate::GoawayReceived {
-						uri: std::sync::Arc::from(msg.new_session_uri.as_ref()),
+					// A second GOAWAY is a protocol violation the draft requires we
+					// close over, so let it propagate and end the session.
+					goaway.record(crate::goaway::Goaway {
+						uri: msg.new_session_uri.into_owned(),
 						timeout: None,
-					};
-					// A peer sends at most one GOAWAY per session. Keep the first
-					// payload: an observer may already be acting on its URI, so a
-					// second GOAWAY must not swap the redirect target out from
-					// under it.
-					if !goaway.record(received) {
-						tracing::warn!(uri = %msg.new_session_uri, "duplicate GOAWAY received; ignoring");
-					}
+					})?;
 					// Keep processing control messages: existing subscriptions
 					// flow until the session actually closes.
 				}

@@ -155,7 +155,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	/// Decode the peer's GOAWAY and surface it through [`crate::Session::goaway`].
+	/// Decode the peer's GOAWAY and surface it through [`crate::Session::recv_goaway`].
 	///
 	/// A decode error propagates to the caller, which logs and continues: a
 	/// malformed GOAWAY must not tear down the session it is trying to drain.
@@ -163,16 +163,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let msg: lite::Goaway = stream.reader.decode().await?;
 		tracing::info!(uri = %msg.uri, "received goaway");
 
-		let received = crate::GoawayReceived {
-			uri: Arc::from(msg.uri.as_ref()),
+		let uri = msg.uri.into_owned();
+		let goaway = crate::goaway::Goaway {
+			uri: uri.clone(),
 			// moq-lite has no timeout field on the wire.
 			timeout: None,
 		};
-		// A peer sends at most one GOAWAY per session. Keep the first payload: an
-		// observer may already be acting on its URI, so a second GOAWAY must not
-		// swap the redirect target out from under it.
-		if !self.goaway.record(received) {
-			tracing::warn!(uri = %msg.uri, "duplicate GOAWAY received; ignoring");
+
+		if let Err(err) = self.goaway.record(goaway) {
+			// A second Goaway stream is a protocol violation. The control loop only
+			// logs per-stream errors, so close the session here rather than letting a
+			// peer silently replace a redirect an observer may already be acting on.
+			tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
+			self.session.close(err.to_code(), &err.to_string());
+			return Err(err);
 		}
 		Ok(())
 	}

@@ -1,53 +1,152 @@
-//! GOAWAY signal plumbing shared between the public [`crate::Session`] API and the
-//! protocol drivers (lite and IETF).
+//! GOAWAY, the graceful drain signal, split into a [Producer] and [Consumer] handle.
 //!
-//! The public types ([`GoawayReceived`]) are re-exported at the crate root; the
-//! channel halves are crate-internal wiring created per session by `Client`/`Server`.
+//! A session sends its own GOAWAY through the [Producer] from
+//! [`Session::send_goaway`](crate::Session::send_goaway), and observes the peer's
+//! on the [Consumer] from [`Session::recv_goaway`](crate::Session::recv_goaway).
+//! Each session sends at most one, which is why the [Producer] is taken once and
+//! consumed by [`Producer::send`].
+//!
+//! Following the redirect is the caller's job. `moq_native::Reconnect` implements
+//! it for native clients.
 
 use std::{
 	sync::{
-		Arc,
+		Arc, Mutex,
 		atomic::{AtomicBool, Ordering},
 	},
 	task::Poll,
 	time::Duration,
 };
 
-/// Information from a received GOAWAY message.
-///
-/// The peer is telling us to reconnect to a new session at the provided URI
-/// (or reconnect to the same endpoint if the URI is empty).
-#[derive(Clone, Debug)]
+use crate::{Error, Result};
+
+/// A GOAWAY: the sender intends to close the session soon and the peer should
+/// migrate its subscriptions elsewhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct GoawayReceived {
-	/// The URI to reconnect to. Empty means reconnect to the same endpoint.
-	pub uri: Arc<str>,
-	/// How long before the sender force-closes the session. `None` if not provided
-	/// (moq-lite has no timeout on the wire; IETF draft-14-16 have no timeout field).
+pub struct Goaway {
+	/// Where the peer should reconnect, including any credentials it needs.
+	/// Empty means reconnect to the same endpoint.
+	pub uri: String,
+
+	/// How long the sender waits before force-closing with
+	/// [`Error::GoawayTimeout`]. `None` means no deadline.
+	///
+	/// Only moq-transport draft-17+ carries this on the wire. Elsewhere it still
+	/// applies locally, so the sender enforces a deadline the peer cannot see.
 	pub timeout: Option<Duration>,
 }
 
-/// Payload carried by the send-side GOAWAY trigger from [`crate::Drain`] to the
-/// protocol driver, which encodes it on whichever channel the version uses.
-#[derive(Clone, Debug)]
-pub(crate) struct Payload {
-	/// Redirect URI (empty = reconnect to the same endpoint).
-	pub uri: Arc<str>,
-	/// Timeout before force-close. Encoded on versions with a wire timeout
-	/// (IETF draft-17+); local-only elsewhere. `None` means no deadline.
-	pub timeout: Option<Duration>,
+impl Goaway {
+	/// Tell the peer to reconnect to the same endpoint.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Tell the peer to reconnect to `uri`.
+	///
+	/// The URI must carry whatever credentials the peer needs: it is dialed as
+	/// given, and nothing from the current session is copied onto it.
+	pub fn redirect(uri: impl Into<String>) -> Self {
+		Self {
+			uri: uri.into(),
+			timeout: None,
+		}
+	}
+
+	/// Force-close the session with [`Error::GoawayTimeout`] if the peer is still
+	/// around after `timeout`.
+	pub fn with_timeout(mut self, timeout: Duration) -> Self {
+		// The wire encodes 0 as "no deadline", so keep the local timer consistent
+		// rather than force-closing almost immediately.
+		self.timeout = (!timeout.is_zero()).then_some(timeout);
+		self
+	}
 }
 
-/// A shared boolean set once a GOAWAY is received from the peer.
+/// Sends this session's single GOAWAY.
 ///
-/// Checked by subscribers before opening new request streams, so gating is a
-/// cheap load rather than a channel poll.
+/// Obtained from [`Session::send_goaway`](crate::Session::send_goaway), which
+/// yields it at most once per session.
+pub struct Producer {
+	trigger: kio::Producer<Option<Goaway>>,
+	/// Whether this side may name a redirect URI. A moq-transport client may not,
+	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
+	redirect: bool,
+}
+
+impl Producer {
+	/// Send the GOAWAY, consuming the handle: a session may only send one.
+	///
+	/// The session must stay driven for the message to reach the wire. With
+	/// [`Goaway::timeout`] set, the driver force-closes the session once the
+	/// deadline passes, so awaiting [`Session::closed`](crate::Session::closed)
+	/// is how a caller observes the drain finishing either way.
+	///
+	/// # Errors
+	///
+	/// Returns [`Error::ProtocolViolation`] when a moq-transport client names a
+	/// redirect URI, which the peer would be required to close the session over.
+	pub fn send(self, goaway: Goaway) -> Result<()> {
+		if !self.redirect && !goaway.uri.is_empty() {
+			return Err(Error::ProtocolViolation);
+		}
+		// The session closing first is not an error: there is nothing left to drain.
+		if let Ok(mut state) = self.trigger.write() {
+			*state = Some(goaway);
+		}
+		Ok(())
+	}
+}
+
+/// Observes the peer's GOAWAY.
+///
+/// Obtained from [`Session::recv_goaway`](crate::Session::recv_goaway). Cheap to
+/// clone; every clone reports the same GOAWAY.
+#[derive(Clone)]
+pub struct Consumer {
+	state: kio::Consumer<Option<Goaway>>,
+}
+
+impl Consumer {
+	/// The peer's GOAWAY, or `None` if it has not sent one.
+	///
+	/// The synchronous read behind [`recv`](Self::recv), for callers that only
+	/// want to know whether the session is draining.
+	pub fn peek(&self) -> Option<Goaway> {
+		self.state.read().clone()
+	}
+
+	/// Poll for the peer's GOAWAY.
+	///
+	/// `Ready(Err)` once the session closes without one, so a caller can stop
+	/// watching rather than parking forever.
+	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<Result<Goaway>> {
+		match self.state.poll(waiter, |state| match &**state {
+			Some(goaway) => Poll::Ready(goaway.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(goaway)) => Poll::Ready(Ok(goaway)),
+			Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Closed)),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for the peer's GOAWAY, or `None` if the session closes without one.
+	pub async fn recv(&self) -> Option<Goaway> {
+		kio::wait(|waiter| self.poll(waiter)).await.ok()
+	}
+}
+
+/// A shared flag set once a GOAWAY is received.
+///
+/// Separate from the [Consumer] channel so the subscriber's check before opening
+/// a request stream is an atomic load rather than a lock.
 #[derive(Clone, Default)]
 pub(crate) struct GoingAway(Arc<AtomicBool>);
 
 impl GoingAway {
-	/// Mark the session as going away. Returns whether this was the first set,
-	/// so a duplicate GOAWAY can be detected and ignored (kept-first semantics).
+	/// Mark the session as going away, returning whether this was the first time.
 	pub fn set(&self) -> bool {
 		!self.0.swap(true, Ordering::AcqRel)
 	}
@@ -62,39 +161,43 @@ impl GoingAway {
 #[derive(Clone)]
 pub(crate) struct Protocol {
 	/// Awaited by the driver's send path; firing means "encode and send GOAWAY now".
-	pub trigger: kio::Consumer<Option<Payload>>,
+	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
-	pub received: kio::Producer<Option<GoawayReceived>>,
+	received: kio::Producer<Option<Goaway>>,
 	/// Set alongside `received`; checked before opening new request streams.
 	pub going_away: GoingAway,
 }
 
 impl Protocol {
-	/// Record a decoded GOAWAY, ignoring duplicates (an observer may already be
-	/// acting on the first payload, so a second must not swap it out).
+	/// Record a decoded GOAWAY.
 	///
-	/// Returns `false` for a duplicate, which the caller should log and discard.
-	pub fn record(&self, received: GoawayReceived) -> bool {
+	/// # Errors
+	///
+	/// Returns [`Error::ProtocolViolation`] on a second GOAWAY, which both drafts
+	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
+	/// payload instead would leave an observer acting on a URI the peer has since
+	/// replaced, with no way to tell.
+	pub fn record(&self, goaway: Goaway) -> Result<()> {
 		if !self.going_away.set() {
-			return false;
+			return Err(Error::ProtocolViolation);
 		}
 		if let Ok(mut state) = self.received.write() {
-			*state = Some(received);
+			*state = Some(goaway);
 		}
-		true
+		Ok(())
 	}
 
-	/// Wait for the send trigger to fire, returning the payload to encode.
+	/// Wait for the send trigger to fire, returning the GOAWAY to encode.
 	///
 	/// Returns `None` if the trigger was dropped without firing (the session is
-	/// closing without a drain), so no GOAWAY should be sent.
-	pub async fn triggered(&self) -> Option<Payload> {
+	/// closing without a drain), so nothing should be sent.
+	pub async fn triggered(&self) -> Option<Goaway> {
 		kio::wait(|waiter| {
 			match self.trigger.poll(waiter, |state| match &**state {
-				Some(v) => Poll::Ready(v.clone()),
+				Some(goaway) => Poll::Ready(goaway.clone()),
 				None => Poll::Pending,
 			}) {
-				Poll::Ready(Ok(v)) => Poll::Ready(Some(v)),
+				Poll::Ready(Ok(goaway)) => Poll::Ready(Some(goaway)),
 				Poll::Ready(Err(_)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
 			}
@@ -103,35 +206,144 @@ impl Protocol {
 	}
 }
 
+/// Enforce a sent GOAWAY's deadline: close the session once it passes.
+///
+/// The draft makes the deadline the sender's promise, not the peer's, so the
+/// driver arms this after the message hits the wire rather than making the
+/// caller hold a handle and await it.
+pub(crate) async fn enforce<S: web_transport_trait::Session>(session: &S, timeout: Option<Duration>) {
+	let Some(timeout) = timeout else {
+		return;
+	};
+
+	let mut closed = std::pin::pin!(session.closed());
+	let mut deadline = std::pin::pin!(web_async::time::sleep(timeout));
+
+	let expired = kio::wait(|waiter| {
+		if waiter.poll_future(closed.as_mut()).is_ready() {
+			return Poll::Ready(false);
+		}
+		waiter.poll_future(deadline.as_mut()).map(|_| true)
+	})
+	.await;
+
+	if expired {
+		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
+		session.close(Error::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
+	}
+}
+
 /// The halves held by the public [`crate::Session`].
 pub(crate) struct Handle {
-	/// Fires the protocol driver's send path.
-	pub trigger: kio::Producer<Option<Payload>>,
-	/// Resolved by [`crate::Session::goaway`] when the peer sends a GOAWAY.
-	pub received: kio::Consumer<Option<GoawayReceived>>,
-	/// Mirror of the protocol-side flag for [`crate::Session::is_going_away`].
-	pub going_away: GoingAway,
-	/// Drain claim: only one GOAWAY per session.
-	pub draining: Arc<AtomicBool>,
+	/// Taken by the first [`crate::Session::send_goaway`] call; `None` after.
+	producer: Mutex<Option<Producer>>,
+	/// Handed out by [`crate::Session::recv_goaway`].
+	consumer: Consumer,
 }
 
 impl Handle {
 	/// Create the session-side handle and its protocol-side counterpart.
-	pub fn new() -> (Self, Protocol) {
+	///
+	/// `redirect` is whether this side may name a URI in its own GOAWAY.
+	pub fn new(redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
 		let going_away = GoingAway::default();
+
 		let handle = Self {
-			received: received.consume(),
-			trigger: trigger.clone(),
-			going_away: going_away.clone(),
-			draining: Arc::new(AtomicBool::new(false)),
+			producer: Mutex::new(Some(Producer {
+				trigger: trigger.clone(),
+				redirect,
+			})),
+			consumer: Consumer {
+				state: received.consume(),
+			},
 		};
 		let protocol = Protocol {
 			trigger: trigger.consume(),
 			received,
 			going_away,
 		};
+
 		(handle, protocol)
+	}
+
+	/// Take the send half, leaving `None` behind so a session sends at most one GOAWAY.
+	pub fn producer(&self) -> Option<Producer> {
+		self.producer.lock().ok()?.take()
+	}
+
+	/// A fresh handle on the receive half.
+	pub fn consumer(&self) -> Consumer {
+		self.consumer.clone()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A session sends at most one GOAWAY, so the producer is taken once.
+	#[test]
+	fn producer_is_taken_once() {
+		let (handle, _protocol) = Handle::new(true);
+		assert!(handle.producer().is_some());
+		assert!(handle.producer().is_none());
+	}
+
+	/// A moq-transport client cannot tell a server where to reconnect, so naming a
+	/// URI is refused locally rather than getting the session closed by the peer.
+	#[test]
+	fn client_redirect_is_refused() {
+		let (handle, _protocol) = Handle::new(false);
+		let err = handle
+			.producer()
+			.unwrap()
+			.send(Goaway {
+				uri: "https://elsewhere.example/".to_string(),
+				..Default::default()
+			})
+			.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation));
+
+		// An empty URI ("I am going away") is still allowed.
+		let (handle, _protocol) = Handle::new(false);
+		handle.producer().unwrap().send(Goaway::default()).unwrap();
+	}
+
+	/// A second GOAWAY is a protocol violation, not something to log and discard.
+	#[test]
+	fn duplicate_is_a_protocol_violation() {
+		let (_handle, protocol) = Handle::new(true);
+		protocol.record(Goaway::default()).unwrap();
+		let err = protocol.record(Goaway::default()).unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation));
+	}
+
+	/// The consumer reports the recorded GOAWAY both synchronously and by polling.
+	#[tokio::test]
+	async fn consumer_observes_the_recorded_goaway() {
+		let (handle, protocol) = Handle::new(true);
+		let consumer = handle.consumer();
+		assert_eq!(consumer.peek(), None);
+
+		let goaway = Goaway {
+			uri: "https://elsewhere.example/".to_string(),
+			timeout: Some(Duration::from_secs(5)),
+		};
+		protocol.record(goaway.clone()).unwrap();
+
+		assert_eq!(consumer.peek(), Some(goaway.clone()));
+		assert_eq!(consumer.recv().await, Some(goaway));
+	}
+
+	/// A session that closes without a GOAWAY resolves `recv` rather than parking
+	/// forever, so a caller watching for one can stop.
+	#[tokio::test]
+	async fn recv_resolves_when_the_session_closes() {
+		let (handle, protocol) = Handle::new(true);
+		let consumer = handle.consumer();
+		drop(protocol);
+		assert_eq!(consumer.recv().await, None);
 	}
 }

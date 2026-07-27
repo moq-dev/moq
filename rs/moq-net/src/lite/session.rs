@@ -140,9 +140,10 @@ pub fn start<S: web_transport_trait::Session>(
 	let peer_setup = peer_setup_slot;
 	let (tasks, task_set) = TaskSet::new();
 
-	// GOAWAY wiring: the public Session holds one half (drain trigger, received
-	// signal), the protocol tasks below hold the other.
-	let (goaway_handle, goaway) = crate::goaway::Handle::new();
+	// GOAWAY wiring: the public Session holds one half (send trigger, received
+	// signal), the protocol tasks below hold the other. moq-lite lets either side
+	// name a redirect URI, unlike moq-transport.
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(true);
 
 	// Read out before the setup task takes ownership below.
 	let our_cost = our_setup.cost;
@@ -158,9 +159,9 @@ pub fn start<S: web_transport_trait::Session>(
 		});
 	}
 
-	// GOAWAY send task: parked on the drain trigger; fires at most once (the
-	// session-side drain claim guarantees a single GOAWAY per session). Races the
-	// transport close so a parked trigger never blocks the task set draining.
+	// GOAWAY send task: parked on the send trigger; fires at most once (the
+	// producer is taken once per session). Races the transport close so a parked
+	// trigger never blocks the task set draining.
 	if version.has_goaway() {
 		let session = session.clone();
 		let goaway = goaway.clone();
@@ -179,11 +180,13 @@ pub fn start<S: web_transport_trait::Session>(
 			let Some(payload) = payload else {
 				return;
 			};
-			// moq-lite has no timeout field on the wire; only the URI is sent. A
-			// deadline still applies locally via Draining::complete.
+			// moq-lite has no timeout field on the wire; only the URI is sent. The
+			// deadline is still ours to honor, enforced locally below.
 			if let Err(err) = send_goaway(&session, &payload.uri, version).await {
 				tracing::warn!(%err, "failed to send goaway");
+				return;
 			}
+			crate::goaway::enforce(&session, payload.timeout).await;
 		});
 	}
 
