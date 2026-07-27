@@ -52,8 +52,8 @@ use super::hang::{Catalog, CatalogExt};
 /// ```
 ///
 /// Note that `insert` takes the whole [`Catalog`], not just the extension, so the built-in media
-/// configs use the same trait. Writing to `catalog.video` / `catalog.audio` from a custom config
-/// fights the media pipeline for those sections; stay in your own.
+/// configs use the same trait. Writing to `catalog.video` / `catalog.audio` / `catalog.text` from a
+/// custom config fights the media pipeline for those sections; stay in your own.
 ///
 /// To advertise a timeline for a custom track, set your config's timeline field from
 /// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline) before [`set`](Rendition::set)
@@ -193,6 +193,26 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 	}
 }
 
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.text.renditions.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.text.renditions.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.text.renditions.remove(name);
+	}
+
+	// Only jitter: a cue track has no bitrate field, so there is nothing to fill from a measurement.
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+	}
+}
+
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
@@ -227,6 +247,14 @@ impl<E: CatalogExt> Reserved<E> {
 
 	/// Reserve an audio rendition; shorthand for [`init`](Self::init).
 	pub fn audio(&self, name: impl Into<String>) -> AudioTrack<E> {
+		self.init(name)
+	}
+
+	/// Reserve a text (caption/subtitle) rendition; shorthand for [`init`](Self::init).
+	///
+	/// Nothing about a cue track is detected from its payload, so the caller [`set`](Rendition::set)s
+	/// a complete config up front rather than waiting on a bitstream.
+	pub fn text(&self, name: impl Into<String>) -> TextTrack<E> {
 		self.init(name)
 	}
 
@@ -290,6 +318,8 @@ pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 pub type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 /// A single audio track's catalog rendition. See [`Rendition`].
 pub type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
+/// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
+pub type TextTrack<E = ()> = Rendition<E, hang::catalog::TextConfig>;
 
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {

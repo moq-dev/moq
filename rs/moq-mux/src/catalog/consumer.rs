@@ -67,7 +67,6 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
 					video: m.video,
 					audio: m.audio,
-					// MSF carries no text tracks, so this stays empty.
 					text: m.text,
 					ext: E::default(),
 				})))

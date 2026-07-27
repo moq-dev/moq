@@ -51,17 +51,36 @@ impl FromStr for TextFormat {
 
 /// The accessibility role of a text track, mirroring the roles registered by
 /// [draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Display, Default)]
 #[non_exhaustive]
 pub enum TextRole {
 	/// A transcription of the spoken dialogue, same-language or translated (the common subtitle).
+	#[display("subtitle")]
 	#[default]
 	Subtitle,
 
 	/// A textual representation of all audio, including non-speech sounds, for viewers who cannot
 	/// hear it (subtitles for the deaf and hard-of-hearing).
+	#[display("caption")]
 	Caption,
+
+	/// An unknown or unsupported role string, preserved verbatim so a newer role survives an older
+	/// consumer. The MSF registry it borrows from is expected to grow, and a rendition we can't
+	/// classify is still worth listing in a picker.
+	#[display("{_0}")]
+	Unknown(String),
+}
+
+impl FromStr for TextRole {
+	type Err = Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		Ok(match s {
+			"subtitle" => Self::Subtitle,
+			"caption" => Self::Caption,
+			_ => Self::Unknown(s.to_string()),
+		})
+	}
 }
 
 #[cfg(test)]
@@ -90,5 +109,20 @@ mod tests {
 	#[test]
 	fn role_default_is_subtitle() {
 		assert_eq!(TextRole::default(), TextRole::Subtitle);
+	}
+
+	#[test]
+	fn role_roundtrip() {
+		for (s, r) in [("subtitle", TextRole::Subtitle), ("caption", TextRole::Caption)] {
+			assert_eq!(TextRole::from_str(s).unwrap(), r);
+			assert_eq!(r.to_string(), s);
+		}
+	}
+
+	#[test]
+	fn role_unknown_preserved() {
+		let parsed = TextRole::from_str("commentary").unwrap();
+		assert_eq!(parsed, TextRole::Unknown("commentary".to_string()));
+		assert_eq!(parsed.to_string(), "commentary");
 	}
 }

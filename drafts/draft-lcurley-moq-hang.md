@@ -251,7 +251,7 @@ type TextSchema = {
 
 type TextConfig = {
 	"format": "vtt" | "ttml" | "utf8" | string,
-	"role": "subtitle" | "caption" | undefined,
+	"role": "subtitle" | "caption" | string | undefined,
 	"lang": string | undefined,
 	"label": string | undefined,
 	// plus the common fields ({{common}})
@@ -272,6 +272,10 @@ The `role` field describes the accessibility intent, defaulting to `subtitle`:
 
 - `subtitle`: a transcription of the spoken dialogue, same-language or translated.
 - `caption`: a textual representation of all audio, including non-speech sounds, for viewers who cannot hear it.
+
+The vocabulary is expected to grow, so a consumer MUST NOT reject a rendition whose `role` it does not recognize.
+It SHOULD keep such a rendition selectable and treat the role as `subtitle`, and MUST preserve the value verbatim if it republishes the catalog.
+Unlike `format`, an unrecognized `role` never prevents rendering: it describes intent, not the wire.
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
 The `label` field is a human-readable name for a track picker, useful when `lang` alone is ambiguous (for example distinguishing subtitles from same-language captions).

@@ -418,6 +418,16 @@ mod test {
 	}
 
 	#[test]
+	fn unknown_text_role_keeps_the_catalog() {
+		// A future `role` value must not take down the whole catalog: audio and video have to keep
+		// playing even when a caption rendition is classified with a vocabulary we don't know yet.
+		let json = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"text":{"renditions":{"subs":{"format":"vtt","role":"commentary"}}}}"#;
+
+		let catalog = Catalog::from_str(json).expect("unknown role rejected the catalog");
+		assert_eq!(catalog.text.renditions.len(), 1);
+	}
+
+	#[test]
 	fn extension_roundtrip() {
 		// An application extends the catalog with its own root section by flattening Catalog.
 		#[derive(Serialize, Deserialize, PartialEq, Debug)]

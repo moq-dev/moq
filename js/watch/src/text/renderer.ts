@@ -19,6 +19,41 @@ const PRUNE_BEHIND = Time.Milli(30_000);
 // How long a `utf8` roll-up cue lingers when no later cue supersedes it.
 const UTF8_LINGER = Time.Milli(30_000);
 
+// How far a VTT payload's own timing may sit from its frame timestamp before we call it a bug.
+// Generous: this is catching a wrong clock, not measuring drift.
+const SKEW_TOLERANCE = Time.Milli(1_000);
+
+/**
+ * Insert a cue keeping `cues` sorted by start time.
+ *
+ * Groups arrive in delivery order rather than sequence order, so a cue can legitimately land
+ * before one that is already stored. Exported for tests.
+ *
+ * @internal
+ */
+export function insertCue(cues: VTTCue[], cue: VTTCue): void {
+	let i = cues.length;
+	while (i > 0 && cues[i - 1].startTime > cue.startTime) i--;
+	cues.splice(i, 0, cue);
+}
+
+/**
+ * Clamp a `utf8` roll-up cue against its neighbours, so exactly one caption shows at a time.
+ *
+ * A roll-up cue has no real end: it runs until the next one starts. Both neighbours are checked
+ * because the following cue may already have arrived out of order. Exported for tests.
+ *
+ * @internal
+ */
+export function rollUp(cues: VTTCue[], cue: VTTCue): void {
+	const i = cues.indexOf(cue);
+	const prev = i > 0 ? cues[i - 1] : undefined;
+	if (prev && prev.endTime > cue.startTime) prev.endTime = cue.startTime;
+
+	const next = cues[i + 1];
+	if (next && cue.endTime > next.startTime) cue.endTime = next.startTime;
+}
+
 export type RendererInput = {
 	// The overlay element captions are drawn into. Owned by the caller (e.g. the <moq-watch> element),
 	// which positions it over the video canvas.
@@ -42,6 +77,10 @@ export class Renderer {
 	readonly in: Readonlys<RendererInput>;
 
 	#signals = new Effect();
+
+	// Whether the clock-skew warning has already fired for the current track, so a misconfigured
+	// publisher costs one line instead of one per cue.
+	#skewWarned = false;
 
 	constructor(source: Source, sync: Sync, props?: Inputs<RendererInput>) {
 		this.source = source;
@@ -68,6 +107,9 @@ export class Renderer {
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
 		const active = broadcast.relativeBroadcast(effect, config.broadcast);
 		if (!active) return;
+
+		// A new track gets its own chance to complain about its clock.
+		this.#skewWarned = false;
 
 		// Pick the frame container. Text uses the timestamped `legacy` container or LOC; anything else
 		// (e.g. `cmaf`) would misread the cue payload, so skip it rather than render garbage.
@@ -127,26 +169,30 @@ export class Renderer {
 		};
 		effect.animate(tick);
 
+		// Accept groups and read each in its own task, like `Container.Consumer` does for media. A
+		// group whose stream stalls then delays only its own cue instead of every later one.
 		effect.spawn(async () => {
 			for (;;) {
 				const group = await sub.recvGroup();
 				if (!group) break;
 
-				try {
-					for (;;) {
-						const frame = await group.readFrame();
-						if (!frame) break;
-						for (const sample of format.decode(frame.payload)) {
-							await this.#ingest(config.format, sample, cues, regions);
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const frame = await group.readFrame();
+							if (!frame) break;
+							for (const sample of format.decode(frame.payload)) {
+								await this.#ingest(config.format, sample, cues, regions);
+							}
 						}
+					} catch (err) {
+						console.warn("captions: group read error", err);
+					} finally {
+						group.close();
 					}
-				} catch (err) {
-					console.warn("captions: group read error", err);
-				} finally {
-					group.close();
-				}
 
-				commit();
+					commit();
+				});
 			}
 		});
 	}
@@ -162,24 +208,38 @@ export class Renderer {
 		const text = new TextDecoder().decode(sample.payload);
 		if (text.length === 0) return;
 
+		const start = (sample.timestamp as number) / 1e6;
+
 		if (format === "utf8") {
-			const start = (sample.timestamp as number) / 1e6;
-			// Roll-up: the previous cue ends when this one begins.
-			const prev = cues.at(-1);
-			if (prev && prev.endTime > start) prev.endTime = start;
-			cues.push(new VTTCue(start, start + UTF8_LINGER / 1000, text));
+			const cue = new VTTCue(start, start + UTF8_LINGER / 1000, text);
+			insertCue(cues, cue);
+			rollUp(cues, cue);
 			return;
 		}
 
 		// vtt: a self-contained WEBVTT segment. `strict: false` (the default) tolerates a missing header.
+		let parsed: Awaited<ReturnType<typeof parseText>>;
 		try {
-			const parsed = await parseText(text, { type: "vtt" });
-			for (const region of parsed.regions) regions.set(region.id, region);
-			cues.push(...parsed.cues);
-			cues.sort((a, b) => a.startTime - b.startTime);
+			parsed = await parseText(text, { type: "vtt" });
 		} catch (err) {
 			console.warn("captions: failed to parse VTT cue", err);
+			return;
 		}
+
+		// The spec requires the payload's timing to be absolute on the same clock as the frame
+		// timestamp. A publisher emitting segment-relative times (the usual WebVTT-in-fMP4 habit)
+		// would otherwise place every cue silently wrong, so say so once rather than never.
+		const first = parsed.cues.at(0);
+		if (!this.#skewWarned && first && Math.abs(first.startTime - start) > SKEW_TOLERANCE / 1000) {
+			this.#skewWarned = true;
+			console.warn(
+				`captions: cue timing is ${(first.startTime - start).toFixed(3)}s off its frame timestamp; ` +
+					"the payload must carry absolute times on the media clock",
+			);
+		}
+
+		for (const region of parsed.regions) regions.set(region.id, region);
+		for (const cue of parsed.cues) insertCue(cues, cue);
 	}
 
 	close(): void {

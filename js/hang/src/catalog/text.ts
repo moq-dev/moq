@@ -13,8 +13,16 @@ import { TimelineSchema } from "./timeline";
  */
 export const TextFormatSchema = z.string();
 
-/** The accessibility role of a text track: dialogue-only subtitles vs. all-audio captions (SDH). */
-export const TextRoleSchema = z.enum(["subtitle", "caption"]);
+/**
+ * The accessibility role of a text track, mirroring the Rust `TextRole`.
+ *
+ * Known values are `"subtitle"` (dialogue only) and `"caption"` (all audio, i.e. SDH). It is a
+ * plain string rather than an enum because the vocabulary is borrowed from
+ * [draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) and is expected to
+ * grow: an unrecognized role must leave the rendition listed (and republishable verbatim), not
+ * drop the catalog's captions. Treat anything else as `"subtitle"`.
+ */
+export const TextRoleSchema = z.string();
 
 /**
  * Schema for a single text (caption/subtitle) rendition.

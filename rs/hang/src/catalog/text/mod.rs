@@ -78,6 +78,7 @@ pub struct TextConfig {
 	pub format: TextFormat,
 
 	/// The accessibility role of the track. Defaults to [`TextRole::Subtitle`].
+	#[serde_as(as = "DisplayFromStr")]
 	#[serde(default)]
 	pub role: TextRole,
 
@@ -178,5 +179,22 @@ mod test {
 
 		let decoded: Text = serde_json::from_str(&output).unwrap();
 		assert_eq!(decoded.renditions["subs"].role, TextRole::Subtitle);
+	}
+
+	#[test]
+	fn unknown_role_preserved() {
+		// A role from a newer publisher must not fail the decode: the MSF registry can grow, and
+		// rejecting the value would take the whole catalog (audio and video included) down with it.
+		let encoded = r#"{"renditions":{"subs":{"format":"vtt","role":"commentary","container":{"kind":"legacy"}}}}"#;
+
+		let decoded: Text = serde_json::from_str(encoded).expect("failed to decode");
+		assert_eq!(
+			decoded.renditions["subs"].role,
+			TextRole::Unknown("commentary".to_string())
+		);
+
+		// And it survives a republish verbatim, so a relaying consumer doesn't erase it.
+		let output = serde_json::to_string(&decoded).expect("failed to encode");
+		assert_eq!(encoded, output, "unknown role not preserved");
 	}
 }

@@ -217,11 +217,18 @@ gst name url='http://localhost:4443' *args:
     just download "{{ name }}"
     cargo build -p moq-gst
 
+    # Only wire the subtitle branch when the file actually has a text track. gst-launch builds every
+    # named branch up front, so a `demux.subtitle_0` that never links leaves its queue without EOS and
+    # the pipeline never shuts down (Ctrl-C hangs on any caption-less file).
+    SUBTITLES=""; \
+    if [ -n "$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "media/{{ name }}.mp4")" ]; then \
+    	SUBTITLES="demux.subtitle_0 ! queue ! identity sync=true ! mux.sink_2"; \
+    fi; \
     GST_PLUGIN_PATH_1_0="${PWD}/../../target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
     gst-launch-1.0 -v -e multifilesrc location="media/{{ name }}.mp4" loop=true ! qtdemux name=demux \
-    	demux.video_0 ! queue ! h264parse ! identity sync=true ! mux.sink_0 \
-    	demux.audio_0 ! queue ! aacparse ! identity sync=true ! mux.sink_1 \
-    	demux.subtitle_0 ! queue ! identity sync=true ! mux.sink_2 \
+    	demux.video_0 ! queue ! parsebin ! identity sync=true ! mux.sink_0 \
+    	demux.audio_0 ! queue ! parsebin ! identity sync=true ! mux.sink_1 \
+    	$SUBTITLES \
     	moqsink name=mux url="{{ url }}" broadcast="{{ name }}.hang" {{ args }}
 
 # Embed a subtitle file into a test video as a soft track, so the gst recipe can publish captions.
