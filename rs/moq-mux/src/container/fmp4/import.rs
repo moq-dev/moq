@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::Error;
 use crate::Result;
-use crate::container::jitter::Metrics;
+use crate::catalog::Estimator;
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -91,11 +91,14 @@ struct Fmp4Track {
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
 
-	// Detects the track bitrate from fragment sizes, used only when the CMAF descriptor didn't
-	// declare one. Jitter comes from the fragment timing above, not this detector.
-	metrics: Metrics,
+	// Measures the track bitrate from fragment sizes, used only when the CMAF descriptor didn't
+	// declare one. Jitter comes from the fragment timing above, not this estimator.
+	estimator: Estimator,
 
-	// Whether the descriptor left the bitrate unset, so the detector should fill it.
+	// The last bitrate written to the catalog, so an unchanged one doesn't republish it.
+	bitrate: Option<u64>,
+
+	// Whether the descriptor left the bitrate unset, so the estimator should fill it.
 	detect_bitrate: bool,
 }
 
@@ -268,7 +271,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					last_timestamp: None,
 					min_duration: None,
 					pending_sequence: None,
-					metrics: Metrics::new(),
+					estimator: Estimator::new(),
+					bitrate: None,
 					detect_bitrate,
 				},
 			);
@@ -781,12 +785,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 
 			// A keyframe fragment starts a new group: close the previous one for the bitrate
-			// detector (used only when the descriptor didn't declare a bitrate).
-			if track.detect_bitrate
-				&& contains_keyframe
-				&& let Some(bitrate) = track.metrics.finish_group(Some(timestamp))
-			{
-				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
+			// estimator (used only when the descriptor didn't declare a bitrate).
+			if contains_keyframe {
+				track.estimator.cut(Some(timestamp));
+				sync_bitrate(&mut self.catalog, track)?;
 			}
 			let fragment_len = fragment_bytes.len();
 
@@ -799,9 +801,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			track.group = Some(g);
 
-			if track.detect_bitrate {
-				track.metrics.record_frame(timestamp, fragment_len);
-			}
+			track.estimator.write(timestamp, fragment_len);
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				// All three share the track timescale (min/max are this fragment's frame
@@ -843,11 +843,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
 		for track in self.tracks.values_mut() {
-			if track.detect_bitrate
-				&& let Some(bitrate) = track.metrics.finish_group(None)
-			{
-				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
-			}
+			track.estimator.cut(None);
+			sync_bitrate(&mut self.catalog, track)?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -889,11 +886,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
-			if track.detect_bitrate
-				&& let Some(bitrate) = track.metrics.finish_group(None)
-			{
-				set_detected_bitrate(&mut self.catalog, track, bitrate)?;
-			}
+			track.estimator.cut(None);
+			sync_bitrate(&mut self.catalog, track)?;
 			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
@@ -903,7 +897,27 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 }
 
-/// Apply a detector-supplied bitrate to a track's catalog config, keeping the maximum seen.
+/// Advertise the measured bitrate when it moves, for a passthrough track whose CMAF descriptor
+/// didn't declare one.
+fn sync_bitrate<E: crate::catalog::hang::CatalogExt>(
+	catalog: &mut crate::catalog::Producer<E>,
+	track: &mut Fmp4Track,
+) -> Result<()> {
+	if !track.detect_bitrate {
+		return Ok(());
+	}
+	let Some(bitrate) = track.estimator.estimate().bitrate else {
+		return Ok(());
+	};
+	if track.bitrate == Some(bitrate) {
+		return Ok(());
+	}
+	track.bitrate = Some(bitrate);
+
+	set_detected_bitrate(catalog, track, bitrate)
+}
+
+/// Apply a measured bitrate to a track's catalog config, keeping the maximum seen.
 fn set_detected_bitrate<E: crate::catalog::hang::CatalogExt>(
 	catalog: &mut crate::catalog::Producer<E>,
 	track: &Fmp4Track,
