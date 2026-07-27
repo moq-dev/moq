@@ -17,8 +17,10 @@ export type ToWorker =
 export type FromWorker =
 	// Sent on load, before the track arrives, so the main thread can fall back without losing it.
 	| { type: "ready"; supported: boolean }
-	// The next captured frame, transferred. The main thread owns and closes it.
-	| { type: "frame"; frame: VideoFrame }
+	// The next captured frame, transferred. The main thread owns and closes it. `at` is when we read
+	// it, as absolute milliseconds (timeOrigin + now) so the main thread can shift it onto its own
+	// timebase: our performance.now() has a different time origin.
+	| { type: "frame"; frame: VideoFrame; at: number }
 	// The track ended; no more frames are coming.
 	| { type: "done" }
 	| { type: "error"; message: string };
@@ -67,6 +69,8 @@ async function pull(): Promise<void> {
 	if (!reader) throw new Error("not started");
 
 	const { value } = await reader.read();
+	const at = performance.timeOrigin + performance.now();
+
 	if (!value) {
 		stop();
 		scope.postMessage({ type: "done" });
@@ -74,7 +78,7 @@ async function pull(): Promise<void> {
 	}
 
 	// Transferring detaches our handle, so the frame is the main thread's to close.
-	scope.postMessage({ type: "frame", frame: value }, [value]);
+	scope.postMessage({ type: "frame", frame: value, at }, [value]);
 }
 
 function stop(): void {

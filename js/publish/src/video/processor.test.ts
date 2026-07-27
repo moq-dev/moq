@@ -28,7 +28,11 @@ class FakeWorker {
 			return;
 		}
 
-		this.#emit({ type: "frame", frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame });
+		this.#emit({
+			type: "frame",
+			frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame,
+			at: performance.timeOrigin + performance.now(),
+		});
 		this.#timestamp += 1000;
 	}
 
@@ -85,8 +89,10 @@ test("captures through the worker, transferring a clone", async () => {
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
 	const reader = stream.getReader();
 
+	const before = performance.now() * 1000;
 	const first = await reader.read();
 	const second = await reader.read();
+	const after = performance.now() * 1000;
 
 	expect(spawned).toHaveLength(1);
 	const worker = spawned[0];
@@ -97,8 +103,12 @@ test("captures through the worker, transferring a clone", async () => {
 	expect(worker.started).toBeDefined();
 	expect(worker.started).not.toBe(track);
 
-	// Timestamps are rebased onto our wall clock, so only the deltas survive.
-	expect(first.value?.timestamp).toBeLessThan(5_000_000);
+	// The camera's epoch is dropped: the first frame lands on the wall clock reading the worker took
+	// when it read the frame, which is bounded by our own two readings.
+	expect(first.value?.timestamp).toBeGreaterThanOrEqual(before);
+	expect(first.value?.timestamp).toBeLessThanOrEqual(after);
+
+	// Everything after the first keeps its original spacing.
 	expect((second.value?.timestamp ?? 0) - (first.value?.timestamp ?? 0)).toBe(1000);
 
 	await reader.cancel();

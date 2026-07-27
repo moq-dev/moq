@@ -36,20 +36,34 @@ export async function workerSupported(): Promise<boolean> {
 	return probe;
 }
 
-// Rewrites capture timestamps onto our wall clock, anchoring the first frame to performance.now().
+// Maps capture timestamps onto our wall clock so audio and video share one epoch. The first frame
+// pins the two clocks together; everything after it keeps its spacing.
+class Epoch {
+	#base?: number;
+	#zero = 0;
+
+	// `at` is when the frame arrived, in milliseconds on our performance.now() timebase. Only the
+	// first one matters, and it has to be measured as close to capture as possible: whatever delay
+	// sits between capture and the anchor becomes a permanent audio/video offset.
+	stamp(frame: VideoFrame, at: number): VideoFrame {
+		if (this.#base === undefined) {
+			this.#base = frame.timestamp;
+			this.#zero = at * 1000;
+		}
+
+		const stamped = new VideoFrame(frame, { timestamp: frame.timestamp - this.#base + this.#zero });
+		frame.close();
+		return stamped;
+	}
+}
+
+// Stamps frames as they arrive, for pipelines that deliver straight to us.
 function rewrite(): TransformStream<VideoFrame, VideoFrame> {
-	let base: number | undefined;
-	let zero = 0;
+	const epoch = new Epoch();
 
 	return new TransformStream<VideoFrame>({
 		transform(frame, controller) {
-			if (base === undefined) {
-				base = frame.timestamp;
-				zero = performance.now() * 1000;
-			}
-			const rewrite = new VideoFrame(frame, { timestamp: frame.timestamp - base + zero });
-			frame.close();
-			controller.enqueue(rewrite);
+			controller.enqueue(epoch.stamp(frame, performance.now()));
 		},
 	});
 }
@@ -75,14 +89,18 @@ async function workerProcessor(source: StreamTrack): Promise<ReadableStream<Vide
 		return undefined;
 	}
 
-	const frames = new ReadableStream<VideoFrame>({
+	const epoch = new Epoch();
+
+	return new ReadableStream<VideoFrame>({
 		async pull(controller) {
 			worker.post({ type: "pull" });
 
 			const msg = await worker.next();
 			switch (msg.type) {
 				case "frame":
-					controller.enqueue(msg.frame);
+					// Anchor on when the worker read the frame, not when we got around to handling
+					// the message, so a busy main thread can't skew video against audio.
+					controller.enqueue(epoch.stamp(msg.frame, msg.at - performance.timeOrigin));
 					return;
 				case "done":
 					worker.close();
@@ -97,8 +115,6 @@ async function workerProcessor(source: StreamTrack): Promise<ReadableStream<Vide
 			worker.close();
 		},
 	});
-
-	return frames.pipeThrough(rewrite());
 }
 
 // A live capture worker, one request in flight at a time.
@@ -152,6 +168,7 @@ function handle(worker: Worker): Handle {
 		post: (msg, transfer) => {
 			worker.postMessage(msg, transfer ?? []);
 		},
+		// One request is in flight at a time (the stream serializes pulls), so a single slot is enough.
 		next: () => {
 			const msg = queue.shift();
 			if (msg) return Promise.resolve(msg);
@@ -160,6 +177,9 @@ function handle(worker: Worker): Handle {
 			});
 		},
 		close: () => {
+			// Cancelling mid-pull leaves a next() waiting on a worker that will never answer, so
+			// settle it rather than stranding the promise and its closure.
+			push({ type: "error", message: "worker terminated" });
 			worker.terminate();
 		},
 	};
@@ -189,9 +209,8 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 		},
 		async pull(controller) {
 			// requestVideoFrameCallback fires once per frame the camera actually delivers, so we
-			// sample its true cadence instead of racing a wall clock. The old timer settled at
-			// 20fps for a 30fps camera because Safari/Firefox clamp performance.now() to whole
-			// milliseconds, so a 33ms tick always read as "too early" for a 33.333ms period.
+			// sample its true cadence rather than racing a wall clock: Safari and Firefox clamp
+			// performance.now() to whole milliseconds, which can't express a 33.333ms period.
 			await new Promise<void>((resolve) => {
 				handle = video.requestVideoFrameCallback((now, metadata) => {
 					// captureTime is the frame's capture instant; both it and now are on the
