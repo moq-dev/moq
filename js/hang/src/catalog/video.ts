@@ -1,5 +1,6 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
+import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 import { TimelineSchema } from "./timeline";
@@ -25,7 +26,7 @@ export const VideoConfigSchema = z.object({
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is (repeated) before each key-frame.
-	description: z.optional(z.string()), // hex encoded TODO use base64
+	description: z.optional(hexSchema),
 
 	// The width and height of the video in pixels.
 	// NOTE: formats that don't use a description can adjust these values in-band.

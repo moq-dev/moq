@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/moq-dev/moq/compare/moq-boy-v0.3.2...moq-boy-v0.4.0) - 2026-07-25
+
+### Other
+
+- *(moq-video)* [**breaking**] one raw Frame type, and carry timestamps through encode ([#2503](https://github.com/moq-dev/moq/pull/2503))
+
 ## [0.3.2](https://github.com/moq-dev/moq/compare/moq-boy-v0.3.1...moq-boy-v0.3.2) - 2026-07-24
 
 ### Added

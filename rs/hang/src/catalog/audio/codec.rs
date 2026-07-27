@@ -68,14 +68,14 @@ pub enum AudioCodecKind {
 	AAC,
 	/// Opus.
 	Opus,
-	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
-	Pcm,
 	/// Unknown or unsupported codec.
 	Unknown,
 	/// Free Lossless Audio Codec.
 	Flac,
 	/// MPEG-1/2 Audio Layer III.
 	Mp3,
+	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
+	Pcm,
 }
 
 impl AudioCodec {
@@ -139,5 +139,15 @@ mod tests {
 		assert_eq!(codec, AudioCodec::Pcm);
 		assert_eq!(codec.to_string(), "pcm");
 		assert_eq!(codec.kind(), AudioCodecKind::Pcm);
+	}
+
+	#[test]
+	fn codec_kind_discriminants_are_stable() {
+		assert_eq!(AudioCodecKind::AAC as isize, 0);
+		assert_eq!(AudioCodecKind::Opus as isize, 1);
+		assert_eq!(AudioCodecKind::Unknown as isize, 2);
+		assert_eq!(AudioCodecKind::Flac as isize, 3);
+		assert_eq!(AudioCodecKind::Mp3 as isize, 4);
+		assert_eq!(AudioCodecKind::Pcm as isize, 5);
 	}
 }

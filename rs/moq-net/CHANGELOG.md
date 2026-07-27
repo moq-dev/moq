@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-net-v0.2.2...moq-net-v0.2.3) - 2026-07-25
+
+### Added
+
+- *(net)* release idle spliced tracks after a linger ([#2505](https://github.com/moq-dev/moq/pull/2505))
+- *(relay)* add --cache-duration ceiling on cached group age ([#2494](https://github.com/moq-dev/moq/pull/2494))
+
+### Fixed
+
+- *(net)* avoid duplicate subscribe streams ([#2513](https://github.com/moq-dev/moq/pull/2513))
+- *(moq-net)* keep the clean end of a finished group that ages out ([#2506](https://github.com/moq-dev/moq/pull/2506))
+- *(net)* tear down idle upstream subscriptions ([#2500](https://github.com/moq-dev/moq/pull/2500))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-net-v0.2.1...moq-net-v0.2.2) - 2026-07-24
 
 ### Added

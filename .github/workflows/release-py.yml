@@ -8,7 +8,7 @@ name: Release Py
 # py/moq-rs/pyproject.toml by hand in a normal PR. On merge to main this reads
 # that version and publishes only if it isn't already on PyPI. That registry
 # check is the release gate (the same model release-plz uses for crates), so
-# there's no separate tag to remember. The wrapper depends on `moq-ffi ~= 0.2.x`
+# there's no separate tag to remember. The wrapper depends on `moq-ffi ~= 0.3.x`
 # and floats to the latest compatible moq-ffi patch, so a moq-ffi patch needs no
 # wrapper re-release.
 
@@ -39,7 +39,7 @@ jobs:
       publish: ${{ steps.pypi.outputs.exists == 'false' }}
 
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -88,4 +88,4 @@ jobs:
           path: dist
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1

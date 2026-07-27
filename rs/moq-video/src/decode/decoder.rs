@@ -344,17 +344,28 @@ mod tests {
 		}
 	}
 
-	/// A decoded surface feeds the hardware encoder as-is, which is the zero-copy
-	/// transcode path (`moq-transcode` re-encodes what it decodes). On macOS that
-	/// only became reachable once decode stopped downloading to I420.
+	/// The multi-rung transcode path stays on hardware through decode, resize, and
+	/// encode. The residency assertion catches a CPU fallback even when the pixels
+	/// and dimensions still look right.
 	#[cfg(target_os = "macos")]
 	#[test]
-	fn videotoolbox_surface_reencodes_in_place() {
+	fn videotoolbox_resized_surface_reencodes_in_place() {
 		let decoded = decode_gray(3);
+		let resized: Vec<_> = decoded
+			.iter()
+			.map(|frame| frame.resize(crate::Size::new(160, 120)).unwrap())
+			.collect();
+		for frame in &resized {
+			assert_eq!(frame.size(), crate::Size::new(160, 120));
+			assert!(
+				matches!(frame.surface, Surface::PixelBuffer(_)),
+				"VideoToolbox resize downloaded to the CPU"
+			);
+		}
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
-			..EncodeConfig::new(320, 240, 30)
+			..EncodeConfig::new(160, 120, 30)
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
@@ -362,12 +373,11 @@ mod tests {
 		};
 
 		let mut packets = 0;
-		for (i, out) in decoded.into_iter().enumerate() {
-			// Re-encode the decoded frame as-is, keying the group off frame 0.
+		for (i, out) in resized.iter().enumerate() {
 			if i == 0 {
 				encoder.keyframe();
 			}
-			packets += encoder.encode(&out).unwrap().len();
+			packets += encoder.encode(out).unwrap().len();
 		}
 		packets += encoder.finish().unwrap().len();
 

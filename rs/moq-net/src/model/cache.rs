@@ -25,6 +25,10 @@ use web_async::Lock;
 /// just its payload bytes.
 const ENTRY_OVERHEAD: u64 = 256;
 
+/// Slack before [`Lru::compact`] rebuilds the heap, so a pool holding just a few
+/// entries doesn't rebuild on every registration.
+const COMPACT_SLACK: usize = 64;
+
 /// A shared byte budget that caches charge into; cloning shares the same budget.
 ///
 /// The pool tracks how many payload bytes are cached across every registered group
@@ -73,11 +77,36 @@ struct Lru {
 	next_id: u64,
 }
 
+impl Lru {
+	/// Drop heap slots whose entry is gone, once they outnumber the live ones.
+	///
+	/// Unregistering leaves its heap slot behind to be discarded on a later pop,
+	/// but `evict` is the only thing that pops and it returns early while the pool
+	/// is under capacity -- so an UNBOUNDED pool never pops at all and the heap
+	/// would grow without bound. Rebuilding costs O(n) but is amortized by the
+	/// doubling threshold, so steady-state churn keeps the heap within 2x live.
+	fn compact(&mut self) {
+		if self.heap.len() <= 2 * self.entries.len() + COMPACT_SLACK {
+			return;
+		}
+		self.heap = self
+			.entries
+			.values()
+			.map(|entry| Reverse((entry.last_access.load(Ordering::Relaxed), entry.id)))
+			.collect();
+	}
+}
+
 /// A single cached group's registration in the pool.
 ///
 /// Holds only atomics plus the eviction hook, so touching recency or flipping the
-/// pin never takes a lock. The hook holds a weak handle to the group, so an entry
-/// never keeps its group alive.
+/// pin never takes a lock.
+///
+/// The hook's `kio::ProducerWeak` does NOT make this cheap to leave registered:
+/// it holds no producer/consumer ref count, but it does hold the group's
+/// `Arc<Mutex<State>>` storage, so a live registration keeps the whole group
+/// alive. Registrations must therefore be dropped as soon as the group stops
+/// being an eviction candidate (see [`Charge::clear`]), not merely on `Drop`.
 pub(crate) struct Entry {
 	id: u64,
 	// Payload bytes plus ENTRY_OVERHEAD currently charged by this entry.
@@ -87,13 +116,25 @@ pub(crate) struct Entry {
 	// Pinned entries (the track's latest group) are skipped by eviction.
 	pinned: AtomicBool,
 	// Aborts the group with Error::Evicted. Called without any pool lock held.
-	evict: Box<dyn Fn() + Send + Sync>,
+	//
+	// `None` once the group stopped being an eviction candidate. Taking it is what
+	// releases the group's state, so it must be dropped (not just left registered)
+	// as soon as the group is dead -- see the type-level note above.
+	evict: Lock<Option<Box<dyn Fn() + Send + Sync>>>,
 	epoch: web_async::time::Instant,
 }
 
 impl Entry {
 	fn now(&self) -> u64 {
 		self.epoch.elapsed().as_millis() as u64
+	}
+
+	/// Take the eviction hook, so dropping it releases whatever it captured.
+	///
+	/// The caller MUST drop the returned hook with no pool lock held: releasing the
+	/// group's state can cascade into drops that re-enter the pool.
+	fn take_hook(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
+		self.evict.lock().take()
 	}
 
 	/// Record a read so eviction considers this group recently used.
@@ -187,13 +228,14 @@ impl Pool {
 				bytes: AtomicU64::new(ENTRY_OVERHEAD),
 				last_access: AtomicU64::new(0),
 				pinned: AtomicBool::new(false),
-				evict,
+				evict: Lock::new(Some(evict)),
 				epoch: inner.epoch,
 			});
 			entry.touch();
 
 			lru.entries.insert(id, entry.clone());
 			lru.heap.push(Reverse((entry.last_access.load(Ordering::Relaxed), id)));
+			lru.compact();
 			entry
 		};
 
@@ -258,8 +300,12 @@ impl Pool {
 			}
 		}
 
+		// Taking the hook also drops it once it has run, releasing the group state
+		// the closure captured. The pool lock is already released here.
 		for victim in victims {
-			(victim.evict)();
+			if let Some(hook) = victim.take_hook() {
+				hook();
+			}
 		}
 	}
 }
@@ -304,13 +350,43 @@ impl Charge {
 		}
 	}
 
-	/// Release everything this charge holds (bytes and overhead). Idempotent;
-	/// used when the group aborts and clears its frames.
+	/// Release everything this charge holds (bytes and overhead) AND drop the
+	/// pool's registration. Idempotent; used when the group aborts and clears its
+	/// frames.
+	///
+	/// Unregistering here, rather than waiting for [`Drop`], is what keeps an
+	/// unbounded pool from growing without bound. The pool's `entries` map holds an
+	/// `Arc<Entry>`, the entry owns the eviction hook, and the hook captures a
+	/// `kio::ProducerWeak<GroupState>` -- which holds no producer/consumer ref count
+	/// but DOES hold the group's `Arc<Mutex<State>>` storage alive. So the map keeps
+	/// the group's state alive, the state owns this charge, and `Charge::drop` (the
+	/// only other unregister) can never run: a cycle, one per group forever.
+	/// `Pool::evict` also unregisters and would break it, but it returns early while
+	/// under capacity, so an unbounded pool never gets there.
+	///
+	/// A released group holds no bytes and is closed, so it is not an eviction
+	/// candidate and has no reason to stay registered.
 	pub(crate) fn clear(&self) {
-		if let Some((inner, entry)) = &self.inner {
-			let bytes = entry.bytes.swap(0, Ordering::Relaxed);
-			inner.used.fetch_sub(bytes, Ordering::Relaxed);
+		let Some((inner, entry)) = &self.inner else {
+			return;
+		};
+
+		let bytes = entry.bytes.swap(0, Ordering::Relaxed);
+		inner.used.fetch_sub(bytes, Ordering::Relaxed);
+
+		{
+			// Safe to take the pool lock under the group's own lock: `Pool::evict`
+			// releases the pool lock BEFORE invoking a hook that locks a group, so
+			// no thread ever holds the pool lock while waiting on a group lock.
+			let mut lru = inner.lru.lock();
+			lru.entries.remove(&entry.id);
+			lru.compact();
 		}
+
+		// Drop the hook with no pool lock held (see `Entry::take_hook`). This is the
+		// drop that actually frees the group: the caller holds the group's state
+		// lock, so its storage outlives this by at least that handle.
+		drop(entry.take_hook());
 	}
 
 	/// Mark the group recently used (a consumer read a frame).
@@ -365,6 +441,59 @@ mod test {
 		assert_eq!(pool.used(), (1 << 40) + ENTRY_OVERHEAD);
 		drop(charge);
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// An unbounded pool must not accumulate bookkeeping for groups that have
+	/// released their cache. Before the fix `entries` grew one slot per group
+	/// forever (each holding the group's whole state alive through the eviction
+	/// hook's `ProducerWeak`), because `evict` -- the only unregister that runs
+	/// under capacity -- returns early on an unbounded pool. Observed as ~75 kB/s
+	/// of RSS growth in a publisher, which is `moq-cli`'s default configuration.
+	#[test]
+	fn unbounded_reclaims_cleared_entries() {
+		let pool = Pool::unbounded();
+
+		// Churn far more groups than could ever be live at once, the way a
+		// publisher does: register, charge some bytes, then release on abort.
+		for _ in 0..10_000 {
+			let (_evicted, hook) = flag();
+			let charge = pool.register(hook);
+			charge.add(4096);
+			charge.clear();
+		}
+
+		let (live, entries) = {
+			let lru = pool.inner.lru.lock();
+			(lru.entries.len(), lru.heap.len())
+		};
+		assert_eq!(live, 0, "cleared groups must not stay registered");
+		assert!(
+			entries <= 2 * COMPACT_SLACK,
+			"stale heap slots must be compacted, got {entries}"
+		);
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// A cleared charge must not keep its group's state alive: the hook is the
+	/// only thing holding it, so dropping the registration must drop the hook.
+	#[test]
+	fn clear_releases_the_eviction_hook() {
+		let pool = Pool::unbounded();
+		let canary = Arc::new(());
+		let held = canary.clone();
+
+		let charge = pool.register(Box::new(move || {
+			// Capture a strong ref the way the real hook captures group state.
+			let _ = &held;
+		}));
+		assert_eq!(Arc::strong_count(&canary), 2, "hook holds the capture");
+
+		charge.clear();
+		assert_eq!(
+			Arc::strong_count(&canary),
+			1,
+			"clearing must drop the hook, releasing whatever it captured"
+		);
 	}
 
 	#[test]

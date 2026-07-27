@@ -139,6 +139,7 @@ impl<E: CatalogExt> Import<E> {
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.track.finish()?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -148,21 +149,23 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
+	/// the fields its config didn't supply.
+	fn estimate(&mut self) {
+		self.rendition.estimate(self.track.estimate());
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		// An explicit boundary finalizes the pending bitrate window at `end`. A bare `cut(None)`
-		// (the facade's per-frame close) stays metric-neutral, leaving the estimator to decode's
-		// per-packet window so it isn't clobbered by a zero-length group.
-		if end.is_some() {
-			self.rendition.record_group_end(end);
-		}
 		self.track.cut(end)?;
+		self.estimate();
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -173,11 +176,6 @@ impl<E: CatalogExt> Import<E> {
 	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
-		// Feed the bitrate estimator one window per packet: close the previous packet's window at
-		// this timestamp, then open this one. Owned entirely by decode so it's independent of where
-		// the caller draws group boundaries (cut/seek).
-		self.rendition.record_group_end(Some(timestamp));
-		let bytes = frame.as_ref().len();
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
@@ -187,7 +185,7 @@ impl<E: CatalogExt> Import<E> {
 			keyframe,
 			duration: None,
 		})?;
-		self.rendition.record_frame(timestamp, bytes);
+		self.estimate();
 		Ok(())
 	}
 }

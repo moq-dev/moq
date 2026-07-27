@@ -50,14 +50,13 @@ impl Frame {
 	}
 
 	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
-	/// preserving the timestamp. A CUDA frame scales on the GPU
-	/// (a box filter, correct at any downscale factor) and stays there, so resize ->
-	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU. Every
-	/// other frame scales on the CPU, which for a `CVPixelBuffer` means a download
-	/// first. When one output size is enough, prefer decoding straight to it
-	/// ([`decode::Config::resize`](crate::decode::Config)), which is free on
-	/// decoders with a hardware scaler; this method is for fanning one decoded
-	/// stream out to several sizes.
+	/// preserving the timestamp. CUDA and macOS `CVPixelBuffer` frames scale on
+	/// the GPU and stay there, so resize ->
+	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU. Other
+	/// frames scale on the CPU. When one output size is enough, prefer decoding
+	/// straight to it ([`decode::Config::resize`](crate::decode::Config)), which
+	/// is free on decoders with a hardware scaler; this method is for fanning one
+	/// decoded stream out to several sizes.
 	pub fn resize(&self, size: Size) -> Result<Frame, Error> {
 		Ok(Frame {
 			timestamp: self.timestamp,
@@ -152,15 +151,26 @@ impl Surface {
 		)?))
 	}
 
-	/// A copy scaled to `size`, staying on the GPU where the platform can (CUDA
-	/// today). The pixel half of [`Frame::resize`], which is what you usually want
-	/// since it carries the timestamp across too.
+	/// A copy scaled to `size`, staying on the GPU for CUDA and macOS pixel-buffer
+	/// surfaces. The pixel half of [`Frame::resize`], which is what you usually
+	/// want since it carries the timestamp across too.
 	pub fn resize(&self, size: Size) -> Result<Surface, Error> {
 		size.validate("resize to")?;
 		let Size { width, height } = size;
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(width, height)?),
+			#[cfg(target_os = "macos")]
+			Surface::PixelBuffer(pixels) => match pixels.resize(width, height) {
+				Ok(scaled) => Surface::PixelBuffer(scaled),
+				// A transfer session or pool can fail on older hardware. Keep the
+				// stream alive with the universal CPU path.
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					Surface::I420(pixels.download_i420()?.resize(width, height)?)
+				}
+			},
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(cuda) => match cuda.resize(width, height) {
 				Ok(scaled) => Surface::Cuda(scaled),
@@ -172,8 +182,7 @@ impl Surface {
 					Surface::I420(cuda.download_i420()?.resize(width, height)?)
 				}
 			},
-			// CVPixelBuffer (the VideoToolbox decoder's output) and D3D11 textures
-			// have no GPU scaler wired up yet: download, then scale on the CPU.
+			// D3D11 textures have no GPU scaler wired up yet.
 			#[allow(unreachable_patterns)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(width, height)?),
 		})
@@ -525,25 +534,93 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 #[cfg(target_os = "macos")]
 pub mod macos {
 	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
-	//! `Surface::PixelBuffer`, plus the download/upload between it and CPU I420.
+	//! `Surface::PixelBuffer`, GPU resize, and download/upload between it and CPU
+	//! I420.
 
+	use std::collections::{HashMap, VecDeque};
+	use std::ffi::c_void;
 	use std::ptr;
-
 	use std::ptr::NonNull;
+	use std::sync::{Arc, LazyLock, Mutex};
 
-	use objc2_core_foundation::CFRetained;
+	use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-		CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
+		CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
+	use objc2_video_toolbox::VTPixelTransferSession;
 
 	use super::I420;
 	use crate::Error;
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
+
+	/// Enough reusable scalers for a large rendition ladder without retaining
+	/// every resolution a long-lived process has ever seen.
+	const SCALER_CACHE_CAPACITY: usize = 16;
+
+	/// Transfer sessions and destination pools are reusable, but VideoToolbox does
+	/// not promise concurrent access to a session. Each cached output size gets
+	/// its own serialized scaler so independent ladder rungs do not contend.
+	type ScalerCache = Mutex<Cache<Scaler>>;
+	static SCALERS: LazyLock<ScalerCache> = LazyLock::new(|| Mutex::new(Cache::new(SCALER_CACHE_CAPACITY)));
+
+	/// A bounded least-recently-used cache that never evicts a value in use.
+	struct Cache<T> {
+		values: HashMap<(u32, u32), Arc<Mutex<T>>>,
+		order: VecDeque<(u32, u32)>,
+		capacity: usize,
+	}
+
+	impl<T> Cache<T> {
+		fn new(capacity: usize) -> Self {
+			Self {
+				values: HashMap::new(),
+				order: VecDeque::new(),
+				capacity,
+			}
+		}
+
+		fn get_or_insert_with<E>(
+			&mut self,
+			key: (u32, u32),
+			create: impl FnOnce() -> Result<T, E>,
+		) -> Result<Arc<Mutex<T>>, E> {
+			if let Some(value) = self.values.get(&key).cloned() {
+				self.touch(key);
+				return Ok(value);
+			}
+
+			let value = Arc::new(Mutex::new(create()?));
+			self.values.insert(key, Arc::clone(&value));
+			self.touch(key);
+			self.prune();
+			Ok(value)
+		}
+
+		fn touch(&mut self, key: (u32, u32)) {
+			self.order.retain(|entry| *entry != key);
+			self.order.push_back(key);
+		}
+
+		fn prune(&mut self) {
+			let mut remaining = self.order.len();
+			while self.values.len() > self.capacity && remaining > 0 {
+				let key = self.order.pop_front().expect("remaining entries");
+				let idle = self.values.get(&key).is_some_and(|value| Arc::strong_count(value) == 1);
+				if idle {
+					self.values.remove(&key);
+				} else {
+					self.order.push_back(key);
+				}
+				remaining -= 1;
+			}
+		}
+	}
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
 	/// is what keeps the capture -> encode path zero-copy.
@@ -584,6 +661,26 @@ pub mod macos {
 
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
 			Self { buffer, width, height }
+		}
+
+		/// Scale into an NV12 buffer owned by the destination-size pool.
+		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
+			let scaler = {
+				let mut scalers = SCALERS
+					.lock()
+					.map_err(|_| Error::Codec(anyhow::anyhow!("pixel-transfer scaler cache lock poisoned")))?;
+				scalers.get_or_insert_with((width, height), || Scaler::new(width, height))?
+			};
+
+			let result = scaler
+				.lock()
+				.map_err(|_| Error::Codec(anyhow::anyhow!("pixel-transfer scaler lock poisoned")))?
+				.resize(self);
+			drop(scaler);
+			if let Ok(mut scalers) = SCALERS.lock() {
+				scalers.prune();
+			}
+			result
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
@@ -640,6 +737,135 @@ pub mod macos {
 				data,
 			})
 		}
+	}
+
+	/// One VideoToolbox transfer session and destination pool for an output size.
+	struct Scaler {
+		session: CFRetained<VTPixelTransferSession>,
+		pool: CFRetained<CVPixelBufferPool>,
+		width: u32,
+		height: u32,
+	}
+
+	// SAFETY: the cache only exposes a Scaler behind its per-size Mutex, so the
+	// transfer session and pool are used and released serially even when resize
+	// calls arrive on different executor threads.
+	unsafe impl Send for Scaler {}
+
+	impl Scaler {
+		fn new(width: u32, height: u32) -> Result<Self, Error> {
+			let mut session_ptr: *mut VTPixelTransferSession = std::ptr::null_mut();
+			let status = unsafe {
+				VTPixelTransferSession::create(None, NonNull::new(&mut session_ptr).expect("stack pointer is non-null"))
+			};
+			let session = NonNull::new(session_ptr)
+				.filter(|_| status == 0)
+				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("VTPixelTransferSessionCreate failed: {status}")))?;
+
+			let attributes = pool_attributes(width, height)?;
+			let mut pool_ptr: *mut CVPixelBufferPool = std::ptr::null_mut();
+			let status = unsafe {
+				CVPixelBufferPool::create(
+					None,
+					None,
+					Some(&attributes),
+					NonNull::new(&mut pool_ptr).expect("stack pointer is non-null"),
+				)
+			};
+			let pool = NonNull::new(pool_ptr)
+				.filter(|_| status == 0)
+				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferPoolCreate failed: {status}")))?;
+
+			Ok(Self {
+				session,
+				pool,
+				width,
+				height,
+			})
+		}
+
+		fn resize(&mut self, source: &PixelBuffer) -> Result<PixelBuffer, Error> {
+			let mut output_ptr: *mut CVPixelBuffer = std::ptr::null_mut();
+			let status = unsafe {
+				CVPixelBufferPool::create_pixel_buffer(
+					None,
+					&self.pool,
+					NonNull::new(&mut output_ptr).expect("stack pointer is non-null"),
+				)
+			};
+			let output = NonNull::new(output_ptr)
+				.filter(|_| status == 0)
+				.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+				.ok_or_else(|| Error::Codec(anyhow::anyhow!("CVPixelBufferPoolCreatePixelBuffer failed: {status}")))?;
+
+			let status = unsafe { self.session.transfer_image(&source.buffer, &output) };
+			if status != 0 {
+				return Err(Error::Codec(anyhow::anyhow!(
+					"VTPixelTransferSessionTransferImage failed: {status}"
+				)));
+			}
+
+			Ok(PixelBuffer::new(output, self.width, self.height))
+		}
+	}
+
+	/// Build a reusable NV12 IOSurface pool for one output size.
+	fn pool_attributes(width: u32, height: u32) -> Result<CFRetained<CFDictionary>, Error> {
+		let width =
+			i32::try_from(width).map_err(|_| Error::Codec(anyhow::anyhow!("pixel-buffer width is too large")))?;
+		let height =
+			i32::try_from(height).map_err(|_| Error::Codec(anyhow::anyhow!("pixel-buffer height is too large")))?;
+		let format = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as i32;
+
+		let width = cf_number(width)?;
+		let height = cf_number(height)?;
+		let format = cf_number(format)?;
+		let iosurface = unsafe {
+			CFDictionary::new(
+				None,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				0,
+				&objc2_core_foundation::kCFTypeDictionaryKeyCallBacks,
+				&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
+			)
+		}
+		.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build IOSurface attributes dictionary")))?;
+
+		let mut keys = [
+			(unsafe { kCVPixelBufferPixelFormatTypeKey } as *const CFString).cast::<c_void>(),
+			(unsafe { kCVPixelBufferWidthKey } as *const CFString).cast::<c_void>(),
+			(unsafe { kCVPixelBufferHeightKey } as *const CFString).cast::<c_void>(),
+			(unsafe { kCVPixelBufferIOSurfacePropertiesKey } as *const CFString).cast::<c_void>(),
+		];
+		let mut values = [
+			(format.as_ref() as *const CFNumber).cast::<c_void>(),
+			(width.as_ref() as *const CFNumber).cast::<c_void>(),
+			(height.as_ref() as *const CFNumber).cast::<c_void>(),
+			(iosurface.as_ref() as *const CFDictionary).cast::<c_void>(),
+		];
+		unsafe {
+			CFDictionary::new(
+				None,
+				keys.as_mut_ptr(),
+				values.as_mut_ptr(),
+				4,
+				&objc2_core_foundation::kCFTypeDictionaryKeyCallBacks,
+				&objc2_core_foundation::kCFTypeDictionaryValueCallBacks,
+			)
+		}
+		.ok_or_else(|| {
+			Error::Codec(anyhow::anyhow!(
+				"failed to build pixel-buffer pool attributes dictionary"
+			))
+		})
+	}
+
+	fn cf_number(value: i32) -> Result<CFRetained<CFNumber>, Error> {
+		unsafe { CFNumber::new(None, CFNumberType::SInt32Type, (&value as *const i32).cast::<c_void>()) }
+			.ok_or_else(|| Error::Codec(anyhow::anyhow!("failed to build CFNumber")))
 	}
 
 	struct UnlockGuard<'a>(&'a CVPixelBuffer);
@@ -701,6 +927,48 @@ pub mod macos {
 				let dst = base.add(y * stride);
 				std::ptr::copy_nonoverlapping(src[y * row_bytes..].as_ptr(), dst, row_bytes);
 			}
+		}
+	}
+
+	#[cfg(test)]
+	mod cache_tests {
+		use super::Cache;
+
+		#[test]
+		fn evicts_the_least_recently_used_idle_value() {
+			let mut cache = Cache::new(2);
+
+			let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
+			drop(first);
+			let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
+			drop(second);
+
+			let first = cache
+				.get_or_insert_with((1, 1), || Err::<(), _>("cached value was recreated"))
+				.unwrap();
+			drop(first);
+			let third = cache.get_or_insert_with((3, 3), || Ok::<_, ()>(())).unwrap();
+			drop(third);
+
+			assert!(cache.values.contains_key(&(1, 1)));
+			assert!(!cache.values.contains_key(&(2, 2)));
+			assert!(cache.values.contains_key(&(3, 3)));
+			assert_eq!(cache.values.len(), 2);
+		}
+
+		#[test]
+		fn defers_eviction_until_an_active_value_is_released() {
+			let mut cache = Cache::new(1);
+			let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
+			let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
+			assert_eq!(cache.values.len(), 2);
+
+			drop(first);
+			cache.prune();
+			assert!(!cache.values.contains_key(&(1, 1)));
+			assert!(cache.values.contains_key(&(2, 2)));
+			assert_eq!(cache.values.len(), 1);
+			drop(second);
 		}
 	}
 }
@@ -1213,6 +1481,83 @@ mod tests {
 		assert!(mae(dst.y(), expected.y()) < 4, "luma ramp drifted");
 		assert!(mae(dst.u(), expected.u()) < 4, "u ramp drifted");
 		assert!(mae(dst.v(), expected.v()) < 4, "v ramp drifted");
+	}
+
+	/// VideoToolbox and the CPU convolution agree on a smooth NV12 gradient.
+	/// The result remains a pixel buffer, pinning the residency regression.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn pixel_buffer_resize_matches_cpu() {
+		let src_i420 = gradient_i420(320, 240);
+		let src = Surface::PixelBuffer(nv12_surface(&src_i420));
+		let scaled = src.resize(Size::new(160, 120)).unwrap();
+		let Surface::PixelBuffer(scaled) = scaled else {
+			panic!("VideoToolbox resize downloaded to the CPU");
+		};
+
+		let gpu = scaled.download_i420().unwrap();
+		let cpu = src_i420.resize(160, 120).unwrap();
+
+		assert_eq!((gpu.width, gpu.height), (160, 120));
+		assert!(mae(gpu.y(), cpu.y()) < 4, "GPU and CPU luma disagree");
+		assert!(mae(gpu.u(), cpu.u()) < 4, "GPU and CPU u disagree");
+		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
+	}
+
+	/// Upload a packed I420 test picture as NV12, including CoreVideo row
+	/// padding, so the transfer test starts from the decoder's surface format.
+	#[cfg(target_os = "macos")]
+	fn nv12_surface(frame: &I420) -> super::macos::PixelBuffer {
+		use std::ptr::{self, NonNull};
+
+		use objc2_core_foundation::CFRetained;
+		use objc2_core_video::{
+			CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+			CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+			kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+		};
+
+		let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+		let status = unsafe {
+			CVPixelBufferCreate(
+				None,
+				frame.width as usize,
+				frame.height as usize,
+				kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+				None,
+				NonNull::new(&mut raw).expect("stack pointer is non-null"),
+			)
+		};
+		assert_eq!(status, 0, "CVPixelBufferCreate failed");
+		let buffer = unsafe { CFRetained::from_raw(NonNull::new(raw).expect("CoreVideo returned a buffer")) };
+
+		let flags = CVPixelBufferLockFlags(0);
+		assert_eq!(unsafe { CVPixelBufferLockBaseAddress(&buffer, flags) }, 0);
+		let width = frame.width as usize;
+		let height = frame.height as usize;
+		let y_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 0) as *mut u8;
+		let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 0);
+		for row in 0..height {
+			unsafe {
+				ptr::copy_nonoverlapping(frame.y()[row * width..].as_ptr(), y_base.add(row * y_stride), width);
+			}
+		}
+
+		let (chroma_width, chroma_height) = (width / 2, height / 2);
+		let uv_base = CVPixelBufferGetBaseAddressOfPlane(&buffer, 1) as *mut u8;
+		let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, 1);
+		for row in 0..chroma_height {
+			let output = unsafe { uv_base.add(row * uv_stride) };
+			for col in 0..chroma_width {
+				unsafe {
+					*output.add(col * 2) = frame.u()[row * chroma_width + col];
+					*output.add(col * 2 + 1) = frame.v()[row * chroma_width + col];
+				}
+			}
+		}
+		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
+
+		super::macos::PixelBuffer::new(buffer, frame.width, frame.height)
 	}
 
 	/// GPU (box filter) and CPU (bilinear convolution) resizes agree on a

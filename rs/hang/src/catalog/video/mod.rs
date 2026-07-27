@@ -14,9 +14,10 @@ use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, DurationMilliSeconds, hex::Hex};
+use serde_with::{DisplayFromStr, DurationMilliSeconds};
 
 use crate::catalog::Container;
+use crate::catalog::hex::Hex;
 
 /// Information about a video track in the catalog.
 ///

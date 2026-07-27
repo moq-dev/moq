@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.12...moq-audio-v0.0.13) - 2026-07-25
+
+### Added
+
+- *(moq-mux)* caller-driven audio grouping via dumb importers ([#2496](https://github.com/moq-dev/moq/pull/2496))
+- *(moq-audio)* add PCM codec ([#2493](https://github.com/moq-dev/moq/pull/2493))
+
+### Fixed
+
+- *(moq-audio)* bound capture buffer queue ([#2487](https://github.com/moq-dev/moq/pull/2487))
+- *(opus)* propagate pre-skip and encoder controls ([#2492](https://github.com/moq-dev/moq/pull/2492))
+
 ## [0.0.12](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.11...moq-audio-v0.0.12) - 2026-07-24
 
 ### Added

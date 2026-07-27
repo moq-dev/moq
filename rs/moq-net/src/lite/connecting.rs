@@ -8,9 +8,8 @@
 //! Backed by `kio`: each in-flight step holds a [`ConnectingProducer`], and the
 //! session is connected once they've all been dropped (which closes the channel).
 //! A step drops its producer when it finishes (or, on an early error, when it goes
-//! out of scope), so a failed step can't hang `connect()`. Exposes both a synchronous
-//! poll API and an async one; prefer `kio` over `tokio` primitives for new async state
-//! so we keep both available.
+//! out of scope), so a failed step can't hang `connect()`. Prefer `kio` over `tokio`
+//! primitives for new async state so the synchronous poll API stays available.
 
 use std::task::Poll;
 
@@ -40,11 +39,6 @@ impl Connecting {
 	/// Poll for connection completion: ready once every step's producer has dropped.
 	pub(crate) fn poll_ready(&self, waiter: &Waiter) -> Poll<()> {
 		self.0.poll_closed(waiter)
-	}
-
-	/// Await connection completion. Resolves immediately when there are no steps.
-	pub(crate) async fn ready(&self) {
-		kio::wait(|waiter| self.poll_ready(waiter)).await;
 	}
 }
 

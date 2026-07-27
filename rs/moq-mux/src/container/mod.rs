@@ -15,7 +15,6 @@ use std::task::Poll;
 use bytes::Bytes;
 
 mod consumer;
-pub(crate) mod jitter;
 mod producer;
 mod source;
 #[cfg(test)]

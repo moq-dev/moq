@@ -88,8 +88,8 @@ pub struct Client {
 	/// Enable UDP generic segmentation offload (GSO).
 	///
 	/// GSO batches sends into one syscall for throughput, but some NICs and
-	/// middleboxes mangle segmented packets. Defaults to on. Only the quinn and
-	/// noq backends can turn it off; setting `false` errors at init on quiche/iroh.
+	/// middleboxes mangle segmented packets. Defaults to on. The iroh backend
+	/// cannot turn it off and rejects an explicit `false`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "client-quic-gso",
@@ -113,7 +113,7 @@ pub struct Client {
 	pub idle_timeout: Option<Duration>,
 
 	/// Keep-alive ping interval. Defaults to 5s; set `0s` to disable.
-	/// Ignored by the quiche and iroh backends, which have no keep-alive knob.
+	/// Ignored by the iroh backend, which has no keep-alive knob.
 	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
 	#[arg(
 		id = "client-quic-keep-alive",
@@ -229,7 +229,6 @@ pub struct Server {
 	pub idle_timeout: Option<Duration>,
 
 	/// Keep-alive ping interval. Defaults to 5s; set `0s` to disable.
-	/// Ignored by the quiche backend, which has no keep-alive knob.
 	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
 	#[arg(
 		id = "server-quic-keep-alive",
@@ -401,10 +400,9 @@ impl Resolved {
 
 	/// Whether the config asks to turn GSO off, which not every backend can honor.
 	///
-	/// Only the quiche and iroh backends consult this, to reject a GSO-off request
-	/// they can't satisfy; quinn and noq toggle GSO directly. A default build
-	/// compiles neither, so the method is intentionally unused there.
-	#[cfg_attr(not(any(feature = "quiche", feature = "iroh")), allow(dead_code))]
+	/// Only the iroh backend consults this, to reject a GSO-off request it can't
+	/// satisfy; the other backends toggle GSO directly.
+	#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
 	pub(crate) fn gso_disabled(&self) -> bool {
 		self.gso == Some(false)
 	}
