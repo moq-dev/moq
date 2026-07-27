@@ -47,6 +47,11 @@ const EVICT_SLACK: usize = 64;
 /// groups, small enough that a write never scans a long queue.
 const EVICT_SCAN: usize = 4;
 
+/// Gross bytes written before a frame write settles eviction debt itself, so a
+/// track appending frames to open groups (never inserting another group) still
+/// pays. Coarse: the cost is one track-state lock per threshold crossing.
+const WRITE_CHARGE_THRESHOLD: u64 = 256 * 1024;
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -55,7 +60,7 @@ const EVICT_SCAN: usize = 4;
 /// which returns the publisher's [`Info`] once the subscription is accepted.
 ///
 /// Not `Copy`: it carries an internal handle to its parent broadcast.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -91,10 +96,28 @@ pub struct Info {
 	pub(crate) broadcast: Arc<broadcast::Info>,
 
 	// Gross bytes charged by this track's groups (payload plus overhead), shared
-	// with every group via its `cache::Charge`. Drained by `charge_debt` on each
-	// group insert, so eviction debt observes actual writes, including growth on
-	// already-demoted groups and backfill, not just group transitions.
+	// with every group via its `cache::Charge` and drained into eviction debt.
+	// Owned by the TrackState and installed here whenever an info is attached to
+	// a track (see `TrackState::install`), so cloning or re-binding an Info never
+	// splits a live track's accounting.
 	pub(crate) written: Arc<AtomicU64>,
+
+	// Weak handle back to the owning track's state, installed alongside `written`,
+	// so a frame write can settle eviction debt itself once enough bytes accumulate
+	// (`Self::maybe_charge`). Weak: a group holding this must not keep the track
+	// alive. `None` until the info is attached to a track.
+	pub(crate) track: Option<kio::ProducerWeak<TrackState>>,
+}
+
+impl std::fmt::Debug for Info {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Info")
+			.field("timescale", &self.timescale)
+			.field("latency_max", &self.latency_max)
+			.field("priority", &self.priority)
+			.field("ordered", &self.ordered)
+			.finish()
+	}
 }
 
 /// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an
@@ -115,6 +138,7 @@ impl Default for Info {
 			ordered: false,
 			broadcast: default_broadcast(),
 			written: Arc::default(),
+			track: None,
 		}
 	}
 }
@@ -158,15 +182,28 @@ impl Info {
 	pub(crate) fn bind(&mut self, broadcast: Arc<broadcast::Info>) {
 		self.latency_max = self.latency_max.min(broadcast.origin.cache_duration);
 		self.broadcast = broadcast;
-		// Every track instantiation funnels through here exactly once: give it its
-		// own write counter, so an `Info` cloned into several tracks can't drain or
-		// inflate another track's eviction accounting.
-		self.written = Arc::default();
+	}
+
+	/// Settle eviction debt from a frame write, once enough bytes accumulate.
+	///
+	/// Called with no group lock held (locks are ordered track then group). Cheap
+	/// until the threshold crosses: one relaxed load. This is what makes a track
+	/// that only appends frames to open groups, never inserting another group,
+	/// still pay its debt.
+	pub(crate) fn maybe_charge(&self) {
+		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
+			return;
+		}
+		let Some(track) = &self.track else { return };
+		let Some(producer) = track.produce() else { return };
+		if let Ok(mut state) = producer.write() {
+			state.charge_debt();
+		}
 	}
 }
 
 #[derive(Default)]
-struct TrackState {
+pub(crate) struct TrackState {
 	// The info for the track; always Some for Subscriber/Producer. Inherited (cloned)
 	// by each group it creates, which reaches the cache pool through its `broadcast`.
 	info: Option<Info>,
@@ -187,20 +224,26 @@ struct TrackState {
 	// served by sequence, never replayed to arrival-order subscribers.
 	arrival: VecDeque<(u64, u32)>,
 
-	// Eviction order under memory pressure: every cached group except the current
-	// max_sequence, so the live edge is protected by omission rather than pinning.
-	// `pay_debt` scans victims from the front; groups accessed more recently than
-	// the pool-wide average rotate to the back instead of dying, decoupling
-	// eviction order from arrival order. Entries are hints validated against
-	// `lookup` on pop, and eviction is deliberately approximate: a bounded scan
-	// per write, sometimes out of order.
-	evict: VecDeque<u64>,
+	// Eviction order under memory pressure as (sequence, stamp): every cached
+	// group except the protected latest. `pay_debt` scans victims from the front;
+	// groups accessed more recently than the pool-wide average rotate to the back
+	// instead of dying, decoupling eviction order from arrival order. Entries are
+	// hints that only resolve while their stamp matches the slot's, so a re-served
+	// sequence can't accumulate duplicate hints that alias its replacement.
+	// Eviction is deliberately approximate: a bounded scan per write.
+	evict: VecDeque<(u64, u32)>,
 
 	// Outstanding eviction debt in bytes, accrued by writes while the shared pool
 	// is over capacity (see `cache::Pool::accrue`) and paid by aborting this
 	// track's own oldest groups. Per track, so eviction lands proportionally to
 	// what each track writes and never touches another track's cache.
 	debt: u64,
+
+	// The track's gross-write counter, drained by `charge_debt`. Owned here and
+	// installed into every info attached to this track, so replacing the info
+	// (e.g. `Request::accept` after pre-accept backfill) never strands the bytes
+	// already-created groups keep charging.
+	written: Arc<AtomicU64>,
 
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
@@ -537,10 +580,14 @@ impl TrackState {
 		if len > 0 {
 			let start = self.expire_cursor % len;
 			for step in 0..len.min(EVICT_SCAN) {
-				let sequence = self.evict[(start + step) % len];
+				let (sequence, stamp) = self.evict[(start + step) % len];
 				let Some(slot) = self.lookup.get(&sequence) else {
 					continue;
 				};
+				if slot.stamp != stamp {
+					// A historical hint; the live entry is elsewhere in the queue.
+					continue;
+				}
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.group.is_aborted() {
@@ -570,8 +617,8 @@ impl TrackState {
 		}
 
 		// Drop dead leading eviction entries so scans stay over live candidates.
-		while let Some(sequence) = self.evict.front() {
-			if self.lookup.contains_key(sequence) {
+		while let Some((sequence, stamp)) = self.evict.front() {
+			if self.lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp) {
 				break;
 			}
 			self.evict.pop_front();
@@ -581,7 +628,8 @@ impl TrackState {
 		// outnumber the live slots.
 		if self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK {
 			let lookup = &self.lookup;
-			self.evict.retain(|sequence| lookup.contains_key(sequence));
+			self.evict
+				.retain(|(sequence, stamp)| lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp));
 		}
 	}
 
@@ -593,6 +641,16 @@ impl TrackState {
 		self.evict.clear();
 		self.latest_group = None;
 		self.debt = 0;
+	}
+
+	/// Attach `info` to this track, installing the state-owned write counter and
+	/// the weak state handle every info attached to a live track must carry.
+	/// Replacing the info (e.g. [`Request::accept`] after pre-accept backfill)
+	/// therefore never strands the bytes already-created groups keep charging.
+	fn install(&mut self, mut info: Info, track: Option<kio::ProducerWeak<TrackState>>) {
+		info.written = self.written.clone();
+		info.track = track;
+		self.info = Some(info);
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -632,12 +690,12 @@ impl TrackState {
 				&& let Some(prev) = self.lookup.get(&latest)
 			{
 				prev.group.cache_demote();
-				self.evict.push_back(latest);
+				self.evict.push_back((latest, prev.stamp));
 			}
 			self.latest_group = Some(sequence);
 		} else {
 			group.cache_demote();
-			self.evict.push_back(sequence);
+			self.evict.push_back((sequence, stamp));
 		}
 
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
@@ -671,14 +729,11 @@ impl TrackState {
 	/// staler than the pool-wide average access time accrues at double rate, so
 	/// stale-heavy tracks drain first.
 	///
-	/// Known limitation: payment only runs here, on group insert. A track that
-	/// keeps appending frames to existing groups without ever inserting another
-	/// group accrues into the counter but doesn't pay, bounding its exposure at
-	/// the per-group frame cap times its open groups; the shared budget squeezes
-	/// the other, still-inserting tracks in the meantime.
+	/// Also runs from the frame-write path via [`Info::maybe_charge`] once a
+	/// track accumulates [`WRITE_CHARGE_THRESHOLD`] unbilled bytes, so a track
+	/// that only appends frames to open groups still pays.
 	fn charge_debt(&mut self) {
-		let Some(info) = &self.info else { return };
-		let written = info.written.swap(0, Ordering::Relaxed);
+		let written = self.written.swap(0, Ordering::Relaxed);
 		let pool = self.broadcast.origin.pool.clone();
 		match pool.accrue(written) {
 			Some(mut accrued) => {
@@ -705,13 +760,13 @@ impl TrackState {
 		let Some(average) = pool.average() else {
 			return false;
 		};
-		let Some(sequence) = self.evict.front() else {
+		let Some((sequence, stamp)) = self.evict.front() else {
 			return false;
 		};
 		let Some(slot) = self.lookup.get(sequence) else {
 			return false;
 		};
-		!slot.group.is_aborted() && slot.group.cache_accessed() <= average
+		slot.stamp == *stamp && !slot.group.is_aborted() && slot.group.cache_accessed() <= average
 	}
 
 	/// Abort this track's stalest groups until the outstanding debt is paid, or
@@ -734,13 +789,17 @@ impl TrackState {
 			if self.debt == 0 || paid >= cap || scanned >= EVICT_SCAN {
 				return;
 			}
-			let Some(sequence) = self.evict.pop_front() else {
+			let Some((sequence, stamp)) = self.evict.pop_front() else {
 				return;
 			};
 			let Some(slot) = self.lookup.get(&sequence) else {
 				// Evicted or expired; discard the dead entry.
 				continue;
 			};
+			if slot.stamp != stamp {
+				// A historical hint; the live entry is elsewhere in the queue.
+				continue;
+			}
 			if slot.group.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
 				self.lookup.remove(&sequence);
@@ -748,7 +807,7 @@ impl TrackState {
 			}
 			if Some(sequence) == self.latest_group {
 				// The live edge is never enqueued, but tolerate finding it anyway.
-				self.evict.push_back(sequence);
+				self.evict.push_back((sequence, stamp));
 				continue;
 			}
 
@@ -757,14 +816,14 @@ impl TrackState {
 			// a FETCH hit, which also covers a backfill still being filled). Rotate
 			// to the back.
 			if slot.group.cache_accessed() > average {
-				self.evict.push_back(sequence);
+				self.evict.push_back((sequence, stamp));
 				continue;
 			}
 			// The full footprint including overhead, so even empty groups repay
 			// their share of the budget when evicted.
 			let size = slot.group.cache_size();
 			if size > self.debt {
-				self.evict.push_front(sequence);
+				self.evict.push_front((sequence, stamp));
 				return;
 			}
 
@@ -830,16 +889,15 @@ impl TrackState {
 		}
 
 		// Adopt the supplied info only if the track hasn't been accepted yet, binding
-		// it to this track's broadcast so its groups reach the shared pool.
-		let broadcast = self.broadcast.clone();
-		let info = self
-			.info
-			.get_or_insert_with(|| {
-				let mut info = info.unwrap_or_default();
-				info.bind(broadcast);
-				info
-			})
-			.clone();
+		// it to this track's broadcast so its groups reach the shared pool. No weak
+		// handle exists at this depth; groups created here still charge the
+		// state-owned counter, they just can't settle debt from the frame path.
+		if self.info.is_none() {
+			let mut info = info.unwrap_or_default();
+			info.bind(self.broadcast.clone());
+			self.install(info, None);
+		}
+		let info = self.info.clone().unwrap();
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence)?;
@@ -886,13 +944,19 @@ impl Producer {
 	) -> Self {
 		let mut info = info.into().unwrap_or_default();
 		info.bind(broadcast.clone());
+		let state = kio::Producer::new(TrackState {
+			broadcast: broadcast.clone(),
+			..Default::default()
+		});
+		let weak = state.weak();
+		state
+			.write()
+			.ok()
+			.expect("a new track is open")
+			.install(info, Some(weak));
 		Self {
 			name: name.into(),
-			state: kio::Producer::new(TrackState {
-				info: Some(info),
-				broadcast: broadcast.clone(),
-				..Default::default()
-			}),
+			state,
 			broadcast,
 			prev_subscription: None,
 			stats: stats::Scope::default(),
@@ -2542,8 +2606,9 @@ impl Request {
 		info.bind(self.broadcast.clone());
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
+		let weak = self.state.weak();
 		if let Ok(mut state) = self.state.write() {
-			state.info = Some(info);
+			state.install(info, Some(weak));
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed on the last producer drop). No-op when untagged.
@@ -4334,6 +4399,113 @@ mod test {
 		assert!(pool.used() > before - 4_000, "one write must not dump the backlog");
 	}
 
+	/// Accepting a track after pre-accept backfill must keep the same write
+	/// counter: the counter is owned by the track state, so replacing the info
+	/// can't strand the bytes already-created groups keep charging.
+	#[tokio::test]
+	async fn accept_preserves_write_accounting() {
+		tokio::time::pause();
+
+		let pool = cache::Pool::new(12_000);
+		let broadcast = broadcast::Info {
+			origin: crate::origin::Info::default().with_pool(pool.clone()),
+			..Default::default()
+		};
+		let request = Request::new(Arc::new(broadcast), "test");
+		let dynamic = request.dynamic();
+		let consumer = request.consume();
+
+		// Serve a backfill before the track is accepted, then grow it.
+		let pending = consumer.fetch_group(0, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut backfill = req.accept(None).unwrap();
+		pending.await.unwrap();
+		backfill
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 30_000]))
+			.unwrap();
+
+		// Accept with a fresh Info: the pre-accept group's writes must still be
+		// drained by this track's future charges.
+		let mut producer = request.accept(None);
+		producer.append_group().unwrap().finish().unwrap();
+		producer.append_group().unwrap().finish().unwrap();
+
+		assert!(
+			producer.consume().peek_group(0).is_none(),
+			"pre-accept backfill growth is reclaimed after accept"
+		);
+		assert!(pool.used() <= 13_000, "usage converges: {}", pool.used());
+	}
+
+	/// Re-serving a sequence many times must not accumulate eviction hints: stale
+	/// hints die on stamp mismatch and compaction reclaims them.
+	#[tokio::test]
+	async fn recreated_sequence_bounds_eviction_hints() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		producer.create_group(5u64.into()).unwrap().finish().unwrap();
+
+		for _ in 0..200 {
+			let group = producer.create_group(1u64.into()).unwrap();
+			group.abort(Error::Cancel).unwrap();
+		}
+
+		let state = producer.state.read();
+		assert!(
+			state.evict.len() <= 2 * state.lookup.len() + EVICT_SLACK,
+			"stale hints are compacted: {} entries for {} slots",
+			state.evict.len(),
+			state.lookup.len()
+		);
+	}
+
+	/// A frame write within the same coarse tick still outranks merely-inserted
+	/// content, so the freshly-written group survives and the empty one pays.
+	#[tokio::test]
+	async fn same_tick_write_outranks_inserted() {
+		tokio::time::pause();
+
+		// No time advances: every stamp lands in the same tick.
+		let (mut producer, _pool) = pooled_producer(10_000);
+
+		producer.append_group().unwrap().finish().unwrap(); // seq 0: empty
+		finished_group(&mut producer, 3_000); // seq 1: written
+		finished_group(&mut producer, 3_000); // seq 2
+		finished_group(&mut producer, 3_000); // seq 3
+		finished_group(&mut producer, 3_000); // seq 4: over budget, pays
+
+		let consumer = producer.consume();
+		assert!(consumer.peek_group(0).is_none(), "insert-only content pays first");
+		assert!(consumer.peek_group(1).is_some(), "same-tick written content survives");
+	}
+
+	/// A track that only appends frames to an open group, never inserting another
+	/// group, still settles its eviction debt once enough bytes accumulate.
+	#[tokio::test]
+	async fn frame_only_writer_pays() {
+		tokio::time::pause();
+
+		let (mut producer, pool) = pooled_producer(2_000);
+		let mut demoted = producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap().finish().unwrap(); // seq 1 demotes seq 0
+
+		// One large frame crosses the charge threshold: the write itself pays,
+		// with no further group insert on this track.
+		demoted
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 300_000]))
+			.unwrap();
+
+		assert!(
+			pool.used() <= 5_000,
+			"the frame write settled the debt: {}",
+			pool.used()
+		);
+		assert!(matches!(demoted.finish(), Err(Error::Evicted)));
+	}
+
 	/// A cloned `Info` reused for several tracks must not share eviction
 	/// accounting: every track instantiation gets its own write counter.
 	#[tokio::test]
@@ -4652,7 +4824,7 @@ mod test {
 			let state = producer.state.read();
 			assert!(state.lookup.contains_key(&1), "refetched group is cached");
 			assert!(
-				!state.evict.contains(&1),
+				state.evict.iter().all(|(sequence, _)| *sequence != 1),
 				"the live edge must not be an eviction candidate"
 			);
 		}

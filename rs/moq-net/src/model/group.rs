@@ -294,6 +294,10 @@ impl Producer {
 		state.evict();
 		drop(state);
 
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.track.maybe_charge();
+
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
 		self.stats.bytes(size);
@@ -331,6 +335,10 @@ impl Producer {
 		});
 		state.evict();
 		drop(state);
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.track.maybe_charge();
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.

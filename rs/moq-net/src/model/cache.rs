@@ -33,6 +33,12 @@ use std::time::Duration;
 /// keeps the access-time sum below u64 (see [`TICK_MS`]).
 const ENTRY_OVERHEAD: u64 = 256;
 
+/// Sub-tick boosts applied to the last-access stamp, breaking ties within one
+/// coarse tick: a frame write outranks merely-inserted content, and an explicit
+/// read (FETCH hit or backfill birth) outranks both.
+const WRITE_BOOST: u64 = 1;
+const READ_BOOST: u64 = 2;
+
 /// Milliseconds per tick of the coarse clock behind access timestamps.
 ///
 /// Coarse ticks keep the count-weighted timestamp sum far from u64 overflow: the
@@ -248,22 +254,17 @@ impl Charge {
 	///
 	/// A write is also an access: it restarts the retention clock and keeps an
 	/// actively-growing group (a straggler or backfill still being filled) from
-	/// being evicted or expired mid-write.
+	/// being evicted or expired mid-write, even within the same coarse tick as
+	/// content that was merely inserted.
 	pub(crate) fn add(&mut self, n: u64) {
 		if let Some(pool) = &self.pool {
 			pool.add(n);
 			self.bytes += n;
-			let now = pool.now();
-			if now > self.last {
-				if self.counted {
-					pool.access_refresh(self.last, now);
-				}
-				self.last = now;
-			}
 		}
 		if let Some(written) = &self.written {
 			written.fetch_add(n, Ordering::Relaxed);
 		}
+		self.touch(WRITE_BOOST);
 	}
 
 	/// Release `n` payload bytes (a frame evicted by the group's own cap).
@@ -296,22 +297,28 @@ impl Charge {
 		}
 	}
 
-	/// Record a cache access (a FETCH hit, or a fetched backfill's birth).
-	///
-	/// Stamps one tick past the current one, so an access within the same coarse
-	/// tick as the population mean still reads as strictly newer and protects the
-	/// group. Idempotent within a tick, so repeated hits can't run ahead of the
-	/// clock.
+	/// Record a cache read (a FETCH hit, or a fetched backfill's birth).
 	pub(crate) fn refresh(&mut self) {
+		self.touch(READ_BOOST);
+	}
+
+	/// Advance the last-access tick to `boost` ticks past the coarse clock.
+	///
+	/// The boost breaks ties within one coarse tick: written content outranks
+	/// merely-inserted content, and explicitly read content outranks both, so a
+	/// same-tick access still reads as strictly newer than the population mean of
+	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
+	/// repeated accesses can't run ahead of the clock by more than the boost.
+	fn touch(&mut self, boost: u64) {
 		let Some(pool) = &self.pool else { return };
-		let now = pool.now().saturating_add(1);
-		if now <= self.last {
+		let target = pool.now().saturating_add(boost);
+		if target <= self.last {
 			return;
 		}
 		if self.counted {
-			pool.access_refresh(self.last, now);
+			pool.access_refresh(self.last, target);
 		}
-		self.last = now;
+		self.last = target;
 	}
 
 	/// Release everything this charge holds: bytes, overhead, and the access
