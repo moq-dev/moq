@@ -118,6 +118,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		version: Version,
 		tasks: Tasks,
 		going_away: crate::goaway::GoingAway,
+		_goaway_received: kio::Consumer<Option<crate::goaway::GoawayReceived>>,
 	) -> Self {
 		Self {
 			session,
@@ -149,6 +150,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remove_track_alias(&state.aliases, alias, request_id);
 		}
 		Some(track)
+	}
+
+	/// Bump all produced routes to DRAIN_COST. Called when a GOAWAY is received
+	/// from the peer, deprioritizing this session so the origin prefers routes
+	/// from non-draining alternatives.
+	pub(super) fn drain_all_broadcasts(&self) {
+		let mut state = self.state.lock();
+		for broadcast in state.broadcasts.values_mut() {
+			broadcast.producer.drain();
+		}
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
@@ -212,12 +223,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(%prefix, "subscribe_namespace ok");
 
+		// Whether the peer has sent a GOAWAY, meaning this session is draining.
+		// Flipped once; subsequent announces inherit the penalty via start_announce.
+		let mut draining = false;
+
 		// Loop reading Namespace/NamespaceDone entries
 		loop {
 			let type_id: u64 = match stream.reader.decode_maybe().await? {
 				Some(id) => id,
 				None => break, // Stream closed
 			};
+
+			// Check if the peer sent a GOAWAY while we were waiting. When it fires
+			// for the first time, bump every existing route to DRAIN_COST.
+			if !draining && self.going_away.is_set() {
+				draining = true;
+				self.drain_all_broadcasts();
+			}
+
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
 
@@ -534,7 +557,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let route = broadcast::Route::new().with_hops(hops).with_announce(true);
+				let mut route = broadcast::Route::new().with_hops(hops).with_announce(true);
+
+				// A GOAWAY from the peer means this session is draining. Insert
+				// new routes at DRAIN_COST so late arrivals on a dying connection
+				// can't become primary.
+				if self.going_away.is_set() {
+					route.cost = broadcast::DRAIN_COST;
+				}
 
 				// Propagates Error::Unauthorized if the path is out of scope.
 				let broadcast = self.origin.create_broadcast(&path, route)?;

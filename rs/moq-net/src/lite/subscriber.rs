@@ -43,6 +43,10 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Set once the peer sends a GOAWAY; new request streams are then rejected
 	/// with [`Error::GoingAway`] (the peer told us to stop asking).
 	pub going_away: crate::goaway::GoingAway,
+	/// Fires when a GOAWAY is received from the peer. The subscriber watches this
+	/// to bump all produced routes to DRAIN_COST, deprioritizing a draining
+	/// session so the origin prefers routes from non-draining alternatives.
+	pub goaway_received: kio::Consumer<Option<crate::goaway::GoawayReceived>>,
 }
 
 #[derive(Clone)]
@@ -72,6 +76,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	cost: Option<u64>,
 	tasks: Tasks,
 	going_away: crate::goaway::GoingAway,
+	// Fires when the peer sends a GOAWAY; used to bump produced routes to DRAIN_COST.
+	goaway_received: kio::Consumer<Option<crate::goaway::GoawayReceived>>,
 }
 
 #[derive(Clone)]
@@ -102,6 +108,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			cost: config.cost,
 			tasks: config.tasks,
 			going_away: config.going_away,
+			goaway_received: config.goaway_received,
 		}
 	}
 
@@ -328,7 +335,63 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		while let Some(announce) = stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await? {
+		// Whether the peer has sent a GOAWAY, meaning this session is draining and
+		// all produced routes should be at DRAIN_COST. Flipped once; subsequent
+		// announces inherit the penalty so late arrivals can't become primary.
+		let mut draining = false;
+
+		loop {
+			// Race the next announce message against the GOAWAY signal. When the
+			// peer drains, bump all existing routes immediately rather than waiting
+			// for the next message (which may never arrive on an idle stream).
+			let announce: Option<lite::AnnounceBroadcast> = if draining {
+				stream.reader.decode_maybe::<lite::AnnounceBroadcast>().await?
+			} else {
+				let mut decode = std::pin::pin!(stream.reader.decode_maybe::<lite::AnnounceBroadcast>());
+				let goaway_rx = &self.goaway_received;
+				enum Outcome<T> {
+					Decoded(T),
+					Goaway,
+				}
+				let outcome = kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(decode.as_mut()) {
+						return Poll::Ready(Outcome::Decoded(res));
+					}
+					match goaway_rx.poll(waiter, |state| match &**state {
+						Some(_) => Poll::Ready(()),
+						None => Poll::Pending,
+					}) {
+						Poll::Ready(Ok(())) | Poll::Ready(Err(_)) => Poll::Ready(Outcome::Goaway),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await;
+				match outcome {
+					Outcome::Decoded(res) => res?,
+					Outcome::Goaway => {
+						// Transition to draining. Bump routes then continue reading.
+						draining = true;
+						for entry in routes.values_mut() {
+							entry.drain();
+						}
+						continue;
+					}
+				}
+			};
+
+			// Also catch the GOAWAY if it fired in between poll cycles (e.g. during
+			// initial-set processing on Lite01/02 where the decode is synchronous).
+			if !draining && self.going_away.is_set() {
+				draining = true;
+				for entry in routes.values_mut() {
+					entry.drain();
+				}
+			}
+
+			let Some(announce) = announce else {
+				break;
+			};
+
 			match announce {
 				lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
 					let path = prefix.join(&suffix);
@@ -562,6 +625,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_cost(cost.charged(link_cost).0)
 			.with_announce(true);
 		route.advertised = cost.0;
+
+		// A GOAWAY from the peer means this session is draining. Insert new routes
+		// at DRAIN_COST so late arrivals on a dying connection can't become primary.
+		if self.going_away.is_set() {
+			route.cost = crate::broadcast::DRAIN_COST;
+		}
+
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
@@ -619,6 +689,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_cost(cost.charged(link_cost).0)
 			.with_announce(true);
 		metadata.advertised = cost.0;
+
+		// A GOAWAY from the peer means this session is draining. Override the cost
+		// so restarted routes on a dying connection can't become primary.
+		if self.going_away.is_set() {
+			metadata.cost = crate::broadcast::DRAIN_COST;
+		}
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {
@@ -906,6 +982,12 @@ impl AnnouncedRoute {
 	/// publisher).
 	fn set_route(&mut self, route: crate::broadcast::Route) {
 		self.source.set_route(route);
+	}
+
+	/// Bump the source's route cost to DRAIN_COST, deprioritizing it so the
+	/// origin prefers routes from non-draining sessions.
+	fn drain(&mut self) {
+		self.source.drain();
 	}
 }
 

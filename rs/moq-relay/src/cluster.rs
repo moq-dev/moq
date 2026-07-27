@@ -348,17 +348,20 @@ pub struct ClusterConfig {
 	#[serde(default, with = "humantime_serde")]
 	pub linger: Option<Duration>,
 
-	/// Fallback drain time in seconds for an upstream peer that sends a GOAWAY
+	/// Fallback drain time for an upstream peer that sends a GOAWAY
 	/// without its own deadline. After a successful reconnect the relay keeps
 	/// the old upstream alive this long so its in-flight groups finish, then
-	/// force-closes it. A deadline carried on the received GOAWAY takes
-	/// precedence over this value. Defaults to 10 seconds.
+	/// force-closes it. The effective deadline is the minimum of this value and
+	/// any deadline carried on the received GOAWAY. Defaults to 10 seconds.
 	#[arg(
-		id = "cluster-drain-timeout",
-		long = "cluster-drain-timeout",
-		env = "MOQ_CLUSTER_DRAIN_TIMEOUT"
+		id = "cluster-drain",
+		long = "cluster-drain",
+		alias = "cluster-drain-timeout",
+		env = "MOQ_CLUSTER_DRAIN",
+		value_parser = humantime::parse_duration,
 	)]
-	pub drain_timeout: Option<u64>,
+	#[serde(default, with = "humantime_serde", alias = "drain_timeout")]
+	pub drain: Option<Duration>,
 }
 
 /// A relay cluster built around a single [`origin::Producer`].
@@ -946,8 +949,7 @@ impl Cluster {
 			.context("failed to connect to cluster peer")?;
 
 		// Fallback drain window for an upstream GOAWAY that carries no timeout.
-		let drain_timeout =
-			std::time::Duration::from_secs(self.config.drain_timeout.unwrap_or(crate::DEFAULT_DRAIN_TIMEOUT_SECS));
+		let drain_timeout = self.config.drain.unwrap_or(crate::DEFAULT_DRAIN);
 
 		// Watch for an upstream GOAWAY and reconnect transparently. The
 		// replacement session shares the same origin, so its announcements attach
@@ -1023,11 +1025,14 @@ impl Cluster {
 					let new_session = new_session.context("cluster reconnect exhausted all retries")?;
 
 					// Drain the old session in the background: keep it alive for the
-					// window (the GOAWAY's own deadline, else the configured
-					// fallback) so in-flight groups finish, then force-close it. Its
+					// minimum of the locally configured drain window and the GOAWAY's
+					// own deadline, so in-flight groups finish before force-close. Its
 					// routes detach on close and the origin hands live tracks over
 					// to the replacement at a group boundary.
-					let timeout = goaway.timeout.unwrap_or(drain_timeout);
+					let timeout = match goaway.timeout {
+						Some(goaway_deadline) => drain_timeout.min(goaway_deadline),
+						None => drain_timeout,
+					};
 					let old = std::mem::replace(&mut session, new_session);
 					tokio::spawn(async move {
 						match tokio::time::timeout(timeout, old.closed()).await {
@@ -1090,9 +1095,12 @@ fn connect_api_is_http(source: &str) -> bool {
 /// Returns the redirect `uri` when it is safe to follow, else `fallback` (the
 /// originally configured peer URL, which also covers the empty "reconnect to
 /// me" URI). A redirect is followed only when its scheme is at least as secure
-/// as the fallback's (no plaintext downgrade); the cluster JWT on the fallback
-/// is carried onto the redirect (unless it brings its own), so a JWT-authed
-/// cluster still authenticates. A malformed uri falls back.
+/// as the fallback's (no plaintext downgrade). A malformed uri falls back.
+///
+/// The redirect URI is used as-is without injecting the caller's JWT: the
+/// sending server is responsible for embedding any credentials the client
+/// needs into the GOAWAY URI before transmitting it, so a client that blindly
+/// follows the redirect always has the right token for the target.
 ///
 /// NOTE: constraining the redirect HOST to a set of trusted cluster peers is a
 /// deliberate follow-up and not handled here.
@@ -1100,7 +1108,7 @@ fn resolve_redirect(uri: &str, fallback: &Url) -> Url {
 	if uri.is_empty() {
 		return fallback.clone();
 	}
-	let Ok(mut parsed) = uri.parse::<Url>() else {
+	let Ok(parsed) = uri.parse::<Url>() else {
 		tracing::warn!(uri, "malformed GOAWAY URI; falling back to original URL");
 		return fallback.clone();
 	};
@@ -1112,16 +1120,6 @@ fn resolve_redirect(uri: &str, fallback: &Url) -> Url {
 			"GOAWAY redirect is a security downgrade; falling back to original URL"
 		);
 		return fallback.clone();
-	}
-	// Carry the cluster JWT over to the redirect target unless it brings its own.
-	if !parsed.query_pairs().any(|(k, v)| k == "jwt" && !v.is_empty()) {
-		let token = fallback
-			.query_pairs()
-			.find(|(k, v)| k == "jwt" && !v.is_empty())
-			.map(|(_, v)| v.into_owned());
-		if let Some(token) = token {
-			parsed.query_pairs_mut().append_pair("jwt", &token);
-		}
 	}
 	parsed
 }
@@ -1632,8 +1630,9 @@ mod tests {
 		assert_eq!(scheme_security_tier("https"), scheme_security_tier("wss"));
 	}
 
-	/// Redirect resolution: follow safe redirects, carry the JWT, and fall back
-	/// on empty, malformed, or downgrading URIs.
+	/// Redirect resolution: follow safe redirects, fall back on empty, malformed,
+	/// or downgrading URIs. JWT is NOT carried over (the server embeds it in the
+	/// GOAWAY URI if the client needs one).
 	#[test]
 	fn resolve_redirect_policy() {
 		let fallback: Url = "https://origin.example/?jwt=secret".parse().unwrap();
@@ -1647,12 +1646,12 @@ mod tests {
 		// Plaintext downgrade falls back.
 		assert_eq!(resolve_redirect("tcp://other.example/", &fallback), fallback);
 
-		// A safe redirect is followed, with the cluster JWT carried over.
+		// A safe redirect is followed as-is (no JWT injected from the fallback).
 		let resolved = resolve_redirect("https://sibling.example/", &fallback);
 		assert_eq!(resolved.host_str(), Some("sibling.example"));
 		assert!(
-			resolved.query_pairs().any(|(k, v)| k == "jwt" && v == "secret"),
-			"cluster JWT must carry onto the redirect: {resolved}"
+			!resolved.query_pairs().any(|(k, _)| k == "jwt"),
+			"JWT must NOT be carried onto the redirect: {resolved}"
 		);
 
 		// A redirect with its own JWT keeps it.

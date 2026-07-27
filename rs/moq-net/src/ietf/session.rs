@@ -47,7 +47,7 @@ pub fn start<S: web_transport_trait::Session>(
 					return Err(err);
 				};
 				let control = Control::new(request_id_max, client);
-				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
+				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version, goaway.clone());
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
 				let (tasks, mut task_set) = TaskSet::new();
@@ -58,6 +58,7 @@ pub fn start<S: web_transport_trait::Session>(
 					version,
 					tasks.clone(),
 					goaway.going_away.clone(),
+					goaway.received.consume(),
 				);
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
@@ -70,12 +71,11 @@ pub fn start<S: web_transport_trait::Session>(
 					tasks.push(async move {
 						let payload = {
 							let mut closed = std::pin::pin!(async { session.closed().await });
-							let mut triggered = std::pin::pin!(goaway.triggered());
 							kio::wait(|waiter| {
 								if waiter.poll_future(closed.as_mut()).is_ready() {
 									return std::task::Poll::Ready(None);
 								}
-								waiter.poll_future(triggered.as_mut())
+								goaway.poll_triggered(waiter)
 							})
 							.await
 						};
@@ -86,6 +86,35 @@ pub fn start<S: web_transport_trait::Session>(
 						adapter.send_goaway(&payload.uri, timeout_ms, version);
 					});
 				}
+
+				// Drain-cost watcher: when the peer sends a GOAWAY, bump all
+				// produced routes to DRAIN_COST so the origin migrates subscribers
+				// to non-draining sessions.
+				{
+					let subscriber = subscriber.clone();
+					let session = session.clone();
+					let goaway_rx = goaway.received.consume();
+					tasks.push(async move {
+						let mut closed = std::pin::pin!(async { session.closed().await });
+						kio::wait(|waiter| {
+							if waiter.poll_future(closed.as_mut()).is_ready() {
+								return std::task::Poll::Ready(());
+							}
+							match goaway_rx.poll(waiter, |state| match &**state {
+								Some(_) => std::task::Poll::Ready(()),
+								None => std::task::Poll::Pending,
+							}) {
+								std::task::Poll::Ready(Ok(())) => {
+									subscriber.drain_all_broadcasts();
+									std::task::Poll::Ready(())
+								}
+								std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(()),
+								std::task::Poll::Pending => std::task::Poll::Pending,
+							}
+						})
+						.await;
+					});
+				}
 				drop(tasks);
 
 				let dispatch_session = adapter.clone();
@@ -94,7 +123,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
-				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer, goaway.clone())));
+				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
 				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version, goaway)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
@@ -165,9 +194,39 @@ pub fn start<S: web_transport_trait::Session>(
 					subscribe,
 					control,
 					version,
-					tasks,
+					tasks.clone(),
 					goaway.going_away.clone(),
+					goaway.received.consume(),
 				);
+
+				// Drain-cost watcher: when the peer sends a GOAWAY, bump all
+				// produced routes to DRAIN_COST so the origin migrates subscribers
+				// to non-draining sessions.
+				{
+					let subscriber = subscriber.clone();
+					let session = session.clone();
+					let goaway_rx = goaway.received.consume();
+					tasks.push(async move {
+						let mut closed = std::pin::pin!(async { session.closed().await });
+						kio::wait(|waiter| {
+							if waiter.poll_future(closed.as_mut()).is_ready() {
+								return std::task::Poll::Ready(());
+							}
+							match goaway_rx.poll(waiter, |state| match &**state {
+								Some(_) => std::task::Poll::Ready(()),
+								None => std::task::Poll::Pending,
+							}) {
+								std::task::Poll::Ready(Ok(())) => {
+									subscriber.drain_all_broadcasts();
+									std::task::Poll::Ready(())
+								}
+								std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(()),
+								std::task::Poll::Pending => std::task::Poll::Pending,
+							}
+						})
+						.await;
+					});
+				}
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();
@@ -327,12 +386,11 @@ async fn run_setup<S: web_transport_trait::Session>(
 	// mid-session is a protocol violation on strict peers).
 	let payload = {
 		let mut closed = std::pin::pin!(session.closed());
-		let mut triggered = std::pin::pin!(goaway.triggered());
 		kio::wait(|waiter| {
 			if waiter.poll_future(closed.as_mut()).is_ready() {
 				return std::task::Poll::Ready(None);
 			}
-			waiter.poll_future(triggered.as_mut())
+			goaway.poll_triggered(waiter)
 		})
 		.await
 	};

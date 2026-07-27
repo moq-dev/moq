@@ -152,12 +152,11 @@ pub fn start<S: web_transport_trait::Session>(
 		tasks.push(async move {
 			let payload = {
 				let mut closed = std::pin::pin!(session.closed());
-				let mut triggered = std::pin::pin!(goaway.triggered());
 				kio::wait(|waiter| {
 					if waiter.poll_future(closed.as_mut()).is_ready() {
 						return std::task::Poll::Ready(None);
 					}
-					waiter.poll_future(triggered.as_mut())
+					goaway.poll_triggered(waiter)
 				})
 				.await
 			};
@@ -190,6 +189,7 @@ pub fn start<S: web_transport_trait::Session>(
 		cost: our_cost,
 		tasks,
 		going_away: goaway.going_away,
+		goaway_received: goaway.received.consume(),
 	});
 
 	let driver = async move {

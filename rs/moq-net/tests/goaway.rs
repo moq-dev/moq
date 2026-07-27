@@ -43,7 +43,7 @@ async fn goaway_send_receive_all_versions() {
 				.server
 				.drain()
 				.expect("drain must be available on GOAWAY versions")
-				.start("https://new.example.com");
+				.start(moq_net::DrainConfig::default().with_uri("https://new.example.com"));
 
 			let goaway = pair.client.goaway().await.expect("session closed before GOAWAY");
 			assert_eq!(&*goaway.uri, "https://new.example.com", "version {version}");
@@ -56,7 +56,7 @@ async fn goaway_send_receive_all_versions() {
 
 			// Client leaves; the drain completes.
 			drop(pair.client);
-			draining.complete().await;
+			draining.complete().await.expect("clean drain");
 		})
 		.await
 		.unwrap_or_else(|_| panic!("test timed out on {version} (likely a mock deadlock)"));
@@ -76,7 +76,7 @@ async fn goaway_wire_timeout_moq_transport_17() {
 			.server
 			.drain()
 			.expect("drain")
-			.start_with_timeout("moqt://relay.example/", Duration::from_secs(5));
+			.start(moq_net::DrainConfig::default().with_uri("moqt://relay.example/").with_timeout(Duration::from_secs(5)));
 		eprintln!("CHECKPOINT: drain started");
 
 		let goaway = pair.client.goaway().await.expect("session closed before GOAWAY");
@@ -85,7 +85,7 @@ async fn goaway_wire_timeout_moq_transport_17() {
 		assert_eq!(goaway.timeout, Some(Duration::from_secs(5)));
 
 		drop(pair.client);
-		draining.complete().await;
+		draining.complete().await.expect("clean drain");
 	})
 	.await
 	.expect("test timed out (likely a mock deadlock)");
@@ -98,14 +98,14 @@ async fn goaway_client_to_server_moq_lite_04() {
 		let version: Version = "moq-lite-04".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
-		let draining = pair.client.drain().expect("drain").start("");
+		let draining = pair.client.drain().expect("drain").start(moq_net::DrainConfig::default().with_uri(""));
 
 		let goaway = pair.server.goaway().await.expect("session closed before GOAWAY");
 		assert_eq!(&*goaway.uri, "", "empty URI = reconnect to the same endpoint");
 		assert!(pair.server.is_going_away());
 
 		drop(pair.server);
-		draining.complete().await;
+		draining.complete().await.expect("clean drain");
 	})
 	.await
 	.expect("test timed out (likely a mock deadlock)");
@@ -158,14 +158,15 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 			.server
 			.drain()
 			.expect("drain")
-			.start_with_timeout("moqt://relay.example/", Duration::from_millis(100));
+			.start(moq_net::DrainConfig::default().with_uri("moqt://relay.example/").with_timeout(Duration::from_millis(100)));
 
 		// The client observes the GOAWAY but deliberately does NOT leave.
 		let goaway = pair.client.goaway().await.expect("session closed before GOAWAY");
 		assert_eq!(goaway.timeout, Some(Duration::from_millis(100)));
 
 		// The deadline fires and the server force-closes with GoawayTimeout (33).
-		draining.complete().await;
+		let result = draining.complete().await;
+		assert!(matches!(result, Err(moq_net::Error::GoawayTimeout)), "expected GoawayTimeout: {result:?}");
 		let reason = pair.client.closed().await;
 		assert!(
 			reason.to_string().contains("goaway timeout"),
@@ -299,7 +300,7 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 		assert_eq!(&frame.payload[..], b"before");
 
 		// Server drains; the client observes the GOAWAY.
-		let _draining = server.drain().expect("drain").start("https://elsewhere.example/");
+		let _draining = server.drain().expect("drain").start(moq_net::DrainConfig::default().with_uri("https://elsewhere.example/"));
 		client.goaway().await.expect("goaway");
 		assert!(client.is_going_away());
 

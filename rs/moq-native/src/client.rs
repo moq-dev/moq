@@ -60,6 +60,11 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub backoff: Backoff,
 
+	/// GOAWAY-driven migration settings for [`Client::reconnect`].
+	#[command(flatten)]
+	#[serde(default)]
+	pub drain: crate::Drain,
+
 	/// WebSocket fallback settings (`--client-websocket-*`), used when QUIC is
 	/// blocked.
 	#[cfg(feature = "websocket")]
@@ -94,6 +99,7 @@ impl Default for ClientConfig {
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),
+			drain: crate::Drain::default(),
 			#[cfg(feature = "websocket")]
 			websocket: crate::websocket::Client::default(),
 		}
@@ -114,6 +120,7 @@ pub struct Client {
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
 	backoff: Backoff,
+	drain: crate::Drain,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
@@ -190,6 +197,7 @@ impl Client {
 			versions,
 			connect: config.connect,
 			backoff: config.backoff,
+			drain: config.drain,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -256,7 +264,7 @@ impl Client {
 	///
 	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
-		Reconnect::new(self.clone(), url, self.backoff.clone())
+		Reconnect::new(self.clone(), url, self.backoff.clone(), self.drain.clone())
 	}
 
 	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it

@@ -114,10 +114,9 @@ impl Session {
 
 	/// Initiate a graceful GOAWAY drain of this session.
 	///
-	/// Returns a [`Drain`] handle; call [`Drain::start`] (or
-	/// [`start_with_timeout`](Drain::start_with_timeout)) to send the GOAWAY frame
-	/// and transition into the [`Draining`] state, then await
-	/// [`Draining::complete`] for the peer to disconnect.
+	/// Returns a [`Drain`] handle; call [`Drain::start`] with a [`DrainConfig`]
+	/// to send the GOAWAY frame and transition into the [`Draining`] state, then
+	/// await [`Draining::complete`] for the peer to disconnect.
 	///
 	/// Returns `None` when the negotiated version has no GOAWAY message
 	/// (moq-lite-03 and earlier), or when a drain is already in progress (only
@@ -172,6 +171,36 @@ impl Session {
 	}
 }
 
+/// Configuration for initiating a GOAWAY drain via [`Drain::start`].
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct DrainConfig {
+	/// The new session URI the peer should reconnect to. Empty tells the peer
+	/// to reconnect to the same endpoint.
+	pub uri: Arc<str>,
+
+	/// Deadline before force-close. [`Draining::complete`] aborts the session
+	/// with [`Error::GoawayTimeout`] when this elapses. The deadline also rides
+	/// the wire on versions with a timeout field (IETF draft-17+) so the peer
+	/// can observe it. `None` means no deadline. A `Duration::ZERO` is treated
+	/// as `None` (the wire encodes 0 as "no deadline").
+	pub timeout: Option<Duration>,
+}
+
+impl DrainConfig {
+	/// Set the redirect URI.
+	pub fn with_uri(mut self, uri: impl Into<Arc<str>>) -> Self {
+		self.uri = uri.into();
+		self
+	}
+
+	/// Set the drain deadline.
+	pub fn with_timeout(mut self, timeout: Duration) -> Self {
+		self.timeout = Some(timeout);
+		self
+	}
+}
+
 /// A claimed but not yet started GOAWAY drain, from [`Session::drain`].
 ///
 /// Call [`start`](Self::start) to send the GOAWAY frame; dropping instead
@@ -183,33 +212,21 @@ pub struct Drain {
 }
 
 impl Drain {
-	/// Send the GOAWAY frame with no deadline.
+	/// Send the GOAWAY frame with the given configuration.
 	///
-	/// `uri` is the new session URI the peer should reconnect to; empty tells the
-	/// peer to reconnect to the same endpoint.
-	pub fn start(self, uri: impl Into<Arc<str>>) -> Draining {
-		self.start_inner(uri, None)
+	/// The session transitions into the [`Draining`] state; await
+	/// [`Draining::complete`] for the peer to disconnect.
+	pub fn start(self, config: DrainConfig) -> Draining {
+		self.start_inner(config)
 	}
 
-	/// Send the GOAWAY frame with a deadline for the peer to disconnect.
-	///
-	/// [`Draining::complete`] force-closes the session with
-	/// [`Error::GoawayTimeout`] when `timeout` elapses. The deadline also rides
-	/// the wire on versions with a timeout field (IETF draft-17+) so the peer can
-	/// observe it. The wire encodes 0 as "no deadline", so a `Duration::ZERO`
-	/// here means the same on both sides: the peer sees no advertised deadline
-	/// and this side installs no local force-close timer (equivalent to
-	/// [`start`](Self::start)).
-	pub fn start_with_timeout(self, uri: impl Into<Arc<str>>, timeout: Duration) -> Draining {
+	fn start_inner(mut self, config: DrainConfig) -> Draining {
+		let session = self.session.take().expect("start consumes the drain");
 		// Zero is "no deadline" on the wire; keep the local timer consistent
 		// rather than force-closing almost immediately.
-		self.start_inner(uri, (!timeout.is_zero()).then_some(timeout))
-	}
-
-	fn start_inner(mut self, uri: impl Into<Arc<str>>, timeout: Option<Duration>) -> Draining {
-		let session = self.session.take().expect("start consumes the drain");
+		let timeout = config.timeout.filter(|d| !d.is_zero());
 		let payload = goaway::Payload {
-			uri: uri.into(),
+			uri: config.uri,
 			timeout,
 		};
 		if let Ok(mut state) = session.goaway.trigger.write() {
@@ -242,12 +259,14 @@ pub struct Draining {
 impl Draining {
 	/// Wait for the peer to close the session after receiving the GOAWAY.
 	///
-	/// With a deadline (from [`Drain::start_with_timeout`]), the session is
+	/// With a deadline (from [`DrainConfig::timeout`]), the session is
 	/// force-closed with [`Error::GoawayTimeout`] when it expires; the timer is
-	/// cancelled if the peer closes first.
-	pub async fn complete(self) {
+	/// cancelled if the peer closes first. Returns `Ok(())` on a clean close
+	/// and `Err(Error::GoawayTimeout)` when the deadline forced an abort.
+	pub async fn complete(self) -> Result<(), Error> {
 		let mut closed = std::pin::pin!(self.session.closed());
 		let mut deadline = self.timeout.map(|timeout| Box::pin(web_async::time::sleep(timeout)));
+		let mut timed_out = false;
 
 		kio::wait(|waiter| {
 			if waiter.poll_future(closed.as_mut()).is_ready() {
@@ -257,12 +276,19 @@ impl Draining {
 				&& waiter.poll_future(sleep.as_mut()).is_ready()
 			{
 				self.session.abort(Error::GoawayTimeout);
+				timed_out = true;
 				// Keep polling: the abort resolves `closed` on the next pass.
 				deadline = None;
 			}
 			std::task::Poll::Pending
 		})
-		.await
+		.await;
+
+		if timed_out {
+			Err(Error::GoawayTimeout)
+		} else {
+			Ok(())
+		}
 	}
 }
 

@@ -2290,13 +2290,13 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		let draining = session
 			.drain()
 			.expect("drain must be available")
-			.start_with_timeout("https://elsewhere.example/", Duration::from_secs(5));
+			.start(moq_net::DrainConfig::default().with_uri("https://elsewhere.example/").with_timeout(Duration::from_secs(5)));
 
 		// Keep producers alive while the client finishes reading.
 		let _broadcast = broadcast;
 		let _track = track;
 
-		draining.complete().await;
+		draining.complete().await.expect("clean drain");
 		Ok::<_, anyhow::Error>(())
 	});
 
@@ -2414,9 +2414,9 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		let draining = session
 			.drain()
 			.expect("drain")
-			.start_with_timeout("", Duration::from_millis(200));
+			.start(moq_net::DrainConfig::default().with_uri("").with_timeout(Duration::from_millis(200)));
 		// The client deliberately overstays; this resolves via the force-close.
-		draining.complete().await;
+		let _ = draining.complete().await;
 		Ok::<_, anyhow::Error>(())
 	});
 

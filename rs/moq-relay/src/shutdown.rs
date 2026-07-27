@@ -63,12 +63,25 @@ impl Shutdown {
 	/// Drain `session` with an empty-URI GOAWAY ("reconnect to me"), waiting for
 	/// the peer to leave and force-closing after [`Self::drain_timeout`].
 	///
+	/// An empty URI tells the client to reconnect to this same relay (a restart
+	/// scenario). The client reuses the JWT it already has, so there is no need
+	/// to echo a token in the GOAWAY payload. When a server redirects to a
+	/// *different* host it is responsible for embedding credentials in the
+	/// redirect URI before sending the GOAWAY.
+	///
 	/// Sessions on versions without GOAWAY (moq-lite-03 and earlier) are closed
 	/// immediately with [`moq_net::Error::GoingAway`]; there is no wire message
 	/// to warn them with.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
 		match session.drain() {
-			Some(drain) => drain.start_with_timeout("", self.drain_timeout).complete().await,
+			Some(drain) => {
+				let config = moq_net::DrainConfig::default()
+					.with_uri("")
+					.with_timeout(self.drain_timeout);
+				if let Err(err) = drain.start(config).complete().await {
+					tracing::debug!(%err, "drain force-closed session on shutdown");
+				}
+			}
 			// `drain()` is None either because the version has no GOAWAY, or
 			// because a drain is already in flight. Force-close only the former
 			// (no wire message can warn it); an already-draining session is left

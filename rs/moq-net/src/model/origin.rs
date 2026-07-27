@@ -2522,6 +2522,77 @@ mod tests {
 		announce().with_hops(hops).with_cost(cost)
 	}
 
+	/// A route at [`broadcast::DRAIN_COST`] sorts after every normal-cost route
+	/// in `route_order`, so `best_route` never picks a draining route while any
+	/// cheaper alternative exists. When the draining route is the only option,
+	/// it still serves as a fallback.
+	#[test]
+	fn test_drain_cost_sorts_last() {
+		let name = Path::new("drain-test");
+
+		let normal = announce();
+		let expensive = announce().with_cost(1000);
+		let draining = announce().with_cost(broadcast::DRAIN_COST);
+
+		// A draining route ranks worse than both zero-cost and high-cost routes.
+		assert!(
+			route_order(&name, &draining) > route_order(&name, &normal),
+			"DRAIN_COST must sort after a zero-cost route"
+		);
+		assert!(
+			route_order(&name, &draining) > route_order(&name, &expensive),
+			"DRAIN_COST must sort after a merely-expensive route"
+		);
+
+		// best_route picks the normal route over the draining one.
+		let source = broadcast::Info::new().produce().consume();
+		let state = FrontState {
+			path: name.to_owned(),
+			self_origin: Origin::random(),
+			next_route: 2,
+			routes: vec![
+				FrontRoute {
+					id: 0,
+					route: draining.clone(),
+					source: source.clone(),
+				},
+				FrontRoute {
+					id: 1,
+					route: normal.clone(),
+					source: source.clone(),
+				},
+			],
+			active: Some(0),
+			linger: Duration::ZERO,
+			closed: false,
+		};
+		assert_eq!(
+			state.best_route(),
+			Some(1),
+			"best_route must prefer a normal route over DRAIN_COST"
+		);
+
+		// When the draining route is the sole option, best_route still returns it.
+		let solo = FrontState {
+			path: name.to_owned(),
+			self_origin: Origin::random(),
+			next_route: 1,
+			routes: vec![FrontRoute {
+				id: 0,
+				route: draining,
+				source: source.clone(),
+			}],
+			active: Some(0),
+			linger: Duration::ZERO,
+			closed: false,
+		};
+		assert_eq!(
+			solo.best_route(),
+			Some(0),
+			"best_route must return DRAIN_COST when it is the only option"
+		);
+	}
+
 	/// While carrying, a strictly cheaper route from a peer that hashes above us
 	/// must not displace the incumbent; the same table re-parents freely once
 	/// idle, or when the peer hashes below us.
@@ -5098,6 +5169,58 @@ mod tests {
 		assert!(
 			request_fut.now_or_never().is_none(),
 			"request should stay pending until served"
+		);
+	}
+
+	/// Two sources for the same broadcast: after one calls `drain()`, the
+	/// origin's selection switches to the non-draining alternative, proving the
+	/// mechanism end-to-end (Producer::drain -> set_route(DRAIN_COST) ->
+	/// route_epoch bump -> reselect -> best_route picks the live route).
+	#[tokio::test(start_paused = true)]
+	async fn test_drain_migrates_best_route() {
+		let self_origin = Origin::random();
+		let mut origin = self_origin.produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let path = PathOwned::from("drainer");
+
+		// Attach a first source (the one that will drain).
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let route_a = announce().with_hops(hops_a);
+		let mut source_a = origin.create_broadcast(&path, route_a).unwrap();
+		settle().await;
+
+		// Observe the announce.
+		announced.assert_next_some("drainer");
+
+		// Attach a second source at a slightly higher cost (the live fallback).
+		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let route_b = announce().with_hops(hops_b).with_cost(10);
+		let _source_b = origin.create_broadcast(&path, route_b).unwrap();
+		settle().await;
+
+		// The origin selects source_a (cost 0) over source_b (cost 10).
+		let bc = consumer.get_broadcast("drainer").unwrap();
+		assert_eq!(bc.route().cost, 0, "initial best route should be cost-0 source_a");
+
+		// Now drain source_a: simulates the subscriber bumping its route when the
+		// peer sends a GOAWAY.
+		source_a.drain();
+		settle().await;
+
+		// The origin reselects: source_b (cost 10) wins over source_a (DRAIN_COST).
+		// route_changed fires on the broadcast consumer.
+		let mut bc_route = bc.clone();
+		let new_route = bc_route.route_changed().await.unwrap();
+		assert_eq!(
+			new_route.cost, 10,
+			"after drain, best_route must switch to the non-draining source"
+		);
+		assert_ne!(
+			new_route.cost,
+			broadcast::DRAIN_COST,
+			"the draining source must NOT be the active route"
 		);
 	}
 }

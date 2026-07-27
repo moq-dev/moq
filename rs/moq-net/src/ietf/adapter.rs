@@ -483,10 +483,11 @@ pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 	shared: Arc<Shared>,
 	control: Control,
 	version: Version,
+	goaway: crate::goaway::Protocol,
 }
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control: Control, version: Version) -> Self {
+	pub fn new(inner: S, control: Control, version: Version, goaway: crate::goaway::Protocol) -> Self {
 		Self {
 			inner,
 			shared: Arc::new(Shared {
@@ -497,6 +498,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 			}),
 			control,
 			version,
+			goaway,
 		}
 	}
 
@@ -510,16 +512,15 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	/// Run the control stream read + write tasks.
 	/// This reads from the control stream and routes messages to virtual streams,
 	/// and also drains the write queue to the control stream writer. A decoded
-	/// GOAWAY is surfaced through `goaway` so [`crate::Session::goaway`] resolves
-	/// instead of the session tearing down.
+	/// GOAWAY is surfaced through the protocol's received channel so
+	/// [`crate::Session::goaway`] resolves instead of the session tearing down.
 	pub async fn run(
 		&self,
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
-		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		let res = {
-			let mut read = std::pin::pin!(self.run_read(reader, goaway));
+			let mut read = std::pin::pin!(self.run_read(reader));
 			let mut write = std::pin::pin!(self.run_write(writer));
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
@@ -587,7 +588,6 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	async fn run_read(
 		&self,
 		mut reader: Reader<S::RecvStream, Version>,
-		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
 			let type_id: u64 = match reader.decode_maybe().await? {
@@ -648,7 +648,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					// payload: an observer may already be acting on its URI, so a
 					// second GOAWAY must not swap the redirect target out from
 					// under it.
-					if !goaway.record(received) {
+					if !self.goaway.record(received) {
 						tracing::warn!(uri = %msg.new_session_uri, "duplicate GOAWAY received; ignoring");
 					}
 					// Keep processing control messages: existing subscriptions

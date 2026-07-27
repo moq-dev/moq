@@ -84,22 +84,20 @@ impl Protocol {
 		true
 	}
 
-	/// Wait for the send trigger to fire, returning the payload to encode.
+	/// Poll for the send trigger to fire, returning the payload to encode.
 	///
-	/// Returns `None` if the trigger was dropped without firing (the session is
-	/// closing without a drain), so no GOAWAY should be sent.
-	pub async fn triggered(&self) -> Option<Payload> {
-		kio::wait(|waiter| {
-			match self.trigger.poll(waiter, |state| match &**state {
-				Some(v) => Poll::Ready(v.clone()),
-				None => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(v)) => Poll::Ready(Some(v)),
-				Poll::Ready(Err(_)) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await
+	/// Returns `Poll::Ready(None)` if the trigger was dropped without firing
+	/// (the session is closing without a drain), so no GOAWAY should be sent.
+	/// Returns `Poll::Pending` while waiting for [`crate::Drain::start`] to fire.
+	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Payload>> {
+		match self.trigger.poll(waiter, |state| match &**state {
+			Some(v) => Poll::Ready(v.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(v)) => Poll::Ready(Some(v)),
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 

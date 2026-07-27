@@ -29,6 +29,9 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// being force-closed with [`moq_net::Error::GoawayTimeout`].
 pub const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 10;
 
+/// Default drain window as a Duration.
+pub const DEFAULT_DRAIN: std::time::Duration = std::time::Duration::from_secs(DEFAULT_DRAIN_TIMEOUT_SECS);
+
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
 fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {

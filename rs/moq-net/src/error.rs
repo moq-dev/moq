@@ -145,7 +145,7 @@ pub enum Error {
 	/// The peer did not close the session within the GOAWAY drain deadline.
 	///
 	/// Sent as the session termination code when the draining side force-closes
-	/// after the advertised deadline expires (see [`crate::Drain::start_with_timeout`]).
+	/// after the advertised deadline expires (see [`crate::Drain::start`]).
 	#[error("goaway timeout")]
 	GoawayTimeout,
 

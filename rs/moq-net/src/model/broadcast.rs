@@ -49,6 +49,13 @@ impl Info {
 	}
 }
 
+/// The cost assigned to a draining route, ensuring it sorts last among all
+/// candidates in [`route_order`](super::route_order). A session entering the
+/// GOAWAY drain state sets its routes to this value so that any non-draining
+/// alternative wins selection, while the draining route remains available as a
+/// fallback when no other path exists.
+pub const DRAIN_COST: u64 = u64::MAX;
+
 /// The path a broadcast takes to reach this origin, and how preferable it is.
 ///
 /// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
@@ -409,6 +416,21 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Bump the route cost to [`DRAIN_COST`], preserving the existing hop chain
+	/// and announce flag. A no-op if already at DRAIN_COST.
+	///
+	/// Called by the subscriber when the session receives a GOAWAY, so the origin
+	/// prefers routes from non-draining sessions while this one remains as a
+	/// fallback.
+	pub(crate) fn drain(&mut self) {
+		let mut state = self.state.lock();
+		if state.route.cost == DRAIN_COST {
+			return;
+		}
+		state.route.cost = DRAIN_COST;
+		state.route_epoch += 1;
+	}
+
 	/// Poll for the next spliced track awaiting a serving route, returning its name
 	/// and logical producer. Route-fed broadcasts only.
 	pub(crate) fn poll_spliced_assigned(&self, waiter: &kio::Waiter) -> Poll<(Arc<str>, super::resume::Producer)> {
@@ -567,6 +589,15 @@ impl SourceGuard {
 	pub fn set_route(&mut self, route: Route) {
 		if let Some(producer) = &mut self.producer {
 			let _ = producer.set_route(route);
+		}
+	}
+
+	/// Bump the source's route cost to [`DRAIN_COST`], preserving the existing
+	/// hop chain and announce flag. The origin re-evaluates best_route, preferring
+	/// any non-draining alternative while keeping this route as a fallback.
+	pub fn drain(&mut self) {
+		if let Some(producer) = &mut self.producer {
+			producer.drain();
 		}
 	}
 }
@@ -1380,5 +1411,57 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// `Producer::drain()` bumps the route cost to DRAIN_COST, preserving the
+	/// hop chain and announce flag. Consumers observe the change through
+	/// `route_changed`, and a subsequent `drain()` is a no-op (idempotent).
+	#[tokio::test]
+	async fn drain_bumps_route_to_drain_cost() {
+		let mut producer = Info::new().produce();
+		let mut consumer = producer.consume();
+
+		// Set an initial non-zero route with a hop chain.
+		let hop = crate::Origin::random();
+		let mut hops = crate::OriginList::new();
+		hops.push(hop).unwrap();
+		let route = Route::new().with_hops(hops).with_cost(42).with_announce(true);
+		producer.set_route(route.clone()).unwrap();
+
+		// route_changed delivers the current route on the first call.
+		let current = consumer.route_changed().await.unwrap();
+		assert_eq!(current.cost, 42);
+		assert!(current.announce);
+
+		// Drain the producer.
+		producer.drain();
+
+		// Consumer should observe the cost jump to DRAIN_COST.
+		let drained = consumer.route_changed().await.unwrap();
+		assert_eq!(drained.cost, DRAIN_COST, "drain must set cost to DRAIN_COST");
+		assert_eq!(drained.hops, current.hops, "drain must preserve the hop chain");
+		assert!(drained.announce, "drain must preserve the announce flag");
+
+		// A second drain is idempotent: no route_changed fires.
+		producer.drain();
+		assert!(
+			consumer.route_changed().now_or_never().is_none(),
+			"a redundant drain must not bump the route epoch"
+		);
+	}
+
+	/// `SourceGuard::drain()` delegates to the producer correctly.
+	#[test]
+	fn source_guard_drain() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let mut guard = SourceGuard::new(producer);
+
+		guard.set_route(Route::new().with_cost(5).with_announce(true));
+		assert_eq!(consumer.route().cost, 5);
+
+		guard.drain();
+		assert_eq!(consumer.route().cost, DRAIN_COST);
+		assert!(consumer.route().announce, "drain must preserve announce");
 	}
 }

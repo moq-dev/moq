@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -57,12 +59,19 @@ pub struct Config {
 	#[serde(default)]
 	pub internal: InternalConfig,
 
-	/// How long (in seconds) accepted sessions may keep running after a shutdown
-	/// signal. The first signal sends every session a GOAWAY and waits this long
-	/// for clients to reconnect elsewhere before force-closing them; a second
-	/// signal exits immediately. Defaults to 10 seconds.
-	#[arg(id = "drain-timeout", long = "drain-timeout", env = "MOQ_DRAIN_TIMEOUT")]
-	pub drain_timeout: Option<u64>,
+	/// How long accepted sessions may keep running after a shutdown signal,
+	/// e.g. "10s" or "30s". The first signal sends every session a GOAWAY and
+	/// waits this long for clients to reconnect elsewhere before force-closing
+	/// them; a second signal exits immediately. Defaults to 10 seconds.
+	#[arg(
+		id = "drain",
+		long = "drain",
+		alias = "drain-timeout",
+		env = "MOQ_DRAIN",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(default, with = "humantime_serde", alias = "drain_timeout")]
+	pub drain: Option<Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -679,6 +688,75 @@ uid = [1001]
 			config.internal.listen,
 			Some("127.0.0.1:9101".parse().unwrap()),
 			"TOML's internal.listen must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	/// Serializes tests that touch `MOQ_DRAIN`. Same rationale as
+	/// `STATS_ENV_LOCK`.
+	static DRAIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the clap+TOML clobber bug applied to the top-level
+	/// `drain` field. It's `Option<Duration>` so a TOML-configured drain window
+	/// survives the CLI re-parse when no `--drain` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_drain() {
+		let _guard = DRAIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: DRAIN_ENV_LOCK ensures no other test in this binary touches
+		// this env var concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_DRAIN");
+		}
+
+		let toml = r#"
+drain = "30s"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("drain-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.drain,
+			Some(std::time::Duration::from_secs(30)),
+			"TOML's drain must not be clobbered by the CLI re-parse"
+		);
+	}
+
+	/// Serializes tests that touch `MOQ_CLUSTER_DRAIN`. Same rationale as
+	/// `STATS_ENV_LOCK`.
+	static CLUSTER_DRAIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+	/// Regression test for the clap+TOML clobber bug applied to `cluster.drain`.
+	/// The field is `Option<Duration>` so a TOML-configured drain window survives
+	/// the CLI re-parse when no `--cluster-drain` flag is passed.
+	#[test]
+	fn cli_does_not_clobber_toml_cluster_drain() {
+		let _guard = CLUSTER_DRAIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// SAFETY: CLUSTER_DRAIN_ENV_LOCK ensures no other test in this binary
+		// touches this env var concurrently.
+		unsafe {
+			std::env::remove_var("MOQ_CLUSTER_DRAIN");
+		}
+
+		let toml = r#"
+[cluster]
+drain = "15s"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("cluster-drain-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(
+			config.cluster.drain,
+			Some(std::time::Duration::from_secs(15)),
+			"TOML's cluster.drain must not be clobbered by the CLI re-parse"
 		);
 	}
 }

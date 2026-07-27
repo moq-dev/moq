@@ -157,7 +157,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let mut cluster_config = ClusterConfig::default();
 		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
 		// Short drain so the test observes the old session force-close quickly.
-		cluster_config.drain_timeout = Some(2);
+		cluster_config.drain = Some(std::time::Duration::from_secs(2));
 		let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 
 		let cluster_run = tokio::spawn(cluster.clone().run());
@@ -200,7 +200,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let draining = session_a
 			.drain()
 			.expect("drain")
-			.start(format!("tcp://127.0.0.1:{port_b}/"));
+			.start(moq_net::DrainConfig::default().with_uri(format!("tcp://127.0.0.1:{port_b}/")));
 
 		// The cluster reconnects: sibling B accepts a session.
 		let _session_b = accepted_b.recv().await.expect("sibling B accepts the redirected dial");
@@ -225,7 +225,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		// The old session drains away (the cluster force-closes it after the
 		// window at the latest).
-		draining.complete().await;
+		let _ = draining.complete().await;
 
 		// No unannounce leaked to the origin during the whole swap: the next
 		// announce event (with a generous bound) must never arrive.
@@ -266,7 +266,7 @@ async fn spawn_relay_with_upstream(
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![upstream_url.to_string()];
 	// Short drain so the test observes teardown quickly.
-	cluster_config.drain_timeout = Some(2);
+	cluster_config.drain = Some(std::time::Duration::from_secs(2));
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
@@ -443,7 +443,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let draining = session_bottom_on_a
 		.drain()
 		.expect("drain")
-		.start_with_timeout(mid_b_url.clone(), Duration::from_secs(5));
+		.start(moq_net::DrainConfig::default().with_uri(mid_b_url.clone()).with_timeout(Duration::from_secs(5)));
 
 	// Positive gate: MID-B's first inbound connection can only be BOTTOM's
 	// post-GOAWAY reconnect (the subscriber talks to BOTTOM, and MID-B's link
@@ -464,7 +464,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("publisher task");
 
 	// ── the old MID-A leg drains away, then is severed entirely ─────────
-	within("old session drains after the swap", draining.complete()).await;
+	let _ = within("old session drains after the swap", draining.complete()).await;
 	// Cut MID-A off from TOP so it can never receive (let alone forward) new
 	// groups. Anything delivered from here on MUST have flowed TOP -> MID-B ->
 	// BOTTOM, positively proving the new leg carries the subscription.
@@ -555,7 +555,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
-	cluster_config.drain_timeout = Some(2);
+	cluster_config.drain = Some(std::time::Duration::from_secs(2));
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 	let cluster_run = tokio::spawn(cluster.clone().run());
 
@@ -592,14 +592,14 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	// Drain with an EMPTY URI: the cluster must fall back to redialing the
 	// originally configured endpoint.
-	let draining = first_dial.drain().expect("drain").start("");
+	let draining = first_dial.drain().expect("drain").start(moq_net::DrainConfig::default().with_uri(""));
 
 	// Positive gate: the upstream accepts a SECOND session (the redial).
 	let _second_dial = within("cluster redials the same endpoint", accepted.recv())
 		.await
 		.expect("accept channel closed");
 
-	within("old session drains", draining.complete()).await;
+	let _ = within("old session drains", draining.complete()).await;
 
 	// Delivery continues on the redialed session (same origin, same publisher
 	// identity, so the rejoined route resumes at the boundary).
