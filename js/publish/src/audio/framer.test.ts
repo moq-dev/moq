@@ -92,14 +92,17 @@ describe("timestamp discontinuities (#2532)", () => {
 		// A sub-millisecond wobble is rounding, not a gap, so the timeline must not restart.
 		for (let index = 0; index < RATE / 128; index++) framer.push(quantum(RATE, index));
 
+		// A whole frame's worth, so a frame actually comes out: 48000 samples divides evenly into
+		// 960-sample frames, leaving the buffer empty, and a short push would emit nothing at all.
 		const nudged = (Time.Micro.fromSecond(1 as Time.Second) + 200) as Time.Micro;
 		const frames = framer.push({
 			timestamp: nudged,
-			channels: [new Float32Array(128)],
+			channels: [new Float32Array(960)],
 		});
 
-		// Still on the original timeline: the 50th 20ms frame, not a fresh origin.
-		for (const frame of frames) expect(frame.timestamp).toBe(Time.Micro(1_000_000));
+		// Still on the original timeline: the 51st 20ms frame, not a fresh origin at the nudge.
+		expect(frames).toHaveLength(1);
+		expect(frames[0].timestamp).toBe(Time.Micro(1_000_000));
 	});
 
 	test("drops only the partial frame at the seam", () => {
