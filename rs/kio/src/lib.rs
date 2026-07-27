@@ -24,7 +24,11 @@ mod producer;
 mod shared;
 mod weak;
 
+#[cfg(feature = "time")]
+pub mod time;
+
 #[cfg(feature = "tokio")]
+#[doc(hidden)]
 pub mod tokio;
 
 #[cfg(test)]

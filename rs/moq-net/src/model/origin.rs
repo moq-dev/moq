@@ -1413,33 +1413,22 @@ async fn run_front(
 	// waiting for a replacement source. A graceful close never gets here (the
 	// detach sets `closed` synchronously), so a running countdown always means a
 	// reconnect is welcome.
-	let mut deadline: Option<web_async::time::Instant> = None;
+	let mut deadline = kio::time::Deadline::new();
 
 	loop {
 		let empty = {
 			let s = state.read();
 			!s.closed && s.routes.is_empty()
 		};
-		deadline = match (empty, deadline) {
+		deadline.set(match (empty, deadline.deadline()) {
 			// An unrepresentable deadline (e.g. `Duration::MAX`) lingers forever:
 			// no timer, only a re-attach or teardown moves the front on.
 			(true, None) => web_async::time::Instant::now().checked_add(linger),
 			(true, at) => at,
 			(false, _) => None,
-		};
+		});
 
 		let step = {
-			// Pending forever while no countdown is running. Fused via `fired`: a
-			// completed future must not be polled again.
-			let mut sleep = std::pin::pin!(async {
-				match deadline {
-					Some(at) => {
-						web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-					}
-					None => std::future::pending().await,
-				}
-			});
-			let mut fired = false;
 			kio::wait(|waiter| {
 				if let Poll::Ready((name, resume)) = broadcast.poll_spliced_assigned(waiter) {
 					return Poll::Ready(Step::Serve(name, resume));
@@ -1459,13 +1448,7 @@ async fn run_front(
 					Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
 					Poll::Pending => {}
 				}
-				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
-					fired = true;
-				}
-				match fired {
-					true => Poll::Ready(Step::Expired),
-					false => Poll::Pending,
-				}
+				deadline.poll(waiter).map(|_| Step::Expired)
 			})
 			.await
 		};
@@ -1537,6 +1520,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	let mut dead: Option<u64> = None;
 	// When the spliced segment stopped being read, starting the release countdown.
 	let mut idle_since: Option<web_async::time::Instant> = None;
+	let mut deadline = kio::time::Deadline::new();
 
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
@@ -1549,22 +1533,9 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			(true, false) => idle_since.or_else(|| Some(web_async::time::Instant::now())),
 			_ => None,
 		};
-		let deadline = idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER));
+		deadline.set(idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER)));
 
 		let step = {
-			// Pinned outside the closure: a future re-created on every poll would
-			// restart the countdown each time and never fire. Fused via `fired`: a
-			// completed future must not be polled again.
-			let mut sleep = std::pin::pin!(async {
-				match deadline {
-					Some(at) => {
-						web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-					}
-					None => std::future::pending().await,
-				}
-			});
-			let mut fired = false;
-
 			kio::wait(|waiter| {
 				// Watch the source table: the front closing, or the active source
 				// moving away from the one currently spliced in (skipping one whose
@@ -1620,13 +1591,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 					});
 				}
 
-				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
-					fired = true;
-				}
-				if fired {
-					return Poll::Ready(Step::Idle);
-				}
-				Poll::Pending
+				deadline.poll(waiter).map(|_| Step::Idle)
 			})
 			.await
 		};
