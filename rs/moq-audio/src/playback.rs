@@ -56,7 +56,7 @@ pub struct Config {
 	pub device: Option<String>,
 }
 
-/// An open output device, mixing any number of [`Sink`]s into it.
+/// An open output device, mixing up to 64 [`Sink`]s into it.
 ///
 /// Cheap to clone; every clone drives the same device. The device closes once
 /// the last clone and the last [`Sink`] are dropped.

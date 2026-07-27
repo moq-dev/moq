@@ -168,9 +168,10 @@ impl Mixer {
 					// unreachable. Retire rather than push anyway: growing the
 					// list would allocate right here on the audio thread.
 					debug_assert!(self.entries.len() < MAX_SINKS, "more sinks than the driver allows");
-					match self.entries.len() < MAX_SINKS {
-						true => self.entries.push(entry),
-						false => self.retire(entry),
+					if self.entries.len() < MAX_SINKS {
+						self.entries.push(entry);
+					} else {
+						self.retire(entry);
 					}
 				}
 				Ok(Command::Remove { id }) => {

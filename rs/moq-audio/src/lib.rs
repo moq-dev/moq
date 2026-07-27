@@ -21,7 +21,7 @@
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`].
 //! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
-//!   output device and mixes any number of `playback::Sink`s into it, so one
+//!   output device and mixes the `playback::Sink`s registered with it, so one
 //!   device serves every track in a call. Requires the `playback` feature, so
 //!   these names are unlinked here too.
 //!
