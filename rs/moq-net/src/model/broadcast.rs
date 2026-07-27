@@ -426,7 +426,12 @@ impl Producer {
 	/// Replace the full route table, in preference order with the active route
 	/// first. Set by the origin's front on every source-table change; the active
 	/// route doubles as the broadcast's advertised [`Route`].
+	///
+	/// `routes` must be non-empty. A front whose table empties is on its way out,
+	/// and it unannounces and aborts rather than advertising a "no route" route,
+	/// so there is no such value to publish here.
 	pub(crate) fn set_routes(&mut self, routes: Vec<Route>) {
+		debug_assert!(!routes.is_empty(), "set_routes requires a non-empty table");
 		let mut state = self.state.lock();
 		if let Some(active) = routes.first()
 			&& state.route != *active
