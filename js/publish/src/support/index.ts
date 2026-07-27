@@ -6,6 +6,7 @@
  */
 import * as Util from "@moq/hang/util";
 import { Connection } from "@moq/net";
+import { workerSupported } from "../video/processor";
 
 export type Level = "full" | "partial" | "none";
 
@@ -104,11 +105,13 @@ export async function isSupported(): Promise<Full> {
 		},
 		video: {
 			capture:
-				// We have a fallback for MediaStreamTrackProcessor, but it's pretty gross so no full points.
+				// Chrome has MediaStreamTrackProcessor on the window; Safari and Firefox only in a
+				// worker, which we hop through. Either way it's the native pipeline, so full points.
 				// @ts-expect-error No typescript types yet.
-				typeof MediaStreamTrackProcessor !== "undefined"
+				typeof MediaStreamTrackProcessor !== "undefined" || (await workerSupported())
 					? "full"
-					: // The fallback drives a <video> element via requestVideoFrameCallback.
+					: // The fallback drives a <video> element via requestVideoFrameCallback, which is
+						// gross and stops producing frames when the window isn't composited.
 						"requestVideoFrameCallback" in HTMLVideoElement.prototype
 						? "partial"
 						: "none",
