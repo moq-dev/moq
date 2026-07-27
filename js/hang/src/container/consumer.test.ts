@@ -25,6 +25,16 @@ function encodeLegacyFrame(timestamp: Time.Micro, payload: Uint8Array): Uint8Arr
 	return data;
 }
 
+/** A one-byte CMAF sample at `timestamp` ticks, lasting one 3000-tick (33_333µs) frame. */
+function encodeCmafFrame(data: number, timestamp: number, sequence: number): Uint8Array {
+	return encodeDataSegment({ data: new Uint8Array([data]), timestamp, duration: 3000, keyframe: true, sequence });
+}
+
+/** Yield long enough for the consumer's spawned group readers to drain what's been written. */
+function settle(ms = 20): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // --- LegacyFormat ---
 
 test("LegacyFormat decodes a valid frame", () => {
@@ -722,6 +732,154 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 
 	const result = await pending;
 	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x02]));
+
+	consumer.close();
+});
+
+// A group can finish before it becomes the active one (it arrived and completed while an earlier
+// group was still open). The cursor then moves past it in next() rather than in #runGroup, so that
+// is where its presentation end has to be recorded. Miss it and the stale end from the group before
+// blocks every later contiguous group.
+test("Consumer delivers a contiguous group after one that completed out of order (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), {
+		format: new CmafFormat(TEST_INIT),
+		latency: 10_000 as Time.Milli,
+	});
+
+	// A (seq 1_000_000) stays open so it remains the active group.
+	const a = new Group.Producer(1_000_000);
+	track.writeGroup(a);
+	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
+
+	// A's second frame stays buffered so A can't be duration-skipped. A ends at 6000 ticks (66_666µs).
+	a.writeFrame({ payload: encodeCmafFrame(0x02, 3000, 1), timestamp: Time.Timestamp.now() });
+	await settle();
+
+	// B (seq 1_045_000) starts at A's end and is CLOSED while A is still active, so B's own finally
+	// block sees sequence !== #active and never records anything. B ends at 9000 ticks (100_000µs).
+	const b = new Group.Producer(1_045_000);
+	track.writeGroup(b);
+	b.writeFrame({ payload: encodeCmafFrame(0x03, 6000, 2), timestamp: Time.Timestamp.now() });
+	b.close();
+	await settle();
+
+	a.close();
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x02]));
+	expect((await consumer.next())?.frame).toBeUndefined(); // A group-done
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x03]));
+	expect((await consumer.next())?.frame).toBeUndefined(); // B group-done
+
+	// C (seq 1_090_000) starts at B's end, so it continues the timeline and must deliver.
+	const pending = consumer.next();
+	const c = new Group.Producer(1_090_000);
+	track.writeGroup(c);
+	c.writeFrame({ payload: encodeCmafFrame(0x04, 9000, 3), timestamp: Time.Timestamp.now() });
+
+	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
+	expect(result).not.toBe("timeout");
+	expect((result as { frame?: Frame } | undefined)?.frame?.payload).toEqual(new Uint8Array([0x04]));
+
+	consumer.close();
+});
+
+// While the cursor sits below every buffered group (a real PTS gap it is waiting out), the delivery
+// head still has to run the latency check on each frame. If only the head is receiving frames,
+// that check is the only thing left that can break the stall.
+test("Consumer latency-skips a waited-out gap when only the head receives frames (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new CmafFormat(TEST_INIT), latency: 100 as Time.Milli });
+
+	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
+	const a = new Group.Producer(1000);
+	track.writeGroup(a);
+	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	a.close();
+	expect((await consumer.next())?.frame).toBeUndefined(); // #active falls back to the 1001 phantom
+
+	// B (seq 2000) starts at 90_000 ticks (1_000_000µs), far past A's end: a real gap, so the cursor
+	// stays on the phantom and B is never promoted.
+	const b = new Group.Producer(2000);
+	track.writeGroup(b);
+	b.writeFrame({ payload: encodeCmafFrame(0x02, 90_000, 1), timestamp: Time.Timestamp.now() });
+	await settle();
+
+	// C (seq 3000) lands just behind B, inside the 100ms budget, then goes silent for the rest of
+	// the test. So C's frames can't be what re-runs the latency check.
+	const c = new Group.Producer(3000);
+	track.writeGroup(c);
+	c.writeFrame({ payload: encodeCmafFrame(0x03, 93_000, 2), timestamp: Time.Timestamp.now() });
+	await settle();
+
+	const pending = consumer.next();
+
+	// B alone grows past the budget (90_000 -> 108_000 ticks, a 200ms span).
+	for (let i = 1; i <= 6; i++) {
+		b.writeFrame({ payload: encodeCmafFrame(0x02, 90_000 + i * 3000, 3 + i), timestamp: Time.Timestamp.now() });
+		await settle(10);
+	}
+
+	// The latency check drops B as the oldest and delivery resumes at C.
+	const result = await Promise.race([pending, settle(300).then(() => "timeout" as const)]);
+	expect(result).not.toBe("timeout");
+	const delivered = result as { frame?: Frame; continuous?: boolean } | undefined;
+	expect(delivered?.frame?.payload).toEqual(new Uint8Array([0x03]));
+	// B's content was thrown away, so downstream must not treat the span as delivered.
+	expect(delivered?.continuous).toBe(false);
+
+	consumer.close();
+});
+
+// --- Continuity reporting ---
+
+// `continuous` is what downstream buffer accounting keys on, so it must be false exactly when the
+// consumer dropped something. Group numbers can't answer that: they aren't required to be
+// sequential, and adjacency doesn't rule out a group the latency check dropped on the way past.
+test("Consumer reports continuity while nothing is dropped", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), { format: new LegacyFormat(), latency: 100 as Time.Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro, 33_000 as Time.Micro]);
+	await settle();
+
+	expect((await consumer.next())?.continuous).toBe(false); // nothing precedes the first frame
+	expect((await consumer.next())?.continuous).toBe(true); // same group: consecutive by protocol
+	expect((await consumer.next())?.frame).toBeUndefined(); // group 0 done
+
+	writeGroupWithLegacyFrames(track, 1, [66_000 as Time.Micro]);
+	await settle();
+	expect((await consumer.next())?.continuous).toBe(true); // group 1 continues group 0
+
+	consumer.close();
+});
+
+// The case the group-number heuristic got backwards: ids jump, but the PTS timeline is unbroken.
+test("Consumer reports continuity across a PTS-contiguous group id jump (CMAF)", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(track.subscribe(), {
+		format: new CmafFormat(TEST_INIT),
+		latency: 10_000 as Time.Milli,
+	});
+
+	const a = new Group.Producer(1_000_000);
+	track.writeGroup(a);
+	a.writeFrame({ payload: encodeCmafFrame(0x01, 0, 0), timestamp: Time.Timestamp.now() });
+	a.close();
+
+	expect((await consumer.next())?.frame?.payload).toEqual(new Uint8Array([0x01]));
+	expect((await consumer.next())?.frame).toBeUndefined(); // group-done
+
+	// Sequence jumps +90_000 but the first PTS meets A's end, so nothing is missing.
+	const b = new Group.Producer(1_090_000);
+	track.writeGroup(b);
+	b.writeFrame({ payload: encodeCmafFrame(0x02, 3000, 1), timestamp: Time.Timestamp.now() });
+
+	const result = await consumer.next();
+	expect(result?.frame?.payload).toEqual(new Uint8Array([0x02]));
+	expect(result?.continuous).toBe(true);
 
 	consumer.close();
 });

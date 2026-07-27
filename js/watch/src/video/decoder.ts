@@ -357,7 +357,7 @@ class DecoderTrack {
 			flip: false,
 		});
 
-		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let previous: Time.Micro | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -367,15 +367,8 @@ class DecoderTrack {
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
-				const { frame, group } = next;
-
-				if (!frame) {
-					if (previous) {
-						previous.final = true;
-					}
-					// The group is done
-					continue;
-				}
+				const { frame } = next;
+				if (!frame) continue; // The group is done
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -393,22 +386,16 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer: frames sent to decoder but not yet rendered.
-				// A finished prior group followed by frames from a later group is contiguous in
-				// playback even when group sequence numbers are not +1-adjacent (some encoders
-				// number groups non-sequentially with large gaps), so bridge on `prior.final`, not `+1`.
-				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && group > prior.group))) {
-					const start = Time.Milli.fromMicro(prior.timestamp);
-					const end = Time.Milli.fromMicro(frame.timestamp);
-					this.#addBuffered(start, end);
+				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
+				// the previous frame when the consumer says nothing is missing in between. Group ids
+				// can't answer that: they aren't required to be sequential (some encoders derive them
+				// from DTS), so adjacency neither proves continuity nor rules out a gap the consumer
+				// skipped, and reporting a skipped span as decoded overstates the buffer.
+				if (previous !== undefined && next.continuous) {
+					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
-				previous = {
-					timestamp: frame.timestamp,
-					group,
-					final: false,
-				};
+				previous = frame.timestamp;
 
 				decoder.decode(chunk);
 			}
@@ -445,7 +432,7 @@ class DecoderTrack {
 			flip: false,
 		});
 
-		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let previous: Time.Micro | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -455,14 +442,8 @@ class DecoderTrack {
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
-				const { frame, group } = next;
-
-				if (!frame) {
-					if (previous) {
-						previous.final = true;
-					}
-					continue;
-				}
+				const { frame } = next;
+				if (!frame) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
@@ -474,19 +455,13 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer (see #runLegacy: bridge on prior.final, not +1, for non-sequential group ids)
-				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && group > prior.group))) {
-					const start = Time.Milli.fromMicro(prior.timestamp);
-					const end = Time.Milli.fromMicro(frame.timestamp);
-					this.#addBuffered(start, end);
+				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
+				// never on group adjacency, which proves nothing about the timeline).
+				if (previous !== undefined && next.continuous) {
+					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
-				previous = {
-					timestamp: frame.timestamp,
-					group,
-					final: false,
-				};
+				previous = frame.timestamp;
 
 				if (decoder.state === "closed") break;
 				decoder.decode(
