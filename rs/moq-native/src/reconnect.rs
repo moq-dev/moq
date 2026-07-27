@@ -87,6 +87,127 @@ pub enum Status {
 	Connected,
 	/// An established session dropped; a reconnect attempt follows.
 	Disconnected,
+	/// The peer sent a GOAWAY; the replacement is being dialed while the old
+	/// session keeps serving.
+	Migrating,
+}
+
+/// What to do with the URI a peer names in its GOAWAY.
+///
+/// The URI is dialed exactly as given, so it must carry whatever credentials the
+/// new endpoint needs. Nothing from the current session is copied onto it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum Redirect {
+	/// Follow any URI that neither downgrades the scheme nor widens what we can
+	/// reach (a public endpoint redirecting to loopback, a private range, or IPC).
+	#[default]
+	Follow,
+	/// Follow only when the authority matches the configured URL, so a peer can
+	/// move us between ports or schemes but not to another host.
+	SameHost,
+	/// Ignore the URI and redial the configured URL.
+	Ignore,
+}
+
+impl Redirect {
+	/// Resolve the URL to dial after a GOAWAY, falling back to `current` when the
+	/// redirect is empty ("reconnect to me"), malformed, or refused by policy.
+	pub fn resolve(&self, uri: &str, current: &Url) -> Url {
+		if uri.is_empty() || matches!(self, Self::Ignore) {
+			return current.clone();
+		}
+
+		let Ok(target) = uri.parse::<Url>() else {
+			tracing::warn!(uri, "malformed GOAWAY URI; redialing the current URL");
+			return current.clone();
+		};
+
+		if scheme_tier(target.scheme()) < scheme_tier(current.scheme()) {
+			tracing::warn!(uri, "GOAWAY redirect downgrades the scheme; redialing the current URL");
+			return current.clone();
+		}
+
+		// A peer must not be able to point us somewhere we could not already
+		// reach: an authenticated upstream redirecting to a loopback or IPC
+		// address turns a redirect into a probe of the local host.
+		if is_local(&target) && !is_local(current) {
+			tracing::warn!(uri, "GOAWAY redirect widens reachability; redialing the current URL");
+			return current.clone();
+		}
+
+		if matches!(self, Self::SameHost) && target.authority() != current.authority() {
+			tracing::warn!(
+				uri,
+				"GOAWAY redirect leaves the current host; redialing the current URL"
+			);
+			return current.clone();
+		}
+
+		target
+	}
+}
+
+/// Rank a scheme so a peer-supplied redirect cannot silently drop encryption.
+/// Unknown schemes rank lowest, so a forgotten classification is refused.
+fn scheme_tier(scheme: &str) -> u8 {
+	match scheme {
+		"https" | "moqt" | "moql" | "wss" | "iroh" => 2,
+		"tcp" | "ws" | "http" => 1,
+		// `unix` lands here deliberately: local IPC is not an upgrade over a
+		// network transport, it is a different reachability class (see `is_local`).
+		_ => 0,
+	}
+}
+
+/// Whether a URL names something only reachable from this host or network.
+fn is_local(url: &Url) -> bool {
+	match url.host() {
+		Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+		Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+		Some(url::Host::Ipv6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+		// No host at all, e.g. a `unix:` socket path.
+		None => true,
+	}
+}
+
+/// How a reconnect loop reacts to a peer's GOAWAY.
+#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct GoawayConfig {
+	/// What to do with the URI a peer names in its GOAWAY.
+	#[arg(
+		id = "goaway-redirect",
+		long,
+		default_value = "follow",
+		env = "MOQ_GOAWAY_REDIRECT",
+		value_enum
+	)]
+	pub redirect: Redirect,
+
+	/// How long the old session keeps serving after its replacement connects,
+	/// when the GOAWAY named no deadline of its own. A deadline on the GOAWAY
+	/// takes precedence.
+	#[arg(
+		id = "goaway-handover",
+		long,
+		default_value = "10s",
+		env = "MOQ_GOAWAY_HANDOVER",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(with = "humantime_serde")]
+	pub handover: Duration,
+}
+
+impl Default for GoawayConfig {
+	fn default() -> Self {
+		Self {
+			redirect: Redirect::default(),
+			handover: Duration::from_secs(10),
+		}
+	}
 }
 
 /// Shared reconnect state, observed by consumers through a [`kio`] channel.
@@ -143,7 +264,7 @@ pub struct Reconnect {
 }
 
 impl Reconnect {
-	pub(crate) fn new(client: Client, url: Url, backoff: Backoff) -> Self {
+	pub(crate) fn new(client: Client, url: Url, backoff: Backoff, goaway: GoawayConfig) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 
@@ -155,7 +276,7 @@ impl Reconnect {
 		let recv_bandwidth = recv_bw.consume();
 
 		let task = tokio::spawn(async move {
-			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url, backoff).await {
+			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url, backoff, goaway).await {
 				tracing::error!(%err, "reconnect loop exited");
 				if let Ok(mut state) = producer.write() {
 					state.error = Some(err);
@@ -179,10 +300,17 @@ impl Reconnect {
 		client: Client,
 		url: Url,
 		backoff: Backoff,
+		goaway: GoawayConfig,
 	) -> crate::Result<()> {
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<Error> = None;
+		// Sticky across migrations: a redirect is an assignment, not a detour, so a
+		// later drop redials wherever we were last sent. Scoped to this loop, so a
+		// fresh Reconnect starts from the configured URL again.
+		let mut url = url;
+		// An old session kept alive after a GOAWAY so its in-flight groups finish.
+		let mut draining: Option<Draining> = None;
 
 		loop {
 			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
@@ -206,9 +334,36 @@ impl Reconnect {
 					}
 
 					let connected = tokio::time::Instant::now();
-					// Wait for the session to close, forwarding its bandwidth estimates into the
-					// persistent producers meanwhile so consumers track the live stats across the connection.
-					let closed = run_session(send_bw, recv_bw, &session).await;
+					// Wait for the session to end, forwarding its bandwidth estimates into the
+					// persistent producers meanwhile so consumers track the live stats across the
+					// connection, and draining any predecessor left over from a migration.
+					let ended = run_session(send_bw, recv_bw, &session, &mut draining).await;
+
+					// A session that stayed up past the initial backoff is healthy; one that
+					// ended sooner counts as a failed attempt however it ended.
+					let healthy = connected.elapsed() >= backoff.initial;
+
+					if let Ended::Goaway(msg) = &ended {
+						// A redirect is an assignment: keep dialing it from here on.
+						url = goaway.redirect.resolve(&msg.uri, &url);
+					}
+
+					if let (Ended::Goaway(msg), true) = (&ended, healthy) {
+						// Planned migration. Keep the old session serving while we dial the
+						// replacement: its routes stay attached, so live tracks hand over at a
+						// group boundary once it finally closes.
+						tracing::info!(%url, "upstream GOAWAY; migrating");
+						if let Ok(mut state) = state.write() {
+							state.status = Some(Status::Migrating);
+						}
+						draining = Some(Draining::new(session, msg.timeout.unwrap_or(goaway.handover)));
+						delay = backoff.initial;
+						retry_start = tokio::time::Instant::now();
+						last_error = None;
+						// No backoff sleep: this is a handover, not a failure.
+						continue;
+					}
+
 					if let Ok(mut state) = state.write() {
 						state.status = Some(Status::Disconnected);
 						state.version = None;
@@ -218,24 +373,30 @@ impl Reconnect {
 					let _ = send_bw.set(None);
 					let _ = recv_bw.set(None);
 
-					if connected.elapsed() >= backoff.initial {
-						// Stayed up past the initial backoff: a healthy session. Reset the backoff
-						// window so a one-off drop reconnects promptly.
+					if healthy {
+						// Reset the backoff window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
 						delay = backoff.initial;
 						retry_start = tokio::time::Instant::now();
 						last_error = None;
 					} else {
 						// Connected then dropped almost immediately (e.g. the server accepts then
-						// resets). Treat it as a failed connection: keep the close reason so the
-						// give-up timeout reports a real cause, and fall through to the shared backoff
-						// sleep below so repeated flaps escalate instead of spinning the CPU.
-						if let Err(err) = closed {
-							let err = Error::from(err);
-							tracing::warn!(%url, %err, "session severed immediately, retrying");
-							last_error = Some(err);
-						} else {
-							tracing::warn!(%url, "session severed immediately, retrying");
+						// resets, or redirects us straight back out). Treat it as a failed
+						// connection: keep the reason so the give-up timeout reports a real cause,
+						// and fall through to the shared backoff sleep below so repeated flaps
+						// escalate instead of spinning the CPU. This is what bounds a redirect
+						// loop between two peers.
+						let err = match ended {
+							Ended::Closed(Err(err)) => Some(Error::from(err)),
+							Ended::Goaway(_) => Some(Error::Reconnect("peer redirected immediately".to_string())),
+							Ended::Closed(Ok(())) => None,
+						};
+						match err {
+							Some(err) => {
+								tracing::warn!(%url, %err, "session severed immediately, retrying");
+								last_error = Some(err);
+							}
+							None => tracing::warn!(%url, "session severed immediately, retrying"),
 						}
 					}
 				}
@@ -340,31 +501,95 @@ impl Reconnect {
 	}
 }
 
-/// Wait for `session` to close, forwarding its send/recv bandwidth estimates into the persistent
-/// producers meanwhile so [`Reconnect`] consumers track the live estimates across the connection.
-/// Returns the session's close result (the loop uses it to distinguish a healthy drop from an
-/// immediate sever).
+/// Why a session stopped being the live one.
+enum Ended {
+	/// The transport closed.
+	Closed(Result<(), moq_net::Error>),
+	/// The peer sent a GOAWAY; the session is still up and serving.
+	Goaway(moq_net::goaway::Goaway),
+}
+
+/// An old session kept alive after a GOAWAY so its in-flight groups finish.
 ///
-/// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, and the
-/// transport's close future (the one non-kio source) is polled through the waiter's own waker.
+/// Held by the reconnect loop rather than a detached task, so dropping the
+/// [`Reconnect`] handle tears the old session down with everything else instead
+/// of leaving an orphan holding the connection open.
+struct Draining {
+	session: moq_net::Session,
+	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+
+impl Draining {
+	fn new(session: moq_net::Session, handover: Duration) -> Self {
+		let closed = {
+			let session = session.clone();
+			Box::pin(async move {
+				session.closed().await;
+			}) as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
+		};
+
+		Self {
+			session,
+			closed,
+			deadline: Box::pin(tokio::time::sleep(handover)),
+		}
+	}
+
+	/// Poll the drain; `true` once it is over and the handle should be released.
+	fn poll(&mut self, waiter: &kio::Waiter) -> bool {
+		if waiter.poll_future(self.closed.as_mut()).is_ready() {
+			tracing::debug!("old session drained cleanly after GOAWAY");
+			return true;
+		}
+		if waiter.poll_future(self.deadline.as_mut()).is_ready() {
+			tracing::warn!("old session did not drain in time; closing");
+			self.session.abort(moq_net::Error::GoawayTimeout);
+			return true;
+		}
+		false
+	}
+}
+
+/// Wait for `session` to close or receive a GOAWAY, forwarding its send/recv bandwidth estimates
+/// into the persistent producers meanwhile so [`Reconnect`] consumers track the live estimates
+/// across the connection, and draining any predecessor left over from an earlier migration.
+///
+/// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
+/// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
+/// polled through the waiter's own waker.
 async fn run_session(
 	send_bw: &BandwidthProducer,
 	recv_bw: &BandwidthProducer,
 	session: &moq_net::Session,
-) -> Result<(), moq_net::Error> {
+	draining: &mut Option<Draining>,
+) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
+	let goaway = session.recv_goaway();
 	let closed = session.closed();
 	tokio::pin!(closed);
 
-	let err = kio::wait(|waiter| {
+	kio::wait(|waiter| {
 		poll_forward(&mut send, send_bw, waiter);
 		poll_forward(&mut recv, recv_bw, waiter);
-		waiter.poll_future(closed.as_mut())
-	})
-	.await;
 
-	Err(err)
+		// Retire the predecessor once it closes or overstays its handover window.
+		if let Some(old) = draining.as_mut()
+			&& old.poll(waiter)
+		{
+			*draining = None;
+		}
+
+		// Checked before the close arm: a GOAWAY means the session is still up, and
+		// migrating from it is not the same as reconnecting after it died.
+		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
+			return Poll::Ready(Ended::Goaway(msg));
+		}
+
+		waiter.poll_future(closed.as_mut()).map(|err| Ended::Closed(Err(err)))
+	})
+	.await
 }
 
 /// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once
