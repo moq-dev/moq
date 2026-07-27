@@ -59,7 +59,7 @@ The binary will be in `target/release/moq-cli`.
 ### Heap profiling
 
 The Nix package includes jemalloc profiling support. Source builds can opt in
-with `--features jemalloc`. Start `moq` with profiling enabled, then send
+with `--features jemalloc`. Start `moq` with profiling enabled and then send
 `SIGUSR1` whenever a heap snapshot is needed:
 
 ```bash
