@@ -178,12 +178,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Tick the probe interval, bailing as soon as the peer closes its side.
 			let closed = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
-				let mut tick = std::pin::pin!(interval.tick());
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Some(res));
 					}
-					waiter.poll_future(tick.as_mut()).map(|_| None)
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					interval.poll_tick(&mut cx).map(|_| None)
 				})
 				.await
 			};
@@ -428,27 +428,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Send updates as they arrive. Closure wins the race so a dead peer can't
 		// stall on a busy announce feed.
+		let mut linger = kio::time::Deadline::new();
 		loop {
 			// The earliest deferred cost-restore, if any entry's linger is running.
-			let deadline = watched
-				.values()
-				.filter_map(|entry| entry.idle_at)
-				.min()
-				.map(|at| at + COST_LINGER);
+			linger.set(
+				watched
+					.values()
+					.filter_map(|entry| entry.idle_at)
+					.min()
+					.map(|at| at + COST_LINGER),
+			);
 			let op = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
-				// Pending forever while no linger is running. Fused via `fired`:
-				// a completed future must not be polled again, and once it fires
-				// the turn always ends in a `Ready` below.
-				let mut linger = std::pin::pin!(async move {
-					match deadline {
-						Some(at) => {
-							web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-						}
-						None => std::future::pending().await,
-					}
-				});
-				let mut fired: Option<web_async::time::Instant> = None;
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Err(res));
@@ -456,9 +447,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
 						return Poll::Ready(Ok(Op::Announce(next)));
 					}
-					if fired.is_none() && waiter.poll_future(linger.as_mut()).is_ready() {
-						fired = Some(web_async::time::Instant::now());
-					}
+					// Stamped per poll rather than kept: the turn always ends in a
+					// `Ready` below once it fires, so it never has to survive.
+					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
 					// Poll every watched broadcast for a route-table change; each
 					// wake rescans the map, which announce-control rates make fine.
 					for (suffix, entry) in watched.iter_mut() {

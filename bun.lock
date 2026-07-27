@@ -179,7 +179,7 @@
       "name": "@moq/net",
       "version": "0.2.0",
       "dependencies": {
-        "@moq/qmux": "^0.3.1",
+        "@moq/qmux": "^0.3.2",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
       },
@@ -581,7 +581,7 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
-    "@moq/qmux": ["@moq/qmux@0.3.1", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.1" } }, "sha512-0bSa8S8Mpr6J/kM94MgPRCPefmLhFwMzkFpNsu873SuS5Jne4oYzXoud/5tyDDoS5JAXb1/KBOBrim55qSrViA=="],
+    "@moq/qmux": ["@moq/qmux@0.3.2", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.1" } }, "sha512-8ymBriVxvD5ISfnTJ3k07Zzt4pBOoh/JnulGCjenY2NrUdCr5PUOy42y/9drSXA3SfCfOdaw4A+BSrWN92qVvg=="],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

@@ -270,9 +270,9 @@ pub struct Producer {
 	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
 	info: Arc<Info>,
 
-	// Broadcast liveness. Consumers watch this (read-only) for close; dropping every
-	// producer (this handle and every `Dynamic`) ends the broadcast.
-	alive: kio::Producer<()>,
+	// Broadcast liveness, shared with every `Dynamic`. Consumers watch it (read-only)
+	// for close; the guard ends the broadcast when the last of those handles drops.
+	alive: Arc<Alive>,
 
 	// Track registry plus the dynamic request queue, mutated by producers and
 	// consumers alike under one lock.
@@ -287,10 +287,11 @@ pub struct Producer {
 impl Producer {
 	/// Create a producer for the given broadcast metadata. Prefer [`Info::produce`].
 	pub fn new(info: Info) -> Self {
+		let state = kio::Shared::<BroadcastState>::default();
 		Self {
 			info: Arc::new(info),
-			alive: Default::default(),
-			state: Default::default(),
+			alive: Alive::new(state.clone()),
+			state,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -306,13 +307,14 @@ impl Producer {
 	/// tracks that are spliced across per-session tracks, queued for a route to
 	/// serve. Used by the origin for broadcasts reached over the network.
 	pub(crate) fn new_spliced(info: Info) -> Self {
+		let state = kio::Shared::new(BroadcastState {
+			spliced: Some(SplicedState::default()),
+			..Default::default()
+		});
 		Self {
 			info: Arc::new(info),
-			alive: Default::default(),
-			state: kio::Shared::new(BroadcastState {
-				spliced: Some(SplicedState::default()),
-				..Default::default()
-			}),
+			alive: Alive::new(state.clone()),
+			state,
 			// The origin-owned spliced broadcast stays untagged: egress attribution is
 			// applied when a tagged `origin::Consumer` hands the consumer out.
 			stats: stats::Scope::default(),
@@ -327,7 +329,7 @@ impl Producer {
 	/// A watch-only handle to the broadcast's demand. See [`Demand`].
 	pub fn demand(&self) -> Demand {
 		Demand {
-			alive: self.alive.consume().weak(),
+			alive: self.alive.token.consume().weak(),
 			state: self.state.clone(),
 		}
 	}
@@ -477,7 +479,7 @@ impl Producer {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			alive: self.alive.consume(),
+			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			route_seen: None,
 			routes_seen: None,
@@ -506,7 +508,7 @@ impl Producer {
 		}
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
-		let _ = self.alive.close();
+		let _ = self.alive.token.close();
 	}
 
 	/// Abort the broadcast, ending it for consumers with `err`.
@@ -530,7 +532,7 @@ impl Producer {
 			state.closing = true;
 			state.abort = Some(err);
 		}
-		let _ = self.alive.close();
+		let _ = self.alive.token.close();
 		Ok(())
 	}
 
@@ -540,16 +542,30 @@ impl Producer {
 	}
 }
 
-impl Drop for Producer {
+/// Ends the broadcast when the last [`Producer`] or [`Dynamic`] drops, closing the
+/// liveness channel every [`Consumer`] watches.
+///
+/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
+/// a snapshot, and acting on it is exactly what invalidates it.
+struct Alive {
+	token: kio::Producer<()>,
+	state: kio::Shared<BroadcastState>,
+}
+
+impl Alive {
+	fn new(state: kio::Shared<BroadcastState>) -> Arc<Self> {
+		Arc::new(Self {
+			token: kio::Producer::default(),
+			state,
+		})
+	}
+}
+
+impl Drop for Alive {
 	fn drop(&mut self) {
-		// Only the last producer ending the broadcast matters; a clone dropping
-		// leaves it live (`alive` is shared with every `Dynamic` too). Warn if that
-		// last exit wasn't an explicit finish(), since consumers will then see
-		// Error::Dropped (classically a GC-collected handle in a language binding
-		// that tears the stream down mid-publish).
-		if !self.alive.is_last() {
-			return;
-		}
+		// Warn if the last exit wasn't an explicit finish(), since consumers will
+		// then see Error::Dropped (classically a GC-collected handle in a language
+		// binding that tears the stream down mid-publish).
 		if !self.state.read().closing {
 			tracing::warn!(
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
@@ -626,7 +642,7 @@ impl Drop for SourceGuard {
 pub struct Dynamic {
 	info: Arc<Info>,
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
-	alive: kio::Producer<()>,
+	alive: Arc<Alive>,
 	state: kio::Shared<BroadcastState>,
 	// Ingress stats scope, applied to the tracks this handler serves. Empty (no-op)
 	// for an untagged broadcast.
@@ -650,7 +666,7 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
+	fn new(info: Arc<Info>, alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
 		state.lock().requests.add_handler();
 
 		Self {
@@ -702,7 +718,7 @@ impl Dynamic {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			alive: self.alive.consume(),
+			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			route_seen: None,
 			routes_seen: None,
@@ -720,7 +736,7 @@ impl Dynamic {
 	/// [`Producer::abort`], or [`Error::Dropped`] for a [`Producer::finish`] or a
 	/// dropped producer (check [`Consumer::is_finished`] to tell those apart).
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		ready!(self.alive.poll_closed(waiter));
+		ready!(self.alive.token.poll_closed(waiter));
 		Poll::Ready(self.state.read().abort.clone().unwrap_or(Error::Dropped))
 	}
 

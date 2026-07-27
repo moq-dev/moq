@@ -43,7 +43,7 @@ impl Info {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default())
+		Producer::new(self, track::Info::default(), Default::default())
 	}
 }
 
@@ -101,8 +101,8 @@ pub(crate) struct GroupState {
 	// The total size (in bytes) of all cached frames plus any in-flight frame.
 	pub(crate) cache: u64,
 
-	// This group's registration in the track's cache pool; mirrors `cache` so the
-	// pool can evict the least-recently-read groups under memory pressure.
+	// Mirrors `cache` into the track's shared cache pool, so the group's bytes count
+	// against the byte budget tracks evict toward.
 	charge: cache::Charge,
 
 	// Once finalized, the total number of frames the group will ever contain. Recorded
@@ -122,7 +122,6 @@ impl GroupState {
 		}
 		let local = index - self.offset;
 		if let Some(f) = self.frames.get(local) {
-			self.charge.touch();
 			let info = frame::Info {
 				size: f.payload.len() as u64,
 				timestamp: f.timestamp,
@@ -132,7 +131,6 @@ impl GroupState {
 		if local == self.frames.len()
 			&& let Some(p) = &self.partial
 		{
-			self.charge.touch();
 			let info = frame::Info {
 				size: p.buf.capacity() as u64,
 				timestamp: p.timestamp,
@@ -196,20 +194,6 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
-/// The pool's eviction hook: abort the group with [`Error::Evicted`], freeing its
-/// frames immediately. A no-op once the group is already aborted or fully dropped.
-fn evict(weak: &kio::ProducerWeak<GroupState>) {
-	// Upgrade to write; a closed (finished or fully dropped) group has nothing to free.
-	let Some(producer) = weak.produce() else { return };
-	let Ok(mut state) = producer.write() else { return };
-	if state.abort.is_some() {
-		return;
-	}
-	state.abort = Some(Error::Evicted);
-	state.release();
-	state.close();
-}
-
 /// Writes frames to a group in order.
 ///
 /// Each group is delivered independently over a QUIC stream.
@@ -223,15 +207,55 @@ pub struct Producer {
 	// inherited by each frame (see [`Self::create_frame`]).
 	info: Info,
 
-	// The parent track's info, inherited rather than passed piecemeal. Its
+	// The parent track's properties, inherited rather than passed piecemeal. Its
 	// `timescale` is used by [`Self::create_frame`] to normalize every frame's
 	// timestamp into the track scale before it enters the stream. Threaded down by
 	// value from [`track::Producer::create_group`] / `append_group`.
 	track: track::Info,
 
+	// The parent track's account against the shared cache pool. Held here as well as
+	// in the group's `cache::Charge` so a frame write can settle the track's eviction
+	// debt with the group lock released.
+	cache: Arc<cache::Track>,
+
 	// Ingress payload meter, set by a tagged [`track::Producer`] via
 	// [`Self::with_meter`]. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
+
+	// Shared by every clone: its `Drop` is the abrupt-teardown, running exactly once
+	// when the last of them goes.
+	alive: Arc<Alive>,
+}
+
+/// Ends the group when the last [`Producer`] clone drops, including the clone the
+/// parent track holds in its cache.
+///
+/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
+/// a snapshot, and acting on it is exactly what can invalidate it. Holding a producer
+/// of its own also keeps the state writable until the teardown has run, whatever order
+/// the last owner's fields drop in.
+struct Alive {
+	info: Info,
+	state: kio::Producer<GroupState>,
+}
+
+impl Drop for Alive {
+	fn drop(&mut self) {
+		// See track::Alive: the last producer dropping without a clean finish releases
+		// the cached frames so a stale consumer can't pin their buffers forever. A
+		// finished group keeps its cache so consumers can drain.
+		if let Ok(mut state) = modify(&self.state)
+			&& state.fin.is_none()
+		{
+			// Dropped without finish() or abort(), so consumers will see
+			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
+			tracing::warn!(
+				sequence = self.info.sequence,
+				"group::Producer dropped without finish() or abort()"
+			);
+			state.release();
+		}
+	}
 }
 
 impl std::ops::Deref for Producer {
@@ -243,26 +267,30 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	/// Create a group producer bound to its parent track's [`track::Info`].
+	/// Create a group producer bound to its parent track's [`track::Info`] and cache
+	/// account.
 	///
 	/// Crate-private: groups are only constructed via [`track::Producer`], which
-	/// threads its [`track::Info`] down so properties like the timescale are inherited
-	/// rather than passed in. Every frame added to this group is normalized to the
-	/// track's timescale by [`Self::create_frame`].
+	/// threads both down so properties like the timescale are inherited rather than
+	/// passed in. Every frame added to this group is normalized to the track's
+	/// timescale by [`Self::create_frame`].
 	///
-	/// Registers the group in the shared cache pool reached through the track's
-	/// broadcast (`track.broadcast.origin.pool`), so its cached bytes count against
-	/// the budget and it can be evicted under memory pressure.
-	pub(crate) fn new(info: Info, track: track::Info) -> Self {
+	/// Charges the group into `cache`, so its cached bytes count against the budget the
+	/// track evicts toward under memory pressure.
+	pub(crate) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
 		let state = kio::Producer::<GroupState>::default();
-		let weak = state.weak();
-		let charge = track.broadcast.origin.pool.register(Box::new(move || evict(&weak)));
-		state.write().ok().expect("a new group is open").charge = charge;
+		state.write().ok().expect("a new group is open").charge = cache.charge();
+		let alive = Arc::new(Alive {
+			info,
+			state: state.clone(),
+		});
 		Self {
 			info,
 			state,
 			track,
+			cache,
 			stats: stats::Meter::default(),
+			alive,
 		}
 	}
 
@@ -310,11 +338,11 @@ impl Producer {
 		state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
 		state.evict();
-
-		// The pool evicts other groups' state, so trigger it only after releasing our
-		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		self.track.broadcast.origin.pool.evict();
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.cache.settle();
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -352,11 +380,11 @@ impl Producer {
 			buf: buf.clone(),
 		});
 		state.evict();
-
-		// The pool evicts other groups' state, so trigger it only after releasing our
-		// lock. Reached via the parent chain; a no-op when the pool is unbounded.
 		drop(state);
-		self.track.broadcast.origin.pool.evict();
+
+		// With the group lock released (lock order is track then group), settle
+		// eviction debt if enough has been written since the track last paid.
+		self.cache.settle();
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.
@@ -427,10 +455,33 @@ impl Producer {
 		self.state.read().abort.is_some()
 	}
 
-	/// This group's cache pool registration, used by the track to pin the latest
-	/// group. `None` when the pool is detached (the unbounded default).
-	pub(crate) fn cache_entry(&self) -> Option<Arc<cache::Entry>> {
-		self.state.read().charge.entry()
+	/// The group's full cached footprint (payload plus fixed overhead), used by the
+	/// track to size this group as an eviction victim.
+	pub(crate) fn cache_size(&self) -> u64 {
+		self.state.read().charge.size()
+	}
+
+	/// Tick of the group's last cache access, driving eviction protection and age
+	/// expiry (see [`cache::Pool::average`]).
+	pub(crate) fn cache_accessed(&self) -> u64 {
+		self.state.read().charge.accessed()
+	}
+
+	/// Enter the group into the evictable population: demoted from the live edge,
+	/// or inserted behind it. Idempotent; a no-op once the group is closed.
+	pub(crate) fn cache_demote(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.demote();
+		}
+	}
+
+	/// Record a cache access (a FETCH hit, or a fetched backfill's birth),
+	/// protecting the group from eviction and restarting its expiry clock. A no-op
+	/// once the group is closed.
+	pub(crate) fn cache_refresh(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.charge.refresh();
+		}
 	}
 
 	/// Create a new consumer for the group.
@@ -474,29 +525,9 @@ impl Clone for Producer {
 			info: self.info,
 			state: self.state.clone(),
 			track: self.track.clone(),
+			cache: self.cache.clone(),
 			stats: self.stats.clone(),
-		}
-	}
-}
-
-impl Drop for Producer {
-	fn drop(&mut self) {
-		// See track::Producer::drop: the last producer dropping without a clean finish
-		// releases the cached frames so a stale consumer can't pin their buffers forever.
-		// A finished group keeps its cache so consumers can drain.
-		if !self.state.is_last() {
-			return;
-		}
-		if let Ok(mut state) = modify(&self.state)
-			&& state.fin.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
-			state.release();
+			alive: self.alive.clone(),
 		}
 	}
 }
@@ -705,10 +736,6 @@ impl Consumer {
 			let local = (index - state.offset).min(state.frames.len());
 			prefetch.fill(state.frames.range(local..).cloned());
 			if prefetch.len > 0 {
-				// Mark the group recently read so the cache pool keeps it over staler
-				// groups. Touching once per batch fill is enough; the drained pops that
-				// follow serve from the prefetch without re-locking.
-				state.charge.touch();
 				return Poll::Ready(Ok(()));
 			}
 			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve
@@ -1161,6 +1188,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
 		);
 		let frame = frame::Info {
 			size: 3,
@@ -1179,6 +1207,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
 		);
 		let writer = producer
 			.create_frame(frame::Info {

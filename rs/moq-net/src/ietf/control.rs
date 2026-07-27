@@ -30,7 +30,7 @@ impl Control {
 
 	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
 	pub async fn next_request_id(&self) -> Result<RequestId, Error> {
-		let mut timeout = std::pin::pin!(web_async::time::sleep(std::time::Duration::from_secs(10)));
+		let mut timeout = kio::time::Deadline::after(std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {
 			let allowed = self.state.poll(waiter, |state| {
@@ -45,7 +45,7 @@ impl Control {
 				return Poll::Ready(Ok(state.request_id_next.increment()));
 			}
 
-			if waiter.poll_future(timeout.as_mut()).is_ready() {
+			if timeout.poll(waiter).is_ready() {
 				tracing::warn!("timed out waiting for MAX_REQUEST_ID");
 				return Poll::Ready(Err(Error::Cancel));
 			}

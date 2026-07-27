@@ -20,6 +20,10 @@
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`].
+//! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
+//!   output device and mixes the `playback::Sink`s registered with it, so one
+//!   device serves every track in a call. Requires the `playback` feature, so
+//!   these names are unlinked here too.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -38,6 +42,9 @@ mod resample;
 pub mod capture;
 pub mod decode;
 pub mod encode;
+
+#[cfg(feature = "playback")]
+pub mod playback;
 
 pub use error::Error;
 pub use format::Format;

@@ -1,57 +1,82 @@
-//! A shared byte budget for cached groups, reclaimed with LRU eviction.
+//! A shared byte budget for cached groups, repaid by write-time eviction.
 //!
-//! Every group registers its cached bytes in a [`Pool`]. When the pool exceeds its
-//! capacity, the least-recently-read groups are aborted with
-//! [`Error::Evicted`](crate::Error::Evicted), freeing their frames immediately. The
-//! latest group of each track is pinned and never evicted, so the live edge always
-//! survives memory pressure.
+//! Every group charges its cached bytes into a [`Pool`] through a crate-internal
+//! `Charge`, billed to its track's `Track` account. The pool itself never evicts: it is
+//! a handful of atomic counters. While the pool is over capacity, each track accrues
+//! eviction debt as it writes (`accrue`),
+//! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
+//! groups with [`Error::Evicted`](crate::Error::Evicted). Reclamation is therefore
+//! distributed across every writing track and converges on the capacity without any
+//! global lock, registry, or background task.
+//!
+//! Cross-track ordering comes from one statistic: the mean last-access time of the
+//! evictable population (every cached group except each track's protected latest).
+//! A group accessed more recently than that mean is never evicted, so a fresh fetch
+//! in one track can't die while another track holds staler content, and a track
+//! whose oldest group is staler than the mean accrues debt at double rate. Evicting
+//! old entries and inserting new ones both advance the mean, so the eviction
+//! frontier moves with cache turnover on its own.
 //!
 //! A pool is inert by default ([`Pool::unbounded`]): publishers and subscribers that
 //! never set a capacity pay only a couple of atomic counters. A relay creates one
 //! bounded pool and shares it across every origin so the whole process caches into a
 //! single budget.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use web_async::Lock;
+use super::track::TrackState;
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
 /// Covers the group/track slot allocations so a track producing many tiny groups
 /// (e.g. one frame per group) is billed roughly for its real footprint instead of
-/// just its payload bytes.
+/// just its payload bytes. Also bounds the live group count (`used / 256`), which
+/// keeps the access-time sum below u64 (see [`TICK_MS`]).
 const ENTRY_OVERHEAD: u64 = 256;
 
-/// Slack before [`Lru::compact`] rebuilds the heap, so a pool holding just a few
-/// entries doesn't rebuild on every registration.
-const COMPACT_SLACK: usize = 64;
+/// Sub-tick boosts applied to the last-access stamp, breaking ties within one
+/// coarse tick: a frame write outranks merely-inserted content, and an explicit
+/// read (FETCH hit or backfill birth) outranks both.
+const WRITE_BOOST: u64 = 1;
+const READ_BOOST: u64 = 2;
+
+/// Milliseconds per tick of the coarse clock behind access timestamps.
+///
+/// Coarse ticks keep the count-weighted timestamp sum far from u64 overflow: the
+/// sum is bounded by `elapsed_ticks * live_groups`, live groups are bounded by
+/// `used / ENTRY_OVERHEAD`, and twenty years of ticks (6.3e9) times a 64 GiB
+/// target's worst-case ~270M groups is ~1.7e18, a tenth of `u64::MAX`. A
+/// byte-weighted mean would overflow u64 even at whole-second ticks, which is why
+/// the mean is count-weighted.
+const TICK_MS: u64 = 100;
 
 /// A shared byte budget that caches charge into; cloning shares the same budget.
 ///
-/// The pool tracks how many payload bytes are cached across every registered group
-/// and evicts the least-recently-read groups once `used` exceeds `capacity`.
-/// Eviction aborts the victim group with [`Error::Evicted`](crate::Error::Evicted),
-/// which frees its frames immediately and wakes any parked readers. Pinned (latest)
-/// groups are never evicted but still count against the budget.
-///
-/// Reads and writes only touch atomics; the internal lock is taken when a group
-/// registers/unregisters and when the pool is actually over budget.
+/// The pool tracks how many payload bytes are cached across every registered group,
+/// plus the mean last-access time of the evictable ones. It never evicts on its own:
+/// tracks accrue eviction debt as they write and evict their own oldest groups to
+/// pay it, so every operation here is a few atomics with no lock. The capacity is
+/// therefore a target usage converges toward, not a hard limit: carried debt, capped
+/// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone, Default)]
 pub struct Pool {
 	inner: Arc<Inner>,
 }
 
 struct Inner {
-	// Total bytes currently charged, including pinned entries and per-entry overhead.
+	// Total bytes currently charged, including per-entry overhead.
 	used: AtomicU64,
 	// u64::MAX means unbounded.
 	capacity: AtomicU64,
-	// Reference point for the coarse `last_access` clock.
+	// Reference point for the coarse tick clock.
 	epoch: web_async::time::Instant,
-	lru: Lock<Lru>,
+	// Sum and count of last-access ticks across the evictable population, giving a
+	// count-weighted mean. Tracks add a group when it becomes evictable (demoted
+	// from the live edge, or inserted behind it) and remove it when it leaves.
+	access_sum: AtomicU64,
+	access_count: AtomicU64,
 }
 
 impl Default for Inner {
@@ -60,99 +85,18 @@ impl Default for Inner {
 			used: AtomicU64::new(0),
 			capacity: AtomicU64::new(u64::MAX),
 			epoch: web_async::time::Instant::now(),
-			lru: Lock::default(),
+			access_sum: AtomicU64::new(0),
+			access_count: AtomicU64::new(0),
 		}
-	}
-}
-
-#[derive(Default)]
-struct Lru {
-	// Min-heap of (last_access snapshot, id). Snapshots go stale when an entry is
-	// touched; a popped entry whose current last_access differs is re-pushed with
-	// the fresh key instead of being evicted (lazy re-keying).
-	heap: BinaryHeap<Reverse<(u64, u64)>>,
-	// Live entries by id. An id popped from the heap that's no longer here was
-	// already evicted or dropped.
-	entries: HashMap<u64, Arc<Entry>>,
-	next_id: u64,
-}
-
-impl Lru {
-	/// Drop heap slots whose entry is gone, once they outnumber the live ones.
-	///
-	/// Unregistering leaves its heap slot behind to be discarded on a later pop,
-	/// but `evict` is the only thing that pops and it returns early while the pool
-	/// is under capacity -- so an UNBOUNDED pool never pops at all and the heap
-	/// would grow without bound. Rebuilding costs O(n) but is amortized by the
-	/// doubling threshold, so steady-state churn keeps the heap within 2x live.
-	fn compact(&mut self) {
-		if self.heap.len() <= 2 * self.entries.len() + COMPACT_SLACK {
-			return;
-		}
-		self.heap = self
-			.entries
-			.values()
-			.map(|entry| Reverse((entry.last_access.load(Ordering::Relaxed), entry.id)))
-			.collect();
-	}
-}
-
-/// A single cached group's registration in the pool.
-///
-/// Holds only atomics plus the eviction hook, so touching recency or flipping the
-/// pin never takes a lock.
-///
-/// The hook's `kio::ProducerWeak` does NOT make this cheap to leave registered:
-/// it holds no producer/consumer ref count, but it does hold the group's
-/// `Arc<Mutex<State>>` storage, so a live registration keeps the whole group
-/// alive. Registrations must therefore be dropped as soon as the group stops
-/// being an eviction candidate (see [`Charge::clear`]), not merely on `Drop`.
-pub(crate) struct Entry {
-	id: u64,
-	// Payload bytes plus ENTRY_OVERHEAD currently charged by this entry.
-	bytes: AtomicU64,
-	// Coarse milliseconds since the pool epoch of the last read (or write).
-	last_access: AtomicU64,
-	// Pinned entries (the track's latest group) are skipped by eviction.
-	pinned: AtomicBool,
-	// Aborts the group with Error::Evicted. Called without any pool lock held.
-	//
-	// `None` once the group stopped being an eviction candidate. Taking it is what
-	// releases the group's state, so it must be dropped (not just left registered)
-	// as soon as the group is dead -- see the type-level note above.
-	evict: Lock<Option<Box<dyn Fn() + Send + Sync>>>,
-	epoch: web_async::time::Instant,
-}
-
-impl Entry {
-	fn now(&self) -> u64 {
-		self.epoch.elapsed().as_millis() as u64
-	}
-
-	/// Take the eviction hook, so dropping it releases whatever it captured.
-	///
-	/// The caller MUST drop the returned hook with no pool lock held: releasing the
-	/// group's state can cascade into drops that re-enter the pool.
-	fn take_hook(&self) -> Option<Box<dyn Fn() + Send + Sync>> {
-		self.evict.lock().take()
-	}
-
-	/// Record a read so eviction considers this group recently used.
-	pub(crate) fn touch(&self) {
-		self.last_access.store(self.now(), Ordering::Relaxed);
-	}
-
-	/// Pin or unpin this entry. Pinned entries are immune to eviction.
-	pub(crate) fn set_pinned(&self, pinned: bool) {
-		self.pinned.store(pinned, Ordering::Relaxed);
 	}
 }
 
 impl Pool {
-	/// Create a pool that evicts once `capacity` bytes are cached.
+	/// Create a pool with a byte target that tracks evict toward as they write.
 	///
 	/// The budget counts frame payload bytes (plus a small fixed overhead per
-	/// group), not process RSS; leave headroom when sizing it from real memory.
+	/// group), not process RSS, and is a convergence target rather than a hard
+	/// limit; leave headroom when sizing it from real memory.
 	pub fn new(capacity: u64) -> Self {
 		let pool = Self::default();
 		pool.inner.capacity.store(capacity, Ordering::Relaxed);
@@ -164,7 +108,7 @@ impl Pool {
 		Self::default()
 	}
 
-	/// The configured capacity in bytes, or `None` when unbounded.
+	/// The configured byte target, or `None` when unbounded.
 	pub fn capacity(&self) -> Option<u64> {
 		match self.inner.capacity.load(Ordering::Relaxed) {
 			u64::MAX => None,
@@ -177,12 +121,13 @@ impl Pool {
 		self.inner.used.load(Ordering::Relaxed)
 	}
 
-	/// Change the capacity, evicting immediately if the new capacity is exceeded.
-	/// `None` makes the pool unbounded.
+	/// Change the capacity. `None` makes the pool unbounded.
+	///
+	/// Takes effect as tracks write: a shrink leaves the pool over budget, which every
+	/// subsequent write pays down proportionally. Nothing is reclaimed synchronously.
 	pub fn resize(&self, capacity: impl Into<Option<u64>>) {
 		let capacity = capacity.into().unwrap_or(u64::MAX);
 		self.inner.capacity.store(capacity, Ordering::Relaxed);
-		self.evict();
 	}
 
 	/// Returns true if both handles share the same underlying pool.
@@ -190,123 +135,72 @@ impl Pool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}
 
-	/// Test-only snapshot of the live entries: (id, last_access ms, bytes, pinned),
-	/// plus the pool's current clock reading. For diagnosing eviction order.
-	#[cfg(test)]
-	pub(crate) fn debug_entries(&self) -> (u64, Vec<(u64, u64, u64, bool)>) {
-		let now = self.inner.epoch.elapsed().as_millis() as u64;
-		let lru = self.inner.lru.lock();
-		let mut entries: Vec<_> = lru
-			.entries
-			.values()
-			.map(|e| {
-				(
-					e.id,
-					e.last_access.load(Ordering::Relaxed),
-					e.bytes.load(Ordering::Relaxed),
-					e.pinned.load(Ordering::Relaxed),
-				)
-			})
-			.collect();
-		entries.sort_unstable();
-		(now, entries)
+	/// Charge `n` more cached bytes.
+	pub(crate) fn add(&self, n: u64) {
+		self.inner.used.fetch_add(n, Ordering::Relaxed);
 	}
 
-	/// Register a group, returning the [`Charge`] that tracks its bytes.
-	///
-	/// `evict` must abort the group (releasing its charge); it is invoked without
-	/// any pool lock held, and never after the returned charge is dropped.
-	pub(crate) fn register(&self, evict: Box<dyn Fn() + Send + Sync>) -> Charge {
-		let inner = self.inner.clone();
-		let entry = {
-			let mut lru = inner.lru.lock();
-			let id = lru.next_id;
-			lru.next_id += 1;
-
-			let entry = Arc::new(Entry {
-				id,
-				bytes: AtomicU64::new(ENTRY_OVERHEAD),
-				last_access: AtomicU64::new(0),
-				pinned: AtomicBool::new(false),
-				evict: Lock::new(Some(evict)),
-				epoch: inner.epoch,
-			});
-			entry.touch();
-
-			lru.entries.insert(id, entry.clone());
-			lru.heap.push(Reverse((entry.last_access.load(Ordering::Relaxed), id)));
-			lru.compact();
-			entry
-		};
-
-		inner.used.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
-		Charge {
-			inner: Some((inner, entry)),
-		}
+	/// Release `n` cached bytes.
+	pub(crate) fn sub(&self, n: u64) {
+		self.inner.used.fetch_sub(n, Ordering::Relaxed);
 	}
 
-	/// Evict least-recently-read groups until the pool is back under capacity.
+	/// Coarse ticks since the pool was created: the clock access timestamps use.
+	pub(crate) fn now(&self) -> u64 {
+		self.inner.epoch.elapsed().as_millis() as u64 / TICK_MS
+	}
+
+	/// Convert a duration into coarse ticks, saturating.
+	pub(crate) fn ticks(duration: Duration) -> u64 {
+		u64::try_from(duration.as_millis() / TICK_MS as u128).unwrap_or(u64::MAX)
+	}
+
+	/// Mean last-access tick across the evictable population, or `None` when it is
+	/// empty. The sum and count are read separately, so the mean is approximate
+	/// under concurrent updates; eviction only needs a rough frontier.
+	pub(crate) fn average(&self) -> Option<u64> {
+		let count = self.inner.access_count.load(Ordering::Relaxed);
+		if count == 0 {
+			return None;
+		}
+		Some(self.inner.access_sum.load(Ordering::Relaxed) / count)
+	}
+
+	/// A group with last-access tick `ts` joined the evictable population.
+	pub(crate) fn access_insert(&self, ts: u64) {
+		self.inner.access_sum.fetch_add(ts, Ordering::Relaxed);
+		self.inner.access_count.fetch_add(1, Ordering::Relaxed);
+	}
+
+	/// A group with last-access tick `ts` left the evictable population.
+	pub(crate) fn access_remove(&self, ts: u64) {
+		self.inner.access_sum.fetch_sub(ts, Ordering::Relaxed);
+		self.inner.access_count.fetch_sub(1, Ordering::Relaxed);
+	}
+
+	/// An evictable group's last-access tick moved from `old` to `new` (a FETCH hit).
+	pub(crate) fn access_refresh(&self, old: u64, new: u64) {
+		// A single wrapping add keeps the sum exact even under racing refreshes.
+		self.inner
+			.access_sum
+			.fetch_add(new.wrapping_sub(old), Ordering::Relaxed);
+	}
+
+	/// The eviction debt a track takes on by writing `written` bytes, or `None` while
+	/// the pool is under capacity (the caller should forget any outstanding debt).
 	///
-	/// Victims are collected under the lock but aborted after it's released, so an
-	/// eviction hook can freely take its group's lock.
-	pub(crate) fn evict(&self) {
-		let inner = &self.inner;
-		if inner.used.load(Ordering::Relaxed) <= inner.capacity.load(Ordering::Relaxed) {
-			return;
+	/// The debt is `written * used / capacity`, so paying it evicts slightly more
+	/// than was written and the overshoot decays toward the capacity. Tracks double
+	/// it when their oldest content is staler than [`Self::average`]. Saturates: a
+	/// tiny capacity must not wrap a huge debt into a small one.
+	pub(crate) fn accrue(&self, written: u64) -> Option<u64> {
+		let used = self.inner.used.load(Ordering::Relaxed);
+		let capacity = self.inner.capacity.load(Ordering::Relaxed);
+		if used <= capacity {
+			return None;
 		}
-
-		let mut victims = Vec::new();
-		{
-			let mut lru = inner.lru.lock();
-			// Bytes the collected victims will release once aborted below.
-			let mut freed = 0u64;
-			// Pinned entries popped this pass; re-pushing them immediately would just
-			// pop them again (same key), so they're held aside until the pass ends.
-			let mut pinned = Vec::new();
-			// Bounding the pops guarantees termination: an entry needs at most two
-			// (one re-key of its stale snapshot, one settle). A concurrent touch can
-			// steal a slot, ending the pass early; the next write retries.
-			let mut budget = 2 * lru.heap.len();
-
-			while budget > 0
-				&& inner.used.load(Ordering::Relaxed).saturating_sub(freed) > inner.capacity.load(Ordering::Relaxed)
-			{
-				budget -= 1;
-				let Some(Reverse((snapshot, id))) = lru.heap.pop() else {
-					break;
-				};
-				let Some(entry) = lru.entries.get(&id) else {
-					// Already evicted or dropped; discard the stale heap slot.
-					continue;
-				};
-				let access = entry.last_access.load(Ordering::Relaxed);
-				if access != snapshot {
-					// Touched since this snapshot; re-key instead of evicting.
-					lru.heap.push(Reverse((access, id)));
-					continue;
-				}
-				if entry.pinned.load(Ordering::Relaxed) {
-					pinned.push(Reverse((access, id)));
-					continue;
-				}
-
-				let entry = lru.entries.remove(&id).unwrap();
-				freed += entry.bytes.load(Ordering::Relaxed);
-				victims.push(entry);
-			}
-
-			for slot in pinned {
-				lru.heap.push(slot);
-			}
-		}
-
-		// Taking the hook also drops it once it has run, releasing the group state
-		// the closure captured. The pool lock is already released here.
-		for victim in victims {
-			if let Some(hook) = victim.take_hook() {
-				hook();
-			}
-		}
+		let debt = written as u128 * used as u128 / capacity.max(1) as u128;
+		Some(u64::try_from(debt).unwrap_or(u64::MAX))
 	}
 }
 
@@ -319,315 +213,350 @@ impl std::fmt::Debug for Pool {
 	}
 }
 
-/// The RAII side of a group's pool registration, owned by the group's state.
+/// Gross bytes a track writes before a frame write settles its eviction debt itself,
+/// so a track appending frames to open groups (never inserting another group) still
+/// pays. Coarse: the cost is one track-state lock per threshold crossing.
+const WRITE_CHARGE_THRESHOLD: u64 = 256 * 1024;
+
+/// One track's account against the [`Pool`], shared with every group it creates.
+///
+/// Groups charge their bytes here (through a [`Charge`]) rather than straight into the
+/// pool, so the track can drain what its own groups wrote into eviction debt and pay it
+/// off by evicting them. The link back to the track is a [`kio::Weak`] because the track
+/// owns its cached groups and each of those owns this account: anything stronger would
+/// make a track's cache immortal.
+///
+/// The default account is detached: an unbounded pool and no track, so every operation
+/// is a no-op.
+#[derive(Default)]
+pub(crate) struct Track {
+	pool: Pool,
+
+	// Gross bytes charged by this track's groups (payload plus overhead), never
+	// decremented here: the track swaps it out as it accrues debt.
+	written: AtomicU64,
+
+	// The track that pays this account off, holding the groups being charged.
+	state: kio::Weak<TrackState>,
+}
+
+impl Track {
+	/// Open an account against `pool` for the track behind `state`.
+	pub(crate) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
+		Arc::new(Self {
+			pool,
+			written: AtomicU64::new(0),
+			state,
+		})
+	}
+
+	/// The pool this track caches into.
+	pub(crate) fn pool(&self) -> &Pool {
+		&self.pool
+	}
+
+	/// Charge a new group's fixed overhead, returning its [`Charge`].
+	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
+		self.pool.add(ENTRY_OVERHEAD);
+		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
+		let last = self.pool.now();
+		Charge {
+			track: Some(self.clone()),
+			bytes: ENTRY_OVERHEAD,
+			last,
+			counted: false,
+		}
+	}
+
+	/// Take everything written since the last call, to be turned into eviction debt.
+	pub(crate) fn take_written(&self) -> u64 {
+		self.written.swap(0, Ordering::Relaxed)
+	}
+
+	/// Settle eviction debt from a frame write, once enough bytes accumulate.
+	///
+	/// Called with no group lock held (locks are ordered track then group). Cheap
+	/// until the threshold crosses: one relaxed load. This is what makes a track
+	/// that only appends frames to open groups, never inserting another group,
+	/// still pay its debt (and age its content out).
+	pub(crate) fn settle(&self) {
+		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
+			return;
+		}
+		// Counts as a producer while it lives, which is why `track::Producer` gates
+		// its teardown on its own clone count rather than the state's.
+		let Some(state) = self.state.upgrade() else { return };
+		if let Ok(mut state) = state.write() {
+			state.charge_debt();
+		}
+	}
+}
+
+/// The RAII byte accounting for one cached group, owned by the group's state.
 ///
 /// `add`/`sub` mirror the group's cached payload bytes into the pool with plain
-/// atomics; no lock is taken until the group unregisters. Dropping (or
-/// [`clear`](Self::clear)ing) the charge releases everything it holds. The default
-/// charge is detached: it belongs to no pool and every operation is a no-op.
+/// atomics, and every charged byte (overhead included) is also accumulated into the
+/// track's account, which the track drains into eviction debt on its next write. The
+/// charge also owns the group's sample in the pool's access mean, so the sample lives
+/// exactly as long as the cached bytes do: aborting or dropping the group removes both,
+/// no matter who does it or when. The default charge is detached: it belongs to no
+/// account and every operation is a no-op.
 #[derive(Default)]
 pub(crate) struct Charge {
-	inner: Option<(Arc<Inner>, Arc<Entry>)>,
+	track: Option<Arc<Track>>,
+	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
+	bytes: u64,
+	// Tick of the last cache access: creation, a FETCH hit, or a fetched backfill's
+	// birth. Eviction protection and age expiry key off this.
+	last: u64,
+	// Whether `last` is currently a sample in the pool's access mean, i.e. the
+	// group is in the evictable population.
+	counted: bool,
 }
 
 impl Charge {
-	/// Charge `n` more payload bytes and mark the group recently used.
+	/// Charge `n` more payload bytes, counting them as written.
 	///
-	/// Doesn't evict; callers trigger [`Pool::evict`] after releasing their own locks.
-	pub(crate) fn add(&self, n: u64) {
-		if let Some((inner, entry)) = &self.inner {
-			entry.bytes.fetch_add(n, Ordering::Relaxed);
-			inner.used.fetch_add(n, Ordering::Relaxed);
-			entry.touch();
+	/// A write is also an access: it restarts the retention clock and keeps an
+	/// actively-growing group (a straggler or backfill still being filled) from
+	/// being evicted or expired mid-write, even within the same coarse tick as
+	/// content that was merely inserted.
+	pub(crate) fn add(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes += n;
 		}
+		self.touch(WRITE_BOOST);
 	}
 
 	/// Release `n` payload bytes (a frame evicted by the group's own cap).
-	pub(crate) fn sub(&self, n: u64) {
-		if let Some((inner, entry)) = &self.inner {
-			entry.bytes.fetch_sub(n, Ordering::Relaxed);
-			inner.used.fetch_sub(n, Ordering::Relaxed);
+	pub(crate) fn sub(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.sub(n);
+			self.bytes = self.bytes.saturating_sub(n);
 		}
 	}
 
-	/// Release everything this charge holds (bytes and overhead) AND drop the
-	/// pool's registration. Idempotent; used when the group aborts and clears its
-	/// frames.
-	///
-	/// Unregistering here, rather than waiting for [`Drop`], is what keeps an
-	/// unbounded pool from growing without bound. The pool's `entries` map holds an
-	/// `Arc<Entry>`, the entry owns the eviction hook, and the hook captures a
-	/// `kio::ProducerWeak<GroupState>` -- which holds no producer/consumer ref count
-	/// but DOES hold the group's `Arc<Mutex<State>>` storage alive. So the map keeps
-	/// the group's state alive, the state owns this charge, and `Charge::drop` (the
-	/// only other unregister) can never run: a cycle, one per group forever.
-	/// `Pool::evict` also unregisters and would break it, but it returns early while
-	/// under capacity, so an unbounded pool never gets there.
-	///
-	/// A released group holds no bytes and is closed, so it is not an eviction
-	/// candidate and has no reason to stay registered.
-	pub(crate) fn clear(&self) {
-		let Some((inner, entry)) = &self.inner else {
-			return;
-		};
+	/// The group's full cached footprint: payload bytes plus overhead.
+	pub(crate) fn size(&self) -> u64 {
+		self.bytes
+	}
 
-		let bytes = entry.bytes.swap(0, Ordering::Relaxed);
-		inner.used.fetch_sub(bytes, Ordering::Relaxed);
+	/// Tick of the group's last cache access.
+	pub(crate) fn accessed(&self) -> u64 {
+		self.last
+	}
 
+	/// Enter the group into the evictable population (demoted from the live edge,
+	/// or inserted behind it), sampling its access time into the pool's mean.
+	/// Idempotent.
+	pub(crate) fn demote(&mut self) {
+		if let Some(track) = &self.track
+			&& !self.counted
 		{
-			// Safe to take the pool lock under the group's own lock: `Pool::evict`
-			// releases the pool lock BEFORE invoking a hook that locks a group, so
-			// no thread ever holds the pool lock while waiting on a group lock.
-			let mut lru = inner.lru.lock();
-			lru.entries.remove(&entry.id);
-			lru.compact();
-		}
-
-		// Drop the hook with no pool lock held (see `Entry::take_hook`). This is the
-		// drop that actually frees the group: the caller holds the group's state
-		// lock, so its storage outlives this by at least that handle.
-		drop(entry.take_hook());
-	}
-
-	/// Mark the group recently used (a consumer read a frame).
-	pub(crate) fn touch(&self) {
-		if let Some((_, entry)) = &self.inner {
-			entry.touch();
+			track.pool.access_insert(self.last);
+			self.counted = true;
 		}
 	}
 
-	/// The registration entry, for pinning. `None` when detached.
-	pub(crate) fn entry(&self) -> Option<Arc<Entry>> {
-		self.inner.as_ref().map(|(_, entry)| entry.clone())
+	/// Record a cache read (a FETCH hit, or a fetched backfill's birth).
+	pub(crate) fn refresh(&mut self) {
+		self.touch(READ_BOOST);
+	}
+
+	/// Advance the last-access tick to `boost` ticks past the coarse clock.
+	///
+	/// The boost breaks ties within one coarse tick: written content outranks
+	/// merely-inserted content, and explicitly read content outranks both, so a
+	/// same-tick access still reads as strictly newer than the population mean of
+	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
+	/// repeated accesses can't run ahead of the clock by more than the boost.
+	fn touch(&mut self, boost: u64) {
+		let Some(track) = &self.track else { return };
+		let target = track.pool.now().saturating_add(boost);
+		if target <= self.last {
+			return;
+		}
+		if self.counted {
+			track.pool.access_refresh(self.last, target);
+		}
+		self.last = target;
+	}
+
+	/// Release everything this charge holds: bytes, overhead, and the access
+	/// sample. Idempotent; used when the group aborts and clears its frames.
+	pub(crate) fn clear(&mut self) {
+		if let Some(track) = &self.track {
+			track.pool.sub(self.bytes);
+			self.bytes = 0;
+			if self.counted {
+				track.pool.access_remove(self.last);
+				self.counted = false;
+			}
+		}
 	}
 }
 
 impl Drop for Charge {
 	fn drop(&mut self) {
-		let Some((inner, entry)) = self.inner.take() else {
-			return;
-		};
-		let bytes = entry.bytes.swap(0, Ordering::Relaxed);
-		inner.used.fetch_sub(bytes, Ordering::Relaxed);
-		// The heap slot (if any) goes stale and is discarded on its next pop.
-		inner.lru.lock().entries.remove(&entry.id);
+		self.clear();
 	}
 }
 
 #[cfg(test)]
 mod test {
 	use super::*;
-	use std::time::Duration;
 
-	fn flag() -> (Arc<AtomicBool>, Box<dyn Fn() + Send + Sync>) {
-		let evicted = Arc::new(AtomicBool::new(false));
-		let hook = evicted.clone();
-		(
-			evicted,
-			Box::new(move || {
-				hook.store(true, Ordering::Relaxed);
-			}),
-		)
+	fn charge(pool: &Pool) -> Charge {
+		// No track behind the account: nothing here settles debt, it just accounts.
+		Track::new(pool.clone(), kio::Weak::new()).charge()
 	}
 
 	#[test]
-	fn unbounded_never_evicts() {
+	fn unbounded_never_accrues() {
 		let pool = Pool::unbounded();
-		let (evicted, hook) = flag();
-		let charge = pool.register(hook);
+		let mut charge = charge(&pool);
 		charge.add(1 << 40);
-		pool.evict();
-		assert!(!evicted.load(Ordering::Relaxed));
+		assert_eq!(pool.accrue(1 << 30), None);
 		assert_eq!(pool.used(), (1 << 40) + ENTRY_OVERHEAD);
 		drop(charge);
 		assert_eq!(pool.used(), 0);
 	}
 
-	/// An unbounded pool must not accumulate bookkeeping for groups that have
-	/// released their cache. Before the fix `entries` grew one slot per group
-	/// forever (each holding the group's whole state alive through the eviction
-	/// hook's `ProducerWeak`), because `evict` -- the only unregister that runs
-	/// under capacity -- returns early on an unbounded pool. Observed as ~75 kB/s
-	/// of RSS growth in a publisher, which is `moq-cli`'s default configuration.
 	#[test]
-	fn unbounded_reclaims_cleared_entries() {
-		let pool = Pool::unbounded();
-
-		// Churn far more groups than could ever be live at once, the way a
-		// publisher does: register, charge some bytes, then release on abort.
-		for _ in 0..10_000 {
-			let (_evicted, hook) = flag();
-			let charge = pool.register(hook);
-			charge.add(4096);
-			charge.clear();
-		}
-
-		let (live, entries) = {
-			let lru = pool.inner.lru.lock();
-			(lru.entries.len(), lru.heap.len())
-		};
-		assert_eq!(live, 0, "cleared groups must not stay registered");
-		assert!(
-			entries <= 2 * COMPACT_SLACK,
-			"stale heap slots must be compacted, got {entries}"
-		);
-		assert_eq!(pool.used(), 0);
+	fn accrue_none_under_capacity() {
+		let pool = Pool::new(1000);
+		let mut charge = charge(&pool);
+		charge.add(500);
+		assert_eq!(pool.accrue(100), None);
 	}
 
-	/// A cleared charge must not keep its group's state alive: the hook is the
-	/// only thing holding it, so dropping the registration must drop the hook.
 	#[test]
-	fn clear_releases_the_eviction_hook() {
-		let pool = Pool::unbounded();
-		let canary = Arc::new(());
-		let held = canary.clone();
+	fn accrue_proportional_over_capacity() {
+		let pool = Pool::new(1000);
+		let mut charge = charge(&pool);
+		charge.add(2000 - ENTRY_OVERHEAD); // used = 2000, twice the capacity
 
-		let charge = pool.register(Box::new(move || {
-			// Capture a strong ref the way the real hook captures group state.
-			let _ = &held;
-		}));
-		assert_eq!(Arc::strong_count(&canary), 2, "hook holds the capture");
+		// Debt exceeds what was written by the overshoot ratio, so the pool drains.
+		assert_eq!(pool.accrue(100), Some(200));
+		// Zero written accrues zero: an idle track takes on no debt.
+		assert_eq!(pool.accrue(0), Some(0));
+	}
+
+	#[test]
+	fn average_tracks_evictable_population() {
+		let pool = Pool::new(1000);
+		assert_eq!(pool.average(), None);
+
+		pool.access_insert(10);
+		pool.access_insert(20);
+		assert_eq!(pool.average(), Some(15));
+
+		// A refresh moves one member's contribution, exactly.
+		pool.access_refresh(10, 40);
+		assert_eq!(pool.average(), Some(30));
+
+		pool.access_remove(40);
+		assert_eq!(pool.average(), Some(20));
+		pool.access_remove(20);
+		assert_eq!(pool.average(), None);
+	}
+
+	#[test]
+	fn charge_raii() {
+		let pool = Pool::new(1000);
+		let mut charge = charge(&pool);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD);
+
+		charge.add(100);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 100);
+		charge.sub(40);
+		assert_eq!(pool.used(), ENTRY_OVERHEAD + 60);
 
 		charge.clear();
-		assert_eq!(
-			Arc::strong_count(&canary),
-			1,
-			"clearing must drop the hook, releasing whatever it captured"
-		);
+		assert_eq!(pool.used(), 0);
+		// Idempotent: a second clear (and the eventual drop) releases nothing more.
+		charge.clear();
+		drop(charge);
+		assert_eq!(pool.used(), 0);
 	}
 
 	#[test]
 	fn detached_charge_is_noop() {
-		let charge = Charge::default();
+		let mut charge = Charge::default();
 		charge.add(123);
 		charge.sub(23);
 		charge.clear();
-		charge.touch();
-		assert!(charge.entry().is_none());
-	}
-
-	#[tokio::test]
-	async fn evicts_least_recently_used() {
-		tokio::time::pause();
-
-		let pool = Pool::new(3 * ENTRY_OVERHEAD + 2500);
-		let (evicted_a, hook_a) = flag();
-		let (evicted_b, hook_b) = flag();
-		let (evicted_c, hook_c) = flag();
-
-		let a = pool.register(hook_a);
-		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
-		let b = pool.register(hook_b);
-		b.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
-
-		// Read A so B becomes the least recently used.
-		a.touch();
-		tokio::time::advance(Duration::from_millis(10)).await;
-
-		let c = pool.register(hook_c);
-		c.add(1000);
-		// Over budget by 500: evicting B (stalest) is enough once its charge clears.
-		pool.evict();
-
-		assert!(!evicted_a.load(Ordering::Relaxed));
-		assert!(evicted_b.load(Ordering::Relaxed));
-		assert!(!evicted_c.load(Ordering::Relaxed));
-
-		// The hook is responsible for releasing the charge (a real group aborts).
-		b.clear();
-		assert_eq!(pool.used(), 2 * (1000 + ENTRY_OVERHEAD));
-	}
-
-	#[tokio::test]
-	async fn pinned_entries_survive() {
-		tokio::time::pause();
-
-		let pool = Pool::new(ENTRY_OVERHEAD);
-		let (evicted_a, hook_a) = flag();
-		let (evicted_b, hook_b) = flag();
-
-		let a = pool.register(hook_a);
-		a.entry().unwrap().set_pinned(true);
-		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
-
-		let b = pool.register(hook_b);
-		b.add(1000);
-
-		pool.evict();
-		// A is older but pinned; B is the only eligible victim.
-		assert!(!evicted_a.load(Ordering::Relaxed));
-		assert!(evicted_b.load(Ordering::Relaxed));
-
-		// With B gone, everything left is pinned: eviction terminates without
-		// touching A even though the pool stays over budget.
-		b.clear();
-		drop(b);
-		pool.evict();
-		assert!(!evicted_a.load(Ordering::Relaxed));
-	}
-
-	#[tokio::test]
-	async fn resize_evicts() {
-		tokio::time::pause();
-
-		let pool = Pool::unbounded();
-		let (evicted_a, hook_a) = flag();
-		let a = pool.register(hook_a);
-		a.add(1000);
-
-		pool.evict();
-		assert!(!evicted_a.load(Ordering::Relaxed));
-
-		pool.resize(100);
-		assert!(evicted_a.load(Ordering::Relaxed));
-
-		// Back to unbounded: nothing more to do, and capacity() reports None.
-		pool.resize(None);
-		assert_eq!(pool.capacity(), None);
-	}
-
-	#[tokio::test]
-	async fn touched_entry_is_rekeyed_not_evicted() {
-		tokio::time::pause();
-
-		let pool = Pool::new(2 * ENTRY_OVERHEAD + 1500);
-		let (evicted_a, hook_a) = flag();
-		let (evicted_b, hook_b) = flag();
-
-		let a = pool.register(hook_a);
-		a.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
-		let b = pool.register(hook_b);
-		b.add(1000);
-		tokio::time::advance(Duration::from_millis(10)).await;
-
-		// A's heap snapshot is stale after this touch, so eviction re-keys A and
-		// picks B instead.
-		a.touch();
-		tokio::time::advance(Duration::from_millis(10)).await;
-		pool.evict();
-
-		assert!(!evicted_a.load(Ordering::Relaxed));
-		assert!(evicted_b.load(Ordering::Relaxed));
 	}
 
 	#[test]
-	fn dropped_charge_leaves_stale_heap_slot() {
-		let pool = Pool::new(0);
-		let (evicted_a, hook_a) = flag();
-		let a = pool.register(hook_a);
-		drop(a);
+	fn accrue_saturates() {
+		// A huge overshoot against a tiny capacity must saturate, not wrap.
+		let pool = Pool::new(1);
+		let mut c = charge(&pool);
+		c.add(1 << 40);
+		assert_eq!(pool.accrue(1 << 40), Some(u64::MAX));
+	}
 
-		// The heap still has A's slot, but the entry is gone: eviction discards it
-		// without calling the hook.
-		let (evicted_b, hook_b) = flag();
-		let b = pool.register(hook_b);
-		b.add(1);
-		pool.evict();
-		assert!(!evicted_a.load(Ordering::Relaxed));
-		assert!(evicted_b.load(Ordering::Relaxed));
+	#[test]
+	fn charge_counts_gross_writes() {
+		let track = Track::new(Pool::new(1000), kio::Weak::new());
+		let mut c = track.charge();
+		c.add(100);
+		c.sub(40); // releases don't refund the gross counter
+		assert_eq!(track.take_written(), ENTRY_OVERHEAD + 100);
+		assert_eq!(track.take_written(), 0, "taking it drains the counter");
+	}
+
+	#[test]
+	fn charge_owns_access_sample() {
+		let pool = Pool::new(1000);
+		let mut c = charge(&pool);
+		assert_eq!(pool.average(), None, "not evictable until demoted");
+
+		c.demote();
+		c.demote(); // idempotent
+		assert!(pool.average().is_some());
+
+		// Clearing (an abort, from anyone) removes the sample with the bytes.
+		c.clear();
+		assert_eq!(pool.average(), None, "aborted groups leave no ghost sample");
+		drop(c);
+		assert_eq!(pool.average(), None);
+	}
+
+	#[test]
+	fn refresh_protects_within_a_tick() {
+		let pool = Pool::new(1000);
+		let mut c = charge(&pool);
+		c.demote();
+		let average = pool.average().unwrap();
+		// A refresh in the same coarse tick still lifts the group above the mean.
+		c.refresh();
+		assert!(c.accessed() > average);
+		// Repeated same-tick refreshes are idempotent, not runaway.
+		let stamped = c.accessed();
+		c.refresh();
+		assert_eq!(c.accessed(), stamped);
+	}
+
+	#[test]
+	fn resize() {
+		let pool = Pool::unbounded();
+		assert_eq!(pool.capacity(), None);
+
+		let mut charge = charge(&pool);
+		charge.add(1000);
+
+		// Shrinking doesn't reclaim anything synchronously; writers accrue debt instead.
+		pool.resize(100);
+		assert_eq!(pool.capacity(), Some(100));
+		assert!(pool.used() > 100);
+		assert!(pool.accrue(50).unwrap() > 50);
+
+		pool.resize(None);
+		assert_eq!(pool.capacity(), None);
+		assert_eq!(pool.accrue(50), None);
 	}
 }

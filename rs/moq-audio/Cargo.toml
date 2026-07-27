@@ -32,13 +32,25 @@ capture = [
     "dep:objc2-foundation",
     "dep:objc2-screen-capture-kit",
 ]
+# Device playback. Mixes any number of `playback::Sink`s into one cpal output
+# stream (CoreAudio / WASAPI / ALSA). Off by default for the same reason as
+# `capture`: a consumer that only encodes shouldn't pull cpal, or the ALSA build
+# dependency on Linux.
+playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 bytes = "1"
-# Pure-Rust cross-platform audio I/O. Optional: only the `capture` feature
-# (microphone input) needs it. Encode stays on unsafe-libopus, so a build
-# without `capture` pulls no new dependency.
+# Pure-Rust cross-platform audio I/O. Optional: only the `capture` and
+# `playback` features need it. Encode stays on unsafe-libopus, so a build
+# without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
+# The realtime SPSC channel between a caller thread and the audio callback: a
+# preallocated ring buffer that resamples the caller's rate to the device rate
+# and corrects for clock drift, so the callback never allocates or blocks. Not a
+# second resampler: it wraps the same `rubato` we already depend on. `channel`
+# is the ring buffer and `resampler` its rubato back end; the default
+# `fft-resampler` stays off, matching the sinc-only stance below.
+fixed-resample = { version = "0.12", optional = true, default-features = false, features = ["channel", "resampler"] }
 hang = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -46,10 +58,10 @@ moq-net = { workspace = true }
 # fft_resampler feature and its RustFFT/realfft dependencies.
 rubato = { version = "4.0", default-features = false }
 thiserror = "2"
-# Only the `capture` feature needs an async runtime (the on-demand capture loop
-# awaits frames and demand transitions).
+# Only the device features need an async runtime: the on-demand capture loop
+# awaits frames and demand transitions, and playback awaits the driver thread.
 tokio = { workspace = true, optional = true, features = ["rt", "macros", "sync", "time"] }
-# Only used by the `capture` feature for stream-error logging.
+# Only used by the device features, for stream-error logging.
 tracing = { version = "0.1", optional = true }
 # Pure-Rust transpilation of libopus 1.3.1. No CMake toolchain, no C
 # linker hackery, and crucially still maintained, unlike the

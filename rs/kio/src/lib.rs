@@ -24,7 +24,11 @@ mod producer;
 mod shared;
 mod weak;
 
+#[cfg(feature = "time")]
+pub mod time;
+
 #[cfg(feature = "tokio")]
+#[doc(hidden)]
 pub mod tokio;
 
 #[cfg(test)]
@@ -35,7 +39,7 @@ pub use pollable::{Pending, Pollable};
 pub use producer::{Mut, Producer, Ref};
 pub use shared::Shared;
 pub use waiter::{Waiter, WaiterList, wait};
-pub use weak::{ConsumerWeak, ProducerWeak};
+pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
 /// The channel closed before the awaited condition held.
 ///

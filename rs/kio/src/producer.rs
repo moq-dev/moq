@@ -4,7 +4,13 @@ use std::{
 	task::Poll,
 };
 
-use crate::{Closed, Counts, State, consumer::Consumer, lock::*, waiter::*, weak::ProducerWeak};
+use crate::{
+	Closed, Counts, State,
+	consumer::Consumer,
+	lock::*,
+	waiter::*,
+	weak::{ProducerWeak, Weak},
+};
 
 /// The producing side of a shared state channel.
 ///
@@ -248,11 +254,11 @@ impl<T> Producer<T> {
 	}
 
 	/// Returns `true` if this is the only remaining producer.
-	///
-	/// Inherently racy if other handles may clone this producer or upgrade a
-	/// [`ProducerWeak`] concurrently. Intended for a producer's own
-	/// `Drop`, where this handle has not yet been counted out, to gate
-	/// last-producer cleanup.
+	#[doc(hidden)]
+	#[deprecated(
+		note = "racy: a clone, or a Weak upgraded by another thread, can invalidate the answer \
+		        before you act on it. Run last-handle cleanup from the Drop of a shared guard instead."
+	)]
 	pub fn is_last(&self) -> bool {
 		self.counts.producers.load(Ordering::Acquire) == 1
 	}
@@ -261,6 +267,17 @@ impl<T> Producer<T> {
 	pub fn weak(&self) -> ProducerWeak<T> {
 		ProducerWeak {
 			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+
+	/// Create a [`Weak`] reference that owns nothing, not even the state allocation.
+	///
+	/// Use this instead of [`Self::weak`] for a handle stored inside the state itself,
+	/// where a [`ProducerWeak`] would keep the allocation alive through its own value.
+	pub fn downgrade(&self) -> Weak<T> {
+		Weak {
+			state: self.state.downgrade(),
 			counts: self.counts.clone(),
 		}
 	}
@@ -279,21 +296,22 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		// Atomically decrement and check if we were the last producer
-		let prev = self.counts.producers.fetch_sub(1, Ordering::AcqRel);
-		if prev > 1 {
-			return;
-		}
-
-		// We were the last producer, need to close. Every waiter reacts to
-		// closure (value/closed resolve, `used`/`unused` resolve to `None`),
-		// so wake all the lists.
 		let mut waiters = {
+			// The count moves under the state lock, in step with the closed flag it
+			// decides. Decrementing outside it would let `ProducerWeak::produce` slip
+			// between the decrement and the close, handing back a producer for a
+			// channel that is about to close.
 			let mut state = self.state.lock();
+			if self.counts.producers.fetch_sub(1, Ordering::AcqRel) > 1 {
+				return;
+			}
 			if state.closed {
 				return;
 			}
 
+			// We were the last producer, so close. Every waiter reacts to closure
+			// (value/closed resolve, `used`/`unused` resolve to `None`), so drain
+			// every list and wake them once the lock is released.
 			state.closed = true;
 			state.take_close_waiters()
 		};
@@ -400,24 +418,6 @@ impl<T> Deref for Ref<'_, T> {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[test]
-	fn is_last_tracks_producer_count() {
-		let producer = Producer::new(0u8);
-		assert!(producer.is_last());
-
-		let clone = producer.clone();
-		assert!(!producer.is_last());
-		assert!(!clone.is_last());
-
-		drop(clone);
-		assert!(producer.is_last());
-
-		// Consumers and weak handles don't count as producers.
-		let _consumer = producer.consume();
-		let _weak = producer.weak();
-		assert!(producer.is_last());
-	}
 
 	#[test]
 	fn poll_gates_on_predicate_then_writes() {

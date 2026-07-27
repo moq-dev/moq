@@ -89,7 +89,7 @@ impl Origin {
 ///
 /// Doubles as the construction config for an [origin `Producer`](Producer) and as the
 /// parent handle every broadcast carries ([`broadcast::Info::origin`]): the origin owns
-/// the [`cache::Pool`] every group in the tree registers with, so a relay configures one
+/// the [`cache::Pool`] every group in the tree charges into, so a relay configures one
 /// bounded pool here and every broadcast, track, and group beneath it reaches that single
 /// budget by walking up the ownership chain. Defaults to an unbounded pool
 /// ([`Origin::produce`] is the shorthand for that). Cheap to clone (a `Copy` id plus an
@@ -101,11 +101,11 @@ pub struct Info {
 	/// detection and shortest-path routing.
 	pub id: Origin,
 
-	/// The cache pool broadcasts under this origin register their groups with. It
-	/// flows down the ownership chain (origin -> broadcast -> track -> group), so a
-	/// group reaches it via `track.broadcast.origin.pool`. Unbounded by default; a
-	/// relay sets a bounded one (via [`Self::with_pool`]) so cached groups across the
-	/// whole process share one memory budget.
+	/// The cache pool broadcasts under this origin charge their groups into. It flows
+	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
+	/// an account against it, and its groups charge through that. Unbounded by
+	/// default; a relay sets a bounded one (via [`Self::with_pool`]) so cached groups
+	/// across the whole process share one memory budget.
 	pub pool: cache::Pool,
 
 	/// Ceiling on how long any non-latest group under this origin is retained. Each
@@ -1589,33 +1589,22 @@ async fn run_front(
 	// waiting for a replacement source. A graceful close never gets here (the
 	// detach sets `closed` synchronously), so a running countdown always means a
 	// reconnect is welcome.
-	let mut deadline: Option<web_async::time::Instant> = None;
+	let mut deadline = kio::time::Deadline::new();
 
 	loop {
 		let empty = {
 			let s = state.read();
 			!s.closed && s.routes.is_empty()
 		};
-		deadline = match (empty, deadline) {
+		deadline.set(match (empty, deadline.deadline()) {
 			// An unrepresentable deadline (e.g. `Duration::MAX`) lingers forever:
 			// no timer, only a re-attach or teardown moves the front on.
 			(true, None) => web_async::time::Instant::now().checked_add(linger),
 			(true, at) => at,
 			(false, _) => None,
-		};
+		});
 
 		let step = {
-			// Pending forever while no countdown is running. Fused via `fired`: a
-			// completed future must not be polled again.
-			let mut sleep = std::pin::pin!(async {
-				match deadline {
-					Some(at) => {
-						web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-					}
-					None => std::future::pending().await,
-				}
-			});
-			let mut fired = false;
 			kio::wait(|waiter| {
 				if let Poll::Ready((name, resume)) = broadcast.poll_spliced_assigned(waiter) {
 					return Poll::Ready(Step::Serve(name, resume));
@@ -1635,13 +1624,7 @@ async fn run_front(
 					Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
 					Poll::Pending => {}
 				}
-				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
-					fired = true;
-				}
-				match fired {
-					true => Poll::Ready(Step::Expired),
-					false => Poll::Pending,
-				}
+				deadline.poll(waiter).map(|_| Step::Expired)
 			})
 			.await
 		};
@@ -1724,6 +1707,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
 	let mut idle_since: Option<web_async::time::Instant> = None;
+	let mut deadline = kio::time::Deadline::new();
 
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
@@ -1764,22 +1748,9 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			(true, false) => idle_since.or_else(|| Some(web_async::time::Instant::now())),
 			_ => None,
 		};
-		let deadline = idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER));
+		deadline.set(idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER)));
 
 		let step = {
-			// Pinned outside the closure: a future re-created on every poll would
-			// restart the countdown each time and never fire. Fused via `fired`: a
-			// completed future must not be polled again.
-			let mut sleep = std::pin::pin!(async {
-				match deadline {
-					Some(at) => {
-						web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-					}
-					None => std::future::pending().await,
-				}
-			});
-			let mut fired = false;
-
 			let skip = |id: u64| refused.contains(&id) || dead.contains(&id);
 			kio::wait(|waiter| {
 				// Watch the source table: the front closing, a better servable
@@ -1840,13 +1811,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 					});
 				}
 
-				if deadline.is_some() && !fired && waiter.poll_future(sleep.as_mut()).is_ready() {
-					fired = true;
-				}
-				if fired {
-					return Poll::Ready(Step::Idle);
-				}
-				Poll::Pending
+				deadline.poll(waiter).map(|_| Step::Idle)
 			})
 			.await
 		};

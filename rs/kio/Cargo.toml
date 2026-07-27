@@ -13,13 +13,15 @@ keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
-# Opt-in `tokio::time::Sleep`, a poll-driven wall-clock wait backed by tokio. Off by
-# default so kio stays runtime-free. Enable it when driving `poll_*` functions on tokio.
+# Opt-in poll-driven wall-clock deadlines, backed by `web-async` (tokio on native,
+# wasmtimer in the browser). Off by default so kio stays runtime-free.
+time = ["dep:web-async"]
 tokio = ["dep:tokio"]
 
 [dependencies]
 smallvec = "1.15"
 tokio = { workspace = true, features = ["time"], optional = true }
+web-async = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
