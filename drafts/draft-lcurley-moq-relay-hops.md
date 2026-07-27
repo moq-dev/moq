@@ -24,7 +24,7 @@ informative:
 --- abstract
 
 This document defines a Relay Hops extension for MoQ Transport {{moqt}}.
-Each namespace advertisement carries an ordered list of Hop IDs identifying the relays it has traversed, starting with the origin publisher.
+Each namespace advertisement carries an ordered list of Hop IDs identifying the relays it has traversed, starting with the original publisher.
 This lets a subscriber prefer the shortest of several paths to the same namespace, identify which advertisements refer to the same broadcast (same origin), and lets a relay cluster detect and avoid routing loops.
 A namespace subscription MAY carry a single Hop ID to exclude, which a relay uses to suppress advertisements that have already passed through that hop.
 
@@ -32,6 +32,9 @@ A namespace subscription MAY carry a single Hop ID to exclude, which a relay use
 
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
+
+This document uses **upstream** and **downstream** relative to the flow of a namespace advertisement: an advertisement travels from its original publisher downstream toward subscribers, so on a given session the peer that sends an advertisement is the upstream peer and the peer that receives it is the downstream peer.
+{{moqt}} uses these terms relative to the original publisher of the content; in a relay mesh the same pair of relays can carry advertisements in both directions, so here the direction is a property of each advertisement, not of the endpoints.
 
 
 # Introduction
@@ -47,13 +50,13 @@ This redundancy is desirable for failover, but it leaves a receiver with no info
 - **Broadcast identity**: two advertisements for the same namespace may refer to the same broadcast or to two distinct origins reusing a namespace. With no origin identity a receiver cannot tell them apart, nor deduplicate redundant paths to one broadcast.
 - **Routing loops**: relay A advertises a namespace to relay B, which advertises it back to A (directly or through a cycle). Without a way to recognize an advertisement it has already seen, a relay will re-advertise it indefinitely.
 
-This extension solves all three with a single mechanism: an ordered list of **Hop IDs** that records the path an advertisement has taken, starting with the origin publisher and with one entry appended per relay.
+This extension solves all three with a single mechanism: an ordered list of **Hop IDs** that records the path an advertisement has taken, starting with the original publisher and with one entry appended per relay.
 The first entry identifies the origin (broadcast identity); the list length gives the path length (path selection); a relay finding its own Hop ID already in the list detects a loop.
 
 ## Why per-hop, not end-to-end
 The Hop ID list is rewritten at every relay: a relay appends its own Hop ID before forwarding an advertisement downstream.
 A relay therefore detects a loop by finding its own Hop ID already present in an incoming advertisement, and a subscriber compares path lengths using the list length.
-Hop IDs are chosen randomly (see [Hop IDs](#hop-ids)) so they are unique with overwhelming probability without any central coordination, even across independently operated relays.
+Hop IDs are unique (see [Hop IDs](#hop-ids)), even across independently operated relays.
 
 
 # Setup Negotiation
@@ -72,16 +75,20 @@ The extension applies to a single hop (one MOQT session) and is negotiated indep
 Negotiating this extension on a session also enables the extended NAMESPACE message format defined in [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements), which appends a Parameters field to NAMESPACE so that it, too, can carry HOP_PATH.
 
 A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE and NAMESPACE it sends on that session, and MUST honor an EXCLUDE_HOP parameter it receives in SUBSCRIBE_NAMESPACE.
-An endpoint that did not negotiate the extension neither adds these parameters nor, for NAMESPACE, the Parameters field that would carry them.
-PUBLISH_NAMESPACE and SUBSCRIBE_NAMESPACE carry a Parameters field in {{moqt}} regardless, and per {{moqt}} an unknown Key-Value-Pair Type is ignored; either way an advertisement forwarded into a non-supporting session loses its hop information gracefully.
+A receiver that negotiated this extension and receives a PUBLISH_NAMESPACE or NAMESPACE without HOP_PATH MUST close the session with a PROTOCOL_VIOLATION.
+
+Message parameters in {{moqt}} have no generic skip rule: a receiver must know a parameter's serialization to parse past it, so an endpoint MUST NOT send HOP_PATH or EXCLUDE_HOP on a session that did not negotiate the extension.
+A relay forwarding an advertisement into a non-supporting session therefore strips HOP_PATH (and, for NAMESPACE, the appended Parameters field); the advertisement loses its hop information.
 
 
 # Hop IDs
-A **Hop ID** is a variable-length integer that identifies a single relay (or the origin publisher) within the path of an advertisement.
+A **Hop ID** is a variable-length integer that identifies a single relay (or the original publisher) within the path of an advertisement.
 
-Each relay and each origin publisher chooses its Hop ID **randomly**.
-An endpoint SHOULD draw a full-width random value (up to the 64-bit varint maximum) so that the probability of two endpoints choosing the same Hop ID is negligible.
-Random assignment means there is no registry, no coordination, and no reserved values: a Hop ID is simply an opaque identifier that is, with overwhelming probability, unique.
+Hop IDs MUST be unique among the endpoints an advertisement can traverse.
+Loop detection and origin identification compare Hop IDs for equality, so two endpoints sharing a Hop ID are indistinguishable: advertisements get dropped as false loops, and distinct broadcasts get conflated into one origin.
+Deployments often already assign each node a unique identifier; an endpoint SHOULD use such a configured identifier as its Hop ID.
+An endpoint with no configured identifier MAY instead draw a full-width random value (up to the 64-bit varint maximum), which is unique with overwhelming probability; a receiver cannot tell how a Hop ID was chosen.
+There is no registry and no reserved values: a Hop ID is simply an opaque identifier.
 
 An endpoint SHOULD keep its Hop ID stable for the lifetime of a session (and MAY reuse it across sessions) so that loop detection and path comparison are consistent.
 
@@ -114,7 +121,6 @@ The number of Key-Value-Pair parameters that follow.
 **Parameters**:
 Zero or more Key-Value-Pairs ({{moqt}} Section 2.5).
 
-The Track Namespace Suffix is self-delimiting, so a receiver parses it and then reads the Parameters that follow, bounded by the message Length.
 Both endpoints of a session know whether Relay Hops was negotiated, so there is no ambiguity about whether a NAMESPACE message on that session carries the appended Parameters field.
 An endpoint MUST NOT append a Parameters field to a NAMESPACE message on a session that did not negotiate Relay Hops, and a receiver on such a session MUST NOT expect one.
 
@@ -122,10 +128,9 @@ This document does not extend NAMESPACE_DONE ({{moqt}} Section 10.17); it carrie
 
 
 # HOP_PATH Parameter
-The HOP_PATH parameter carries the ordered list of Hop IDs that an advertisement has traversed, from the origin publisher toward the receiver.
-It is a Key-Value-Pair (see {{moqt}} Section 2.5) carried in the Parameters of a namespace advertisement: a PUBLISH_NAMESPACE message ({{moqt}} Section 10.15) or an extended NAMESPACE message (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)).
-
-Because the value is a variable-length list, HOP_PATH uses an odd Type so that it is length-prefixed:
+The HOP_PATH parameter carries the ordered list of Hop IDs that an advertisement has traversed, from the original publisher toward the receiver.
+It is a parameter (see {{moqt}} Section 2.5) carried in a namespace advertisement: a PUBLISH_NAMESPACE message ({{moqt}} Section 10.15) or an extended NAMESPACE message (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)).
+As with every {{moqt}} message parameter, its serialization is defined here and a receiver only encounters it on a session that negotiated the extension:
 
 ~~~
 HOP_PATH Parameter {
@@ -135,10 +140,13 @@ HOP_PATH Parameter {
 }
 ~~~
 
+**Length**:
+The length of the Hop ID list in bytes.
+
 **Hop ID**:
-One or more Hop IDs, ordered from the origin publisher (first entry) to the relay immediately upstream of the receiver (last entry).
-The number of entries is determined by consuming Hop IDs until `Length` bytes have been read; a receiver MUST close the session with a PROTOCOL_VIOLATION if the entries do not exactly fill `Length`, or if the list is empty (`Length` 0).
-HOP_PATH always contains at least one entry: the first entry is the Hop ID of the origin publisher, even before the advertisement has traversed any relay.
+One or more Hop IDs, ordered from the original publisher (first entry) to the relay immediately upstream of the receiver (last entry).
+A receiver MUST close the session with a PROTOCOL_VIOLATION if the Hop IDs do not exactly fill `Length`, or if the list is empty (`Length` 0).
+HOP_PATH always contains at least one entry: the first entry is the Hop ID of the original publisher, even before the advertisement has traversed any relay.
 
 ## Relay Behavior
 When a relay forwards a namespace advertisement downstream on a session that negotiated this extension, it MUST append its own Hop ID to the HOP_PATH it received.
@@ -158,15 +166,15 @@ Two advertisements for the same namespace whose HOP_PATH begins with the same Ho
 If the first Hop IDs differ, the advertisements come from distinct origins that happen to reuse a namespace, and a receiver MUST NOT treat them as interchangeable.
 
 A publisher (or relay acting as one) SHOULD advertise only the single best path it currently knows for each namespace.
-If the best path changes — for example after a relay failover — the publisher MAY re-advertise the namespace; the new advertisement, carrying an updated HOP_PATH, replaces the prior one per the namespace-advertisement semantics of {{moqt}}.
+If the best path changes (for example after a relay failover), the publisher MAY re-advertise the namespace; the new advertisement, carrying an updated HOP_PATH, replaces the prior one per the namespace-advertisement semantics of {{moqt}}.
 
 
 # EXCLUDE_HOP Parameter
 The EXCLUDE_HOP parameter lets a downstream subscriber tell an upstream relay to suppress advertisements that have already passed through a given hop.
 A relay in a cluster uses it to prevent the upstream from sending back an advertisement that the downstream originated, the most common source of a two-hop loop.
 
-It is a Key-Value-Pair carried in the Parameters of a SUBSCRIBE_NAMESPACE message ({{moqt}} Section 10.18).
-A single Hop ID is excluded, so EXCLUDE_HOP uses an even Type and its value is a bare varint with no length prefix:
+It is a parameter carried in a SUBSCRIBE_NAMESPACE message ({{moqt}} Section 10.18).
+Its value is a single varint:
 
 ~~~
 EXCLUDE_HOP Parameter {
@@ -182,11 +190,11 @@ To exclude nothing, a subscriber simply omits the parameter; there is no reserve
 A relay that receives a SUBSCRIBE_NAMESPACE carrying EXCLUDE_HOP MUST NOT send, on that session, any PUBLISH_NAMESPACE whose HOP_PATH contains the excluded Hop ID (including the entry the relay would itself append).
 The exclusion is scoped to the namespace subscription it accompanies.
 
-A relay that receives EXCLUDE_HOP without having negotiated the Relay Hops extension ignores it as an unknown parameter, which is the safe default (it simply does not perform the exclusion).
+A subscriber MUST NOT send EXCLUDE_HOP on a session that did not negotiate the Relay Hops extension (see [Setup Negotiation](#setup-negotiation)); a receiver that has not negotiated it cannot parse the parameter, let alone honor it.
 
 
 # Security Considerations
-Hop IDs are opaque random integers, so an individual value reveals nothing about a relay's identity or location.
+An individual Hop ID reveals nothing about a relay's identity or location beyond what its operator encodes in it; a deployment that considers its configured identifiers sensitive can use random values instead.
 A HOP_PATH list does, however, expose the number of hops an advertisement traversed, which can hint at the size and shape of a relay deployment.
 A relay that wishes to hide its internal topology MAY coalesce the hops within its own administrative domain into a single Hop ID, or strip HOP_PATH entirely, before forwarding across a trust boundary (for example, to a subscriber outside the operator's own relay cluster).
 This is analogous to how BGP confederations hide internal AS topology while preserving loop detection; it is a deployment choice, not a requirement.
@@ -198,7 +206,6 @@ Because a relay only ever appends to HOP_PATH, it cannot make a competing path a
 
 This document requests the following registrations.
 High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; they also avoid the greasing pattern (`0x7f * N + 0x9D`).
-HOP_PATH carries a list, so its Type is odd (length-prefixed); EXCLUDE_HOP carries a single Hop ID, so its Type is even (a bare varint). See {{moqt}} Section 2.5.
 
 ## MOQT Setup Options
 
