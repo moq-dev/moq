@@ -55,13 +55,15 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       ffi_version: ${{ steps.version.outputs.ffi_version }}
+      ffi_changed: ${{ steps.ffi-diff.outputs.changed }}
       # On PRs we only build (dry-run). On main/dev we publish when the version
       # isn't already tagged on the mirror.
       publish: ${{ github.event_name == 'push' && steps.gate.outputs.exists == 'false' }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Read versions
@@ -72,6 +74,18 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "ffi_version=$FFI_VERSION" >> "$GITHUB_OUTPUT"
           echo "wrapper $VERSION, moq-ffi pin $FFI_VERSION"
+
+      - name: Check for unreleased FFI changes
+        id: ffi-diff
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA"...HEAD -- rs/moq-ffi; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # The release gate: skip publishing a version already tagged on the mirror.
       # Runs on PRs too, as an informational dry-run.
@@ -103,12 +117,13 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
 
       - name: Check FFI mirror tag
         id: ffi
+        if: needs.build.outputs.publish == 'true' || (github.event_name == 'pull_request' && needs.build.outputs.ffi_changed != 'true')
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         # Treat a missing mirror repo / unreachable remote as "not published"
@@ -131,7 +146,11 @@ jobs:
         run: ./swift/scripts/verify.sh --tarball "artifacts/moq-${BUILD_VERSION}-swift.tar.gz"
 
       - name: Skip notice
-        if: steps.ffi.outputs.exists != 'true'
+        if: needs.build.outputs.ffi_changed == 'true'
+        run: echo "::notice::moq-ffi changed in this PR; skipping the published-package cross-resolve. The required Swift workflow validates the wrapper against freshly generated bindings."
+
+      - name: Unpublished FFI notice
+        if: (needs.build.outputs.publish == 'true' || github.event_name == 'pull_request') && needs.build.outputs.ffi_changed != 'true' && steps.ffi.outputs.exists != 'true'
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         run: echo "::notice::moq-swift-ffi ${FFI_VERSION} not published yet; skipping cross-package resolve."
@@ -143,7 +162,7 @@ jobs:
     if: ${{ needs.build.outputs.publish == 'true' }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
 
@@ -180,7 +199,7 @@ jobs:
     if: github.event_name == 'pull_request'
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
 

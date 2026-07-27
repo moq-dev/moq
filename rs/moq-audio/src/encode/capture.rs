@@ -15,7 +15,9 @@ use crate::{Error, Format, Frame};
 /// format (no capture needed), but the device only opens while a subscriber is
 /// listening and is released when the last one leaves. On resume the timeline
 /// re-anchors (via [`Producer::reset_epoch`]) so the idle gap lands in the PTS,
-/// keeping audio aligned with a wall-clock video track.
+/// keeping audio aligned with a wall-clock video track. A buffer dropped because
+/// the encoder fell behind re-anchors the same way, so the loss surfaces as a
+/// skip rather than as drift.
 ///
 /// Frames are stamped from `clock`, so passing the same [`Clock`](moq_mux::Clock)
 /// to a concurrent video publish keeps the two tracks aligned. Returns when the
@@ -88,9 +90,17 @@ async fn capture_loop(
 
 			let Some(samples) = samples else { break }; // device stopped producing samples
 
+			// A dropped capture buffer is a real hole in the timeline. PTS advances
+			// by sample count, so writing straight across it would compress the hole
+			// out and leave audio permanently behind the video clock; re-anchor to
+			// spend it as a one-time discontinuity instead.
+			if samples.gap {
+				producer.reset_epoch();
+			}
+
 			// Stamp from the shared clock (including any idle gap) so the producer's
 			// epoch re-anchors and audio stays aligned with the video track.
-			producer.write(&frame(samples, clock.micros())?)?;
+			producer.write(&frame(samples.data, clock.micros())?)?;
 		}
 
 		// Release the device and re-anchor so the next frame after resume reflects the gap.

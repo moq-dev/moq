@@ -1,21 +1,21 @@
-//! Opus encoder front end.
+//! Audio encoder front end.
 //!
-//! Single-codec implementation today: [`Encoder`] wraps libopus 1.3.1 via
-//! [`unsafe_libopus`], a pure-Rust c2rust transpilation. No CMake toolchain, no
-//! sys crate, no linker gymnastics. When AAC or other codecs land we'll factor
-//! out a backend dispatch behind [`Codec`]; introducing a trait now would be
-//! premature.
+//! [`Encoder`] dispatches over the closed [`Codec`] set. Opus wraps libopus
+//! 1.3.1 via [`unsafe_libopus`], while PCM serializes interleaved `f32` samples
+//! directly.
 
 use std::str::FromStr;
 use std::time::Duration;
 
 use bytes::Bytes;
 use unsafe_libopus::{
-	OPUS_APPLICATION_AUDIO, OPUS_OK, OPUS_SET_BITRATE_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
+	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_SET_BITRATE_REQUEST,
+	OPUS_SET_DTX_REQUEST, OPUS_SET_INBAND_FEC_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
 	opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
 use crate::opus;
+use crate::pcm;
 use crate::{Error, Format};
 
 /// libopus packet size ceiling per RFC 6716 §3.4.
@@ -26,9 +26,11 @@ const MAX_PACKET_BYTES: usize = 4_000;
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Codec {
-	/// Opus (RFC 6716). The only codec today, and the default.
+	/// Opus (RFC 6716), and the default.
 	#[default]
 	Opus,
+	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
+	Pcm,
 }
 
 impl Codec {
@@ -37,6 +39,7 @@ impl Codec {
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Opus => "opus",
+			Self::Pcm => "pcm",
 		}
 	}
 }
@@ -53,6 +56,7 @@ impl FromStr for Codec {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
 			"opus" => Ok(Self::Opus),
+			"pcm" => Ok(Self::Pcm),
 			other => Err(Error::Unsupported(format!("unknown codec: {other}"))),
 		}
 	}
@@ -105,9 +109,15 @@ pub struct Config {
 	/// Channel count the codec runs at. `None` matches [`Input::channels`];
 	/// anything else is rejected, since remapping isn't implemented.
 	pub channels: Option<u32>,
-	/// Bitrate in bits per second. `None` lets the codec pick.
+	/// Bitrate in bits per second. `None` lets Opus pick. PCM requires `None`
+	/// because its bitrate is fixed by the sample rate and channel count.
 	pub bitrate: Option<u32>,
+	/// Enable Opus in-band forward error correction.
+	pub fec: bool,
+	/// Enable Opus discontinuous transmission during silence.
+	pub dtx: bool,
 	/// Encoded frame duration. Opus accepts 2.5 / 5 / 10 / 20 / 40 / 60 ms.
+	/// PCM accepts any duration containing a whole number of samples.
 	pub frame_duration: Duration,
 }
 
@@ -120,6 +130,8 @@ impl Config {
 			sample_rate: None,
 			channels: None,
 			bitrate: None,
+			fec: false,
+			dtx: false,
 			frame_duration: Duration::from_millis(20),
 		}
 	}
@@ -131,27 +143,41 @@ impl Config {
 /// and publish the resulting packets through a [`Producer`](super::Producer)
 /// built from the same [`Config`].
 pub struct Encoder {
-	inner: *mut OpusEncoder,
+	backend: Backend,
 	config: Config,
 	/// Resolved codec sample rate (from `config.sample_rate`, else the input rate
 	/// snapped up to a supported one).
 	codec_rate: u32,
 	/// Resolved codec channel count (currently always the input's).
 	codec_channels: u32,
+	/// Current libopus target bitrate.
+	bitrate: u64,
+	/// Encoder lookahead expressed in the OpusHead 48 kHz timebase.
+	pre_skip: u16,
 	frame_size: usize,
+}
+
+enum Backend {
+	Opus(Opus),
+	Pcm,
+}
+
+struct Opus {
+	inner: *mut OpusEncoder,
 	scratch: Vec<u8>,
 }
 
 // SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
-// struct; libopus encoder methods take a single &mut, so a unique
-// owner is allowed to move it across threads.
-unsafe impl Send for Encoder {}
+// struct; libopus encoder methods take a single &mut, so a unique owner is
+// allowed to move it across threads.
+unsafe impl Send for Opus {}
 
 impl Encoder {
 	/// Open an encoder for `config`.
 	pub fn new(config: &Config) -> Result<Self, Error> {
 		match config.codec {
 			Codec::Opus => Self::new_opus(config.clone()),
+			Codec::Pcm => Self::new_pcm(config.clone()),
 		}
 	}
 
@@ -179,28 +205,127 @@ impl Encoder {
 			return Err(opus::error(err, "opus_encoder_create"));
 		}
 
-		if let Some(b) = config.bitrate {
-			// SAFETY: `inner` is a freshly-created encoder; varargs! produces
-			// the single i32 the SET_BITRATE request expects.
-			let rc = unsafe { opus_encoder_ctl_impl(inner, OPUS_SET_BITRATE_REQUEST, varargs![b as i32]) };
-			if rc != OPUS_OK {
+		let configured = Self::configure_opus(inner, &config, codec_rate, codec_channels);
+		let (bitrate, pre_skip) = match configured {
+			Ok(configured) => configured,
+			Err(err) => {
 				// SAFETY: `inner` was created above and not yet handed out.
 				unsafe { opus_encoder_destroy(inner) };
-				return Err(opus::error(rc, "OPUS_SET_BITRATE"));
+				return Err(err);
 			}
-		}
+		};
 
 		Ok(Self {
-			inner,
+			backend: Backend::Opus(Opus {
+				inner,
+				scratch: vec![0u8; MAX_PACKET_BYTES],
+			}),
 			config,
 			codec_rate,
 			codec_channels,
+			bitrate,
+			pre_skip,
 			frame_size,
-			scratch: vec![0u8; MAX_PACKET_BYTES],
 		})
 	}
 
-	/// The config this encoder opened with.
+	fn new_pcm(config: Config) -> Result<Self, Error> {
+		if config.bitrate.is_some() {
+			return Err(Error::Unsupported(
+				"pcm bitrate is fixed; leave Config::bitrate unset".into(),
+			));
+		}
+
+		let codec_rate = config.sample_rate.unwrap_or(config.input.sample_rate);
+		if codec_rate == 0 {
+			return Err(Error::Unsupported("pcm sample rate must be greater than zero".into()));
+		}
+
+		let codec_channels = config.channels.unwrap_or(config.input.channels);
+		if codec_channels == 0 {
+			return Err(Error::Unsupported("pcm channel count must be greater than zero".into()));
+		}
+		if codec_channels != config.input.channels {
+			return Err(Error::Unsupported(format!(
+				"channel remapping not implemented (input {}ch, output {codec_channels}ch)",
+				config.input.channels
+			)));
+		}
+
+		let frame_size = pcm::frame_size(codec_rate, config.frame_duration)?;
+		pcm::frame_bytes(frame_size, codec_channels)?;
+		let bitrate = pcm::bitrate(codec_rate, codec_channels)?;
+		Ok(Self {
+			backend: Backend::Pcm,
+			config,
+			codec_rate,
+			codec_channels,
+			bitrate,
+			pre_skip: 0,
+			frame_size,
+		})
+	}
+
+	fn configure_opus(
+		inner: *mut OpusEncoder,
+		config: &Config,
+		codec_rate: u32,
+		codec_channels: u32,
+	) -> Result<(u64, u16), Error> {
+		if let Some(bitrate) = config.bitrate {
+			Self::set_opus_bitrate(inner, codec_channels, bitrate as u64)?;
+		}
+		Self::set_opus_ctl(
+			inner,
+			OPUS_SET_INBAND_FEC_REQUEST,
+			i32::from(config.fec),
+			"OPUS_SET_INBAND_FEC",
+		)?;
+		Self::set_opus_ctl(inner, OPUS_SET_DTX_REQUEST, i32::from(config.dtx), "OPUS_SET_DTX")?;
+
+		let bitrate = Self::get_opus_ctl(inner, OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
+		let bitrate = u64::try_from(bitrate)
+			.map_err(|_| Error::Unsupported(format!("Opus reported negative bitrate {bitrate}")))?;
+		let lookahead = Self::get_opus_ctl(inner, OPUS_GET_LOOKAHEAD_REQUEST, "OPUS_GET_LOOKAHEAD")?;
+		let lookahead = u64::try_from(lookahead)
+			.map_err(|_| Error::Unsupported(format!("Opus reported negative lookahead {lookahead}")))?;
+		let pre_skip = u16::try_from((lookahead * 48_000) / codec_rate as u64)
+			.map_err(|_| Error::Unsupported(format!("Opus lookahead {lookahead} does not fit in OpusHead")))?;
+
+		Ok((bitrate, pre_skip))
+	}
+
+	fn set_opus_bitrate(inner: *mut OpusEncoder, channels: u32, bitrate: u64) -> Result<(), Error> {
+		let max = 300_000 * channels as u64;
+		if !(500..=max).contains(&bitrate) {
+			return Err(Error::Unsupported(format!(
+				"Opus bitrate must be between 500 and {max} bits per second for {channels} channel(s), got {bitrate}"
+			)));
+		}
+		Self::set_opus_ctl(inner, OPUS_SET_BITRATE_REQUEST, bitrate as i32, "OPUS_SET_BITRATE")
+	}
+
+	fn set_opus_ctl(inner: *mut OpusEncoder, request: i32, value: i32, name: &'static str) -> Result<(), Error> {
+		// SAFETY: `inner` owns a live encoder and each request here expects one i32.
+		let rc = unsafe { opus_encoder_ctl_impl(inner, request, varargs![value]) };
+		if rc != OPUS_OK {
+			return Err(opus::error(rc, name));
+		}
+		Ok(())
+	}
+
+	fn get_opus_ctl(inner: *mut OpusEncoder, request: i32, name: &'static str) -> Result<i32, Error> {
+		let mut value = 0;
+		// SAFETY: `inner` owns a live encoder and each request here expects one
+		// valid mutable i32 output.
+		let rc = unsafe { opus_encoder_ctl_impl(inner, request, varargs![&mut value]) };
+		if rc != OPUS_OK {
+			return Err(opus::error(rc, name));
+		}
+		Ok(value)
+	}
+
+	/// The encoder config, including the latest accepted runtime bitrate.
 	pub fn config(&self) -> &Config {
 		&self.config
 	}
@@ -229,6 +354,24 @@ impl Encoder {
 		self.frame_size
 	}
 
+	/// Current target bitrate in bits per second.
+	pub fn bitrate(&self) -> u64 {
+		self.bitrate
+	}
+
+	/// Retune the live Opus encoder to `bitrate` bits per second.
+	pub fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		let Backend::Opus(opus) = &mut self.backend else {
+			return Err(Error::Unsupported("pcm bitrate is fixed".into()));
+		};
+		if bitrate != self.bitrate {
+			Self::set_opus_bitrate(opus.inner, self.codec_channels, bitrate)?;
+			self.bitrate = bitrate;
+			self.config.bitrate = Some(bitrate as u32);
+		}
+		Ok(())
+	}
+
 	/// Encode one frame of interleaved `f32` PCM at [`codec_rate`](Self::codec_rate).
 	///
 	/// `pcm.len()` must equal `frame_size() * codec_channels()`. The
@@ -242,44 +385,73 @@ impl Encoder {
 				expected: expected * std::mem::size_of::<f32>(),
 			});
 		}
-		// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
-		// are bounded by the lengths we pass.
-		let n = unsafe {
-			opus_encode_float(
-				self.inner,
-				pcm.as_ptr(),
-				self.frame_size as i32,
-				self.scratch.as_mut_ptr(),
-				self.scratch.len() as i32,
-			)
-		};
-		if n < 0 {
-			return Err(opus::error(n, "opus_encode_float"));
+		match &mut self.backend {
+			Backend::Opus(opus) => {
+				// SAFETY: `inner` owns a live OpusEncoder; pcm and scratch slices
+				// are bounded by the lengths we pass.
+				let n = unsafe {
+					opus_encode_float(
+						opus.inner,
+						pcm.as_ptr(),
+						self.frame_size as i32,
+						opus.scratch.as_mut_ptr(),
+						opus.scratch.len() as i32,
+					)
+				};
+				if n < 0 {
+					return Err(crate::opus::error(n, "opus_encode_float"));
+				}
+				Ok(Bytes::copy_from_slice(&opus.scratch[..n as usize]))
+			}
+			Backend::Pcm => {
+				let mut payload = Vec::with_capacity(std::mem::size_of_val(pcm));
+				for sample in pcm {
+					payload.extend_from_slice(&sample.to_le_bytes());
+				}
+				Ok(payload.into())
+			}
 		}
-		Ok(Bytes::copy_from_slice(&self.scratch[..n as usize]))
 	}
 
 	/// hang catalog entry describing this encoder's output stream.
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
-		// `codec_channels` is validated to mono/stereo at encoder construction, so the
-		// OpusHead (channel mapping family 0) always encodes.
-		let head = moq_mux::codec::opus::Config {
-			sample_rate: self.codec_rate,
-			channel_count: self.codec_channels,
-		}
-		.encode()
-		.expect("opus encoder channels validated to mono/stereo");
+		match self.config.codec {
+			Codec::Opus => {
+				// `codec_channels` is validated to mono/stereo at encoder construction,
+				// so the OpusHead (channel mapping family 0) always encodes.
+				let head = moq_mux::codec::opus::Config::new(self.codec_rate, self.codec_channels)
+					.with_pre_skip(self.pre_skip)
+					.encode()
+					.expect("opus encoder channels validated to mono/stereo");
 
-		let mut config =
-			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, self.codec_rate, self.codec_channels);
-		config.bitrate = self.config.bitrate.map(|b| b as u64);
-		config.description = Some(head);
-		config.container = hang::catalog::Container::Legacy;
-		config
+				let mut config = hang::catalog::AudioConfig::new(
+					hang::catalog::AudioCodec::Opus,
+					self.codec_rate,
+					self.codec_channels,
+				);
+				config.bitrate = self.config.bitrate.map(u64::from);
+				config.description = Some(head);
+				config.container = hang::catalog::Container::Legacy;
+				config
+			}
+			Codec::Pcm => {
+				let mut config = hang::catalog::AudioConfig::new(
+					hang::catalog::AudioCodec::Pcm,
+					self.codec_rate,
+					self.codec_channels,
+				);
+				config.bitrate = Some(
+					pcm::bitrate(self.codec_rate, self.codec_channels)
+						.expect("pcm encoder bitrate validated at construction"),
+				);
+				config.container = hang::catalog::Container::Legacy;
+				config
+			}
+		}
 	}
 }
 
-impl Drop for Encoder {
+impl Drop for Opus {
 	fn drop(&mut self) {
 		// SAFETY: `inner` is a live OpusEncoder that nothing else aliases.
 		unsafe { opus_encoder_destroy(self.inner) };
@@ -309,6 +481,13 @@ mod tests {
 			sample_rate: 48_000,
 			channels: 2,
 		}
+	}
+
+	fn opus_inner(encoder: &Encoder) -> *mut OpusEncoder {
+		let Backend::Opus(opus) = &encoder.backend else {
+			panic!("expected Opus encoder");
+		};
+		opus.inner
 	}
 
 	#[test]
@@ -369,6 +548,80 @@ mod tests {
 		assert_eq!(cfg.bitrate, Some(64_000));
 		let desc = cfg.description.expect("OpusHead should be present");
 		assert_eq!(desc.len(), 19);
+		let head = moq_mux::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
+		assert_eq!(head.pre_skip, enc.pre_skip);
+		assert_eq!(head.pre_skip, 312);
+	}
+
+	#[test]
+	fn opus_decoder_trims_encoder_lookahead_once() {
+		let mut enc = Encoder::new(&Config::new(stereo_48k())).unwrap();
+		let mut dec = Decoder::new(&enc.catalog()).unwrap();
+		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
+
+		let first = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
+		assert_eq!(
+			first.len(),
+			(enc.frame_size() - enc.pre_skip as usize) * enc.codec_channels() as usize
+		);
+
+		let second = dec.decode(&enc.encode(&frame).unwrap()).unwrap();
+		assert_eq!(second.len(), frame.len());
+	}
+
+	#[test]
+	fn opus_runtime_bitrate_updates_encoder_state() {
+		let mut enc = Encoder::new(&Config {
+			bitrate: Some(64_000),
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+
+		enc.set_bitrate(32_000).unwrap();
+		assert_eq!(enc.bitrate(), 32_000);
+		assert_eq!(enc.config().bitrate, Some(32_000));
+		assert_eq!(
+			Encoder::get_opus_ctl(
+				opus_inner(&enc),
+				unsafe_libopus::OPUS_GET_BITRATE_REQUEST,
+				"OPUS_GET_BITRATE"
+			)
+			.unwrap(),
+			32_000
+		);
+	}
+
+	#[test]
+	fn opus_runtime_bitrate_rejects_values_libopus_would_clamp() {
+		let mut enc = Encoder::new(&Config::new(stereo_48k())).unwrap();
+		let original = enc.bitrate();
+		assert!(enc.set_bitrate(1).is_err());
+		assert!(enc.set_bitrate(600_001).is_err());
+		assert_eq!(enc.bitrate(), original);
+	}
+
+	#[test]
+	fn opus_applies_fec_and_dtx_controls() {
+		let enc = Encoder::new(&Config {
+			fec: true,
+			dtx: true,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+
+		assert_eq!(
+			Encoder::get_opus_ctl(
+				opus_inner(&enc),
+				unsafe_libopus::OPUS_GET_INBAND_FEC_REQUEST,
+				"OPUS_GET_INBAND_FEC"
+			)
+			.unwrap(),
+			1
+		);
+		assert_eq!(
+			Encoder::get_opus_ctl(opus_inner(&enc), unsafe_libopus::OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX").unwrap(),
+			1
+		);
 	}
 
 	#[test]
@@ -376,6 +629,9 @@ mod tests {
 		assert_eq!(Codec::Opus.as_str(), "opus");
 		assert_eq!(Codec::Opus.to_string(), "opus");
 		assert_eq!("opus".parse::<Codec>().unwrap(), Codec::Opus);
+		assert_eq!(Codec::Pcm.as_str(), "pcm");
+		assert_eq!(Codec::Pcm.to_string(), "pcm");
+		assert_eq!("pcm".parse::<Codec>().unwrap(), Codec::Pcm);
 		assert!("aac".parse::<Codec>().is_err());
 	}
 
@@ -392,5 +648,76 @@ mod tests {
 		.unwrap();
 		assert_eq!(enc.codec_rate(), 24_000);
 		assert_eq!(enc.catalog().sample_rate, 24_000);
+		assert_eq!(enc.pre_skip, 312);
+	}
+
+	#[test]
+	fn pcm_roundtrip_is_lossless() {
+		let mut enc = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+		let mut dec = Decoder::new(&enc.catalog()).unwrap();
+		let input = sine(440.0, enc.codec_rate(), enc.codec_channels(), enc.frame_size());
+
+		let packet = enc.encode(&input).unwrap();
+		let output = dec.decode(&packet).unwrap();
+
+		assert_eq!(output, input);
+	}
+
+	#[test]
+	fn pcm_catalog_declares_fixed_bitrate() {
+		let enc = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+		let catalog = enc.catalog();
+
+		assert_eq!(catalog.codec, hang::catalog::AudioCodec::Pcm);
+		assert_eq!(catalog.bitrate, Some(48_000 * 2 * 32));
+		assert_eq!(catalog.description, None);
+	}
+
+	#[test]
+	fn pcm_rejects_runtime_bitrate_change() {
+		let mut enc = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			..Config::new(stereo_48k())
+		})
+		.unwrap();
+		let bitrate = enc.bitrate();
+
+		assert!(matches!(enc.set_bitrate(bitrate), Err(Error::Unsupported(_))));
+		assert_eq!(enc.bitrate(), bitrate);
+	}
+
+	#[test]
+	fn pcm_rejects_fractional_sample_frame_duration() {
+		let err = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			frame_duration: Duration::from_micros(2_500),
+			..Config::new(Input {
+				sample_rate: 44_100,
+				..Input::default()
+			})
+		});
+		assert!(matches!(err, Err(Error::Unsupported(_))));
+	}
+
+	#[test]
+	fn pcm_rejects_bitrate_overflow() {
+		let err = Encoder::new(&Config {
+			codec: Codec::Pcm,
+			frame_duration: Duration::from_secs(1),
+			..Config::new(Input {
+				sample_rate: u32::MAX,
+				channels: u32::MAX,
+				..Input::default()
+			})
+		});
+		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 }

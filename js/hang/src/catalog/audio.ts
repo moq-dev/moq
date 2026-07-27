@@ -1,5 +1,6 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
+import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 import { TimelineSchema } from "./timeline";
@@ -19,7 +20,8 @@ export const AudioConfigSchema = z.object({
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
 
-	// See: https://w3c.github.io/webcodecs/codec_registry.html
+	// Registered WebCodecs codec string, or Hang's "pcm" extension for
+	// interleaved little-endian IEEE-754 binary32 samples.
 	codec: z.string(),
 
 	// The container format, used to decode the timestamp and more.
@@ -28,7 +30,7 @@ export const AudioConfigSchema = z.object({
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is in-band.
-	description: z.optional(z.string()), // hex encoded TODO use base64
+	description: z.optional(hexSchema),
 
 	// The sample rate of the audio in Hz
 	sampleRate: u53Schema,

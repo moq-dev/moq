@@ -24,6 +24,7 @@ pub mod hang;
 pub mod msf;
 
 mod consumer;
+mod estimate;
 mod format;
 mod producer;
 mod select;
@@ -31,8 +32,9 @@ mod stream;
 mod tracks;
 
 pub use consumer::Consumer;
+pub use estimate::{Estimate, Estimator};
 pub use format::*;
 pub use producer::{Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;
-pub use tracks::{AudioTrack, Estimate, Rendition, RenditionConfig, Reserved, VideoHint, VideoTrack};
+pub use tracks::{AudioTrack, Rendition, RenditionConfig, Reserved, VideoHint, VideoTrack};

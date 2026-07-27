@@ -2183,9 +2183,9 @@ dependencies = [
 
 [[package]]
 name = "fast_image_resize"
-version = "5.5.0"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
 dependencies = [
  "cfg-if",
  "document-features",
@@ -2235,6 +2235,18 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "fixed-resample"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3505607cc0adc388ce98f59707477c02fbd05a2fa0c1b8c4cf42b71a3cb9c34"
+dependencies = [
+ "audioadapter",
+ "audioadapter-buffers",
+ "ringbuf",
+ "rubato",
+]
 
 [[package]]
 name = "fixedbitset"
@@ -2843,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3859,6 +3871,7 @@ version = "0.5.0"
 dependencies = [
  "smallvec",
  "tokio",
+ "web-async",
 ]
 
 [[package]]
@@ -3930,7 +3943,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4178,12 +4191,13 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "block2",
  "bytes",
  "cpal",
  "dispatch2",
+ "fixed-resample",
  "hang",
  "moq-mux",
  "moq-net",
@@ -4221,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4242,7 +4256,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4270,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hang",
@@ -4299,7 +4313,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4317,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4348,6 +4362,7 @@ dependencies = [
  "moq-net",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -4372,7 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4403,7 +4418,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.2"
+version = "0.19.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4454,7 +4469,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "criterion",
@@ -4475,16 +4490,16 @@ dependencies = [
 
 [[package]]
 name = "moq-nvenc"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "cudarc",
  "lazy_static",
- "libloading 0.8.9",
+ "libloading 0.9.0",
 ]
 
 [[package]]
 name = "moq-relay"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4527,7 +4542,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4547,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4571,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4620,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.38"
+version = "0.5.39"
 dependencies = [
  "anyhow",
  "clap",
@@ -4629,7 +4644,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4662,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4672,7 +4687,7 @@ dependencies = [
  "dispatch2",
  "fast_image_resize",
  "hang",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
@@ -4928,12 +4943,13 @@ dependencies = [
 
 [[package]]
 name = "netlink-proto"
-version = "0.12.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b65d130ee111430e47eed7896ea43ca693c387f097dd97376bffafbf25812128"
+checksum = "e6f7398dddf5f152d2a91a2921a134c6097056e292c0d4b9906007855e7cece6"
 dependencies = [
  "bytes",
- "futures",
+ "futures-channel",
+ "futures-util",
  "log",
  "netlink-packet-core",
  "netlink-sys",
@@ -6099,6 +6115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic-util"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
 name = "portmapper"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6805,6 +6830,17 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a158e09ede21a14b172ca6cdd6208386c6ae2cb6acef58d774368ef8c450dfa7"
+dependencies = [
+ "crossbeam-utils",
+ "portable-atomic",
+ "portable-atomic-util",
 ]
 
 [[package]]
@@ -9260,9 +9296,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quiche"
-version = "0.4.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fea3eb47ecea9f8b748d57349c0697742581e43dadd4715650ba5d8119f81bd2"
+checksum = "3599414f964f4f1132dc8bd8f6c497b7a7b97043e4d5de53abbc155527d48fdf"
 dependencies = [
  "boring",
  "bytes",
@@ -9274,6 +9310,7 @@ dependencies = [
  "tokio",
  "tokio-quiche",
  "tracing",
+ "url",
  "web-transport-proto",
  "web-transport-trait",
 ]

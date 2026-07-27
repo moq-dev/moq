@@ -93,6 +93,8 @@ typealias MediaFrame = uniffi.moq.MoqMediaFrame
 typealias Video = uniffi.moq.MoqVideo
 /** Caller-provided catalog fields for a video track. */
 typealias VideoHint = uniffi.moq.MoqVideoHint
+/** Catalog properties shared by every video rendition; absent fields clear those properties. */
+typealias VideoProperties = uniffi.moq.MoqVideoProperties
 /** Media format, initialization bytes, and optional video hints. */
 typealias Init = uniffi.moq.MoqInit
 /** The catalog description of an audio track: codec, sample rate, channels, and container. */

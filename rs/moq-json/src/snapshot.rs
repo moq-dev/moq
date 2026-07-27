@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{Diff, Result, diff};
+use crate::{Diff, Error, Result, diff};
 
 /// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
 ///
@@ -512,12 +512,25 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 	/// Materialize the current reconstructed value into `T`. Call only after at least one frame has
 	/// been applied in the current group.
+	///
+	/// Deserializing from the reconstructed [`Value`] rather than the frame bytes costs the line and
+	/// column a parse error would carry, so the error is prefixed with the JSON path of the offending
+	/// field instead. Without it a rejected field deep in a document reports only its own complaint,
+	/// with nothing to say where it came from.
 	fn reconstruct(&self) -> Result<T> {
 		let current = self
 			.current
 			.as_ref()
 			.expect("a value is present after applying a frame");
-		Ok(serde_json::from_value(current.clone())?)
+
+		serde_path_to_error::deserialize(current).map_err(|err| {
+			let path = err.path().to_string();
+			match path.as_str() {
+				// The whole document, not a field within it: nothing useful to prefix.
+				"." => Error::Json(err.into_inner().to_string()),
+				_ => Error::Json(format!("{}: {}", path, err.into_inner())),
+			}
+		})
 	}
 }
 
@@ -991,6 +1004,47 @@ mod test {
 			"windowed delta {} should be far below the raw patch {}",
 			frames[1].len(),
 			raw_delta.len()
+		);
+	}
+
+	#[test]
+	fn rejected_field_names_its_path() {
+		#[derive(serde::Deserialize)]
+		#[allow(dead_code)]
+		struct Inner {
+			count: u8,
+		}
+		#[derive(serde::Deserialize)]
+		#[allow(dead_code)]
+		struct Outer {
+			inner: Inner,
+		}
+
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!({ "inner": { "count": 300 } })).unwrap();
+
+		let mut consumer = Consumer::<Outer>::new(track, ConsumerConfig::default());
+		let Poll::Ready(Err(err)) = consumer.poll_next(&kio::Waiter::noop()) else {
+			panic!("expected a deserialize error");
+		};
+
+		// Deserializing from a Value has no line/column, so the path is the only locator a
+		// consumer gets. See https://github.com/moq-dev/moq/issues/2509.
+		assert!(err.to_string().starts_with("json: inner.count: "), "{err}");
+	}
+
+	#[test]
+	fn rejected_root_omits_the_path() {
+		let (mut producer, track) = producer(cfg(0));
+		producer.update(&json!("not a map")).unwrap();
+
+		let mut consumer = Consumer::<std::collections::BTreeMap<String, u8>>::new(track, ConsumerConfig::default());
+		let Poll::Ready(Err(err)) = consumer.poll_next(&kio::Waiter::noop()) else {
+			panic!("expected a deserialize error");
+		};
+		assert_eq!(
+			err.to_string(),
+			"json: invalid type: string \"not a map\", expected a map"
 		);
 	}
 

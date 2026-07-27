@@ -5,9 +5,12 @@ use crate::container::Frame;
 /// AAC importer.
 ///
 /// The catalog comes from an AudioSpecificConfig (variable-length, typically extracted from an MP4
-/// ESDS atom); build the config with [`config`]. Each packet passed to [`decode`](Self::decode) is
-/// published as one hang frame in its own group, so the relay can forward each frame without waiting
-/// for a group boundary. The codec's packet loss concealment handles drops.
+/// ESDS atom); build the config with [`config`]. Every AAC packet is independently decodable, so
+/// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend it):
+/// frames accumulate into the current group until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s.
+/// The [`import::Track`](crate::import::Track) facade cuts after every packet by default (one group
+/// per frame, so the relay forwards without waiting); a caller that drives its own boundaries (a
+/// segment cadence) cuts less often. The codec's packet loss concealment handles drops.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
@@ -57,8 +60,8 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.finish()?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -68,33 +71,43 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
+	/// the fields its config didn't supply.
+	fn estimate(&mut self) {
+		self.rendition.estimate(self.track.estimate());
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		self.rendition.record_group_end(end);
 		self.track.cut(end)?;
+		self.estimate();
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
+		self.estimate();
 		Ok(())
 	}
 
-	/// Publish one AAC packet as its own group, stamping `pts` or a wall clock when absent.
+	/// Publish one AAC packet, stamping `pts` or a wall clock when absent.
+	///
+	/// AAC is independently decodable, so the packet is marked a keyframe only when it starts a group
+	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
+	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
-		self.rendition.record_group_end(Some(timestamp));
-		let bytes = frame.as_ref().len();
+		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
+		// instead of opening one group (one QUIC stream) per packet.
+		let keyframe = self.track.needs_keyframe();
 		self.track.write(Frame {
 			timestamp,
 			payload: frame.into_bytes(),
-			keyframe: true,
+			keyframe,
 			duration: None,
 		})?;
-		self.track.cut(None)?;
-		self.rendition.record_frame(timestamp, bytes);
+		self.estimate();
 		Ok(())
 	}
 }

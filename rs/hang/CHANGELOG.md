@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1](https://github.com/moq-dev/moq/compare/hang-v0.20.0...hang-v0.20.1) - 2026-07-25
+
+### Added
+
+- *(bindings)* expose shared video properties ([#2457](https://github.com/moq-dev/moq/pull/2457))
+- *(moq-audio)* add PCM codec ([#2493](https://github.com/moq-dev/moq/pull/2493))
+
+### Fixed
+
+- *(hang)* preserve audio codec kind discriminants ([#2511](https://github.com/moq-dev/moq/pull/2511))
+
 ## [0.20.0](https://github.com/moq-dev/moq/compare/hang-v0.19.5...hang-v0.20.0) - 2026-07-22
 
 ### Fixed

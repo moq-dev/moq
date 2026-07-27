@@ -68,7 +68,12 @@ let
       filter =
         path: type: (final.lib.hasInfix "/test_data/" path) || (craneLib.filterCargoSources path type);
     };
-    cargoExtraArgs = "-p moq-cli";
+    cargoExtraArgs = "-p moq-cli --features jemalloc";
+    # Enable frame pointers so jemalloc profiles resolve complete call stacks.
+    RUSTFLAGS = "-C force-frame-pointers=yes";
+    # jemalloc's configure uses -O0 test builds, which conflict with
+    # Nix's _FORTIFY_SOURCE hardening (requires -O).
+    hardeningDisable = [ "fortify" ];
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
   };
@@ -165,6 +170,13 @@ let
       # line so this is independent of the profile name and the exact .pc
       # template. Stays relocatable; no build-time path leaks into the store.
       sed -i 's#^libdir=.*#libdir=''${pcfiledir}/..#' $out/lib/pkgconfig/moq.pc
+
+      # Same relocation for includedir: the template points at the cargo tree's
+      # shared target/include (../../../ from the .pc). Here the header lives in
+      # $out/include, one level up from $out/lib, so it's ../../ from the .pc.
+      # Without this, pkg-config --cflags emits a bogus -I above $out and
+      # consumers fail with "moq.h: No such file or directory".
+      sed -i 's#^includedir=.*#includedir=''${pcfiledir}/../../include#' $out/lib/pkgconfig/moq.pc
 
       major_version="$(echo "${libmoqInfo.version}" | cut -d. -f1)"
       substitute ${../rs/libmoq/cmake/moq-config.cmake.in} \

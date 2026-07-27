@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.0"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.1"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -108,6 +108,18 @@ try broadcast.finish()
 ```
 
 Video publishers can pass `video: VideoHint(...)` to seed catalog fields before the stream reveals them. Use `publishMedia(on:format:initData:video:)` to accept a media track obtained from `BroadcastDynamic`.
+
+Properties that apply to every video rendition are updated together. `nil` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```swift
+try broadcast.setVideoProperties(
+    VideoProperties(
+        display: Dimensions(width: 1080, height: 1920),
+        rotation: 90,
+        flip: false
+    )
+)
+```
 
 For sparse or replayed raw tracks, use `track.createGroup(sequence:)`. `track.finish(at:)` declares the exclusive end while still permitting lower groups, and `group.abort(errorCode:)` terminates a group with an application error.
 

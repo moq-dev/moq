@@ -76,6 +76,11 @@ func (b *BroadcastProducer) SetAnnounce(live bool) error {
 	return b.inner.SetAnnounce(live)
 }
 
+// SetVideoProperties replaces the catalog properties shared by every video rendition.
+func (b *BroadcastProducer) SetVideoProperties(properties VideoProperties) error {
+	return b.inner.SetVideoProperties(properties)
+}
+
 // PublishMedia publishes a media track from an init segment, fed frame by
 // frame with explicit timestamps.
 func (b *BroadcastProducer) PublishMedia(format string, init []byte, opts ...MediaOption) (*MediaProducer, error) {

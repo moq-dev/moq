@@ -159,12 +159,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Tick the probe interval, bailing as soon as the peer closes its side.
 			let closed = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
-				let mut tick = std::pin::pin!(interval.tick());
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Some(res));
 					}
-					waiter.poll_future(tick.as_mut()).map(|_| None)
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					interval.poll_tick(&mut cx).map(|_| None)
 				})
 				.await
 			};
@@ -400,27 +400,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Send updates as they arrive. Closure wins the race so a dead peer can't
 		// stall on a busy announce feed.
+		let mut linger = kio::time::Deadline::new();
 		loop {
 			// The earliest deferred cost-restore, if any entry's linger is running.
-			let deadline = watched
-				.values()
-				.filter_map(|entry| entry.idle_at)
-				.min()
-				.map(|at| at + COST_LINGER);
+			linger.set(
+				watched
+					.values()
+					.filter_map(|entry| entry.idle_at)
+					.min()
+					.map(|at| at + COST_LINGER),
+			);
 			let op = {
 				let mut closed = std::pin::pin!(stream.reader.closed());
-				// Pending forever while no linger is running. Fused via `fired`:
-				// a completed future must not be polled again, and once it fires
-				// the turn always ends in a `Ready` below.
-				let mut linger = std::pin::pin!(async move {
-					match deadline {
-						Some(at) => {
-							web_async::time::sleep(at.saturating_duration_since(web_async::time::Instant::now())).await
-						}
-						None => std::future::pending().await,
-					}
-				});
-				let mut fired: Option<web_async::time::Instant> = None;
 				kio::wait(|waiter| {
 					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
 						return Poll::Ready(Err(res));
@@ -428,9 +419,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
 						return Poll::Ready(Ok(Op::Announce(next)));
 					}
-					if fired.is_none() && waiter.poll_future(linger.as_mut()).is_ready() {
-						fired = Some(web_async::time::Instant::now());
-					}
+					// Stamped per poll rather than kept: the turn always ends in a
+					// `Ready` below once it fires, so it never has to survive.
+					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
 					// Poll every watched broadcast for a route change; each wake
 					// rescans the map, which announce-control rates make fine.
 					for (suffix, entry) in watched.iter_mut() {
@@ -1058,131 +1049,8 @@ mod test {
 mod announce_test {
 	use super::*;
 	use crate::coding::{Decode, Reader};
+	use crate::lite::test_transport::*;
 	use std::sync::Mutex;
-
-	#[derive(Debug, Clone, Default)]
-	struct SinkError;
-
-	impl std::fmt::Display for SinkError {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "sink transport error")
-		}
-	}
-
-	impl std::error::Error for SinkError {}
-
-	impl web_transport_trait::Error for SinkError {
-		fn session_error(&self) -> Option<(u32, String)> {
-			Some((0, "closed".to_string()))
-		}
-	}
-
-	/// Captures everything the announce loop writes, so tests decode it back
-	/// into announce messages.
-	#[derive(Clone, Default)]
-	struct SinkSend {
-		writes: Arc<Mutex<Vec<u8>>>,
-	}
-
-	impl web_transport_trait::SendStream for SinkSend {
-		type Error = SinkError;
-
-		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-			self.writes.lock().unwrap().extend_from_slice(buf);
-			Ok(buf.len())
-		}
-
-		fn set_priority(&mut self, _order: u8) {}
-
-		fn finish(&mut self) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		fn reset(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	/// A peer that never speaks and never closes, so the announce loop only ever
-	/// acts on model-side events (announces, routes, demand, the linger timer).
-	struct PendingRecv;
-
-	impl web_transport_trait::RecvStream for PendingRecv {
-		type Error = SinkError;
-
-		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn stop(&mut self, _code: u32) {}
-
-		async fn closed(&mut self) -> Result<(), Self::Error> {
-			std::future::pending().await
-		}
-	}
-
-	/// Only names the stream types for `Stream<S, Version>`; `run_announce`
-	/// never touches the session itself.
-	#[derive(Clone)]
-	struct SinkSession;
-
-	impl web_transport_trait::Session for SinkSession {
-		type SendStream = SinkSend;
-		type RecvStream = PendingRecv;
-		type Error = SinkError;
-
-		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-			std::future::pending().await
-		}
-
-		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
-			Ok(())
-		}
-
-		async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
-			std::future::pending().await
-		}
-
-		fn max_datagram_size(&self) -> usize {
-			0
-		}
-
-		fn protocol(&self) -> Option<&str> {
-			None
-		}
-
-		fn close(&self, _code: u32, _reason: &str) {}
-
-		async fn closed(&self) -> Self::Error {
-			std::future::pending().await
-		}
-
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			SinkStats
-		}
-	}
-
-	struct SinkStats;
-
-	impl web_transport_trait::Stats for SinkStats {
-		fn estimated_send_rate(&self) -> Option<u64> {
-			None
-		}
-	}
 
 	const VERSION: Version = Version::Lite06Wip;
 
@@ -1317,10 +1185,11 @@ mod announce_test {
 		let downstream = origin.consume().announced_broadcast("cam").await.unwrap();
 		let track = demand.then(|| downstream.track("video").unwrap());
 
-		let writes = Arc::new(Mutex::new(Vec::new()));
+		let log = Log::default();
+		let writes = log.writes.clone();
 		let consumer = origin.consume();
 		let mut stream = Stream::<SinkSession, Version> {
-			writer: Writer::new(SinkSend { writes: writes.clone() }, VERSION),
+			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),
 		};
 		let task = tokio::spawn(async move {
@@ -1806,25 +1675,44 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			sequence,
 		};
 		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
-
 		let mut stream = Writer::new(stream, self.version);
-		stream.set_priority(priority.current());
-		stream.encode(&lite::DataType::Group).await?;
-		stream.encode(&msg).await?;
 
-		// Lite05+ delta-encodes per-frame timestamps within the group. The first
-		// frame's delta is absolute (against an implicit prev value of 0), every
-		// subsequent delta is signed against the previous frame.
-		let mut prev_ts: u64 = 0;
-		while let Some(frame) = self.next_frame(&mut stream, &mut priority, &mut group).await? {
-			self.serve_frame(&mut stream, &mut priority, frame, &mut prev_ts)
-				.await?;
+		if let Err(err) = self.write_group(&mut stream, &msg, &mut priority, &mut group).await {
+			// Reset with the real reason (Old, Lagged, Evicted, ...) so the subscriber can
+			// tell a truncated group from a routine cancel. Without this the Writer's Drop
+			// fallback reports every failure as Cancel.
+			stream.abort(&err);
+			return Err(err);
 		}
 
 		stream.finish()?;
 		stream.closed().await?;
 
 		tracing::debug!(sequence, "finished group");
+
+		Ok(())
+	}
+
+	/// Write the group header and every frame, leaving the stream open for the caller to
+	/// finish or abort.
+	async fn write_group(
+		&mut self,
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &lite::Group,
+		priority: &mut PriorityHandle,
+		group: &mut group::Consumer,
+	) -> Result<(), Error> {
+		stream.set_priority(priority.current());
+		stream.encode(&lite::DataType::Group).await?;
+		stream.encode(msg).await?;
+
+		// Lite05+ delta-encodes per-frame timestamps within the group. The first
+		// frame's delta is absolute (against an implicit prev value of 0), every
+		// subsequent delta is signed against the previous frame.
+		let mut prev_ts: u64 = 0;
+		while let Some(frame) = self.next_frame(stream, priority, group).await? {
+			self.serve_frame(stream, priority, frame, &mut prev_ts).await?;
+		}
 
 		Ok(())
 	}
@@ -1996,5 +1884,51 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let track_priority = self.track_priority_current();
 		priority.set_track(track_priority);
 		stream.set_priority(priority.current());
+	}
+}
+
+/// A group that fails mid-stream must reset with its own error code. The subscriber uses
+/// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
+/// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
+#[cfg(test)]
+mod serve_group_test {
+	use super::*;
+	use crate::lite::test_transport::*;
+	use crate::{Timestamp, broadcast};
+
+	#[tokio::test]
+	async fn resets_with_the_abort_code() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+
+		// Drain the frame, leaving the task parked awaiting the next one.
+		assert!(futures::poll!(serve.as_mut()).is_pending());
+
+		// The group is dropped from the cache mid-stream: a truncated group, not a cancel.
+		group.abort(Error::Old).unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
 	}
 }

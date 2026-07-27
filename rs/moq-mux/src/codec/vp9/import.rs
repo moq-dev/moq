@@ -89,19 +89,13 @@ impl<E: CatalogExt> Import<E> {
 		}
 
 		let pts = self.rendition.timestamp(pts)?;
-		// A key frame starts a new group: close the previous one for the bitrate detector.
-		if header.keyframe {
-			self.rendition.record_group_end(Some(pts));
-		}
-		let bytes = frame.as_ref().len();
 		self.track.write(Frame {
 			timestamp: pts,
 			payload: frame.into_bytes(),
 			keyframe: header.keyframe,
 			duration: None,
 		})?;
-
-		self.rendition.record_frame(pts, bytes);
+		self.estimate();
 
 		Ok(())
 	}
@@ -113,8 +107,8 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.finish()?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -124,17 +118,23 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
+	/// the fields its config didn't supply.
+	fn estimate(&mut self) {
+		self.rendition.estimate(self.track.estimate());
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		self.rendition.record_group_end(end);
 		self.track.cut(end)?;
+		self.estimate();
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
+		self.estimate();
 		Ok(())
 	}
 }

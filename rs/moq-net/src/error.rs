@@ -130,9 +130,9 @@ pub enum Error {
 	#[error("frame timestamp doesn't match track timescale")]
 	TimestampMismatch,
 
-	/// The group was evicted from the cache under memory pressure (see
-	/// [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`], the group was
-	/// still within the publisher's window; it can be re-fetched.
+	/// The group was evicted by its own track to pay eviction debt under memory
+	/// pressure (see [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`],
+	/// the group was still within the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -195,8 +195,13 @@ impl Error {
 
 	/// Convert a transport error into an [Error], decoding stream reset codes.
 	pub fn from_transport(err: impl web_transport_trait::Error) -> Self {
-		if let Some(code) = err.stream_error() {
-			return Self::Remote(code);
+		match err.stream_error() {
+			// Code 0 is what [`Self::Cancel`] encodes to, and what a plain stream
+			// drop sends: the peer is done with the stream, not failing. Decoding it
+			// back keeps a routine unsubscribe out of the error paths.
+			Some(0) => return Self::Cancel,
+			Some(code) => return Self::Remote(code),
+			None => {}
 		}
 
 		Self::Transport(err.to_string())

@@ -97,9 +97,12 @@ impl Config {
 /// passing the track producer and the [`catalog::Reserved`](crate::catalog::Reserved)
 /// it reserves its rendition from.
 ///
-/// Each frame handed to [`decode`](Self::decode) is published in its own group so the
-/// relay can forward it immediately. MP3 carries its config in band, so the rendition
-/// has no out-of-band description.
+/// Every MP3 frame is independently decodable, so [`decode`](Self::decode) marks only the first frame
+/// of each group a keyframe (the rest extend it): frames accumulate into the current group until the
+/// caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track)
+/// facade cuts after every frame by default (one group per frame); a caller driving its own
+/// boundaries cuts less often. MP3 carries its config in band, so the rendition has no out-of-band
+/// description.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
@@ -135,8 +138,8 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.finish()?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -146,33 +149,43 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
+	/// the fields its config didn't supply.
+	fn estimate(&mut self) {
+		self.rendition.estimate(self.track.estimate());
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		self.rendition.record_group_end(end);
 		self.track.cut(end)?;
+		self.estimate();
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
+		self.estimate();
 		Ok(())
 	}
 
-	/// Publish one MP3 frame as its own group, stamping `pts` or a wall clock when absent.
+	/// Publish one MP3 frame, stamping `pts` or a wall clock when absent.
+	///
+	/// MP3 is independently decodable, so the frame is marked a keyframe only when it starts a group
+	/// (see [`Producer::needs_keyframe`](crate::container::Producer::needs_keyframe)); otherwise it
+	/// extends the current group. The caller bounds groups via [`cut`](Self::cut) / [`seek`](Self::seek).
 	pub fn decode<B: moq_net::IntoBytes>(&mut self, frame: B, pts: Option<Timestamp>) -> crate::Result<()> {
 		let timestamp = self.rendition.timestamp(pts)?;
-		self.rendition.record_group_end(Some(timestamp));
-		let bytes = frame.as_ref().len();
+		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
+		// instead of opening one group (one QUIC stream) per packet.
+		let keyframe = self.track.needs_keyframe();
 		self.track.write(Frame {
 			timestamp,
 			payload: frame.into_bytes(),
-			keyframe: true,
+			keyframe,
 			duration: None,
 		})?;
-		self.track.cut(None)?;
-		self.rendition.record_frame(timestamp, bytes);
+		self.estimate();
 		Ok(())
 	}
 }

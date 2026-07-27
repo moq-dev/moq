@@ -4,7 +4,14 @@
 //! tracks, and shaped the same way: both split into `capture` / `encode` /
 //! `decode` role modules over a shared root [`Error`]. Sits on top of [`moq_mux`]
 //! (and the `hang` catalog) and adds the native pieces a desktop/CLI publisher
-//! needs:
+//! needs.
+//!
+//! A raw picture is a [`Frame`] wherever it crosses the API: a timestamp and a
+//! [`Surface`] holding the pixels. Capture and [`decode`] produce them, [`encode`]
+//! consumes them and hands back the compressed [`encode::Encoded`], and [`Size`]
+//! names a resolution. Keyframes are the encoder's business: it inserts them per
+//! [`encode::Config::gop`], and [`encode::Encoder::keyframe`] is there for the
+//! rarer case where a caller needs one at a specific frame.
 //!
 //! - [`capture`] describes a frame source ([`capture::Config`]) and grabs
 //!   frames per platform: AVFoundation/ScreenCaptureKit on macOS, native V4L2
@@ -22,24 +29,24 @@
 //!     It encodes strictly on demand: the track and catalog are advertised up
 //!     front, but the camera opens only while a subscriber is watching and is
 //!     released when the last one leaves.
-//!   - [`encode::Producer`] publishes packets you encoded yourself.
+//!   - [`encode::Encoder`] encodes [`Frame`]s you supply (from capture, a
+//!     decoder, or your own pixels via [`Surface::rgba`]) and
+//!     [`encode::Producer`] publishes the results.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS, Media Foundation /
 //!   DXVA on Windows, NVDEC on Linux, openh264 software fallback for H.264).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
-//!   [`decode::Config::resize`]. [`Size`] names a resolution wherever one
-//!   crosses the API.
+//!   [`decode::Config::resize`].
 //!
 //! ## API stability
 //!
 //! The public API is codec-agnostic: no public type, signature, or error
 //! variant names a backend (openh264 / VideoToolbox / NVENC / NVDEC) or a
-//! capture implementation. [`encode::Encoder`] takes raw RGBA bytes,
-//! [`decode::Consumer`] returns opaque [`decode::Frame`]s (CPU I420 on demand,
-//! GPU-resident when hardware decoded), and the camera capture path stays
-//! internal. So swapping or bumping any backend crate is not a breaking change
+//! capture implementation. [`encode::Encoder`] takes a [`Frame`],
+//! [`decode::Consumer`] returns one (CPU I420 on demand, GPU-resident when
+//! hardware decoded), and the camera capture path stays internal. So swapping or bumping any backend crate is not a breaking change
 //! for consumers. Config structs are `#[non_exhaustive]`: build them via
 //! `default()`/`new()` and set fields, so new options stay additive.
 //!
@@ -63,7 +70,7 @@ mod size;
 mod mf;
 
 pub use error::Error;
-pub use frame::{I420, Surface};
+pub use frame::{Frame, I420, Surface};
 pub use size::Size;
 
 /// The CoreFoundation bindings owning the handle [`Surface::into_pixel_buffer`]

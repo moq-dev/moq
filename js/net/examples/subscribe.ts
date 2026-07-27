@@ -16,9 +16,20 @@ async function main() {
 		if (!group) break;
 
 		for (;;) {
-			const frame = await group.readString();
-			if (!frame) break;
+			let frame: string | undefined;
+			try {
+				frame = await group.readString();
+			} catch (err) {
+				// The publisher reset the group. The code is whatever it means to that peer,
+				// and reads the same way on every transport.
+				if (err instanceof Moq.RemoteError) {
+					console.warn("group reset with code", err.code);
+					break;
+				}
+				throw err;
+			}
 
+			if (!frame) break;
 			console.log("Received:", frame);
 		}
 	}

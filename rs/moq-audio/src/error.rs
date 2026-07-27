@@ -20,6 +20,13 @@ pub enum Error {
 	#[error("audio capture: {0}")]
 	Capture(String),
 
+	/// The playback backend failed: the output device could not be opened, or the
+	/// stream stopped and could not be restarted. The device or host API is at
+	/// fault, not the configuration; `playback::devices` reports what is
+	/// available.
+	#[error("audio playback: {0}")]
+	Playback(String),
+
 	/// The input buffer was not aligned to the codec's frame size.
 	#[error("input buffer length {got} bytes does not match expected {expected}")]
 	Misaligned {

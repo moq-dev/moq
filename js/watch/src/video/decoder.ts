@@ -7,6 +7,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Si
 import { base64ToBytes } from "../base64";
 
 import type { Sync } from "../sync";
+import { rotateVideoDimensions } from "./presentation";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
@@ -181,20 +182,17 @@ export class Decoder {
 
 		const display = catalog.display;
 		if (display) {
-			effect.set(this.#out.display, {
-				width: display.width,
-				height: display.height,
-			});
+			effect.set(this.#out.display, { width: display.width, height: display.height });
 			return;
 		}
 
 		const frame = effect.get(this.#out.frame);
 		if (!frame) return;
 
-		effect.set(this.#out.display, {
-			width: frame.displayWidth,
-			height: frame.displayHeight,
-		});
+		effect.set(
+			this.#out.display,
+			rotateVideoDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
+		);
 	}
 
 	#runBuffering(effect: Effect): void {
@@ -357,7 +355,7 @@ class DecoderTrack {
 			flip: false,
 		});
 
-		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let previous: Time.Micro | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -367,15 +365,8 @@ class DecoderTrack {
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
-				const { frame, group } = next;
-
-				if (!frame) {
-					if (previous) {
-						previous.final = true;
-					}
-					// The group is done
-					continue;
-				}
+				const { frame } = next;
+				if (!frame) continue; // The group is done
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -393,19 +384,16 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer: frames sent to decoder but not yet rendered
-				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
-					const start = Time.Milli.fromMicro(prior.timestamp);
-					const end = Time.Milli.fromMicro(frame.timestamp);
-					this.#addBuffered(start, end);
+				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
+				// the previous frame when the consumer says nothing is missing in between. Group ids
+				// can't answer that: they aren't required to be sequential (some encoders derive them
+				// from DTS), so adjacency neither proves continuity nor rules out a gap the consumer
+				// skipped, and reporting a skipped span as decoded overstates the buffer.
+				if (previous !== undefined && next.continuous) {
+					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
-				previous = {
-					timestamp: frame.timestamp,
-					group,
-					final: false,
-				};
+				previous = frame.timestamp;
 
 				decoder.decode(chunk);
 			}
@@ -442,7 +430,7 @@ class DecoderTrack {
 			flip: false,
 		});
 
-		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
+		let previous: Time.Micro | undefined;
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -452,14 +440,8 @@ class DecoderTrack {
 				// Publisher rewound: flush queued/in-flight video and re-anchor before decoding.
 				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
 
-				const { frame, group } = next;
-
-				if (!frame) {
-					if (previous) {
-						previous.final = true;
-					}
-					continue;
-				}
+				const { frame } = next;
+				if (!frame) continue;
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
@@ -471,19 +453,13 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 
-				// Track decode buffer
-				const prior = previous;
-				if (prior && (prior.group === group || (prior.final && prior.group + 1 === group))) {
-					const start = Time.Milli.fromMicro(prior.timestamp);
-					const end = Time.Milli.fromMicro(frame.timestamp);
-					this.#addBuffered(start, end);
+				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
+				// never on group adjacency, which proves nothing about the timeline).
+				if (previous !== undefined && next.continuous) {
+					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
 				}
 
-				previous = {
-					timestamp: frame.timestamp,
-					group,
-					final: false,
-				};
+				previous = frame.timestamp;
 
 				if (decoder.state === "closed") break;
 				decoder.decode(

@@ -80,6 +80,18 @@ video = broadcast.publish_media(
 
 A value the stream later detects fills only a gap the hint left, so a detected value always wins. Audio formats resolve entirely from their init bytes, so they take no hint.
 
+Properties that apply to every video rendition are updated together. Omitted fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```python
+broadcast.set_video_properties(
+    moq.VideoProperties(
+        display=moq.Dimensions(width=1080, height=1920),
+        rotation=90.0,
+        flip=False,
+    )
+)
+```
+
 ### Subscribing to media
 
 ```python

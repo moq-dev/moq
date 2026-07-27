@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.1...moq-srt-v0.2.2) - 2026-07-25
+
+### Fixed
+
+- *(moq-srt)* clamp egress send instants to the first packet (fixes tune-in stall) ([#2501](https://github.com/moq-dev/moq/pull/2501))
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.0...moq-srt-v0.2.1) - 2026-07-24
 
 ### Other

@@ -132,6 +132,20 @@ func TestPublishMediaLifecycle(t *testing.T) {
 	}
 }
 
+func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotation := 315.0
+	if err := broadcast.SetVideoProperties(moq.VideoProperties{Rotation: &rotation}); err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

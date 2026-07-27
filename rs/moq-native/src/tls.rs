@@ -614,10 +614,8 @@ pub struct Server {
 	/// and can be used by the application to grant elevated access. Clients that
 	/// do not present a certificate are unaffected.
 	///
-	/// Client certificate reporting is only supported by the Quinn and noq QUIC
-	/// backends. Plain-TLS listeners built via [`Self::server_config`] also use
-	/// these roots for optional mTLS when the feature set includes quinn, noq, or
-	/// quiche.
+	/// Plain-TLS listeners built via [`Self::server_config`] also use these roots
+	/// for optional mTLS.
 	#[arg(
 		long = "server-tls-root",
 		id = "server-tls-root",
@@ -706,6 +704,12 @@ impl PeerIdentity {
 	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
 		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
 		Some(Self { chain: *chain })
+	}
+
+	/// Wrap a certificate chain already exposed by a QUIC backend.
+	#[cfg(feature = "quiche")]
+	pub(crate) fn from_chain(chain: Vec<CertificateDer<'static>>) -> Self {
+		Self { chain }
 	}
 
 	/// The validated certificate chain, leaf first.

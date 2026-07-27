@@ -206,8 +206,8 @@ impl<E: CatalogExt> Import<E> {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.finish()?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -217,17 +217,23 @@ impl<E: CatalogExt> Import<E> {
 		self.track.abort(err);
 	}
 
+	/// Publish what the track measured (bitrate, jitter) into the catalog rendition, filling only
+	/// the fields its config didn't supply.
+	fn estimate(&mut self) {
+		self.rendition.estimate(self.track.estimate());
+	}
+
 	/// Cut the current group at `end` without finishing the track.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
-		self.rendition.record_group_end(end);
 		self.track.cut(end)?;
+		self.estimate();
 		Ok(())
 	}
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.rendition.record_group_end(None);
 		self.track.seek(sequence)?;
+		self.estimate();
 		Ok(())
 	}
 
@@ -246,19 +252,12 @@ impl<E: CatalogExt> Import<E> {
 				return Err(Error::MissingSequenceHeader.into());
 			}
 
-			// A keyframe starts a new group: close the previous one for the bitrate detector.
-			if frame.keyframe {
-				self.rendition.record_group_end(Some(frame.timestamp));
-			}
-
-			let pts = frame.timestamp;
-			let bytes = frame.payload.len();
 			// A pre-keyframe delta has no group to anchor it: the producer returns
 			// MissingKeyframe, which a caller joining mid-stream skips.
 			self.track.write(frame)?;
-
-			self.rendition.record_frame(pts, bytes);
 		}
+
+		self.estimate();
 		Ok(())
 	}
 

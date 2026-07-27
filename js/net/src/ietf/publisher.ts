@@ -1,9 +1,9 @@
 import * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
+import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { error, reason } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";

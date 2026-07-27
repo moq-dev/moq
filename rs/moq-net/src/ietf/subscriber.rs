@@ -93,7 +93,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
-	let mut timeout = std::pin::pin!(web_async::time::sleep(TRACK_ALIAS_TIMEOUT));
+	let mut timeout = kio::time::Deadline::after(TRACK_ALIAS_TIMEOUT);
 	kio::wait(|waiter| {
 		let resolved = aliases.poll(waiter, |aliases| match aliases.get(&alias) {
 			Some(request_id) => Poll::Ready(*request_id),
@@ -102,7 +102,7 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 		if let Poll::Ready(result) = resolved {
 			return Poll::Ready(result.map_err(|_| Error::Dropped));
 		}
-		if waiter.poll_future(timeout.as_mut()).is_ready() {
+		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
 		}
 		Poll::Pending

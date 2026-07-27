@@ -70,7 +70,7 @@ Once a transport is in place, the API is identical to the browser:
 ```javascript
 import * as Moq from "@moq/net";
 
-const url = new URL("https://relay.moq.dev/anon");
+const url = new URL("https://cdn.moq.dev/anon");
 const connection = await Moq.Connection.connect(url);
 
 // publish or subscribe exactly as you would in the browser...

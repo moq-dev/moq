@@ -934,15 +934,91 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::coding::Decode;
+	use crate::lite::test_transport::SinkSession;
+	use crate::util::TaskSet;
+
+	const VERSION: Version = Version::Lite05;
+
+	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
+	/// before any of it reaches the transport.
+	///
+	/// Both halves matter: a second stream re-requests the same id, which the peer is
+	/// free to serve twice, and a late insert loses the race with a publisher that
+	/// serves its first group the instant it reads the request (`recv_group` drops a
+	/// group whose id isn't in the map yet).
+	#[tokio::test]
+	async fn establish_sends_one_registered_subscribe() {
+		// Writes park until this opens, so the assertions below run at the exact moment
+		// the request would hit the wire.
+		let gate = kio::Producer::new(false);
+		let session = SinkSession::gated_bi(gate.consume());
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let (tasks, _task_set) = TaskSet::new();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			session: session.clone(),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			tasks,
+		});
+		let subscribes = subscriber.subscribes.clone();
+		let serve = TrackServe {
+			subscriber,
+			path: Path::new("room/host").to_owned(),
+			name: "catalog.json".to_string(),
+		};
+
+		let mut broadcast = crate::broadcast::Info::new().produce();
+		let mut producer = broadcast.create_track("catalog.json", None).unwrap();
+		let mut sub = Sub::None;
+		let mut establish = std::pin::pin!(serve.establish(
+			&mut producer,
+			&mut sub,
+			Subscription::default(),
+			Some(Timescale::default()),
+		));
+
+		// Parked on the first write: the stream is open and nothing has been sent yet.
+		assert!(futures::poll!(establish.as_mut()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1);
+		assert!(subscribes.lock().contains_key(&0), "registered before the wire");
+
+		let Ok(mut open) = gate.write() else {
+			panic!("gate closed")
+		};
+		*open = true;
+		drop(open);
+
+		establish.await.unwrap();
+
+		// One request, on one stream, and nothing else behind it.
+		assert_eq!(session.log.bi_opens(), 1);
+
+		let writes = session.log.writes.lock().unwrap().clone();
+		let mut wire = writes.as_slice();
+		assert_eq!(
+			lite::ControlType::decode(&mut wire, VERSION).unwrap(),
+			lite::ControlType::Subscribe
+		);
+		let msg = lite::Subscribe::decode(&mut wire, VERSION).unwrap();
+		assert_eq!(msg.id, 0);
+		assert_eq!(msg.track, "catalog.json");
+		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
+	}
+}
+
 /// The at-most-one live upstream subscription: its control stream plus the params
 /// echoed in every SUBSCRIBE_UPDATE.
 struct SubStream<S: web_transport_trait::Session> {
 	stream: Stream<S, Version>,
 	id: u64,
-	/// Capped at the latest group and dropped to priority 0 because the last
-	/// downstream subscriber left. The stream stays open during the linger window
-	/// so a returning consumer resumes without a fresh SUBSCRIBE.
-	paused: bool,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	ordered: bool,
@@ -998,6 +1074,10 @@ enum Teardown {
 	/// The route or session failed: abort the track so the origin re-splices it
 	/// from another source.
 	GiveBack(Error),
+	/// The origin released this copy: nobody is reading it, so drop it (and the
+	/// `TRACK_INFO` behind it) rather than holding the state for a reader that
+	/// may never come back.
+	Released,
 }
 
 /// One step for the [`TrackServe`] loop, produced by racing track demand, the
@@ -1013,15 +1093,16 @@ enum Event {
 	SubResponse(lite::SubscribeResponse),
 	/// The upstream subscribe stream closed: `Ok` is a clean FIN, `Err` a transport error.
 	SubClosed(Result<(), Error>),
+	/// Every reader of this copy went away (the origin released it).
+	Unused,
 	/// The whole session died.
 	SessionClosed,
 }
 
 /// Serves one requested track for a relay: owns this session's copy of the
 /// track (spliced into the origin's logical track), driving the single upstream
-/// subscription (opened lazily on the first downstream subscriber,
-/// paused/resumed across consumer churn) concurrently with any number of
-/// one-shot fetches.
+/// subscription (opened lazily on the first downstream subscriber, canceled when
+/// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: web_transport_trait::Session> {
 	subscriber: Subscriber<S>,
@@ -1031,7 +1112,8 @@ struct TrackServe<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> TrackServe<S> {
 	async fn run(self, request: track::Request) {
-		// SUBSCRIBE_UPDATE (and thus pause/resume) only exists on Lite03+.
+		// SUBSCRIBE_UPDATE only exists on Lite03+, so older peers can't carry a
+		// preference change to an established subscription.
 		let supports_update = !matches!(self.subscriber.version, Version::Lite01 | Version::Lite02);
 		let supports_fetch = self.subscriber.version.has_track_stream();
 
@@ -1109,7 +1191,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						}
 					}
 
-					// (3) The upstream subscribe stream closed, or carried a START/END/DROP.
+					// (3) Nobody reads this copy anymore: the origin released it after its
+					// idle linger, so drop it instead of holding the track state (and its
+					// TRACK_INFO) for a reader that may never return. In-flight fetches
+					// keep it alive: work already accepted still gets finished.
+					if fetches.is_empty() && serving.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Event::Unused);
+					}
+
+					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
 					if let Poll::Ready(res) = waiter.poll_future(sub_msg.as_mut()) {
 						return Poll::Ready(match res {
 							Ok(Some(msg)) => Event::SubResponse(msg),
@@ -1118,7 +1208,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						});
 					}
 
-					// (4) The session died: hand the track back for another route.
+					// (5) The session died: hand the track back for another route.
 					if waiter.poll_future(session_closed.as_mut()).is_ready() {
 						return Poll::Ready(Event::SessionClosed);
 					}
@@ -1178,6 +1268,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					tracing::warn!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, %err, "subscribe error");
 					break Teardown::GiveBack(err);
 				}
+				Event::Unused => {
+					tracing::debug!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "track released (idle)");
+					break Teardown::Released;
+				}
 				Event::SessionClosed => {
 					break Teardown::GiveBack(Error::Dropped);
 				}
@@ -1199,6 +1293,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				// Mark this copy dead: subscribers stall while the origin
 				// re-splices the track from the next source.
 				let _ = serving.abort(err);
+			}
+			Teardown::Released => {
+				// A deliberate end with no reader to observe it, which also drops the
+				// cached groups. The origin re-requests the track from this session if
+				// one comes back.
+				let _ = serving.abort(Error::Cancel);
 			}
 		}
 	}
@@ -1244,7 +1344,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	}
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
-	/// subscriber, resume/update it while live, or pause it when the last leaves.
+	/// subscriber, update it while live, or cancel it when the last one leaves.
 	async fn handle_subscription(
 		&self,
 		producer: &mut track::Producer,
@@ -1259,16 +1359,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// Open an upstream SUBSCRIBE for the first subscriber.
 					self.establish(producer, sub, subscription, timescale).await?;
 				}
-				Sub::Active(active) if active.paused => {
-					// A consumer returned: resume by uncapping.
-					active.paused = false;
-					active.priority = subscription.priority;
-					active.ordered = subscription.ordered;
-					active.max_latency = subscription.latency_max;
-					active.start_group = subscription.group_start;
-					self.send_update(active, subscription.group_end).await?;
-					tracing::info!(track = %self.name, "subscribe resumed");
-				}
 				Sub::Active(active) => {
 					// Downstream preferences changed: forward them upstream as a
 					// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
@@ -1282,29 +1372,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 			},
 			None => {
-				// Last subscriber left: pause the upstream (cap at the latest cached
-				// group, priority 0) but keep the stream open in case one returns.
-				if supports_update {
-					if let Sub::Active(active) = sub
-						&& !active.paused
-					{
-						active.paused = true;
-						active.start_group = None;
-						let cap = producer.latest().unwrap_or(0);
-						let update = lite::SubscribeUpdate {
-							priority: 0,
-							ordered: active.ordered,
-							max_latency: active.max_latency,
-							start_group: active.start_group,
-							end_group: Some(cap),
-						};
-						active.stream.writer.encode(&update).await?;
-					}
-				} else if let Sub::Active(active) = sub {
-					// No SUBSCRIBE_UPDATE to pause with (Lite01/02): cancel the
-					// upstream subscription outright, or it streams every group into
-					// the cache with zero consumers. A returning subscriber
-					// re-establishes from the current demand.
+				// Last subscriber left: cancel the upstream subscription outright. An
+				// idle subscription still streams every group into a cache nobody
+				// reads, and the upstream counts it as a live viewer of the broadcast.
+				// A returning subscriber re-establishes from the current demand.
+				if let Sub::Active(active) = sub {
 					self.subscriber.subscribes.lock().remove(&active.id);
 					let _ = active.stream.writer.finish();
 					tracing::info!(track = %self.name, "subscribe canceled (idle)");
@@ -1405,7 +1477,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		*sub = Sub::Active(SubStream {
 			stream,
 			id,
-			paused: false,
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
 			start_group: subscription.group_start,

@@ -25,23 +25,22 @@ pub(super) use inline::Sink;
 mod threaded {
 	use std::thread::JoinHandle;
 
-	use bytes::Bytes;
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::encoder::{self, Encoder};
-	use crate::Error;
-	use crate::frame::Surface;
+	use crate::encode::Encoded;
+	use crate::{Error, Frame};
 
 	/// Work for the encode thread. Both variants go down the same channel so a
 	/// bitrate change lands in order with the frames around it, rather than
 	/// racing them.
 	enum Request {
-		/// A frame and whether to force a keyframe, plus a oneshot to return that
-		/// frame's packets (or an error) in order.
+		/// A frame to encode and whether to force a keyframe, plus a oneshot to
+		/// return the resulting access units (or an error) in order.
 		Encode {
-			frame: Surface,
+			frame: Frame,
 			keyframe: bool,
-			resp: oneshot::Sender<Result<Vec<Bytes>, Error>>,
+			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
 		},
 		/// Retune to a new bitrate, reporting whether the backend took it so the
 		/// caller can stop adapting against an encoder that can't. The round trip
@@ -89,7 +88,10 @@ mod threaded {
 				while let Some(req) = req_rx.blocking_recv() {
 					match req {
 						Request::Encode { frame, keyframe, resp } => {
-							let _ = resp.send(encoder.encode(&frame, keyframe));
+							if keyframe {
+								encoder.keyframe();
+							}
+							let _ = resp.send(encoder.encode(&frame));
 						}
 						Request::SetBitrate { bitrate, resp } => {
 							let _ = resp.send(encoder.set_bitrate(bitrate));
@@ -120,7 +122,7 @@ mod threaded {
 
 		/// Encode one frame, awaiting its packets. The frame is moved to the
 		/// encode thread; the result returns over a oneshot.
-		pub(in crate::encode) async fn encode(&mut self, frame: Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
+		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 			self.request(|resp| Request::Encode { frame, keyframe, resp }).await
 		}
 
@@ -165,11 +167,9 @@ mod threaded {
 
 #[cfg(target_os = "macos")]
 mod inline {
-	use bytes::Bytes;
-
 	use super::super::encoder::{self, Encoder};
-	use crate::Error;
-	use crate::frame::Surface;
+	use crate::encode::Encoded;
+	use crate::{Error, Frame};
 
 	/// An [`Encoder`] driven inline on the capture task (see the module docs).
 	pub(in crate::encode) struct Sink(Encoder);
@@ -184,8 +184,11 @@ mod inline {
 			self.0.name()
 		}
 
-		pub(in crate::encode) async fn encode(&mut self, frame: Surface, keyframe: bool) -> Result<Vec<Bytes>, Error> {
-			self.0.encode(&frame, keyframe)
+		pub(in crate::encode) async fn encode(&mut self, frame: Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
+			if keyframe {
+				self.0.keyframe();
+			}
+			self.0.encode(&frame)
 		}
 
 		/// Retune the encoder. Async only to match the threaded `Sink`; there's

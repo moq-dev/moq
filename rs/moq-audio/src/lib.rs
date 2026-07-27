@@ -2,9 +2,8 @@
 //!
 //! Counterpart to [`moq-video`](https://crates.io/crates/moq-video) for audio
 //! tracks, and shaped the same way. Sits on top of [`moq_mux`] and [`hang`] and
-//! adds the missing piece for native callers: a Rust-native Opus implementation
-//! that turns raw PCM into the bitstreams `moq_mux::codec::opus` already knows
-//! how to ingest (and vice versa for decode).
+//! adds the missing piece for native callers: Rust-native Opus and uncompressed
+//! PCM codecs that turn raw samples into HANG audio tracks and back.
 //!
 //! - `capture` describes an audio source (`capture::Config`) and grabs buffers
 //!   per platform: a microphone via cpal (CoreAudio / WASAPI / ALSA) everywhere,
@@ -21,6 +20,10 @@
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`].
+//! - `playback` plays decoded PCM out a speaker. `playback::Engine` owns the
+//!   output device and mixes the `playback::Sink`s registered with it, so one
+//!   device serves every track in a call. Requires the `playback` feature, so
+//!   these names are unlinked here too.
 //!
 //! [`Format`] mirrors WebCodecs `AudioData.format`; the helpers convert between
 //! any supported layout and the interleaved `f32` representation libopus
@@ -32,12 +35,16 @@ mod error;
 mod format;
 mod frame;
 mod opus;
+mod pcm;
 mod resample;
 
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod decode;
 pub mod encode;
+
+#[cfg(feature = "playback")]
+pub mod playback;
 
 pub use error::Error;
 pub use format::Format;

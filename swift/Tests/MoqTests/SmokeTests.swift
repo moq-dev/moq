@@ -59,6 +59,12 @@ final class SmokeTests: XCTestCase {
         try broadcast.finish()
     }
 
+    func testVideoPropertiesUseDefaultedFields() throws {
+        let broadcast = try BroadcastProducer()
+        try broadcast.setVideoProperties(VideoProperties(rotation: 315))
+        try broadcast.finish()
+    }
+
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")

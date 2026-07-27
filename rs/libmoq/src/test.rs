@@ -217,6 +217,7 @@ fn publish_catalog_config_invalid_broadcast() {
 		coded_height: std::ptr::null(),
 	};
 	assert!(unsafe { moq_publish_video_config(0, &video) } < 0);
+	assert!(unsafe { moq_publish_video_properties(0, &moq_video_properties::default()) } < 0);
 
 	let audio_codec = "opus";
 	let audio = moq_audio_config {
@@ -243,6 +244,11 @@ fn publish_catalog_config_null_pointer() {
 		unsafe { moq_publish_video_config(broadcast, std::ptr::null()) },
 		-6,
 		"null config should return InvalidPointer (-6)"
+	);
+	assert_eq!(
+		unsafe { moq_publish_video_properties(broadcast, std::ptr::null()) },
+		-6,
+		"null properties should return InvalidPointer (-6)"
 	);
 	assert_eq!(
 		unsafe { moq_publish_audio_config(broadcast, std::ptr::null()) },
@@ -275,6 +281,16 @@ fn publish_catalog_roundtrip() {
 		coded_height: &height,
 	};
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
+	let properties = moq_video_properties {
+		display_width: 1080,
+		display_height: 1920,
+		has_display: true,
+		rotation: 315.0,
+		has_rotation: true,
+		flip: true,
+		has_flip: true,
+	};
+	assert_eq!(unsafe { moq_publish_video_properties(broadcast, &properties) }, 0);
 
 	let audio_name = "audio";
 	let audio_codec = "opus";
@@ -318,6 +334,16 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(codec, "vp8");
 	assert_eq!(unsafe { *video_cfg.coded_width }, 1920);
 	assert_eq!(unsafe { *video_cfg.coded_height }, 1080);
+
+	let mut properties = moq_video_properties::default();
+	assert_eq!(unsafe { moq_consume_video_properties(catalog_id, &mut properties) }, 0);
+	assert!(properties.has_display);
+	assert_eq!(properties.display_width, 1080);
+	assert_eq!(properties.display_height, 1920);
+	assert!(properties.has_rotation);
+	assert_eq!(properties.rotation, 0.0);
+	assert!(properties.has_flip);
+	assert!(properties.flip);
 
 	// And so does the audio rendition.
 	let mut audio_cfg = moq_audio_config {
@@ -1499,13 +1525,14 @@ fn video_raw_decode() {
 	config.kind = moq_video::encode::Kind::Software;
 	let mut encoder = moq_video::encode::Encoder::new(&config).expect("openh264 encoder");
 	let gray = vec![0x80u8; 320 * 240 * 4];
-	let mut frames: Vec<bytes::Bytes> = Vec::new();
-	for i in 0..5 {
-		frames.extend(
-			encoder
-				.encode_rgba(&gray, moq_video::Size::new(320, 240), i == 0)
-				.unwrap(),
-		);
+	let mut frames: Vec<moq_video::encode::Encoded> = Vec::new();
+	for i in 0..5u64 {
+		if i == 0 {
+			encoder.keyframe();
+		}
+		let surface = moq_video::Surface::rgba(&gray, moq_video::Size::new(320, 240)).unwrap();
+		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(i * 33_333).unwrap());
+		frames.extend(encoder.encode(&frame).unwrap());
 	}
 	frames.extend(encoder.finish().unwrap());
 	assert!(!frames.is_empty(), "encoder produced no frames");
@@ -1540,7 +1567,7 @@ fn video_raw_decode() {
 
 	for (i, frame) in frames.iter().enumerate() {
 		assert_eq!(
-			unsafe { moq_publish_media_frame(media, frame.as_ptr(), frame.len(), (i as u64) * 33_000) },
+			unsafe { moq_publish_media_frame(media, frame.payload.as_ptr(), frame.payload.len(), (i as u64) * 33_000) },
 			0
 		);
 	}

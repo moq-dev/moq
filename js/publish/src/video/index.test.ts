@@ -1,6 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { Broadcast } from "../broadcast.ts";
-import { Encoder } from "./index.ts";
+
+// Capture pulls the worker in as an inlined blob URL, which the bun test loader can't resolve. Stub
+// it so the module imports; nothing here spawns a worker.
+mock.module("./capture-worker.ts?worker&inline", () => ({ default: class {} }));
+
+const { Encoder } = await import("./index.ts");
 
 // Registration runs inside an effect, which settles over a few microtasks.
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));

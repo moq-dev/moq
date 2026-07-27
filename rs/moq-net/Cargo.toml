@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version.workspace = true
 
@@ -18,7 +18,7 @@ ignored = ["getrandom"]
 [dependencies]
 bytes = "1"
 futures = "0.3"
-kio = { workspace = true }
+kio = { workspace = true, features = ["time"] }
 num_enum = "0.7"
 rand = "0.10.1"
 serde = { workspace = true }

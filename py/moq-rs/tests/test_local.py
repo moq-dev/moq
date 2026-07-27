@@ -84,6 +84,15 @@ def test_publish_media_lifecycle():
     broadcast.finish()
 
 
+def test_video_properties_use_defaulted_fields():
+    broadcast = moq.BroadcastProducer()
+    properties = moq.VideoProperties(rotation=315.0)
+    assert properties.display is None
+    assert properties.flip is None
+    broadcast.set_video_properties(properties)
+    broadcast.finish()
+
+
 def test_unknown_format():
     broadcast = moq.BroadcastProducer()
     with pytest.raises(Exception):

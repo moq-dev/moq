@@ -235,7 +235,7 @@ a relay with a few lines:
 
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
-let url = url::Url::parse("https://relay.moq.dev/anon")?;
+let url = url::Url::parse("https://cdn.moq.dev/anon")?;
 let session = client.connect(url).await?;
 ```
 

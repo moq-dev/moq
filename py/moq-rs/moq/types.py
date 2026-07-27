@@ -60,6 +60,12 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoHint as VideoHint,
 )
+from moq_ffi import (
+    MoqVideoProperties,
+)
+
+VideoProperties = MoqVideoProperties
+"""Video catalog properties shared by every rendition; ``None`` fields clear them."""
 
 __all__ = [
     "Audio",
@@ -82,4 +88,5 @@ __all__ = [
     "TrackInfo",
     "Video",
     "VideoHint",
+    "VideoProperties",
 ]

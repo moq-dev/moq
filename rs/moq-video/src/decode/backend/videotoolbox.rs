@@ -37,9 +37,9 @@ use objc2_video_toolbox::{
 	VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord, VTDecompressionSession,
 };
 
-use super::{Backend, Codec, Config, Decoded};
-use crate::Error;
+use super::{Backend, Codec, Config};
 use crate::frame::{Surface, macos::PixelBuffer};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -172,7 +172,7 @@ impl VideoToolbox {
 }
 
 impl Backend for VideoToolbox {
-	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Decoded>, Error> {
+	fn decode(&mut self, access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
 		// Split the Annex-B access unit, pull out any parameter sets, and gather
 		// the slices into length-prefixed (4-byte) form. `NalIterator` yields the
 		// parameter-set NALs as zero-copy `Bytes` (sub-slices of `access_unit`), so
@@ -235,10 +235,7 @@ impl Backend for VideoToolbox {
 		// every output frame belongs to the access unit just submitted.
 		Ok(std::mem::take(&mut self.sink.frames)
 			.into_iter()
-			.map(|surface| Decoded {
-				timestamp,
-				frame: Surface::PixelBuffer(surface),
-			})
+			.map(|surface| Frame::new(Surface::PixelBuffer(surface), timestamp))
 			.collect())
 	}
 

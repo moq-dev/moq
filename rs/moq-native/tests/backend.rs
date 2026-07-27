@@ -16,6 +16,8 @@ struct ConnectTest<'a> {
 	scheme: &'a str,
 	/// Server bind address, e.g. `[::]:0` or `127.0.0.1:0`.
 	bind: &'a str,
+	/// Optional client bind address when it should differ from the server.
+	client_bind: Option<&'a str>,
 	/// Authority the client dials: a DNS name (sends SNI) or a bare IP (no SNI).
 	authority: &'a str,
 	backend: moq_native::QuicBackend,
@@ -33,6 +35,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
+		client_bind: None,
 		authority: "localhost",
 		backend,
 		qlog: None,
@@ -49,6 +52,7 @@ async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
 	connect_test(ConnectTest {
 		scheme,
 		bind: "127.0.0.1:0",
+		client_bind: None,
 		authority: "127.0.0.1",
 		backend,
 		qlog: None,
@@ -63,6 +67,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	let ConnectTest {
 		scheme,
 		bind,
+		client_bind,
 		authority,
 		backend,
 		qlog,
@@ -100,7 +105,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	client_config.quic.qlog = qlog.map(Into::into);
 	// Bind the client to the same address family as the server so an IPv4 dial
 	// doesn't try to egress from an IPv6 socket (and vice versa).
-	client_config.bind = bind.parse().expect("invalid bind address");
+	client_config.bind = client_bind.unwrap_or(bind).parse().expect("invalid bind address");
 
 	let client = client_config.init().expect("failed to init client");
 	let url: url::Url = format!("{scheme}://{authority}:{}", addr.port()).parse().unwrap();
@@ -167,9 +172,11 @@ async fn connect_test(config: ConnectTest<'_>) {
 /// Generate a CA, a server cert + key, and a client cert + key (all PEM, the
 /// leaf certs signed by the CA) written to a tempdir. Returns the dir plus the
 /// five paths so the caller can wire them into the TLS configs.
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
-	use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+	use rcgen::{
+		BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+	};
 	use std::io::Write;
 
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
@@ -178,17 +185,25 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	let ca_key = KeyPair::generate().expect("ca key");
 	let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
 	ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+	ca_params.distinguished_name.push(DnType::CommonName, "moq test CA");
+	ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 	let ca_cert = ca_params.self_signed(&ca_key).expect("ca cert");
 	let issuer = Issuer::from_params(&ca_params, &ca_key);
 
 	// Server leaf with a localhost SAN so the client can verify the name.
 	let server_key = KeyPair::generate().expect("server key");
-	let server_params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+	let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).expect("server params");
+	server_params.distinguished_name.push(DnType::CommonName, "localhost");
+	server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
 	let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert");
 
 	// Client leaf presented during the handshake for mTLS.
 	let client_key = KeyPair::generate().expect("client key");
-	let client_params = CertificateParams::new(Vec::new()).expect("client params");
+	let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).expect("client params");
+	client_params
+		.distinguished_name
+		.push(DnType::CommonName, "client.example");
+	client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 	let client_cert = client_params.signed_by(&client_key, &issuer).expect("client cert");
 
 	let write = |name: &str, contents: String| {
@@ -210,7 +225,7 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 }
 
 /// Filesystem paths to the PEM material produced by [`generate_mtls_certs`].
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 struct MtlsPaths {
 	ca: std::path::PathBuf,
 	server_cert: std::path::PathBuf,
@@ -221,18 +236,20 @@ struct MtlsPaths {
 
 /// Connect with a client certificate signed by a CA the server trusts, and
 /// assert the server observes the validated peer certificate via mTLS.
-#[cfg(any(feature = "quinn", feature = "noq"))]
-async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend) {
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
 	let pub_origin = Origin::random().produce();
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".to_string());
+	server_config.bind = Some("127.0.0.1:0".to_string());
 	server_config.tls.cert = vec![paths.server_cert.clone()];
 	server_config.tls.key = vec![paths.server_key.clone()];
 	server_config.tls.root = vec![paths.ca.clone()];
 	server_config.backend = Some(backend.clone());
+	server_config.quic.gso = Some(false);
+	server_config.quic.keep_alive = Some(Duration::from_secs(1));
 
 	let mut server = server_config.init().expect("failed to init server");
 	let addr = server.local_addr().expect("failed to get local addr");
@@ -242,15 +259,27 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend) {
 	client_config.tls.system_roots = Some(false);
 	client_config.tls.cert = Some(paths.client_cert.clone());
 	client_config.tls.key = Some(paths.client_key.clone());
+	client_config.tls.host_name = Some("localhost".to_string());
 	client_config.backend = Some(backend);
+	client_config.bind = "0.0.0.0:0".parse().unwrap();
+	client_config.quic.gso = Some(false);
+	client_config.quic.keep_alive = Some(Duration::from_secs(1));
 
 	let client = client_config.init().expect("failed to init client");
-	let url: url::Url = format!("{scheme}://localhost:{}", addr.port()).parse().unwrap();
+	// Dial the IP while verifying the certificate's localhost SAN. This covers
+	// the independent TLS hostname override alongside client authentication.
+	let url: url::Url = format!("{scheme}://127.0.0.1:{}", addr.port()).parse().unwrap();
 
+	let (identity_tx, identity_rx) = tokio::sync::oneshot::channel();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		// The peer cert must be visible before we accept the session.
 		let has_cert = request.peer_identity().is_some();
+		let _ = identity_tx.send(has_cert);
+		if reject {
+			request.close(403).await?;
+			return Ok::<_, anyhow::Error>(has_cert);
+		}
 		let session = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(has_cert)
@@ -258,15 +287,27 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
+		.expect("client connect timed out");
 
-	drop(session);
-	let has_cert = server_handle
+	let has_cert = tokio::time::timeout(TIMEOUT, identity_rx)
 		.await
-		.expect("server task panicked")
-		.expect("server task failed");
+		.expect("identity inspection timed out")
+		.expect("server dropped identity result");
 	assert!(has_cert, "server did not observe the client certificate");
+	if !reject {
+		session.as_ref().expect("client connect failed");
+	}
+	drop(session);
+
+	if reject {
+		server_handle.abort();
+	} else {
+		tokio::time::timeout(TIMEOUT, server_handle)
+			.await
+			.expect("server task timed out")
+			.expect("server task panicked")
+			.expect("server task failed");
+	}
 }
 
 // ── Quinn backend ───────────────────────────────────────────────────
@@ -289,7 +330,7 @@ async fn quinn_raw_quic_no_sni() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quinn_mtls() {
-	mtls_test("https", moq_native::QuicBackend::Quinn).await;
+	mtls_test("https", moq_native::QuicBackend::Quinn, false).await;
 }
 
 #[cfg(feature = "quinn")]
@@ -304,9 +345,31 @@ async fn quinn_webtransport() {
 #[cfg(feature = "quiche")]
 #[tracing_test::traced_test]
 #[tokio::test]
-#[ignore = "quiche raw QUIC (moqt://) fails; likely a web-transport-quiche bug"]
 async fn quiche_raw_quic() {
 	backend_test("moqt", moq_native::QuicBackend::Quiche).await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quiche_dual_stack_ipv4() {
+	connect_test(ConnectTest {
+		scheme: "moqt",
+		bind: "[::]:0",
+		client_bind: Some("0.0.0.0:0"),
+		authority: "127.0.0.1",
+		backend: moq_native::QuicBackend::Quiche,
+		qlog: None,
+	})
+	.await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quiche_mtls() {
+	// Avoid waiting on the separately tracked quiche WebTransport teardown bug.
+	mtls_test("https", moq_native::QuicBackend::Quiche, true).await;
 }
 
 #[cfg(feature = "quiche")]
@@ -479,7 +542,7 @@ async fn noq_webtransport() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn noq_mtls() {
-	mtls_test("https", moq_native::QuicBackend::Noq).await;
+	mtls_test("https", moq_native::QuicBackend::Noq, false).await;
 }
 
 // ── qlog ────────────────────────────────────────────────────────────
@@ -497,6 +560,7 @@ async fn qlog_test(scheme: &str, backend: moq_native::QuicBackend) -> Vec<std::p
 	connect_test(ConnectTest {
 		scheme,
 		bind: "[::]:0",
+		client_bind: None,
 		authority: "localhost",
 		backend,
 		qlog: Some(dir.path()),

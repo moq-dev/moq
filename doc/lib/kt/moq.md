@@ -16,12 +16,12 @@ Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.0")
+    implementation("dev.moq:moq:0.4.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
 
-The wrapper depends on `dev.moq:moq-ffi:[0.2,0.3)`, so Gradle resolves the latest bindings patch automatically. The bindings carry the native binaries:
+The wrapper depends on `dev.moq:moq-ffi:[0.3,0.4)`, so Gradle resolves the latest bindings patch automatically. The bindings carry the native binaries:
 
 - Android: arm64-v8a, armeabi-v7a, x86\_64
 - JVM: Linux x86\_64 + aarch64, macOS x86\_64 + aarch64, Windows x86\_64
@@ -118,6 +118,18 @@ Moq.connect("https://relay.example.com").use { moq ->
     audio.finish()
     broadcast.finish()
 }
+```
+
+Properties that apply to every video rendition are updated together. `null` fields clear the corresponding catalog property, and rotation is normalized to the nearest clockwise quarter turn:
+
+```kotlin
+broadcast.setVideoProperties(
+    VideoProperties(
+        display = Dimensions(width = 1080u, height = 1920u),
+        rotation = 90.0,
+        flip = false,
+    )
+)
 ```
 
 ## Serve

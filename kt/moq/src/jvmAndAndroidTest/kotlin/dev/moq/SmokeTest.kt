@@ -54,9 +54,19 @@ class SmokeTest {
         )
         val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
         val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
+        val properties: VideoProperties = VideoProperties(rotation = 315.0)
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
         assertEquals(false, stream.compression)
+        assertNull(properties.display)
+        assertNull(properties.flip)
+    }
+
+    @Test
+    fun `broadcast updates shared video properties`() {
+        BroadcastProducer().use { broadcast ->
+            broadcast.setVideoProperties(VideoProperties(rotation = 315.0))
+        }
     }
 
     @Test

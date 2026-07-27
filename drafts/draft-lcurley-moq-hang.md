@@ -134,7 +134,7 @@ type VideoSchema = {
 
 The `renditions` field contains a map of track names to video decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#video-decoder-config) for specifics and registered codecs.
-Any Uint8Array fields are hex-encoded as a string.
+Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
 The `display` field is the size to render the video at, in pixels.
 It is separate from a rendition's `displayAspectWidth`/`displayAspectHeight` because changing it does not require reinitializing the decoder.
@@ -197,9 +197,22 @@ type AudioSchema = {
 
 The `renditions` field contains a map of track names to audio decoder configurations.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
-Any Uint8Array fields are hex-encoded as a string.
+Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
 In addition to the WebCodecs fields, each rendition MAY carry the fields common to audio and video ({{common}}).
+
+### PCM {#audio-pcm}
+
+Hang defines the `"pcm"` audio codec for uncompressed samples.
+The `sampleRate` and `numberOfChannels` fields MUST be present and greater than zero.
+The `description` field MUST NOT be present.
+If `bitrate` is present, it MUST equal `sampleRate * numberOfChannels * 32`.
+
+Each codec payload consists of interleaved IEEE 754 binary32 samples in little-endian byte order.
+Samples are ordered by sample frame, then by ascending channel index within each frame.
+The payload length MUST be a non-zero multiple of `4 * numberOfChannels`.
+The frame timestamp identifies the presentation time of its first sample.
+The frame duration in seconds is the payload length divided by `4 * numberOfChannels * sampleRate`.
 
 For example:
 
@@ -225,6 +238,14 @@ For example:
 	},
 }
 ~~~
+
+## Binary Fields {#binary}
+A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
+A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
+A consumer MUST accept either case.
+
+Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
+Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
 
 ## Common Rendition Fields {#common}
 Audio and video renditions share the following fields, extending the WebCodecs decoder config:

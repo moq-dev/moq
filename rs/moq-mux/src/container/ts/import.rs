@@ -369,10 +369,7 @@ impl<E: catalog::Catalog> Import<E> {
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
 				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
 				let track = crate::import::unique_track(&mut self.broadcast, ".opus")?;
-				let config = opus::Config {
-					sample_rate: 48_000,
-					channel_count,
-				};
+				let config = opus::Config::new(48_000, channel_count);
 				Stream::Opus(Box::new(OpusStream {
 					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
 					unwrap: PtsUnwrap::default(),
@@ -1268,6 +1265,9 @@ impl<E: CatalogExt> AacStream<E> {
 			};
 
 			import.decode(&data[offset + header.header_len..end], pts)?;
+			// The importer accumulates; cut each ADTS frame into its own group (one QUIC stream)
+			// so the relay forwards it without waiting for the next.
+			import.cut(None)?;
 
 			offset = end;
 			index += 1;
@@ -1369,6 +1369,9 @@ impl<E: CatalogExt> OpusStream<E> {
 				other => other,
 			};
 			self.import.decode(packet, pts)?;
+			// The importer accumulates; cut each Opus packet into its own group (one QUIC stream)
+			// so the relay forwards it without waiting for the next.
+			self.import.cut(None)?;
 
 			// Default to 20 ms (960 samples) if the TOC can't be read, so a malformed packet
 			// doesn't stall the timeline for the rest of the PES.
@@ -1537,6 +1540,9 @@ impl<E: CatalogExt> LegacyStream<E> {
 			};
 
 			import.decode(&data[offset..end], pts)?;
+			// The importer accumulates; cut each frame into its own group (one QUIC stream)
+			// so the relay forwards it without waiting for the next.
+			import.cut(None)?;
 
 			pts = match pts {
 				// `pts` is a 90 kHz PES PTS; rescale the sample-rate advance to match

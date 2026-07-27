@@ -19,6 +19,9 @@ public typealias Catalog = MoqFFI.MoqCatalog
 public typealias Video = MoqFFI.MoqVideo
 /// Caller-provided catalog fields for a video track.
 public typealias VideoHint = MoqFFI.MoqVideoHint
+/// Catalog properties shared by every video rendition. A `nil` field clears
+/// that property from the next catalog snapshot.
+public typealias VideoProperties = MoqFFI.MoqVideoProperties
 /// An audio rendition in the catalog: codec, sample rate, channel count,
 /// bitrate, and container.
 public typealias Audio = MoqFFI.MoqAudio

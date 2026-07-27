@@ -130,11 +130,25 @@ fn encoder_thread(
 			}
 		};
 
-		let keyframe = force_keyframe.swap(false, Ordering::AcqRel);
+		// Asked for before the conversion below, which can fail: the encoder holds the
+		// request until a frame actually arrives, so dropping this frame delays the
+		// keyframe rather than losing it. A viewer needs a decodable starting point;
+		// otherwise the encoder's own GOP keys the stream.
+		if force_keyframe.swap(false, Ordering::AcqRel) {
+			enc.keyframe();
+		}
 		let start = Instant::now();
-		match enc.encode_rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT), keyframe) {
-			Ok(packets) => {
-				if let Err(e) = producer.publish(packets, ts) {
+		let surface = match moq_video::Surface::rgba(&rgba, moq_video::Size::new(WIDTH, HEIGHT)) {
+			Ok(surface) => surface,
+			// A single bad frame is tolerable; keep going.
+			Err(e) => {
+				tracing::error!(error = %e, "RGBA conversion error");
+				continue;
+			}
+		};
+		match enc.encode(&moq_video::Frame::new(surface, ts)) {
+			Ok(encoded) => {
+				if let Err(e) = producer.publish(&encoded) {
 					// Publish only fails once the track/broadcast is gone, which
 					// is terminal -- stop rather than flooding logs every frame.
 					tracing::error!(error = %e, "video publish failed; stopping encoder");

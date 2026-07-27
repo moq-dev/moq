@@ -46,6 +46,8 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
+	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
+	VideoProperties = ffi.MoqVideoProperties
 
 	// Container selects how subscribed media frames are demuxed. Build one with
 	// LegacyContainer, CmafContainer, or LocContainer.

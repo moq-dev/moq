@@ -15,6 +15,10 @@ pub enum AudioCodec {
 	#[display("opus")]
 	Opus,
 
+	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
+	#[display("pcm")]
+	Pcm,
+
 	/// FLAC, the Free Lossless Audio Codec (RFC 9639). The decoder
 	/// initialization data (the `fLaC` stream marker plus the STREAMINFO
 	/// metadata block) travels out of band in [`AudioConfig::description`]. Both
@@ -60,11 +64,18 @@ pub enum AudioCodec {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AudioCodecKind {
+	/// Advanced Audio Coding.
 	AAC,
+	/// Opus.
 	Opus,
+	/// Unknown or unsupported codec.
 	Unknown,
+	/// Free Lossless Audio Codec.
 	Flac,
+	/// MPEG-1/2 Audio Layer III.
 	Mp3,
+	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
+	Pcm,
 }
 
 impl AudioCodec {
@@ -73,6 +84,7 @@ impl AudioCodec {
 		match self {
 			Self::AAC(_) => AudioCodecKind::AAC,
 			Self::Opus => AudioCodecKind::Opus,
+			Self::Pcm => AudioCodecKind::Pcm,
 			Self::Flac => AudioCodecKind::Flac,
 			Self::Mp3 => AudioCodecKind::Mp3,
 			// Legacy TS-bridge codecs aren't WebCodecs-decodable, so they share the
@@ -91,6 +103,8 @@ impl FromStr for AudioCodec {
 			return AAC::from_str(s).map(Into::into);
 		} else if s == "opus" {
 			return Ok(Self::Opus);
+		} else if s == "pcm" {
+			return Ok(Self::Pcm);
 		} else if s == "flac" {
 			return Ok(Self::Flac);
 		} else if s == "mp3" {
@@ -117,5 +131,23 @@ mod tests {
 		assert_eq!(codec, AudioCodec::Flac);
 		assert_eq!(codec.to_string(), "flac");
 		assert_eq!(codec.kind(), AudioCodecKind::Flac);
+	}
+
+	#[test]
+	fn pcm_roundtrip() {
+		let codec = AudioCodec::from_str("pcm").unwrap();
+		assert_eq!(codec, AudioCodec::Pcm);
+		assert_eq!(codec.to_string(), "pcm");
+		assert_eq!(codec.kind(), AudioCodecKind::Pcm);
+	}
+
+	#[test]
+	fn codec_kind_discriminants_are_stable() {
+		assert_eq!(AudioCodecKind::AAC as isize, 0);
+		assert_eq!(AudioCodecKind::Opus as isize, 1);
+		assert_eq!(AudioCodecKind::Unknown as isize, 2);
+		assert_eq!(AudioCodecKind::Flac as isize, 3);
+		assert_eq!(AudioCodecKind::Mp3 as isize, 4);
+		assert_eq!(AudioCodecKind::Pcm as isize, 5);
 	}
 }

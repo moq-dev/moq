@@ -2,21 +2,24 @@
 //!
 //! [`Backend`] is the seam between frame input prep (capture + color conversion,
 //! owned by [`Encoder`](super::Encoder)) and the codec itself. Every backend
-//! takes a planar I420 [`Surface`] and emits Annex-B with in-band parameter sets
-//! (SPS/PPS, plus VPS for H.265), the framing the matching catalog importer
-//! expects. Each backend produces exactly one codec, so the producer can route
-//! its packets to the right importer.
+//! takes a raw [`Frame`] and emits Annex-B with in-band parameter sets (SPS/PPS,
+//! plus VPS for H.265), the framing the matching catalog importer expects. Each
+//! backend produces exactly one codec, so the producer can route its packets to
+//! the right importer.
+//!
+//! Output is stamped with the timestamp of the frame it was encoded from, not
+//! whichever frame happened to be going in. A backend that flushes each frame
+//! before returning just echoes the input timestamp; one that buffers (Media
+//! Foundation) correlates through the codec's own sample clock.
 //!
 //! [`open`] picks the best backend for a [`Codec`](super::Codec) +
 //! [`Kind`](super::Kind): only candidates that support the requested codec are
 //! considered, hardware (platform-gated) before the always-available openh264
 //! software fallback.
 
-use bytes::Bytes;
-
 use super::encoder::{Codec, Config, Kind};
-use crate::Error;
-use crate::frame::Surface;
+use crate::encode::Encoded;
+use crate::{Error, Frame};
 
 mod openh264;
 
@@ -33,14 +36,16 @@ mod nvenc;
 mod vaapi;
 
 /// An opened video encoder. Feed it frames at the configured resolution; get
-/// back zero or more packets in the codec's wire framing.
+/// back zero or more access units in the codec's wire framing, each stamped with
+/// the timestamp of the frame it came from.
 pub(crate) trait Backend: Send {
-	/// Encode one frame. Set `keyframe` to force an IDR (e.g. on resume so a
-	/// re-subscribing viewer can start decoding at once).
-	fn encode(&mut self, frame: &Surface, keyframe: bool) -> Result<Vec<Bytes>, Error>;
+	/// Encode one frame, forcing an IDR when `keyframe` is set. Backends key frames
+	/// automatically per [`Config::gop`], so this is only the caller's extra
+	/// request, arriving via [`Encoder::keyframe`](super::Encoder::keyframe).
+	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error>;
 
-	/// Flush the encoder, returning any buffered packets.
-	fn finish(&mut self) -> Result<Vec<Bytes>, Error>;
+	/// Flush the encoder, returning any buffered access units.
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error>;
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. Called as the congestion controller's estimate
