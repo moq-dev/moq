@@ -75,11 +75,11 @@ rust-version = "1.91"
 [workspace.dependencies]
 flate2 = "1.1"
 hang = { version = "0.20", path = "rs/hang" }
-kio = { version = "0.5", path = "rs/kio" }
-moq-audio = { version = "0.0.13", path = "rs/moq-audio" }
+kio = { version = "0.6", path = "rs/kio" }
+moq-audio = { version = "0.0.14", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
-moq-hls = { version = "0.4.2", path = "rs/moq-hls", default-features = false }
-moq-json = { version = "0.3.1", path = "rs/moq-json" }
+moq-hls = { version = "0.4.3", path = "rs/moq-hls", default-features = false }
+moq-json = { version = "0.3.2", path = "rs/moq-json" }
 moq-loc = { version = "0.2", path = "rs/moq-loc" }
 moq-msf = { version = "0.4", path = "rs/moq-msf" }
 moq-mux = { version = "0.9", path = "rs/moq-mux" }
@@ -91,8 +91,8 @@ moq-net = { version = "0.2", path = "rs/moq-net" }
 moq-nvenc = { version = "0.0.3", path = "rs/moq-nvenc" }
 moq-rtc = { version = "0.2.2", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.2.2", path = "rs/moq-rtmp" }
-moq-srt = { version = "0.2.2", path = "rs/moq-srt" }
-moq-stats = { version = "0.1.2", path = "rs/moq-stats" }
+moq-srt = { version = "0.2.3", path = "rs/moq-srt" }
+moq-stats = { version = "0.1.3", path = "rs/moq-stats" }
 moq-token = { version = "0.7", path = "rs/moq-token" }
 # default-features off (the hardware codecs) on moq-transcode and moq-video so
 # each consumer opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a
