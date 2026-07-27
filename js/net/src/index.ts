@@ -13,8 +13,8 @@ export * as Announce from "./announced.ts";
 export * as Broadcast from "./broadcast.ts";
 /** Connection helpers: connect to or accept a MoQ session and reconnect on failure. */
 export * as Connection from "./connection/index.ts";
-/** Errors, including the code a peer reports when it resets a stream. */
-export * as Error from "./error.ts";
+/** The error a read or write rejects with when the peer resets a stream, carrying its code. */
+export { RemoteError } from "./error.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */

@@ -20,20 +20,20 @@
  *   frame = await group.readFrame();
  * } catch (err) {
  *   // Whatever this peer's code 2 means to it.
- *   if (err instanceof Remote && err.code === 2) return;
+ *   if (err instanceof RemoteError && err.code === 2) return;
  *   throw err;
  * }
  * ```
  *
  * @public
  */
-export class Remote extends Error {
+export class RemoteError extends Error {
 	/** The code the peer sent, verbatim. */
 	readonly code: number;
 
 	constructor(code: number, options?: { cause?: unknown }) {
 		super(`remote error: ${code}`, options);
-		this.name = "Remote";
+		this.name = "RemoteError";
 		this.code = code;
 	}
 }
@@ -51,7 +51,7 @@ function streamCode(err: unknown): number | undefined {
 }
 
 /**
- * Decode a transport failure into a {@link Remote} error when it carries a stream reset code,
+ * Decode a transport failure into a {@link RemoteError} error when it carries a stream reset code,
  * otherwise pass it through.
  *
  * Native WebTransport rejects with a `WebTransportError`; the WebSocket fallback mints an error
@@ -63,7 +63,7 @@ function streamCode(err: unknown): number | undefined {
 export function fromTransport(err: unknown): Error {
 	const code = streamCode(err);
 	if (code === undefined) return error(err);
-	return new Remote(code, { cause: err });
+	return new RemoteError(code, { cause: err });
 }
 
 /**

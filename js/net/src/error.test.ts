@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { fromTransport, Remote, reason } from "./error.ts";
+import { fromTransport, RemoteError, reason } from "./error.ts";
 
 // Minimal stand-in for the DOM WebTransportError, which the test runtime may not define.
 class FakeWebTransportError extends Error {
@@ -30,8 +30,8 @@ afterEach(() => {
 test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
 	const src = new FakeWebTransportError("stream", 2);
 	const err = fromTransport(src);
-	expect(err).toBeInstanceOf(Remote);
-	expect((err as Remote).code).toBe(2);
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(2);
 	expect(err.message).toBe("remote error: 2");
 	// The original error stays reachable for logging.
 	expect(err.cause).toBe(src);
@@ -40,7 +40,7 @@ test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
 test("fromTransport: code 0 is a code like any other", () => {
 	// 0 is what a transport sends for a stream dropped with no code of its own. What it
 	// means is up to the peer, so it gets no special treatment here.
-	expect((fromTransport(new FakeWebTransportError("stream", 0)) as Remote).code).toBe(0);
+	expect((fromTransport(new FakeWebTransportError("stream", 0)) as RemoteError).code).toBe(0);
 });
 
 test("fromTransport: decodes a fallback error with no WebTransportError global", () => {
@@ -48,8 +48,8 @@ test("fromTransport: decodes a fallback error with no WebTransportError global",
 	// read the fields rather than the class.
 	globals.WebTransportError = undefined;
 	const err = fromTransport({ source: "stream", streamErrorCode: 31, message: "" });
-	expect(err).toBeInstanceOf(Remote);
-	expect((err as Remote).code).toBe(31);
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(31);
 });
 
 test("fromTransport: a session failure has no stream code, so it passes through", () => {
@@ -93,5 +93,5 @@ test("reason: WebTransportError keeps a populated message and appends details", 
 });
 
 test("reason: a decoded remote error names its code", () => {
-	expect(reason(new Remote(31))).toBe("remote error: 31");
+	expect(reason(new RemoteError(31))).toBe("remote error: 31");
 });

@@ -66,13 +66,13 @@ See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/net/exa
 
 ### Remote errors
 
-When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.Error.Remote` carrying it:
+When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.RemoteError` carrying it:
 
 ```ts
 try {
 	frame = await group.readFrame();
 } catch (err) {
-	if (err instanceof Moq.Error.Remote) console.warn("peer reset the group:", err.code);
+	if (err instanceof Moq.RemoteError) console.warn("peer reset the group:", err.code);
 	throw err;
 }
 ```

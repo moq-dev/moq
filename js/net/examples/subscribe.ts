@@ -22,7 +22,7 @@ async function main() {
 			} catch (err) {
 				// The publisher reset the group. The code is whatever it means to that peer,
 				// and reads the same way on every transport.
-				if (err instanceof Moq.Error.Remote) {
+				if (err instanceof Moq.RemoteError) {
 					console.warn("group reset with code", err.code);
 					break;
 				}
