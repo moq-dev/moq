@@ -14,7 +14,6 @@ use crate::Waiter;
 /// [`poll`](Self::poll) it against a [`Waiter`] each time your `poll_*` runs. Reading the
 /// clock through `tokio::time` means a `tokio::time::pause()` test advances it in step.
 #[deprecated(note = "use kio::time::Deadline, which also works on wasm and can be re-armed in place")]
-#[doc(hidden)]
 pub struct Sleep {
 	inner: Pin<Box<::tokio::time::Sleep>>,
 }
