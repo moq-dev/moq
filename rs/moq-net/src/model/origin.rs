@@ -101,11 +101,11 @@ pub struct Info {
 	/// detection and shortest-path routing.
 	pub id: Origin,
 
-	/// The cache pool broadcasts under this origin charge their groups into. It
-	/// flows down the ownership chain (origin -> broadcast -> track -> group), so a
-	/// group reaches it via `track.broadcast.origin.pool`. Unbounded by default; a
-	/// relay sets a bounded one (via [`Self::with_pool`]) so cached groups across the
-	/// whole process share one memory budget.
+	/// The cache pool broadcasts under this origin charge their groups into. It flows
+	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
+	/// an account against it, and its groups charge through that. Unbounded by
+	/// default; a relay sets a bounded one (via [`Self::with_pool`]) so cached groups
+	/// across the whole process share one memory budget.
 	pub pool: cache::Pool,
 
 	/// Ceiling on how long any non-latest group under this origin is retained. Each

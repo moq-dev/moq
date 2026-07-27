@@ -4,7 +4,13 @@ use std::{
 	task::Poll,
 };
 
-use crate::{Closed, Counts, State, consumer::Consumer, lock::*, waiter::*, weak::ProducerWeak};
+use crate::{
+	Closed, Counts, State,
+	consumer::Consumer,
+	lock::*,
+	waiter::*,
+	weak::{ProducerWeak, Weak},
+};
 
 /// The producing side of a shared state channel.
 ///
@@ -261,6 +267,17 @@ impl<T> Producer<T> {
 	pub fn weak(&self) -> ProducerWeak<T> {
 		ProducerWeak {
 			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+
+	/// Create a [`Weak`] reference that owns nothing, not even the state allocation.
+	///
+	/// Use this instead of [`Self::weak`] for a handle stored inside the state itself,
+	/// where a [`ProducerWeak`] would keep the allocation alive through its own value.
+	pub fn downgrade(&self) -> Weak<T> {
+		Weak {
+			state: self.state.downgrade(),
 			counts: self.counts.clone(),
 		}
 	}

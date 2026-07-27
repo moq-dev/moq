@@ -23,7 +23,6 @@ pub use super::subscription::Subscription;
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
-	sync::atomic::{AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -47,20 +46,13 @@ const EVICT_SLACK: usize = 64;
 /// groups, small enough that a write never scans a long queue.
 const EVICT_SCAN: usize = 4;
 
-/// Gross bytes written before a frame write settles eviction debt itself, so a
-/// track appending frames to open groups (never inserting another group) still
-/// pays. Coarse: the cost is one track-state lock per threshold crossing.
-const WRITE_CHARGE_THRESHOLD: u64 = 256 * 1024;
-
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
 /// while the track is alive. A subscriber learns them via
 /// [`broadcast::Consumer::track`](broadcast::Consumer::track),
 /// which returns the publisher's [`Info`] once the subscription is accepted.
-///
-/// Not `Copy`: it carries an internal handle to its parent broadcast.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track.
@@ -86,47 +78,6 @@ pub struct Info {
 	/// out-of-order (or not at all) over the network. Used only to break ties,
 	/// reported in TRACK_INFO (Lite05+), and defaults to `false` (newest-first).
 	pub ordered: bool,
-
-	// The broadcast this track belongs to, bound when the track is created under one
-	// (`create_track` / `reserve_track` / `Request::accept`); until then it's a
-	// standalone broadcast with an unbounded pool. Not on the wire, and not a knob:
-	// every bind path overwrites whatever is here. It's the parent link a group walks
-	// to reach the shared cache pool (`track.broadcast.origin.pool`), which stays
-	// crate-private.
-	pub(crate) broadcast: Arc<broadcast::Info>,
-
-	// Gross bytes charged by this track's groups (payload plus overhead), shared
-	// with every group via its `cache::Charge` and drained into eviction debt.
-	// Owned by the TrackState and installed here whenever an info is attached to
-	// a track (see `TrackState::install`), so cloning or re-binding an Info never
-	// splits a live track's accounting.
-	pub(crate) written: Arc<AtomicU64>,
-
-	// Weak handle back to the owning track's state, installed alongside `written`,
-	// so a frame write can settle eviction debt itself once enough bytes accumulate
-	// (`Self::maybe_charge`). Weak: a group holding this must not keep the track
-	// alive. `None` until the info is attached to a track.
-	pub(crate) track: Option<kio::ProducerWeak<TrackState>>,
-}
-
-impl std::fmt::Debug for Info {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Info")
-			.field("timescale", &self.timescale)
-			.field("latency_max", &self.latency_max)
-			.field("priority", &self.priority)
-			.field("ordered", &self.ordered)
-			.finish()
-	}
-}
-
-/// The shared parent for a not-yet-bound [`Info`]: a standalone broadcast with an
-/// unbounded pool. Cheap to hand out (one `Arc` clone) and replaced the moment the
-/// track is bound to a real broadcast.
-fn default_broadcast() -> Arc<broadcast::Info> {
-	static DEFAULT: std::sync::LazyLock<Arc<broadcast::Info>> =
-		std::sync::LazyLock::new(|| Arc::new(broadcast::Info::default()));
-	DEFAULT.clone()
 }
 
 impl Default for Info {
@@ -136,9 +87,6 @@ impl Default for Info {
 			latency_max: DEFAULT_LATENCY_MAX,
 			priority: 0,
 			ordered: false,
-			broadcast: default_broadcast(),
-			written: Arc::default(),
-			track: None,
 		}
 	}
 }
@@ -172,46 +120,22 @@ impl Info {
 		self.ordered = ordered;
 		self
 	}
-
-	/// Bind this track to its parent `broadcast`, the moment groups gain a shared
-	/// cache pool to register with. Also clamps [`Self::latency_max`] down to the
-	/// origin's [`cache_duration`](crate::origin::Info::cache_duration) ceiling, so a
-	/// group is never retained longer than the origin allows regardless of the window
-	/// the publisher advertised. Every bind path funnels through here, so the clamp
-	/// covers local publishers and relayed (lite / IETF) tracks alike.
-	pub(crate) fn bind(&mut self, broadcast: Arc<broadcast::Info>) {
-		self.latency_max = self.latency_max.min(broadcast.origin.cache_duration);
-		self.broadcast = broadcast;
-	}
-
-	/// Settle eviction debt from a frame write, once enough bytes accumulate.
-	///
-	/// Called with no group lock held (locks are ordered track then group). Cheap
-	/// until the threshold crosses: one relaxed load. This is what makes a track
-	/// that only appends frames to open groups, never inserting another group,
-	/// still pay its debt.
-	pub(crate) fn maybe_charge(&self) {
-		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
-			return;
-		}
-		let Some(track) = &self.track else { return };
-		let Some(producer) = track.produce() else { return };
-		if let Ok(mut state) = producer.write() {
-			state.charge_debt();
-		}
-	}
 }
 
 #[derive(Default)]
 pub(crate) struct TrackState {
-	// The info for the track; always Some for Subscriber/Producer. Inherited (cloned)
-	// by each group it creates, which reaches the cache pool through its `broadcast`.
+	// The publisher's properties, once known; always Some for Subscriber/Producer.
+	// Copied by value into each group it creates.
 	info: Option<Info>,
 
-	// The broadcast this track belongs to, the source for stamping `Info::broadcast`
-	// on groups (and on a not-yet-accepted track's default info). Its
-	// `origin.pool` is the shared cache pool every group registers with.
+	// The broadcast this track belongs to. Supplies the cache pool its groups charge
+	// into and the `cache_duration` ceiling clamping `Info::latency_max`.
 	broadcast: Arc<broadcast::Info>,
+
+	// This track's account against the shared cache pool, shared with every group it
+	// creates (see `cache::Track`). Holds the gross-write counter `charge_debt` drains,
+	// and the weak link a frame write follows back here to settle its own debt.
+	cache: Arc<cache::Track>,
 
 	// Cached groups by sequence: the single source of truth for what is cached. The
 	// two orderings below hold bare sequences and validate against this map, so a
@@ -238,12 +162,6 @@ pub(crate) struct TrackState {
 	// track's own oldest groups. Per track, so eviction lands proportionally to
 	// what each track writes and never touches another track's cache.
 	debt: u64,
-
-	// The track's gross-write counter, drained by `charge_debt`. Owned here and
-	// installed into every info attached to this track, so replacing the info
-	// (e.g. `Request::accept` after pre-accept backfill) never strands the bytes
-	// already-created groups keep charging.
-	written: Arc<AtomicU64>,
 
 	// Datagrams in arrival order paired with their arrival time, a best-effort send buffer
 	// evicted by age (see `MAX_DATAGRAM_AGE`). Shares the group `max_sequence` namespace but
@@ -337,7 +255,7 @@ struct FetchOutcome {
 impl TrackState {
 	fn poll_info(&self) -> Poll<Result<Info>> {
 		if let Some(info) = &self.info {
-			Poll::Ready(Ok(info.clone()))
+			Poll::Ready(Ok(*info))
 		} else {
 			Poll::Pending
 		}
@@ -573,7 +491,7 @@ impl TrackState {
 	/// few writes. Expiry throughput is therefore EVICT_SCAN groups per write; the
 	/// byte budget reclaims the remainder under memory pressure.
 	fn evict_expired(&mut self, max_age: Duration) {
-		let now = self.broadcast.origin.pool.now();
+		let now = self.cache.pool().now();
 		let max_ticks = cache::Pool::ticks(max_age);
 
 		let len = self.evict.len();
@@ -643,14 +561,30 @@ impl TrackState {
 		self.debt = 0;
 	}
 
-	/// Attach `info` to this track, installing the state-owned write counter and
-	/// the weak state handle every info attached to a live track must carry.
-	/// Replacing the info (e.g. [`Request::accept`] after pre-accept backfill)
-	/// therefore never strands the bytes already-created groups keep charging.
-	fn install(&mut self, mut info: Info, track: Option<kio::ProducerWeak<TrackState>>) {
-		info.written = self.written.clone();
-		info.track = track;
+	/// Attach `info` to this track, clamping the publisher's window down to the
+	/// origin's [`cache_duration`](crate::origin::Info::cache_duration) ceiling so a
+	/// group is never retained longer than the origin allows. Every path that binds an
+	/// info to a track funnels through here, covering local publishers and relayed
+	/// (lite / IETF) tracks alike.
+	fn install(&mut self, mut info: Info) {
+		info.latency_max = info.latency_max.min(self.broadcast.origin.cache_duration);
 		self.info = Some(info);
+	}
+
+	/// Create the shared state for a track under `broadcast`, along with the cache
+	/// account it and its groups charge into.
+	///
+	/// The account holds a [`kio::Weak`] back to this state: a group must be able to
+	/// settle the track's eviction debt as it writes, but the track owns its cached
+	/// groups, so anything stronger would make the pair immortal.
+	fn spawn(broadcast: Arc<broadcast::Info>) -> kio::Producer<Self> {
+		let state = kio::Producer::new(Self {
+			broadcast: broadcast.clone(),
+			..Default::default()
+		});
+		let cache = cache::Track::new(broadcast.origin.pool.clone(), state.downgrade());
+		state.write().ok().expect("a new track is open").cache = cache;
+		state
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
@@ -721,20 +655,20 @@ impl TrackState {
 	}
 
 	/// Accrue and pay eviction debt for everything written since the last charge:
-	/// the track's gross-write counter, which the groups' charges feed on every
-	/// frame (so growth on already-demoted groups and backfill is billed too).
+	/// this track's account, which the groups' charges feed on every frame (so
+	/// growth on already-demoted groups and backfill is billed too).
 	///
 	/// Runs BEFORE the new group is inserted, so a brand-new entry is never a
 	/// victim of the very write that created it. A track whose oldest content is
 	/// staler than the pool-wide average access time accrues at double rate, so
 	/// stale-heavy tracks drain first.
 	///
-	/// Also runs from the frame-write path via [`Info::maybe_charge`] once a
-	/// track accumulates [`WRITE_CHARGE_THRESHOLD`] unbilled bytes, so a track
-	/// that only appends frames to open groups still pays.
-	fn charge_debt(&mut self) {
-		let written = self.written.swap(0, Ordering::Relaxed);
-		let pool = self.broadcast.origin.pool.clone();
+	/// Also runs from the frame-write path via [`cache::Track::settle`], which is
+	/// why it's reachable from the account, so a track that only appends frames to
+	/// open groups still pays.
+	pub(super) fn charge_debt(&mut self) {
+		let written = self.cache.take_written();
+		let pool = self.cache.pool().clone();
 		match pool.accrue(written) {
 			Some(mut accrued) => {
 				if self.oldest_is_stale(&pool) {
@@ -888,22 +822,19 @@ impl TrackState {
 			return Err(Error::Closed);
 		}
 
-		// Adopt the supplied info only if the track hasn't been accepted yet, binding
-		// it to this track's broadcast so its groups reach the shared pool. No weak
-		// handle exists at this depth; groups created here still charge the
-		// state-owned counter, they just can't settle debt from the frame path.
+		// Adopt the supplied info only if the track hasn't been accepted yet. Groups
+		// created here charge the same account as any other, so backfill written
+		// before the track is accepted settles its debt like the rest.
 		if self.info.is_none() {
-			let mut info = info.unwrap_or_default();
-			info.bind(self.broadcast.clone());
-			self.install(info, None);
+			self.install(info.unwrap_or_default());
 		}
-		let info = self.info.clone().unwrap();
+		let info = self.info.unwrap();
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
 		self.claim_sequence(sequence)?;
 
 		let latency_max = info.latency_max;
-		let group = group::Producer::new(group::Info { sequence }, info);
+		let group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
 		// A backfill exists because someone is fetching it right now: stamp that
 		// access so the eviction walk can't kill it before the fetch resolves.
 		// It is also invisible to arrival-order subscribers: fetched on demand,
@@ -935,25 +866,19 @@ impl Producer {
 	/// Crate-private: tracks are born from their broadcast via
 	/// [`broadcast::Producer::create_track`] (or served on demand through a
 	/// [`Request`]), which threads the broadcast's `Arc<broadcast::Info>` down. The
-	/// track binds it onto its [`Info`] so every group reaches the shared cache pool
-	/// by walking `track.broadcast.origin.pool`.
+	/// track opens its cache account against that broadcast's origin pool, and every
+	/// group it creates charges into it.
 	pub(crate) fn new(
 		broadcast: Arc<broadcast::Info>,
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
-		let mut info = info.into().unwrap_or_default();
-		info.bind(broadcast.clone());
-		let state = kio::Producer::new(TrackState {
-			broadcast: broadcast.clone(),
-			..Default::default()
-		});
-		let weak = state.weak();
+		let state = TrackState::spawn(broadcast.clone());
 		state
 			.write()
 			.ok()
 			.expect("a new track is open")
-			.install(info, Some(weak));
+			.install(info.into().unwrap_or_default());
 		Self {
 			name: name.into(),
 			state,
@@ -990,14 +915,13 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		let info = state.info.as_ref().unwrap();
-		let track = info.clone();
-		let latency_max = info.latency_max;
+		let track = state.info.unwrap();
+		let latency_max = track.latency_max;
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
 		state.claim_sequence(group.sequence)?;
 
-		let group = group::Producer::new(group, track).with_meter(self.stats.meter());
+		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.commit_group(&group, true, latency_max);
 
 		Ok(group)
@@ -1016,11 +940,11 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 
-		let info = state.info.as_ref().unwrap();
-		let track = info.clone();
-		let latency_max = info.latency_max;
+		let track = state.info.unwrap();
+		let latency_max = track.latency_max;
 
-		let group = group::Producer::new(group::Info { sequence }, track).with_meter(self.stats.meter());
+		let group =
+			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.commit_group(&group, true, latency_max);
 
 		Ok(group)
@@ -1245,13 +1169,7 @@ impl Producer {
 		// requiring a live producer state. If the track already ended, the returned
 		// subscriber surfaces the close/abort on its first read; the preferences are
 		// simply never registered (nothing aggregates them anymore).
-		let info = self
-			.state
-			.read()
-			.info
-			.as_ref()
-			.expect("producer always has info")
-			.clone();
+		let info = *self.state.read().info.as_ref().expect("producer always has info");
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
@@ -2550,10 +2468,7 @@ pub struct Request {
 impl Request {
 	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
-		let state = kio::Producer::new(TrackState {
-			broadcast: broadcast.clone(),
-			..Default::default()
-		});
+		let state = TrackState::spawn(broadcast.clone());
 		let dynamic = Dynamic::new(name.clone(), state.clone());
 		Self {
 			name,
@@ -2602,13 +2517,10 @@ impl Request {
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
-		let mut info = info.into().unwrap_or_default();
-		info.bind(self.broadcast.clone());
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
-		let weak = self.state.weak();
 		if let Ok(mut state) = self.state.write() {
-			state.install(info, Some(weak));
+			state.install(info.into().unwrap_or_default());
 		}
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed on the last producer drop). No-op when untagged.
@@ -4506,18 +4418,97 @@ mod test {
 		assert!(matches!(demoted.finish(), Err(Error::Evicted)));
 	}
 
-	/// A cloned `Info` reused for several tracks must not share eviction
-	/// accounting: every track instantiation gets its own write counter.
+	/// One `Info` describing several tracks must not join their eviction accounting:
+	/// each track opens its own account against the pool.
 	#[tokio::test]
-	async fn cloned_info_does_not_share_accounting() {
+	async fn each_track_owns_its_account() {
 		let broadcast = Arc::new(broadcast::Info::default());
 		let info = Info::default();
-		let a = Producer::new(broadcast.clone(), "a", info.clone());
+		let a = Producer::new(broadcast.clone(), "a", info);
 		let b = Producer::new(broadcast, "b", info);
 
-		let a = a.state.read().info.as_ref().unwrap().written.clone();
-		let b = b.state.read().info.as_ref().unwrap().written.clone();
-		assert!(!Arc::ptr_eq(&a, &b), "each track owns its write counter");
+		let a = a.state.read().cache.clone();
+		let b = b.state.read().cache.clone();
+		assert!(!Arc::ptr_eq(&a, &b), "each track owns its account");
+	}
+
+	/// A finished track releases everything once every handle is gone.
+	///
+	/// Its groups hold the cache account, and the account links back here, so that link
+	/// has to be weak: anything stronger makes the state (and every cached frame in it)
+	/// immortal, even with no producer or consumer left.
+	#[tokio::test]
+	async fn finished_track_frees_its_cache() {
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		finished_group(&mut producer, 100);
+		producer.finish().unwrap();
+
+		let state = producer.state.downgrade();
+		drop(producer);
+
+		assert!(state.upgrade().is_none(), "the track state is freed");
+		assert_eq!(pool.used(), 0, "so are its cached bytes");
+	}
+
+	/// A subscriber holding one cached group must not pin the whole track: a group
+	/// carries the track's properties by value, not a handle back to its state.
+	#[tokio::test]
+	async fn cached_group_outlives_its_track() {
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		let sequence = finished_group(&mut producer, 100);
+		let group = producer.consume().peek_group(sequence).expect("cached");
+		producer.finish().unwrap();
+
+		let state = producer.state.downgrade();
+		drop(producer);
+		assert!(state.upgrade().is_none(), "the track state is freed");
+		assert!(pool.used() > 0, "the retained group keeps its own bytes");
+
+		drop(group);
+		assert_eq!(pool.used(), 0, "which it releases when dropped");
+	}
+
+	/// A backfill served before the track was accepted settles its own debt: the
+	/// account exists from the moment the state does, so acceptance replacing the
+	/// `Info` can't leave already-created groups writing for free.
+	#[tokio::test]
+	async fn pre_accept_backfill_settles_late_writes() {
+		tokio::time::pause();
+
+		let pool = cache::Pool::new(2_000);
+		let broadcast = broadcast::Info {
+			origin: crate::origin::Info::default().with_pool(pool.clone()),
+			..Default::default()
+		};
+		let request = Request::new(Arc::new(broadcast), "test");
+		let dynamic = request.dynamic();
+		let consumer = request.consume();
+
+		// Serve backfill seq 0 before the track is accepted.
+		let pending = consumer.fetch_group(0, None);
+		let req = dynamic
+			.requested_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut backfill = req.accept(None).unwrap();
+		pending.await.unwrap();
+
+		// Accept, then demote the backfill with a live group.
+		let mut producer = request.accept(None);
+		producer.append_group().unwrap().finish().unwrap();
+
+		// No further insert: the late write into the demoted backfill is the only
+		// thing that can pay the debt it just took on.
+		backfill
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 300_000]))
+			.unwrap();
+
+		assert!(
+			pool.used() <= 5_000,
+			"the frame write settled the debt: {}",
+			pool.used()
+		);
 	}
 
 	/// A late frame write restarts the retention clock (retention is documented as

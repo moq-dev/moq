@@ -13,6 +13,7 @@ use crate::frame::{self, Frame, FrameBuf};
 use crate::{Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -42,7 +43,7 @@ impl Info {
 	/// tests that don't exercise timestamps.
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
-		Producer::new(self, track::Info::default())
+		Producer::new(self, track::Info::default(), Default::default())
 	}
 }
 
@@ -206,11 +207,16 @@ pub struct Producer {
 	// inherited by each frame (see [`Self::create_frame`]).
 	info: Info,
 
-	// The parent track's info, inherited rather than passed piecemeal. Its
+	// The parent track's properties, inherited rather than passed piecemeal. Its
 	// `timescale` is used by [`Self::create_frame`] to normalize every frame's
 	// timestamp into the track scale before it enters the stream. Threaded down by
 	// value from [`track::Producer::create_group`] / `append_group`.
 	track: track::Info,
+
+	// The parent track's account against the shared cache pool. Held here as well as
+	// in the group's `cache::Charge` so a frame write can settle the track's eviction
+	// debt with the group lock released.
+	cache: Arc<cache::Track>,
 
 	// Ingress payload meter, set by a tagged [`track::Producer`] via
 	// [`Self::with_meter`]. Empty (no-op) for an untagged group.
@@ -226,24 +232,24 @@ impl std::ops::Deref for Producer {
 }
 
 impl Producer {
-	/// Create a group producer bound to its parent track's [`track::Info`].
+	/// Create a group producer bound to its parent track's [`track::Info`] and cache
+	/// account.
 	///
 	/// Crate-private: groups are only constructed via [`track::Producer`], which
-	/// threads its [`track::Info`] down so properties like the timescale are inherited
-	/// rather than passed in. Every frame added to this group is normalized to the
-	/// track's timescale by [`Self::create_frame`].
+	/// threads both down so properties like the timescale are inherited rather than
+	/// passed in. Every frame added to this group is normalized to the track's
+	/// timescale by [`Self::create_frame`].
 	///
-	/// Charges the group into the shared cache pool reached through the track's
-	/// broadcast (`track.broadcast.origin.pool`), so its cached bytes count against
-	/// the budget the track evicts toward under memory pressure.
-	pub(crate) fn new(info: Info, track: track::Info) -> Self {
+	/// Charges the group into `cache`, so its cached bytes count against the budget the
+	/// track evicts toward under memory pressure.
+	pub(crate) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
 		let state = kio::Producer::<GroupState>::default();
-		state.write().ok().expect("a new group is open").charge =
-			cache::Charge::new(track.broadcast.origin.pool.clone(), track.written.clone());
+		state.write().ok().expect("a new group is open").charge = cache.charge();
 		Self {
 			info,
 			state,
 			track,
+			cache,
 			stats: stats::Meter::default(),
 		}
 	}
@@ -296,7 +302,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.track.maybe_charge();
+		self.cache.settle();
 
 		// Ingress payload: one whole frame written.
 		self.stats.frames(1);
@@ -338,7 +344,7 @@ impl Producer {
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
-		self.track.maybe_charge();
+		self.cache.settle();
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
 		// frame::Producer writes them.
@@ -443,7 +449,7 @@ impl Producer {
 		Consumer {
 			info: self.info,
 			state: self.state.consume(),
-			track: self.track.clone(),
+			track: self.track,
 			index: 0,
 			prefetch: Prefetch::default(),
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
@@ -478,7 +484,8 @@ impl Clone for Producer {
 		Self {
 			info: self.info,
 			state: self.state.clone(),
-			track: self.track.clone(),
+			track: self.track,
+			cache: self.cache.clone(),
 			stats: self.stats.clone(),
 		}
 	}
@@ -607,7 +614,7 @@ impl Clone for Consumer {
 		Self {
 			state: self.state.clone(),
 			info: self.info,
-			track: self.track.clone(),
+			track: self.track,
 			index: self.index,
 			prefetch: Prefetch::default(),
 			// Inherit the meter without re-counting the group: the original already
@@ -1162,6 +1169,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
 		);
 		let frame = frame::Info {
 			size: 3,
@@ -1180,6 +1188,7 @@ mod test {
 		let mut producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
 		);
 		let writer = producer
 			.create_frame(frame::Info {

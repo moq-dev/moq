@@ -7,14 +7,76 @@ use crate::{
 	Closed, Counts, State,
 	consumer::Consumer,
 	lock::*,
-	producer::{Producer, Ref},
+	producer::{Mut, Producer, Ref},
 	waiter::*,
 };
+
+/// A handle that owns nothing at all ([`Producer::downgrade`](crate::Producer::downgrade)).
+///
+/// Unlike [`ProducerWeak`], which keeps the state allocated so it stays readable after
+/// the channel closes, this drops with the last real handle. That makes it the one
+/// handle you can store *inside* the state it points at (a child holding a link back to
+/// its parent, say) without the two keeping each other alive forever.
+///
+/// [`upgrade`](Self::upgrade) it while the state is still around.
+pub struct Weak<T> {
+	pub(crate) state: WeakLock<State<T>>,
+	pub(crate) counts: Arc<Counts>,
+}
+
+impl<T> Weak<T> {
+	/// A handle that never upgrades, mirroring [`std::sync::Weak::new`].
+	///
+	/// Useful as a placeholder for a link that isn't wired up yet, or that a
+	/// standalone (channel-less) value doesn't have.
+	pub fn new() -> Self {
+		Self {
+			state: WeakLock::new(),
+			counts: Arc::new(Counts::default()),
+		}
+	}
+
+	/// Recover a [`ProducerWeak`], or `None` once the state has been dropped.
+	///
+	/// The channel may still be closed; check or write through the returned handle.
+	pub fn upgrade(&self) -> Option<ProducerWeak<T>> {
+		Some(ProducerWeak {
+			state: self.state.upgrade()?,
+			counts: self.counts.clone(),
+		})
+	}
+}
+
+impl<T> Default for Weak<T> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<T> Clone for Weak<T> {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+}
+
+impl<T> std::fmt::Debug for Weak<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Weak")
+			.field("alive", &self.state.upgrade().is_some())
+			.finish()
+	}
+}
 
 /// A weak handle from the producing side ([`Producer::weak`](crate::Producer::weak)).
 ///
 /// Holds no ref count, so it never keeps the channel open. Upgrade it back to a [`Producer`]
 /// (write access) or a [`Consumer`] (read access) while the channel is still live.
+///
+/// It does keep the state *allocated*, which is what lets it read a closed channel's final
+/// value. Reach for [`Weak`] instead when the handle is stored inside that same state.
 #[derive(Debug)]
 pub struct ProducerWeak<T> {
 	pub(crate) state: Lock<State<T>>,
@@ -62,6 +124,20 @@ impl<T> ProducerWeak<T> {
 	pub fn read(&self) -> Ref<'_, T> {
 		Ref {
 			state: self.state.lock(),
+		}
+	}
+
+	/// Acquire mutable access to the shared state, like [`Producer::write`].
+	///
+	/// Returns `Ok(Mut)` if the channel is open, or `Err(Ref)` with read-only access
+	/// if closed. No new producer is minted, so this can't resurrect a channel or
+	/// perturb the producer count; a closed channel stays closed.
+	pub fn write(&self) -> Result<Mut<'_, T>, Ref<'_, T>> {
+		let state = self.state.lock();
+		if state.closed {
+			Err(Ref { state })
+		} else {
+			Ok(Mut::new(state))
 		}
 	}
 
@@ -284,6 +360,62 @@ mod test {
 
 		drop(consumer);
 		assert_eq!(weak.unused().await, Ok(()));
+	}
+
+	/// A state holding a handle back to itself is still deallocated once the last real
+	/// handle drops. `ProducerWeak` would keep it (and everything it owns) alive forever.
+	#[test]
+	fn weak_breaks_a_self_reference() {
+		struct Node {
+			// Only its refcount matters: it's how the test sees the state deallocate.
+			_alive: Arc<()>,
+			back: Option<Weak<Node>>,
+		}
+
+		let alive = Arc::new(());
+		let producer = Producer::new(Node {
+			_alive: alive.clone(),
+			back: None,
+		});
+		producer.write().ok().expect("open").back = Some(producer.downgrade());
+		assert_eq!(Arc::strong_count(&alive), 2, "the state is alive");
+
+		let weak = producer.downgrade();
+		assert!(weak.upgrade().is_some());
+
+		drop(producer);
+		assert_eq!(Arc::strong_count(&alive), 1, "the state is gone despite the cycle");
+		assert!(weak.upgrade().is_none());
+	}
+
+	/// A consumer draining a closed channel keeps the state around, so a weak handle
+	/// stored inside it still upgrades. It just can't write.
+	#[test]
+	fn weak_upgrades_while_a_consumer_remains() {
+		let producer = Producer::new(0u32);
+		let weak = producer.downgrade();
+		let consumer = producer.consume();
+
+		drop(producer);
+		let strong = weak.upgrade().expect("the consumer holds the state");
+		assert!(strong.is_closed());
+		assert!(strong.write().is_err(), "a closed channel stays closed");
+
+		// The upgraded handle owns the state too, so it has to go first.
+		drop(strong);
+		drop(consumer);
+		assert!(weak.upgrade().is_none());
+	}
+
+	/// Writing through a `ProducerWeak` notifies consumers without minting a producer.
+	#[test]
+	fn producer_weak_writes() {
+		let producer = Producer::new(0u32);
+		let weak = producer.weak();
+		let consumer = producer.consume();
+
+		*weak.write().ok().expect("open") = 7;
+		assert_eq!(*consumer.read(), 7);
 	}
 
 	#[tokio::test]

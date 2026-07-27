@@ -1,8 +1,9 @@
 //! A shared byte budget for cached groups, repaid by write-time eviction.
 //!
 //! Every group charges its cached bytes into a [`Pool`] through a crate-internal
-//! `Charge`. The pool itself never evicts: it is a handful of atomic counters. While
-//! the pool is over capacity, each track accrues eviction debt as it writes (`accrue`),
+//! `Charge`, billed to its track's `Track` account. The pool itself never evicts: it is
+//! a handful of atomic counters. While the pool is over capacity, each track accrues
+//! eviction debt as it writes (`accrue`),
 //! sized proportionally to what it wrote, and pays that debt by aborting its own oldest
 //! groups with [`Error::Evicted`](crate::Error::Evicted). Reclamation is therefore
 //! distributed across every writing track and converges on the capacity without any
@@ -24,6 +25,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use super::track::TrackState;
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
 ///
@@ -210,21 +213,95 @@ impl std::fmt::Debug for Pool {
 	}
 }
 
+/// Gross bytes a track writes before a frame write settles its eviction debt itself,
+/// so a track appending frames to open groups (never inserting another group) still
+/// pays. Coarse: the cost is one track-state lock per threshold crossing.
+const WRITE_CHARGE_THRESHOLD: u64 = 256 * 1024;
+
+/// One track's account against the [`Pool`], shared with every group it creates.
+///
+/// Groups charge their bytes here (through a [`Charge`]) rather than straight into the
+/// pool, so the track can drain what its own groups wrote into eviction debt and pay it
+/// off by evicting them. The link back to the track is a [`kio::Weak`] because the track
+/// owns its cached groups and each of those owns this account: anything stronger would
+/// make a track's cache immortal.
+///
+/// The default account is detached: an unbounded pool and no track, so every operation
+/// is a no-op.
+#[derive(Default)]
+pub(crate) struct Track {
+	pool: Pool,
+
+	// Gross bytes charged by this track's groups (payload plus overhead), never
+	// decremented here: the track swaps it out as it accrues debt.
+	written: AtomicU64,
+
+	// The track that pays this account off, holding the groups being charged.
+	state: kio::Weak<TrackState>,
+}
+
+impl Track {
+	/// Open an account against `pool` for the track behind `state`.
+	pub(crate) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
+		Arc::new(Self {
+			pool,
+			written: AtomicU64::new(0),
+			state,
+		})
+	}
+
+	/// The pool this track caches into.
+	pub(crate) fn pool(&self) -> &Pool {
+		&self.pool
+	}
+
+	/// Charge a new group's fixed overhead, returning its [`Charge`].
+	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
+		self.pool.add(ENTRY_OVERHEAD);
+		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
+		let last = self.pool.now();
+		Charge {
+			track: Some(self.clone()),
+			bytes: ENTRY_OVERHEAD,
+			last,
+			counted: false,
+		}
+	}
+
+	/// Take everything written since the last call, to be turned into eviction debt.
+	pub(crate) fn take_written(&self) -> u64 {
+		self.written.swap(0, Ordering::Relaxed)
+	}
+
+	/// Settle eviction debt from a frame write, once enough bytes accumulate.
+	///
+	/// Called with no group lock held (locks are ordered track then group). Cheap
+	/// until the threshold crosses: one relaxed load. This is what makes a track
+	/// that only appends frames to open groups, never inserting another group,
+	/// still pay its debt (and age its content out).
+	pub(crate) fn settle(&self) {
+		if self.written.load(Ordering::Relaxed) < WRITE_CHARGE_THRESHOLD {
+			return;
+		}
+		let Some(state) = self.state.upgrade() else { return };
+		if let Ok(mut state) = state.write() {
+			state.charge_debt();
+		}
+	}
+}
+
 /// The RAII byte accounting for one cached group, owned by the group's state.
 ///
 /// `add`/`sub` mirror the group's cached payload bytes into the pool with plain
 /// atomics, and every charged byte (overhead included) is also accumulated into the
-/// track's gross-write counter, which the track drains into eviction debt on its
-/// next write. The charge also owns the group's sample in the pool's access mean,
-/// so the sample lives exactly as long as the cached bytes do: aborting or dropping
-/// the group removes both, no matter who does it or when. The default charge is
-/// detached: it belongs to no pool and every operation is a no-op.
+/// track's account, which the track drains into eviction debt on its next write. The
+/// charge also owns the group's sample in the pool's access mean, so the sample lives
+/// exactly as long as the cached bytes do: aborting or dropping the group removes both,
+/// no matter who does it or when. The default charge is detached: it belongs to no
+/// account and every operation is a no-op.
 #[derive(Default)]
 pub(crate) struct Charge {
-	pool: Option<Pool>,
-	// The owning track's gross-write counter (see `track::Info`); never decremented
-	// here, the track swaps it out as it accrues debt.
-	written: Option<Arc<AtomicU64>>,
+	track: Option<Arc<Track>>,
 	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
 	bytes: u64,
 	// Tick of the last cache access: creation, a FETCH hit, or a fetched backfill's
@@ -236,20 +313,6 @@ pub(crate) struct Charge {
 }
 
 impl Charge {
-	/// Charge a new group's fixed overhead into `pool`, counting it as written.
-	pub(crate) fn new(pool: Pool, written: Arc<AtomicU64>) -> Self {
-		pool.add(ENTRY_OVERHEAD);
-		written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
-		let last = pool.now();
-		Self {
-			pool: Some(pool),
-			written: Some(written),
-			bytes: ENTRY_OVERHEAD,
-			last,
-			counted: false,
-		}
-	}
-
 	/// Charge `n` more payload bytes, counting them as written.
 	///
 	/// A write is also an access: it restarts the retention clock and keeps an
@@ -257,20 +320,18 @@ impl Charge {
 	/// being evicted or expired mid-write, even within the same coarse tick as
 	/// content that was merely inserted.
 	pub(crate) fn add(&mut self, n: u64) {
-		if let Some(pool) = &self.pool {
-			pool.add(n);
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
 			self.bytes += n;
-		}
-		if let Some(written) = &self.written {
-			written.fetch_add(n, Ordering::Relaxed);
 		}
 		self.touch(WRITE_BOOST);
 	}
 
 	/// Release `n` payload bytes (a frame evicted by the group's own cap).
 	pub(crate) fn sub(&mut self, n: u64) {
-		if let Some(pool) = &self.pool {
-			pool.sub(n);
+		if let Some(track) = &self.track {
+			track.pool.sub(n);
 			self.bytes = self.bytes.saturating_sub(n);
 		}
 	}
@@ -289,10 +350,10 @@ impl Charge {
 	/// or inserted behind it), sampling its access time into the pool's mean.
 	/// Idempotent.
 	pub(crate) fn demote(&mut self) {
-		if let Some(pool) = &self.pool
+		if let Some(track) = &self.track
 			&& !self.counted
 		{
-			pool.access_insert(self.last);
+			track.pool.access_insert(self.last);
 			self.counted = true;
 		}
 	}
@@ -310,13 +371,13 @@ impl Charge {
 	/// weaker accesses. Idempotent within a tick (monotone, never regressing), so
 	/// repeated accesses can't run ahead of the clock by more than the boost.
 	fn touch(&mut self, boost: u64) {
-		let Some(pool) = &self.pool else { return };
-		let target = pool.now().saturating_add(boost);
+		let Some(track) = &self.track else { return };
+		let target = track.pool.now().saturating_add(boost);
 		if target <= self.last {
 			return;
 		}
 		if self.counted {
-			pool.access_refresh(self.last, target);
+			track.pool.access_refresh(self.last, target);
 		}
 		self.last = target;
 	}
@@ -324,11 +385,11 @@ impl Charge {
 	/// Release everything this charge holds: bytes, overhead, and the access
 	/// sample. Idempotent; used when the group aborts and clears its frames.
 	pub(crate) fn clear(&mut self) {
-		if let Some(pool) = &self.pool {
-			pool.sub(self.bytes);
+		if let Some(track) = &self.track {
+			track.pool.sub(self.bytes);
 			self.bytes = 0;
 			if self.counted {
-				pool.access_remove(self.last);
+				track.pool.access_remove(self.last);
 				self.counted = false;
 			}
 		}
@@ -346,7 +407,8 @@ mod test {
 	use super::*;
 
 	fn charge(pool: &Pool) -> Charge {
-		Charge::new(pool.clone(), Arc::new(AtomicU64::new(0)))
+		// No track behind the account: nothing here settles debt, it just accounts.
+		Track::new(pool.clone(), kio::Weak::new()).charge()
 	}
 
 	#[test]
@@ -437,12 +499,12 @@ mod test {
 
 	#[test]
 	fn charge_counts_gross_writes() {
-		let pool = Pool::new(1000);
-		let written = Arc::new(AtomicU64::new(0));
-		let mut c = Charge::new(pool.clone(), written.clone());
+		let track = Track::new(Pool::new(1000), kio::Weak::new());
+		let mut c = track.charge();
 		c.add(100);
 		c.sub(40); // releases don't refund the gross counter
-		assert_eq!(written.load(Ordering::Relaxed), ENTRY_OVERHEAD + 100);
+		assert_eq!(track.take_written(), ENTRY_OVERHEAD + 100);
+		assert_eq!(track.take_written(), 0, "taking it drains the counter");
 	}
 
 	#[test]
