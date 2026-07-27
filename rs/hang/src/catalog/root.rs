@@ -39,7 +39,14 @@ pub struct Catalog {
 	/// Contains a map of text track renditions that the viewer can choose from
 	/// based on their preferences (language, role). Omitted from the wire when empty, so a
 	/// broadcast without captions stays byte-identical to before this section existed.
-	#[serde(default, skip_serializing_if = "Text::is_empty")]
+	///
+	/// A `text` value that isn't a caption section decodes as empty rather than failing the
+	/// catalog, since applications could carry their own `text` key before this was reserved.
+	#[serde(
+		default,
+		skip_serializing_if = "Text::is_empty",
+		deserialize_with = "crate::catalog::deserialize_text"
+	)]
 	pub text: Text,
 }
 
@@ -415,6 +422,22 @@ mod test {
 
 		let decoded = Catalog::from_str(&json).expect("failed to decode");
 		assert_eq!(catalog, decoded, "text section did not round-trip");
+	}
+
+	#[test]
+	fn legacy_text_section_keeps_the_catalog() {
+		// `text` was an ordinary application section before captions reserved it, so a value with
+		// the wrong shape must cost its captions and nothing else. Audio and video keep playing.
+		for legacy in [
+			r#""a caption overlay""#,
+			r#"["a","b"]"#,
+			r#"{"overlay":{"x":1}}"#,
+			r#"{"renditions":42}"#,
+		] {
+			let json = format!(r#"{{"video":{{"renditions":{{}}}},"audio":{{"renditions":{{}}}},"text":{legacy}}}"#);
+			let catalog = Catalog::from_str(&json).unwrap_or_else(|e| panic!("legacy text {legacy} broke it: {e}"));
+			assert!(catalog.text.is_empty(), "legacy text {legacy} decoded as captions");
+		}
 	}
 
 	#[test]

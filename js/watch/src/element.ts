@@ -123,6 +123,7 @@ export default class MoqWatch extends HTMLElement {
 	#captionsOverlayEl?: HTMLDivElement;
 
 	// Whether to download. Driven by the renderer/emitter policy, read by the decoders.
+	#captionsEnabled = new Signal(false);
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 
@@ -175,6 +176,12 @@ export default class MoqWatch extends HTMLElement {
 			audioSource.close();
 		});
 
+		this.text = new Text.Source({
+			broadcast: this.broadcast,
+			target: this.controls.captions,
+		});
+		this.signals.cleanup(() => this.text.close());
+
 		// Sources produce the per-rendition jitter that Sync reads, so they're created
 		// before Sync to avoid a construction cycle.
 		this.sync = new Sync({
@@ -182,6 +189,7 @@ export default class MoqWatch extends HTMLElement {
 			connection: this.connection.established,
 			video: videoSource.out.jitter,
 			audio: audioSource.out.jitter,
+			text: this.text.out.jitter,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
@@ -206,17 +214,16 @@ export default class MoqWatch extends HTMLElement {
 			this.renderer.close();
 		});
 
-		this.text = new Text.Source({
-			broadcast: this.broadcast,
-			target: this.controls.captions,
-		});
 		this.captionsRenderer = new Text.Renderer(this.text, this.sync, {
 			container: this.#captionsOverlay,
-			enabled: this.#enabled,
+			enabled: this.#captionsEnabled,
 		});
-		this.signals.cleanup(() => {
-			this.text.close();
-			this.captionsRenderer.close();
+		this.signals.cleanup(() => this.captionsRenderer.close());
+
+		// Captions follow playback, like audio and video. The caption clock runs off wall time, so
+		// leaving them on while paused scrolls text over a frozen frame.
+		this.signals.run((effect) => {
+			this.#captionsEnabled.set(effect.get(this.#enabled) && !effect.get(this.controls.paused));
 		});
 
 		// Audio download follows the emitter's enable policy (paused/muted).

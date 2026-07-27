@@ -38,6 +38,25 @@ export function insertCue(cues: VTTCue[], cue: VTTCue): void {
 }
 
 /**
+ * Drop every cue that ended before `cutoff`, returning whether anything was removed.
+ *
+ * Scans the whole array rather than shifting off the front: cues are ordered by start time, not
+ * end time, so one long-running early cue would otherwise stop the sweep and let every expired cue
+ * behind it accumulate for the life of the stream. Exported for tests.
+ *
+ * @internal
+ */
+export function pruneCues(cues: VTTCue[], cutoff: number): boolean {
+	let kept = 0;
+	for (const cue of cues) {
+		if (cue.endTime >= cutoff) cues[kept++] = cue;
+	}
+	if (kept === cues.length) return false;
+	cues.length = kept;
+	return true;
+}
+
+/**
  * Clamp a `utf8` roll-up cue against its neighbours, so exactly one caption shows at a time.
  *
  * A roll-up cue has no real end: it runs until the next one starts. Both neighbours are checked
@@ -52,6 +71,23 @@ export function rollUp(cues: VTTCue[], cue: VTTCue): void {
 
 	const next = cues[i + 1];
 	if (next && cue.endTime > next.startTime) cue.endTime = next.startTime;
+}
+
+/**
+ * End whichever roll-up cue is showing at `time`, adding nothing.
+ *
+ * An empty `utf8` payload clears the caption rather than displaying an empty one, so the clear is
+ * a scheduled event in its own right. Exported for tests.
+ *
+ * @internal
+ */
+export function clearCue(cues: VTTCue[], time: number): void {
+	for (let i = cues.length - 1; i >= 0; i--) {
+		const cue = cues[i];
+		if (cue.startTime > time) continue;
+		if (cue.endTime > time) cue.endTime = time;
+		return;
+	}
 }
 
 export type RendererInput = {
@@ -157,13 +193,7 @@ export class Renderer {
 			if (now !== undefined) {
 				renderer.currentTime = now / 1000;
 
-				const cutoff = (now - PRUNE_BEHIND) / 1000;
-				let pruned = false;
-				while (cues.length > 0 && cues[0].endTime < cutoff) {
-					cues.shift();
-					pruned = true;
-				}
-				if (pruned) commit();
+				if (pruneCues(cues, (now - PRUNE_BEHIND) / 1000)) commit();
 			}
 			effect.animate(tick);
 		};
@@ -206,16 +236,23 @@ export class Renderer {
 		regions: Map<string, VTTRegion>,
 	): Promise<void> {
 		const text = new TextDecoder().decode(sample.payload);
-		if (text.length === 0) return;
-
 		const start = (sample.timestamp as number) / 1e6;
 
 		if (format === "utf8") {
+			// An empty payload clears the caption (per the hang draft) rather than showing nothing,
+			// so it still has to be scheduled: it just ends the current cue instead of adding one.
+			if (text.length === 0) {
+				clearCue(cues, start);
+				return;
+			}
+
 			const cue = new VTTCue(start, start + UTF8_LINGER / 1000, text);
 			insertCue(cues, cue);
 			rollUp(cues, cue);
 			return;
 		}
+
+		if (text.length === 0) return;
 
 		// vtt: a self-contained WEBVTT segment. `strict: false` (the default) tolerates a missing header.
 		let parsed: Awaited<ReturnType<typeof parseText>>;

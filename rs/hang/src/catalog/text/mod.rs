@@ -29,6 +29,24 @@ pub struct Text {
 	pub renditions: BTreeMap<String, TextConfig>,
 }
 
+/// A `serde` `deserialize_with` helper that decodes a catalog `text` section, falling back to empty
+/// when the value isn't one.
+///
+/// `text` only became a reserved media section with captions; before that an application could
+/// carry its own `text` key through the catalog extension mechanism. Failing the decode would take
+/// the whole catalog down with it, so a section we can't read costs its captions and nothing else.
+/// The JS parser does the same (`z.catch` in `catalog/root.ts`).
+///
+/// Use it on the `text` field of any catalog root that embeds this section:
+/// `#[serde(default, deserialize_with = "hang::catalog::deserialize_text")]`.
+pub fn deserialize_text<'de, D>(deserializer: D) -> Result<Text, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	let value = serde_json::Value::deserialize(deserializer)?;
+	Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 impl Text {
 	/// Insert a track config, returning an error if the name already exists.
 	pub fn insert(&mut self, name: &str, config: TextConfig) -> crate::Result<()> {

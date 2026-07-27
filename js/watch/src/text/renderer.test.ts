@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { VTTCue } from "media-captions";
-import { insertCue, rollUp } from "./renderer";
+import { clearCue, insertCue, pruneCues, rollUp } from "./renderer";
 
 // Build a cue store by inserting in the given delivery order, returning the resulting start times.
 function starts(order: number[]): number[] {
@@ -66,5 +66,55 @@ describe("rollUp", () => {
 		insertCue(cues, only);
 		rollUp(cues, only);
 		expect(only.endTime).toBe(30);
+	});
+});
+
+describe("clearCue", () => {
+	// The hang draft defines an empty utf8 payload as clearing the caption, so it has to be
+	// scheduled rather than dropped: otherwise stale accessibility text stays on screen.
+	test("ends the cue showing at the clear time", () => {
+		const cues = [new VTTCue(0, 30, "showing")];
+		clearCue(cues, 5);
+		expect(cues[0].endTime).toBe(5);
+		expect(cues).toHaveLength(1);
+	});
+
+	test("ignores cues that have not started yet", () => {
+		const cues = [new VTTCue(0, 2, "done"), new VTTCue(10, 40, "later")];
+		clearCue(cues, 5);
+		expect(cues[0].endTime).toBe(2);
+		expect(cues[1].endTime).toBe(40);
+	});
+
+	test("is a no-op with nothing showing", () => {
+		const cues: VTTCue[] = [];
+		expect(() => clearCue(cues, 5)).not.toThrow();
+	});
+});
+
+describe("pruneCues", () => {
+	test("drops expired cues and reports the change", () => {
+		const cues = [new VTTCue(0, 1, "old"), new VTTCue(2, 3, "old"), new VTTCue(9, 10, "fresh")];
+		expect(pruneCues(cues, 5)).toBe(true);
+		expect(cues.map((c) => c.text)).toEqual(["fresh"]);
+		expect(pruneCues(cues, 5)).toBe(false);
+	});
+
+	// Cues are ordered by start time, not end time. A long-running early cue used to stop the
+	// sweep at the head, letting every expired cue behind it accumulate for the whole stream.
+	test("prunes behind a long-running early cue", () => {
+		const cues = [new VTTCue(0, 1_000, "long")];
+		for (let i = 1; i <= 20; i++) cues.push(new VTTCue(i, i + 0.5, `short ${i}`));
+
+		expect(pruneCues(cues, 15)).toBe(true);
+		expect(cues.map((c) => c.text)).toEqual([
+			"long",
+			"short 15",
+			"short 16",
+			"short 17",
+			"short 18",
+			"short 19",
+			"short 20",
+		]);
 	});
 });

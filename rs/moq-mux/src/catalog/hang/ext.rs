@@ -103,7 +103,14 @@ pub struct Catalog<E: CatalogExt = ()> {
 
 	/// Caption/subtitle renditions. Omitted from the wire when empty, so a broadcast without
 	/// captions stays byte-identical to before this section existed.
-	#[serde(default, skip_serializing_if = "hang::catalog::Text::is_empty")]
+	///
+	/// Decoded leniently: an application could carry its own `text` section through [`Extra`] before
+	/// this one was reserved, and that must not take the whole catalog down.
+	#[serde(
+		default,
+		skip_serializing_if = "hang::catalog::Text::is_empty",
+		deserialize_with = "hang::catalog::deserialize_text"
+	)]
 	pub text: hang::catalog::Text,
 
 	#[serde(flatten)]
@@ -168,6 +175,19 @@ mod test {
 	}
 
 	impl CatalogExt for Scte35Ext {}
+
+	#[test]
+	fn legacy_text_section_keeps_the_catalog() {
+		// `Extra` is exactly the mechanism an application would have used to carry its own `text`
+		// section before captions reserved the name, so an unreadable one must cost its captions
+		// and nothing else rather than failing the whole decode.
+		let json =
+			r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"text":{"overlay":"hi"},"scte35":{"spliceId":7}}"#;
+
+		let catalog: Catalog<Extra> = serde_json::from_str(json).expect("legacy text section broke the catalog");
+		assert!(catalog.text.is_empty());
+		assert!(catalog.ext.get("scte35").is_some(), "unrelated sections still decode");
+	}
 
 	#[test]
 	fn extension_roundtrip() {
