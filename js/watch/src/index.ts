@@ -14,6 +14,7 @@ export * as Signals from "@moq/signals";
 export * as Audio from "./audio";
 export * from "./broadcast";
 export * from "./sync";
+export * as Text from "./text";
 export * as Video from "./video";
 
 // NOTE: element is not exported from this module

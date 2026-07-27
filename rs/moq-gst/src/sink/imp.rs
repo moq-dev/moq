@@ -252,6 +252,8 @@ impl ElementImpl for MoqSink {
 					.build(),
 			);
 			caps.merge(gst::Caps::builder("audio/x-opus").build());
+			// Subtitles: one decoded UTF-8 cue per buffer, as demuxers emit timed text.
+			caps.merge(gst::Caps::builder("text/x-raw").field("format", "utf8").build());
 
 			let sink =
 				gst::PadTemplate::new("sink_%u", gst::PadDirection::Sink, gst::PadPresence::Request, &caps).unwrap();
@@ -364,6 +366,8 @@ impl MoqSink {
 		// moq-net rejects it (FrameTooLarge) before reserving its own group slot, and that error invalidates
 		// just this pad.
 		let pts = buffer.pts();
+		// Only subtitles use this: a cue needs an explicit end, unlike a media frame.
+		let duration = buffer.duration();
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
 			gst::FlowError::Error
@@ -392,7 +396,7 @@ impl MoqSink {
 			return Ok(gst::FlowSuccess::Ok); // drop quietly; the pad already reported its failure
 		}
 
-		let no_segment = media.push_buffer(data, pts);
+		let no_segment = media.push_buffer(data, pts, duration);
 		drop(guard);
 
 		if no_segment {

@@ -9,6 +9,7 @@ mod container;
 mod hex;
 mod priority;
 mod root;
+mod text;
 mod timeline;
 mod video;
 
@@ -16,5 +17,6 @@ pub use audio::*;
 pub use container::*;
 pub use priority::*;
 pub use root::*;
+pub use text::*;
 pub use timeline::*;
 pub use video::*;

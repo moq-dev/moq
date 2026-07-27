@@ -25,9 +25,56 @@ enum PadState {
 	Invalid,
 }
 
+/// Where a pad's buffers land: a codec importer, or a subtitle track written as WebVTT cues.
+enum Sink {
+	Media(import::Track),
+	Text(Text),
+}
+
+/// A subtitle pad. GStreamer hands us one decoded cue per buffer (`text/x-raw`, UTF-8) with the
+/// presentation time and duration already resolved by the demuxer, so each buffer becomes one
+/// self-contained WebVTT segment in its own group, on the same media clock as audio and video.
+struct Text {
+	producer: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+}
+
+impl Text {
+	/// Publish one cue spanning `[start, start + duration)` on the media clock.
+	fn write(&mut self, text: &str, start_micros: u64, duration_micros: u64) -> Result<()> {
+		let payload = format!(
+			"WEBVTT\n\n{} --> {}\n{}\n",
+			format_timestamp(start_micros),
+			format_timestamp(start_micros + duration_micros),
+			text.trim_end()
+		);
+
+		self.producer.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(start_micros)?,
+			duration: None,
+			payload: Bytes::from(payload.into_bytes()),
+			keyframe: true,
+		})?;
+		// One cue per group, so a late joiner tunes in on the current caption.
+		self.producer.cut(None)?;
+		Ok(())
+	}
+}
+
+/// Format microseconds as a WebVTT `HH:MM:SS.mmm` timestamp.
+fn format_timestamp(micros: u64) -> String {
+	let ms = micros / 1000;
+	format!(
+		"{:02}:{:02}:{:02}.{:03}",
+		ms / 3_600_000,
+		(ms / 60_000) % 60,
+		(ms / 1000) % 60,
+		ms % 1000
+	)
+}
+
 /// One sink pad's media producer plus its timeline policy.
 pub struct Pad {
-	track: Option<import::Track>,
+	track: Option<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going.
@@ -94,6 +141,14 @@ impl Pad {
 		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
 		// pin (the AAC codec_data) are checked below. The importer reserves a uniquely named track, which it
 		// accepts (setting the timescale) inside `Track::new`.
+		// Subtitles skip the codec importers entirely: the demuxer already resolved each cue to UTF-8
+		// text with a presentation time, so there is nothing to parse, only a text rendition to declare.
+		if structure.name().as_str() == "text/x-raw" {
+			self.track = Some(Sink::Text(Self::reserve_text(&mut broadcast, catalog, structure)?));
+			self.caps = Some(caps.clone());
+			return Ok(());
+		}
+
 		let track: import::Track = match structure.name().as_str() {
 			"video/x-h264" => Self::reserve(&mut broadcast, catalog, ".avc3", "avc3", &[])?,
 			"video/x-h265" => Self::reserve(&mut broadcast, catalog, ".hev1", "hev1", &[])?,
@@ -150,9 +205,33 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(track);
+		self.track = Some(Sink::Media(track));
 		self.caps = Some(caps.clone());
 		Ok(())
+	}
+
+	/// Declare a subtitle rendition: a plain track plus its catalog entry. Unlike the codec paths there
+	/// is no config to detect from the bitstream, so the entry is complete up front.
+	fn reserve_text(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer,
+		structure: &gst::StructureRef,
+	) -> Result<Text> {
+		let name = broadcast.unique_name(".vtt");
+		let request = broadcast.reserve_track(name.clone())?;
+		let producer = request.accept(hang::container::track_info());
+
+		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		config.role = hang::catalog::TextRole::Caption;
+		// GStreamer surfaces the track language as a BCP-47-ish tag when the container carries one.
+		config.lang = structure.get::<String>("language-code").ok();
+
+		let mut catalog = catalog;
+		catalog.lock().text.insert(&name, config)?;
+
+		Ok(Text {
+			producer: moq_mux::container::Producer::new(producer, moq_mux::catalog::hang::Container::Legacy),
+		})
 	}
 
 	/// Reserve a uniquely named track and hand it to the single-codec importer, which accepts the request
@@ -249,7 +328,7 @@ impl Pad {
 	/// pad.
 	/// Returns `true` the first time a buffer is dropped because the pad has no TIME segment, so the
 	/// caller can surface it once on the bus: without a timeline the pad can never publish.
-	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>) -> bool {
+	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>, duration: Option<gst::ClockTime>) -> bool {
 		if self.failed {
 			return false;
 		}
@@ -260,9 +339,25 @@ impl Pad {
 		}
 		match timestamp {
 			Ok(micros) => {
-				let ts = hang::container::Timestamp::from_micros(micros).ok();
-				let track = self.track.as_mut().expect("track present");
-				if let Err(err) = track.decode(&data, ts) {
+				let result: Result<()> = match self.track.as_mut().expect("track present") {
+					Sink::Media(track) => {
+						let ts = hang::container::Timestamp::from_micros(micros).ok();
+						track.decode(&data, ts).map_err(Into::into)
+					}
+					Sink::Text(text) => match std::str::from_utf8(&data) {
+						// A cue with no duration would never be dismissed, so drop it rather than pin it
+						// on screen; the demuxer supplies one for every real subtitle sample.
+						Ok(cue) => match duration {
+							Some(duration) => text.write(cue, micros, duration.useconds()),
+							None => {
+								gst::warning!(CAT, "dropping subtitle cue without a duration");
+								return false;
+							}
+						},
+						Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+					},
+				};
+				if let Err(err) = result {
 					gst::warning!(CAT, "invalidating pad: {err}");
 					self.fail();
 				}
@@ -283,10 +378,13 @@ impl Pad {
 	/// `finish()` is safe even when no frame was ever decoded.
 	pub fn finalize(&mut self) -> Result<bool> {
 		// take() up front makes this attempt-once: after a failed finish() the producer is already gone.
-		let Some(mut track) = self.track.take() else {
+		let Some(track) = self.track.take() else {
 			return Ok(false);
 		};
-		track.finish()?;
+		match track {
+			Sink::Media(mut track) => track.finish()?,
+			Sink::Text(mut text) => text.producer.finish()?,
+		}
 		Ok(true)
 	}
 }
@@ -298,7 +396,14 @@ pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
 	matches!(
 		s.name().as_str(),
-		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "audio/mpeg" | "audio/x-opus"
+		"video/x-h264"
+			| "video/x-h265"
+			| "video/x-av1"
+			| "video/x-vp8"
+			| "video/x-vp9"
+			| "audio/mpeg"
+			| "audio/x-opus"
+			| "text/x-raw"
 	)
 }
 

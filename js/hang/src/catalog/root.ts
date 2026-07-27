@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
+import { TextSchema } from "./text";
 import { VideoSchema } from "./video";
 
 /**
@@ -14,6 +15,7 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
+	text: z.optional(TextSchema),
 });
 
 /** The root catalog object, with optional video and audio sections plus any app extensions. */

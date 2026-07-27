@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, PRIORITY, Video};
+use crate::catalog::{Audio, PRIORITY, Text, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -33,6 +33,14 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
+
+	/// Text (caption/subtitle) track information with multiple renditions.
+	///
+	/// Contains a map of text track renditions that the viewer can choose from
+	/// based on their preferences (language, role). Omitted from the wire when empty, so a
+	/// broadcast without captions stays byte-identical to before this section existed.
+	#[serde(default, skip_serializing_if = "Text::is_empty")]
+	pub text: Text,
 }
 
 impl Catalog {
@@ -375,6 +383,38 @@ mod test {
 		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
+	}
+
+	#[test]
+	fn empty_text_section_omitted() {
+		// A catalog without captions must stay byte-identical to before the text section existed:
+		// the empty section is skipped, unlike the always-present video/audio sections.
+		let catalog = Catalog::default();
+		let output = catalog.to_json().expect("failed to encode");
+		assert!(!output.contains("text"), "empty text section leaked: {output}");
+	}
+
+	#[test]
+	fn text_section_roundtrip() {
+		use crate::catalog::{Text, TextConfig, TextFormat, TextRole};
+
+		let mut config = TextConfig::new(TextFormat::Vtt);
+		config.role = TextRole::Caption;
+		config.lang = Some("en".to_string());
+
+		let mut text = Text::default();
+		text.insert("captions.en", config).expect("insert");
+
+		let catalog = Catalog {
+			text,
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert!(json.contains("\"text\""), "text section missing: {json}");
+
+		let decoded = Catalog::from_str(&json).expect("failed to decode");
+		assert_eq!(catalog, decoded, "text section did not round-trip");
 	}
 
 	#[test]

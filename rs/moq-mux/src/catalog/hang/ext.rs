@@ -39,7 +39,7 @@ impl CatalogExt for () {}
 /// cross. Publish/consume a [`Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `video` and `audio` are reserved for the base media sections, so [`set`](Self::set)
+/// `video`, `audio`, and `text` are reserved for the base media sections, so [`set`](Self::set)
 /// rejects them to keep the wire JSON free of duplicate keys.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
@@ -69,10 +69,10 @@ impl Extra {
 	}
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved media
-	/// section (`video`/`audio`).
+	/// section (`video`/`audio`/`text`).
 	pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		let name = name.into();
-		if matches!(name.as_str(), "video" | "audio") {
+		if matches!(name.as_str(), "video" | "audio" | "text") {
 			return Err(crate::Error::ReservedSection(name));
 		}
 		self.0.insert(name, value);
@@ -86,11 +86,11 @@ impl Extra {
 }
 
 /// The base media sections plus an application extension `E` (defaulting to `()` for none),
-/// serialized as a flat union: the `video`/`audio` sections and the extension's sections share one
-/// JSON object on the wire.
+/// serialized as a flat union: the `video`/`audio`/`text` sections and the extension's sections
+/// share one JSON object on the wire.
 ///
-/// `video` and `audio` are direct fields (`catalog.video`), and the catalog derefs to the extension
-/// so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
+/// `video`, `audio`, and `text` are direct fields (`catalog.video`), and the catalog derefs to the
+/// extension so its sections are reachable directly too (`catalog.scte35`, or `catalog.ext.scte35`
 /// explicitly). A consumer reading a different extension (or none) ignores sections it doesn't know.
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned"))]
@@ -100,6 +100,11 @@ pub struct Catalog<E: CatalogExt = ()> {
 
 	#[serde(default)]
 	pub audio: hang::catalog::Audio,
+
+	/// Caption/subtitle renditions. Omitted from the wire when empty, so a broadcast without
+	/// captions stays byte-identical to before this section existed.
+	#[serde(default, skip_serializing_if = "hang::catalog::Text::is_empty")]
+	pub text: hang::catalog::Text,
 
 	#[serde(flatten)]
 	pub ext: E,
