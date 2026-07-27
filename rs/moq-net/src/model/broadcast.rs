@@ -882,9 +882,23 @@ impl Consumer {
 
 		// A route-fed broadcast mints spliced logical tracks: they outlive any
 		// session, and a route is asked (via the pending queue) to start serving.
+		let closing = state.closing;
 		if let Some(spliced) = state.spliced.as_mut() {
+			// An aborted logical track is a verdict from the sources attached at
+			// the time, not a property of the name: a publisher that had not yet
+			// created the track may have it now. Drop it so this request reaches a
+			// source again, exactly as the plain lookup below reclaims a closed
+			// entry. A *finished* one stays, since its cache is still readable.
+			if spliced.tracks.get(name).is_some_and(|track| track.is_aborted()) {
+				spliced.tracks.remove(name);
+			}
 			if let Some(producer) = spliced.tracks.get(name) {
 				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+			}
+			// A deliberately-ended broadcast serves nothing new; nothing drains the
+			// pending queue once the front is torn down.
+			if closing {
+				return Err(Error::NotFound);
 			}
 			let name: Arc<str> = name.into();
 			let producer = super::resume::Producer::new();
