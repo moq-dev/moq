@@ -39,19 +39,34 @@ export async function workerSupported(): Promise<boolean> {
 // Maps capture timestamps onto our wall clock so audio and video share one epoch. The first frame
 // pins the two clocks together; everything after it keeps its spacing.
 class Epoch {
+	// The source timestamp we anchored on, and our wall clock at that moment in microseconds.
 	#base?: number;
 	#zero = 0;
 
-	// `at` is when the frame arrived, in milliseconds on our performance.now() timebase. Only the
-	// first one matters, and it has to be measured as close to capture as possible: whatever delay
-	// sits between capture and the anchor becomes a permanent audio/video offset.
+	// Whether the source clock is stuck, decided on the second frame.
+	#stuck?: boolean;
+
+	// `at` is when the frame arrived, in milliseconds on our performance.now() timebase. For the
+	// first frame it has to be measured as close to capture as possible: whatever delay sits between
+	// capture and the anchor becomes a permanent audio/video offset.
 	stamp(frame: VideoFrame, at: number): VideoFrame {
+		const arrived = at * 1000;
+
 		if (this.#base === undefined) {
 			this.#base = frame.timestamp;
-			this.#zero = at * 1000;
+			this.#zero = arrived;
+		} else if (this.#stuck === undefined) {
+			// WebKit stamps every frame off a canvas capture track with 0, which would collapse the
+			// whole stream onto one instant. One frame is enough to tell: a real capture clock always
+			// advances, so anything that hasn't moved by now never will.
+			this.#stuck = frame.timestamp === this.#base;
 		}
 
-		const stamped = new VideoFrame(frame, { timestamp: frame.timestamp - this.#base + this.#zero });
+		// A stuck source leaves arrival time as the only clock we have, which is what the <video>
+		// fallback uses anyway.
+		const timestamp = this.#stuck ? arrived : frame.timestamp - this.#base + this.#zero;
+
+		const stamped = new VideoFrame(frame, { timestamp });
 		frame.close();
 		return stamped;
 	}

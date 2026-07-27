@@ -1,8 +1,13 @@
 import { expect, mock, test } from "bun:test";
 import type { FromWorker, ToWorker } from "./capture-worker.ts";
 
-// Whether the fake worker claims a native MediaStreamTrackProcessor, and every worker spawned so far.
+// Whether the fake worker claims a native MediaStreamTrackProcessor, how much its source clock
+// advances per frame (WebKit's canvas tracks don't advance at all), and every worker spawned so far.
 let supported = true;
+let advance = 1000;
+// Added to each frame's arrival time, so a test can space arrivals apart by more than the clock
+// resolution rather than relying on performance.now() ticking between microtasks.
+let arrivalStep = 0;
 const spawned: FakeWorker[] = [];
 
 // Stands in for the real capture worker: reports support on load, then answers each pull with a
@@ -16,6 +21,8 @@ class FakeWorker {
 	started?: FakeTrack;
 
 	#timestamp = 5_000_000; // the camera's own epoch, which the rewrite has to erase
+	#frames = 0;
+	#at = performance.now(); // frozen, so arrivals only move by arrivalStep
 
 	constructor() {
 		spawned.push(this);
@@ -31,9 +38,10 @@ class FakeWorker {
 		this.#emit({
 			type: "frame",
 			frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame,
-			at: performance.timeOrigin + performance.now(),
+			at: performance.timeOrigin + this.#at + this.#frames * arrivalStep,
 		});
-		this.#timestamp += 1000;
+		this.#timestamp += advance;
+		this.#frames += 1;
 	}
 
 	terminate(): void {
@@ -83,13 +91,17 @@ const { TrackProcessor } = await import("./processor.ts");
 
 test("captures through the worker, transferring a clone", async () => {
 	supported = true;
+	advance = 1000;
+	arrivalStep = 0;
 	spawned.length = 0;
+
+	// The worker is constructed synchronously inside TrackProcessor, so bracket the whole call.
+	const before = performance.now() * 1000;
 
 	const track = new FakeTrack();
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
 	const reader = stream.getReader();
 
-	const before = performance.now() * 1000;
 	const first = await reader.read();
 	const second = await reader.read();
 	const after = performance.now() * 1000;
@@ -117,6 +129,8 @@ test("captures through the worker, transferring a clone", async () => {
 
 test("falls back when the worker has no MediaStreamTrackProcessor", async () => {
 	supported = false;
+	advance = 1000;
+	arrivalStep = 0;
 	spawned.length = 0;
 
 	const track = new FakeTrack();
@@ -133,4 +147,27 @@ test("falls back when the worker has no MediaStreamTrackProcessor", async () => 
 	// Nothing was handed over, so the caller's track is untouched.
 	expect(track.clones).toBe(0);
 	expect(track.stopped).toBe(false);
+});
+
+test("falls back to arrival time when the source clock is stuck", async () => {
+	supported = true;
+	// WebKit reports 0 for every frame off a canvas capture track, which the file source uses there.
+	advance = 0;
+	arrivalStep = 10;
+	spawned.length = 0;
+
+	const track = new FakeTrack();
+	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
+	const reader = stream.getReader();
+
+	const first = await reader.read();
+	const second = await reader.read();
+	const third = await reader.read();
+
+	// Without the fallback all three would land on the same instant, and the encoder would see a
+	// stream of frames that never advances. Arrivals are 10ms apart, so the deltas are exact.
+	expect((second.value?.timestamp ?? 0) - (first.value?.timestamp ?? 0)).toBe(10_000);
+	expect((third.value?.timestamp ?? 0) - (second.value?.timestamp ?? 0)).toBe(10_000);
+
+	await reader.cancel();
 });
