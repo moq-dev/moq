@@ -23,6 +23,8 @@ pub use super::subscription::Subscription;
 use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
+	sync::OnceLock,
+	sync::atomic::{AtomicBool, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -854,11 +856,8 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
-	// Counts the producer clones, and only them, so teardown fires exactly when the
-	// publisher lets go. The track state's own producer count is a different
-	// question: a group settling its eviction debt upgrades the account's weak
-	// handle, which momentarily counts there (see `cache::Track::settle`).
-	alive: kio::Producer<()>,
+	// Shared with every clone and every `Dynamic`: its `Drop` is the teardown.
+	alive: Arc<Alive>,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
 	// one subscription on tag and closed when the last producer clone drops. Empty
 	// (no-op) for an untagged broadcast.
@@ -878,18 +877,21 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<Info>>,
 	) -> Self {
+		let name = name.into();
 		let state = TrackState::spawn(broadcast.clone());
 		state
 			.write()
 			.ok()
 			.expect("a new track is open")
 			.install(info.into().unwrap_or_default());
+		let alive = Alive::new(name.clone(), state.clone());
+		alive.publish(None);
 		Self {
-			name: name.into(),
+			name,
 			state,
 			broadcast,
 			prev_subscription: None,
-			alive: Default::default(),
+			alive,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -898,7 +900,7 @@ impl Producer {
 	/// ingress subscription (closed when the last producer clone drops). Called by a
 	/// tagged [`broadcast::Producer`] when it creates the track.
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
-		scope.open_subscription();
+		self.alive.publish(Some(&scope));
 		self.stats = scope;
 		self
 	}
@@ -1266,7 +1268,7 @@ impl Producer {
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
 	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone())
+		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -1334,13 +1336,21 @@ pub struct Dynamic {
 	state: kio::Producer<TrackState>,
 	// The fetch queue this handle drains; its `dynamic` count gates `fetch_group`.
 	fetch: kio::Shared<FetchState>,
+	// Shared with the track's producers: a handler still serving fetches keeps the
+	// track alive, like a producer clone does.
+	alive: Arc<Alive>,
 }
 
 impl Dynamic {
-	fn new(name: Arc<str>, state: kio::Producer<TrackState>) -> Self {
+	fn new(name: Arc<str>, state: kio::Producer<TrackState>, alive: Arc<Alive>) -> Self {
 		let fetch = state.read().fetch.clone();
 		fetch.lock().add_handler();
-		Self { name, state, fetch }
+		Self {
+			name,
+			state,
+			fetch,
+			alive,
+		}
 	}
 
 	/// The track's name, unique within its broadcast.
@@ -1376,6 +1386,7 @@ impl Clone for Dynamic {
 			name: self.name.clone(),
 			state: self.state.clone(),
 			fetch: self.fetch.clone(),
+			alive: self.alive.clone(),
 		}
 	}
 }
@@ -1394,17 +1405,58 @@ impl Drop for Dynamic {
 	}
 }
 
-impl Drop for Producer {
+/// Ends the track when the last [`Producer`] or [`Dynamic`] drops.
+///
+/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is a
+/// snapshot, and acting on it is exactly what invalidates it. The track state's own
+/// producer count can't answer it either, since a group settling its eviction debt
+/// upgrades the account's weak handle and counts there for the duration (see
+/// [`cache::Track::settle`]). Holding a producer of its own also keeps the state
+/// writable until the teardown has run, whatever order the last owner's fields drop in.
+struct Alive {
+	name: Arc<str>,
+	state: kio::Producer<TrackState>,
+
+	// Set when a `Producer` is first minted, so a `Request` nobody accepted (its
+	// `Dynamic` holds this guard too) isn't reported as an abandoned publisher.
+	published: AtomicBool,
+
+	// Ingress subscription for this track, opened by the tagged producer that claimed
+	// it and closed when this guard drops.
+	stats: OnceLock<stats::Subscription>,
+}
+
+impl Alive {
+	fn new(name: Arc<str>, state: kio::Producer<TrackState>) -> Arc<Self> {
+		Arc::new(Self {
+			name,
+			state,
+			published: Default::default(),
+			stats: Default::default(),
+		})
+	}
+
+	/// Note that a [`Producer`] was minted from this track, optionally under a tagged
+	/// broadcast's ingress scope (counted as one subscription for as long as the track
+	/// has a publisher).
+	fn publish(&self, stats: Option<&stats::Scope>) {
+		self.published.store(true, Ordering::Relaxed);
+		if let Some(scope) = stats {
+			let _ = self.stats.set(scope.subscribe());
+		}
+	}
+}
+
+impl Drop for Alive {
 	fn drop(&mut self) {
+		// A request nobody accepted was never publishing; there's nothing to tear down.
+		if !self.published.load(Ordering::Relaxed) {
+			return;
+		}
 		// The last producer going away without finishing is an abrupt teardown:
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		if !self.alive.is_last() {
-			return;
-		}
-		// The last ingress producer closing the track ends its subscription.
-		self.stats.close_subscription();
 		if let Ok(mut state) = self.state.write()
 			&& state.final_sequence.is_none()
 		{
@@ -1412,7 +1464,7 @@ impl Drop for Producer {
 			// Error::Dropped instead of a clean end. Deliberate ends go through
 			// finish()/abort().
 			tracing::warn!(
-				track = %self.name(),
+				track = %self.name,
 				"track::Producer dropped without finish() or abort()"
 			);
 			state.clear_cache();
@@ -2460,6 +2512,10 @@ pub struct Request {
 	// The previous subscription that was combined, used to detect changes.
 	prev_subscription: Option<Subscription>,
 
+	// Shared with the accepted [`Producer`] and every [`Dynamic`]: its `Drop` is the
+	// teardown, and it stays inert until a producer is minted.
+	alive: Arc<Alive>,
+
 	// A requested track is served on demand, so it counts as fetch-capable from
 	// birth: a consumer's cache-miss `fetch_group` waits to be served instead of
 	// racing the producer (e.g. a relay) into creating its own handler. Released
@@ -2475,12 +2531,14 @@ impl Request {
 	pub(crate) fn new(broadcast: Arc<broadcast::Info>, name: impl Into<Arc<str>>) -> Self {
 		let name = name.into();
 		let state = TrackState::spawn(broadcast.clone());
-		let dynamic = Dynamic::new(name.clone(), state.clone());
+		let alive = Alive::new(name.clone(), state.clone());
+		let dynamic = Dynamic::new(name.clone(), state.clone(), alive.clone());
 		Self {
 			name,
 			broadcast,
 			state,
 			prev_subscription: None,
+			alive,
 			_dynamic: dynamic,
 			stats: stats::Scope::default(),
 		}
@@ -2507,7 +2565,7 @@ impl Request {
 	/// groups, before [`Self::accept`] is even called. A relay creates one to fetch
 	/// past groups from upstream while (or instead of) serving a live subscription.
 	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone())
+		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	/// Poll for the request becoming unused (every consumer dropped), so a relay can
@@ -2529,14 +2587,14 @@ impl Request {
 			state.install(info.into().unwrap_or_default());
 		}
 		// Accepting the request creates the track producer: count it as one ingress
-		// subscription (closed on the last producer drop). No-op when untagged.
-		self.stats.open_subscription();
+		// subscription (closed when the last handle drops). No-op when untagged.
+		self.alive.publish(Some(&self.stats));
 		Producer {
 			name: self.name,
 			broadcast: self.broadcast,
 			state: self.state,
 			prev_subscription: None,
-			alive: Default::default(),
+			alive: self.alive,
 			stats: self.stats,
 		}
 	}
@@ -4437,6 +4495,21 @@ mod test {
 		let a = a.state.read().cache.clone();
 		let b = b.state.read().cache.clone();
 		assert!(!Arc::ptr_eq(&a, &b), "each track owns its account");
+	}
+
+	/// A `Dynamic` still serving fetches keeps the track alive, so the publisher
+	/// letting go isn't an abrupt teardown: the handler can still serve the cache.
+	#[tokio::test]
+	async fn a_dynamic_defers_teardown() {
+		let (mut producer, pool) = pooled_producer(1 << 40);
+		let dynamic = producer.dynamic();
+		finished_group(&mut producer, 100);
+
+		drop(producer);
+		assert!(pool.used() > 0, "the handler still serves the cache");
+
+		drop(dynamic);
+		assert_eq!(pool.used(), 0, "the last handle tears it down");
 	}
 
 	/// A finished track releases everything once every handle is gone.

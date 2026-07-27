@@ -254,11 +254,11 @@ impl<T> Producer<T> {
 	}
 
 	/// Returns `true` if this is the only remaining producer.
-	///
-	/// Inherently racy if other handles may clone this producer or upgrade a
-	/// [`ProducerWeak`] concurrently. Intended for a producer's own
-	/// `Drop`, where this handle has not yet been counted out, to gate
-	/// last-producer cleanup.
+	#[doc(hidden)]
+	#[deprecated(
+		note = "racy: a clone, or a Weak upgraded by another thread, can invalidate the answer \
+		        before you act on it. Run last-handle cleanup from the Drop of a shared guard instead."
+	)]
 	pub fn is_last(&self) -> bool {
 		self.counts.producers.load(Ordering::Acquire) == 1
 	}
@@ -417,24 +417,6 @@ impl<T> Deref for Ref<'_, T> {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[test]
-	fn is_last_tracks_producer_count() {
-		let producer = Producer::new(0u8);
-		assert!(producer.is_last());
-
-		let clone = producer.clone();
-		assert!(!producer.is_last());
-		assert!(!clone.is_last());
-
-		drop(clone);
-		assert!(producer.is_last());
-
-		// Consumers and weak handles don't count as producers.
-		let _consumer = producer.consume();
-		let _weak = producer.weak();
-		assert!(producer.is_last());
-	}
 
 	#[test]
 	fn poll_gates_on_predicate_then_writes() {

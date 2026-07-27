@@ -221,6 +221,41 @@ pub struct Producer {
 	// Ingress payload meter, set by a tagged [`track::Producer`] via
 	// [`Self::with_meter`]. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
+
+	// Shared by every clone: its `Drop` is the abrupt-teardown, running exactly once
+	// when the last of them goes.
+	alive: Arc<Alive>,
+}
+
+/// Ends the group when the last [`Producer`] clone drops, including the clone the
+/// parent track holds in its cache.
+///
+/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
+/// a snapshot, and acting on it is exactly what can invalidate it. Holding a producer
+/// of its own also keeps the state writable until the teardown has run, whatever order
+/// the last owner's fields drop in.
+struct Alive {
+	info: Info,
+	state: kio::Producer<GroupState>,
+}
+
+impl Drop for Alive {
+	fn drop(&mut self) {
+		// See track::Alive: the last producer dropping without a clean finish releases
+		// the cached frames so a stale consumer can't pin their buffers forever. A
+		// finished group keeps its cache so consumers can drain.
+		if let Ok(mut state) = modify(&self.state)
+			&& state.fin.is_none()
+		{
+			// Dropped without finish() or abort(), so consumers will see
+			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
+			tracing::warn!(
+				sequence = self.info.sequence,
+				"group::Producer dropped without finish() or abort()"
+			);
+			state.release();
+		}
+	}
 }
 
 impl std::ops::Deref for Producer {
@@ -245,12 +280,17 @@ impl Producer {
 	pub(crate) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		state.write().ok().expect("a new group is open").charge = cache.charge();
+		let alive = Arc::new(Alive {
+			info,
+			state: state.clone(),
+		});
 		Self {
 			info,
 			state,
 			track,
 			cache,
 			stats: stats::Meter::default(),
+			alive,
 		}
 	}
 
@@ -487,28 +527,7 @@ impl Clone for Producer {
 			track: self.track,
 			cache: self.cache.clone(),
 			stats: self.stats.clone(),
-		}
-	}
-}
-
-impl Drop for Producer {
-	fn drop(&mut self) {
-		// See track::Producer::drop: the last producer dropping without a clean finish
-		// releases the cached frames so a stale consumer can't pin their buffers forever.
-		// A finished group keeps its cache so consumers can drain.
-		if !self.state.is_last() {
-			return;
-		}
-		if let Ok(mut state) = modify(&self.state)
-			&& state.fin.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
-			state.release();
+			alive: self.alive.clone(),
 		}
 	}
 }

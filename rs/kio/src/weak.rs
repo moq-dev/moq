@@ -404,7 +404,6 @@ mod test {
 		let consumer = producer.consume();
 
 		let upgraded = weak.upgrade().expect("open");
-		assert!(!producer.is_last(), "the upgrade is counted");
 
 		drop(producer);
 		assert!(!consumer.is_closed(), "the upgrade keeps it open");
