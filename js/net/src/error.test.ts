@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { StreamError } from "@moq/qmux";
 import { fromTransport, RemoteError, reason } from "./error.ts";
 
 // Minimal stand-in for the DOM WebTransportError, which the test runtime may not define.
@@ -94,4 +95,13 @@ test("reason: WebTransportError keeps a populated message and appends details", 
 
 test("reason: a decoded remote error names its code", () => {
 	expect(reason(new RemoteError(31))).toBe("remote error: 31");
+});
+
+test("fromTransport: decodes a real qmux stream reset", () => {
+	// The WebSocket fallback's actual error type, not a stand-in: this is the contract the
+	// fallback path depends on, and it only holds from @moq/qmux 0.3.2 on. Before that, qmux
+	// formatted the code into an Error message and this silently decoded nothing.
+	const err = fromTransport(new StreamError(2, "RESET_STREAM"));
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(2);
 });
