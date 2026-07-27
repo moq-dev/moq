@@ -23,6 +23,11 @@ use crate::{
 /// Local origins are built with [`Origin::new`] or [`Origin::random`], both of
 /// which guarantee a non-zero id so loop detection can work. Remote peers may
 /// still send `0`; it is legal on the wire but cannot be used for loop detection.
+///
+/// An id identifies one producer instance and its sequence space: the first
+/// hop of an announce tells consumers whether a replacement source continues
+/// the previous broadcast or restarts it, so mint a fresh id per session
+/// rather than reusing one across restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Origin {
 	/// 62-bit identifier. Encoded as a QUIC varint on the wire.
@@ -1519,21 +1524,26 @@ async fn run_front(
 async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resume: super::resume::Producer) {
 	enum Step {
 		Closed,
-		Splice(u64, broadcast::Consumer),
+		Splice(u64, broadcast::Consumer, Option<Origin>),
 		Complete,
 		Failed,
 		/// The linger expired with the track still unread: release the segment.
 		Idle,
 		/// A reader arrived or the last one left: recompute the demand gate.
 		Demand,
-		/// The freshly spliced copy produced: resolve resumed vs restarted.
+		/// The freshly spliced copy produced: check the splice boundary once.
 		Produced(Option<u64>),
 	}
 
 	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
-	// Restart watch over the newest splice (resume::Producer::reanchor_restarted).
+	// The first hop of the route whose copy was last spliced in: the
+	// producer-instance identity that gates takeover vs reset. Outlives the
+	// source's death, since the linger replacement arrives after it.
+	let mut last_first_hop: Option<Origin> = None;
+	// One-shot watch over a fresh boundary splice, warning if the source
+	// violates the identity contract by producing below the boundary.
 	let mut splice_latest: Option<u64> = None;
 	let mut splice_settled = true;
 	// A source whose splice failed because it had already closed. Its watcher is
@@ -1589,14 +1599,13 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							return Poll::Ready(Step::Closed);
 						}
 						let active = guard.active.expect("predicate guaranteed an active source");
-						let source = guard
+						let route = guard
 							.routes
 							.iter()
 							.find(|r| r.id == active)
-							.expect("active source in table")
-							.source
-							.clone();
-						return Poll::Ready(Step::Splice(active, source));
+							.expect("active source in table");
+						let first_hop = route.route.hops.iter().next().copied();
+						return Poll::Ready(Step::Splice(active, route.source.clone(), first_hop));
 					}
 					Poll::Ready(Err(_)) => return Poll::Ready(Step::Closed),
 					Poll::Pending => {}
@@ -1625,8 +1634,8 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 					});
 				}
 
-				// While the takeover boundary is provisional, watch the copy's
-				// production to resolve resumed vs restarted.
+				// Watch a fresh boundary splice's first production for an
+				// identity-contract violation (warn only).
 				if let Some((_, track)) = &serving
 					&& !splice_settled
 					&& let Poll::Ready(latest) = track.poll_latest_changed(splice_latest, waiter)
@@ -1661,11 +1670,21 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			Step::Demand => {}
 			Step::Produced(latest) => {
 				splice_latest = latest;
-				splice_settled = match resume.reanchor_restarted() {
-					Ok(super::resume::Reanchor::Pending) => false,
-					Ok(_) => true,
-					Err(_) => return,
-				};
+				splice_settled = true;
+				if let (Some(latest), Some(boundary)) = (latest, resume.splice_boundary())
+					&& latest < boundary
+				{
+					// The identity contract says a same-hop source resumes the
+					// old numbering; producing below the boundary means these
+					// groups are never delivered. Mint origin ids per producer
+					// instance to take the reset path instead.
+					tracing::warn!(
+						name = %name,
+						latest,
+						boundary,
+						"takeover source with an unchanged identity produced below the splice boundary",
+					);
+				}
 			}
 			Step::Idle => {
 				// Nobody has read the track for the linger: drop the source's copy so
@@ -1678,7 +1697,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				}
 				serving = None;
 			}
-			Step::Splice(id, source) => {
+			Step::Splice(id, source, first_hop) => {
 				// Ask the source for its copy and wait for the info to resolve,
 				// proving it servable, before splicing it in. Bail out early if
 				// the table moves on while waiting.
@@ -1722,19 +1741,29 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 
 				match attempt {
 					Ok(track) => {
-						if resume.takeover(&track).is_err() {
+						// The first hop is the producer-instance identity: the
+						// same instance resumes the old sequence space and is
+						// spliced at the boundary, while a new instance is a
+						// new broadcast with its own numbering, so the logical
+						// track resets onto it (see resume::Producer::reset_onto).
+						let continuous = match (first_hop, last_first_hop) {
+							(Some(new), Some(old)) => new == old,
+							_ => true,
+						};
+						let spliced = match continuous {
+							true => resume.takeover(&track),
+							false => resume.reset_onto(&track),
+						};
+						if spliced.is_err() {
 							// The logical track already ended (finished or
 							// aborted); nothing left to serve.
 							return;
 						}
-						// The source may have produced before the splice;
-						// otherwise the production watch decides later.
+						last_first_hop = first_hop;
+						// Arm the contract watch while the splice has a
+						// boundary the source could violate.
 						splice_latest = track.latest();
-						splice_settled = match resume.reanchor_restarted() {
-							Ok(super::resume::Reanchor::Pending) => false,
-							Ok(_) => true,
-							Err(_) => return,
-						};
+						splice_settled = resume.splice_boundary().is_none();
 						// A successful splice proves the track servable: reset
 						// the strike budget.
 						fails = 0;
@@ -3132,14 +3161,20 @@ mod tests {
 	/// source and resumes exactly at the first missing group.
 	#[tokio::test]
 	async fn test_route_failover() {
+		// Both routes originate from producer 9; the suffixes differ.
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = OriginList::try_from(vec![Origin::new(9).unwrap(), Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![
+			Origin::new(9).unwrap(),
+			Origin::new(2).unwrap(),
+			Origin::new(3).unwrap(),
+		])
+		.unwrap();
 
 		// The first source announces the broadcast.
 		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
@@ -3182,24 +3217,16 @@ mod tests {
 		settle().await;
 		announced.assert_next_wait();
 
-		// The new copy resumes one past the spliced groups. Its floor is
-		// provisional until it produces in range (a reconnecting source may
-		// have restarted its numbering), so demand stays open; the read
-		// cursor still filters groups the old source already delivered.
+		// The new copy resumes one past the spliced groups: its demand starts at
+		// the boundary, and groups the old source already delivered are filtered.
 		let mut producer = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, None);
+		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
 		sub.assert_not_closed();
-
-		// The in-range production resolved the splice: the boundary is
-		// promoted into wire demand.
-		settle().await;
-		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// `route_changed` yields the current route first, then each change; equal
@@ -3235,6 +3262,7 @@ mod tests {
 	/// churn.
 	#[tokio::test]
 	async fn test_route_cost_update() {
+		// Both routes originate from producer 9; the suffixes differ.
 		tokio::time::pause();
 
 		// The takeover happens while a subscriber is live (carrying), so the local
@@ -3244,8 +3272,13 @@ mod tests {
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
-		let hops_b = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
+		let hops_a = OriginList::try_from(vec![Origin::new(9).unwrap(), Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![
+			Origin::new(9).unwrap(),
+			Origin::new(2).unwrap(),
+			Origin::new(3).unwrap(),
+		])
+		.unwrap();
 
 		// A (shorter chain) wins at equal cost.
 		let mut source_a = origin
@@ -3288,20 +3321,13 @@ mod tests {
 
 		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
-		// Demand registers as the subscriber polls. The new segment's floor is
-		// provisional until it produces in range (a reconnecting source may
-		// have restarted its numbering), so demand stays open at first.
+		// Demand registers as the subscriber polls; the new segment starts at the
+		// splice boundary.
 		sub.assert_no_group();
-		assert_eq!(producer_b.subscription().unwrap().group_start, None);
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
 		producer_b.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();
-
-		// The in-range production resolved the splice: the boundary is
-		// promoted into wire demand.
-		settle().await;
-		sub.assert_no_group();
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
 
 		// The active source updating its own metadata re-advertises in place.
 		source_b
@@ -3401,14 +3427,20 @@ mod tests {
 	/// starts at the boundary, and the subscriber reads a seamless sequence.
 	#[tokio::test]
 	async fn test_route_handover() {
+		// Both routes originate from producer 9; the suffixes differ.
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
-		let hops_long = OriginList::try_from(vec![Origin::new(2).unwrap(), Origin::new(3).unwrap()]).unwrap();
-		let hops_short = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_long = OriginList::try_from(vec![
+			Origin::new(9).unwrap(),
+			Origin::new(2).unwrap(),
+			Origin::new(3).unwrap(),
+		])
+		.unwrap();
+		let hops_short = OriginList::try_from(vec![Origin::new(9).unwrap(), Origin::new(1).unwrap()]).unwrap();
 
 		let source_a = origin
 			.create_broadcast("test", announce().with_hops(hops_long))
@@ -3441,14 +3473,11 @@ mod tests {
 		let mut producer_b = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 
-		// The old copy's demand is capped at the boundary. The new copy's
-		// splice is PROVISIONAL: its floor stays out of wire demand until the
-		// source's first production proves it resumes the old numbering (a
-		// restarted source would never number past the boundary and a floored
-		// subscription would starve it; see resume::Producer::reanchor_restarted).
+		// The old copy's demand is capped at the boundary; the new copy's starts
+		// there. Both propagate as the subscriber polls.
 		sub.assert_no_group();
 		assert_eq!(producer_a.subscription().unwrap().group_end, Some(1));
-		assert_eq!(producer_b.subscription().unwrap().group_start, None);
+		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
 
 		// The old copy racing past its cap is filtered; the new copy serves on.
 		producer_a.create_group(group::Info { sequence: 2 }).unwrap();
@@ -3458,12 +3487,6 @@ mod tests {
 		assert_eq!(sub.assert_group().sequence, 3);
 		sub.assert_no_group();
 		sub.assert_not_closed();
-
-		// Producing at the boundary resolved the splice: the boundary is
-		// promoted into wire demand.
-		settle().await;
-		sub.assert_no_group();
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// A graceful detach (deliberate unannounce) closes immediately: no linger, so
@@ -3719,22 +3742,15 @@ mod tests {
 		assert!(again.is_clone(&broadcast), "the reconnect must splice, not replace");
 
 		// The pending track re-splices from the new source and resumes one past
-		// the groups the old source already delivered. The floor is provisional
-		// (a reconnecting source may have restarted its numbering), so demand
-		// stays open until the first production proves the resume.
+		// the groups the old source already delivered. Demand registers as the
+		// subscriber polls.
 		let mut producer = accept_track(&mut dynamic, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, None);
+		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2);
 		sub.assert_not_closed();
-
-		// The in-range production resolved the splice: the boundary is
-		// promoted into wire demand.
-		settle().await;
-		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
 	}
 
 	/// A replacement source that RESTARTS its group numbering (a fresh session's
@@ -3780,7 +3796,9 @@ mod tests {
 
 		// The publisher reconnects as a NEW session: fresh broadcast, fresh
 		// producer, group numbering restarted from zero.
-		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		// A reconnecting publisher is a fresh session with a fresh identity.
+		let rehops = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(rehops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
 		settle().await;
@@ -3837,7 +3855,9 @@ mod tests {
 		// The publisher reconnects as a NEW session with restarted numbering,
 		// and a LATE subscriber joins with a floor resolved against the old
 		// numbering (what a relay's run_subscribe computes from `latest()`).
-		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		// A reconnecting publisher is a fresh session with a fresh identity.
+		let rehops = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(rehops)).unwrap();
 		let mut dynamic = source.dynamic();
 		settle().await;
 		settle().await;
