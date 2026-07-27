@@ -10,6 +10,13 @@
 //! runnable), so "the test terminates" is itself the assertion. Anything else is
 //! asserted directly.
 //!
+//! Know the boundary before trusting a pass: only kio's primitives are swapped for
+//! loom's (see `kio/src/sync.rs`). moq-net's own `web_async::Lock`s and bare
+//! `std::sync::atomic` counters, like the ones in `model/cache.rs`, still execute
+//! under loom (its threads are cooperative) but loom does not permute around them.
+//! So these models cover the kio handoff every handle is built on, not every
+//! critical section moq-net owns.
+//!
 //! Run with `just rs loom`; the whole file compiles away without `cfg(loom)`.
 #![cfg(loom)]
 
@@ -98,10 +105,15 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
-/// Two tracks share one bounded pool, each written from its own thread, so their
-/// charges and eviction debt interleave. However that lands, the pool must be back
-/// to zero once every handle is gone: a charge that outlives its group is how a
-/// cache leaks.
+/// Two tracks publish into one bounded pool from separate threads, and the pool must
+/// be back to zero once every handle is gone: a charge that outlives its group is how
+/// a cache leaks, and loom's Arc-leak check catches the reference-cycle flavor of the
+/// same bug.
+///
+/// This does not model the charge accounting itself. `cache::Pool` counts with bare
+/// `AtomicU64`s and guards its LRU with a `web_async::Lock`, so loom permutes the two
+/// tracks only where they meet in kio. Reordering the pool's own counters would need
+/// those swapped for loom's too.
 #[test]
 fn concurrent_tracks_drain_a_shared_pool() {
 	loom::model(|| {
