@@ -1446,6 +1446,8 @@ impl Alive {
 	fn publish(&self, stats: Option<&stats::Scope>) {
 		self.published.store(true, Ordering::Relaxed);
 		if let Some(scope) = stats {
+			// At most one scope ever arrives: a track is minted either through
+			// `Producer::new` (+ `with_stats`) or through `Request::accept`, never both.
 			let _ = self.stats.set(scope.subscribe());
 		}
 	}
