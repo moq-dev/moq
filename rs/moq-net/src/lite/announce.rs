@@ -76,8 +76,14 @@ pub struct RouteCost(pub u64);
 impl RouteCost {
 	/// Add a link's price, saturating so a hostile or buggy peer advertising a
 	/// huge cost sorts last instead of wrapping around to best.
+	///
+	/// Saturates at [`crate::broadcast::MAX_COST`] rather than `u64::MAX`: the
+	/// sum is re-encoded as a varint when we forward the announcement, and a
+	/// varint cannot carry more than 2^62-1. Clamping past `u64::MAX` alone would
+	/// leave a peer able to fail our downstream encode by advertising the largest
+	/// cost the wire can express.
 	pub fn charged(self, link_cost: u64) -> Self {
-		Self(self.0.saturating_add(link_cost))
+		Self(self.0.saturating_add(link_cost).min(crate::broadcast::MAX_COST))
 	}
 }
 
@@ -585,11 +591,20 @@ mod tests {
 	}
 
 	// Charging a link accumulates, saturating rather than wrapping so a bogus peer
-	// sorts last, not first.
+	// sorts last, not first. The ceiling is the largest cost a varint can carry, so
+	// whatever a peer advertises, the sum we forward still encodes.
 	#[test]
 	fn route_cost_charge_saturates() {
 		assert_eq!(RouteCost(4).charged(5), RouteCost(9));
-		assert_eq!(RouteCost(u64::MAX).charged(10), RouteCost(u64::MAX));
+		assert_eq!(RouteCost(u64::MAX).charged(10), RouteCost(crate::broadcast::MAX_COST));
+
+		// The regression: a peer may legally advertise the largest varint there is,
+		// and adding this link's price to it must not push the result out of range.
+		let mut buf = Vec::new();
+		RouteCost(crate::broadcast::MAX_COST)
+			.charged(1)
+			.encode(&mut buf, Version::Lite06Wip)
+			.expect("a charged cost must stay encodable");
 	}
 
 	// An ANNOUNCE_END message on lite-06 is tiny: type byte, size prefix, id varint.
