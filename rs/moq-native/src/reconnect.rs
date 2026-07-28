@@ -199,9 +199,10 @@ pub struct GoawayConfig {
 	#[arg(id = "goaway-redirect", long, env = "MOQ_GOAWAY_REDIRECT", value_enum)]
 	pub redirect: Option<Redirect>,
 
-	/// How long the old session keeps serving after its replacement connects,
-	/// when the GOAWAY named no deadline of its own, e.g. "10s" or "500ms". A
-	/// deadline on the GOAWAY takes precedence. Defaults to 10 seconds.
+	/// How long the old session keeps serving after its replacement connects, e.g.
+	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
+	/// since the peer force-closes at its own deadline regardless, but a longer one
+	/// does not extend it. Defaults to 10 seconds.
 	#[arg(
 		id = "goaway-handover",
 		long,
@@ -212,7 +213,8 @@ pub struct GoawayConfig {
 	pub handover: Option<Duration>,
 }
 
-/// Default handover window, applied when neither the GOAWAY nor the config names one.
+/// Default handover window, and the ceiling a GOAWAY deadline is capped to when
+/// the config names none.
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
 
 impl GoawayConfig {
@@ -221,9 +223,18 @@ impl GoawayConfig {
 		self.redirect.unwrap_or_default()
 	}
 
-	/// The configured handover window, or the default.
-	pub fn handover(&self) -> Duration {
-		self.handover.unwrap_or(DEFAULT_HANDOVER)
+	/// How long the old session keeps serving, given the deadline the peer's GOAWAY
+	/// named (`None` when it named none).
+	///
+	/// Whichever comes first. The peer's deadline is a promise about when it
+	/// force-closes, so waiting past it just holds a dead session; ours is the cap
+	/// on how long we keep one around at all, so a peer naming an hour cannot talk
+	/// us into honoring it.
+	pub fn handover(&self, timeout: Option<Duration>) -> Duration {
+		std::cmp::min(
+			self.handover.unwrap_or(DEFAULT_HANDOVER),
+			timeout.unwrap_or(Duration::MAX),
+		)
 	}
 }
 
@@ -378,7 +389,7 @@ impl Reconnect {
 						if let Some(mut old) = draining.take() {
 							old.retire();
 						}
-						draining = Some(Draining::new(session, msg.timeout.unwrap_or_else(|| goaway.handover())));
+						draining = Some(Draining::new(session, goaway.handover(msg.timeout)));
 
 						if healthy {
 							delay = backoff.initial;
@@ -718,12 +729,39 @@ mod tests {
 		assert_eq!(parsed.goaway.redirect, None);
 		assert_eq!(parsed.goaway.handover, None);
 		assert_eq!(parsed.goaway.redirect(), Redirect::Follow);
-		assert_eq!(parsed.goaway.handover(), Duration::from_secs(10));
+		assert_eq!(parsed.goaway.handover(None), Duration::from_secs(10));
 
 		// Flags passed: they land where the merge can see them.
 		let parsed = Wrapper::parse_from(["test", "--goaway-redirect", "ignore", "--goaway-handover", "3s"]);
 		assert_eq!(parsed.goaway.redirect, Some(Redirect::Ignore));
 		assert_eq!(parsed.goaway.handover, Some(Duration::from_secs(3)));
+	}
+
+	/// Our own window caps the peer's. A GOAWAY deadline shortens the handover but
+	/// never extends it, so an upstream naming an absurd one cannot make us hold a
+	/// dying session open for it.
+	#[test]
+	fn handover_takes_the_earlier_deadline() {
+		let config = GoawayConfig {
+			handover: Some(Duration::from_secs(10)),
+			..Default::default()
+		};
+
+		assert_eq!(config.handover(None), Duration::from_secs(10), "no deadline: ours");
+		assert_eq!(
+			config.handover(Some(Duration::from_secs(3))),
+			Duration::from_secs(3),
+			"a shorter peer deadline wins: it force-closes then anyway"
+		);
+		assert_eq!(
+			config.handover(Some(Duration::from_secs(3600))),
+			Duration::from_secs(10),
+			"a longer peer deadline must not extend our cap"
+		);
+
+		// The default is a cap too, not just a fallback for a silent peer.
+		let default = GoawayConfig::default();
+		assert_eq!(default.handover(Some(Duration::from_secs(3600))), DEFAULT_HANDOVER);
 	}
 
 	/// A peer must not be able to redirect us somewhere we could not already

@@ -200,9 +200,9 @@ tls.disable_verify = true
 # redirects toward loopback/private/IPC addresses are always refused.
 goaway.redirect = "follow"
 
-# How long the old upstream keeps serving after its replacement connects, when
-# the GOAWAY named no deadline of its own. A deadline on the received GOAWAY
-# takes precedence. Default: "10s".
+# How long the old upstream keeps serving after its replacement connects. This
+# is a cap: a shorter deadline on the received GOAWAY wins, since the peer
+# force-closes then anyway, but a longer one does not extend it. Default: "10s".
 goaway.handover = "10s"
 
 # Or provide trusted root certificates. By default these replace the system
