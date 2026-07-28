@@ -363,6 +363,50 @@ mod tests {
 	// The property HLS needs from the timeline rework: audio and video renditions share one
 	// segment numbering, cut at the same boundaries. Video is one group per segment; an audio
 	// segment packs every audio group inside the video segment's span.
+	// The declared bound is a target, not a guarantee: a GOP longer than it can't be split, so
+	// the segmenter publishes an honest long segment. EXT-X-TARGETDURATION has to cover it,
+	// since a playlist whose EXTINF exceeds it is invalid.
+	#[tokio::test]
+	async fn target_duration_covers_a_segment_that_overran_the_bound() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0");
+		registration.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
+		drop(reserved);
+
+		// 3s GOPs against the default 2s bound: every segment is one whole GOP.
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Kind::Video,
+			)
+			.unwrap();
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(3_000_000, true)).unwrap();
+		media.write(frame(6_000_000, true)).unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+
+		let playlist = rendition.playlist();
+		assert_eq!(playlist.segments[0].duration, 3.0);
+		assert_eq!(
+			playlist.target_duration, 3,
+			"the declared bound is 2s, but a 3s segment must not exceed EXT-X-TARGETDURATION"
+		);
+	}
+
 	#[tokio::test]
 	async fn audio_and_video_segments_are_aligned() {
 		let origin = moq_net::Origin::random().produce();

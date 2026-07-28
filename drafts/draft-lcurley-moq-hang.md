@@ -359,6 +359,7 @@ The `durationMax` field is the declared upper bound on a segment's `duration`, i
 The publisher knows its segmentation policy up front (the encoder its keyframe cadence, an importer its source's target duration), so the bound is declared rather than inferred: a consumer can size buffers, and an HLS exporter can write `EXT-X-TARGETDURATION`, from the catalog alone.
 The value MUST NOT change for the life of the broadcast.
 A segment SHOULD NOT exceed the bound; it MAY exceed it slightly (by less than half a second, the tolerance HLS's nearest-integer rounding grants) or when the media offers no valid boundary (a single GOP longer than the bound, see {{timeline-segmentation}}).
+The bound is therefore a declared target, not a guarantee, so a consumer deriving a hard limit from it (an HLS `EXT-X-TARGETDURATION`, which every `EXTINF` must fit under) MUST raise that limit to cover any record whose `duration` exceeds the bound.
 
 The `wall` field, if known, is the wall-clock time of `pts` 0: in `timescale` units, measured from the moq epoch, 2020-01-01T00:00:00Z.
 A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
@@ -421,7 +422,8 @@ Whatever the policy, a publisher MUST NOT emit a record until the segment is com
 Records are therefore self-contained and immediately servable, and the newest record is the live edge.
 
 A group that starts before the first boundary belongs to the first segment.
-The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content and MAY undercount the last group's duration.
+The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content.
+A publisher SHOULD carry the end of the last group's content into that value, since a publisher that knows only where each group *started* would report a duration one group short, and zero for a final segment that is a single group.
 
 
 # Security Considerations

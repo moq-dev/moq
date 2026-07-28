@@ -79,7 +79,8 @@ struct TrackState {
 	/// Group opens reported and not yet flushed into a record: (sequence, pts, keyframe).
 	pending: VecDeque<(u64, Timestamp, bool)>,
 	/// The newest reported timestamp: everything earlier is known, which is what lets a
-	/// segment ending at or before it flush.
+	/// segment ending at or before it flush. Advanced by a group open (the group starts
+	/// there) and by [`Recorder::end`] (the content stops there).
 	frontier: Option<Timestamp>,
 	/// The recorder was dropped; this track no longer gates completeness.
 	closed: bool,
@@ -114,6 +115,8 @@ struct State {
 	sink: Option<moq_json::stream::Producer<Record>>,
 	/// Records flushed before a sink attached, drained into it on attach.
 	buffered: Vec<Record>,
+	/// Live [`Hold`]s: while any exists, no record flushes (more tracks are still enrolling).
+	holds: usize,
 	/// The wire timescale for `pts`/`duration` (the catalog section's default: milliseconds).
 	timescale: Timescale,
 }
@@ -150,6 +153,19 @@ impl State {
 			}
 		}
 
+		self.try_flush(false);
+	}
+
+	/// `name`'s content ends at `pts`: everything up to there is now known, even though no
+	/// group opened at it. This is what gives the final segment an honest duration, since its
+	/// end is not a boundary anybody cut.
+	fn report_end(&mut self, name: &str, pts: Timestamp) {
+		let Some(track) = self.tracks.get_mut(name) else {
+			return;
+		};
+		if track.frontier.is_none_or(|f| pts.as_micros() > f.as_micros()) {
+			track.frontier = Some(pts);
+		}
 		self.try_flush(false);
 	}
 
@@ -224,6 +240,12 @@ impl State {
 			return;
 		}
 
+		// A record is immutable once published, so a caller that knows more tracks are still
+		// enrolling holds flushing back until they are (see [`Segmenter::hold`]).
+		if self.holds > 0 {
+			return;
+		}
+
 		while self.boundaries.len() >= 2 {
 			let end = self.boundaries[1];
 			let complete = finished
@@ -250,8 +272,10 @@ impl State {
 		let pts = start.as_scale(self.timescale) as u64;
 		let duration = match end {
 			Some(end) => (end.as_scale(self.timescale) as u64).saturating_sub(pts),
-			// The final segment has no end boundary; its duration runs to the newest report.
-			// The last group's own duration is unknown, so this is short by up to one group.
+			// The final segment has no end boundary, so it runs to the newest thing any track
+			// reported: its end of content when the track reported one (a finished
+			// `container::Producer` does), otherwise the last group it opened, which
+			// undercounts that group's tail.
 			None => self
 				.tracks
 				.values()
@@ -323,6 +347,9 @@ impl State {
 
 	/// The terminal flush: treat every track as closed, then emit the final open segment.
 	fn finish(&mut self) {
+		// Nothing more will enroll, so an outstanding hold has nothing left to wait for.
+		self.holds = 0;
+
 		// Content but never a boundary (nobody cut and the driver never reported): anchor the
 		// one segment at the earliest report so the content is still indexed.
 		if self.boundaries.is_empty() {
@@ -389,8 +416,24 @@ impl Segmenter {
 				driver: None,
 				sink: None,
 				buffered: Vec::new(),
+				holds: 0,
 				timescale: Timescale::MILLI,
 			})),
+		}
+	}
+
+	/// Hold record publishing back until the returned [`Hold`] drops.
+	///
+	/// A record is immutable once published, and completeness is judged against the tracks
+	/// enrolled *at that moment*, so a segment that flushes while a sibling rendition is still
+	/// enrolling omits it for good (and that rendition's earlier groups then land in whatever
+	/// segment flushes next). Take a hold around a batch that enrolls or feeds several tracks
+	/// (an HLS import walking its renditions one at a time) so every one of them is accounted
+	/// for before anything is published. Holds nest; the last one to drop flushes.
+	pub fn hold(&self) -> Hold {
+		self.state.lock().unwrap().holds += 1;
+		Hold {
+			state: self.state.clone(),
 		}
 	}
 
@@ -462,6 +505,21 @@ impl Segmenter {
 	}
 }
 
+/// Holds [`Segmenter`] record publishing back while tracks are still enrolling.
+///
+/// Minted by [`Segmenter::hold`]; whatever became complete meanwhile flushes when it drops.
+pub struct Hold {
+	state: Arc<Mutex<State>>,
+}
+
+impl Drop for Hold {
+	fn drop(&mut self) {
+		let mut state = self.state.lock().unwrap();
+		state.holds = state.holds.saturating_sub(1);
+		state.try_flush(false);
+	}
+}
+
 /// Reports one media track's group opens into the shared [`Segmenter`].
 ///
 /// Move-only: it is the track's single reporting handle, and dropping it closes the track's
@@ -480,6 +538,16 @@ impl Recorder {
 	/// segmenter builds ranges and completeness from.
 	pub(crate) fn record(&mut self, sequence: u64, pts: Timestamp, keyframe: bool) {
 		self.state.lock().unwrap().report(&self.name, sequence, pts, keyframe);
+	}
+
+	/// Report that this track's content extends to `pts`, without a group opening there.
+	///
+	/// A group open says where content *starts*; the last group of a broadcast has no
+	/// successor to bound it, so its segment would otherwise be published a group short (zero
+	/// for a segment that is a single group). Report the end whenever you know it: closing a
+	/// group, finishing a track.
+	pub(crate) fn end(&mut self, pts: Timestamp) {
+		self.state.lock().unwrap().report_end(&self.name, pts);
 	}
 }
 
@@ -1025,6 +1093,68 @@ mod test {
 		assert_eq!(
 			entries[2],
 			entry(2, 4_000, 500, &[("video0", &[(2, 2)]), ("audio0", &[(1, 1)])])
+		);
+	}
+
+	// The last group of a broadcast has no successor to bound it, so without a reported end
+	// the final segment's duration collapses to zero (an HLS `EXTINF:0`).
+	#[tokio::test]
+	async fn the_final_segment_runs_to_the_reported_end() {
+		let (broadcast, segmenter, mut timeline) = setup();
+		let mut video = segmenter.track("video0", Kind::Video);
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		// A finished `container::Producer` reports where its content stops.
+		video.end(ms(4_000));
+		drop(video);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
+				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
+			]
+		);
+	}
+
+	// A record is immutable and judged against the tracks enrolled when it flushes, so a
+	// producer that enrolls its tracks one batch at a time (an HLS import walking its
+	// renditions) holds flushing back until they are all in.
+	#[tokio::test]
+	async fn a_hold_defers_flushing_until_every_track_enrolls() {
+		let (broadcast, segmenter, mut timeline) = setup();
+		let hold = segmenter.hold();
+
+		// The primary rendition runs a whole batch of segments through before its sibling
+		// has even loaded an init segment.
+		let mut first = segmenter.track("video0", Kind::Video);
+		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
+			first.record(seq, ms(t), true);
+		}
+
+		let mut second = segmenter.track("video1", Kind::Video);
+		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
+			second.record(seq, ms(t), true);
+		}
+
+		drop(hold);
+		drop(first);
+		drop(second);
+		timeline.finish().unwrap();
+
+		// Both renditions are indexed from segment 0. Without the hold, segments 0 and 1
+		// would have flushed knowing only video0 (a permanent gap for video1), and video1's
+		// first two groups would have folded into segment 2.
+		let entries = drain(&broadcast, &timeline).await;
+		assert_eq!(
+			entries[0],
+			entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("video1", &[(0, 0)])])
+		);
+		assert_eq!(
+			entries[1],
+			entry(1, 2_000, 2_000, &[("video0", &[(1, 1)]), ("video1", &[(1, 1)])])
 		);
 	}
 

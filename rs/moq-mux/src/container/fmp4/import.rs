@@ -844,6 +844,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			track.estimator.write(timestamp, fragment_len);
 
+			// Report how far this fragment presents. Every group but the last is bounded by the
+			// next one's open, so this is what keeps the final segment from being published a
+			// group short. Same timescale throughout, so the add can't mismatch scales.
+			if let Some(recorder) = track.recorder.as_mut()
+				&& let Some(max) = max_timestamp
+			{
+				let end = track.min_duration.and_then(|d| max.checked_add(d).ok()).unwrap_or(max);
+				recorder.end(end);
+			}
+
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
 				// All three share the track timescale (min/max are this fragment's frame
 				// timestamps, min_duration is derived from them).

@@ -60,6 +60,9 @@ export class Producer {
 	#track: Moq.Track.Producer;
 	#group?: Moq.Group.Producer;
 	#timeline?: TimelineRecorder;
+	// The newest timestamp written, reported to the timeline when the track closes: the last
+	// group has no successor to bound it, so its segment would be published a group short.
+	#end?: Time.Micro;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, props: ProducerProps = {}) {
@@ -82,10 +85,13 @@ export class Producer {
 			payload: encodeFrame(data, timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
+
+		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
 	}
 
 	/** Close the track and current group, optionally with an error. */
 	close(err?: Error) {
+		if (this.#end !== undefined) this.#timeline?.end(this.#end);
 		this.#track.close(err);
 		this.#group?.close();
 	}

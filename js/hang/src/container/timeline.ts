@@ -90,7 +90,8 @@ interface TrackState {
 	kind: Kind;
 	// Group opens reported and not yet flushed into a record.
 	pending: { sequence: number; pts: Time.Micro; keyframe: boolean }[];
-	// The newest reported timestamp: everything earlier is known.
+	// The newest reported timestamp: everything earlier is known. Advanced by a group open (the
+	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
 	closed: boolean;
 }
@@ -121,6 +122,8 @@ export class Segmenter {
 	// Where flushed records go once a Producer attaches; buffered until then.
 	#sink?: (record: Record) => void;
 	#buffered: Record[] = [];
+	// Live holds: while any exists, no record flushes (more tracks are still enrolling).
+	#holds = 0;
 
 	constructor(props: SegmenterProps = {}) {
 		this.#durationMaxUs = (props.durationMax ?? DEFAULT_DURATION_MAX_MS) * 1000;
@@ -146,6 +149,27 @@ export class Segmenter {
 		this.#manual = true;
 		this.#cutAt(pts);
 		this.#tryFlush(false);
+	}
+
+	/**
+	 * Hold record publishing back until the returned dispose function is called.
+	 *
+	 * A record is immutable once published, and completeness is judged against the tracks
+	 * enrolled *at that moment*, so a segment that flushes while a sibling rendition is still
+	 * enrolling omits it for good (and that rendition's earlier groups then land in whatever
+	 * segment flushes next). Take a hold around a batch that enrolls or feeds several tracks so
+	 * every one of them is accounted for before anything is published. Holds nest; the last one
+	 * released flushes.
+	 */
+	hold(): () => void {
+		this.#holds += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#holds -= 1;
+			this.#tryFlush(false);
+		};
 	}
 
 	/**
@@ -189,6 +213,17 @@ export class Segmenter {
 			this.#autoCut(pts);
 		}
 
+		this.#tryFlush(false);
+	}
+
+	/**
+	 * @internal A track's content ends at `pts`, without a group opening there. This is what
+	 * gives the final segment an honest duration, since its end is not a boundary anybody cut.
+	 */
+	reportEnd(name: string, pts: Time.Micro): void {
+		const track = this.#tracks.get(name);
+		if (!track) return;
+		if (track.frontier === undefined || pts > track.frontier) track.frontier = pts;
 		this.#tryFlush(false);
 	}
 
@@ -254,6 +289,10 @@ export class Segmenter {
 		// With nothing enrolled there is nothing to describe; boundaries just wait.
 		if (this.#tracks.size === 0) return;
 
+		// A record is immutable once published, so a caller that knows more tracks are still
+		// enrolling holds flushing back until they are (see hold()).
+		if (this.#holds > 0) return;
+
 		while (this.#boundaries.length >= 2) {
 			const end = this.#boundaries[1];
 			if (!finished) {
@@ -277,7 +316,9 @@ export class Segmenter {
 		if (end !== undefined) {
 			endUnits = Math.floor((end * DEFAULT_TIMESCALE) / 1_000_000);
 		} else {
-			// The final segment has no end boundary; its duration runs to the newest report.
+			// The final segment has no end boundary, so it runs to the newest thing any track
+			// reported: its end of content when the track reported one, otherwise the last group
+			// it opened, which undercounts that group's tail.
 			let max = start;
 			for (const track of this.#tracks.values()) {
 				if (track.frontier !== undefined && track.frontier > max) max = track.frontier;
@@ -334,6 +375,9 @@ export class Segmenter {
 
 	/** @internal The terminal flush: treat every track as closed, then emit the open tail. */
 	finish(): void {
+		// Nothing more will enroll, so an outstanding hold has nothing left to wait for.
+		this.#holds = 0;
+
 		// Content but never a boundary (nobody cut and the driver never reported): anchor the
 		// one segment at the earliest report so the content is still indexed.
 		if (this.#boundaries.length === 0) {
@@ -382,6 +426,19 @@ export class Recorder {
 	 */
 	record(sequence: number, pts: Time.Micro, keyframe = true): void {
 		this.#segmenter.report(this.#name, sequence, pts, keyframe);
+	}
+
+	/**
+	 * Report that this track's content extends to `pts` (microseconds), without a group opening
+	 * there.
+	 *
+	 * A group open says where content *starts*; the last group of a broadcast has no successor
+	 * to bound it, so its segment would otherwise be published a group short (zero for a segment
+	 * that is a single group). Report the end whenever you know it: closing a group, finishing a
+	 * track.
+	 */
+	end(pts: Time.Micro): void {
+		this.#segmenter.reportEnd(this.#name, pts);
 	}
 
 	/** Close the track's enrollment: segments no longer wait on it. */

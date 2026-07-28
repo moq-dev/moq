@@ -248,3 +248,69 @@ test("groups before the first boundary join the first segment", () => {
 		},
 	]);
 });
+
+// The last group of a broadcast has no successor to bound it, so without a reported end the
+// final segment's duration collapses to zero (an HLS EXTINF:0).
+test("the final segment runs to the reported end", () => {
+	const { segmenter, records } = capture();
+	const video = segmenter.track("video0", "video");
+
+	video.record(0, us(0));
+	video.record(1, us(2000));
+	// A closing container producer reports where its content stops.
+	video.end(us(4000));
+	video.close();
+	segmenter.finish();
+
+	expect(records).toEqual([
+		{ segment: 0, pts: 0, duration: 2000, tracks: { video0: [{ start: 0, end: 0 }] } },
+		{ segment: 1, pts: 2000, duration: 2000, tracks: { video0: [{ start: 1, end: 1 }] } },
+	]);
+});
+
+// A record is immutable and judged against the tracks enrolled when it flushes, so a producer
+// that enrolls its tracks one batch at a time holds flushing back until they are all in.
+test("a hold defers flushing until every track enrolls", () => {
+	const { segmenter, records } = capture();
+	const release = segmenter.hold();
+
+	// The primary rendition runs a whole batch of segments through before its sibling exists.
+	const first = segmenter.track("video0", "video");
+	for (const [seq, ms] of [
+		[0, 0],
+		[1, 2000],
+		[2, 4000],
+	] as const) {
+		first.record(seq, us(ms));
+	}
+
+	const second = segmenter.track("video1", "video");
+	for (const [seq, ms] of [
+		[0, 0],
+		[1, 2000],
+		[2, 4000],
+	] as const) {
+		second.record(seq, us(ms));
+	}
+
+	expect(records).toHaveLength(0);
+	release();
+
+	// Both renditions are indexed from segment 0. Without the hold, segments 0 and 1 would have
+	// flushed knowing only video0, and video1's first two groups would have folded into
+	// segment 2.
+	expect(records).toEqual([
+		{
+			segment: 0,
+			pts: 0,
+			duration: 2000,
+			tracks: { video0: [{ start: 0, end: 0 }], video1: [{ start: 0, end: 0 }] },
+		},
+		{
+			segment: 1,
+			pts: 2000,
+			duration: 2000,
+			tracks: { video0: [{ start: 1, end: 1 }], video1: [{ start: 1, end: 1 }] },
+		},
+	]);
+});
