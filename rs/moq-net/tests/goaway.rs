@@ -390,3 +390,65 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 	.await
 	.expect("test timed out (likely a mock deadlock)");
 }
+
+/// A GOAWAY costs the peer's routes at [`DRAIN_COST`] so the origin stops
+/// preferring a connection that is about to close.
+///
+/// The peer sends nothing after the GOAWAY, which is the case that matters: the
+/// subscriber has to react to the signal itself, not to a later announce that a
+/// draining peer has no reason to send.
+async fn goaway_drains_routes(version: Version) {
+	tokio::time::timeout(TEST_TIMEOUT, async {
+		let pub_origin = Origin::random().produce();
+		let _broadcast = pub_origin
+			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("create broadcast");
+
+		let sub_origin = Origin::random().produce();
+
+		let mut opts = MockConnectOptions::new(version);
+		opts.server_publish = Some(pub_origin.clone());
+		opts.client_subscribe = Some(sub_origin.clone());
+		let MockPair { client, server } = connect_mock(opts).await;
+
+		let mut announced = sub_origin
+			.consume()
+			.announced_broadcast("test")
+			.await
+			.expect("broadcast announced");
+		assert_ne!(
+			announced.route().cost,
+			moq_net::broadcast::DRAIN_COST,
+			"a healthy route must not start out draining"
+		);
+
+		server
+			.send_goaway()
+			.expect("goaway producer")
+			.send(Goaway::new())
+			.expect("send goaway");
+		client.recv_goaway().recv().await.expect("goaway");
+
+		// Nothing else is sent on the announce stream, so this only resolves if the
+		// subscriber acted on the GOAWAY rather than on another message.
+		loop {
+			let route = announced.route_changed().await.expect("route");
+			if route.cost == moq_net::broadcast::DRAIN_COST {
+				assert!(route.announce, "a draining route stays announced");
+				break;
+			}
+		}
+	})
+	.await
+	.expect("test timed out (likely a route that never drained)");
+}
+
+#[tokio::test]
+async fn goaway_drains_routes_moq_lite_04() {
+	goaway_drains_routes("moq-lite-04".parse().unwrap()).await;
+}
+
+#[tokio::test]
+async fn goaway_drains_routes_moq_transport_19() {
+	goaway_drains_routes("moq-transport-19".parse().unwrap()).await;
+}

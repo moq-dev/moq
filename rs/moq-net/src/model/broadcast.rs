@@ -49,6 +49,24 @@ impl Info {
 	}
 }
 
+/// The highest value [`Route::cost`] can take, and where cost accumulation
+/// saturates.
+///
+/// The ceiling is the wire's, not the model's: lite-06 carries the cost as a QUIC
+/// varint, which tops out at 2^62-1, so a larger value could be selected on but
+/// never forwarded.
+pub const MAX_COST: u64 = (1 << 62) - 1;
+
+/// The cost given to a route whose session is draining, so every other candidate
+/// outranks it while it stays selectable as the last path to the content.
+///
+/// A session sets this on its routes when its peer sends a GOAWAY, so seeing it
+/// on a [`Route`] means the path still works but is on its way out.
+///
+/// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
+/// draining route is still announced downstream, so its cost has to fit the wire.
+pub const DRAIN_COST: u64 = MAX_COST;
+
 /// The path a broadcast takes to reach this origin, and how preferable it is.
 ///
 /// Unlike [`Info`], the route is dynamic: it changes when the serving session fails
@@ -66,6 +84,7 @@ pub struct Route {
 
 	/// The cost of pulling the broadcast via this route, accumulated per link:
 	/// lower wins, with ties broken by hop length and then a deterministic hash.
+	/// Capped at [`MAX_COST`].
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,
@@ -681,6 +700,35 @@ impl Dynamic {
 	/// The broadcast's static metadata, fixed when it was created.
 	pub fn info(&self) -> &Info {
 		&self.info
+	}
+
+	/// Bump this source's route to [`DRAIN_COST`], keeping its hop chain and
+	/// announce flag.
+	///
+	/// Called when the session feeding the source receives a GOAWAY, so the origin
+	/// hands live subscriptions to any other route at the next group boundary
+	/// rather than riding a connection that is about to close and losing the group
+	/// in flight. The draining route stays selectable, so a broadcast with no
+	/// alternative keeps being served until the session actually ends.
+	///
+	/// It lives here rather than on [`Producer`] because the handler is what each
+	/// wire's per-source task already holds, so nothing has to keep a second
+	/// producer clone alive just to reach the route.
+	///
+	/// Idempotent: the signal stays set, so a task may call this on every wakeup.
+	pub(crate) fn drain(&mut self) {
+		let mut state = self.state.lock();
+		if state.route.cost == DRAIN_COST {
+			return;
+		}
+
+		state.route.cost = DRAIN_COST;
+		state.route_epoch += 1;
+
+		// An ordinary source's table is just its own route, and the origin reads the
+		// table rather than the route when ranking, so both have to move together.
+		state.routes = vec![state.route.clone()];
+		state.routes_epoch += 1;
 	}
 
 	/// Poll for the next consumer-requested track, without blocking.
@@ -1498,5 +1546,64 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// Draining moves only the cost: the hop chain and announce flag have to
+	/// survive, or the origin would treat the source as a different path (or stop
+	/// advertising it) rather than as the same one on its way out.
+	#[tokio::test]
+	async fn drain_costs_the_route_without_disturbing_it() {
+		let mut producer = Info::new().produce();
+		let mut consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		producer
+			.set_route(Route::new().with_hops(hops.clone()).with_cost(42).with_announce(true))
+			.unwrap();
+
+		let before = consumer.route_changed().await.unwrap();
+		assert_eq!(before.cost, 42);
+
+		dynamic.drain();
+
+		let after = consumer.route_changed().await.unwrap();
+		assert_eq!(after.cost, DRAIN_COST);
+		assert_eq!(after.hops, hops, "draining must not change the path");
+		assert!(after.announce, "a draining route stays advertised");
+
+		// The origin ranks off the route table, so it has to move with the route.
+		assert_eq!(consumer.routes(), vec![after]);
+	}
+
+	/// The signal stays set, so the per-source task calls this on every wakeup. A
+	/// repeat must not bump the epoch, or each wakeup would look like a route
+	/// change and churn the origin.
+	#[tokio::test]
+	async fn drain_is_idempotent() {
+		let producer = Info::new().produce();
+		let mut consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		dynamic.drain();
+		assert_eq!(consumer.route_changed().await.unwrap().cost, DRAIN_COST);
+
+		dynamic.drain();
+		assert!(
+			consumer.route_changed().now_or_never().is_none(),
+			"a redundant drain must not look like a route change"
+		);
+	}
+
+	/// A draining cost still has to fit the wire, since the route keeps being
+	/// announced downstream while it drains.
+	#[test]
+	fn drain_cost_is_encodable() {
+		use crate::coding::Encode;
+
+		let mut buf = Vec::new();
+		DRAIN_COST
+			.encode(&mut buf, crate::lite::Version::Lite06Wip)
+			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

@@ -540,7 +540,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let route = broadcast::Route::new().with_hops(hops).with_announce(true);
+				let mut route = broadcast::Route::new().with_hops(hops).with_announce(true);
+
+				// A namespace published after the peer's GOAWAY starts out draining, so
+				// a late arrival on a dying connection can't take over as primary. The
+				// per-source task only ever moves a route in this direction, so there is
+				// no race between the two.
+				if self.going_away.is_set() {
+					route.cost = broadcast::DRAIN_COST;
+				}
 
 				// Propagates Error::Unauthorized if the path is out of scope.
 				let broadcast = self.origin.create_broadcast(&path, route)?;
@@ -646,6 +654,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					kio::wait(|waiter| {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
+						}
+						// A draining peer usually stops publishing namespaces, so react to
+						// the signal itself; waiting for another message would leave the
+						// route primary until the session finally closed. Idempotent, since
+						// the signal stays set and this task wakes for other reasons too.
+						if self.going_away.poll(waiter).is_ready() {
+							broadcast.drain();
 						}
 						broadcast.poll_requested_track(waiter).map(Some)
 					})

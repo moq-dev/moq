@@ -786,6 +786,7 @@ A relay that withholds its Hop ID (advertising 0) does not appear in the path un
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
 The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
 When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+Saturation MUST cap the sum at the largest value a variable-length integer can carry, since the sum is re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
 This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
@@ -1146,6 +1147,9 @@ The new session URI SHOULD use the same scheme as the current session's URI.
 An endpoint MUST close the session with a protocol violation if it receives more than one GOAWAY.
 
 A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original.
+
+A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
+The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.

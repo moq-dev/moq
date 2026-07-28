@@ -149,22 +149,63 @@ impl Consumer {
 	}
 }
 
-/// A shared flag set once a GOAWAY is received.
+/// The receive-side GOAWAY signal handed to a subscriber.
 ///
-/// Separate from the [Consumer] channel so the subscriber's check before opening
-/// a request stream is an atomic load rather than a lock.
-#[derive(Clone, Default)]
-pub(crate) struct GoingAway(Arc<AtomicBool>);
+/// Carries the flag and the channel together because a subscriber needs both: an
+/// atomic load before opening a request stream (the hot path, which is why the
+/// flag is not merely a read of the channel), and a wakeup for the per-source
+/// tasks, which have to react to a peer that drains and then goes quiet.
+#[derive(Clone)]
+pub(crate) struct GoingAway {
+	flag: Arc<AtomicBool>,
+	received: Consumer,
+}
 
 impl GoingAway {
 	/// Mark the session as going away, returning whether this was the first time.
 	pub fn set(&self) -> bool {
-		!self.0.swap(true, Ordering::AcqRel)
+		!self.flag.swap(true, Ordering::AcqRel)
 	}
 
 	/// Whether a GOAWAY has been received.
 	pub fn is_set(&self) -> bool {
-		self.0.load(Ordering::Acquire)
+		self.flag.load(Ordering::Acquire)
+	}
+
+	/// Poll for the peer's GOAWAY, so a loop already polling other sources can
+	/// react to a draining peer instead of waiting on a message it may never send.
+	///
+	/// Stays `Ready` once set, so a caller must treat what it does in response as
+	/// idempotent rather than as an edge.
+	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// Presence only, rather than [`Consumer::poll`]: this stays ready for the rest
+		// of the session, and every wakeup of every per-source task would otherwise
+		// clone the URI just to throw it away.
+		match self.received.state.poll(waiter, |state| match &**state {
+			Some(_) => Poll::Ready(()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			// The session closed without a GOAWAY. Nothing is draining, and the
+			// caller's own loop is about to end on the same close.
+			Poll::Ready(Err(_)) => Poll::Pending,
+			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+/// A detached signal for tests that build a subscriber without a session. Its
+/// channel is already closed, so it never reports a GOAWAY.
+#[cfg(test)]
+impl Default for GoingAway {
+	fn default() -> Self {
+		let received = kio::Producer::new(None);
+		Self {
+			flag: Default::default(),
+			received: Consumer {
+				state: received.consume(),
+			},
+		}
 	}
 }
 
@@ -259,16 +300,20 @@ impl Handle {
 	pub fn new(redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
-		let going_away = GoingAway::default();
+		let consumer = Consumer {
+			state: received.consume(),
+		};
+		let going_away = GoingAway {
+			flag: Default::default(),
+			received: consumer.clone(),
+		};
 
 		let handle = Self {
 			producer: Mutex::new(Some(Producer {
 				trigger: trigger.clone(),
 				redirect,
 			})),
-			consumer: Consumer {
-				state: received.consume(),
-			},
+			consumer,
 		};
 		let protocol = Protocol {
 			trigger: trigger.consume(),

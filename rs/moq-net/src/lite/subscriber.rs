@@ -559,11 +559,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let mut route = crate::broadcast::Route::new()
-			.with_hops(hops)
-			.with_cost(cost.charged(link_cost).0)
-			.with_announce(true);
-		route.advertised = cost.0;
+		let route = self.announced_route(hops, cost, link_cost);
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
@@ -585,6 +581,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// observe nothing. When the first hop differs, the original publisher was
 	/// replaced: the old route detaches gracefully and a fresh one attaches, so
 	/// downstream sees a real Ended + Active (a new broadcast, nothing resumes).
+	/// The route to attach to a broadcast this peer announced, charging our link's
+	/// price on top of the cost it advertised.
+	///
+	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
+	/// including a restart of one already attached: a connection on its way out must
+	/// not win selection, however good the path it advertises looks.
+	fn announced_route(&self, hops: crate::OriginList, cost: RouteCost, link_cost: u64) -> crate::broadcast::Route {
+		let mut route = crate::broadcast::Route::new()
+			.with_hops(hops)
+			.with_cost(cost.charged(link_cost).0)
+			.with_announce(true);
+		route.advertised = cost.0;
+
+		if self.going_away.is_set() {
+			route.cost = crate::broadcast::DRAIN_COST;
+		}
+
+		route
+	}
+
 	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
 	/// route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
@@ -616,11 +632,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let mut metadata = crate::broadcast::Route::new()
-			.with_hops(hops)
-			.with_cost(cost.charged(link_cost).0)
-			.with_announce(true);
-		metadata.advertised = cost.0;
+		let metadata = self.announced_route(hops, cost, link_cost);
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {
@@ -661,6 +673,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					kio::wait(|waiter| {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
+						}
+						// A draining peer usually stops announcing, so react to the signal
+						// itself; waiting for another message would leave the route primary
+						// until the session finally closed. Idempotent, since the signal
+						// stays set and this task wakes for other reasons too.
+						if self.going_away.poll(waiter).is_ready() {
+							dynamic.drain();
 						}
 						dynamic.poll_requested_track(waiter).map(Some)
 					})
