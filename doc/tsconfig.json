@@ -1,0 +1,10 @@
+{
+	"extends": "../js/tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"types": ["node"]
+	},
+	// config.ts is not type-checked: VitePress's own nav types reject the
+	// `link` + `items` combination the theme relies on.
+	"include": [".vitepress/drafts.ts"]
+}

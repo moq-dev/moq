@@ -48,7 +48,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
-- `/doc/` - documentation site (VitePress, deployed via Cloudflare).
+- `/doc/` - documentation site (VitePress, deployed via Cloudflare). The `/draft/` section is generated from `drafts/` by `doc/.vitepress/drafts.ts`.
 - `/drafts/` - IETF Internet-Drafts (kramdown-rfc) for the MoQ protocols implemented here. Built and published to the datatracker via `just drafts`. See `drafts/CLAUDE.md`.
 
 ## Language Bindings
@@ -163,6 +163,7 @@ Changes in one area usually need matching updates elsewhere, including docs. If 
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
 | `rs/libmoq` C ABI (`moq.h`) | `cpp/obs/src`, `doc/bin/obs.md` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
+| a kramdown-rfc construct new to `drafts/` | `doc/.vitepress/drafts.ts`, which translates the drafts into `/draft/` site pages |
 
 **Any change to the on-the-wire format MUST update the matching IETF draft under `drafts/` in the same PR.** The drafts are the normative spec other implementations (and future us) build against, so a wire change that lands without the draft update silently forks the code from the spec. This covers new/changed/removed SETUP parameters, messages, fields, framing, enum values, and version bumps anywhere under `rs/moq-net` (and the catalog/container framing in `rs/hang`). Update the draft for the specific feature you touched: `draft-lcurley-moq-lite.md` for moq-lite session/SETUP/framing, and the per-feature draft for the rest (`draft-lcurley-moq-probe.md`, `draft-lcurley-moq-relay-hops.md`, `draft-lcurley-moq-timestamp.md`, `draft-lcurley-moq-hang.md`, etc.). New capabilities go in as backward-compatible extensions even after a draft is published: SETUP requires receivers to ignore unknown parameter IDs, so a new parameter is additive. Validate with `just drafts check` (kramdown-rfc). See [`drafts/CLAUDE.md`](drafts/CLAUDE.md).
 

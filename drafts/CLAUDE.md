@@ -45,6 +45,21 @@ There is no CI tag-trigger and no API secret. For a brand-new draft (`-00`), set
 `kramdown-rfc` fetches bibxml references into `.refcache/` on first build, so
 the initial build needs network access.
 
+## Documentation site
+
+The drafts also render on [doc.moq.dev](https://doc.moq.dev/draft/), under
+`/draft/`. `doc/.vitepress/drafts.ts` translates each source into a VitePress
+page at config load; the output lands in `doc/draft/` and is gitignored.
+
+The sources stay canonical, and no draft should be reshaped to suit the site.
+But kramdown-rfc markdown is not CommonMark, so the translator has a case for
+each construct we use: the `--- abstract`/`--- middle`/`--- back` markers, `{{ref}}`
+and `[ref]` citations, `{::boilerplate bcp14-tagged}`, `{:...}` IALs, and the
+kramdown table form with a delimiter row above the header. Using a construct the
+translator doesn't know about renders wrong (or breaks the build, since `{{...}}`
+is also Vue interpolation). Add a case there in the same PR, and check the result
+with `bun run --cwd doc dev`.
+
 ## Conventions
 
 - Draft sources are kramdown-rfc markdown; `remark` (the repo's CommonMark

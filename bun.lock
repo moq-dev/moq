@@ -59,8 +59,11 @@
       "name": "moq-doc",
       "version": "0.1.0",
       "devDependencies": {
+        "@types/node": "^26.1.1",
+        "typescript": "7.0.2",
         "vitepress": "^1.6.4",
         "wrangler": "^4.110.0",
+        "yaml": "^2.9.0",
       },
     },
     "js/clock": {
