@@ -201,8 +201,8 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
-	let client = config.client.clone().init()?;
 	let url = config.client.connect.clone().context("--client-connect is required")?;
+	let client = config.client.clone().init()?;
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
@@ -485,12 +485,14 @@ async fn main() -> Result<()> {
 mod tests {
 	use super::*;
 
-	/// The relay URL comes from the flattened `ClientConfig`, so `demo/boy/justfile`
-	/// dials with `--client-connect`. A second connect flag of our own would still
-	/// parse here but leave `--client-connect` inert, so assert the URL actually
-	/// lands where `run` reads it.
+	/// `--client-connect` is the only way to reach the relay: it must parse without
+	/// a connect flag of our own alongside it, and the URL must land where `run`
+	/// reads it. A second required flag would leave `--client-connect` inert.
+	///
+	/// The argv is a copy of `demo/boy/justfile`, not a read of it, so this pins the
+	/// binary's flag surface rather than the two staying in sync.
 	#[test]
-	fn demo_invocation_parses() {
+	fn matches_demo_invocation() {
 		let config = Config::try_parse_from([
 			"moq-boy",
 			"--client-connect",
