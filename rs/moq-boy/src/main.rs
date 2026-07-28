@@ -31,7 +31,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use url::Url;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -46,10 +45,6 @@ mod video;
 
 #[derive(Parser, Clone)]
 pub struct Config {
-	/// Connect to the given relay URL.
-	#[arg(long)]
-	pub url: Url,
-
 	/// Path to the Game Boy ROM file.
 	#[arg(long)]
 	pub rom: PathBuf,
@@ -207,6 +202,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
 	let client = config.client.clone().init()?;
+	let url = config.client.connect.clone().context("--client-connect is required")?;
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_net::Origin::random().produce();
@@ -231,12 +227,12 @@ async fn run(config: &Config) -> Result<()> {
 		.consume()
 		.announced();
 
-	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publisher(&publish_origin)
 		.with_subscriber(consume_origin)
-		.reconnect(config.url.clone());
+		.reconnect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
@@ -482,5 +478,33 @@ async fn main() -> Result<()> {
 			tracing::error!(err = %format!("{err:#}"), "exiting");
 			std::process::exit(1);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The relay URL comes from the flattened `ClientConfig`, so `demo/boy/justfile`
+	/// dials with `--client-connect`. A second connect flag of our own would still
+	/// parse here but leave `--client-connect` inert, so assert the URL actually
+	/// lands where `run` reads it.
+	#[test]
+	fn demo_invocation_parses() {
+		let config = Config::try_parse_from([
+			"moq-boy",
+			"--client-connect",
+			"http://localhost:4443",
+			"--rom",
+			"rom/big2small.gb",
+			"--location",
+			"localhost",
+		])
+		.expect("demo/boy/justfile invocation should parse");
+
+		assert_eq!(
+			config.client.connect.as_ref().map(|url| url.as_str()),
+			Some("http://localhost:4443/")
+		);
 	}
 }
