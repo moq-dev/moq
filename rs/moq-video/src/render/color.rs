@@ -2,6 +2,22 @@
 
 use crate::Color;
 
+/// The luma/chroma weights (`kr`, `kb`) a matrix is derived from.
+///
+/// Lives here rather than on [`Color`] because deriving the matrix is the
+/// shader's business; the enum itself only names a space.
+fn weights(color: Color) -> (f32, f32) {
+	match color {
+		Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
+		Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+	}
+}
+
+/// Whether luma is 16..235 rather than 0..255.
+fn limited(color: Color) -> bool {
+	matches!(color, Color::Bt601Limited | Color::Bt709Limited)
+}
+
 /// The uniform the shader multiplies each sample by: a column-major 3x3 matrix
 /// padded to WGSL's 16-byte column stride, then the offsets to subtract from
 /// (Y, U, V) before the multiply.
@@ -10,7 +26,7 @@ use crate::Color;
 /// magic constants means a new color space is two numbers, and the limited
 /// range scaling stays in one place.
 pub(super) fn uniform(color: Color) -> [f32; 16] {
-	let (kr, kb) = color.weights();
+	let (kr, kb) = weights(color);
 	let kg = 1.0 - kr - kb;
 	// The inverse of the RGB -> YCbCr matrix, which is fully determined by
 	// kr/kb: Cb and Cr are the blue/red difference scaled into +-0.5.
@@ -20,7 +36,7 @@ pub(super) fn uniform(color: Color) -> [f32; 16] {
 	// Limited range: luma spans 219 of 255 codes starting at 16, chroma 224
 	// centered on 128. Stretch both back to 0..1 so the matrix output is
 	// full-range RGB.
-	let y_offset = match color.limited() {
+	let y_offset = match limited(color) {
 		true => {
 			let (luma, chroma) = (255.0 / 219.0, 255.0 / 224.0);
 			y *= luma;
@@ -93,13 +109,13 @@ mod tests {
 		// shader's inverse brings it back. Catches a transposed or mis-scaled
 		// column, which a grayscale-only test would miss.
 		for color in [Color::Bt601Full, Color::Bt709Full, Color::Bt709Limited] {
-			let (kr, kb) = color.weights();
+			let (kr, kb) = weights(color);
 			let kg = 1.0 - kr - kb;
-			let (scale, offset) = match color.limited() {
+			let (scale, offset) = match limited(color) {
 				true => (219.0 / 255.0, 16.0 / 255.0),
 				false => (1.0, 0.0),
 			};
-			let chroma_scale = match color.limited() {
+			let chroma_scale = match limited(color) {
 				true => 224.0 / 255.0,
 				false => 1.0,
 			};

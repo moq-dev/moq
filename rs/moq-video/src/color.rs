@@ -44,26 +44,18 @@ impl Color {
 	}
 
 	/// The same matrix as `self` but in the given range, for a caller that knows
-	/// the range (a pixel format says so) and not the matrix.
+	/// the range and not the matrix.
+	///
+	/// Only a surface whose pixel format spells out its range reaches this, and
+	/// CoreVideo's video-range/full-range NV12 is the only one today. It widens
+	/// when a platform that carries range metadata gains an import path.
+	#[cfg(target_os = "macos")]
 	pub(crate) fn with_range(self, limited: bool) -> Self {
 		match (self, limited) {
 			(Color::Bt601Limited | Color::Bt601Full, true) => Color::Bt601Limited,
 			(Color::Bt601Limited | Color::Bt601Full, false) => Color::Bt601Full,
 			(_, true) => Color::Bt709Limited,
 			(_, false) => Color::Bt709Full,
-		}
-	}
-
-	/// Whether luma is 16..235 rather than 0..255.
-	pub(crate) fn limited(self) -> bool {
-		matches!(self, Color::Bt601Limited | Color::Bt709Limited)
-	}
-
-	/// The luma/chroma weights (`kr`, `kb`) this matrix is derived from.
-	pub(crate) fn weights(self) -> (f32, f32) {
-		match self {
-			Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
-			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
 		}
 	}
 }
@@ -79,6 +71,7 @@ mod tests {
 		assert_eq!(Color::infer(Size::new(1280, 720)), Color::Bt709Limited);
 	}
 
+	#[cfg(target_os = "macos")]
 	#[test]
 	fn with_range_keeps_the_matrix() {
 		assert_eq!(Color::Bt709Limited.with_range(false), Color::Bt709Full);

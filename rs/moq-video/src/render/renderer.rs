@@ -114,6 +114,10 @@ pub struct Renderer {
 struct Pipelines {
 	layout: wgpu::BindGroupLayout,
 	sampler: wgpu::Sampler,
+	/// Paired with [`Layout::Nv12`], so it exists only where an importer can
+	/// hand back that layout. The shader still declares the entry point
+	/// everywhere, so it stays validated on every platform either way.
+	#[cfg(target_os = "macos")]
 	nv12: wgpu::RenderPipeline,
 	i420: wgpu::RenderPipeline,
 }
@@ -196,6 +200,7 @@ impl Renderer {
 		});
 
 		let pipeline = match source.layout {
+			#[cfg(target_os = "macos")]
 			Layout::Nv12 => &self.shader.nv12,
 			Layout::I420 => &self.shader.i420,
 		};
@@ -395,6 +400,7 @@ impl Pipelines {
 		});
 
 		Ok(Self {
+			#[cfg(target_os = "macos")]
 			nv12: pipeline("nv12"),
 			i420: pipeline("i420"),
 			layout,

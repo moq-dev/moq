@@ -7,7 +7,10 @@ use crate::{Color, Error, Frame, Size, Surface};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Layout {
 	/// Luma plane plus one interleaved chroma plane. What every hardware
-	/// decoder hands back.
+	/// decoder hands back, so only a zero-copy import produces it: the CPU
+	/// upload path is always I420. Gated to the platforms that have such an
+	/// importer, which today means macOS alone.
+	#[cfg(target_os = "macos")]
 	Nv12,
 	/// Three separate planes.
 	I420,
