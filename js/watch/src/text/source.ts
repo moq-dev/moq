@@ -1,5 +1,4 @@
 import type * as Catalog from "@moq/hang/catalog";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
@@ -29,11 +28,6 @@ type SourceOutput = {
 	// The selected track name and its config, or undefined when off / not found.
 	track: Signal<string | undefined>;
 	config: Signal<Catalog.TextConfig | undefined>;
-
-	// The selected rendition's jitter (ms) to fold into the sync buffer. Wired into Sync by the
-	// parent: a publisher that flushes cues less often than it flushes frames needs the extra
-	// buffer, or short cues land after their display window and are never shown.
-	jitter: Signal<Time.Milli | undefined>;
 };
 
 /**
@@ -50,7 +44,6 @@ export class Source {
 		available: new Signal<Record<string, Catalog.TextConfig>>({}),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.TextConfig | undefined>(undefined),
-		jitter: new Signal<Time.Milli | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
 
@@ -82,7 +75,6 @@ export class Source {
 		if (!target || !config) {
 			effect.set(this.#out.track, undefined);
 			effect.set(this.#out.config, undefined);
-			effect.set(this.#out.jitter, undefined);
 			return;
 		}
 
@@ -92,7 +84,6 @@ export class Source {
 
 		effect.set(this.#out.track, target);
 		effect.set(this.#out.config, config);
-		effect.set(this.#out.jitter, config.jitter !== undefined ? Time.Milli(config.jitter) : undefined);
 	}
 
 	close(): void {

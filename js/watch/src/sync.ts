@@ -38,12 +38,9 @@ export type SyncInput = {
 	// The connection used for "real-time" jitter: PROBE supplies RTT.
 	connection: Getter<Moq.Connection.Established | undefined>;
 
-	// Any additional delay required for audio, video, or captions (wired from the per-rendition
-	// source). Captions count too: a publisher that flushes cues in batches needs the same buffer
-	// slack, or a short cue lands after its display window and is never shown.
+	// Any additional delay required for audio or video (wired from the per-rendition source).
 	audio: Getter<Time.Milli | undefined>;
 	video: Getter<Time.Milli | undefined>;
-	text: Getter<Time.Milli | undefined>;
 };
 
 type SyncOutput = {
@@ -51,7 +48,7 @@ type SyncOutput = {
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
 	reference: Signal<Time.Milli | undefined>;
 
-	// The total buffer required: jitter + max(audio, video, text).
+	// The total buffer required: jitter + max(audio, video).
 	buffer: Signal<Time.Milli>;
 
 	// The jitter buffer in milliseconds (always numeric).
@@ -103,7 +100,6 @@ export class Sync {
 			connection: getter(props?.connection),
 			audio: getter(props?.audio),
 			video: getter(props?.video),
-			text: getter(props?.text),
 		};
 
 		this.#update = Promise.withResolvers();
@@ -170,9 +166,8 @@ export class Sync {
 		const jitter = effect.get(this.#out.jitter);
 		const video = effect.get(this.in.video) ?? Time.Milli.zero;
 		const audio = effect.get(this.in.audio) ?? Time.Milli.zero;
-		const text = effect.get(this.in.text) ?? Time.Milli.zero;
 
-		const buffer = Time.Milli.add(Time.Milli.max(Time.Milli.max(video, audio), text), jitter);
+		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#out.buffer.set(buffer);
 
 		this.#update.resolve();

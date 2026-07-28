@@ -189,7 +189,6 @@ export default class MoqWatch extends HTMLElement {
 			connection: this.connection.established,
 			video: videoSource.out.jitter,
 			audio: audioSource.out.jitter,
-			text: this.text.out.jitter,
 		});
 		this.signals.cleanup(() => this.sync.close());
 
