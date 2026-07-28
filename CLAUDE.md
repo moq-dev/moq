@@ -172,7 +172,7 @@ For wire, `moq-ffi`, or gateway changes, also run the cross-language interop mat
 
 ## Branch Targeting
 
-PRs target `main` by default, however large the change: bug fixes, new behavior, additive APIs, docs, refactors. `dev` is reserved for changes that break an existing published contract: wire-protocol changes under `rs/moq-net`, breaking (renamed/removed/signature-changed, not newly added) `pub` API changes in the core libraries or language wrappers, and catalog/container format breaks. When in doubt, target `main`. Full rules in [CONTRIBUTING.md](CONTRIBUTING.md#branch-targeting).
+PRs target `main` by default, however large the change: bug fixes, new behavior, additive APIs, docs, refactors, and wire-protocol work. `dev` is reserved for one thing, a semver break in a published API: a renamed, removed, or signature-changed `pub`/exported item in the core libraries or language wrappers. Adding an item is additive, so it goes to `main`. When in doubt, target `main`. Full rules in [CONTRIBUTING.md](CONTRIBUTING.md#branch-targeting).
 
 ## Workflow
 
