@@ -27,12 +27,11 @@ key = "key.pem"
 ### Top-level keys {#drain-timeout}
 
 ```toml
-# How long (in seconds) accepted sessions may keep running after a shutdown
-# signal (SIGINT/ctrl-c, or SIGTERM on unix). The first signal sends every
-# session a GOAWAY (telling clients to
-# reconnect) and waits this long before force-closing them; a second signal
-# exits immediately. Default: 10.
-drain_timeout = 10
+# How long accepted sessions may keep running after a shutdown signal
+# (SIGINT/ctrl-c, or SIGTERM on unix). The first signal sends every session a
+# GOAWAY (telling clients to reconnect) and waits this long before force-closing
+# them; a second signal exits immediately. Default: "10s".
+drain_timeout = "10s"
 ```
 
 ### \[log]
@@ -182,13 +181,6 @@ token = "cluster.jwt"
 # never notice. A clean unannounce always takes effect immediately. "0"
 # unannounces abrupt losses immediately too. Default: 5s.
 linger = "5s"
-
-# Optional. Fallback drain time in seconds when an upstream peer sends a GOAWAY
-# without its own deadline: after reconnecting to the replacement, the relay
-# keeps the old upstream alive this long so in-flight groups finish, then
-# force-closes it. A deadline on the received GOAWAY takes precedence.
-# Default: 10.
-drain_timeout = 10
 ```
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
@@ -201,6 +193,17 @@ Client settings used when connecting to other relays (clustering).
 [client]
 # Disable TLS verification (development only!)
 tls.disable_verify = true
+
+# What to do with the URI an upstream peer names in its GOAWAY:
+# "follow" (default), "same-host", or "ignore". A followed redirect is dialed
+# exactly as given, so it must carry its own credentials; scheme downgrades and
+# redirects toward loopback/private/IPC addresses are always refused.
+goaway.redirect = "follow"
+
+# How long the old upstream keeps serving after its replacement connects, when
+# the GOAWAY named no deadline of its own. A deadline on the received GOAWAY
+# takes precedence. Default: "10s".
+goaway.handover = "10s"
 
 # Or provide trusted root certificates. By default these replace the system
 # roots, so the relay trusts only these CAs.

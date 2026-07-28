@@ -60,7 +60,7 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub backoff: Backoff,
 
-	/// How [`Client::reconnect`] reacts to a peer's GOAWAY (`--client-goaway-*`).
+	/// How [`Client::reconnect`] reacts to a peer's GOAWAY (`--goaway-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub goaway: GoawayConfig,

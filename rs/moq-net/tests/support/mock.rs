@@ -288,8 +288,8 @@ impl web_transport_trait::Session for MockSession {
 		match rx.recv().await {
 			Some(stream) => Ok(stream),
 			None => {
-				// Channel closed: session is shutting down. Wait for close signal.
-				self.side.conn.close_notify.notified().await;
+				// Channel closed: session is shutting down. Wait for the close signal.
+				self.await_close().await;
 				Err(self.close_error())
 			}
 		}
@@ -300,7 +300,7 @@ impl web_transport_trait::Session for MockSession {
 		match rx.recv().await {
 			Some(pair) => Ok(pair),
 			None => {
-				self.side.conn.close_notify.notified().await;
+				self.await_close().await;
 				Err(self.close_error())
 			}
 		}
@@ -373,6 +373,21 @@ impl web_transport_trait::Session for MockSession {
 }
 
 impl MockSession {
+	/// Wait until the connection is closed.
+	///
+	/// `notify_waiters` stores no permit, so registering after the close already
+	/// fired would park forever. Register before checking the state, the same
+	/// dance as `closed()`.
+	async fn await_close(&self) {
+		loop {
+			let notified = self.side.conn.close_notify.notified();
+			if self.side.conn.close_state.lock().unwrap().is_some() {
+				return;
+			}
+			notified.await;
+		}
+	}
+
 	fn close_error(&self) -> MockError {
 		self.side
 			.conn

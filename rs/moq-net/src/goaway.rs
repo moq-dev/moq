@@ -20,6 +20,10 @@ use std::{
 
 use crate::{Error, Result};
 
+/// Maximum New Session URI length, in bytes. Both wires cap it here, and a
+/// receiver treats anything longer as a protocol violation.
+pub(crate) const MAX_URI: usize = 8192;
+
 /// A GOAWAY: the sender intends to close the session soon and the peer should
 /// migrate its subscriptions elsewhere.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,9 +90,16 @@ impl Producer {
 	/// # Errors
 	///
 	/// Returns [`Error::ProtocolViolation`] when a moq-transport client names a
-	/// redirect URI, which the peer would be required to close the session over.
+	/// redirect URI, which the peer would be required to close the session over,
+	/// or when the URI exceeds the 8,192-byte wire cap.
 	pub fn send(self, goaway: Goaway) -> Result<()> {
 		if !self.redirect && !goaway.uri.is_empty() {
+			return Err(Error::ProtocolViolation);
+		}
+		// Both wires cap the URI, so sending a longer one would just get the session
+		// closed by the peer. Refuse it here, the one chokepoint both wires funnel
+		// through, rather than at each encoder.
+		if goaway.uri.len() > MAX_URI {
 			return Err(Error::ProtocolViolation);
 		}
 		// The session closing first is not an error: there is nothing left to drain.
@@ -309,6 +320,26 @@ mod tests {
 		// An empty URI ("I am going away") is still allowed.
 		let (handle, _protocol) = Handle::new(false);
 		handle.producer().unwrap().send(Goaway::default()).unwrap();
+	}
+
+	/// A URI past the wire cap is refused at the send chokepoint rather than
+	/// reaching an encoder that would frame it wrong.
+	#[test]
+	fn oversized_uri_is_refused() {
+		let (handle, _protocol) = Handle::new(true);
+		let err = handle
+			.producer()
+			.unwrap()
+			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
+			.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation));
+
+		let (handle, _protocol) = Handle::new(true);
+		handle
+			.producer()
+			.unwrap()
+			.send(Goaway::redirect("x".repeat(MAX_URI)))
+			.expect("exactly at the cap is fine");
 	}
 
 	/// A second GOAWAY is a protocol violation, not something to log and discard.

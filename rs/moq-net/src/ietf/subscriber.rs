@@ -158,6 +158,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 	) -> Result<(), Error> {
+		// A peer that sent GOAWAY told us to stop opening requests on this session,
+		// announce-interest included (draft-19 sect 10.4).
+		if self.going_away.is_set() {
+			return Err(Error::GoingAway);
+		}
+
 		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 

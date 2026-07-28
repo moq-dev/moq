@@ -561,10 +561,15 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 			return;
 		}
 
+		// The size prefix is a u16 on a stream shared with every other request, so a
+		// wrapping cast here would desynchronize the framing for all of them.
+		let Ok(size) = u16::try_from(body.len()) else {
+			tracing::warn!(len = body.len(), "goaway too large for the control stream");
+			return;
+		};
+
 		let mut raw = BytesMut::new();
-		if crate::ietf::GoAway::ID.encode(&mut raw, version).is_err()
-			|| (body.len() as u16).encode(&mut raw, version).is_err()
-		{
+		if crate::ietf::GoAway::ID.encode(&mut raw, version).is_err() || size.encode(&mut raw, version).is_err() {
 			return;
 		}
 		raw.extend_from_slice(&body);

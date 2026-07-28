@@ -165,48 +165,63 @@ fn scheme_tier(scheme: &str) -> u8 {
 fn is_local(url: &Url) -> bool {
 	match url.host() {
 		Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-		Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-		Some(url::Host::Ipv6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+		Some(url::Host::Ipv4(ip)) => is_local_v4(ip),
+		// An IPv4-mapped address reaches the same host as the v4 it wraps, so judge
+		// it by that rather than by the v6 rules.
+		Some(url::Host::Ipv6(ip)) => match ip.to_ipv4_mapped() {
+			Some(v4) => is_local_v4(v4),
+			// Loopback (::1), unspecified (::), unique local (fc00::/7), link local (fe80::/10).
+			None => {
+				ip.is_loopback()
+					|| ip.is_unspecified()
+					|| (ip.segments()[0] & 0xfe00) == 0xfc00
+					|| (ip.segments()[0] & 0xffc0) == 0xfe80
+			}
+		},
 		// No host at all, e.g. a `unix:` socket path.
 		None => true,
 	}
 }
 
+fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
+	ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+}
+
 /// How a reconnect loop reacts to a peer's GOAWAY.
-#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GoawayConfig {
-	/// What to do with the URI a peer names in its GOAWAY.
-	#[arg(
-		id = "goaway-redirect",
-		long,
-		default_value = "follow",
-		env = "MOQ_GOAWAY_REDIRECT",
-		value_enum
-	)]
-	pub redirect: Redirect,
+	/// What to do with the URI a peer names in its GOAWAY. Defaults to
+	/// [`Redirect::Follow`].
+	#[arg(id = "goaway-redirect", long, env = "MOQ_GOAWAY_REDIRECT", value_enum)]
+	pub redirect: Option<Redirect>,
 
 	/// How long the old session keeps serving after its replacement connects,
-	/// when the GOAWAY named no deadline of its own. A deadline on the GOAWAY
-	/// takes precedence.
+	/// when the GOAWAY named no deadline of its own, e.g. "10s" or "500ms". A
+	/// deadline on the GOAWAY takes precedence. Defaults to 10 seconds.
 	#[arg(
 		id = "goaway-handover",
 		long,
-		default_value = "10s",
 		env = "MOQ_GOAWAY_HANDOVER",
 		value_parser = humantime::parse_duration,
 	)]
-	#[serde(with = "humantime_serde")]
-	pub handover: Duration,
+	#[serde(default, with = "humantime_serde")]
+	pub handover: Option<Duration>,
 }
 
-impl Default for GoawayConfig {
-	fn default() -> Self {
-		Self {
-			redirect: Redirect::default(),
-			handover: Duration::from_secs(10),
-		}
+/// Default handover window, applied when neither the GOAWAY nor the config names one.
+const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
+
+impl GoawayConfig {
+	/// The configured redirect policy, or the default.
+	pub fn redirect(&self) -> Redirect {
+		self.redirect.unwrap_or_default()
+	}
+
+	/// The configured handover window, or the default.
+	pub fn handover(&self) -> Duration {
+		self.handover.unwrap_or(DEFAULT_HANDOVER)
 	}
 }
 
@@ -345,7 +360,7 @@ impl Reconnect {
 
 					if let Ended::Goaway(msg) = &ended {
 						// A redirect is an assignment: keep dialing it from here on.
-						url = goaway.redirect.resolve(&msg.uri, &url);
+						url = goaway.redirect().resolve(&msg.uri, &url);
 
 						// Hand over gracefully however the backoff bookkeeping scores this
 						// session. The old one keeps serving until it closes or overstays,
@@ -356,7 +371,12 @@ impl Reconnect {
 						if let Ok(mut state) = state.write() {
 							state.status = Some(Status::Migrating);
 						}
-						draining = Some(Draining::new(session, msg.timeout.unwrap_or(goaway.handover)));
+						// Retire any predecessor first: overwriting would drop its deadline
+						// on the floor and leave it holding the connection open.
+						if let Some(mut old) = draining.take() {
+							old.retire();
+						}
+						draining = Some(Draining::new(session, msg.timeout.unwrap_or_else(|| goaway.handover())));
 
 						if healthy {
 							delay = backoff.initial;
@@ -372,7 +392,9 @@ impl Reconnect {
 						// across the sleep, so the redirect loop costs time, not data.
 						last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
 						tracing::warn!(%url, ?delay, "peer redirected immediately; retrying after backoff");
-						tokio::time::sleep(delay).await;
+						// Keep the handover bounded across the sleep: nothing else polls the
+						// predecessor while the loop is between connections.
+						sleep_draining(delay, &mut draining).await;
 						delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 						continue;
 					}
@@ -448,8 +470,10 @@ impl Reconnect {
 
 	/// Wait until the connection status changes from what this handle last reported.
 	///
-	/// Returns the current [`Status`]. The loop alternates `Connected`/`Disconnected`, so successive
-	/// calls alternate too; but a status that flips and flips back before the caller polls is
+	/// Returns the current [`Status`]. The loop moves between `Connected`,
+	/// `Disconnected`, and `Migrating` (a GOAWAY handover, where the old session is
+	/// still serving), so successive calls report changes rather than a fixed
+	/// alternation; a status that flips and flips back before the caller polls is
 	/// reported once. This tracks the *current* state, not every edge.
 	pub async fn status(&mut self) -> crate::Result<Status> {
 		kio::wait(|waiter| self.poll_status(waiter)).await
@@ -550,6 +574,11 @@ impl Draining {
 		}
 	}
 
+	/// Close the old session now, whatever remains of its window.
+	fn retire(&mut self) {
+		self.session.abort(moq_net::Error::GoawayTimeout);
+	}
+
 	/// Poll the drain; `true` once it is over and the handle should be released.
 	fn poll(&mut self, waiter: &kio::Waiter) -> bool {
 		if waiter.poll_future(self.closed.as_mut()).is_ready() {
@@ -563,6 +592,25 @@ impl Draining {
 		}
 		false
 	}
+}
+
+/// Sleep for `delay` while keeping a draining predecessor's deadline enforced.
+///
+/// The drain is otherwise only polled from [`run_session`], which is reached only
+/// after a successful connect, so a replacement that takes several backoff rounds
+/// to reach would leave the old session holding its connection well past the
+/// handover window.
+async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
+	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
+	kio::wait(|waiter| {
+		if let Some(old) = draining.as_mut()
+			&& old.poll(waiter)
+		{
+			*draining = None;
+		}
+		waiter.poll_future(sleep.as_mut())
+	})
+	.await
 }
 
 /// Wait for `session` to close or receive a GOAWAY, forwarding its send/recv bandwidth estimates
@@ -648,6 +696,67 @@ fn terminal(state: &State) -> Error {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The clap+TOML clobber guard: both `GoawayConfig` fields are `Option<T>` with
+	/// no `default_value`, so a TOML-configured value survives the CLI re-parse
+	/// that follows. A bare scalar with a clap default would silently win instead.
+	#[test]
+	fn cli_does_not_clobber_toml_goaway() {
+		use clap::Parser;
+
+		#[derive(Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			goaway: GoawayConfig,
+		}
+
+		// No flags passed: the fields stay None so a TOML layer underneath keeps its
+		// values, and the accessors supply the documented defaults.
+		let parsed = Wrapper::parse_from(["test"]);
+		assert_eq!(parsed.goaway.redirect, None);
+		assert_eq!(parsed.goaway.handover, None);
+		assert_eq!(parsed.goaway.redirect(), Redirect::Follow);
+		assert_eq!(parsed.goaway.handover(), Duration::from_secs(10));
+
+		// Flags passed: they land where the merge can see them.
+		let parsed = Wrapper::parse_from(["test", "--goaway-redirect", "ignore", "--goaway-handover", "3s"]);
+		assert_eq!(parsed.goaway.redirect, Some(Redirect::Ignore));
+		assert_eq!(parsed.goaway.handover, Some(Duration::from_secs(3)));
+	}
+
+	/// A peer must not be able to redirect us somewhere we could not already
+	/// reach. IPv4-mapped and link-local forms are the easy ones to miss.
+	#[test]
+	fn local_targets_are_recognized() {
+		let local = [
+			"https://127.0.0.1/",
+			"https://localhost/",
+			"https://[::1]/",
+			"https://10.0.0.1/",
+			"https://169.254.1.1/",
+			"https://[::ffff:127.0.0.1]/",
+			"https://[::ffff:10.0.0.1]/",
+			"https://[fe80::1]/",
+			"https://[fc00::1]/",
+			"https://0.0.0.0/",
+		];
+		for url in local {
+			assert!(is_local(&url.parse().unwrap()), "{url} should be local");
+		}
+
+		for url in ["https://example.com/", "https://8.8.8.8/", "https://[2606:4700::1]/"] {
+			assert!(!is_local(&url.parse().unwrap()), "{url} should not be local");
+		}
+
+		// A public endpoint may not redirect us inward, but a local one may stay local.
+		let public: Url = "https://relay.example/".parse().unwrap();
+		let localhost: Url = "https://127.0.0.1:4443/".parse().unwrap();
+		assert_eq!(Redirect::Follow.resolve("https://[::ffff:127.0.0.1]/", &public), public);
+		assert_eq!(
+			Redirect::Follow.resolve("https://127.0.0.1:9999/", &localhost).port(),
+			Some(9999)
+		);
+	}
 
 	#[test]
 	fn test_backoff_default() {

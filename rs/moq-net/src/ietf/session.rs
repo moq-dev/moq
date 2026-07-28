@@ -522,19 +522,27 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(
 	// middle of the drain we are trying to honor.
 	//
 	// Nothing else is expected on this stream: a peer sends at most one GOAWAY
-	// per session. Read (and discard) any further framed messages so a
-	// duplicate GOAWAY is surfaced in the logs rather than silently consumed.
+	// per session. A second one is the same protocol violation the shared
+	// control stream enforces, so close over it here too rather than logging;
+	// anything else is merely unexpected and discarded.
 	loop {
 		let id: u64 = match reader.decode_maybe().await? {
 			Some(id) => id,
 			None => return Ok(()),
 		};
 		let size: u16 = reader.decode::<u16>().await?;
-		let _ = reader.read_exact(size as usize).await?;
-		tracing::warn!(
-			id,
-			duplicate_goaway = id == ietf::GoAway::ID,
-			"unexpected message after GOAWAY on the SETUP stream; ignoring"
-		);
+		let mut data = reader.read_exact(size as usize).await?;
+
+		if id == ietf::GoAway::ID {
+			let msg = ietf::GoAway::decode_msg(&mut data, version)?;
+			let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
+			goaway.record(crate::goaway::Goaway {
+				uri: msg.new_session_uri.into_owned(),
+				timeout,
+			})?;
+			continue;
+		}
+
+		tracing::warn!(id, "unexpected message after GOAWAY on the SETUP stream; ignoring");
 	}
 }

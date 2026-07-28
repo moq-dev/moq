@@ -153,7 +153,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let mut client_config = moq_native::ClientConfig::default();
 		client_config.tls.disable_verify = Some(true);
 		// Short handover so the test observes the old session close quickly.
-		client_config.goaway.handover = Duration::from_secs(2);
+		client_config.goaway.handover = Some(Duration::from_secs(2));
 		let client = client_config.init().expect("client init");
 
 		let mut cluster_config = ClusterConfig::default();
@@ -271,7 +271,7 @@ async fn spawn_relay_with_upstream(
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let client = client_config.init().expect("client init");
 
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
@@ -347,7 +347,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let mid_a_client = client_config.init().expect("mid-a client init");
 	let mid_a_upstream = within(
 		"MID-A connects to TOP",
@@ -553,7 +553,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let client = client_config.init().expect("client init");
 
 	let mut cluster_config = ClusterConfig::default();
