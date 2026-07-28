@@ -104,8 +104,8 @@ pub enum Redirect {
 	/// reach (a public endpoint redirecting to loopback, a private range, or IPC).
 	#[default]
 	Follow,
-	/// Follow only when the authority matches the configured URL, so a peer can
-	/// move us between ports or schemes but not to another host.
+	/// Follow only when the host matches the configured URL, so a peer can move us
+	/// between ports or schemes but not to another host.
 	SameHost,
 	/// Ignore the URI and redial the configured URL.
 	Ignore,
@@ -137,7 +137,9 @@ impl Redirect {
 			return current.clone();
 		}
 
-		if matches!(self, Self::SameHost) && target.authority() != current.authority() {
+		// Host only, not the full authority: the port is what a peer legitimately
+		// moves us across when it hands off to a sibling process on the same box.
+		if matches!(self, Self::SameHost) && target.host_str() != current.host_str() {
 			tracing::warn!(
 				uri,
 				"GOAWAY redirect leaves the current host; redialing the current URL"
@@ -755,6 +757,83 @@ mod tests {
 		assert_eq!(
 			Redirect::Follow.resolve("https://127.0.0.1:9999/", &localhost).port(),
 			Some(9999)
+		);
+	}
+
+	/// The scheme ranking is what stops a peer from quietly moving us off an
+	/// encrypted transport. An unknown scheme ranks lowest so a classification we
+	/// forgot to add is refused rather than trusted.
+	#[test]
+	fn scheme_tiers_rank_encrypted_above_plaintext() {
+		for scheme in ["https", "moqt", "moql", "wss", "iroh"] {
+			assert_eq!(scheme_tier(scheme), 2, "{scheme} is encrypted");
+		}
+		for scheme in ["tcp", "ws", "http"] {
+			assert_eq!(scheme_tier(scheme), 1, "{scheme} is plaintext");
+		}
+		// `unix` is not an upgrade over a network transport, it is a different
+		// reachability class, so it must not outrank one.
+		for scheme in ["unix", "gopher", ""] {
+			assert_eq!(scheme_tier(scheme), 0, "{scheme} is unclassified");
+		}
+	}
+
+	/// A redirect may hold the scheme or improve it, never weaken it.
+	#[test]
+	fn resolve_refuses_a_scheme_downgrade() {
+		let secure: Url = "https://relay.example/".parse().unwrap();
+		let plain: Url = "http://relay.example/".parse().unwrap();
+
+		// Downgrades fall back to the current URL rather than being followed.
+		assert_eq!(Redirect::Follow.resolve("http://other.example/", &secure), secure);
+		assert_eq!(Redirect::Follow.resolve("unix:///tmp/moq.sock", &secure), secure);
+
+		// Same tier and upgrades are followed.
+		let same: Url = "https://other.example/".parse().unwrap();
+		assert_eq!(Redirect::Follow.resolve("https://other.example/", &secure), same);
+		assert_eq!(Redirect::Follow.resolve("https://other.example/", &plain), same);
+	}
+
+	/// The three ways a redirect resolves to "redial what we already had": the peer
+	/// naming no URI, a URI we cannot parse, and a policy that ignores it outright.
+	#[test]
+	fn resolve_falls_back_to_the_current_url() {
+		let current: Url = "https://relay.example/".parse().unwrap();
+
+		assert_eq!(
+			Redirect::Follow.resolve("", &current),
+			current,
+			"empty means 'reconnect to me'"
+		);
+		assert_eq!(
+			Redirect::Follow.resolve("not a url", &current),
+			current,
+			"a malformed URI is not a reason to stop reconnecting"
+		);
+		assert_eq!(
+			Redirect::Ignore.resolve("https://other.example/", &current),
+			current,
+			"Ignore never leaves the configured URL"
+		);
+	}
+
+	/// `SameHost` lets a peer move us between ports or schemes on the endpoint we
+	/// already chose, but not onto a different host.
+	#[test]
+	fn resolve_same_host_pins_the_authority() {
+		let current: Url = "https://relay.example:4443/".parse().unwrap();
+
+		assert_eq!(
+			Redirect::SameHost.resolve("https://elsewhere.example/", &current),
+			current,
+			"another host is refused"
+		);
+
+		let moved = Redirect::SameHost.resolve("https://relay.example:5443/", &current);
+		assert_eq!(
+			moved.port(),
+			Some(5443),
+			"a different port on the same host is followed"
 		);
 	}
 
