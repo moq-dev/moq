@@ -49,3 +49,12 @@ smoke-negative *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 ts *args:
     ./ts/run.sh {{ args }}
+
+# Stands up two meshed relays with a 1+1 redundant publisher pair, kills the
+# active source and checks that the standby takes over. Covers the wiring the
+# routing unit tests can't: real relays, lazily-created tracks, and the QUIC
+# idle timeout that gates failure detection. `--idle 10s` for a faster run. See
+
+# failover/README.md.
+failover *args:
+    ./failover/run.sh {{ args }}
