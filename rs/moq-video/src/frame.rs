@@ -21,7 +21,7 @@ use moq_net::Timestamp;
 
 use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix, rgba_to_yuv420};
 
-use crate::{Error, Size};
+use crate::{Color, Error, Size};
 
 /// One raw (uncompressed) video frame: the pixels plus when they are shown.
 ///
@@ -247,6 +247,11 @@ pub struct I420 {
 	pub(crate) height: u32,
 	/// Y plane (`width * height`) then U then V (`width/2 * height/2` each).
 	pub(crate) data: Vec<u8>,
+	/// The color space these samples are in, when it is known rather than
+	/// guessed. Set by the conversions that pick a matrix themselves; `None`
+	/// where the pixels only passed through (a decode, a camera) and the
+	/// bitstream's answer did not come with them.
+	pub(crate) color: Option<Color>,
 }
 
 impl I420 {
@@ -265,7 +270,12 @@ impl I420 {
 				data.len()
 			)));
 		}
-		Ok(Self { width, height, data })
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: None,
+		})
 	}
 
 	/// The frame width in pixels.
@@ -281,6 +291,24 @@ impl I420 {
 	/// The packed planes, Y then U then V.
 	pub fn data(&self) -> &[u8] {
 		&self.data
+	}
+
+	/// The color space these samples are in, or `None` when the crate does not
+	/// know: the pixels came out of a decoder or a camera, and the bitstream's
+	/// color description did not travel with them.
+	///
+	/// Anything converting these samples to RGB needs an answer either way, so
+	/// treat `None` as "fall back to [`Color::infer`]" rather than "does not
+	/// matter". Use [`with_color`](Self::with_color) if you know better.
+	pub fn color(&self) -> Option<Color> {
+		self.color
+	}
+
+	/// Declare the color space of these samples, for a caller who knows it (the
+	/// stream's VUI, a camera's documented output) where the crate cannot.
+	pub fn with_color(mut self, color: Color) -> Self {
+		self.color = Some(color);
+		self
 	}
 
 	/// Tightly-packed I420 byte length for the given even dimensions.
@@ -357,7 +385,12 @@ impl I420 {
 			v_dst[row * cw..row * cw + cw].copy_from_slice(&v[row * uv_stride..row * uv_stride + cw]);
 		}
 
-		Self { width, height, data }
+		Self {
+			width,
+			height,
+			data,
+			color: None,
+		}
 	}
 
 	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420, BT.601
@@ -419,7 +452,12 @@ impl I420 {
 		data[..luma].copy_from_slice(&nv12[..luma]);
 		let (u_dst, v_dst) = data[luma..].split_at_mut(chroma);
 		deinterleave_uv(&nv12[luma..need], u_dst, v_dst);
-		Ok(Self { width, height, data })
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: None,
+		})
 	}
 
 	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
@@ -472,17 +510,31 @@ impl I420 {
 			plane(resizer, self.v(), sw2, sh2, v_dst, dw2, dh2)
 		})?;
 
-		Ok(Self { width, height, data })
+		// Resampling moves samples around, it does not reinterpret them.
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: self.color,
+		})
 	}
 
 	/// Flatten the three planes of a freshly-converted image into one tightly
 	/// packed I420 buffer (Y, then U, then V).
+	/// Every caller converts from RGB with `YuvRange::Limited` +
+	/// `YuvStandardMatrix::Bt601`, so the result's color space is known outright
+	/// rather than left to be guessed from the resolution downstream.
 	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {
 		let mut data = Vec::with_capacity(Self::len(width, height));
 		data.extend_from_slice(planar.y_plane.borrow());
 		data.extend_from_slice(planar.u_plane.borrow());
 		data.extend_from_slice(planar.v_plane.borrow());
-		Self { width, height, data }
+		Self {
+			width,
+			height,
+			data,
+			color: Some(Color::Bt601Limited),
+		}
 	}
 
 	fn luma_len(&self) -> usize {
@@ -554,7 +606,7 @@ pub mod macos {
 	use objc2_video_toolbox::VTPixelTransferSession;
 
 	use super::I420;
-	use crate::Error;
+	use crate::{Color, Error};
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
@@ -684,6 +736,10 @@ pub mod macos {
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
+		///
+		/// A deinterleave, not a color conversion, so the samples keep whatever
+		/// space they arrived in. The pixel format names the range, which is
+		/// carried through; the matrix it does not, so that half stays inferred.
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -693,6 +749,9 @@ pub mod macos {
 					"cannot download pixel format {format:#x}; expected NV12"
 				)));
 			}
+
+			let limited = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+			let color = Some(Color::infer(crate::Size::new(self.width, self.height)).with_range(limited));
 
 			let (w, h) = (self.width as usize, self.height as usize);
 			let (cw, ch) = (w / 2, h / 2);
@@ -735,6 +794,7 @@ pub mod macos {
 				width: self.width,
 				height: self.height,
 				data,
+				color,
 			})
 		}
 	}
@@ -1119,6 +1179,9 @@ pub mod cuda {
 				width: self.width,
 				height: self.height,
 				data,
+				// A deinterleave, not a color conversion, and nothing here names
+				// the space these samples are in. Left unknown to be inferred.
+				color: None,
 			})
 		}
 
@@ -1362,6 +1425,9 @@ pub mod d3d11 {
 				width: self.width,
 				height: self.height,
 				data,
+				// A deinterleave, not a color conversion, and nothing here names
+				// the space these samples are in. Left unknown to be inferred.
+				color: None,
 			})
 		}
 	}
@@ -1459,7 +1525,12 @@ mod tests {
 				v[row * cw + col] = (((row + col) * 255) / (ch + cw)) as u8;
 			}
 		}
-		I420 { width, height, data }
+		I420 {
+			width,
+			height,
+			data,
+			color: None,
+		}
 	}
 
 	/// Mean absolute error between two equal-length planes.
