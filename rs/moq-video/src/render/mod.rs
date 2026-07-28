@@ -28,9 +28,9 @@
 //! A hardware-decoded frame is imported by aliasing the decoder's surface as a
 //! texture rather than copying it: `CVMetalTextureCache` on macOS, for the
 //! `PixelBuffer` variant of [`Surface`](crate::Surface) that capture and a
-//! VideoToolbox decode produce. (Named without a link because that variant only
-//! exists on macOS, and a link to it would dangle in the docs built for every
-//! other platform.)
+//! VideoToolbox decode produce.
+// `PixelBuffer` is deliberately not a doc link: the variant is macOS-only, so a
+// link to it fails the `-D warnings` rustdoc build on every other platform.
 //!
 //! Every other frame, and any import that fails, goes through
 //! [`Surface::into_i420`](crate::Surface::into_i420) and a plane upload. That

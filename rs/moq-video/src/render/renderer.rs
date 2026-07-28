@@ -43,9 +43,15 @@ pub struct Config {
 	/// [`wgpu::TextureUsages::COPY_SRC`] to read frames back.
 	pub usage: wgpu::TextureUsages,
 
-	/// How to interpret the frame's YUV samples. `None` infers it per frame from
-	/// the frame's size and, on a GPU surface, its pixel format. Set it when the
-	/// stream's color space is known.
+	/// How to interpret the frame's YUV samples, overriding what the frame says
+	/// about itself.
+	///
+	/// `None` takes the frame's own [`I420::color`](crate::I420::color), or the
+	/// range its GPU pixel format names, and falls back to
+	/// [`Color::infer`](crate::Color::infer) for pixels that carry neither. Set
+	/// it when you know the stream's color space and the frame does not, which is
+	/// whenever it came off the wire: the authoritative answer is in the
+	/// bitstream's VUI and does not survive decoding.
 	pub color: Option<Color>,
 
 	/// Whether to import GPU frames zero-copy (aliasing the decoder's surface as

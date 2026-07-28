@@ -46,9 +46,9 @@ impl Color {
 	/// The same matrix as `self` but in the given range, for a caller that knows
 	/// the range and not the matrix.
 	///
-	/// Only a surface whose pixel format spells out its range reaches this, and
-	/// CoreVideo's video-range/full-range NV12 is the only one today. It widens
-	/// when a platform that carries range metadata gains an import path.
+	/// Only a surface whose pixel format spells out its range reaches this, which
+	/// is why it is macOS-only: CoreVideo's video-range and full-range NV12 name
+	/// theirs.
 	#[cfg(target_os = "macos")]
 	pub(crate) fn with_range(self, limited: bool) -> Self {
 		match (self, limited) {
