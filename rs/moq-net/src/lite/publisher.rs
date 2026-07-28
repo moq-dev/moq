@@ -223,7 +223,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Origin
 		// parameter, the same identity the subscribe path excludes.
-		let exclude_hop = if self.version.has_request_exclude_hop() {
+		let exclude_hop = if self.version.has_exclude_hop() {
 			interest.exclude_hop
 		} else if self.version.has_setup_stream() {
 			self.peer_setup.origin().await.map(|origin| origin.id()).unwrap_or(0)
@@ -274,10 +274,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
-		// Peer's session-level origin id, sent in AnnounceInterest. We skip
-		// forwarding announces whose hop chain already contains this id, so
-		// reflected announces (cluster loops) never hit the wire. Zero means
-		// the peer didn't set it (Lite03 or earlier), pass through.
+		// Peer's session-level origin id, sent in ANNOUNCE_REQUEST on lite-04/05.
+		// We skip forwarding announces whose hop chain already contains this id, so
+		// reflected announces (cluster loops) never hit the wire. Zero means the peer
+		// didn't send one (every other version), in which case we forward and the peer
+		// drops the reflection on receipt.
 		exclude_hop: u64,
 		version: Version,
 	) -> Result<(), Error> {

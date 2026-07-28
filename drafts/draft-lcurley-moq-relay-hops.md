@@ -157,8 +157,11 @@ The stand-in MUST be stable for the lifetime of the upstream session and unique 
 
 When a relay receives a namespace advertisement on a session that negotiated this extension, it MUST inspect the HOP_PATH:
 
-- If its own Hop ID already appears in the list, the advertisement has looped. The relay MUST NOT forward it and SHOULD drop it.
+- If its own Hop ID already appears in the list, the advertisement has looped back to this relay. The relay MUST discard it: it MUST NOT forward it, and MUST NOT select it as a path to the namespace. Forwarding it would extend the loop, and subscribing through it would route the relay back to itself.
 - Otherwise the relay MAY forward it downstream, appending its own Hop ID as described above.
+
+This receiver-side check is the only loop defense this extension requires, and it catches loops of any length.
+A relay MAY additionally avoid sending an advertisement back toward a peer it came from, but that is a bandwidth optimization: the advertisement is discarded on arrival either way.
 
 ## Path Selection
 A relay or subscriber that receives advertisements for the same namespace over multiple sessions MAY use the length of the HOP_PATH list as a tiebreaker, preferring the advertisement with the fewest hops (usually the lowest-latency path).

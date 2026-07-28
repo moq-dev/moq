@@ -2,7 +2,7 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type Origin, OriginSchema } from "./origin.ts";
-import { hasAnnounceId, hasAnnounceOk, hasRouteCost, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasExcludeHop, hasRouteCost, Version } from "./version.ts";
 
 // Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
 // hop chains are rejected; this keeps loop-detection bounded and rejects
@@ -233,8 +233,12 @@ export async function decodeAnnounceBroadcastMaybe(
  */
 export class AnnounceRequest {
 	prefix: Path.Valid;
-	// 62-bit Origin id of the peer asking for announces. Zero means "no exclusion".
-	// Must be a bigint: peer origins are up to 62 bits and overflow u53.
+	/** Lite04/05 only: the 62-bit Origin id of the peer asking for announces, which the
+	 * publisher uses to skip announces that already passed through it. Zero means "no
+	 * exclusion". Not on the wire elsewhere, so a value set here is ignored when encoding
+	 * for another version and decodes as zero.
+	 *
+	 * Must be a bigint: peer origins are up to 62 bits and overflow u53. */
 	excludeHop: bigint;
 
 	constructor(prefix: Path.Valid, excludeHop: bigint = 0n) {
@@ -244,29 +248,14 @@ export class AnnounceRequest {
 
 	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.prefix));
-		switch (version) {
-			case Version.DRAFT_04:
-			case Version.DRAFT_05:
-				// Lite04/05 only: exclude_hop field (u62 varint). Lite06 moved the
-				// identity to the session-wide SETUP Origin parameter.
-				await w.u62(this.excludeHop);
-				break;
-			default:
-				break;
+		if (hasExcludeHop(version)) {
+			await w.u62(this.excludeHop);
 		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
-		let excludeHop = 0n;
-		switch (version) {
-			case Version.DRAFT_04:
-			case Version.DRAFT_05:
-				excludeHop = await r.u62();
-				break;
-			default:
-				break;
-		}
+		const excludeHop = hasExcludeHop(version) ? await r.u62() : 0n;
 		return new AnnounceRequest(prefix, excludeHop);
 	}
 

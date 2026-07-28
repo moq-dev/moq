@@ -36,6 +36,9 @@ node_modules
 # Cloudflare Wrangler
 .wrangler/
 
+# VitePress pages generated from drafts/ by doc/.vitepress/drafts.ts
+/doc/draft/
+
 # We're using bun
 package-lock.json
 yarn.lock

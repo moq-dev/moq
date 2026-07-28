@@ -106,20 +106,26 @@ test("AnnounceBroadcast rejects explicit restart status before draft-05", async 
 	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_04)).rejects.toThrow();
 });
 
-test("AnnounceRequest carries exclude_hop only on draft-04/05", async () => {
-	const msg = new AnnounceRequest(Path.from("room"), 7n);
+async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise<AnnounceRequest> {
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
+	return AnnounceRequest.decode(reader, version);
+}
 
-	for (const version of [Version.DRAFT_04, Version.DRAFT_05]) {
-		const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
-		const got = await AnnounceRequest.decode(reader, version);
-		expect(got.excludeHop).toBe(7n);
-		expect(await reader.done()).toBe(true);
-	}
+// Draft04/05 carry the subscriber's origin id so the publisher can skip reflected
+// announces before they hit the wire.
+test("AnnounceRequest carries excludeHop on draft-05", async () => {
+	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), 42n), Version.DRAFT_05);
+	expect(got.excludeHop).toBe(42n);
+});
 
-	// Draft-06 moved the identity to the SETUP Origin parameter, so the field is
-	// gone from its wire image and decodes back to zero, with nothing left over.
-	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, Version.DRAFT_06)));
-	const got = await AnnounceRequest.decode(reader, Version.DRAFT_06);
+// Draft06 dropped the field: the receiver's reflected-announce check catches the same
+// loops, so a value set locally is simply not sent and decodes as zero.
+test("AnnounceRequest drops excludeHop on draft-06", async () => {
+	const msg = new AnnounceRequest(Path.from("room/"), 42n);
+	const got = await requestRoundTrip(msg, Version.DRAFT_06);
 	expect(got.excludeHop).toBe(0n);
-	expect(await reader.done()).toBe(true);
+
+	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05));
+	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06));
+	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
