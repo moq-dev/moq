@@ -40,8 +40,15 @@ enum Sink {
 ///
 /// The rendition guard is held for the pad's lifetime: dropping it retires the catalog entry, so a
 /// pad that fails or finalizes stops advertising a track nobody is writing to.
+///
+/// No jitter is estimated. The estimator measures the smallest gap between consecutive frames,
+/// which for a codec is the frame duration but for cues is just how close two subtitles happen to
+/// sit. That says nothing about how long a consumer must buffer, and feeding it to the catalog
+/// would inflate every consumer's playback buffer by an arbitrary amount. Each cue is written and
+/// cut immediately, so the absent field says what is true: flushed as produced.
 struct Text {
 	producer: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+	#[allow(dead_code, reason = "held so dropping the pad retires the catalog rendition")]
 	rendition: moq_mux::catalog::TextTrack,
 }
 
@@ -71,7 +78,6 @@ impl Text {
 		})?;
 		// One cue per group, so a late joiner tunes in on the current caption.
 		self.producer.cut(None)?;
-		self.rendition.estimate(self.producer.estimate());
 		Ok(())
 	}
 }
@@ -820,6 +826,31 @@ mod tests {
 			catalog.snapshot().text.renditions.is_empty(),
 			"failed pad left a phantom rendition"
 		);
+	}
+
+	// Cue spacing is not a buffering requirement. Publishing it as `jitter` would inflate every
+	// consumer's shared playback buffer, so toggling captions on would re-anchor audio and video.
+	#[test]
+	fn text_rendition_declares_no_jitter() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &text_caps());
+		pad.observe_segment(time_segment());
+
+		// Two cues 500ms apart: the estimator's minimum-gap heuristic would report 500ms here.
+		for (start_ms, dur_ms) in [(0u64, 400u64), (500, 400)] {
+			pad.push_buffer(
+				Bytes::from_static(b"hello"),
+				Some(gst::ClockTime::from_mseconds(start_ms)),
+				Some(gst::ClockTime::from_mseconds(dur_ms)),
+			);
+		}
+		assert!(!pad.is_failed());
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.text.renditions.values().next().expect("a text rendition");
+		assert_eq!(config.jitter, None, "cue spacing leaked into the catalog as jitter");
 	}
 
 	// A cue with no duration has no end, so it would pin on screen forever: drop it instead.
