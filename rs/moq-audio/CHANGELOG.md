@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.13...moq-audio-v0.0.14) - 2026-07-27
+
+### Added
+
+- *(moq-audio)* play decoded PCM out a speaker ([#2529](https://github.com/moq-dev/moq/pull/2529))
+
 ## [0.0.13](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.12...moq-audio-v0.0.13) - 2026-07-25
 
 ### Added

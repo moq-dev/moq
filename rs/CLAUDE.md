@@ -149,3 +149,13 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
   - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
 
   Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
+
+- **`just rs loom` is a manual gate. Run it by hand whenever you touch kio's refcount/waiter plumbing (`lock.rs`, `producer.rs`, `consumer.rs`, `weak.rs`, `waiter.rs`) or moq-net's model layer (`model/`), and mention the result in the PR.** Nothing else will run it: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`, so it's deliberately outside `check`/`ci`. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
+
+  Loom permutes every thread interleaving instead of hoping a stress loop hits the bad one. It caught a `ProducerWeak::produce` race that had been live for months, on iteration 4. Reading the results:
+
+  - A **hang is a finding, not a flake**: a parked `loom::future::block_on` that never wakes leaves every thread blocked, which loom reports as a deadlock. That's how a lost wakeup surfaces.
+  - **"Arc leaked"** means a reference cycle, usually a handle stored inside the state it points at. That's what `kio::Weak` (as opposed to `ProducerWeak`, which keeps the allocation) exists to avoid.
+  - Before trusting a *passing* model, mutate the code it covers and confirm it fails. A model that never exercises the race is worse than none.
+
+  Two constraints when adding to it: every non-loom `#[cfg(test)]` in kio must be `#[cfg(all(test, not(loom)))]`, or the tokio tests build loom primitives outside `loom::model` and panic; and loom's `Arc` has no `downgrade`, so `lock.rs` and `waiter.rs` keep std's (see `kio/src/sync.rs`).

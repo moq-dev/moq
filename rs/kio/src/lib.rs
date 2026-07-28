@@ -12,10 +12,12 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	sync::atomic::AtomicUsize,
 };
 
+use crate::sync::AtomicUsize;
+
 mod lock;
+mod sync;
 mod waiter;
 
 mod consumer;
@@ -31,7 +33,9 @@ pub mod time;
 #[doc(hidden)]
 pub mod tokio;
 
-#[cfg(test)]
+#[cfg(all(test, loom))]
+mod loom;
+#[cfg(all(test, not(loom)))]
 mod tests;
 
 pub use consumer::Consumer;

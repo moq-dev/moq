@@ -1,8 +1,13 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	sync::{Arc, Mutex, MutexGuard, Weak},
+	// std, not `crate::sync`: [`WeakLock`] needs `Arc::downgrade`, which loom's Arc
+	// doesn't have. Loom still models the `Mutex` inside, which is the part that
+	// orders every handle against every other.
+	sync::{Arc, Weak},
 };
+
+use crate::sync::{Mutex, MutexGuard};
 
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
 pub struct Lock<T> {

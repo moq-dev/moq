@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.3...moq-relay-v0.14.4) - 2026-07-27
+
+### Other
+
+- *(net)* replace the global LRU cache pool with per-track write-time eviction ([#2526](https://github.com/moq-dev/moq/pull/2526))
+
 ## [0.14.3](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.2...moq-relay-v0.14.3) - 2026-07-25
 
 ### Added

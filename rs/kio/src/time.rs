@@ -123,7 +123,7 @@ impl std::fmt::Debug for Deadline {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
 	use std::task::Waker;
 

@@ -3,6 +3,7 @@ use std::{
 	future::Future,
 	marker::PhantomData,
 	pin::Pin,
+	// std, not `crate::sync`: loom's Arc has no `downgrade`. See `sync.rs`.
 	sync::{Arc, OnceLock, Weak},
 	task::{Context, Poll, Waker},
 };
@@ -181,7 +182,7 @@ where
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
 	use super::*;
 
