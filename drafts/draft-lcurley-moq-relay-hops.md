@@ -52,10 +52,6 @@ This redundancy is desirable for failover, but it leaves a receiver with no info
 
 This extension solves all three with a single mechanism: an ordered list of **Hop IDs** that records the path an advertisement has taken, starting with the original publisher and with one entry appended per relay.
 The first entry identifies the origin (broadcast identity); the list length gives the path length (path selection); a relay finding its own Hop ID already in the list detects a loop.
-
-## Why per-hop, not end-to-end
-The Hop ID list is rewritten at every relay: a relay appends its own Hop ID before forwarding an advertisement downstream.
-A relay therefore detects a loop by finding its own Hop ID already present in an incoming advertisement, and a subscriber compares path lengths using the list length.
 Hop IDs are unique (see [Hop IDs](#hop-ids)), even across independently operated relays.
 
 
@@ -92,8 +88,6 @@ There is no registry and no reserved values: a Hop ID is simply an opaque identi
 
 An endpoint SHOULD keep its Hop ID stable for the lifetime of a session (and MAY reuse it across sessions) so that loop detection and path comparison are consistent.
 
-When a relay bridges an advertisement from an upstream peer that did **not** negotiate this extension, the upstream carries no HOP_PATH. The relay MUST synthesize one (see [Relay Behavior](#relay-behavior)) by assigning a random Hop ID to stand in for the unknown upstream, so that loop detection and path length still work within the cooperating region of the mesh.
-
 
 # Carrying Parameters on Namespace Advertisements
 This extension attaches its downstream state (HOP_PATH) to namespace advertisements as Key-Value-Pair parameters (see {{moqt}} Section 2.5).
@@ -121,8 +115,7 @@ The number of Key-Value-Pair parameters that follow.
 **Parameters**:
 Zero or more Key-Value-Pairs ({{moqt}} Section 2.5).
 
-Both endpoints of a session know whether Relay Hops was negotiated, so there is no ambiguity about whether a NAMESPACE message on that session carries the appended Parameters field.
-An endpoint MUST NOT append a Parameters field to a NAMESPACE message on a session that did not negotiate Relay Hops, and a receiver on such a session MUST NOT expect one.
+An endpoint MUST NOT append a Parameters field to a NAMESPACE message on a session that did not negotiate Relay Hops; both endpoints know whether it was negotiated, so there is no ambiguity about which format applies.
 
 This document does not extend NAMESPACE_DONE ({{moqt}} Section 10.17); it carries no Relay Hops state.
 
@@ -146,12 +139,13 @@ The length of the Hop ID list in bytes.
 **Hop ID**:
 One or more Hop IDs, ordered from the original publisher (first entry) to the relay immediately upstream of the receiver (last entry).
 A receiver MUST close the session with a PROTOCOL_VIOLATION if the Hop IDs do not exactly fill `Length`, or if the list is empty (`Length` 0).
-HOP_PATH always contains at least one entry: the first entry is the Hop ID of the original publisher, even before the advertisement has traversed any relay.
+HOP_PATH always contains at least one entry: the first entry is the Hop ID of the original publisher, even before the advertisement has traversed any relay (or a bridging relay's stand-in for it, see [Relay Behavior](#relay-behavior)).
 
 ## Relay Behavior
 When a relay forwards a namespace advertisement downstream on a session that negotiated this extension, it MUST append its own Hop ID to the HOP_PATH it received.
 The relay's own Hop ID is therefore always the last entry of the list it sends.
-If the advertisement arrived from an upstream that did not negotiate this extension (and so carried no HOP_PATH), the relay MUST first create a HOP_PATH whose single initial entry is a random Hop ID it assigns to stand in for that unknown upstream, then append its own Hop ID.
+If the advertisement arrived from an upstream that did not negotiate this extension (and so carried no HOP_PATH), the relay MUST first create a HOP_PATH whose single initial entry is a Hop ID the relay assigns to stand in for that upstream, then append its own Hop ID.
+The stand-in MUST be stable for the lifetime of the upstream session and unique per upstream (a random value chosen per session works); advertisements bridged from the same upstream then share an origin, so loop detection, path length, and origin-based deduplication keep working within the supporting region of the mesh.
 
 When a relay receives a namespace advertisement on a session that negotiated this extension, it MUST inspect the HOP_PATH:
 
@@ -164,9 +158,6 @@ This is advisory: the receiver MAY apply additional local policy (e.g. measured 
 
 Two advertisements for the same namespace whose HOP_PATH begins with the same Hop ID share an origin and therefore refer to the same broadcast; a receiver MAY treat them as redundant paths and keep only the best one.
 If the first Hop IDs differ, the advertisements come from distinct origins that happen to reuse a namespace, and a receiver MUST NOT treat them as interchangeable.
-
-A publisher (or relay acting as one) SHOULD advertise only the single best path it currently knows for each namespace.
-If the best path changes (for example after a relay failover), the publisher MAY re-advertise the namespace; the new advertisement, carrying an updated HOP_PATH, replaces the prior one per the namespace-advertisement semantics of {{moqt}}.
 
 
 # EXCLUDE_HOP Parameter
@@ -187,17 +178,14 @@ EXCLUDE_HOP Parameter {
 The single Hop ID to exclude.
 To exclude nothing, a subscriber simply omits the parameter; there is no reserved "exclude nothing" value.
 
-A relay that receives a SUBSCRIBE_NAMESPACE carrying EXCLUDE_HOP MUST NOT send, on that session, any PUBLISH_NAMESPACE whose HOP_PATH contains the excluded Hop ID (including the entry the relay would itself append).
-The exclusion is scoped to the namespace subscription it accompanies.
-
-A subscriber MUST NOT send EXCLUDE_HOP on a session that did not negotiate the Relay Hops extension (see [Setup Negotiation](#setup-negotiation)); a receiver that has not negotiated it cannot parse the parameter, let alone honor it.
+A relay that receives a SUBSCRIBE_NAMESPACE carrying EXCLUDE_HOP MUST NOT send, for that subscription, any namespace advertisement whose HOP_PATH contains the excluded Hop ID (including the entry the relay would itself append).
+The exclusion is scoped to the namespace subscription it accompanies; advertisements sent for other subscriptions, or proactively, are unaffected.
 
 
 # Security Considerations
 An individual Hop ID reveals nothing about a relay's identity or location beyond what its operator encodes in it; a deployment that considers its configured identifiers sensitive can use random values instead.
 A HOP_PATH list does, however, expose the number of hops an advertisement traversed, which can hint at the size and shape of a relay deployment.
 A relay that wishes to hide its internal topology MAY coalesce the hops within its own administrative domain into a single Hop ID, or strip HOP_PATH entirely, before forwarding across a trust boundary (for example, to a subscriber outside the operator's own relay cluster).
-This is analogous to how BGP confederations hide internal AS topology while preserving loop detection; it is a deployment choice, not a requirement.
 
 Because a relay only ever appends to HOP_PATH, it cannot make a competing path appear shorter than it is; the worst a misbehaving relay can do is under-report the upstream portion of its own path to win an advisory tie-break. Since path selection is advisory, the impact is limited to a suboptimal path choice. A receiver MUST NOT make security decisions based on Hop IDs, and SHOULD corroborate path selection with locally measured signals (e.g. RTT) when it matters.
 
@@ -205,7 +193,7 @@ Because a relay only ever appends to HOP_PATH, it cannot make a competing path a
 # IANA Considerations
 
 This document requests the following registrations.
-High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions; they also avoid the greasing pattern (`0x7f * N + 0x9D`).
+High, distinctive values are requested to avoid the low ranges reserved by {{moqt}} and to minimize collisions with provisional registrations by other extensions.
 
 ## MOQT Setup Options
 
