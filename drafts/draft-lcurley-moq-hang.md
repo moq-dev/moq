@@ -344,6 +344,7 @@ The catalog's root `timeline` field advertises the track:
 type TimelineSchema = {
 	"track": string,
 	"timescale": number | undefined,
+	"durationMax": number,
 	"wall": number | undefined,
 }
 ~~~
@@ -351,8 +352,13 @@ type TimelineSchema = {
 The `track` field names the MoQ track carrying the segment records.
 The name `timeline.z` is RECOMMENDED; a consumer MUST use the advertised name rather than assuming it.
 
-The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `wall`.
+The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax` and `wall`.
 If absent, it defaults to 1000 (milliseconds).
+
+The `durationMax` field is the declared upper bound on a segment's `duration`, in `timescale` units.
+The publisher knows its segmentation policy up front (the encoder its keyframe cadence, an importer its source's target duration), so the bound is declared rather than inferred: a consumer can size buffers, and an HLS exporter can write `EXT-X-TARGETDURATION`, from the catalog alone.
+The value MUST NOT change for the life of the broadcast.
+A segment SHOULD NOT exceed the bound; it MAY exceed it slightly (by less than half a second, the tolerance HLS's nearest-integer rounding grants) or when the media offers no valid boundary (a single GOP longer than the bound, see {{timeline-segmentation}}).
 
 The `wall` field, if known, is the wall-clock time of `pts` 0: in `timescale` units, measured from the moq epoch, 2020-01-01T00:00:00Z.
 A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
@@ -409,6 +415,8 @@ Audio groups are short and can be cut anywhere; an audio track contributes every
 A segment MAY span multiple video groups (small GOPs packed into a larger segment).
 
 How boundaries are chosen is publisher policy: following a source's existing segmentation (an imported HLS playlist, CMAF segments on disk), or pacing by a target duration.
+Either way the policy SHOULD keep every segment within the advertised `durationMax` ({{timeline-catalog}}).
+A publisher pacing on keyframes should close a segment at the last keyframe that keeps it within the bound rather than the first keyframe past it, which would overrun by up to one GOP; only a single GOP longer than the bound justifies a longer segment.
 Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every participating track's groups for the span are known.
 Records are therefore self-contained and immediately servable, and the newest record is the live edge.
 

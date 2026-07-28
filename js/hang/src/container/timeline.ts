@@ -52,9 +52,8 @@ export interface Record {
 export const DEFAULT_TIMESCALE = 1000;
 
 /**
- * The default {@link Segmenter} auto-cut threshold in milliseconds: with nobody cutting
- * explicitly, a new segment starts at the first driver keyframe at least this far past the
- * last boundary.
+ * The conventional {@link Segmenter} segment-duration bound in milliseconds (2 seconds), for
+ * callers with no opinion of their own.
  */
 export const DEFAULT_DURATION_MAX_MS = 2000;
 
@@ -75,9 +74,12 @@ export type Kind = "video" | "audio";
 /** Options for a {@link Segmenter}. */
 export interface SegmenterProps {
 	/**
-	 * The auto-cut threshold in milliseconds of media time: a new segment starts at the first
-	 * driver keyframe at least this far past the last boundary. Irrelevant once
-	 * {@link Segmenter.cut} is used (explicit cuts disable auto-cut). Defaults to
+	 * The declared upper bound on a segment's duration, in milliseconds of media time. The
+	 * boundary owner knows it up front (the encoder its keyframe cadence, an importer its
+	 * source's target duration); it is advertised in the catalog's timeline section and
+	 * enforced by auto-cut, which closes a segment at the last driver keyframe that keeps it
+	 * within the bound (only a GOP longer than the bound still overruns). Explicit
+	 * {@link Segmenter.cut}s are expected to honor it too. Defaults to
 	 * {@link DEFAULT_DURATION_MAX_MS}.
 	 */
 	durationMax?: number;
@@ -105,6 +107,9 @@ export class Segmenter {
 	#durationMaxUs: number;
 	// An explicit cut() arrived: the application owns the boundaries; auto-cut stays off.
 	#manual = false;
+	// The driver's latest boundary candidate (a keyframe for a video driver) since the last
+	// boundary: where auto-cut retroactively closes a segment that would otherwise overrun.
+	#candidate?: Time.Micro;
 	// Boundaries of segments not yet flushed: boundaries[0] starts segment #nextSegment.
 	#boundaries: Time.Micro[] = [];
 	// The newest boundary ever created (never popped), the auto-cut reference point.
@@ -119,6 +124,15 @@ export class Segmenter {
 
 	constructor(props: SegmenterProps = {}) {
 		this.#durationMaxUs = (props.durationMax ?? DEFAULT_DURATION_MAX_MS) * 1000;
+	}
+
+	/**
+	 * The declared segment-duration bound, in timeline timescale units (milliseconds),
+	 * rounded up. Advertised in the catalog's timeline section, so it must not change once
+	 * the timeline is published.
+	 */
+	get durationMax(): number {
+		return Math.ceil(this.#durationMaxUs / 1000);
 	}
 
 	/**
@@ -149,6 +163,8 @@ export class Segmenter {
 		const driver = this.#driver ? this.#tracks.get(this.#driver) : undefined;
 		if (!driver || (kind === "video" && driver.kind !== "video")) {
 			this.#driver = name;
+			// A previous driver's pending candidate is not a valid boundary for this one.
+			this.#candidate = undefined;
 		}
 
 		return new Recorder(this, name);
@@ -170,11 +186,42 @@ export class Segmenter {
 		// Auto-cut: only the driver paces, only at a keyframe when the driver is video (an
 		// audio driver can cut anywhere), and never once the application cuts explicitly.
 		if (!this.#manual && this.#driver === name && (keyframe || track.kind !== "video")) {
-			const due = this.#lastBoundary === undefined || pts >= this.#lastBoundary + this.#durationMaxUs;
-			if (due) this.#cutAt(pts);
+			this.#autoCut(pts);
 		}
 
 		this.#tryFlush(false);
+	}
+
+	// Auto-cut policy for a driver boundary candidate at `pts`: keep every segment within the
+	// declared bound whenever the driver's cadence allows. A boundary can only land where the
+	// driver reported (a keyframe for video), so waiting for the first candidate past the
+	// bound would overrun it by up to one GOP; instead, when `pts` would overrun, the segment
+	// is closed retroactively at the previous candidate. Only a GOP longer than the bound
+	// itself still yields an honest long segment.
+	#autoCut(pts: Time.Micro): void {
+		const last = this.#lastBoundary;
+		if (last === undefined) {
+			// The first candidate anchors the first segment.
+			this.#cutAt(pts);
+			this.#candidate = pts;
+			return;
+		}
+
+		const bound = last + this.#durationMaxUs;
+		if (pts > bound) {
+			// This candidate overruns: close the segment at the previous one instead.
+			if (this.#candidate !== undefined && this.#candidate > last) {
+				this.#cutAt(this.#candidate);
+			}
+			// Still overrunning (the whole GOP is longer than the bound): cut here anyway.
+			const cutLast = this.#lastBoundary;
+			if (cutLast !== undefined && pts >= cutLast + this.#durationMaxUs) {
+				this.#cutAt(pts);
+			}
+		} else if (pts === bound) {
+			this.#cutAt(pts);
+		}
+		this.#candidate = pts;
 	}
 
 	/** @internal A track's recorder closed: stop gating completeness on it. */
@@ -183,6 +230,8 @@ export class Segmenter {
 		if (track) track.closed = true;
 		if (this.#driver === name) {
 			this.#driver = this.#elect();
+			// The old driver's pending candidate is not a valid boundary for the new one.
+			this.#candidate = undefined;
 		}
 		this.#tryFlush(false);
 	}
@@ -377,6 +426,7 @@ export class Producer {
 		return {
 			track: this.#track,
 			timescale: u53(DEFAULT_TIMESCALE),
+			durationMax: u53(this.#segmenter.durationMax),
 			wall: this.#wall === undefined ? undefined : u53(this.#wall),
 		};
 	}

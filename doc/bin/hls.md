@@ -40,9 +40,11 @@ exactly the groups that segment's ranges cover from the relay's cache and
 transmuxes them to CMAF (one moof+mdat per fetch). A broadcast whose catalog
 advertises no timeline can't be served this way and is skipped.
 
-`EXT-X-TARGETDURATION` is the longest record duration observed. When the
-timeline advertises a wall-clock anchor, the playlist carries
-`EXT-X-PROGRAM-DATE-TIME`.
+`EXT-X-TARGETDURATION` is the timeline's declared `durationMax`, rounded up to
+whole seconds: the publisher knows and enforces its segment duration (the
+import declares the source playlist's target duration), so the exporter never
+guesses from observed durations. When the timeline advertises a wall-clock
+anchor, the playlist carries `EXT-X-PROGRAM-DATE-TIME`.
 
 One server is path-based, so it can expose many broadcasts at once:
 

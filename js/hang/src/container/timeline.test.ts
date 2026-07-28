@@ -54,6 +54,57 @@ test("auto-cut paces on video keyframes and waits for every track", () => {
 	});
 });
 
+test("auto-cut enforces the declared bound with misaligned keyframes", () => {
+	const { segmenter, records } = capture();
+	const video = segmenter.track("video0", "video");
+
+	// Keyframes every 900ms against the default 2s bound: when the next keyframe would
+	// overrun, the segment closes retroactively at the previous one, so no segment exceeds
+	// the declared bound.
+	for (const [seq, ms] of [
+		[0, 0],
+		[1, 900],
+		[2, 1800],
+		[3, 2700],
+		[4, 3600],
+		[5, 4500],
+	] as const) {
+		video.record(seq, us(ms));
+	}
+	video.close();
+	segmenter.finish();
+
+	expect(records).toEqual([
+		{ segment: 0, pts: 0, duration: 1800, tracks: { video0: [{ start: 0, end: 1 }] } },
+		{ segment: 1, pts: 1800, duration: 1800, tracks: { video0: [{ start: 2, end: 3 }] } },
+		{ segment: 2, pts: 3600, duration: 900, tracks: { video0: [{ start: 4, end: 5 }] } },
+	]);
+});
+
+test("a GOP longer than the bound overruns honestly", () => {
+	const { segmenter, records } = capture();
+	const video = segmenter.track("video0", "video");
+
+	video.record(0, us(0));
+	video.record(1, us(5000));
+	video.record(2, us(7000));
+	video.close();
+	segmenter.finish();
+
+	expect(records).toEqual([
+		{ segment: 0, pts: 0, duration: 5000, tracks: { video0: [{ start: 0, end: 0 }] } },
+		{ segment: 1, pts: 5000, duration: 2000, tracks: { video0: [{ start: 1, end: 1 }] } },
+		{ segment: 2, pts: 7000, duration: 0, tracks: { video0: [{ start: 2, end: 2 }] } },
+	]);
+});
+
+test("the declared bound is exposed for the catalog section", () => {
+	expect(new Segmenter().durationMax).toBe(2000);
+	expect(new Segmenter({ durationMax: 6000 }).durationMax).toBe(6000);
+	// Fractional milliseconds round up: an advertised bound must never understate.
+	expect(new Segmenter({ durationMax: 1000.5 }).durationMax).toBe(1001);
+});
+
 test("explicit cuts disable auto-cut and pack multiple GOPs per segment", () => {
 	const { segmenter, records } = capture();
 	const video = segmenter.track("video0", "video");

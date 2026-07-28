@@ -16,11 +16,12 @@
 //! - **The owner sets policy.** Segment boundaries come from [`Segmenter::cut`] when the
 //!   application knows them (an HLS import following the source playlist, a CMAF file's
 //!   on-disk segments, an encoder that places its own keyframes). When nobody cuts, the
-//!   segmenter auto-cuts: on the driver track's keyframes once
-//!   [`duration_max`](Segmenter::with_duration_max) has elapsed since the last boundary. The
+//!   segmenter auto-cuts on the driver track's keyframes, keeping every segment within the
+//!   `duration_max` bound declared at [`Segmenter::new`] (see there for the exact rule). The
 //!   driver is the first enrolled video track (video keyframes are where a segment must
 //!   start), or the first enrolled track of any kind when the broadcast has no video. The
-//!   first explicit cut disables auto-cut: the application has taken control.
+//!   first explicit cut disables auto-cut: the application has taken control, and its cuts
+//!   are expected to honor the same declared bound.
 //! - **Records flush on completeness.** A segment's record is published only once every
 //!   enrolled track has reported a group at or past the segment's end boundary (or closed),
 //!   proving the segment's group ranges are final on every track. The record is then
@@ -56,8 +57,8 @@ use hang::timeline::{DEFAULT_NAME, Range, Record, RecordExt};
 
 use moq_net::{Timescale, Timestamp};
 
-/// The default [`Segmenter`] auto-cut threshold: with nobody cutting explicitly, a new
-/// segment starts at the first driver keyframe at least this far past the last boundary.
+/// The conventional [`Segmenter`] segment-duration bound (2 seconds), for callers with no
+/// opinion of their own.
 pub const DEFAULT_DURATION_MAX: Timestamp = Timestamp::new_const(2, Timescale::SECOND);
 
 /// What a media track carries, declared when it enrolls via [`Segmenter::track`].
@@ -86,11 +87,18 @@ struct TrackState {
 
 /// The state one [`Segmenter`] guards.
 struct State {
-	/// The auto-cut threshold (see [`Segmenter::with_duration_max`]).
+	/// The declared segment-duration bound (see [`Segmenter::new`]). Frozen once the
+	/// timeline track advertises it.
 	duration_max: Timestamp,
 	/// An explicit [`cut`](Segmenter::cut) arrived: the application owns the boundaries and
 	/// auto-cut stays off for the rest of the broadcast.
 	manual: bool,
+	/// The driver's latest reported boundary candidate (a keyframe for a video driver) since
+	/// the last boundary: where auto-cut retroactively closes a segment that would otherwise
+	/// overrun `duration_max`.
+	candidate: Option<Timestamp>,
+	/// A segment already overran the declared bound and was warned about; log it once.
+	warned_overrun: bool,
 	/// Boundaries of segments not yet flushed: `boundaries[0]` starts segment `next_segment`,
 	/// which spans to `boundaries[1]`.
 	boundaries: VecDeque<Timestamp>,
@@ -138,17 +146,47 @@ impl State {
 		if !self.manual && self.driver.as_deref() == Some(name) {
 			let kind = self.tracks[name].kind;
 			if keyframe || kind != Kind::Video {
-				let due = match self.last_boundary {
-					None => true,
-					Some(last) => pts.as_micros() >= last.as_micros() + self.duration_max.as_micros(),
-				};
-				if due {
-					self.cut_at(pts);
-				}
+				self.auto_cut(pts);
 			}
 		}
 
 		self.try_flush(false);
+	}
+
+	/// Auto-cut policy for a driver boundary candidate at `pts`: keep every segment within
+	/// the declared `duration_max` whenever the driver's cadence allows.
+	///
+	/// A boundary can only land where the driver reported (a keyframe for video), so waiting
+	/// for the first candidate past the bound would overrun it by up to one GOP. Instead,
+	/// when `pts` would overrun, the segment is closed retroactively at the previous
+	/// candidate. Only a GOP longer than the bound itself still yields an honest long
+	/// segment.
+	fn auto_cut(&mut self, pts: Timestamp) {
+		let Some(last) = self.last_boundary else {
+			// The first candidate anchors the first segment.
+			self.cut_at(pts);
+			self.candidate = Some(pts);
+			return;
+		};
+
+		let bound = last.as_micros() + self.duration_max.as_micros();
+		if pts.as_micros() > bound {
+			// This candidate overruns: close the segment at the previous one instead.
+			if let Some(candidate) = self.candidate
+				&& candidate.as_micros() > last.as_micros()
+			{
+				self.cut_at(candidate);
+			}
+			// Still overrunning (the whole GOP is longer than the bound): cut here anyway.
+			if let Some(last) = self.last_boundary
+				&& pts.as_micros() >= last.as_micros() + self.duration_max.as_micros()
+			{
+				self.cut_at(pts);
+			}
+		} else if pts.as_micros() == bound {
+			self.cut_at(pts);
+		}
+		self.candidate = Some(pts);
 	}
 
 	/// A track's recorder was dropped: stop gating completeness on it and re-elect the driver.
@@ -158,6 +196,8 @@ impl State {
 		}
 		if self.driver.as_deref() == Some(name) {
 			self.driver = self.elect();
+			// The old driver's pending candidate is not a valid boundary for the new one.
+			self.candidate = None;
 		}
 		self.try_flush(false);
 	}
@@ -221,6 +261,21 @@ impl State {
 				.unwrap_or(pts)
 				.saturating_sub(pts),
 		};
+
+		// A segment materially past the declared bound means the producer misdeclared it (or
+		// the media left no valid boundary); the catalog already advertised the bound, so all
+		// we can do is say so. Allow the sub-half-second slack HLS rounding grants.
+		let slack = self.timescale.as_u64() / 2;
+		let bound = (self.duration_max.as_micros() * self.timescale.as_u64() as u128).div_ceil(1_000_000) as u64;
+		if !self.warned_overrun && duration > bound + slack {
+			self.warned_overrun = true;
+			tracing::warn!(
+				segment = self.next_segment,
+				duration,
+				duration_max = bound,
+				"segment overran the declared duration_max; consumers (e.g. HLS TARGETDURATION) trust the declared bound"
+			);
+		}
 
 		let mut record = Record::new(self.next_segment, pts, duration);
 		self.next_segment += 1;
@@ -304,18 +359,29 @@ pub struct Segmenter {
 }
 
 impl Default for Segmenter {
+	/// A segmenter declaring the conventional [`DEFAULT_DURATION_MAX`] bound.
 	fn default() -> Self {
-		Self::new()
+		Self::new(DEFAULT_DURATION_MAX)
 	}
 }
 
 impl Segmenter {
-	/// A fresh segmenter: no tracks, no boundaries, auto-cut at [`DEFAULT_DURATION_MAX`].
-	pub fn new() -> Self {
+	/// A fresh segmenter declaring `duration_max`, the upper bound on a segment's duration.
+	///
+	/// The bound is policy the boundary owner knows up front: the encoder its keyframe
+	/// cadence, an importer its source's target duration. It is advertised in the catalog's
+	/// timeline section (consumers derive HLS `EXT-X-TARGETDURATION` from it, so it must not
+	/// change once advertised) and enforced by auto-cut: a segment is closed at the last
+	/// driver keyframe that keeps it within the bound, falling back to an honest overrun
+	/// only when a single GOP exceeds the bound. Explicit [`cut`](Self::cut)s are expected
+	/// to honor it too; a materially longer segment is logged.
+	pub fn new(duration_max: Timestamp) -> Self {
 		Self {
 			state: Arc::new(Mutex::new(State {
-				duration_max: DEFAULT_DURATION_MAX,
+				duration_max,
 				manual: false,
+				candidate: None,
+				warned_overrun: false,
 				boundaries: VecDeque::new(),
 				last_boundary: None,
 				next_segment: 0,
@@ -328,16 +394,19 @@ impl Segmenter {
 		}
 	}
 
-	/// Set the auto-cut threshold: a new segment starts at the first driver keyframe at least
-	/// this far past the last boundary. Translates to HLS `EXT-X-TARGETDURATION` (though an
-	/// exporter should trust the observed durations: a long GOP makes a longer segment, since
-	/// a boundary can only land on a keyframe).
+	/// Replace the declared segment-duration bound, for an owner that learns it after the
+	/// segmenter exists (e.g. an HLS import reading the source playlist's target duration).
 	///
-	/// Applies to the shared state, so it also works on a clone that is already wired in.
-	/// Irrelevant once [`cut`](Self::cut) is used; explicit cuts disable auto-cut.
-	pub fn with_duration_max(self, duration_max: Timestamp) -> Self {
-		self.state.lock().unwrap().duration_max = duration_max;
-		self
+	/// Errors once the timeline track exists: the catalog has advertised the bound by then,
+	/// and consumers hold it for the life of the broadcast. Set it before the first media
+	/// track enrolls.
+	pub fn set_duration_max(&self, duration_max: Timestamp) -> crate::Result<()> {
+		let mut state = self.state.lock().unwrap();
+		if state.sink.is_some() {
+			return Err(crate::Error::TimelineAdvertised);
+		}
+		state.duration_max = duration_max;
+		Ok(())
 	}
 
 	/// Declare a segment boundary at `pts`: the segment before it ends, the one after starts.
@@ -382,6 +451,8 @@ impl Segmenter {
 		};
 		if promote {
 			state.driver = Some(name.to_string());
+			// A previous driver's pending candidate is not a valid boundary for this one.
+			state.candidate = None;
 		}
 
 		Recorder {
@@ -429,6 +500,9 @@ pub struct Producer {
 	state: Arc<Mutex<State>>,
 	track: String,
 	timescale: Timescale,
+	// The declared segment-duration bound in timescale units, frozen at creation (the
+	// segmenter rejects changes once the timeline exists).
+	duration_max: u64,
 	// The wall-clock time of pts 0, in timescale units since the moq epoch, advertised in
 	// section(). Shared across clones.
 	wall: Arc<Mutex<Option<u64>>>,
@@ -442,7 +516,7 @@ impl Producer {
 		let config = moq_json::stream::ProducerConfig::default().with_compression(true);
 		let mut sink = moq_json::stream::Producer::new(net, config);
 
-		let timescale = {
+		let (timescale, duration_max) = {
 			let mut state = segmenter.state.lock().unwrap();
 			for record in state.buffered.drain(..) {
 				if let Err(err) = sink.append(&record) {
@@ -451,20 +525,24 @@ impl Producer {
 				}
 			}
 			state.sink = Some(sink);
-			state.timescale
+			// Freeze the declared bound in the section's timescale, rounding up: an
+			// advertised bound must never understate the declared one.
+			let units = (state.duration_max.as_micros() * state.timescale.as_u64() as u128).div_ceil(1_000_000) as u64;
+			(state.timescale, units)
 		};
 
 		Ok(Self {
 			state: segmenter.state.clone(),
 			track: DEFAULT_NAME.to_string(),
 			timescale,
+			duration_max,
 			wall: Arc::new(Mutex::new(None)),
 		})
 	}
 
 	/// The catalog's root section advertising this timeline.
 	pub fn section(&self) -> Timeline {
-		let mut section = Timeline::new(&self.track);
+		let mut section = Timeline::new(&self.track, self.duration_max);
 		section.timescale = self.timescale.as_u64() as u32;
 		section.wall = *self.wall.lock().unwrap();
 		section
@@ -476,7 +554,9 @@ impl Producer {
 	/// Stored as the extrapolated wall-clock time of pts 0, the single value the
 	/// [`Timeline::wall`](hang::catalog::Timeline::wall) field carries: in this timeline's timescale,
 	/// measured from the moq epoch ([`MOQ_EPOCH_UNIX_MILLIS`](hang::catalog::MOQ_EPOCH_UNIX_MILLIS),
-	/// 2020). Read every time the catalog republishes the section, so set it early.
+	/// 2020). The catalog snapshots [`section`](Self::section) when it advertises the timeline, so
+	/// go through [`catalog::Producer::set_wall`](crate::catalog::Producer::set_wall) (which
+	/// re-advertises) rather than calling this after the timeline is advertised.
 	pub fn set_wall(&mut self, pts: Timestamp, wall: SystemTime) {
 		let unix_millis = wall
 			.duration_since(SystemTime::UNIX_EPOCH)
@@ -632,7 +712,7 @@ mod test {
 
 	fn setup() -> (moq_net::broadcast::Producer, Segmenter, Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let segmenter = Segmenter::new();
+		let segmenter = Segmenter::default();
 		let producer = Producer::new(&mut broadcast, &segmenter).unwrap();
 		(broadcast, segmenter, producer)
 	}
@@ -669,6 +749,75 @@ mod test {
 				entry(2, 4_000, 0, &[("video0", &[(2, 2)]), ("audio0", &[(8, 8)])]),
 			]
 		);
+	}
+
+	// Keyframes that don't divide duration_max evenly must not accumulate overrun: when the
+	// next keyframe would overrun the bound, the segment closes retroactively at the previous
+	// keyframe, so every segment stays within the declared bound.
+	#[tokio::test]
+	async fn auto_cut_enforces_the_declared_bound() {
+		let (broadcast, segmenter, mut timeline) = setup();
+		let mut video = segmenter.track("video0", Kind::Video);
+
+		// Keyframes every 900ms against the default 2s bound.
+		for (seq, t) in [(0u64, 0u64), (1, 900), (2, 1_800), (3, 2_700), (4, 3_600), (5, 4_500)] {
+			video.record(seq, ms(t), true);
+		}
+		drop(video);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 1_800, &[("video0", &[(0, 1)])]),
+				entry(1, 1_800, 1_800, &[("video0", &[(2, 3)])]),
+				entry(2, 3_600, 900, &[("video0", &[(4, 5)])]),
+			]
+		);
+	}
+
+	// A single GOP longer than the bound leaves no valid boundary; the segment overruns
+	// honestly rather than splitting a group.
+	#[tokio::test]
+	async fn a_gop_longer_than_the_bound_overruns_honestly() {
+		let (broadcast, segmenter, mut timeline) = setup();
+		let mut video = segmenter.track("video0", Kind::Video);
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(5_000), true);
+		video.record(2, ms(7_000), true);
+		drop(video);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 5_000, &[("video0", &[(0, 0)])]),
+				entry(1, 5_000, 2_000, &[("video0", &[(1, 1)])]),
+				entry(2, 7_000, 0, &[("video0", &[(2, 2)])]),
+			]
+		);
+	}
+
+	// The declared bound is set at construction (or before the timeline track exists) and
+	// frozen once advertised: the catalog section carries it for the life of the broadcast.
+	#[test]
+	fn duration_max_is_declared_and_frozen() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let segmenter = Segmenter::new(Timestamp::from_millis(6_500).unwrap());
+		segmenter
+			.set_duration_max(Timestamp::from_millis(6_000).unwrap())
+			.expect("settable before the timeline exists");
+
+		let timeline = Producer::new(&mut broadcast, &segmenter).unwrap();
+		assert_eq!(timeline.section().duration_max, 6_000);
+		assert!(
+			segmenter
+				.set_duration_max(Timestamp::from_millis(4_000).unwrap())
+				.is_err(),
+			"the advertised bound must not change"
+		);
+		assert_eq!(timeline.section().duration_max, 6_000);
 	}
 
 	#[tokio::test]
@@ -782,7 +931,10 @@ mod test {
 		audio.record(0, ms(0), true);
 		audio.record(1, ms(2_000), true); // audio-driven boundary at 2s
 
-		// Video joins: it becomes the driver, and the next boundary lands on ITS keyframe.
+		// Video joins: it becomes the driver, and boundaries land on ITS keyframes. The
+		// keyframe at 4.1s would leave a 2.1s segment, so the segment is closed retroactively
+		// at the 2.1s keyframe, keeping every segment within the declared 2s bound (and
+		// starting the video segment on its keyframe).
 		let mut video = segmenter.track("video0", Kind::Video);
 		video.record(0, ms(2_100), true);
 		video.record(1, ms(4_100), true);
@@ -795,8 +947,9 @@ mod test {
 			drain(&broadcast, &timeline).await,
 			vec![
 				entry(0, 0, 2_000, &[("audio0", &[(0, 0)])]),
-				entry(1, 2_000, 2_100, &[("audio0", &[(1, 1)]), ("video0", &[(0, 0)])]),
-				entry(2, 4_100, 100, &[("audio0", &[(2, 2)]), ("video0", &[(1, 1)])]),
+				entry(1, 2_000, 100, &[("audio0", &[(1, 1)])]),
+				entry(2, 2_100, 2_000, &[("video0", &[(0, 0)])]),
+				entry(3, 4_100, 100, &[("audio0", &[(2, 2)]), ("video0", &[(1, 1)])]),
 			]
 		);
 	}
@@ -925,7 +1078,7 @@ mod test {
 	#[tokio::test]
 	async fn records_flushed_before_the_track_exists_are_buffered() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let segmenter = Segmenter::new();
+		let segmenter = Segmenter::default();
 
 		// Segments complete before any timeline track exists (e.g. the catalog wires the
 		// track lazily): they publish the moment it attaches.
@@ -983,7 +1136,7 @@ mod test {
 	#[tokio::test]
 	async fn rejects_an_out_of_range_pts() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let segmenter = Segmenter::new();
+		let segmenter = Segmenter::default();
 		let timeline = Producer::new(&mut broadcast, &segmenter).unwrap();
 
 		// Publish a record whose pts no Timestamp can hold, bypassing the segmenter.

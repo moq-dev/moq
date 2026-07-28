@@ -124,7 +124,7 @@ impl<E: CatalogExt> Producer<E> {
 			clock: crate::Clock::new(),
 			broadcast: broadcast.clone(),
 			timeline: Arc::new(Mutex::new(None)),
-			segmenter: crate::timeline::Segmenter::new(),
+			segmenter: crate::timeline::Segmenter::default(),
 		})
 	}
 
@@ -252,11 +252,24 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// The broadcast's [`Segmenter`](crate::timeline::Segmenter): where the application cuts
-	/// segment boundaries ([`cut`](crate::timeline::Segmenter::cut)) or tunes the auto-cut
-	/// threshold, and where tracks not built through
+	/// segment boundaries ([`cut`](crate::timeline::Segmenter::cut)) or declares the
+	/// segment-duration bound ([`set_duration_max`](crate::timeline::Segmenter::set_duration_max),
+	/// before the first media track enrolls), and where tracks not built through
 	/// [`media_producer`](Self::media_producer) enroll.
 	pub fn segmenter(&self) -> crate::timeline::Segmenter {
 		self.segmenter.clone()
+	}
+
+	/// Set the timeline's wall-clock anchor (see
+	/// [`timeline::Producer::set_wall`](crate::timeline::Producer::set_wall)) and re-advertise
+	/// the catalog's `timeline` section so consumers see it.
+	///
+	/// Creates the timeline on first use, like [`timeline`](Self::timeline).
+	pub fn set_wall(&mut self, pts: moq_net::Timestamp, wall: std::time::SystemTime) -> crate::Result<()> {
+		let mut timeline = self.timeline()?;
+		timeline.set_wall(pts, wall);
+		self.lock().timeline = Some(timeline.section());
+		Ok(())
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.

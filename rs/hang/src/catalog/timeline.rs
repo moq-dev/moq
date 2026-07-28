@@ -31,6 +31,17 @@ pub struct Timeline {
 	#[serde(default = "Timeline::default_timescale")]
 	pub timescale: u32,
 
+	/// The declared upper bound on a segment's duration, in [`timescale`](Self::timescale)
+	/// units.
+	///
+	/// The encoder knows its keyframe cadence (or the cutter its boundaries), so the bound is
+	/// declared up front rather than observed: a consumer can size buffers, and an HLS
+	/// exporter can write `EXT-X-TARGETDURATION`, from the catalog alone. A segment may
+	/// exceed it only slightly (under half a second, the same tolerance HLS's
+	/// nearest-integer rounding grants), or arbitrarily when the media leaves no valid
+	/// boundary (a GOP longer than the bound).
+	pub duration_max: u64,
+
 	/// The wall-clock time of `pts` 0, in [`timescale`](Self::timescale) units since the moq
 	/// epoch ([`MOQ_EPOCH_UNIX_MILLIS`], 2020-01-01), if known. A consumer derives the wall-clock
 	/// time of any group as `wall + pts`, and Unix time by adding the moq epoch back (an absolute
@@ -48,12 +59,14 @@ impl Timeline {
 		1000
 	}
 
-	/// A timeline section naming `track`, at the default millisecond timescale and with no
+	/// A timeline section naming `track` with the declared segment-duration bound
+	/// `duration_max` (in timescale units), at the default millisecond timescale and with no
 	/// wall-clock anchor. Set [`timescale`](Self::timescale) / [`wall`](Self::wall) afterward.
-	pub fn new(track: impl Into<String>) -> Self {
+	pub fn new(track: impl Into<String>, duration_max: u64) -> Self {
 		Self {
 			track: track.into(),
 			timescale: Self::default_timescale(),
+			duration_max,
 			wall: None,
 		}
 	}
@@ -65,19 +78,29 @@ mod test {
 
 	#[test]
 	fn defaults_timescale_to_ms() {
-		let json = r#"{"track":"timeline.z"}"#;
+		let json = r#"{"track":"timeline.z","durationMax":2000}"#;
 		let decoded: Timeline = serde_json::from_str(json).unwrap();
 		assert_eq!(decoded.track, "timeline.z");
 		assert_eq!(decoded.timescale, 1000);
+		assert_eq!(decoded.duration_max, 2000);
 		assert_eq!(decoded.wall, None);
 	}
 
 	#[test]
+	fn duration_max_is_required() {
+		let json = r#"{"track":"timeline.z"}"#;
+		assert!(serde_json::from_str::<Timeline>(json).is_err());
+	}
+
+	#[test]
 	fn roundtrip_with_wall() {
-		let mut timeline = Timeline::new("timeline.z");
+		let mut timeline = Timeline::new("timeline.z", 2000);
 		timeline.wall = Some(1_751_846_400_000);
 		let json = serde_json::to_string(&timeline).unwrap();
-		assert_eq!(json, r#"{"track":"timeline.z","timescale":1000,"wall":1751846400000}"#);
+		assert_eq!(
+			json,
+			r#"{"track":"timeline.z","timescale":1000,"durationMax":2000,"wall":1751846400000}"#
+		);
 		assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), timeline);
 	}
 }

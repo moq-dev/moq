@@ -113,6 +113,11 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
+	/// The timeline's declared segment-duration bound was changed after the catalog
+	/// advertised it; set it before the first media track enrolls.
+	#[error("the timeline is already advertised in the catalog")]
+	TimelineAdvertised,
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

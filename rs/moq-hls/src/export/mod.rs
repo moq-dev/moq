@@ -330,7 +330,10 @@ mod tests {
 		assert_eq!(playlist.segments[0].segment, 0);
 		assert_eq!(playlist.segments[0].duration, 2.0);
 		assert_eq!(playlist.segments[1].segment, 1);
-		assert_eq!(playlist.target_duration, 2, "ceil of the longest timeline gap");
+		assert_eq!(
+			playlist.target_duration, 2,
+			"the catalog's declared durationMax, in whole seconds"
+		);
 		assert!(!playlist.finished);
 
 		let rendered = rendition.media_playlist(None).expect("playable");
@@ -532,7 +535,7 @@ mod tests {
 		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME, 2000));
 		renditions.sync(&source, &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
@@ -540,7 +543,7 @@ mod tests {
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
 		let empty = moq_mux::catalog::hang::Catalog {
-			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME)),
+			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME, 2000)),
 			..Default::default()
 		};
 		renditions.sync(&source, &empty);

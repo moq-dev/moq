@@ -333,6 +333,9 @@ struct TrackState {
 	/// Whether this rendition declares the broadcast's segment boundaries (the source
 	/// playlist's segmentation): one cut per pushed segment. Exactly one track cuts.
 	cuts: bool,
+	/// The cutting track already declared the source's target duration as the broadcast's
+	/// segment-duration bound.
+	declared: bool,
 	/// The importer for the current init segment generation, minted by [`Self::ensure_map`].
 	importer: Option<Fmp4>,
 	next_sequence: Option<u64>,
@@ -350,6 +353,7 @@ impl TrackState {
 			select,
 			sink,
 			cuts,
+			declared: false,
 			importer: None,
 			next_sequence: None,
 			next_discontinuity: None,
@@ -365,6 +369,22 @@ impl TrackState {
 		if target_duration.is_none() {
 			*target_duration = Some(playlist.target_duration);
 		}
+
+		// The cutting track reproduces the source's segmentation, so the source's target
+		// duration is the broadcast's declared bound; declare it before consuming segments,
+		// since the first init segment advertises the timeline and freezes it.
+		if self.cuts && !self.declared {
+			self.declared = true;
+			match moq_net::Timestamp::new(playlist.target_duration.max(1), moq_net::Timescale::SECOND) {
+				Ok(bound) => {
+					if let Err(err) = self.sink.catalog.segmenter().set_duration_max(bound) {
+						warn!(label = %self.label, %err, "failed to declare the source target duration");
+					}
+				}
+				Err(err) => warn!(label = %self.label, %err, "unrepresentable source target duration"),
+			}
+		}
+
 		self.consume_segments(fetcher, &playlist).await
 	}
 

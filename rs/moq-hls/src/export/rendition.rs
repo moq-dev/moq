@@ -87,10 +87,6 @@ pub struct Rendition {
 	/// The source and (possibly sibling) broadcast reference, resolved lazily for FETCH.
 	source: moq_mux::Source,
 	sibling: Option<moq_net::PathRelativeOwned>,
-	/// The largest `EXT-X-TARGETDURATION` advertised so far, in seconds. Latched monotonically:
-	/// HLS forbids a live playlist's target duration from changing, so it never shrinks even
-	/// after a long segment evicts from the window.
-	target_duration: std::sync::atomic::AtomicU64,
 	/// The init segment, built on first request.
 	init: tokio::sync::Mutex<Option<Bytes>>,
 }
@@ -118,7 +114,6 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new()),
 			source: source.clone(),
 			sibling: config.broadcast.clone(),
-			target_duration: std::sync::atomic::AtomicU64::new(0),
 			init: tokio::sync::Mutex::new(None),
 		}
 	}
@@ -137,7 +132,6 @@ impl Rendition {
 			live: Arc::new(segments::Producer::new()),
 			source: source.clone(),
 			sibling: config.broadcast.clone(),
-			target_duration: std::sync::atomic::AtomicU64::new(0),
 			init: tokio::sync::Mutex::new(None),
 		}
 	}
@@ -200,16 +194,15 @@ impl Rendition {
 	pub(crate) fn playlist(&self) -> Snapshot {
 		let window = self.live.window();
 
-		// EXT-X-TARGETDURATION must be >= every segment's duration and, per the HLS spec, must not
-		// change over a playlist's lifetime. Records carry explicit durations, so take the longest
-		// seen so far and latch it monotonically (fetch_max) so a long segment evicting from the
-		// window can never shrink the advertised value.
-		let longest = window.segments.iter().map(|s| s.duration).fold(0.0f64, f64::max);
-		let want = (longest.ceil() as u64).max(1);
+		// EXT-X-TARGETDURATION comes straight from the catalog's declared bound: the encoder
+		// (or cutter) knows and enforces its segment duration, so the exporter never has to
+		// guess from observed durations. Rounded up, since HLS wants whole seconds and the
+		// advertised value must never understate the bound.
 		let target_duration = self
-			.target_duration
-			.fetch_max(want, std::sync::atomic::Ordering::Relaxed)
-			.max(want);
+			.section
+			.duration_max
+			.div_ceil((self.section.timescale as u64).max(1))
+			.max(1);
 
 		let program_date_time = window.segments.first().and_then(|first| self.wall_clock(first.pts));
 
