@@ -502,9 +502,12 @@ mod tests {
 		])
 		.expect("demo/boy/justfile invocation should parse");
 
-		assert_eq!(
-			config.client.connect.as_ref().map(|url| url.as_str()),
-			Some("http://localhost:4443/")
-		);
+		let connect = config
+			.client
+			.connect
+			.expect("--client-connect should reach the client config");
+		assert_eq!(connect.scheme(), "http");
+		assert_eq!(connect.host_str(), Some("localhost"));
+		assert_eq!(connect.port(), Some(4443));
 	}
 }
