@@ -6,13 +6,14 @@
 // degrades into a paragraph.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMarkdownRenderer } from "vitepress";
 import { type DraftPage, renderDrafts } from "./drafts";
 
-const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..");
-const md = await createMarkdownRenderer(srcDir);
+const here = dirname(fileURLToPath(import.meta.url));
+const md = await createMarkdownRenderer(join(here, ".."));
 
 const pages = renderDrafts();
 
@@ -23,6 +24,12 @@ function content(page: DraftPage): string {
 
 function html(page: DraftPage): string {
 	return md.render(content(page));
+}
+
+/** The kramdown-rfc source this page was generated from, metadata block stripped. */
+function source(page: DraftPage): string {
+	const raw = readFileSync(join(here, "../../drafts", `${page.name}.md`), "utf8");
+	return raw.slice(raw.indexOf("--- abstract"));
 }
 
 test("every draft produces a page", () => {
@@ -76,15 +83,12 @@ describe("citations resolve", () => {
 
 describe("tables render as tables", () => {
 	test.each(pages.map((p) => [p.name, p] as const))("%s", (_name, page) => {
-		// kramdown draws separators between body rows; GFM allows exactly one
-		// delimiter, below the header. Every source table must survive.
-		const source = content(page)
-			.split("\n")
-			.filter((line) => line.trim().startsWith("|"));
-		if (source.length === 0) return;
-
+		// Counted against the *source*, not the generated markdown: comparing
+		// the output to itself would still pass if a table were dropped whole.
+		// kramdown draws separators between body rows and GFM allows exactly
+		// one, below the header, so each source table must survive as one table.
 		const rendered = html(page);
-		expect(rendered.match(/<table/g) ?? []).toHaveLength(countTables(content(page)));
+		expect(rendered.match(/<table/g) ?? []).toHaveLength(countTables(source(page)));
 
 		// A dropped delimiter leaves the rows as paragraph text.
 		expect(rendered).not.toMatch(/<p>\s*\|/);
@@ -113,19 +117,28 @@ describe("tables render as tables", () => {
 	});
 });
 
-/** Count the table blocks in a page: runs of consecutive `|` lines. */
+/**
+ * Count the table blocks in a body: runs of consecutive `|` lines.
+ *
+ * Handles both fence styles, since the sources use `~~~` and the generated
+ * pages use ```` ``` ````.
+ */
 function countTables(body: string): number {
 	const lines = body.split("\n");
 	let count = 0;
 	let fenced = false;
+	let previous = false;
 
-	for (let i = 0; i < lines.length; i++) {
-		if (lines[i].startsWith("```")) fenced = !fenced;
-		if (fenced) continue;
+	for (const line of lines) {
+		if (/^(~~~|```)/.test(line)) {
+			fenced = !fenced;
+			previous = false;
+			continue;
+		}
 
-		const row = lines[i].trim().startsWith("|");
-		const previous = i > 0 && lines[i - 1].trim().startsWith("|");
+		const row = !fenced && line.trim().startsWith("|");
 		if (row && !previous) count++;
+		previous = row;
 	}
 	return count;
 }
