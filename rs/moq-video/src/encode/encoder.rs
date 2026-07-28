@@ -7,7 +7,7 @@
 
 use super::Encoded;
 use super::backend::{self, Backend};
-use crate::{Error, Frame, Size};
+use crate::{Color, Error, Frame, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -65,6 +65,14 @@ pub struct Config {
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	pub kind: Kind,
+	/// The color space of the input frames, written into the bitstream's VUI so a
+	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
+	/// what the crate's own RGB conversions produce and what a player falls back
+	/// to, so leaving it unset keeps the pixels and the label in agreement.
+	///
+	/// Set it only when feeding frames the crate did not convert and whose space
+	/// you know from elsewhere.
+	pub color: Option<Color>,
 }
 
 impl Config {
@@ -80,12 +88,21 @@ impl Config {
 			gop: framerate.saturating_mul(2).max(1),
 			codec: Codec::default(),
 			kind: Kind::Auto,
+			color: None,
 		}
 	}
 
 	/// The encoded resolution.
 	pub fn size(&self) -> Size {
 		Size::new(self.width, self.height)
+	}
+
+	/// Resolved input color space: explicit override, or the size-based guess
+	/// every player makes for an untagged stream. Backends write this into the
+	/// VUI; the crate's RGB conversions pick the same answer for the same size,
+	/// so the samples match what the bitstream claims.
+	pub(crate) fn resolved_color(&self) -> Color {
+		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
@@ -980,5 +997,37 @@ mod tests {
 				.unwrap()
 				.is_empty()
 		);
+	}
+
+	/// The hardware encoder states the color space too, and states the one the
+	/// pixels were actually converted into. VideoToolbox takes the three
+	/// properties as a request, so read the SPS back rather than trusting that it
+	/// honored them.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_sps_declares_the_color_space() {
+		use super::backend::test_util::declared_color;
+		use crate::Color;
+
+		for (size, expected) in [
+			(Size::new(640, 480), Color::Bt601Limited),
+			(Size::new(1920, 1080), Color::Bt709Limited),
+		] {
+			let config = Config {
+				kind: Kind::Named("videotoolbox".into()),
+				..Config::new(size.width, size.height, 30)
+			};
+			let mut encoder = Encoder::new(&config).expect("videotoolbox is available on macOS");
+
+			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
+			let surface = crate::frame::Surface::rgba(&rgba, size).unwrap();
+			encoder.keyframe();
+			let frames = encoder
+				.encode(&Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap()))
+				.unwrap();
+
+			let keyframe = frames.first().expect("a keyframe");
+			assert_eq!(declared_color(&keyframe.payload), Some(expected), "{size} SPS");
+		}
 	}
 }

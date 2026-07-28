@@ -137,3 +137,48 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 
 	Err(Error::NoEncoder(tried.join(", ")))
 }
+
+#[cfg(test)]
+pub(crate) mod test_util {
+	use h264_reader::nal::sps::SeqParameterSet;
+	use h264_reader::nal::{Nal, RefNal, UnitType};
+
+	use crate::Color;
+
+	/// The color space an H.264 Annex-B stream declares in its SPS, or `None` if
+	/// it carries no color description and a decoder would have to guess.
+	///
+	/// Reads the bitstream rather than the encoder's config, so a backend that
+	/// quietly drops the VUI (or a driver that ignores it) fails the test instead
+	/// of passing on our own bookkeeping.
+	pub(crate) fn declared_color(annexb: &[u8]) -> Option<Color> {
+		// Every 4-byte start code contains a 3-byte one at offset 1, so scanning
+		// for the short form finds both.
+		let starts: Vec<usize> = (0..annexb.len().saturating_sub(2))
+			.filter(|&i| annexb[i..i + 3] == [0, 0, 1])
+			.map(|i| i + 3)
+			.collect();
+
+		let sps = starts.iter().enumerate().find_map(|(n, &start)| {
+			// Bound the NAL at the next start code: a trailing slice would
+			// leave the SPS parser reading into the following NAL.
+			let end = starts.get(n + 1).map_or(annexb.len(), |&next| next - 3);
+			let nal = RefNal::new(&annexb[start..end], &[], true);
+			match nal.header().ok()?.nal_unit_type() {
+				UnitType::SeqParameterSet => SeqParameterSet::from_bits(nal.rbsp_bits()).ok(),
+				_ => None,
+			}
+		})?;
+
+		let signal = sps.vui_parameters.as_ref()?.video_signal_type.as_ref()?;
+		let description = signal.colour_description.as_ref()?;
+		let limited = !signal.video_full_range_flag;
+		Some(match (description.matrix_coefficients, limited) {
+			(1, true) => Color::Bt709Limited,
+			(1, false) => Color::Bt709Full,
+			(5 | 6, true) => Color::Bt601Limited,
+			(5 | 6, false) => Color::Bt601Full,
+			(other, _) => panic!("unexpected matrix_coefficients {other}"),
+		})
+	}
+}

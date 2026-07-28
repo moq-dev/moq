@@ -5,13 +5,15 @@
 
 use bytes::Bytes;
 use openh264::OpenH264API;
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType};
+use openh264::encoder::{
+	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType, VuiConfig,
+};
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
 
 use super::super::encoder::Config;
 use super::{Backend, Encoded};
-use crate::{Error, Frame};
+use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -31,13 +33,23 @@ impl Openh264 {
 	}
 
 	fn new(config: &Config) -> Result<Self, Error> {
+		let color = config.resolved_color();
+		// State the color space in the SPS so a decoder doesn't fall back to
+		// guessing it from the frame height.
+		let vui = match color {
+			Color::Bt601Limited | Color::Bt601Full => VuiConfig::bt601(),
+			Color::Bt709Limited | Color::Bt709Full => VuiConfig::bt709(),
+		}
+		.full_range(!color.limited());
+
 		let cfg = EncoderConfig::new()
 			.bitrate(BitRate::from_bps(config.resolved_bitrate().min(u32::MAX as u64) as u32))
 			.max_frame_rate(FrameRate::from_hz(config.framerate as f32))
 			.rate_control_mode(RateControlMode::Bitrate)
 			// Real-time camera: prioritize latency over compression.
 			.usage_type(UsageType::CameraVideoRealTime)
-			.intra_frame_period(IntraFramePeriod::from_num_frames(config.gop));
+			.intra_frame_period(IntraFramePeriod::from_num_frames(config.gop))
+			.vui(vui);
 
 		let encoder = Encoder::with_api_config(OpenH264API::from_source(), cfg)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("openh264 init: {e}")))?;
@@ -236,5 +248,40 @@ mod tests {
 		enc.encode(&gray(), false).unwrap();
 
 		assert_eq!(enc.read_bitrate(), (opened / 4) as i64, "the deferred rate resurrected");
+	}
+
+	/// The SPS states the color space, so a decoder never falls back to guessing
+	/// it from the frame height, and it states the space the pixels were actually
+	/// converted into. Read back out of the bitstream, not off our own config.
+	#[test]
+	fn the_sps_declares_the_color_space() {
+		use super::super::test_util::declared_color;
+		use crate::{Color, Size};
+
+		for (size, expected) in [
+			(Size::new(640, 480), Color::Bt601Limited),
+			(Size::new(1920, 1080), Color::Bt709Limited),
+		] {
+			let config = Config {
+				kind: Kind::Software,
+				..Config::new(size.width, size.height, 30)
+			};
+			let mut enc = Openh264::new(&config).unwrap();
+
+			// Saturated red: the color the two matrices disagree most about, so a
+			// mislabeled stream is a visible bug rather than a rounding difference.
+			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
+			let surface = Surface::rgba(&rgba, size).unwrap();
+			let frame = Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap());
+
+			let encoded = enc.encode(&frame, true).unwrap();
+			let annexb = &encoded.first().expect("a keyframe").payload;
+
+			assert_eq!(declared_color(annexb), Some(expected), "{size} SPS color description");
+
+			// The label has to match the pixels: same source of truth on both sides.
+			let i420 = frame.surface.to_i420().unwrap();
+			assert_eq!(i420.color(), Some(expected), "{size} converted pixels");
+		}
 	}
 }

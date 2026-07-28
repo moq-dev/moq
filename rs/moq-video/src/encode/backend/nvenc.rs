@@ -35,14 +35,15 @@ use cudarc::driver::CudaContext;
 use moq_nvenc::sys::nvEncodeAPI::NV_ENC_INPUT_RESOURCE_TYPE;
 use moq_nvenc::sys::nvEncodeAPI::{
 	GUID, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_PARAMS_RC_MODE,
-	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO,
+	NV_ENC_PRESET_P4_GUID, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS,
+	NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
 use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
-use crate::{Error, Frame};
+use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "nvenc";
 
@@ -109,18 +110,56 @@ impl Nvenc {
 		//     undecodable for late joiners.
 		//   - idrPeriod == gopLength: make every periodic I-frame an IDR (a clean
 		//     random-access point), so each GOP boundary is joinable.
-		//
+
+		// State the color space in the SPS so a decoder doesn't fall back to
+		// guessing it from the frame height. BT.601 goes out as the SMPTE 170M set
+		// (the 525-line variant, code point 6), which is what every other encoder
+		// writes for standard definition.
+		let color = config.resolved_color();
+		let (primaries, transfer, matrix) = match color {
+			Color::Bt601Limited | Color::Bt601Full => (
+				NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M,
+				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M,
+				NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
+			),
+			Color::Bt709Limited | Color::Bt709Full => (
+				NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709,
+				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
+				NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT709,
+			),
+		};
+
 		// SAFETY: the preset config's codec union was initialized by
 		// `get_preset_config` for `codec_guid`, so we write the matching arm.
 		unsafe {
+			// The two codecs' VUI structs are distinct types with identical fields,
+			// so the assignments are written per-arm rather than shared.
 			match config.codec {
 				Codec::H264 => {
 					cfg.encodeCodecConfig.h264Config.set_repeatSPSPPS(1);
 					cfg.encodeCodecConfig.h264Config.idrPeriod = config.gop;
+
+					let vui = &mut cfg.encodeCodecConfig.h264Config.h264VUIParameters;
+					vui.videoSignalTypePresentFlag = 1;
+					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.colourDescriptionPresentFlag = 1;
+					vui.colourPrimaries = primaries;
+					vui.transferCharacteristics = transfer;
+					vui.colourMatrix = matrix;
 				}
 				Codec::H265 => {
 					cfg.encodeCodecConfig.hevcConfig.set_repeatSPSPPS(1);
 					cfg.encodeCodecConfig.hevcConfig.idrPeriod = config.gop;
+
+					let vui = &mut cfg.encodeCodecConfig.hevcConfig.hevcVUIParameters;
+					vui.videoSignalTypePresentFlag = 1;
+					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.colourDescriptionPresentFlag = 1;
+					vui.colourPrimaries = primaries;
+					vui.transferCharacteristics = transfer;
+					vui.colourMatrix = matrix;
 				}
 			}
 		}
