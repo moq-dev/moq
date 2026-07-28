@@ -74,6 +74,26 @@ export function hasAnnounceId(version: Version): boolean {
 	}
 }
 
+/** Whether ANNOUNCE_REQUEST carries the Exclude Hop field: the subscriber's own
+ * origin id, which the publisher uses to skip announces whose hop chain already
+ * passed through the subscriber. Present in lite-04 and lite-05 only.
+ *
+ * The receiver's own reflected-announce check drops those announces anyway (and
+ * catches loops of any length, not just the two-hop case), so lite-06 drops the
+ * field and keeps the check.
+ *
+ * Unlike the gates above, this lists the versions that *have* the field: it was
+ * removed rather than added, so future versions default to not carrying it. */
+export function hasExcludeHop(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+			return true;
+		default:
+			return false;
+	}
+}
+
 /** Whether announcements carry a route cost varint alongside the hop chain: the
  * marginal cost of pulling the broadcast via this route, accumulated per link.
  * Added in lite-06. Older versions carry nothing, so a received route stays at

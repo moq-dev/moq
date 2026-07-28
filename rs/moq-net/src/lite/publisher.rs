@@ -222,10 +222,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		announced: &mut announce::Consumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
-		// Peer's session-level origin id, sent in AnnounceInterest. We skip
-		// forwarding announces whose hop chain already contains this id, so
-		// reflected announces (cluster loops) never hit the wire. Zero means
-		// the peer didn't set it (Lite03 or earlier), pass through.
+		// Peer's session-level origin id, sent in ANNOUNCE_REQUEST on lite-04/05.
+		// We skip forwarding announces whose hop chain already contains this id, so
+		// reflected announces (cluster loops) never hit the wire. Zero means the peer
+		// didn't send one (every other version), in which case we forward and the peer
+		// drops the reflection on receipt.
 		exclude_hop: u64,
 		version: Version,
 	) -> Result<(), Error> {
@@ -671,7 +672,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Decide whether to forward an active announcement and compute the outgoing hop chain.
 	///
 	/// Returns `None` when the announce should be skipped: the peer asked us to exclude it
-	/// (`exclude_hop`), it already passed through us (reflected loop), or the hop chain is full.
+	/// (`exclude_hop`, lite-04/05 only), it already passed through us (reflected loop), or
+	/// the hop chain is full.
 	fn prepare_active_hops(
 		hops: &OriginList,
 		self_origin: Origin,

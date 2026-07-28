@@ -675,16 +675,11 @@ A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive a
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
-  Exclude Hop (i),
 }
 ~~~
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
-
-**Exclude Hop**:
-If non-zero, the publisher SHOULD skip announcements for broadcasts whose Hop ID entries (including the publisher's own `Hop ID` from ANNOUNCE_OK) contain this value.
-This is used by relays to avoid routing loops in a cluster.
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_RESTART messages for any future updates.
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
@@ -755,6 +750,12 @@ When forwarding an announcement received from an upstream peer, a relay MUST app
 The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
 The first entry of the reconstructed path (the first Hop ID, or the ANNOUNCE_OK `Hop ID` when the list is empty) identifies the original publisher of the broadcast; ANNOUNCE_RESTART uses it to distinguish a route change from a replacement (see [ANNOUNCE_RESTART](#announce-restart)).
 A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
+
+A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID.
+Such an announcement has looped back, so the receiver neither forwards it nor selects it as a route to the broadcast; forwarding would extend the loop, and subscribing through it would route the receiver back to itself.
+This is the only loop defense moq-lite requires, and it catches loops of any length.
+A publisher MAY additionally skip sending an announcement toward the peer it was learned from, but that is a bandwidth optimization rather than a correctness measure: the receiver discards the announcement either way.
+A relay that withholds its Hop ID (advertising 0) cannot be detected this way, so loops through it are caught only by the hop limit.
 
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
@@ -1169,6 +1170,8 @@ The `Message Length` describes the payload size on the wire.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
+- Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
+- Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
@@ -1294,7 +1297,7 @@ The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subs
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy — scheme, authority, and port — before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier. The `Exclude Hop` filter in ANNOUNCE_REQUEST is a loop-avoidance hint, not an access control; a publisher is not required to honor it, and it MUST NOT be relied upon to hide broadcasts.
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [ANNOUNCE_START](#announce-start)).
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches) or request large announce prefixes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control.

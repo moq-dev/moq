@@ -26,7 +26,6 @@ informative:
 This document defines a Relay Hops extension for MoQ Transport {{moqt}}.
 Each namespace advertisement carries an ordered list of Hop IDs identifying the relays it has traversed, starting with the original publisher.
 This lets a subscriber prefer the shortest of several paths to the same namespace, identify which advertisements refer to the same broadcast (same origin), and lets a relay cluster detect and avoid routing loops.
-A namespace subscription MAY carry a single Hop ID to exclude, which a relay uses to suppress advertisements that have already passed through that hop.
 
 --- middle
 
@@ -70,10 +69,10 @@ The extension applies to a single hop (one MOQT session) and is negotiated indep
 
 Negotiating this extension on a session also enables the extended NAMESPACE message format defined in [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements), which appends a Parameters field to NAMESPACE so that it, too, can carry HOP_PATH.
 
-A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE and NAMESPACE it sends on that session, and MUST honor an EXCLUDE_HOP parameter it receives in SUBSCRIBE_NAMESPACE.
+A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE and NAMESPACE it sends on that session.
 A receiver that negotiated this extension and receives a PUBLISH_NAMESPACE or NAMESPACE without HOP_PATH MUST close the session with a PROTOCOL_VIOLATION.
 
-Message parameters in {{moqt}} have no generic skip rule: a receiver must know a parameter's serialization to parse past it, so an endpoint MUST NOT send HOP_PATH or EXCLUDE_HOP on a session that did not negotiate the extension.
+Message parameters in {{moqt}} have no generic skip rule: a receiver must know a parameter's serialization to parse past it, so an endpoint MUST NOT send HOP_PATH on a session that did not negotiate the extension.
 A relay forwarding an advertisement into a non-supporting session therefore strips HOP_PATH (and, for NAMESPACE, the appended Parameters field); the advertisement loses its hop information.
 
 
@@ -149,8 +148,11 @@ The stand-in MUST be stable for the lifetime of the upstream session and unique 
 
 When a relay receives a namespace advertisement on a session that negotiated this extension, it MUST inspect the HOP_PATH:
 
-- If its own Hop ID already appears in the list, the advertisement has looped. The relay MUST NOT forward it and SHOULD drop it.
+- If its own Hop ID already appears in the list, the advertisement has looped back to this relay. The relay MUST discard it: it MUST NOT forward it, and MUST NOT select it as a path to the namespace. Forwarding it would extend the loop, and subscribing through it would route the relay back to itself.
 - Otherwise the relay MAY forward it downstream, appending its own Hop ID as described above.
+
+This receiver-side check is the only loop defense this extension requires, and it catches loops of any length.
+A relay MAY additionally avoid sending an advertisement back toward a peer it came from, but that is a bandwidth optimization: the advertisement is discarded on arrival either way.
 
 ## Path Selection
 A relay or subscriber that receives advertisements for the same namespace over multiple sessions MAY use the length of the HOP_PATH list as a tiebreaker, preferring the advertisement with the fewest hops (usually the lowest-latency path).
@@ -158,28 +160,6 @@ This is advisory: the receiver MAY apply additional local policy (e.g. measured 
 
 Two advertisements for the same namespace whose HOP_PATH begins with the same Hop ID share an origin and therefore refer to the same broadcast; a receiver MAY treat them as redundant paths and keep only the best one.
 If the first Hop IDs differ, the advertisements come from distinct origins that happen to reuse a namespace, and a receiver MUST NOT treat them as interchangeable.
-
-
-# EXCLUDE_HOP Parameter
-The EXCLUDE_HOP parameter lets a downstream subscriber tell an upstream relay to suppress advertisements that have already passed through a given hop.
-A relay in a cluster uses it to prevent the upstream from sending back an advertisement that the downstream originated, the most common source of a two-hop loop.
-
-It is a parameter carried in a SUBSCRIBE_NAMESPACE message ({{moqt}} Section 10.18).
-Its value is a single varint:
-
-~~~
-EXCLUDE_HOP Parameter {
-  Type (vi64) = 0x40B58
-  Hop ID (vi64)
-}
-~~~
-
-**Hop ID**:
-The single Hop ID to exclude.
-To exclude nothing, a subscriber simply omits the parameter; there is no reserved "exclude nothing" value.
-
-A relay that receives a SUBSCRIBE_NAMESPACE carrying EXCLUDE_HOP MUST NOT send, for that subscription, any namespace advertisement whose HOP_PATH contains the excluded Hop ID (including the entry the relay would itself append).
-The exclusion is scoped to the namespace subscription it accompanies; advertisements sent for other subscriptions, or proactively, are unaffected.
 
 
 # Security Considerations
@@ -205,13 +185,12 @@ This document requests a registration in the "MOQT Setup Options" registry ({{mo
 
 ## MOQT Message Parameters
 
-This document requests registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-HOP_PATH is carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message defined by this document (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)); EXCLUDE_HOP is carried in SUBSCRIBE_NAMESPACE.
+This document requests a registration in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
+HOP_PATH is carried in PUBLISH_NAMESPACE and in the extended NAMESPACE message defined by this document (see [Carrying Parameters on Namespace Advertisements](#carrying-parameters-on-namespace-advertisements)).
 
 | Value   | Name        | Carried In                   | Reference     |
 |:--------|:------------|:-----------------------------|:--------------|
 | 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, NAMESPACE | This Document |
-| 0x40B58 | EXCLUDE_HOP | SUBSCRIBE_NAMESPACE          | This Document |
 
 
 --- back

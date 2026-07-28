@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import {
+	type AnnounceBroadcast,
+	AnnounceRequest,
+	decodeAnnounceBroadcast,
+	encodeAnnounceBroadcast,
+} from "./announce.ts";
 import { OriginSchema } from "./origin.ts";
 import { Version } from "./version.ts";
 
@@ -99,4 +104,28 @@ test("AnnounceBroadcast rejects explicit restart status before draft-05", async 
 	wire[1] = 2;
 
 	await expect(decodeAnnounceBroadcast(new Reader(undefined, wire), Version.DRAFT_04)).rejects.toThrow();
+});
+
+async function requestRoundTrip(msg: AnnounceRequest, version: Version): Promise<AnnounceRequest> {
+	const reader = new Reader(undefined, await bytes((w) => msg.encode(w, version)));
+	return AnnounceRequest.decode(reader, version);
+}
+
+// Draft04/05 carry the subscriber's origin id so the publisher can skip reflected
+// announces before they hit the wire.
+test("AnnounceRequest carries excludeHop on draft-05", async () => {
+	const got = await requestRoundTrip(new AnnounceRequest(Path.from("room/"), 42n), Version.DRAFT_05);
+	expect(got.excludeHop).toBe(42n);
+});
+
+// Draft06 dropped the field: the receiver's reflected-announce check catches the same
+// loops, so a value set locally is simply not sent and decodes as zero.
+test("AnnounceRequest drops excludeHop on draft-06", async () => {
+	const msg = new AnnounceRequest(Path.from("room/"), 42n);
+	const got = await requestRoundTrip(msg, Version.DRAFT_06);
+	expect(got.excludeHop).toBe(0n);
+
+	const with05 = await bytes((w) => msg.encode(w, Version.DRAFT_05));
+	const with06 = await bytes((w) => msg.encode(w, Version.DRAFT_06));
+	expect(with06.byteLength).toBeLessThan(with05.byteLength);
 });
