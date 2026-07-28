@@ -26,15 +26,17 @@
 //! ## Zero-copy
 //!
 //! A hardware-decoded frame is imported by aliasing the decoder's surface as a
-//! texture rather than copying it: `CVMetalTextureCache` on macOS, for a
-//! [`Surface::PixelBuffer`](crate::Surface::PixelBuffer) from capture or a
-//! VideoToolbox decode.
+//! texture rather than copying it: `CVMetalTextureCache` on macOS, for the
+//! `PixelBuffer` variant of [`Surface`](crate::Surface) that capture and a
+//! VideoToolbox decode produce. (Named without a link because that variant only
+//! exists on macOS, and a link to it would dangle in the docs built for every
+//! other platform.)
 //!
 //! Every other frame, and any import that fails, goes through
 //! [`Surface::into_i420`](crate::Surface::into_i420) and a plane upload. That
-//! path is always available, so a frame always renders. An import path that
-//! keeps failing (a driver that cannot do it at all) retires itself after a few
-//! frames rather than paying for the attempt forever.
+//! path is always available, so which route a frame takes is a question of cost.
+//! An import path that keeps failing (a driver that cannot do it at all) retires
+//! itself after a few frames rather than paying for the attempt forever.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 

@@ -18,7 +18,7 @@ pub(super) enum Layout {
 
 /// One frame's planes, bound and sampled as-is.
 ///
-/// `plane2` is unused by [`Layout::Nv12`], where it holds a copy of `plane1` so
+/// `plane2` is unused by the NV12 layout, where it holds a copy of `plane1` so
 /// that one bind group layout serves both shaders.
 pub(super) struct Source {
 	pub layout: Layout,

@@ -332,7 +332,7 @@ impl I420 {
 			YuvConversionMode::Balanced,
 		)
 		.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		Ok(Self::pack(&planar, width, height, Some(Color::Bt601Limited)))
 	}
 
 	/// Convert BGRA to I420, BT.601 limited range. `stride` is the source row
@@ -353,7 +353,7 @@ impl I420 {
 			YuvConversionMode::Balanced,
 		)
 		.map_err(|e| Error::Codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		Ok(Self::pack(&planar, width, height, Some(Color::Bt601Limited)))
 	}
 
 	/// Pack strided Y/U/V planes (4:2:0, full-size luma, half-size chroma) into a
@@ -409,7 +409,7 @@ impl I420 {
 			YuvConversionMode::Balanced,
 		)
 		.map_err(|e| Error::Codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		Ok(Self::pack(&planar, width, height, Some(Color::Bt601Limited)))
 	}
 
 	/// Convert packed YUYV (YUV 4:2:2, `stride` bytes per row) to I420. A chroma
@@ -428,7 +428,9 @@ impl I420 {
 		};
 		yuyv422_to_yuv420(&mut planar, &packed)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		// A chroma resample, not a color conversion: these samples are in
+		// whatever space the camera produced, which nothing here names.
+		Ok(Self::pack(&planar, width, height, None))
 	}
 
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
@@ -521,10 +523,10 @@ impl I420 {
 
 	/// Flatten the three planes of a freshly-converted image into one tightly
 	/// packed I420 buffer (Y, then U, then V).
-	/// Every caller converts from RGB with `YuvRange::Limited` +
-	/// `YuvStandardMatrix::Bt601`, so the result's color space is known outright
-	/// rather than left to be guessed from the resolution downstream.
-	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {
+	/// `color` is what the caller's conversion produced: the RGB conversions pick
+	/// a matrix, so they know it outright, while a caller that only resamples
+	/// chroma passes `None` and leaves the samples' space open.
+	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32, color: Option<Color>) -> Self {
 		let mut data = Vec::with_capacity(Self::len(width, height));
 		data.extend_from_slice(planar.y_plane.borrow());
 		data.extend_from_slice(planar.u_plane.borrow());
@@ -533,7 +535,7 @@ impl I420 {
 			width,
 			height,
 			data,
-			color: Some(Color::Bt601Limited),
+			color,
 		}
 	}
 
@@ -1446,6 +1448,52 @@ pub mod d3d11 {
 
 #[cfg(test)]
 mod tests {
+	/// A conversion that picks a matrix says so; one that only moves samples
+	/// around must not.
+	///
+	/// The distinction decides whether a renderer trusts the frame or guesses
+	/// from the resolution, and guessing wrong tints saturated colors (see the
+	/// render module's HD test). Labeling everything with the RGB matrix would be
+	/// worse than labeling nothing: a 720p camera's BT.709 samples would be
+	/// pinned to BT.601 rather than inferring BT.709 correctly.
+	#[test]
+	fn only_a_real_color_conversion_labels_its_output() {
+		use super::I420;
+		use crate::{Color, Size};
+
+		let size = Size::new(64, 64);
+		let rgba = vec![0u8; size.pixels() as usize * 4];
+		let converted = I420::from_rgba(&rgba, size.width * 4, size.width, size.height).expect("rgba to i420");
+		assert_eq!(
+			converted.color(),
+			Some(Color::Bt601Limited),
+			"an RGB conversion knows the matrix it used"
+		);
+
+		// Resampling moves samples around; it does not reinterpret them.
+		let resized = converted.resize(32, 32).expect("resize");
+		assert_eq!(resized.color(), Some(Color::Bt601Limited), "resize preserves the space");
+
+		// A passthrough leaves it open for the consumer to infer.
+		let raw = I420::new(64, 64, vec![0; I420::len(64, 64)]).expect("i420");
+		assert_eq!(raw.color(), None);
+		assert_eq!(raw.with_color(Color::Bt709Full).color(), Some(Color::Bt709Full));
+	}
+
+	/// V4L2 hands back YUYV already in the camera's color space, so the 4:2:2 ->
+	/// 4:2:0 chroma resample must not claim it is BT.601: a 720p camera is
+	/// usually BT.709, and mislabeling pins it to the wrong matrix instead of
+	/// letting the resolution heuristic get it right.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn yuyv_capture_keeps_its_color_space_open() {
+		let (width, height) = (1280, 720);
+		// YUYV packs two pixels into four bytes.
+		let yuyv = vec![0u8; width as usize * height as usize * 2];
+		let frame = super::I420::from_yuyv(&yuyv, width * 2, width, height).expect("yuyv to i420");
+		assert_eq!(frame.color(), None, "a chroma resample names no color space");
+	}
+
 	/// A short buffer is rejected at construction rather than panicking later: the
 	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
 	/// a public `I420` has to be impossible to build malformed.
