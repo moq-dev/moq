@@ -229,7 +229,7 @@ impl Rendition {
 				.segments
 				.into_iter()
 				.map(|s| Segment {
-					group: s.group,
+					segment: s.segment,
 					duration: s.duration,
 				})
 				.collect(),
@@ -307,13 +307,13 @@ impl Rendition {
 		Ok(Some(bytes))
 	}
 
-	/// Fetch and transmux the segment starting at group `sequence`.
+	/// Fetch and transmux the segment numbered `segment`.
 	///
-	/// Fetches every group the segment covers (audio timelines skip groups, so a segment may span
-	/// several) and encodes them as a single CMAF fragment. `None` when the segment isn't in the
-	/// playlist window or its groups already left the relay cache.
-	pub async fn segment(&self, sequence: u64) -> Result<Option<Bytes>> {
-		let Some((start, end)) = self.live.segment_groups(sequence) else {
+	/// Fetches every group the segment covers (an audio segment packs many short groups) and
+	/// encodes them as a single CMAF fragment. `None` when the segment isn't in the playlist
+	/// window or its groups already left the relay cache.
+	pub async fn segment(&self, segment: u64) -> Result<Option<Bytes>> {
+		let Some((start, end)) = self.live.segment_groups(segment) else {
 			return Ok(None);
 		};
 		let Some(track) = self.track() else {
@@ -364,7 +364,7 @@ impl Rendition {
 		if frames.is_empty() {
 			return Ok(None);
 		}
-		Ok(Some(muxer.fragment(start as u32, &frames)?))
+		Ok(Some(muxer.fragment(segment as u32, &frames)?))
 	}
 }
 

@@ -240,8 +240,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			)?;
 
 			// Each track indexes its own group opens: audio and video group boundaries differ, so a
-			// per-track timeline (the 1:1 default) is correct here, not a shared one.
+			// per-track timeline (the 1:1 default) is correct here, not a shared one. The cadence
+			// keeps their segment numbers aligned: video groups open segments, audio packs into them.
 			let timeline = self.catalog.timeline(track.name())?;
+			let cadence = match kind {
+				TrackKind::Video => crate::timeline::Cadence::Boundary,
+				TrackKind::Audio => crate::timeline::Cadence::Aligned,
+			};
 
 			let detect_bitrate = match kind {
 				TrackKind::Video => {
@@ -266,7 +271,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					track,
 					group: None,
-					recorder: Some(timeline.recorder()),
+					recorder: Some(timeline.recorder(cadence)),
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
@@ -769,8 +774,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 
-			// A keyframe fragment just opened a new group; index it in the track's timeline (throttled
-			// to the recorder's granularity) so a playlist/seek/VOD reader can map time to group.
+			// A keyframe fragment just opened a new group; index it in the track's timeline (mapped
+			// onto the aligned segments per the recorder's cadence) so a playlist/seek/VOD reader
+			// can map time to group.
 			// The timeline is an optional sidecar (consumers extrapolate across gaps), so a recording
 			// failure must NOT abort the passthrough. Drop the recorder and carry on.
 			if contains_keyframe {

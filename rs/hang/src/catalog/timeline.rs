@@ -9,16 +9,18 @@ pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 
 /// Describes a media track's companion timeline track.
 ///
-/// A timeline track maps each of the media track's groups to its start timestamp (see the
-/// [`timeline`](crate::timeline) module for the record format), so a consumer can seek, or
-/// build an HLS/DASH playlist, without downloading the media itself. This section, present on
-/// a [`VideoConfig`](crate::catalog::VideoConfig) or
+/// A timeline track is the media track's segment index: each record maps a segment (one or
+/// more groups) to its starting group and timestamp (see the [`timeline`](crate::timeline)
+/// module for the record format), so a consumer can seek, or build an HLS/DASH playlist,
+/// without downloading the media itself. This section, present on a
+/// [`VideoConfig`](crate::catalog::VideoConfig) or
 /// [`AudioConfig`](crate::catalog::AudioConfig) when the publisher offers one, points at that
 /// track and declares how to read its timestamps.
 ///
-/// The section is per media track on purpose: audio and video groups have different
-/// durations (and metadata tracks different still), so a single broadcast-wide timeline can't
-/// describe them all. Each media track carries its own.
+/// The section is per media track on purpose: a video segment is a single group while an audio
+/// segment packs many shorter ones, so each track needs its own group mapping. Only the
+/// segment *numbers* are shared: segment N covers the same span of content time on every
+/// track, which is what makes the timelines sufficient for HLS/DASH export.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

@@ -47,8 +47,9 @@ impl Estimate {
 /// #     frame: moq_mux::container::Frame,
 /// # ) -> moq_mux::Result<()> {
 /// use moq_mux::catalog::hang::Container;
+/// use moq_mux::timeline::Cadence;
 ///
-/// let mut track = catalog.media_producer(net, Container::Legacy)?;
+/// let mut track = catalog.media_producer(net, Container::Legacy, Cadence::Boundary)?;
 /// let mut rendition = reserved.video(track.name());
 /// rendition.set(config);
 ///

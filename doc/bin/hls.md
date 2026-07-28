@@ -24,12 +24,15 @@ The export server never subscribes to media. Per broadcast it subscribes to
 exactly two kinds of metadata track:
 
 - the **catalog**, which lists the renditions and their codec configs, and
-- each rendition's **timeline** track, a tiny log mapping every media group to
-  its start timestamp (the `timeline` section on the rendition's catalog entry
-  names it).
+- each rendition's **timeline** track, a tiny log of its segments: each record
+  maps an aligned segment number to the group and timestamp it starts at (the
+  `timeline` section on the rendition's catalog entry names it).
 
-Media playlists are rendered purely from the timeline: each record starts a
-segment, and the gap to the next record is its duration. Media bytes move only
+Media playlists are rendered purely from the timeline: each record is a
+segment, and the gap to the next record is its duration. Segment numbers are
+aligned across renditions (audio and video cut at the same boundaries, as HLS
+requires), so the same segment number names the same span of content time in
+every media playlist and `EXT-X-MEDIA-SEQUENCE` lines up. Media bytes move only
 when a player requests a segment: the server FETCHes exactly the groups that
 segment covers from the relay's cache and transmuxes them to CMAF (one
 moof+mdat per group). Renditions without a timeline track can't be served this
@@ -45,14 +48,14 @@ One server is path-based, so it can expose many broadcasts at once:
 GET /{broadcast}/master.m3u8
 GET /{broadcast}/{kind}/{rendition}/media.m3u8
 GET /{broadcast}/{kind}/{rendition}/init.mp4
-GET /{broadcast}/{kind}/{rendition}/seg/{group}.m4s
+GET /{broadcast}/{kind}/{rendition}/seg/{segment}.m4s
 ```
 
 `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
-name address distinct resources. A segment is addressed by its starting group
-sequence; audio timelines may skip groups (they're throttled to about one
-record per second of media), in which case one segment covers the whole group
-range up to the next record.
+name address distinct resources. A segment is addressed by its aligned segment
+number. A video segment is a single group (a GOP); an audio segment packs every
+audio group inside the same span, so one fetch covers the whole group range up
+to the next record.
 
 ## CLI shape
 

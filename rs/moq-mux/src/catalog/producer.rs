@@ -62,6 +62,10 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The per-rendition timeline producers, memoized by media-track name so the catalog
 	/// section and the media track's group recorder share one track. See [`media_producer`](Self::media_producer).
 	timelines: Arc<Mutex<BTreeMap<String, crate::timeline::Producer>>>,
+
+	/// The broadcast's shared segment counter, wired into every timeline so segment numbers
+	/// align across tracks. See [`segmenter`](Self::segmenter).
+	segmenter: crate::timeline::Segmenter,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -76,6 +80,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			clock: self.clock,
 			broadcast: self.broadcast.clone(),
 			timelines: self.timelines.clone(),
+			segmenter: self.segmenter.clone(),
 		}
 	}
 }
@@ -121,6 +126,7 @@ impl<E: CatalogExt> Producer<E> {
 			clock: crate::Clock::new(),
 			broadcast: broadcast.clone(),
 			timelines: Arc::new(Mutex::new(BTreeMap::new())),
+			segmenter: crate::timeline::Segmenter::new(),
 		})
 	}
 
@@ -205,23 +211,32 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Build the media [`container::Producer`](crate::container::Producer) for `track`, recording its
-	/// group opens into the `<name>.timeline.z` timeline named after it.
+	/// group opens into the `<name>.timeline.z` timeline named after it as aligned segments.
+	///
+	/// `cadence` states how the track's groups map onto the broadcast's segments: video is
+	/// [`Cadence::Boundary`](crate::timeline::Cadence::Boundary) (every group, opened by a
+	/// keyframe, is a segment) and audio is
+	/// [`Cadence::Aligned`](crate::timeline::Cadence::Aligned) (groups pack into the segments
+	/// video opens). See [`timeline`](crate::timeline).
 	///
 	/// This is the 1:1 default. To share a timeline across aligned renditions, build the producer
 	/// yourself and wire the shared timeline's recorder:
-	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared)?.recorder())`,
+	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared)?.recorder(cadence))`,
 	/// and advertise `catalog.timeline(shared)?.section()` on each of their configs.
 	pub fn media_producer<C: crate::container::Container>(
 		&self,
 		track: moq_net::track::Producer,
 		container: C,
+		cadence: crate::timeline::Cadence,
 	) -> crate::Result<crate::container::Producer<C>> {
-		let recorder = self.timeline(track.name())?.recorder();
+		let recorder = self.timeline(track.name())?.recorder(cadence);
 		Ok(crate::container::Producer::new(track, container).with_recorder(recorder))
 	}
 
 	/// The [`timeline::Producer`](crate::timeline::Producer) named `name`, creating its
 	/// `<name>.timeline.z` track on first use and returning the same shared handle thereafter.
+	/// Every timeline minted here numbers segments through the broadcast's one
+	/// [`segmenter`](Self::segmenter), so they stay aligned.
 	///
 	/// Advertise it on a rendition by setting `config.timeline = Some(timeline.section())`, and
 	/// record group opens through its [`recorder`](crate::timeline::Producer::recorder). Two
@@ -236,9 +251,15 @@ impl<E: CatalogExt> Producer<E> {
 			return Ok(timeline.clone());
 		}
 
-		let timeline = crate::timeline::Producer::new(&mut self.broadcast.clone(), name)?;
+		let timeline = crate::timeline::Producer::new(&mut self.broadcast.clone(), name, self.segmenter.clone())?;
 		timelines.insert(name.to_string(), timeline.clone());
 		Ok(timeline)
+	}
+
+	/// The broadcast's shared [`Segmenter`](crate::timeline::Segmenter): the segment counter
+	/// every timeline minted by [`timeline`](Self::timeline) aligns on.
+	pub fn segmenter(&self) -> crate::timeline::Segmenter {
+		self.segmenter.clone()
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.

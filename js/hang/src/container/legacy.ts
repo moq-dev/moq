@@ -48,8 +48,8 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 /** Options for a legacy-container {@link Producer}. */
 export interface ProducerProps {
 	/**
-	 * Record each group open (sequence + start timestamp) into this companion timeline track, so
-	 * consumers can index the media without downloading it.
+	 * Record each group open (sequence + start timestamp) into this companion timeline track as
+	 * aligned segments, so consumers can index the media without downloading it.
 	 */
 	timeline?: TimelineProducer;
 }

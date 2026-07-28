@@ -278,9 +278,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.
+		let cadence = match kind {
+			TrackKind::Video => crate::timeline::Cadence::Boundary,
+			TrackKind::Audio => crate::timeline::Cadence::Aligned,
+		};
 		let media = self
 			.catalog
-			.media_producer(track, crate::catalog::hang::Container::Legacy)?;
+			.media_producer(track, crate::catalog::hang::Container::Legacy, cadence)?;
 
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();

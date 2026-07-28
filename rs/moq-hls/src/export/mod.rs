@@ -247,7 +247,11 @@ mod tests {
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Boundary,
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(1_000_000, false)).unwrap();
@@ -268,9 +272,9 @@ mod tests {
 
 		let playlist = rendition.playlist();
 		assert_eq!(playlist.segments.len(), 2, "the live-edge group is not listed");
-		assert_eq!(playlist.segments[0].group, 0);
+		assert_eq!(playlist.segments[0].segment, 0);
 		assert_eq!(playlist.segments[0].duration, 2.0);
-		assert_eq!(playlist.segments[1].group, 1);
+		assert_eq!(playlist.segments[1].segment, 1);
 		assert_eq!(playlist.target_duration, 2, "ceil of the longest timeline gap");
 		assert!(!playlist.finished);
 
@@ -296,6 +300,101 @@ mod tests {
 
 		// Keep the publisher alive for the whole test.
 		drop((media, registration, broadcast));
+	}
+
+	// The property HLS needs from the timeline rework: audio and video renditions share one
+	// segment numbering, cut at the same boundaries. Video is one group per segment; an audio
+	// segment packs every audio group inside the video segment's span.
+	#[tokio::test]
+	async fn audio_and_video_segments_are_aligned() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut video_registration = reserved.video("video0");
+		let mut video_config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video_config.framerate = Some(30.0);
+		video_config.timeline = Some(catalog.timeline("video0").unwrap().section());
+		video_registration.set(video_config);
+		let mut audio_registration = reserved.audio("audio0");
+		let mut audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio_config.timeline = Some(catalog.timeline("audio0").unwrap().section());
+		audio_registration.set(audio_config);
+		drop(reserved);
+
+		let video_track = broadcast.create_track("video0", None).unwrap();
+		let mut video = catalog
+			.media_producer(
+				video_track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Boundary,
+			)
+			.unwrap();
+		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let mut audio = catalog
+			.media_producer(
+				audio_track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Aligned,
+			)
+			.unwrap();
+
+		// Interleaved by pts, as a muxer would demux them: video keyframes every 2s open the
+		// segments; audio publishes a 500ms group each cut.
+		let mut audio_write = |micros: u64| {
+			let keyframe = audio.needs_keyframe();
+			audio.write(frame(micros, keyframe)).unwrap();
+			audio.cut(None).unwrap();
+		};
+		video.write(frame(0, true)).unwrap(); // segment 0
+		for micros in [0u64, 500_000, 1_000_000, 1_500_000] {
+			audio_write(micros); // audio groups 0..=3 pack into segment 0
+		}
+		video.write(frame(2_000_000, true)).unwrap(); // segment 1
+		for micros in [2_000_000u64, 2_500_000, 3_000_000, 3_500_000] {
+			audio_write(micros); // audio groups 4..=7 pack into segment 1
+		}
+		video.write(frame(4_000_000, true)).unwrap(); // segment 2 (live edge)
+		audio_write(4_000_000); // audio group 8 opens its slice of segment 2
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
+		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
+		let _ = tokio::time::timeout(Duration::from_secs(5), video_rendition.playable()).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
+
+		// Both playlists list the same segment numbers over the same spans.
+		let video_playlist = video_rendition.playlist();
+		let audio_playlist = audio_rendition.playlist();
+		assert_eq!(video_playlist.media_sequence, audio_playlist.media_sequence);
+		let video_segments: Vec<u64> = video_playlist.segments.iter().map(|s| s.segment).collect();
+		let audio_segments: Vec<u64> = audio_playlist.segments.iter().map(|s| s.segment).collect();
+		assert_eq!(video_segments, vec![0, 1]);
+		assert_eq!(audio_segments, vec![0, 1], "audio lists the same aligned segments");
+		assert_eq!(audio_playlist.segments[0].duration, 2.0, "cut at the video boundary");
+
+		// The same URI names the same span of content time on either rendition.
+		let rendered = audio_rendition.media_playlist(None).expect("playable");
+		assert!(rendered.contains("seg/0.m4s\n"));
+		assert!(rendered.contains("seg/1.m4s\n"));
+
+		// A video segment is one group; the matching audio segment transmuxes its four groups.
+		let video_segment = video_rendition.segment(1).await.unwrap().expect("video segment");
+		assert_eq!(&video_segment[4..8], b"moof");
+		let audio_segment = audio_rendition.segment(1).await.unwrap().expect("audio segment");
+		assert_eq!(&audio_segment[4..8], b"moof");
+		assert!(
+			audio_segment.len() > video_segment.len(),
+			"the audio segment packs multiple groups into one fragment"
+		);
+
+		drop((video, audio, video_registration, audio_registration, broadcast));
 	}
 
 	// Dropping the broadcaster must not truncate a recording in progress. A cursor holds its
@@ -324,7 +423,11 @@ mod tests {
 		// publisher finishes.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Boundary,
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -351,7 +454,7 @@ mod tests {
 			.expect("the cursor drains without parking")
 			.unwrap()
 		{
-			groups.push(segment.group);
+			groups.push(segment.segment);
 		}
 		assert!(
 			groups.contains(&1),
@@ -417,7 +520,11 @@ mod tests {
 
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Boundary,
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -477,7 +584,11 @@ mod tests {
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.media_producer(
+				track,
+				moq_mux::catalog::hang::Container::Legacy,
+				moq_mux::timeline::Cadence::Boundary,
+			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -505,13 +616,13 @@ mod tests {
 			.expect("first segment finalizes")
 			.unwrap()
 			.expect("a segment, not end");
-		assert_eq!(first.group, 0);
+		assert_eq!(first.segment, 0);
 		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, 2.0);
 		assert!(!first.discontinuity, "a clean start is not a discontinuity");
 
 		let second = segments.next().await.unwrap().expect("second segment");
-		assert_eq!(second.group, 1);
+		assert_eq!(second.segment, 1);
 		assert!(!second.discontinuity, "consecutive segments are continuous");
 
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the

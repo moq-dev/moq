@@ -1,7 +1,8 @@
 //! Hand-written HLS media playlist generation.
 //!
-//! Rendered purely from timeline records: each segment is a starting group plus the gap to
-//! the next record. URIs are relative to the media playlist
+//! Rendered purely from timeline records: each record starts a segment (numbered by the
+//! broadcast's aligned segment sequence, so renditions cut at the same boundaries) and the gap
+//! to the next record is its duration. URIs are relative to the media playlist
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
@@ -29,8 +30,8 @@ pub(crate) struct Snapshot {
 
 /// One listed segment.
 pub(crate) struct Segment {
-	/// The starting group sequence; the URI is `seg/{group}.m4s`.
-	pub group: u64,
+	/// The aligned segment number; the URI is `seg/{segment}.m4s`.
+	pub segment: u64,
 	/// `EXTINF` duration in seconds.
 	pub duration: f64,
 }
@@ -61,7 +62,7 @@ pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 			);
 		}
 		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
-		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.group);
+		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.segment);
 	}
 
 	if snapshot.finished {
@@ -84,11 +85,11 @@ mod tests {
 			media_sequence: 10,
 			segments: vec![
 				Segment {
-					group: 10,
+					segment: 10,
 					duration: 2.0,
 				},
 				Segment {
-					group: 11,
+					segment: 11,
 					duration: 1.96,
 				},
 			],
@@ -119,7 +120,7 @@ mod tests {
 			target_duration: 4,
 			media_sequence: 0,
 			segments: vec![Segment {
-				group: 0,
+				segment: 0,
 				duration: 4.0,
 			}],
 			finished: true,

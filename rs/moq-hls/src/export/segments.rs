@@ -1,13 +1,17 @@
 //! One rendition's segment timeline, as a `Producer`/[`Consumer`] pair.
 //!
 //! The `Producer` is fed [`moq_mux::timeline::Entry`]s by a background task as the publisher
-//! indexes new groups; it keeps a bounded window of them. Two things read that window:
+//! indexes new segments; it keeps a bounded window of them. Two things read that window:
 //!
 //! * the HTTP serve path, synchronously, to render a media playlist and look up a segment's
 //!   group span (nothing here touches media bytes on that path); and
 //! * a [`Consumer`] cursor, for a recorder that wants every finalized segment *with its media*,
 //!   in order, exactly once. `next()` waits for the next segment to finalize, FETCHes and
 //!   transmuxes its groups (via [`Rendition`]), and yields the CMAF bytes.
+//!
+//! Entries carry the broadcast's aligned segment numbers, so a segment is addressed by that
+//! number everywhere (the `seg/{segment}.m4s` URI, `EXT-X-MEDIA-SEQUENCE`, the recorder
+//! cursor), and the same number names the same span of content time on every rendition.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
@@ -38,21 +42,20 @@ pub(crate) struct Producer {
 
 struct State {
 	/// Timeline records within the window, oldest first. Consecutive records bound a segment:
-	/// record `i` starts it, record `i + 1` supplies its duration, so the last record is the
-	/// live edge (its segment is still growing).
+	/// record `i` starts it, record `i + 1` supplies its duration and group span, so the last
+	/// record is the live edge (its segment is still growing).
 	entries: VecDeque<Entry>,
-	/// Records evicted from the front of the window since subscribing; the playlist's
-	/// `EXT-X-MEDIA-SEQUENCE` base, so segment positions stay stable across reloads.
-	dropped: u64,
 	/// The timeline track ended: the broadcast is over and the last record is a full segment.
 	ended: bool,
 }
 
-/// One playlist segment: a starting group and the media it covers.
+/// One playlist segment: its aligned number, its starting group, and the media span it covers.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Row {
-	/// The first group of the segment (its URI: `seg/{group}.m4s`). The segment covers every
-	/// group up to (excluding) the next segment's `group`.
+	/// The aligned segment number (its URI: `seg/{segment}.m4s`), shared across renditions.
+	pub segment: u64,
+	/// The rendition's first group of the segment. The segment covers every group up to
+	/// (excluding) the next record's group.
 	pub group: u64,
 	/// Presentation duration in seconds (the gap to the next timeline record).
 	pub duration: f64,
@@ -63,7 +66,8 @@ pub(crate) struct Row {
 /// A consistent read of the window, for rendering one playlist (the serve path only).
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) struct Window {
-	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment.
+	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its aligned segment number, so
+	/// sequence numbers line up across renditions.
 	pub sequence: u64,
 	/// Complete segments, oldest first.
 	pub segments: Vec<Row>,
@@ -73,8 +77,8 @@ pub(crate) struct Window {
 
 /// The next finalized segment a [`Consumer`] should emit, resolved from the window.
 enum Next {
-	/// A finalized segment is ready to fetch, along with the group that follows it in the
-	/// window (`None` if it's the last / ended-final record). The successor lets a cursor
+	/// A finalized segment is ready to fetch, along with the segment number that follows it in
+	/// the window (`None` if it's the last / ended-final record). The successor lets a cursor
 	/// notice a gap: if the next segment it emits isn't this successor, records were evicted
 	/// unseen in between.
 	Ready { row: Row, successor: Option<u64> },
@@ -104,6 +108,7 @@ impl State {
 			&& let Some(last) = self.entries.back()
 		{
 			segments.push(Row {
+				segment: last.segment,
 				group: last.group,
 				duration: self.final_duration(),
 				pts: last.pts,
@@ -111,7 +116,7 @@ impl State {
 		}
 
 		Window {
-			sequence: self.dropped,
+			sequence: segments.first().map(|s| s.segment).unwrap_or(0),
 			segments,
 			ended: self.ended,
 		}
@@ -134,7 +139,7 @@ impl State {
 			.max(DEFAULT_SEGMENT.as_secs_f64())
 	}
 
-	/// The first finalized segment starting past `after`, for a cursor.
+	/// The first finalized segment numbered past `after`, for a cursor.
 	///
 	/// A record is finalized once a later record bounds its duration, or the timeline has
 	/// ended (making the live-edge record the final segment). Segments evicted from the front
@@ -142,7 +147,7 @@ impl State {
 	/// oldest record still in the window.
 	fn next_after(&self, after: Option<u64>) -> Next {
 		let mut iter = self.entries.iter().enumerate().filter(|(_, e)| match after {
-			Some(after) => e.group > after,
+			Some(after) => e.segment > after,
 			None => true,
 		});
 		let Some((index, entry)) = iter.next() else {
@@ -152,12 +157,13 @@ impl State {
 			// Bounded by the next record: finalized, and that record is its successor.
 			Some(next) => Next::Ready {
 				row: row(entry, Some(next)),
-				successor: Some(next.group),
+				successor: Some(next.segment),
 			},
 			// The live-edge record is only a segment once the timeline ended; nothing follows it,
 			// so it takes the same estimated duration the serve path advertises for it.
 			None if self.ended => Next::Ready {
 				row: Row {
+					segment: entry.segment,
 					group: entry.group,
 					duration: self.final_duration(),
 					pts: entry.pts,
@@ -174,7 +180,6 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State {
 				entries: VecDeque::new(),
-				dropped: 0,
 				ended: false,
 			}),
 			broadcast: OnceLock::new(),
@@ -187,18 +192,17 @@ impl Producer {
 			return;
 		};
 
-		if let Some(back_pts) = state.entries.back().map(|e| e.pts) {
+		if let Some(back) = state.entries.back() {
 			// A non-advancing record (a duplicate, or a stalled/mis-scaled source) would open a
 			// zero-duration segment and never trigger eviction; drop it so the prior segment just
 			// covers its groups too.
-			if entry.pts == back_pts {
+			if entry.pts == back.pts {
 				return;
 			}
-			// A backward jump means the publisher restarted its timeline; the old window can't be
-			// stitched onto the new one, so start over (keeping the sequence monotonic).
-			if entry.pts < back_pts {
+			// A backward jump in pts or segment number means the publisher restarted its timeline;
+			// the old window can't be stitched onto the new one, so start over.
+			if entry.pts < back.pts || entry.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
-				state.dropped += state.entries.len() as u64;
 				state.entries.clear();
 			}
 		}
@@ -214,7 +218,6 @@ impl Producer {
 				break;
 			}
 			state.entries.pop_front();
-			state.dropped += 1;
 		}
 	}
 
@@ -239,15 +242,15 @@ impl Producer {
 		self.state.read().window()
 	}
 
-	/// The groups covered by the segment starting at `group`, or `None` if it isn't in the
-	/// window. An open end means "until the track ends" (the final segment of an ended
-	/// timeline).
-	pub fn segment_groups(&self, group: u64) -> Option<(u64, Option<u64>)> {
+	/// The groups covered by segment `segment`, or `None` if it isn't in the window. An open
+	/// end means "until the track ends" (the final segment of an ended timeline).
+	pub fn segment_groups(&self, segment: u64) -> Option<(u64, Option<u64>)> {
 		let state = self.state.read();
-		let index = state.entries.iter().position(|e| e.group == group)?;
+		let index = state.entries.iter().position(|e| e.segment == segment)?;
+		let entry = &state.entries[index];
 		match state.entries.get(index + 1) {
-			Some(next) => Some((group, Some(next.group))),
-			None if state.ended => Some((group, None)),
+			Some(next) => Some((entry.group, Some(next.group))),
+			None if state.ended => Some((entry.group, None)),
 			None => None,
 		}
 	}
@@ -302,7 +305,10 @@ impl Producer {
 
 /// A finalized segment with its transmuxed media, yielded by a [`Consumer`].
 pub struct Segment {
-	/// The segment's starting group (also its `seg/{group}.m4s` URI stem).
+	/// The aligned segment number (also its `seg/{segment}.m4s` URI stem), shared across the
+	/// broadcast's renditions.
+	pub segment: u64,
+	/// The rendition's first group of the segment.
 	pub group: u64,
 	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`].
 	pub media: Bytes,
@@ -324,11 +330,11 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// The group of the last segment returned; the next call resumes strictly after it. Only
+	/// The number of the last segment returned; the next call resumes strictly after it. Only
 	/// advanced once a segment is fetched or skipped, so a transient fetch error re-tries the
 	/// same segment on the next call instead of losing it.
 	after: Option<u64>,
-	/// The successor group recorded when the last segment was emitted. If the next segment
+	/// The successor segment recorded when the last one was emitted. If the next segment
 	/// isn't it, records were evicted unseen in between (a gap).
 	expected: Option<u64>,
 	/// A gap opened since the last emitted segment (a skip); set on the next one's discontinuity.
@@ -355,14 +361,15 @@ impl Consumer {
 			};
 			// A gap opened if the segment we're about to emit isn't the successor the previous
 			// one recorded (records between them evicted unseen).
-			let gap = self.gap || self.expected.is_some_and(|expected| expected != row.group);
+			let gap = self.gap || self.expected.is_some_and(|expected| expected != row.segment);
 
-			match self.rendition.segment(row.group).await? {
+			match self.rendition.segment(row.segment).await? {
 				Some(media) => {
-					self.after = Some(row.group);
+					self.after = Some(row.segment);
 					self.expected = successor;
 					self.gap = false;
 					return Ok(Some(Segment {
+						segment: row.segment,
 						group: row.group,
 						media,
 						duration: row.duration,
@@ -373,7 +380,7 @@ impl Consumer {
 				// Its groups aged out of the cache before we fetched them; skip to the next and
 				// carry the gap onto whichever segment we emit next.
 				None => {
-					self.after = Some(row.group);
+					self.after = Some(row.segment);
 					self.expected = successor;
 					self.gap = true;
 				}
@@ -401,6 +408,7 @@ fn row(entry: &Entry, next: Option<&Entry>) -> Row {
 		.map(|next| Duration::from(next.pts).saturating_sub(Duration::from(entry.pts)))
 		.unwrap_or(DEFAULT_SEGMENT);
 	Row {
+		segment: entry.segment,
 		group: entry.group,
 		duration: duration.as_secs_f64(),
 		pts: entry.pts,
@@ -411,8 +419,9 @@ fn row(entry: &Entry, next: Option<&Entry>) -> Row {
 mod tests {
 	use super::*;
 
-	fn entry(group: u64, pts_ms: u64) -> Entry {
+	fn entry(segment: u64, group: u64, pts_ms: u64) -> Entry {
 		Entry {
+			segment,
 			group,
 			pts: moq_net::Timestamp::from_millis(pts_ms).unwrap(),
 			ext: (),
@@ -422,17 +431,17 @@ mod tests {
 	#[test]
 	fn last_record_is_the_live_edge_until_ended() {
 		let live = Producer::new();
-		live.push(entry(0, 0), Duration::from_secs(30));
-		live.push(entry(1, 2_000), Duration::from_secs(30));
-		live.push(entry(2, 4_000), Duration::from_secs(30));
+		live.push(entry(0, 0, 0), Duration::from_secs(30));
+		live.push(entry(1, 1, 2_000), Duration::from_secs(30));
+		live.push(entry(2, 2, 4_000), Duration::from_secs(30));
 
 		let window = live.window();
 		assert_eq!(window.sequence, 0);
 		assert!(!window.ended);
 		assert_eq!(window.segments.len(), 2, "the live-edge record is not listed");
-		assert_eq!(window.segments[0].group, 0);
+		assert_eq!(window.segments[0].segment, 0);
 		assert_eq!(window.segments[0].duration, 2.0);
-		assert_eq!(window.segments[1].group, 1);
+		assert_eq!(window.segments[1].segment, 1);
 
 		live.end();
 		let window = live.window();
@@ -446,65 +455,69 @@ mod tests {
 		let live = Producer::new();
 		let window = Duration::from_secs(4);
 		for i in 0..6u64 {
-			live.push(entry(i, i * 2_000), window);
+			live.push(entry(i, i, i * 2_000), window);
 		}
 
 		let snapshot = live.window();
-		// Segments still cover >= 4s after eviction, and the sequence counts the drops.
+		// Segments still cover >= 4s after eviction, and the sequence is the first listed
+		// segment's aligned number.
 		assert!(snapshot.sequence > 0);
 		let span: f64 = snapshot.segments.iter().map(|s| s.duration).sum();
 		assert!(span >= 4.0);
-		assert_eq!(snapshot.segments.first().unwrap().group, snapshot.sequence);
+		assert_eq!(snapshot.segments.first().unwrap().segment, snapshot.sequence);
 	}
 
 	#[test]
-	fn segment_groups_cover_record_gaps() {
+	fn segment_groups_span_to_the_next_record() {
 		let live = Producer::new();
 		let window = Duration::from_secs(30);
-		// An audio-style timeline: records skip groups (granularity throttling).
-		live.push(entry(0, 0), window);
-		live.push(entry(50, 1_000), window);
-		live.push(entry(100, 2_000), window);
+		// An audio-style timeline: each segment packs many groups, so records skip group numbers.
+		live.push(entry(0, 0, 0), window);
+		live.push(entry(1, 50, 1_000), window);
+		live.push(entry(2, 100, 2_000), window);
 
 		assert_eq!(live.segment_groups(0), Some((0, Some(50))));
-		assert_eq!(live.segment_groups(50), Some((50, Some(100))));
-		// The live edge isn't a segment yet, and unknown groups miss.
-		assert_eq!(live.segment_groups(100), None);
+		assert_eq!(live.segment_groups(1), Some((50, Some(100))));
+		// The live edge isn't a segment yet, and unknown segments miss.
+		assert_eq!(live.segment_groups(2), None);
 		assert_eq!(live.segment_groups(7), None);
 
 		live.end();
-		assert_eq!(live.segment_groups(100), Some((100, None)));
+		assert_eq!(live.segment_groups(2), Some((100, None)));
 	}
 
 	#[test]
 	fn backwards_jump_resets_the_window() {
 		let live = Producer::new();
 		let window = Duration::from_secs(30);
-		live.push(entry(0, 10_000), window);
-		live.push(entry(1, 12_000), window);
-		live.push(entry(2, 1_000), window); // restart
+		live.push(entry(0, 0, 10_000), window);
+		live.push(entry(1, 1, 12_000), window);
+		live.push(entry(2, 2, 1_000), window); // restart: pts rewound
 
 		let snapshot = live.window();
-		assert_eq!(snapshot.sequence, 2, "reset keeps the media sequence monotonic");
 		assert!(snapshot.segments.is_empty(), "only the live edge remains");
+
+		// A segment number that rewinds (a restarted publisher) resets the same way.
+		live.push(entry(0, 0, 2_000), window);
+		assert!(live.window().segments.is_empty(), "only the live edge remains");
 	}
 
 	#[test]
 	fn non_advancing_record_is_skipped() {
 		let live = Producer::new();
 		let window = Duration::from_secs(30);
-		live.push(entry(0, 0), window);
-		live.push(entry(1, 2_000), window);
+		live.push(entry(0, 0, 0), window);
+		live.push(entry(1, 1, 2_000), window);
 		// A record whose pts equals the live edge would open a zero-duration segment; it's dropped
 		// so the prior segment just covers its groups.
-		live.push(entry(2, 2_000), window);
-		live.push(entry(3, 4_000), window);
+		live.push(entry(2, 2, 2_000), window);
+		live.push(entry(3, 3, 4_000), window);
 
 		live.end();
 		let window = live.window();
 		let durations: Vec<f64> = window.segments.iter().map(|s| s.duration).collect();
 		assert!(!durations.contains(&0.0), "no zero-duration segment: {durations:?}");
-		// Group 2 was absorbed into group 1's segment (still bounded by group 3's record).
+		// Segment 2 was absorbed into segment 1 (still bounded by segment 3's record).
 		assert_eq!(live.segment_groups(1), Some((1, Some(3))));
 		assert_eq!(live.segment_groups(2), None, "the skipped record is not a boundary");
 	}
@@ -519,8 +532,8 @@ mod tests {
 
 		// The watcher's own order: end() then close() -- the live edge finalizes.
 		let clean = Producer::new();
-		clean.push(entry(0, 0), window);
-		clean.push(entry(1, 2_000), window);
+		clean.push(entry(0, 0, 0), window);
+		clean.push(entry(1, 1, 2_000), window);
 		clean.end();
 		clean.close();
 		assert!(
@@ -530,8 +543,8 @@ mod tests {
 
 		// Reversed: a close() that races ahead of end() strands it forever.
 		let raced = Producer::new();
-		raced.push(entry(0, 0), window);
-		raced.push(entry(1, 2_000), window);
+		raced.push(entry(0, 0, 0), window);
+		raced.push(entry(1, 1, 2_000), window);
 		raced.close();
 		raced.end();
 		assert!(
@@ -547,21 +560,21 @@ mod tests {
 		let live = Producer::new();
 		let window = Duration::from_secs(30);
 		// A 6s cadence, so the flat 4s DEFAULT_SEGMENT would be wrong for the last segment.
-		live.push(entry(0, 0), window);
-		live.push(entry(1, 6_000), window);
-		live.push(entry(2, 12_000), window);
+		live.push(entry(0, 0, 0), window);
+		live.push(entry(1, 1, 6_000), window);
+		live.push(entry(2, 2, 12_000), window);
 		live.end();
 
 		let served = live.window();
 		let last_served = served.segments.last().expect("a final segment");
-		assert_eq!(last_served.group, 2);
+		assert_eq!(last_served.segment, 2);
 		assert_eq!(last_served.duration, 6.0, "serve path estimates from the cadence");
 
 		let last_recorded = match live.state.read().next_after(Some(1)) {
 			Next::Ready { row, .. } => row,
 			_ => panic!("ending finalizes the live edge"),
 		};
-		assert_eq!(last_recorded.group, 2);
+		assert_eq!(last_recorded.segment, 2);
 		assert_eq!(
 			last_recorded.duration, last_served.duration,
 			"the cursor times the final segment like the serve path"
@@ -572,21 +585,21 @@ mod tests {
 	fn next_after_walks_finalized_segments() {
 		let live = Producer::new();
 		let window = Duration::from_secs(30);
-		live.push(entry(0, 0), window);
-		live.push(entry(1, 2_000), window);
-		live.push(entry(2, 4_000), window);
+		live.push(entry(0, 0, 0), window);
+		live.push(entry(1, 1, 2_000), window);
+		live.push(entry(2, 2, 4_000), window);
 
-		// Groups 0 and 1 are finalized; group 2 is the live edge.
+		// Segments 0 and 1 are finalized; segment 2 is the live edge.
 		let first = match live.state.read().next_after(None) {
 			Next::Ready { row, .. } => row,
 			_ => panic!("expected a finalized segment"),
 		};
-		assert_eq!(first.group, 0);
+		assert_eq!(first.segment, 0);
 		let second = match live.state.read().next_after(Some(0)) {
 			Next::Ready { row, .. } => row,
 			_ => panic!("expected a finalized segment"),
 		};
-		assert_eq!(second.group, 1);
+		assert_eq!(second.segment, 1);
 		assert!(
 			matches!(live.state.read().next_after(Some(1)), Next::Pending),
 			"the live edge is not finalized while live"
@@ -597,7 +610,7 @@ mod tests {
 			Next::Ready { row, .. } => row,
 			_ => panic!("ending finalizes the live edge"),
 		};
-		assert_eq!(last.group, 2);
+		assert_eq!(last.segment, 2);
 		assert!(matches!(live.state.read().next_after(Some(2)), Next::Ended));
 	}
 }
