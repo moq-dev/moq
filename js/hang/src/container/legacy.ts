@@ -4,7 +4,7 @@ import { Time } from "@moq/net";
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
 import type { Format as ContainerFormat } from "./format";
-import type { Producer as TimelineProducer } from "./timeline";
+import type { Recorder as TimelineRecorder } from "./timeline";
 import type { Frame } from "./types";
 
 /** The legacy hang container: a microsecond timestamp varint followed by the raw codec payload. */
@@ -48,17 +48,18 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 /** Options for a legacy-container {@link Producer}. */
 export interface ProducerProps {
 	/**
-	 * Record each group open (sequence + start timestamp) into this companion timeline track as
-	 * aligned segments, so consumers can index the media without downloading it.
+	 * Report each group open (sequence + start timestamp) into the broadcast's timeline, so
+	 * consumers can index the media without downloading it. Mint one via
+	 * {@link Timeline.Segmenter.track}.
 	 */
-	timeline?: TimelineProducer;
+	timeline?: TimelineRecorder;
 }
 
 /** Writes legacy-container frames into a MoQ track, starting a new group on each keyframe. */
 export class Producer {
 	#track: Moq.Track.Producer;
 	#group?: Moq.Group.Producer;
-	#timeline?: TimelineProducer;
+	#timeline?: TimelineRecorder;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, props: ProducerProps = {}) {
@@ -71,8 +72,8 @@ export class Producer {
 		if (keyframe) {
 			this.#group?.close();
 			this.#group = this.#track.appendGroup();
-			// Index the group the moment it opens: its start is this keyframe's timestamp.
-			this.#timeline?.record(this.#group.sequence, timestamp);
+			// Report the group the moment it opens: its start is this keyframe's timestamp.
+			this.#timeline?.record(this.#group.sequence, timestamp, true);
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}

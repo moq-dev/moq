@@ -40,16 +40,16 @@ impl Estimate {
 ///
 /// ```no_run
 /// # fn example<E: moq_mux::catalog::hang::CatalogExt>(
-/// #     catalog: moq_mux::catalog::Producer<E>,
+/// #     mut catalog: moq_mux::catalog::Producer<E>,
 /// #     reserved: moq_mux::catalog::Reserved<E>,
 /// #     net: moq_net::track::Producer,
 /// #     config: hang::catalog::VideoConfig,
 /// #     frame: moq_mux::container::Frame,
 /// # ) -> moq_mux::Result<()> {
 /// use moq_mux::catalog::hang::Container;
-/// use moq_mux::timeline::Cadence;
+/// use moq_mux::timeline::Kind;
 ///
-/// let mut track = catalog.media_producer(net, Container::Legacy, Cadence::Boundary)?;
+/// let mut track = catalog.media_producer(net, Container::Legacy, Kind::Video)?;
 /// let mut rendition = reserved.video(track.name());
 /// rendition.set(config);
 ///

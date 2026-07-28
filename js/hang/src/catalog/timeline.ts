@@ -11,18 +11,16 @@ import { u53, u53Schema } from "./integers";
 export const MOQ_EPOCH_UNIX_MILLIS = 1_577_836_800_000;
 
 /**
- * Describes a media track's companion timeline track: the track's segment index, mapping each
- * segment (one or more groups) to its starting group and timestamp, so a consumer can seek (or
- * build an HLS/DASH playlist) without downloading the media itself.
+ * Describes the broadcast's timeline track: its segment index, one record per aligned segment
+ * mapping a span of content time to the group ranges that carry it on each media track, so a
+ * consumer can seek (or build an HLS/DASH playlist) without downloading the media itself.
  *
- * Present on a {@link VideoConfig} / {@link AudioConfig} when the publisher offers one. It is per
- * media track on purpose: a video segment is a single group while an audio segment packs many
- * shorter ones, so each track needs its own group mapping. Only the segment *numbers* are shared:
- * segment N covers the same span of content time on every track, which is what makes the
- * timelines sufficient for HLS/DASH export.
+ * Lives at the catalog root: there is one timeline per broadcast, because its whole point is
+ * that segments are aligned across the broadcast's tracks. A publisher that doesn't segment
+ * simply omits it.
  */
 export const TimelineSchema = z.object({
-	// The name of the companion MoQ track carrying this track's segment records.
+	// The name of the MoQ track carrying the broadcast's segment records.
 	track: z.string(),
 
 	// Units per second for the records' `pts` (and `wall`). Defaults to 1000 (milliseconds).

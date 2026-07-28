@@ -111,14 +111,12 @@ impl<C: Container> Producer<C> {
 		self
 	}
 
-	/// Record each group open (sequence + keyframe timestamp) through `recorder`, so consumers can
-	/// index the media without downloading it.
+	/// Report each group open (sequence, timestamp, keyframe) through `recorder`, enrolling
+	/// this track in the broadcast's timeline so consumers can index the media without
+	/// downloading it.
 	///
-	/// Mint the recorder from a [`timeline::Producer`](crate::timeline::Producer) (see
-	/// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline)). The record carries no
-	/// track id, so wire one recorder per timeline; a set of aligned renditions shares a timeline by
-	/// recording only the source and advertising the same section on the rest.
-	/// [`media_producer`](crate::catalog::Producer::media_producer) wires the 1:1 default for you.
+	/// Mint the recorder from the broadcast's [`Segmenter`](crate::timeline::Segmenter);
+	/// [`media_producer`](crate::catalog::Producer::media_producer) wires it for you.
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
@@ -156,16 +154,11 @@ impl<C: Container> Producer<C> {
 				None => self.inner.append_group()?,
 			};
 
-			// Index the group the moment it opens: its start is this keyframe's timestamp. The
-			// timeline is an optional sidecar (consumers tolerate gaps by extrapolating), so a
-			// recording failure must NOT abort the media write. Drop the recorder and carry on.
-			let timeline_err = match self.recorder.as_mut() {
-				Some(recorder) => recorder.record(group.sequence, frame.timestamp).err(),
-				None => None,
-			};
-			if let Some(err) = timeline_err {
-				tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
-				self.recorder = None;
+			// Report the group the moment it opens: its start is this frame's timestamp. The
+			// segmenter absorbs publish failures itself (the timeline is an optional sidecar),
+			// so reporting can't abort the media write.
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
 			}
 
 			self.group = Some(group);

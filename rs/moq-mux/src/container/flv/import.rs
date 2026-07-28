@@ -504,7 +504,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track: self.catalog.media_producer(
 					net_track,
 					crate::catalog::hang::Container::Legacy,
-					crate::timeline::Cadence::Boundary,
+					crate::timeline::Kind::Video,
 				)?,
 				config,
 			},
@@ -530,7 +530,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				track: self.catalog.media_producer(
 					net_track,
 					crate::catalog::hang::Container::Legacy,
-					crate::timeline::Cadence::Aligned,
+					crate::timeline::Kind::Audio,
 				)?,
 				config,
 			},

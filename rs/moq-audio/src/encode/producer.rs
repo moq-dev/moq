@@ -107,7 +107,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// rendition in `catalog` immediately.
 	pub fn new(
 		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<E>,
+		mut catalog: moq_mux::catalog::Producer<E>,
 		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
@@ -139,15 +139,10 @@ impl<E: CatalogExt> Producer<E> {
 			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec))?,
 		};
 		let name = track.name().to_string();
-		let track = catalog.media_producer(
-			track,
-			moq_mux::container::legacy::Wire,
-			moq_mux::timeline::Cadence::Aligned,
-		)?;
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire, moq_mux::timeline::Kind::Audio)?;
 
 		let mut catalog_mut = catalog.clone();
-		let mut config = encoder.catalog();
-		config.timeline = Some(catalog.timeline(&name)?.section());
+		let config = encoder.catalog();
 		catalog_mut.lock().audio.insert(&name, config)?;
 
 		Ok(Self {

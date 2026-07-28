@@ -1,11 +1,11 @@
 //! Export: serve a MoQ broadcast as HLS, fetching media on demand.
 //!
-//! A [`Broadcaster`] subscribes to one broadcast's catalog and, per rendition, to its
-//! timeline track (see [`hang::timeline`]). That is the *only* standing traffic: playlists
-//! are rendered from timeline records (each record maps a group to its start timestamp), and
-//! media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
-//! groups that segment covers from the relay cache and transmuxes them to CMAF. Renditions
-//! whose catalog entry advertises no timeline can't be served this way and are skipped.
+//! A [`Broadcaster`] subscribes to one broadcast's catalog and its single timeline track (see
+//! [`hang::timeline`]). That is the *only* standing traffic: playlists are a pure function of
+//! the timeline records (each names a complete aligned segment with per-track group ranges),
+//! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly
+//! the groups that segment covers from the relay cache and transmuxes them to CMAF. A
+//! broadcast whose catalog advertises no timeline can't be served this way and is skipped.
 //!
 //! The same machinery serves two kinds of consumer:
 //!
@@ -67,21 +67,27 @@ pub struct Broadcaster {
 	/// renditions themselves (see [`renditions::Producer::clear`]). Set once, right after
 	/// construction.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
+	/// The broadcast's timeline watcher, spawned by the catalog watcher once the catalog
+	/// advertises the timeline track. On drop it is aborted only when no cursor still needs
+	/// its records (see `Drop`).
+	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Broadcaster {
 	/// Resolve `source`'s catalog broadcast and start tracking its renditions.
 	pub async fn new(source: moq_mux::Source, config: Config) -> crate::Result<Arc<Self>> {
 		let broadcast = source.broadcast().await?;
-		let renditions = renditions::Producer::new();
+		let renditions = renditions::Producer::new(config.window);
+		let timeline_watcher = Arc::new(Mutex::new(None));
 		let broadcaster = Arc::new(Self {
 			broadcast: broadcast.clone(),
 			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
+			timeline_watcher: timeline_watcher.clone(),
 		});
 		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(source, broadcast, config, renditions));
+		let watcher = tokio::spawn(watch_catalog(source, broadcast, renditions, timeline_watcher));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		Ok(broadcaster)
 	}
@@ -159,19 +165,25 @@ impl Drop for Broadcaster {
 		if let Some(watcher) = self.watcher.lock().unwrap().take() {
 			watcher.abort();
 		}
-		// The rendition map lives in shared state, so unlike an owned map it does NOT free its
-		// renditions when this handle goes away: a surviving `renditions::Consumer` would pin
-		// every `Rendition`, and with it the timeline watcher and source subscription it holds.
-		// Release them here so teardown can't leak a standing subscription.
+		// A recording cursor (holding an `Arc<Rendition>`) must keep receiving timeline
+		// records after this broadcaster is gone, or its final segments would be truncated;
+		// the timeline watcher then ends on its own when the timeline (or broadcast) does.
+		// With no such holder, abort it now so teardown can't leak a standing subscription.
+		let held = self.renditions.any_held_externally();
+		// Release the map either way: a surviving `renditions::Consumer` would otherwise pin
+		// every `Rendition` forever.
 		self.renditions.clear();
+		if !held && let Some(watcher) = self.timeline_watcher.lock().unwrap().take() {
+			watcher.abort();
+		}
 	}
 }
 
 async fn watch_catalog(
 	source: moq_mux::Source,
 	broadcast: moq_net::broadcast::Consumer,
-	config: Config,
 	renditions: renditions::Producer,
+	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 ) {
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
@@ -189,9 +201,19 @@ async fn watch_catalog(
 		}
 	};
 
+	let mut timeline_started = false;
 	loop {
 		match kio::wait(|waiter| consumer.poll_next(waiter)).await {
-			Ok(Some(catalog)) => renditions.sync(&source, &config, &catalog),
+			Ok(Some(catalog)) => {
+				renditions.sync(&source, &catalog);
+				// The broadcast has one timeline; subscribe once it's advertised and fan its
+				// records out to every rendition.
+				if !timeline_started && let Some(section) = catalog.timeline.clone() {
+					timeline_started = true;
+					let watcher = tokio::spawn(watch_timeline(broadcast.clone(), section, renditions.fanout()));
+					*timeline_watcher.lock().unwrap() = Some(watcher);
+				}
+			}
 			Ok(None) => break,
 			Err(err) => {
 				tracing::warn!(%err, "broadcast catalog stream ended with error");
@@ -202,6 +224,40 @@ async fn watch_catalog(
 
 	// The source is done (or errored): let recording cursors finish.
 	renditions.close();
+}
+
+/// The broadcast's timeline watcher: read the single timeline track and fan each record out
+/// to every rendition's window.
+async fn watch_timeline(
+	broadcast: moq_net::broadcast::Consumer,
+	section: hang::catalog::Timeline,
+	renditions: renditions::Fanout,
+) {
+	match watch(&broadcast, &section, &renditions).await {
+		// The timeline finished cleanly: the publisher is done, so every window can end
+		// (ENDLIST) and recording cursors drain to completion.
+		Ok(()) => renditions.end_windows(),
+		// A transient error (subscription reset, relay hiccup): don't mark the windows ended;
+		// the serve path keeps serving the frozen windows.
+		Err(err) => {
+			tracing::warn!(track = %section.track, %err, "timeline watcher error; leaving the playlists live")
+		}
+	}
+	// The timeline stream is over either way: close so recording cursors terminate instead of
+	// parking forever (the serve path still reads the last windows).
+	renditions.close_windows();
+}
+
+async fn watch(
+	broadcast: &moq_net::broadcast::Consumer,
+	section: &hang::catalog::Timeline,
+	renditions: &renditions::Fanout,
+) -> crate::Result<()> {
+	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
+	while let Some(entry) = timeline.next().await? {
+		renditions.push(entry);
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -234,13 +290,12 @@ mod tests {
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
@@ -250,7 +305,7 @@ mod tests {
 			.media_producer(
 				track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Boundary,
+				moq_mux::timeline::Kind::Video,
 			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
@@ -312,17 +367,15 @@ mod tests {
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
 		let mut video_registration = reserved.video("video0");
 		let mut video_config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video_config.framerate = Some(30.0);
-		video_config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		video_registration.set(video_config);
 		let mut audio_registration = reserved.audio("audio0");
-		let mut audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
-		audio_config.timeline = Some(catalog.timeline("audio0").unwrap().section());
+		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		audio_registration.set(audio_config);
 		drop(reserved);
 
@@ -331,7 +384,7 @@ mod tests {
 			.media_producer(
 				video_track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Boundary,
+				moq_mux::timeline::Kind::Video,
 			)
 			.unwrap();
 		let audio_track = broadcast.create_track("audio0", None).unwrap();
@@ -339,7 +392,7 @@ mod tests {
 			.media_producer(
 				audio_track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Aligned,
+				moq_mux::timeline::Kind::Audio,
 			)
 			.unwrap();
 
@@ -415,7 +468,6 @@ mod tests {
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
@@ -426,7 +478,7 @@ mod tests {
 			.media_producer(
 				track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Boundary,
+				moq_mux::timeline::Kind::Video,
 			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
@@ -476,18 +528,22 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), "live");
 
 		// Drive the producer directly so the catalog can be reconciled synchronously.
-		let renditions = renditions::Producer::new();
-		let mut media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		media.timeline = Some(hang::catalog::Timeline::new("video.timeline"));
+		let renditions = renditions::Producer::new(Config::default().window);
+		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		renditions.sync(&source, &Config::default(), &catalog);
+		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
+		renditions.sync(&source, &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
 		let mut segments = rendition.segments();
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
-		renditions.sync(&source, &Config::default(), &moq_mux::catalog::hang::Catalog::default());
+		let empty = moq_mux::catalog::hang::Catalog {
+			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME)),
+			..Default::default()
+		};
+		renditions.sync(&source, &empty);
 		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("a removed rendition's cursor ends instead of parking")
@@ -508,13 +564,12 @@ mod tests {
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
@@ -523,7 +578,7 @@ mod tests {
 			.media_producer(
 				track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Boundary,
+				moq_mux::timeline::Kind::Video,
 			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
@@ -571,13 +626,12 @@ mod tests {
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
 			.expect("publish allowed");
 		settle().await;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
 
 		let reserved = catalog.reserve();
 		let mut registration = reserved.video("video0");
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.framerate = Some(30.0);
-		config.timeline = Some(catalog.timeline("video0").unwrap().section());
 		registration.set(config);
 		drop(reserved);
 
@@ -587,7 +641,7 @@ mod tests {
 			.media_producer(
 				track,
 				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Cadence::Boundary,
+				moq_mux::timeline::Kind::Video,
 			)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();

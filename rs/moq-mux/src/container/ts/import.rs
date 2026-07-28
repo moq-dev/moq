@@ -733,7 +733,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	let media = catalog.media_producer(
 		track,
 		crate::catalog::hang::Container::Legacy,
-		crate::timeline::Cadence::Boundary,
+		crate::timeline::Kind::Video,
 	)?;
 
 	let mut guard = catalog.lock();

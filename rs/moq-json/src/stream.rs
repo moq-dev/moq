@@ -10,7 +10,7 @@
 //! compresses against all the earlier ones. There is deliberately no group rolling (and so no
 //! catch-up machinery): the only reason to roll would be moq-net's per-group frame cap, which
 //! isn't worth working around here. A caller that wants to bound the record rate throttles at
-//! the source (e.g. the timeline's granularity); a consumer that finds a gap can fetch or
+//! the source (e.g. the timeline's segment cadence); a consumer that finds a gap can fetch or
 //! extrapolate.
 //!
 //! That single group is what bounds the log's history. moq-net caps a group's cached bytes, and a

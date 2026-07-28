@@ -101,6 +101,10 @@ pub struct Catalog<E: CatalogExt = ()> {
 	#[serde(default)]
 	pub audio: hang::catalog::Audio,
 
+	/// The broadcast's timeline track (its aligned segment index), if the publisher offers one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub timeline: Option<hang::catalog::Timeline>,
+
 	#[serde(flatten)]
 	pub ext: E,
 }
@@ -111,6 +115,7 @@ impl<E: CatalogExt> Catalog<E> {
 		let mut catalog = hang::Catalog::default();
 		catalog.video = self.video.clone();
 		catalog.audio = self.audio.clone();
+		catalog.timeline = self.timeline.clone();
 		catalog
 	}
 }

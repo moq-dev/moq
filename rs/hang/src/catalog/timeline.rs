@@ -7,26 +7,23 @@ use serde::{Deserialize, Serialize};
 /// consumer recovers Unix time by adding this back.
 pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 
-/// Describes a media track's companion timeline track.
+/// Describes the broadcast's timeline track, its segment index.
 ///
-/// A timeline track is the media track's segment index: each record maps a segment (one or
-/// more groups) to its starting group and timestamp (see the [`timeline`](crate::timeline)
-/// module for the record format), so a consumer can seek, or build an HLS/DASH playlist,
-/// without downloading the media itself. This section, present on a
-/// [`VideoConfig`](crate::catalog::VideoConfig) or
-/// [`AudioConfig`](crate::catalog::AudioConfig) when the publisher offers one, points at that
-/// track and declares how to read its timestamps.
+/// The timeline track carries one record per aligned segment: a span of content time shared
+/// by every media track, mapped to the group ranges that carry it on each track (see the
+/// [`timeline`](crate::timeline) module for the record format). A consumer can seek, or build
+/// an HLS/DASH playlist, without downloading the media itself.
 ///
-/// The section is per media track on purpose: a video segment is a single group while an audio
-/// segment packs many shorter ones, so each track needs its own group mapping. Only the
-/// segment *numbers* are shared: segment N covers the same span of content time on every
-/// track, which is what makes the timelines sufficient for HLS/DASH export.
+/// The section lives at the catalog root ([`Catalog::timeline`](crate::Catalog)): there is one
+/// timeline per broadcast, because its whole point is that segments are aligned across the
+/// broadcast's tracks. A publisher that doesn't segment simply omits it.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Timeline {
-	/// The name of the companion MoQ track carrying this track's group -> timestamp records.
+	/// The name of the MoQ track carrying the broadcast's segment records
+	/// ([`timeline::DEFAULT_NAME`](crate::timeline::DEFAULT_NAME) by convention).
 	pub track: String,
 
 	/// Units per second for the timeline's `pts` and [`wall`](Self::wall). Defaults to 1000
@@ -68,22 +65,19 @@ mod test {
 
 	#[test]
 	fn defaults_timescale_to_ms() {
-		let json = r#"{"track":"video0.timeline"}"#;
+		let json = r#"{"track":"timeline.z"}"#;
 		let decoded: Timeline = serde_json::from_str(json).unwrap();
-		assert_eq!(decoded.track, "video0.timeline");
+		assert_eq!(decoded.track, "timeline.z");
 		assert_eq!(decoded.timescale, 1000);
 		assert_eq!(decoded.wall, None);
 	}
 
 	#[test]
 	fn roundtrip_with_wall() {
-		let mut timeline = Timeline::new("audio0.timeline");
+		let mut timeline = Timeline::new("timeline.z");
 		timeline.wall = Some(1_751_846_400_000);
 		let json = serde_json::to_string(&timeline).unwrap();
-		assert_eq!(
-			json,
-			r#"{"track":"audio0.timeline","timescale":1000,"wall":1751846400000}"#
-		);
+		assert_eq!(json, r#"{"track":"timeline.z","timescale":1000,"wall":1751846400000}"#);
 		assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), timeline);
 	}
 }

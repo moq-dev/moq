@@ -104,6 +104,7 @@ The root of the catalog is a JSON document with the following schema:
 type Catalog = {
 	"audio": AudioSchema | undefined,
 	"video": VideoSchema | undefined,
+	"timeline": TimelineSchema | undefined,
 	// ... any custom fields ...
 }
 ~~~
@@ -114,7 +115,7 @@ The catalog SHOULD be mostly static, delegating any dynamic content to other tra
 For example, a `"chat"` section should include the name of a chat track, not individual chat messages.
 This way catalog updates are rare and a client MAY choose to not subscribe.
 
-This specification currently only defines audio and video tracks.
+This specification currently defines audio and video media tracks, plus an optional timeline track ({{timeline}}) indexing their segments.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -323,6 +324,96 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+
+
+# Timeline {#timeline}
+The timeline track is the broadcast's segment index.
+MoQ groups carry only an opaque sequence number; the timestamps live inside the media frames.
+The timeline republishes the broadcast's segmentation as metadata: one record per segment, mapping a span of content time to the group ranges that carry it on each media track.
+A consumer can answer "which groups cover time T on track X" and "where is the live edge" from a few bytes per segment, without downloading media.
+This is sufficient to render an HLS or DASH playlist, seek a VOD recording, or index an archive.
+
+The timeline is optional.
+There is one timeline per broadcast, because its purpose is that segments are aligned across the broadcast's tracks: segment N covers the same span of content time on every track, which is what HLS requires of switchable renditions.
+A broadcast that does not need aligned segments simply omits it.
+
+## Catalog Section {#timeline-catalog}
+The catalog's root `timeline` field advertises the track:
+
+~~~
+type TimelineSchema = {
+	"track": string,
+	"timescale": number | undefined,
+	"wall": number | undefined,
+}
+~~~
+
+The `track` field names the MoQ track carrying the segment records.
+The name `timeline.z` is RECOMMENDED; a consumer MUST use the advertised name rather than assuming it.
+
+The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `wall`.
+If absent, it defaults to 1000 (milliseconds).
+
+The `wall` field, if known, is the wall-clock time of `pts` 0: in `timescale` units, measured from the moq epoch, 2020-01-01T00:00:00Z.
+A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix time by adding the epoch back (for HLS `EXT-X-PROGRAM-DATE-TIME` or DASH `availabilityStartTime`).
+The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
+
+## Track Framing {#timeline-framing}
+The timeline track is an append-log: a single group that is never rolled, with one record per frame, every record preserved in order.
+Each record is a UTF-8 JSON object.
+
+The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each record compresses against all earlier ones.
+The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally with one shared window.
+The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
+
+A consumer MUST start reading from the group's first frame; the shared window makes a mid-group join undecodable.
+The live group is therefore bounded history; deep history is served from a recording.
+
+## Records {#timeline-records}
+Each record describes one complete segment:
+
+~~~
+type TimelineRecord = {
+	"segment": number,
+	"pts": number,
+	"duration": number,
+	"tracks": Map<TrackName, TimelineRange[]> | undefined,
+}
+
+type TimelineRange = {
+	"start": number,
+	"end": number,
+	"keyframe": boolean | undefined,
+}
+~~~
+
+The `segment` field is the segment's number.
+Numbers are consecutive within a broadcast, anchoring HLS `EXT-X-MEDIA-SEQUENCE`; they are explicit rather than implied by record order so a reader joining mid-stream, or reading a windowed recording, keeps stable numbering.
+
+The `pts` field is the segment's start and `duration` its length, both in the timeline's timescale.
+The next record's `pts` equals `pts + duration` unless content time itself jumped; a consumer SHOULD treat such a jump as a discontinuity.
+
+The `tracks` field maps each participating media track name to the group ranges it contributes.
+Each range covers groups `start` through `end` inclusive, as used by moq-lite FETCH and SUBSCRIBE.
+More than one range means the group sequence is discontinuous inside the segment: the skipped groups never existed.
+A track absent from the map has no content for the span (a gap; HLS `EXT-X-GAP`).
+A record MUST tolerate and SHOULD preserve unknown fields, like the catalog.
+
+The `keyframe` field states whether the range's first group starts with a keyframe, i.e. whether a player can join or switch renditions there.
+If absent, it defaults to true; a publisher sets `false` when a source resumes without one, so an exporter knows not to advertise the segment as independently decodable.
+
+## Segmentation {#timeline-segmentation}
+A segment is a span of content time shared by every media track.
+Segment boundaries SHOULD land on video keyframe timestamps: every group already starts with a keyframe ({{container}}), so a boundary at a video keyframe lets each video track contribute whole groups and remain independently decodable.
+Audio groups are short and can be cut anywhere; an audio track contributes every group whose start falls inside the span.
+A segment MAY span multiple video groups (small GOPs packed into a larger segment).
+
+How boundaries are chosen is publisher policy: following a source's existing segmentation (an imported HLS playlist, CMAF segments on disk), or pacing by a target duration.
+Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every participating track's groups for the span are known.
+Records are therefore self-contained and immediately servable, and the newest record is the live edge.
+
+A group that starts before the first boundary belongs to the first segment.
+The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content and MAY undercount the last group's duration.
 
 
 # Security Considerations

@@ -58,6 +58,13 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// Bytes carried across calls: a partial atom at the tail of one `decode` waits
 	// here for the rest to arrive on the next call.
 	buffer: BytesMut,
+
+	// A segment boundary (styp or explicit `cut()`) waiting to land on the next keyframe
+	// fragment, where it becomes a `Segmenter::cut` at that fragment's timestamp.
+	pending_cut: bool,
+
+	// Whether a styp atom marks a segment boundary (see `with_cut_on_boundary`).
+	cut_on_styp: bool,
 }
 
 #[derive(PartialEq, Debug)]
@@ -72,11 +79,9 @@ struct Fmp4Track {
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
 
-	// Indexes this track's group opens into its `<name>.timeline.z` timeline, advertised in the
-	// rendition's config. Passthrough writes groups by hand (no `container::Producer`), so the
-	// recorder is fed directly at each keyframe rather than through `with_recorder`.
-	// `None` once recording has failed, matching `container::Producer`: the timeline is an
-	// optional sidecar, so losing it must not take the media down with it.
+	// Reports this track's group opens into the broadcast's timeline. Passthrough writes
+	// groups by hand (no `container::Producer`), so the recorder is fed directly at each
+	// keyframe fragment rather than through `with_recorder`.
 	recorder: Option<crate::timeline::Recorder>,
 
 	// The minimum buffer required for the track.
@@ -118,7 +123,29 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			moof_size: 0,
 			broadcast,
 			buffer: BytesMut::new(),
+			pending_cut: false,
+			cut_on_styp: true,
 		}
+	}
+
+	/// Whether a `styp` atom marks a segment boundary (a CMAF segment on disk), cutting the
+	/// broadcast's [`Segmenter`](crate::timeline::Segmenter) at the next keyframe fragment.
+	/// On by default.
+	///
+	/// Turn it off on every importer but one when several feed a single broadcast (e.g. an
+	/// HLS import with separate audio renditions): boundaries are broadcast-wide, so only
+	/// one source should declare them.
+	pub fn with_cut_on_boundary(mut self, cut: bool) -> Self {
+		self.cut_on_styp = cut;
+		self
+	}
+
+	/// Declare that the next keyframe fragment starts a new segment, for callers that know
+	/// the source's segmentation out of band (e.g. an HLS import following its playlist).
+	/// Equivalent to what a `styp` atom triggers when
+	/// [`with_cut_on_boundary`](Self::with_cut_on_boundary) is on.
+	pub fn cut(&mut self) {
+		self.pending_cut = true;
 	}
 
 	/// Restrict which track roles are published.
@@ -176,7 +203,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		for (atom, start, size) in parsed {
 			match atom {
-				Any::Ftyp(_) | Any::Styp(_) => {}
+				Any::Ftyp(_) => {}
+				// A styp opens a CMAF segment: the on-disk segmentation is the boundary
+				// hint, landing on the next keyframe fragment.
+				Any::Styp(_) if self.cut_on_styp => self.pending_cut = true,
+				Any::Styp(_) => {}
 				Any::Moov(moov) => {
 					self.init(moov)?;
 				}
@@ -202,6 +233,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init(&mut self, moov: Moov) -> Result<()> {
+		// Create the broadcast's timeline before locking the catalog below: creating it
+		// publishes the root section through that same lock.
+		self.catalog.timeline()?;
+
 		// Clone the catalog to avoid the borrow checker.
 		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
@@ -239,27 +274,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				moq_net::track::Info::default().with_timescale(timescale),
 			)?;
 
-			// Each track indexes its own group opens: audio and video group boundaries differ, so a
-			// per-track timeline (the 1:1 default) is correct here, not a shared one. The cadence
-			// keeps their segment numbers aligned: video groups open segments, audio packs into them.
-			let timeline = self.catalog.timeline(track.name())?;
-			let cadence = match kind {
-				TrackKind::Video => crate::timeline::Cadence::Boundary,
-				TrackKind::Audio => crate::timeline::Cadence::Aligned,
+			// Enroll every track in the broadcast's timeline: passthrough writes groups by hand
+			// (no `container::Producer`), so the recorder is fed directly at each group open.
+			let timeline_kind = match kind {
+				TrackKind::Video => crate::timeline::Kind::Video,
+				TrackKind::Audio => crate::timeline::Kind::Audio,
 			};
+			let recorder = self.catalog.segmenter().track(track.name(), timeline_kind);
 
 			let detect_bitrate = match kind {
 				TrackKind::Video => {
-					let mut config = self.init_video(trak, &moov)?;
+					let config = self.init_video(trak, &moov)?;
 					let detect = config.bitrate.is_none();
-					config.timeline = Some(timeline.section());
 					catalog.video.renditions.insert(track.name().to_string(), config);
 					detect
 				}
 				TrackKind::Audio => {
-					let mut config = self.init_audio(trak, &moov)?;
+					let config = self.init_audio(trak, &moov)?;
 					let detect = config.bitrate.is_none();
-					config.timeline = Some(timeline.section());
 					catalog.audio.renditions.insert(track.name().to_string(), config);
 					detect
 				}
@@ -271,7 +303,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					track,
 					group: None,
-					recorder: Some(timeline.recorder(cadence)),
+					recorder: Some(recorder),
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
@@ -533,6 +565,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
+		// A pending cut waits for a video keyframe; only an import with no video at all may
+		// anchor a boundary on another track's fragment.
+		let has_video = self.tracks.values().any(|t| t.kind == TrackKind::Video);
 		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		let moof_size = self.moof_size;
@@ -774,19 +809,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 
-			// A keyframe fragment just opened a new group; index it in the track's timeline (mapped
-			// onto the aligned segments per the recorder's cadence) so a playlist/seek/VOD reader
-			// can map time to group.
-			// The timeline is an optional sidecar (consumers extrapolate across gaps), so a recording
-			// failure must NOT abort the passthrough. Drop the recorder and carry on.
 			if contains_keyframe {
-				let timeline_err = match track.recorder.as_mut() {
-					Some(recorder) => recorder.record(g.sequence, timestamp).err(),
-					None => None,
-				};
-				if let Some(err) = timeline_err {
-					tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
-					track.recorder = None;
+				// A pending segment boundary (a styp, or an explicit `cut()`) lands on the next
+				// keyframe fragment: for video that is where a segment can start, and for an
+				// audio-only import the audio fragment is the best anchor there is.
+				if self.pending_cut && (track.kind == TrackKind::Video || !has_video) {
+					self.pending_cut = false;
+					self.catalog.segmenter().cut(timestamp);
+				}
+
+				// A keyframe fragment just opened a new group; report it so the broadcast's
+				// timeline can index the segment (the segmenter absorbs publish failures).
+				if let Some(recorder) = track.recorder.as_mut() {
+					recorder.record(g.sequence, timestamp, true);
 				}
 			}
 

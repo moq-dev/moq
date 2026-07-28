@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -54,17 +53,16 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// a caller has none land on one timeline and audio/video stay in sync.
 	clock: crate::Clock,
 
-	/// A clone of the broadcast, retained so per-rendition timeline tracks can be created
-	/// lazily when a rendition is registered (the codec importers hold only their media
-	/// track, not the broadcast).
+	/// A clone of the broadcast, retained so the timeline track can be created lazily when
+	/// the first media track enrolls (the codec importers hold only their media track, not
+	/// the broadcast).
 	broadcast: moq_net::broadcast::Producer,
 
-	/// The per-rendition timeline producers, memoized by media-track name so the catalog
-	/// section and the media track's group recorder share one track. See [`media_producer`](Self::media_producer).
-	timelines: Arc<Mutex<BTreeMap<String, crate::timeline::Producer>>>,
+	/// The broadcast's one timeline track, created lazily by [`timeline`](Self::timeline).
+	timeline: Arc<Mutex<Option<crate::timeline::Producer>>>,
 
-	/// The broadcast's shared segment counter, wired into every timeline so segment numbers
-	/// align across tracks. See [`segmenter`](Self::segmenter).
+	/// The broadcast's segmenter: the shared boundary list every enrolled track's groups map
+	/// onto. See [`segmenter`](Self::segmenter).
 	segmenter: crate::timeline::Segmenter,
 }
 
@@ -79,7 +77,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			reservations: self.reservations.clone(),
 			clock: self.clock,
 			broadcast: self.broadcast.clone(),
-			timelines: self.timelines.clone(),
+			timeline: self.timeline.clone(),
 			segmenter: self.segmenter.clone(),
 		}
 	}
@@ -125,7 +123,7 @@ impl<E: CatalogExt> Producer<E> {
 			reservations: Arc::new(Mutex::new(Reservations::default())),
 			clock: crate::Clock::new(),
 			broadcast: broadcast.clone(),
-			timelines: Arc::new(Mutex::new(BTreeMap::new())),
+			timeline: Arc::new(Mutex::new(None)),
 			segmenter: crate::timeline::Segmenter::new(),
 		})
 	}
@@ -210,54 +208,53 @@ impl<E: CatalogExt> Producer<E> {
 		}
 	}
 
-	/// Build the media [`container::Producer`](crate::container::Producer) for `track`, recording its
-	/// group opens into the `<name>.timeline.z` timeline named after it as aligned segments.
+	/// Build the media [`container::Producer`](crate::container::Producer) for `track`,
+	/// enrolling it in the broadcast's timeline so its groups are indexed into the aligned
+	/// segments.
 	///
-	/// `cadence` states how the track's groups map onto the broadcast's segments: video is
-	/// [`Cadence::Boundary`](crate::timeline::Cadence::Boundary) (every group, opened by a
-	/// keyframe, is a segment) and audio is
-	/// [`Cadence::Aligned`](crate::timeline::Cadence::Aligned) (groups pack into the segments
-	/// video opens). See [`timeline`](crate::timeline).
-	///
-	/// This is the 1:1 default. To share a timeline across aligned renditions, build the producer
-	/// yourself and wire the shared timeline's recorder:
-	/// `container::Producer::new(track, container).with_recorder(catalog.timeline(shared)?.recorder(cadence))`,
-	/// and advertise `catalog.timeline(shared)?.section()` on each of their configs.
+	/// `kind` states what the track carries: the segmenter prefers a video track as its
+	/// auto-cut driver, since segment boundaries must land on video keyframes. The broadcast's
+	/// one timeline track is created (and advertised in the catalog's root `timeline` section)
+	/// on first use; see [`timeline`](crate::timeline) for the whole model.
 	pub fn media_producer<C: crate::container::Container>(
-		&self,
+		&mut self,
 		track: moq_net::track::Producer,
 		container: C,
-		cadence: crate::timeline::Cadence,
+		kind: crate::timeline::Kind,
 	) -> crate::Result<crate::container::Producer<C>> {
-		let recorder = self.timeline(track.name())?.recorder(cadence);
+		self.timeline()?;
+		let recorder = self.segmenter.track(track.name(), kind);
 		Ok(crate::container::Producer::new(track, container).with_recorder(recorder))
 	}
 
-	/// The [`timeline::Producer`](crate::timeline::Producer) named `name`, creating its
-	/// `<name>.timeline.z` track on first use and returning the same shared handle thereafter.
-	/// Every timeline minted here numbers segments through the broadcast's one
-	/// [`segmenter`](Self::segmenter), so they stay aligned.
+	/// The broadcast's [`timeline::Producer`](crate::timeline::Producer), creating its track
+	/// ([`hang::timeline::DEFAULT_NAME`]) and advertising it in the catalog's root `timeline`
+	/// section on first use.
 	///
-	/// Advertise it on a rendition by setting `config.timeline = Some(timeline.section())`, and
-	/// record group opens through its [`recorder`](crate::timeline::Producer::recorder). Two
-	/// renditions naming the same timeline share it: an aligned transcode ladder records the source
-	/// and has the rungs only advertise the same section.
+	/// [`media_producer`](Self::media_producer) calls this for you; call it directly to
+	/// [`set_wall`](crate::timeline::Producer::set_wall) or when wiring recorders by hand via
+	/// [`segmenter`](Self::segmenter).
 	///
-	/// Errors on first use if the broadcast can't create the `<name>.timeline.z` track, for example
-	/// because something else already took that name.
-	pub fn timeline(&self, name: &str) -> crate::Result<crate::timeline::Producer> {
-		let mut timelines = self.timelines.lock().unwrap();
-		if let Some(timeline) = timelines.get(name) {
-			return Ok(timeline.clone());
+	/// Errors on first use if the broadcast can't create the timeline track, for example
+	/// because something else already took the name.
+	pub fn timeline(&mut self) -> crate::Result<crate::timeline::Producer> {
+		{
+			let timeline = self.timeline.lock().unwrap();
+			if let Some(timeline) = timeline.as_ref() {
+				return Ok(timeline.clone());
+			}
 		}
 
-		let timeline = crate::timeline::Producer::new(&mut self.broadcast.clone(), name, self.segmenter.clone())?;
-		timelines.insert(name.to_string(), timeline.clone());
+		let timeline = crate::timeline::Producer::new(&mut self.broadcast.clone(), &self.segmenter)?;
+		*self.timeline.lock().unwrap() = Some(timeline.clone());
+		self.lock().timeline = Some(timeline.section());
 		Ok(timeline)
 	}
 
-	/// The broadcast's shared [`Segmenter`](crate::timeline::Segmenter): the segment counter
-	/// every timeline minted by [`timeline`](Self::timeline) aligns on.
+	/// The broadcast's [`Segmenter`](crate::timeline::Segmenter): where the application cuts
+	/// segment boundaries ([`cut`](crate::timeline::Segmenter::cut)) or tunes the auto-cut
+	/// threshold, and where tracks not built through
+	/// [`media_producer`](Self::media_producer) enroll.
 	pub fn segmenter(&self) -> crate::timeline::Segmenter {
 		self.segmenter.clone()
 	}
@@ -272,7 +269,7 @@ impl<E: CatalogExt> Producer<E> {
 		self.hang.finish()?;
 		self.hangz.finish()?;
 		self.msf_track.finish()?;
-		for timeline in self.timelines.lock().unwrap().values_mut() {
+		if let Some(timeline) = self.timeline.lock().unwrap().as_mut() {
 			timeline.finish()?;
 		}
 		Ok(())
@@ -565,11 +562,27 @@ mod test {
 	#[test]
 	fn timeline_reports_a_track_collision() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast).unwrap();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
 
 		// Something else already took the name the timeline track wants.
-		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
-		assert!(catalog.timeline("video0").is_err());
+		let _taken = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
+		assert!(catalog.timeline().is_err());
+	}
+
+	#[test]
+	fn timeline_advertises_the_catalog_section() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast).unwrap();
+
+		// First use creates the track and advertises it at the catalog root; a second call
+		// returns the same shared handle without republishing.
+		let timeline = catalog.timeline().unwrap();
+		assert_eq!(
+			catalog.snapshot().timeline,
+			Some(timeline.section()),
+			"the root section should advertise the timeline track"
+		);
+		catalog.timeline().unwrap();
 	}
 
 	fn h264_config() -> VideoConfig {
