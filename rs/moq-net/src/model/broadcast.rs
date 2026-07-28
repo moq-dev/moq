@@ -484,6 +484,7 @@ impl Producer {
 			route_seen: None,
 			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 
@@ -723,6 +724,7 @@ impl Dynamic {
 			route_seen: None,
 			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 
@@ -796,6 +798,11 @@ pub struct Consumer {
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
 	stats: stats::Scope,
+	// Keeps the origin's front off routes that flow back through the peer this
+	// handle was resolved for, released when the last clone drops. Only set on the
+	// shared front of a route-fed broadcast, and only for a peer that declared an
+	// origin; `None` everywhere else.
+	exclusion: Option<Arc<super::origin_impl::ExclusionGuard>>,
 }
 
 impl Clone for Consumer {
@@ -809,11 +816,20 @@ impl Clone for Consumer {
 			route_seen: None,
 			routes_seen: None,
 			stats: self.stats.clone(),
+			exclusion: self.exclusion.clone(),
 		}
 	}
 }
 
 impl Consumer {
+	/// Attach the guard that keeps the origin's front off routes flowing back
+	/// through the peer this handle was resolved for. Set once, at the origin's
+	/// broadcast handoff; the guard is shared by every clone of this handle.
+	pub(crate) fn with_exclusion(mut self, guard: Arc<super::origin_impl::ExclusionGuard>) -> Self {
+		self.exclusion = Some(guard);
+		self
+	}
+
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -1052,6 +1068,7 @@ impl WeakConsumer {
 			route_seen: None,
 			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 }

@@ -553,6 +553,46 @@ impl NotifyNode {
 	}
 }
 
+/// Keeps a peer registered in [`FrontState::excluded`] for as long as it holds the
+/// shared front, so the front stays off routes that flow back through it.
+///
+/// Carried by the [`broadcast::Consumer`] handed to that peer and shared by its
+/// clones, so the registration ends when the last of them drops. A guard whose
+/// front has already closed is inert.
+pub(crate) struct ExclusionGuard {
+	state: kio::Producer<FrontState>,
+	peer: Origin,
+}
+
+impl ExclusionGuard {
+	/// Register `peer` and return the guard that releases it, or `None` if the
+	/// front is closing (nothing left to keep off a route).
+	fn new(state: &kio::Producer<FrontState>, peer: Origin) -> Option<Arc<Self>> {
+		let mut s = state.write().ok()?;
+		if s.closed {
+			return None;
+		}
+		*s.excluded.entry(peer).or_default() += 1;
+		drop(s);
+		Some(Arc::new(Self {
+			state: state.clone(),
+			peer,
+		}))
+	}
+}
+
+impl Drop for ExclusionGuard {
+	fn drop(&mut self) {
+		let Ok(mut state) = self.state.write() else { return };
+		if let std::collections::hash_map::Entry::Occupied(mut entry) = state.excluded.entry(self.peer) {
+			match entry.get() {
+				1 => drop(entry.remove()),
+				n => *entry.get_mut() = n - 1,
+			}
+		}
+	}
+}
+
 /// How a path resolves against the announce tree for one consumer.
 ///
 /// `Excluded` is deliberately not folded into `Missing`: they mean opposite
@@ -673,13 +713,23 @@ impl OriginNode {
 		// tainted for the requester: the front picks per track and re-picks on
 		// failover, so a tainted route anywhere in the table is one the front may
 		// serve them from. Checking the whole table rather than just the active
-		// route is what keeps that honest. Otherwise pin them to the best clean
-		// source. A pinned broadcast skips the front's re-splicing, which is fine:
-		// the requester is itself a relay (only a forwarder's origin can appear in
-		// a chain) and re-splices via its own front when the pinned source dies.
+		// route is what keeps that honest at this instant; the guard registered
+		// below keeps it honest afterwards, holding the front off a route through
+		// this peer for as long as they are reading it. Otherwise pin them to the
+		// best clean source. A pinned broadcast skips the front's re-splicing,
+		// which is fine: the requester is itself a relay (only a forwarder's origin
+		// can appear in a chain) and re-splices via its own front when the pinned
+		// source dies.
 		let state = broadcast.state.read();
 		if !state.routes.iter().any(|r| r.route.hops.contains(&origin)) {
-			return Resolved::Found(broadcast.broadcast.consume());
+			drop(state);
+			let shared = broadcast.broadcast.consume();
+			return match ExclusionGuard::new(&broadcast.state, origin) {
+				Some(guard) => Resolved::Found(shared.with_exclusion(guard)),
+				// The front closed between the lookup and the registration; it
+				// serves nothing now, so there is nothing to keep off a route.
+				None => Resolved::Found(shared),
+			};
 		}
 		match state
 			.dispatch(Some(origin))
@@ -1144,6 +1194,13 @@ struct FrontState {
 	publisher: Option<Origin>,
 	next_route: u64,
 	routes: Vec<FrontRoute>,
+	/// Peers currently reading this front through the shared broadcast, refcounted
+	/// by live [`ExclusionGuard`]s. The resolve-time check only proves the table is
+	/// clean for a requester at that instant; the front picks per track and re-picks
+	/// on failover, so without this a route tainted for an attached peer could be
+	/// adopted underneath them and hand them back their own bytes. Routes through
+	/// these origins are avoided while any clean alternative exists.
+	excluded: HashMap<Origin, usize>,
 	/// The source tracks are dispatched to. Backups park until promoted.
 	active: Option<u64>,
 	/// How long the front outlives ungracefully losing its last source (see
@@ -1157,9 +1214,15 @@ struct FrontState {
 
 impl FrontState {
 	/// The source new track requests should dispatch to: live first, then lowest
-	/// cost, then shortest hop chain with a deterministic hash tie-break.
+	/// cost, then shortest hop chain with a deterministic hash tie-break, skipping
+	/// routes that flow through a peer currently reading the front while any other
+	/// route remains (see [`Self::prefer_untainted`]).
 	fn best_route(&self) -> Option<u64> {
-		self.dispatch(None)
+		let candidates: Vec<&FrontRoute> = self.routes.iter().collect();
+		self.prefer_untainted(&candidates)
+			.into_iter()
+			.min_by_key(|r| route_order(&self.path.as_path(), &r.route))
+			.map(|r| r.id)
 	}
 
 	/// The source a subscription from `exclude` should dispatch to: the best
@@ -1176,6 +1239,35 @@ impl FrontState {
 			.map(|r| r.id)
 	}
 
+	/// Whether serving from `route` would hand an attached peer its own bytes back.
+	fn taints_a_reader(&self, route: &broadcast::Route) -> bool {
+		route.hops.iter().any(|hop| self.excluded.contains_key(hop))
+	}
+
+	/// Narrow `candidates` to the routes clean for every peer currently reading the
+	/// shared front, unless that would leave nothing.
+	///
+	/// Keeping the front off a tainted route is what makes the resolve-time
+	/// split-horizon check hold for the life of a subscription rather than just at
+	/// request time. Falling back when every route is tainted is deliberate: the
+	/// alternative is starving readers the route is perfectly good for, and a peer
+	/// whose only path runs back through itself has nothing to be served from
+	/// anyway. It re-resolves to [`Error::Unroutable`] on its next request.
+	fn prefer_untainted<'a>(&self, candidates: &[&'a FrontRoute]) -> Vec<&'a FrontRoute> {
+		if self.excluded.is_empty() {
+			return candidates.to_vec();
+		}
+		let clean: Vec<&FrontRoute> = candidates
+			.iter()
+			.copied()
+			.filter(|r| !self.taints_a_reader(&r.route))
+			.collect();
+		match clean.is_empty() {
+			true => candidates.to_vec(),
+			false => clean,
+		}
+	}
+
 	/// The source one track should be served from: the front's active source
 	/// unless `skip` rules it out, then the next-best route that survives.
 	///
@@ -1187,12 +1279,14 @@ impl FrontState {
 	fn serve_route(&self, skip: impl Fn(u64) -> bool) -> Option<u64> {
 		if let Some(active) = self.active
 			&& !skip(active)
+			&& let Some(route) = self.routes.iter().find(|r| r.id == active)
+			&& !self.taints_a_reader(&route.route)
 		{
 			return Some(active);
 		}
-		self.routes
-			.iter()
-			.filter(|r| !skip(r.id))
+		let candidates: Vec<&FrontRoute> = self.routes.iter().filter(|r| !skip(r.id)).collect();
+		self.prefer_untainted(&candidates)
+			.into_iter()
 			.min_by_key(|r| route_order(&self.path.as_path(), &r.route))
 			.map(|r| r.id)
 	}
@@ -1532,6 +1626,7 @@ fn attach_source(
 		self_origin: origin.id,
 		publisher,
 		next_route: 1,
+		excluded: HashMap::new(),
 		routes: vec![FrontRoute {
 			id: 0,
 			route,
@@ -2829,6 +2924,7 @@ mod tests {
 			self_origin,
 			publisher: routes.first().and_then(|r| r.hops.iter().next().copied()),
 			next_route: routes.len() as u64,
+			excluded: HashMap::new(),
 			routes: routes
 				.into_iter()
 				.enumerate()
@@ -4457,6 +4553,77 @@ mod tests {
 		// A fresh request now has nowhere clean to go, and says so rather than
 		// silently serving the peer their own route.
 		assert!(matches!(scoped.request_broadcast("test").await, Err(Error::Unroutable)));
+	}
+
+	/// The resolve-time check only proves the table is clean for a peer at that
+	/// instant. A route through them attaching *afterwards* must not be adopted
+	/// underneath their live subscription: they hold the shared front, so the front
+	/// stays off that route while a clean one remains.
+	#[tokio::test]
+	async fn test_exclusion_holds_when_a_tainted_route_attaches_later() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+
+		// Only a clean route exists, so the peer legitimately gets the shared front.
+		// Priced above the route that arrives later, so the front genuinely prefers
+		// that one and staying put is the guard's doing, not the tie-break's.
+		let source_clean = origin
+			.create_broadcast("test", announce().with_hops(local).with_cost(5))
+			.unwrap();
+		let mut dynamic_clean = source_clean.dynamic();
+		settle().await;
+		settle().await;
+		let scoped = consumer.clone().excluding(peer);
+		let broadcast = scoped.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer_clean = accept_track(&mut dynamic_clean, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer_clean.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// A cheaper route back through the peer attaches. Without the registration
+		// the front would re-splice onto it and hand the peer its own bytes.
+		// `advertised` non-zero says the announcing relay is not itself carrying, which
+		// keeps the simultaneous-activation handover gate (whose key comparison is
+		// hash-random) out of this test: the front takes the cheaper route outright
+		// unless the exclusion stops it.
+		let mut tainted = announce().with_hops(via_peer.clone()).with_cost(0);
+		tainted.advertised = 1;
+		let mut source_tainted = origin.create_broadcast("test", tainted).unwrap();
+		let mut dynamic_tainted = source_tainted.dynamic();
+		settle().await;
+		settle().await;
+		dynamic_tainted.assert_no_request();
+		producer_clean.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
+
+		// The registration ends with the last handle. The next table change is free
+		// to take the cheaper route, which is what proves it was released.
+		drop(sub);
+		drop(broadcast);
+		drop(scoped);
+		settle().await;
+		let mut bumped = announce().with_hops(via_peer).with_cost(1);
+		bumped.advertised = 1;
+		source_tainted.set_route(bumped).unwrap();
+		settle().await;
+		let plain = consumer.request_broadcast("test").await.unwrap();
+		let _plain_track = plain.track("video").unwrap().subscribe(None);
+		settle().await;
+		settle().await;
+		assert!(
+			dynamic_tainted.requested_track().now_or_never().is_some(),
+			"the front must be free to use the route again once the peer is gone"
+		);
 	}
 
 	/// An announced path every route of which loops through the requester is
