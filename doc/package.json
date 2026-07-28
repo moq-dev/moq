@@ -6,7 +6,8 @@
 	"scripts": {
 		"dev": "vitepress dev --open",
 		"build": "vitepress build",
-		"check": "tsc --noEmit && vitepress build",
+		"check": "tsc --noEmit && bun test ./.vitepress && vitepress build",
+		"test": "bun test ./.vitepress",
 		"preview": "vitepress preview",
 		"deploy": "vitepress build && wrangler deploy"
 	},

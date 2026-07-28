@@ -10,9 +10,13 @@
 //   - The metadata block runs to `--- abstract`, so gray-matter never finds
 //     the closing fence and the whole document parses as frontmatter.
 //   - `{{ref}}` citations collide with Vue template interpolation.
-//   - `{::boilerplate}` / `{:key="value"}` IALs and the leading table
-//     delimiter row have no CommonMark equivalent.
+//   - `{::boilerplate}` / `{:key="value"}` IALs have no CommonMark equivalent.
+//   - Tables use delimiter rows where GFM allows exactly one, so they render
+//     as paragraphs.
 // Everything below exists to translate those, one construct at a time.
+//
+// drafts.test.ts renders the output through VitePress itself, since the
+// failure mode here is markdown that reads fine but renders as something else.
 
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -50,6 +54,8 @@ export interface DraftPage {
 	title: string;
 	/** Site route, e.g. `/draft/moq-lite`. */
 	link: string;
+	/** The generated VitePress markdown. */
+	markdown: string;
 }
 
 /** The metadata block above `--- abstract`. Only the fields we render. */
@@ -66,13 +72,8 @@ interface Reference {
 	url?: string;
 }
 
-/**
- * Regenerate the draft pages and return them in sidebar order.
- *
- * Called from `config.ts` at module load, so the output is on disk before
- * VitePress enumerates routes. Editing a draft needs a dev-server restart.
- */
-export function syncDrafts(): DraftPage[] {
+/** Translate every draft into a page, without touching disk. */
+export function renderDrafts(): DraftPage[] {
 	const names = readdirSync(SRC_DIR)
 		.filter((f) => f.startsWith("draft-") && f.endsWith(".md"))
 		.map((f) => f.slice(0, -3))
@@ -82,18 +83,30 @@ export function syncDrafts(): DraftPage[] {
 	// datatracker, so `{{moql}}` in one draft links to our page for another.
 	const routes = new Map(names.map((name) => [name, `${BASE}/${slug(name)}`]));
 
+	return names.map((name) => {
+		const source = readFileSync(join(SRC_DIR, `${name}.md`), "utf8");
+		const { meta, body } = render(source, routes);
+		return { name, title: meta.title, link: `${BASE}/${slug(name)}`, markdown: body };
+	});
+}
+
+/**
+ * Regenerate the draft pages on disk and return them in sidebar order.
+ *
+ * Called from `config.ts` at module load, so the output is there before
+ * VitePress enumerates routes. Editing a draft needs a dev-server restart.
+ */
+export function syncDrafts(): DraftPage[] {
+	const pages = renderDrafts();
+
 	rmSync(OUT_DIR, { recursive: true, force: true });
 	mkdirSync(OUT_DIR, { recursive: true });
 
-	const pages: DraftPage[] = [];
-	for (const name of names) {
-		const source = readFileSync(join(SRC_DIR, `${name}.md`), "utf8");
-		const { meta, body } = render(source, routes);
-		writeFileSync(join(OUT_DIR, `${slug(name)}.md`), body);
-		pages.push({ name, title: meta.title, link: `${BASE}/${slug(name)}` });
+	for (const page of pages) {
+		writeFileSync(join(OUT_DIR, `${slug(page.name)}.md`), page.markdown);
 	}
-
 	writeFileSync(join(OUT_DIR, "index.md"), renderIndex(pages));
+
 	return pages;
 }
 
@@ -210,6 +223,38 @@ function isDelimiter(line: string): boolean {
 	return /^\s*\|[-:|\s]+\|?\s*$/.test(line.trim()) && line.includes("-");
 }
 
+/** Is this any row of a table? */
+function isRow(line: string): boolean {
+	return line.trim().startsWith("|");
+}
+
+/**
+ * Rewrite one table from kramdown's shape into GFM's.
+ *
+ * kramdown treats delimiter rows as decoration: one above the first row marks
+ * it as a header, and more between body rows draw separators. GFM instead
+ * gives exactly one meaning to exactly one delimiter, the alignment row
+ * directly below the header, and renders nothing as a table without it. So
+ * keep that one and drop every other delimiter.
+ */
+function table(rows: string[]): string[] {
+	const body = rows[0] !== undefined && isDelimiter(rows[0]) ? rows.slice(1) : rows;
+	const [header, ...rest] = body;
+	if (header === undefined) return [];
+
+	// Alignment (`|---:|:---|`) only survives if the row below the header
+	// already carries it. Otherwise synthesize a plain one, since a header
+	// with no delimiter at all is not a table.
+	const columns = header
+		.trim()
+		.replace(/^\||\|$/g, "")
+		.split("|").length;
+	const [next] = rest;
+	const alignment = next !== undefined && isDelimiter(next) ? next : `|${"---|".repeat(columns)}`;
+
+	return [header, alignment, ...rest.filter((row) => !isDelimiter(row))];
+}
+
 /**
  * Rewrite the citations in one run of prose.
  *
@@ -237,9 +282,11 @@ function citeSegment(
 		return link(resolve(alias ?? name, routes), suffix);
 	});
 
-	// `[ref]`, but not an image, an inline link, or a link definition. Only
-	// rewrite aliases the draft actually declared, so ordinary brackets survive.
-	return braces.replace(/(!?)\[([^\][]+)\](?![([:])/g, (whole, bang: string, name: string) => {
+	// `[ref]`, but not an image or an inline link. Only rewrite aliases the
+	// draft actually declared, so ordinary brackets survive. A trailing colon
+	// is left in place: a citation often just precedes one ("exactly as in
+	// [qmux]: an endpoint advertises...").
+	return braces.replace(/(!?)\[([^\][]+)\](?![([])/g, (whole, bang: string, name: string) => {
 		if (bang) return whole;
 		const alias = meta.normative[name] ?? meta.informative[name];
 		return alias ? link(resolve(alias, routes)) : whole;
@@ -251,12 +298,18 @@ function render(source: string, routes: Map<string, string>): { meta: Metadata; 
 	const { meta, abstract, middle, back } = split(source);
 	const labels = anchors([...middle, ...back]);
 
-	const cite = (line: string) =>
+	const cite = (line: string) => {
+		// An actual link definition (`[ref]: url`) defines the alias rather than
+		// citing it. The drafts have none today, since kramdown-rfc synthesizes
+		// them, but rewriting one would corrupt it.
+		if (/^\s*\[[^\][]+\]:/.test(line)) return line;
+
 		// Inline code is verbatim, so only rewrite the segments between backticks.
-		line
+		return line
 			.split(/(`[^`]*`)/)
 			.map((segment) => (segment.startsWith("`") ? segment : citeSegment(segment, meta, labels, routes)))
 			.join("");
+	};
 
 	const body = (lines: string[]): string[] => {
 		const out: string[] = [];
@@ -292,9 +345,14 @@ function render(source: string, routes: Map<string, string>): { meta: Metadata; 
 			// Any other IAL (`{:numbered="false"}`) has no CommonMark meaning.
 			if (/^\{:.*\}$/.test(line.trim())) continue;
 
-			// kramdown allows a delimiter row *above* the header to mark it as one.
-			// GFM would read that as the header, so drop it.
-			if (isDelimiter(line) && !isDelimiter(lines[i - 1] ?? "") && isDelimiter(lines[i + 2] ?? "")) continue;
+			// Tables have to be reshaped as a whole, not row by row.
+			if (isRow(line)) {
+				let end = i;
+				while (end < lines.length && isRow(lines[end])) end++;
+				out.push(...table(lines.slice(i, end)).map(cite));
+				i = end - 1;
+				continue;
+			}
 
 			// Demote headings so the page title stays the only h1 and the
 			// outline picks up the draft's own sections.
