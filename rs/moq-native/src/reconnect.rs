@@ -346,21 +346,34 @@ impl Reconnect {
 					if let Ended::Goaway(msg) = &ended {
 						// A redirect is an assignment: keep dialing it from here on.
 						url = goaway.redirect.resolve(&msg.uri, &url);
-					}
 
-					if let (Ended::Goaway(msg), true) = (&ended, healthy) {
-						// Planned migration. Keep the old session serving while we dial the
-						// replacement: its routes stay attached, so live tracks hand over at a
-						// group boundary once it finally closes.
+						// Hand over gracefully however the backoff bookkeeping scores this
+						// session. The old one keeps serving until it closes or overstays,
+						// so its routes stay attached and live tracks splice onto the
+						// replacement at a group boundary. Tearing it down here instead
+						// would drop every group published until the replacement caught up.
 						tracing::info!(%url, "upstream GOAWAY; migrating");
 						if let Ok(mut state) = state.write() {
 							state.status = Some(Status::Migrating);
 						}
 						draining = Some(Draining::new(session, msg.timeout.unwrap_or(goaway.handover)));
-						delay = backoff.initial;
-						retry_start = tokio::time::Instant::now();
-						last_error = None;
-						// No backoff sleep: this is a handover, not a failure.
+
+						if healthy {
+							delay = backoff.initial;
+							retry_start = tokio::time::Instant::now();
+							last_error = None;
+							// No backoff sleep: a handover off a healthy session is not a failure.
+							continue;
+						}
+
+						// Redirected almost immediately. Still follow it, but score it as a
+						// failed attempt so two peers bouncing us between them escalate
+						// through backoff and eventually give up. The old session serves
+						// across the sleep, so the redirect loop costs time, not data.
+						last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+						tracing::warn!(%url, ?delay, "peer redirected immediately; retrying after backoff");
+						tokio::time::sleep(delay).await;
+						delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 						continue;
 					}
 
@@ -388,8 +401,9 @@ impl Reconnect {
 						// loop between two peers.
 						let err = match ended {
 							Ended::Closed(Err(err)) => Some(Error::from(err)),
-							Ended::Goaway(_) => Some(Error::Reconnect("peer redirected immediately".to_string())),
 							Ended::Closed(Ok(())) => None,
+							// Handled above: a GOAWAY never reaches here.
+							Ended::Goaway(_) => None,
 						};
 						match err {
 							Some(err) => {
