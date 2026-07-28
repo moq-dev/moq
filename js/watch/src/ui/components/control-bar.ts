@@ -2,6 +2,7 @@ import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
 import type { UiState } from "../state";
+import { captionsButton } from "./captions-button";
 import { fullscreenButton } from "./fullscreen-button";
 import { liveBadge } from "./live-badge";
 import { playPauseButton } from "./play-pause";
@@ -18,7 +19,7 @@ export function controlBar(parent: Effect, watch: MoqWatch, state: UiState, play
 	const spacer = DOM.create("div", { className: "controls-spacer" });
 
 	const right = DOM.create("div", { className: "controls-group" });
-	right.append(settingsButton(parent, state), fullscreenButton(parent, player));
+	right.append(captionsButton(parent, watch), settingsButton(parent, state), fullscreenButton(parent, player));
 
 	bar.append(left, spacer, right);
 	return bar;
