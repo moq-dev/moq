@@ -159,6 +159,13 @@ export class Subscriber {
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
 		const msg = new AnnounceRequest(prefix, this.origin);
 
+		// Drop reflected announces so callers asking for "someone else's broadcasts"
+		// don't re-see their own publishes. A caller can always ask for this, and it is
+		// required on versions that don't carry excludeHop above: there the peer isn't
+		// filtering them out for us, so filtering here keeps what the app sees the same
+		// as lite-05. Lite01-03 carry no real hop ids, so the check never matches there.
+		const dropReflected = options.ignoreSelf || !hasExcludeHop(this.version);
+
 		try {
 			// Open a stream and send the announce interest.
 			const stream = await Stream.open(this.#quic);
@@ -247,16 +254,8 @@ export class Subscriber {
 					}
 				}
 
-				// Drop reflected announces so callers asking for "someone else's
-				// broadcasts" don't re-see their own publishes. A caller can always ask
-				// for this, and it is required on versions that don't carry excludeHop in
-				// ANNOUNCE_REQUEST: there the peer isn't filtering them out for us, so
-				// filtering here keeps what the app sees the same as lite-05. Lite01-03
-				// carry no real hop ids, so the check never matches there anyway.
-				//
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
-				const dropReflected = options.ignoreSelf || !hasExcludeHop(this.version);
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {

@@ -755,7 +755,7 @@ A receiver MUST discard an announcement whose reconstructed path contains its ow
 Such an announcement has looped back, so the receiver neither forwards it nor selects it as a route to the broadcast; forwarding would extend the loop, and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
 A publisher MAY additionally skip sending an announcement toward the peer it was learned from, but that is a bandwidth optimization rather than a correctness measure: the receiver discards the announcement either way.
-A relay that withholds its Hop ID (advertising 0) cannot be detected this way, so loops through it are caught only by the hop limit.
+A relay that withholds its Hop ID (advertising 0) does not appear in the path under a distinguishable identity, so it cannot recognize an announcement that already passed through it; withholding the ID trades loop detection for privacy.
 
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
