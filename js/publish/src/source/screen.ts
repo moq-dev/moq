@@ -89,6 +89,14 @@ export class Screen {
 			effect.cleanup(() => v?.stop());
 			effect.cleanup(() => a?.stop());
 
+			// The browser's own "Stop sharing" control ends the track. Unlike a camera we cannot
+			// re-open it (getDisplayMedia needs a user gesture), and the user just asked us to stop
+			// anyway, so drop the source and let the app pick a new one.
+			const primary = v ?? a;
+			if (primary) {
+				effect.event(primary, "ended", () => this.#out.source.set(undefined));
+			}
+
 			effect.set(this.#out.source, {
 				video: v,
 				audio: a ? { track: a, kind: "music" } : undefined,

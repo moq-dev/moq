@@ -1,6 +1,7 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Audio from "../audio";
 import { Device, type DeviceProps } from "./device";
+import { Restart } from "./restart";
 
 // Signals the microphone reads.
 export type MicrophoneInput = {
@@ -37,6 +38,7 @@ export class Microphone {
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
+	#restart = new Restart();
 
 	constructor(props?: MicrophoneProps) {
 		this.in = {
@@ -51,6 +53,8 @@ export class Microphone {
 	#run(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		this.#restart.subscribe(effect);
 
 		const device = effect.get(this.device.out.requested);
 
@@ -82,6 +86,11 @@ export class Microphone {
 			effect.cleanup(this.device.capture(settings?.deviceId));
 			if (!track) return;
 
+			// A track that arrives dead has already fired "ended", so publishing it would strand a
+			// silent capture that nothing retries.
+			if (track.readyState === "ended") return;
+
+			this.#restart.watch(effect, track);
 			effect.set(this.#out.source, { track, kind: "voice" });
 		});
 	}

@@ -1,6 +1,7 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Video from "../video";
 import { Device, type DeviceProps } from "./device";
+import { Restart } from "./restart";
 
 // Signals the camera reads.
 export type CameraInput = {
@@ -49,6 +50,7 @@ export class Camera {
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
+	#restart = new Restart();
 
 	constructor(props?: CameraProps) {
 		this.in = {
@@ -63,6 +65,8 @@ export class Camera {
 	#run(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		this.#restart.subscribe(effect);
 
 		const device = effect.get(this.device.out.requested);
 		const constraints = effect.get(this.constraints) ?? {};
@@ -95,6 +99,11 @@ export class Camera {
 			effect.cleanup(this.device.capture(source?.getSettings().deviceId));
 			if (!source) return;
 
+			// A track that arrives dead has already fired "ended", so publishing it would strand a
+			// frozen capture that nothing retries.
+			if (source.readyState === "ended") return;
+
+			this.#restart.watch(effect, source);
 			effect.set(this.#out.source, source);
 		});
 	}

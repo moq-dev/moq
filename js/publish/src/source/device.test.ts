@@ -39,7 +39,14 @@ class FakeMediaDevices extends EventTarget {
 
 	async getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream> {
 		this.requests.push(constraints);
-		const track = { getSettings: () => ({ deviceId: this.settled }), stop: () => {} };
+
+		// An EventTarget, since the source watches the track for "ended".
+		const track = Object.assign(new EventTarget(), {
+			readyState: "live",
+			getSettings: () => ({ deviceId: this.settled }),
+			stop: () => {},
+		});
+
 		return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
 	}
 }
