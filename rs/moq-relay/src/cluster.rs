@@ -623,7 +623,8 @@ impl Cluster {
 				let this = self.clone();
 				let token = token.clone();
 				let dialed = dialed.clone();
-				let self_url = node.to_owned();
+				// Canonical, so the tiebreaker compares the same spelling both sides do.
+				let self_url = canonicalize_peer_key(node);
 				tasks.spawn(async move {
 					this.run_discovery(self_url, token, dialed).await;
 				});
@@ -675,31 +676,33 @@ impl Cluster {
 			tokio::select! {
 				ann = announced.next() => {
 					let Some(moq_net::announce::Update { path: relative, broadcast }) = ann else { return; };
-					let peer = relative.as_str();
+					// The address to dial, which keeps its query: `run_remote` reads
+					// `?cost=` and `?jwt=` off it. The key is only its identity.
+					let peer = advertised_node_url(relative.as_str());
+					let key = canonicalize_peer_key(&peer);
 					// Skip self and any peer we lose the tiebreaker to; that side
 					// dials us instead, so each pair forms a single session.
-					if !should_dial(&self_url, peer) {
+					if !should_dial(&self_url, &key) {
 						continue;
 					}
-					let peer = peer.to_owned();
-					let key = canonicalize_peer_key(&peer);
 					match broadcast {
 						Some(_) => {
 							if dialed.contains(&key) {
 								// Already dialed (possibly via another source). Mark gossip as
 								// a wanter and cancel any pending stale-sweep.
 								if dialed.add_source(&key, DialSource::Gossip) {
-									tracing::debug!(%peer, "reannounce within sweep window; keeping dial");
+									tracing::debug!(peer = %key, "reannounce within sweep window; keeping dial");
 								}
 								continue;
 							}
-							tracing::info!(%peer, "discovered cluster peer; dialing");
+							tracing::info!(peer = %key, "discovered cluster peer; dialing");
 							let this = self.clone();
 							let token = token.clone();
-							let peer_for_task = peer.clone();
+							// Logged by key, never `peer`, so an inline jwt stays out of the logs.
+							let log_peer = key.clone();
 							let handle = tokio::spawn(async move {
-								if let Err(err) = this.run_remote(&peer_for_task, token).await {
-									tracing::warn!(%err, peer = %peer_for_task, "cluster peer connection ended");
+								if let Err(err) = this.run_remote(&peer, token).await {
+									tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
 								}
 							});
 							dialed.insert(key, handle.abort_handle(), DialSource::Gossip);
@@ -987,6 +990,7 @@ fn connect_api_is_http(source: &str) -> bool {
 /// verbatim. A bare host or `host:port` is still accepted for backwards
 /// compatibility and wrapped in `https://.../` (callers warn about this legacy
 /// form for user-supplied `--cluster-connect` entries).
+///
 fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
@@ -995,6 +999,33 @@ fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	}
 
 	Url::parse(&format!("https://{peer}/")).with_context(|| format!("invalid cluster peer host: {peer}"))
+}
+
+/// The address to dial for a node advertised under `MESH_PREFIX`.
+///
+/// A relay advertises its URL as a broadcast path, and [`Path`] collapses slash
+/// runs, so `https://relay-b.example/` arrives as `https:/relay-b.example`. The
+/// scheme is put back here rather than read as a hostname.
+///
+/// The trailing colon on the leading segment is what marks a scheme: a bare
+/// `host:port` carries its colon in the middle of the segment, never at the end,
+/// so the two spellings can't be mistaken for each other and no list of known
+/// schemes is needed. A scheme-less advertisement means `https`, exactly as
+/// [`peer_url`] reads a bare host.
+///
+/// The query survives, because [`Cluster::run_remote`] reads `?cost=` and `?jwt=`
+/// off the address it dials. Pass the result through [`canonicalize_peer_key`]
+/// for an identity key; don't dial the key, which drops the query.
+///
+/// A trailing slash on a non-empty URL path does not survive, since a path has no
+/// way to spell one. `https://a.example/edge/` advertises the same as
+/// `https://a.example/edge`.
+fn advertised_node_url(advertised: &str) -> String {
+	match advertised.split_once('/') {
+		// The segment already ends in `:`, so this restores the `//` the path ate.
+		Some((scheme, rest)) if scheme.ends_with(':') => format!("{scheme}//{rest}"),
+		_ => advertised.to_owned(),
+	}
 }
 
 /// Whether a peer string uses the deprecated bare-host / `host:port` form rather
@@ -1398,6 +1429,79 @@ mod tests {
 		assert!(is_legacy_peer("cdn.example.com"));
 		assert!(is_legacy_peer("localhost:4443"));
 		assert!(!is_legacy_peer("https://cdn.example.com/?jwt=abc"));
+	}
+
+	/// What a discovering relay reads off `announced()` for this node.
+	fn advertised(node: &str) -> String {
+		Path::new(MESH_PREFIX)
+			.join(node)
+			.as_str()
+			.strip_prefix(&format!("{MESH_PREFIX}/"))
+			.expect("advertised under the mesh prefix")
+			.to_owned()
+	}
+
+	/// A node URL is advertised as a broadcast path, which collapses the `//` after
+	/// the scheme. It has to come back as the same address anyway, or every
+	/// gossip-discovered peer is dialed as the hostname `https`.
+	#[test]
+	fn a_node_url_survives_a_broadcast_path() {
+		for node in [
+			"https://a.example/",
+			"https://b.example:4443/",
+			"tcp://c.example:4443",
+			"https://d.example/?jwt=abc",
+			"https://e.example/deep/path",
+			// Legacy bare forms, which carry no scheme and default to https.
+			"rendezvous.example.com:4443",
+			"cdn.example.com",
+		] {
+			let dialed = advertised_node_url(&advertised(node));
+			assert_eq!(
+				peer_url(&dialed).unwrap(),
+				peer_url(node).unwrap(),
+				"{node} did not survive a round trip through a broadcast path"
+			);
+		}
+	}
+
+	/// The dialed address keeps its query. `run_remote` reads `?cost=` off it to
+	/// price the link, so canonicalizing first (which drops the query) would leave
+	/// every gossip-discovered link silently at the default cost.
+	#[test]
+	fn an_advertised_url_keeps_the_query_it_is_dialed_with() {
+		let dialed = advertised_node_url(&advertised("https://a.example/?cost=10&jwt=abc"));
+		assert_eq!(dialed, "https://a.example/?cost=10&jwt=abc");
+
+		// The value has to reach where `run_remote` reads it.
+		let mut url = peer_url(&dialed).unwrap();
+		assert_eq!(take_cost(&mut url).unwrap(), Some(10));
+		assert_eq!(url.as_str(), "https://a.example/?jwt=abc");
+	}
+
+	/// The colon that ends a scheme is the only signal, so a bare `host:port` (whose
+	/// colon sits mid-segment) must not be read as one.
+	#[test]
+	fn a_bare_host_port_is_not_read_as_a_scheme() {
+		assert_eq!(
+			advertised_node_url("rendezvous.example.com:4443"),
+			"rendezvous.example.com:4443"
+		);
+		assert_eq!(
+			canonicalize_peer_key(&advertised_node_url("rendezvous.example.com:4443")),
+			"https://rendezvous.example.com:4443/"
+		);
+	}
+
+	/// With both sides canonical, exactly one of a pair dials.
+	#[test]
+	fn gossiped_urls_keep_the_tiebreaker_symmetric() {
+		let a = canonicalize_peer_key("https://a.example/");
+		let b = canonicalize_peer_key(&advertised_node_url("https:/b.example"));
+		assert!(
+			should_dial(&a, &b) != should_dial(&b, &a),
+			"exactly one side of a pair must dial"
+		);
 	}
 
 	/// The same relay spelled as a bare `host:port`, a full URL, or a URL with an
