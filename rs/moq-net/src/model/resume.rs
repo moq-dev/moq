@@ -596,7 +596,17 @@ impl Group {
 					// arrive. A finished logical track has no more switches coming, and an
 					// aborted one is over outright, so a dead copy is the end of the group
 					// rather than a gap to park on.
-					let terminal = state.finished || state.abort.is_some();
+					//
+					// Nor can one arrive below the resume point. [`Producer::takeover`]
+					// derives every boundary from [`ResumeState::resume_position`], which
+					// only moves forward, so once it is past this position no future segment
+					// will ever cover it and nobody will be asked for these frames again.
+					//
+					// Only once a route has been given up on, though: a live route that has
+					// not delivered this group yet may still do so out of order, and its own
+					// progress is what moved the resume point past us.
+					let stranded = dead.is_some() && state.resume_position().is_some_and(|resume| resume > position);
+					let terminal = state.finished || state.abort.is_some() || stranded;
 					match state.segments.iter().find(|segment| segment.covers(position)) {
 						// The route that owns these frames died: wait for a replacement.
 						Some(segment) if dead == Some(segment.id) => match terminal {
@@ -663,7 +673,17 @@ impl Group {
 	/// No replacement can arrive: report the loss that stalled us, or a clean end.
 	fn give_up(&mut self) -> Result<bool> {
 		match self.dead.take() {
-			Some((_, err)) => Err(err),
+			Some((_, err)) => {
+				// The only place a spliced group's loss becomes visible, so say which
+				// frames went missing rather than leaving a stuck group to explain itself.
+				tracing::warn!(
+					group = self.sequence,
+					frame = self.index,
+					%err,
+					"no route can serve the rest of this group"
+				);
+				Err(err)
+			}
 			None => Ok(false),
 		}
 	}
@@ -1974,8 +1994,12 @@ mod test {
 	/// A route whose copy of the group is missing the frames the reader needs is treated
 	/// like a dead one. Reading the tail as if it were the head would silently renumber
 	/// every frame in the group.
+	///
+	/// The loss is reported rather than parked on, because the route already produced
+	/// past the missing frames. Boundaries come from `resume_position`, which only moves
+	/// forward, so no future takeover will ever ask anyone for frame 0 again.
 	#[tokio::test]
-	async fn copy_missing_the_head_stalls() {
+	async fn copy_missing_the_head_is_lost() {
 		let (mut track_a, consumer_a) = track_pair("a");
 
 		let mut producer = Producer::new();
@@ -1991,9 +2015,49 @@ mod test {
 		assert_eq!(reading.sequence, 0);
 		assert_eq!(reading.index(), 0, "the reader still wants frame 0");
 		assert!(
-			reading.read_frame().now_or_never().is_none(),
-			"must stall rather than serve the tail as the head"
+			matches!(reading.read_frame().now_or_never(), Some(Err(Error::Lagged))),
+			"must report the loss rather than serve the tail as the head"
 		);
+	}
+
+	/// A route that has run ahead of the seam but has not been given up on still parks.
+	///
+	/// It may yet deliver the missing frames out of order, and its own progress is what
+	/// moved the resume point past them, so its being ahead is not evidence the frames
+	/// are gone. Only a route already declared dead strands the reader.
+	#[tokio::test]
+	async fn live_route_ahead_of_the_seam_still_parks() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert_eq!(read(&mut reading), b"a1");
+
+		// B takes over inside group 0, then runs ahead to group 1 without ever serving
+		// the rest of group 0. That pushes the resume point past the seam.
+		producer.takeover(&consumer_b).unwrap();
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"a live route may still fill the seam out of order"
+		);
+
+		// Once it does, the reader picks up where it left off.
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(2).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b2");
 	}
 
 	#[tokio::test]
