@@ -24,6 +24,50 @@ const UTF8_LINGER = Time.Milli(30_000);
 const SKEW_TOLERANCE = Time.Milli(1_000);
 
 /**
+ * The cue state for one selected track, accumulated as groups arrive.
+ *
+ * `clears` holds the timestamps of `utf8` clear frames. They outlive the cue they terminate because
+ * groups are read concurrently and can complete out of order: a clear may land before the cue it is
+ * meant to end, and has to still apply when that cue shows up.
+ *
+ * @internal
+ */
+export type CueStore = {
+	cues: VTTCue[];
+	regions: Map<string, VTTRegion>;
+	clears: number[];
+};
+
+/**
+ * Neutralize a cue payload before the renderer splices it into `innerHTML`.
+ *
+ * [media-captions](https://github.com/vidstack/captions) decodes a fixed set of HTML entities in
+ * cue text *after* tokenizing it, then concatenates the result into an HTML string and assigns that
+ * to `innerHTML`. So `&amp;lt;img src=x onerror=…&amp;gt;` never presents a literal `<` for the
+ * tokenizer to intercept, gets decoded once it is too late, and becomes a live element whose
+ * `onerror` runs script in the page's origin. Its tag allowlist does not help, and
+ * `pointer-events: none` does not stop a load handler. Annotation values (`<v Name>`) are also
+ * interpolated into attributes without quote escaping.
+ *
+ * Escaping one level deeper than usual means that single decode pass lands on the ordinary escape,
+ * so the text renders exactly as the publisher wrote it and no markup survives. `&amp;` becomes
+ * `&amp;amp;amp;`, decodes to `&amp;amp;`, and displays as `&amp;`. Since no raw `<` is left, no tags
+ * are built and the attribute hole closes with it.
+ *
+ * VTT styling tags are lost, which is the same trade the publish side already makes when it escapes
+ * outgoing cues. Rendering an allowlist of WebVTT elements as real DOM nodes is the upgrade path.
+ *
+ * @internal
+ */
+export function sanitizeCue(text: string): string {
+	return text
+		.replaceAll("&", "&amp;amp;")
+		.replaceAll("<", "&amp;lt;")
+		.replaceAll(">", "&amp;gt;")
+		.replaceAll('"', "&amp;quot;");
+}
+
+/**
  * Insert a cue keeping `cues` sorted by start time.
  *
  * Groups arrive in delivery order rather than sequence order, so a cue can legitimately land
@@ -46,7 +90,16 @@ export function insertCue(cues: VTTCue[], cue: VTTCue): void {
  *
  * @internal
  */
-export function pruneCues(cues: VTTCue[], cutoff: number): boolean {
+export function pruneCues(store: CueStore, cutoff: number): boolean {
+	const { cues, clears } = store;
+
+	// Clear marks age out on the same horizon; nothing arriving now can precede them.
+	let keptClears = 0;
+	for (const t of clears) {
+		if (t >= cutoff) clears[keptClears++] = t;
+	}
+	clears.length = keptClears;
+
 	let kept = 0;
 	for (const cue of cues) {
 		if (cue.endTime >= cutoff) cues[kept++] = cue;
@@ -64,13 +117,18 @@ export function pruneCues(cues: VTTCue[], cutoff: number): boolean {
  *
  * @internal
  */
-export function rollUp(cues: VTTCue[], cue: VTTCue): void {
+export function rollUp(store: CueStore, cue: VTTCue): void {
+	const { cues, clears } = store;
 	const i = cues.indexOf(cue);
 	const prev = i > 0 ? cues[i - 1] : undefined;
 	if (prev && prev.endTime > cue.startTime) prev.endTime = cue.startTime;
 
 	const next = cues[i + 1];
 	if (next && cue.endTime > next.startTime) cue.endTime = next.startTime;
+
+	// A clear that already arrived ends this cue, even though the cue is the later delivery.
+	const clear = clears.find((t) => t > cue.startTime);
+	if (clear !== undefined && cue.endTime > clear) cue.endTime = clear;
 }
 
 /**
@@ -81,7 +139,14 @@ export function rollUp(cues: VTTCue[], cue: VTTCue): void {
  *
  * @internal
  */
-export function clearCue(cues: VTTCue[], time: number): void {
+export function clearCue(store: CueStore, time: number): void {
+	const { cues, clears } = store;
+
+	// Remember it first: the cue this clear terminates may not have arrived yet.
+	let at = clears.length;
+	while (at > 0 && clears[at - 1] > time) at--;
+	if (clears[at] !== time) clears.splice(at, 0, time);
+
 	for (let i = cues.length - 1; i >= 0; i--) {
 		const cue = cues[i];
 		if (cue.startTime > time) continue;
@@ -182,9 +247,8 @@ export class Renderer {
 
 		const sub = active.track(track).subscribe({ priority: Catalog.PRIORITY.text });
 		effect.cleanup(() => sub.close());
-		const cues: VTTCue[] = [];
-		const regions = new Map<string, VTTRegion>();
-		const commit = () => renderer.changeTrack({ cues: [...cues], regions: [...regions.values()] });
+		const store: CueStore = { cues: [], regions: new Map(), clears: [] };
+		const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });
 
 		// Drive the caption clock off the shared media clock so cues line up with audio/video, and
 		// prune cues that have scrolled well past the playhead. Reschedules itself each frame.
@@ -193,7 +257,7 @@ export class Renderer {
 			if (now !== undefined) {
 				renderer.currentTime = now / 1000;
 
-				if (pruneCues(cues, (now - PRUNE_BEHIND) / 1000)) commit();
+				if (pruneCues(store, (now - PRUNE_BEHIND) / 1000)) commit();
 			}
 			effect.animate(tick);
 		};
@@ -212,7 +276,7 @@ export class Renderer {
 							const frame = await group.readFrame();
 							if (!frame) break;
 							for (const sample of format.decode(frame.payload)) {
-								await this.#ingest(config.format, sample, cues, regions);
+								await this.#ingest(config.format, sample, store);
 							}
 						}
 					} catch (err) {
@@ -229,12 +293,7 @@ export class Renderer {
 
 	// Parse one cue payload into the cue/region store. The frame timestamp is the authoritative cue
 	// start on the media clock; a VTT payload also carries its own absolute timing.
-	async #ingest(
-		format: string,
-		sample: Container.Frame,
-		cues: VTTCue[],
-		regions: Map<string, VTTRegion>,
-	): Promise<void> {
+	async #ingest(format: string, sample: Container.Frame, store: CueStore): Promise<void> {
 		const text = new TextDecoder().decode(sample.payload);
 		const start = (sample.timestamp as number) / 1e6;
 
@@ -242,13 +301,13 @@ export class Renderer {
 			// An empty payload clears the caption (per the hang draft) rather than showing nothing,
 			// so it still has to be scheduled: it just ends the current cue instead of adding one.
 			if (text.length === 0) {
-				clearCue(cues, start);
+				clearCue(store, start);
 				return;
 			}
 
-			const cue = new VTTCue(start, start + UTF8_LINGER / 1000, text);
-			insertCue(cues, cue);
-			rollUp(cues, cue);
+			const cue = new VTTCue(start, start + UTF8_LINGER / 1000, sanitizeCue(text));
+			insertCue(store.cues, cue);
+			rollUp(store, cue);
 			return;
 		}
 
@@ -275,8 +334,12 @@ export class Renderer {
 			);
 		}
 
-		for (const region of parsed.regions) regions.set(region.id, region);
-		for (const cue of parsed.cues) insertCue(cues, cue);
+		for (const region of parsed.regions) store.regions.set(region.id, region);
+		for (const cue of parsed.cues) {
+			// The payload is untrusted, and the renderer builds HTML out of this text.
+			cue.text = sanitizeCue(cue.text);
+			insertCue(store.cues, cue);
+		}
 	}
 
 	close(): void {
