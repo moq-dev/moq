@@ -256,7 +256,7 @@ export default class MoqPublish extends HTMLElement {
 			if (preview instanceof HTMLCanvasElement) {
 				const renderer = new Preview.Renderer({
 					canvas: preview,
-					frame: this.capture.out.frame,
+					frames: this.capture.out.frames,
 					display: this.capture.out.display,
 					flip: this.#flip,
 					encoder: this.video,

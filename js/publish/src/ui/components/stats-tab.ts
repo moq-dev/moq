@@ -99,9 +99,25 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 	// Live graphs: frame rate from captured frames, bitrate measured from the bytes we encoded.
 	// The congestion controller's send estimate would be simpler, but Safari's WebTransport has no
 	// getStats(), so it has no estimate at all and the graph stayed empty there.
+	// Counted off our own stream rather than a signal, which would coalesce a burst of frames into
+	// one notification and undercount the rate.
 	let frames = 0;
-	parent.subscribe(publish.capture.out.frame, () => {
-		frames++;
+	parent.run((effect) => {
+		const fanout = effect.get(publish.capture.out.frames);
+		if (!fanout) return;
+
+		const reader = fanout.subscribe(effect).getReader();
+		effect.cleanup(() => void reader.cancel());
+
+		effect.spawn(async () => {
+			for (;;) {
+				const next = await Promise.race([reader.read(), effect.cancel]);
+				if (!next?.value) break;
+
+				frames++;
+				next.value.close();
+			}
+		});
 	});
 
 	const encoded = () => publish.video.out.stats.peek().bytes;

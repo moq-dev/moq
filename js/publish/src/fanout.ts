@@ -48,9 +48,14 @@ export class Fanout<T> {
 		void this.#pump(source).catch((err) => console.error("fanout source failed:", err));
 	}
 
-	/** A stream of everything published from now on, cancelled when `effect` is torn down. */
-	subscribe(effect: Effect): ReadableStream<T> {
-		const reader: Reader<T> = { queue: [], waiting: undefined, done: this.#closed };
+	/**
+	 * A stream of everything published from now on, cancelled when `effect` is torn down.
+	 *
+	 * `queue` overrides how far this reader may fall behind before it loses its oldest. Pass 1 for a
+	 * consumer that only wants the newest, like a preview that draws one frame per paint.
+	 */
+	subscribe(effect: Effect, queue = this.#queue): ReadableStream<T> {
+		const reader: Reader<T> = { queue: [], limit: queue, waiting: undefined, done: this.#closed };
 		this.#readers.add(reader);
 
 		effect.cleanup(() => {
@@ -134,7 +139,7 @@ export class Fanout<T> {
 
 	#push(reader: Reader<T>, value: T): void {
 		// Drop this reader's oldest rather than stalling the source for everyone.
-		while (reader.queue.length >= this.#queue) {
+		while (reader.queue.length >= reader.limit) {
 			const dropped = reader.queue.shift();
 			if (dropped !== undefined) this.#release?.(dropped);
 		}
@@ -154,6 +159,7 @@ export class Fanout<T> {
 // One attached reader: what it hasn't consumed yet, plus a resolver parked on an empty queue.
 type Reader<T> = {
 	queue: T[];
+	limit: number;
 	waiting: (() => void) | undefined;
 	done: boolean;
 };

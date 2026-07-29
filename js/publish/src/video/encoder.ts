@@ -197,33 +197,52 @@ export class Encoder {
 			});
 
 			effect.run((effect) => {
-				const frame = effect.get(capture.out.frame);
-				if (!frame) return;
+				const fanout = effect.get(capture.out.frames);
+				if (!fanout) return;
 
-				if (encoder.state !== "configured") return;
+				// Our own stream off the shared capture, so the preview or another rendition reading
+				// slowly can't take frames from this one.
+				const reader = fanout.subscribe(effect).getReader();
+				effect.cleanup(() => void reader.cancel());
 
-				// This doesn't need to be reactive.
-				const config = this.config.peek();
+				effect.spawn(async () => {
+					for (;;) {
+						const next = await Promise.race([reader.read(), effect.cancel]);
+						if (!next?.value) break;
 
-				// Pace to the target frame rate by dropping frames that arrive too soon.
-				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
-				// The shared frame Signal owner closes frames, so we just skip encoding here.
-				const targetFrameRate = config?.frameRate;
-				if (targetFrameRate && lastEncoded !== undefined) {
-					const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
-					if (frame.timestamp - lastEncoded < minGap - minGap / 2) return;
-				}
-				lastEncoded = frame.timestamp as Time.Micro;
+						// Ours now: every path below has to close it.
+						const frame = next.value;
+						try {
+							if (encoder.state !== "configured") continue;
 
-				const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+							// This doesn't need to be reactive.
+							const config = this.config.peek();
 
-				// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
-				const keyFrame = !lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
-				if (keyFrame) {
-					lastKeyframe = frame.timestamp as Time.Micro;
-				}
+							// Pace to the target frame rate by dropping frames that arrive too soon.
+							// Allow half an interval of slack so jittery capture timestamps don't drop
+							// a frame we meant to keep.
+							const targetFrameRate = config?.frameRate;
+							if (targetFrameRate && lastEncoded !== undefined) {
+								const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
+							}
+							lastEncoded = frame.timestamp as Time.Micro;
 
-				encoder.encode(frame, { keyFrame });
+							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+
+							// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
+							const keyFrame =
+								!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
+							if (keyFrame) {
+								lastKeyframe = frame.timestamp as Time.Micro;
+							}
+
+							encoder.encode(frame, { keyFrame });
+						} finally {
+							frame.close();
+						}
+					}
+				});
 			});
 		});
 	}
@@ -353,15 +372,17 @@ export class Encoder {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const frame = effect.get(capture.out.frame);
-		if (!frame) return;
+		// The captured size, rather than a frame: this only needs the dimensions, and holding a frame
+		// here would mean owning and closing it.
+		const display = effect.get(capture.out.display);
+		if (!display) return;
 
 		const source = effect.get(capture.in.source);
 		if (!source) return;
 
 		const user = effect.get(this.config);
 
-		const sourcePixels = frame.codedWidth * frame.codedHeight;
+		const sourcePixels = display.width * display.height;
 
 		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
 		let maxPixels = user?.maxPixels ?? sourceConstraintPixels(source) ?? sourcePixels;
@@ -376,8 +397,8 @@ export class Encoder {
 
 		// Make sure width/height is a power of 16
 		// TODO should this be on a per-codec basis?
-		const width = 16 * Math.floor((frame.codedWidth * ratio) / 16);
-		const height = 16 * Math.floor((frame.codedHeight * ratio) / 16);
+		const width = 16 * Math.floor((display.width * ratio) / 16);
+		const height = 16 * Math.floor((display.height * ratio) / 16);
 
 		effect.set(this.#dimensions, { width, height });
 	}

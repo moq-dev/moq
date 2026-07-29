@@ -450,10 +450,25 @@ const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${
 $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 
 // Count captured frames; the publish API has no encoded-frame counter, so this
-// is the capture rate feeding the encoder (a good proxy for output fps).
+// is the capture rate feeding the encoder (a good proxy for output fps). Read off our own stream:
+// a signal coalesces a burst into one notification, which undercounts the rate.
 let frames = 0;
 viz.run((effect) => {
-	if (effect.get(publish.capture.out.frame)) frames++;
+	const fanout = effect.get(publish.capture.out.frames);
+	if (!fanout) return;
+
+	const reader = fanout.subscribe(effect).getReader();
+	effect.cleanup(() => void reader.cancel());
+
+	effect.spawn(async () => {
+		for (;;) {
+			const next = await Promise.race([reader.read(), effect.cancel]);
+			if (!next?.value) break;
+
+			frames++;
+			next.value.close();
+		}
+	});
 });
 
 let prevFrames = 0;
