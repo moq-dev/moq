@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.14...moq-audio-v0.0.15) - 2026-07-29
+
+### Added
+
+- *(moq-audio)* cancel the speaker's echo out of the microphone ([#2538](https://github.com/moq-dev/moq/pull/2538))
+
 ## [0.0.14](https://github.com/moq-dev/moq/compare/moq-audio-v0.0.13...moq-audio-v0.0.14) - 2026-07-27
 
 ### Added

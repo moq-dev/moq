@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.4...moq-cli-v0.9.5) - 2026-07-29
+
+### Added
+
+- *(net)* fail over across redundant publishers via per-peer route selection ([#2473](https://github.com/moq-dev/moq/pull/2473))
+
 ## [0.9.4](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.3...moq-cli-v0.9.4) - 2026-07-27
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/moq-dev/moq/compare/kio-v0.5.1...kio-v0.5.2) - 2026-07-29
+
+### Other
+
+- *(kio,net)* model-check the concurrent handoffs with loom ([#2543](https://github.com/moq-dev/moq/pull/2543))
+
 ## [0.5.1](https://github.com/moq-dev/moq/compare/kio-v0.5.0...kio-v0.5.1) - 2026-07-27
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.1...moq-boy-v0.4.2) - 2026-07-29
+
+### Fixed
+
+- *(moq-boy,moq-native)* dial the relay via --client-connect again ([#2551](https://github.com/moq-dev/moq/pull/2551))
+
 ## [0.4.1](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.0...moq-boy-v0.4.1) - 2026-07-27
 
 ### Other
