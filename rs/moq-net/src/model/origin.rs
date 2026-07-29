@@ -1012,12 +1012,14 @@ impl Producer {
 	///
 	/// Splicing requires the same content identity: every source at a path must
 	/// share the first hop of its route, which is a promise that they produce
-	/// interchangeable tracks. A source arriving with a different first hop is a
-	/// *replacement* instead: it takes the path immediately and consumers see an
-	/// unannounce followed by an announce, rather than unrelated content spliced
-	/// into a live subscription. So a publisher reconnecting under a fresh
-	/// identity displaces the session it replaced right away, without waiting for
-	/// the transport to notice the old one is gone.
+	/// interchangeable tracks. An *announced* source arriving with a different
+	/// first hop is a replacement instead: it takes the path immediately and
+	/// consumers see an unannounce followed by an announce, rather than unrelated
+	/// content spliced into a live subscription. So a publisher reconnecting
+	/// under a fresh identity displaces the session it replaced right away,
+	/// without waiting for the transport to notice the old one is gone. An
+	/// offline source never displaces anything: it ranks below every announced
+	/// route, so it waits invisibly for the incumbent to end.
 	///
 	/// `route` is the source's initial metadata; update it with
 	/// [`broadcast::Producer::set_route`]. The [`broadcast::Route::announce`] flag
@@ -1208,10 +1210,11 @@ struct FrontState {
 	self_origin: Origin,
 	/// Content identity: the original publisher (first hop) shared by every
 	/// attached source, or `None` for a broadcast produced locally (no hops).
-	/// Fixed for the front's lifetime; a source with a different first hop is
-	/// new content, not an alternate route, so it replaces this front rather than
-	/// joining it (see [`attach_source`]). This is the same rule the session layer
-	/// applies to a restart whose first hop changed.
+	/// Fixed for the front's lifetime; a source with a different first hop is new
+	/// content, not an alternate route, so it replaces this front (or waits for
+	/// it, when offline) rather than joining it (see [`attach_source`]). This is
+	/// the same rule the session layer applies to a restart whose first hop
+	/// changed.
 	publisher: Option<Origin>,
 	/// Attach counter, handed to each [`FrontRoute`] so [`route_order`] can break
 	/// an exact tie toward the newest source.
@@ -1230,8 +1233,9 @@ struct FrontState {
 	/// [`Info::linger`]). [`run_front`] arms the countdown when the table empties.
 	linger: Duration,
 	/// Terminal: no more sources may attach and every poller stops. Set
-	/// synchronously by the detach that empties the table, or by [`run_front`]
-	/// when the linger window expires without a replacement.
+	/// synchronously by the detach that empties the table or by an
+	/// [`attach_source`] takeover, and by [`run_front`] when the linger window
+	/// expires without a replacement.
 	closed: bool,
 }
 
@@ -1452,10 +1456,11 @@ fn detach_source(
 /// route observation, forwards route updates, and detaches it when the source
 /// closes. Spawned by [`Producer::create_broadcast`].
 ///
-/// A source whose original publisher (first hop) differs from the live front's
-/// takes the path over as a fresh broadcast rather than joining. A route update
-/// that changes the source's own first hop likewise detaches it and re-runs the
-/// attach, so a publisher swap is always a replacement, never a silent splice.
+/// An announced source whose original publisher (first hop) differs from the
+/// live front's takes the path over as a fresh broadcast rather than joining; an
+/// offline one parks until the front closes. A route update that changes the
+/// source's own first hop likewise detaches it and re-runs the attach, so a
+/// publisher swap is always a replacement, never a silent splice.
 async fn run_source(
 	origin: Info,
 	node: Lock<OriginNode>,
@@ -1464,6 +1469,13 @@ async fn run_source(
 	mut source: broadcast::Consumer,
 	ingress: stats::Scope,
 ) {
+	let ctx = AttachContext {
+		origin: &origin,
+		node: &node,
+		full: &full,
+		rest: &rest,
+	};
+
 	// The first `route_changed` yields the current route immediately; nothing is
 	// visible to consumers until this attach, giving the creator a window to set
 	// up tracks and dynamic handlers.
@@ -1489,7 +1501,46 @@ async fn run_source(
 			node.lock().leaf(&rest)
 		};
 
-		let (state, broadcast, id) = attach_source(&origin, &node, &leaf, &full, &rest, &source, route.clone());
+		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone()) {
+			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
+			Attach::Parked(incumbent) => {
+				tracing::warn!(
+					broadcast = %full,
+					"path already live with a different publisher; parking an offline source until it ends",
+				);
+				// Wait for the incumbent front to close, or for our own route to
+				// change: announcing ourselves is what earns the takeover, and our
+				// source closing means giving up.
+				let update = kio::wait(|waiter| {
+					if let Poll::Ready(update) = source.poll_route_changed(waiter) {
+						return Poll::Ready(Some(update));
+					}
+					// Ready on either the closed flag or the channel itself dying;
+					// both mean the incumbent is gone.
+					match incumbent.poll(waiter, |s| if s.closed { Poll::Ready(()) } else { Poll::Pending }) {
+						Poll::Ready(_) => Poll::Ready(None),
+						Poll::Pending => Poll::Pending,
+					}
+				})
+				.await;
+				match update {
+					// Our route moved; recompute the guard and retry with it.
+					Some(Ok(update)) => {
+						match (update.announce, announce.is_some()) {
+							(true, false) => announce = Some(ingress.announce()),
+							(false, true) => announce = None,
+							_ => {}
+						}
+						route = update;
+					}
+					// The source closed while parked; it was never visible.
+					Some(Err(_)) => return,
+					// The incumbent is gone; retry, creating a fresh front.
+					None => {}
+				}
+				continue 'attach;
+			}
+		};
 		let publisher = route.hops.iter().next().copied();
 
 		loop {
@@ -1540,9 +1591,30 @@ async fn run_source(
 	}
 }
 
+/// The outcome of [`attach_source`].
+enum Attach {
+	/// The source joined (or created) the front at its path, yielding the shared
+	/// source table, the spliced broadcast, and the source's table id.
+	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
+	/// The path's live front belongs to a different original publisher and this
+	/// source is offline, so it would rank below every route the front holds and
+	/// must not take the path from it. The caller parks on the returned table
+	/// until the front closes.
+	Parked(kio::Producer<FrontState>),
+}
+
+/// Everything about a source's attach that does not change between attempts.
+struct AttachContext<'a> {
+	origin: &'a Info,
+	node: &'a Lock<OriginNode>,
+	/// Absolute path, for the front's identity and log lines.
+	full: &'a PathOwned,
+	/// Path relative to `node`, for locating (and later pruning) the leaf.
+	rest: &'a PathOwned,
+}
+
 /// Attach a source to the broadcast at `leaf`, creating (and publishing) the
-/// broadcast if none is live. Returns the shared source table, the spliced
-/// broadcast, and the source's table id. One lock acquisition covers the whole
+/// broadcast if none is live. One lock acquisition covers the whole
 /// join-or-create decision, so concurrent attaches cannot race each other.
 ///
 /// Joining requires the same content identity (first hop). A source whose
@@ -1552,15 +1624,17 @@ async fn run_source(
 /// with a different first hop is a replacement, never a standby, and it is what
 /// keeps a reconnect from waiting on the transport to retire the session it
 /// replaced.
+///
+/// Taking over requires announcing, which keeps the rule consistent with
+/// [`route_order`]: an offline source ranks below every announced route, so it
+/// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
+/// cutting its subscribers for content nobody has advertised.
 fn attach_source(
-	origin: &Info,
-	node: &Lock<OriginNode>,
+	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
-	full: &PathOwned,
-	rest: &PathOwned,
 	source: &broadcast::Consumer,
 	route: broadcast::Route,
-) -> (kio::Producer<FrontState>, broadcast::Producer, u64) {
+) -> Attach {
 	let publisher = route.hops.iter().next().copied();
 	let mut leaf_guard = leaf.lock();
 
@@ -1582,6 +1656,8 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
+			} else if !route.announce {
+				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
 				// the incumbent here (rather than letting the newcomer wait it out)
@@ -1591,7 +1667,7 @@ fn attach_source(
 				// incumbent's own task observes the flag and finishes its teardown,
 				// finding the leaf slot already taken.
 				s.closed = true;
-				tracing::warn!(broadcast = %full, "replacing a live broadcast from a different publisher");
+				tracing::warn!(broadcast = %ctx.full, "replacing a live broadcast from a different publisher");
 			}
 		}
 		if let Some(id) = joined {
@@ -1599,17 +1675,19 @@ fn attach_source(
 			let broadcast = existing.broadcast.clone();
 			drop(leaf_guard);
 			sync_front(&state, &broadcast, leaf);
-			return (state, broadcast, id);
+			return Attach::Ready(state, broadcast, id);
 		}
 	}
 
 	// First source: create the broadcast and publish it into the tree.
 	let announce = route.announce;
-	let broadcast = broadcast::Producer::new_spliced(broadcast::Info { origin: origin.clone() });
+	let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
+		origin: ctx.origin.clone(),
+	});
 	let _ = broadcast.clone().set_route(route.clone());
 	let state = kio::Producer::new(FrontState {
-		path: full.clone(),
-		self_origin: origin.id,
+		path: ctx.full.clone(),
+		self_origin: ctx.origin.id,
 		publisher,
 		next_route: 1,
 		excluded: HashMap::new(),
@@ -1619,7 +1697,7 @@ fn attach_source(
 			source: source.clone(),
 		}],
 		active: Some(0),
-		linger: origin.linger,
+		linger: ctx.origin.linger,
 		closed: false,
 	});
 
@@ -1632,20 +1710,25 @@ fn attach_source(
 		leaf_guard.notify.lock().unannounce(&stale.path);
 	}
 	let entry = OriginBroadcast {
-		path: full.clone(),
+		path: ctx.full.clone(),
 		broadcast: broadcast.clone(),
 		state: state.clone(),
 		announced: announce,
 	};
 	if entry.announced {
-		leaf_guard.notify.lock().announce(full, &broadcast.consume());
+		leaf_guard.notify.lock().announce(ctx.full, &broadcast.consume());
 	}
 	leaf_guard.broadcast = Some(entry);
 	drop(leaf_guard);
 
-	web_async::spawn(run_front(state.clone(), broadcast.clone(), node.clone(), rest.clone()));
+	web_async::spawn(run_front(
+		state.clone(),
+		broadcast.clone(),
+		ctx.node.clone(),
+		ctx.rest.clone(),
+	));
 
-	(state, broadcast, 0)
+	Attach::Ready(state, broadcast, 0)
 }
 
 /// Owns a front's lifecycle: dispatches each requested track to a serve task
@@ -3020,6 +3103,18 @@ mod tests {
 			Some(1),
 			"a direct publisher route must win while carrying"
 		);
+
+		// The peer's session reconnecting: same chain, same cost, so the gate's
+		// strictly-cheaper test does not apply and recency decides. Loosening that
+		// test to `<=` would hold a carrying front on the dead session until the
+		// transport timed it out, which is the whole point of the recency order.
+		let mut state = front_state(lost, vec![sibling_route(peer), sibling_route(peer)]);
+		state.reselect(true);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"a reconnect on an identical chain must win while carrying"
+		);
 	}
 
 	/// The gate only protects an announced incumbent: one that lost its announce
@@ -4300,6 +4395,90 @@ mod tests {
 		settle().await;
 		subscribing.await.unwrap();
 		stale_dynamic.assert_no_request();
+	}
+
+	/// The same reconnect, but arriving while a subscription is already spliced
+	/// onto the stale route: the live track must re-splice onto the new session
+	/// rather than ride the dead one until the transport gives up. The gate
+	/// [`FrontState::reselect`] applies while carrying is pinned separately, in
+	/// [`test_carrying_switches_to_benign_routes`].
+	#[tokio::test]
+	async fn test_carrying_reconnect_switches_immediately() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+
+		let stale = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
+		let mut stale_dynamic = stale.dynamic();
+		settle().await;
+
+		// A live subscription riding the original session.
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		settle().await;
+		let _stale_producer = accept_track(&mut stale_dynamic, "video").await;
+		settle().await;
+		// Held: the splice only follows the active route while the track is read.
+		let _subscription = subscribing.await.unwrap();
+
+		// The reconnect arrives with the front already carrying.
+		let fresh = origin
+			.create_broadcast("test", announce().with_hops(hops.clone()))
+			.unwrap();
+		let mut fresh_dynamic = fresh.dynamic();
+		settle().await;
+		settle().await;
+
+		// The carrying front re-splices onto the reconnect rather than waiting for
+		// the stale session to die.
+		let _fresh_producer = accept_track(&mut fresh_dynamic, "video").await;
+	}
+
+	/// Taking the path over is scoped to a newcomer that would actually outrank
+	/// the incumbent. An offline source (a cache, or an on-demand handler) is
+	/// ranked below every announced route, so arriving under a different
+	/// publisher must not unannounce a live broadcast and cut its subscribers.
+	#[tokio::test]
+	async fn test_offline_mismatch_never_evicts_a_live_front() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let hops_live = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_cache = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
+
+		let live = origin
+			.create_broadcast("test", announce().with_hops(hops_live.clone()))
+			.unwrap();
+		let mut live_dynamic = live.dynamic();
+		settle().await;
+		let face = announced.assert_next_some("test");
+
+		// A subscriber riding the live broadcast, which the eviction would cut.
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		settle().await;
+		let _producer = accept_track(&mut live_dynamic, "video").await;
+		settle().await;
+		subscribing.await.unwrap();
+
+		// An offline source for different content at the same path: it stays
+		// invisible rather than displacing the live one.
+		let _cache = origin
+			.create_broadcast("test", broadcast::Route::new().with_hops(hops_cache))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_wait();
+		assert!(!face.is_closed(), "the live front must survive");
+		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_live);
 	}
 
 	/// A subscription from a peer the active chain flows through is served from
