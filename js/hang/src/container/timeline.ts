@@ -135,6 +135,10 @@ export class Producer {
 	#start?: Time.Micro;
 	// Explicit cut() boundaries not yet reached, in order.
 	#cuts: Time.Micro[] = [];
+	// A cut() arrived, so the application owns the boundaries from here on and the durationMin
+	// pacing stops. Without this the pacing races ahead of a source whose segments are longer
+	// than the minimum, closing one before its real boundary is declared.
+	#manual = false;
 	#nextSegment = 0;
 	#tracks = new Map<string, TrackState>();
 	// Live reservations: while any exists, no record flushes (more tracks are still enrolling).
@@ -179,10 +183,16 @@ export class Producer {
 	 * still waits for every track's groups. A cut that would make a segment shorter than the
 	 * minimum is ignored, so several producers declaring the same boundaries cost nothing.
 	 *
+	 * The first call takes over for good: {@link ProducerProps.durationMin} pacing stops, since it
+	 * would otherwise close a segment just before the caller declares where it really ends.
+	 *
 	 * Throws if a segment already exceeded {@link ProducerProps.durationMax}.
 	 */
 	cut(pts: Time.Micro): void {
 		if (this.#overrun) throw this.#overrun;
+
+		// Even a cut this rejects says the caller owns the boundaries.
+		this.#manual = true;
 
 		const since = this.#cuts.at(-1) ?? this.#start;
 		if (since === undefined || pts >= since + this.#durationMinUs) {
@@ -306,6 +316,12 @@ export class Producer {
 	#closeSegment(finished: boolean): boolean {
 		const start = this.#start;
 		if (start === undefined) return false;
+
+		// Discard boundaries the timeline has already reached. Only the first is ever consulted,
+		// so leaving a spent one there would block every later cut behind it and silently drop
+		// the caller back to durationMin pacing.
+		while (this.#cuts.length > 0 && this.#cuts[0] <= start) this.#cuts.shift();
+
 		const boundary = this.#boundary(start, finished);
 		if (!boundary) return false;
 		const [end, cut] = boundary;
@@ -332,6 +348,10 @@ export class Producer {
 	#boundary(start: Time.Micro, finished: boolean): [Time.Micro, boolean] | undefined {
 		const cut = this.#cuts[0];
 		if (cut !== undefined && cut > start) return [cut, true];
+
+		// The application declared a boundary at some point, so it owns them all: pacing here
+		// would close a segment the caller is about to cut somewhere else.
+		if (this.#manual) return undefined;
 
 		const threshold = start + this.#durationMinUs;
 

@@ -139,6 +139,10 @@ struct State {
 	start: Option<Timestamp>,
 	/// Explicit [`Producer::cut`] boundaries not yet reached, in order.
 	cuts: VecDeque<Timestamp>,
+	/// A [`Producer::cut`] arrived, so the application owns the boundaries from here on and the
+	/// `duration_min` pacing stops. Without this the pacing races ahead of a source whose
+	/// segments are longer than the minimum, closing one before its real boundary is declared.
+	manual: bool,
 	/// The number the next flushed record gets.
 	next_segment: u64,
 	/// Every enrolled track, keyed by media track name.
@@ -222,6 +226,14 @@ impl State {
 		let Some(start) = self.start else {
 			return false;
 		};
+
+		// Discard boundaries the timeline has already reached. Only the front is ever consulted,
+		// so leaving a spent one there would block every later cut behind it and silently drop
+		// the caller back to `duration_min` pacing.
+		while self.cuts.front().is_some_and(|c| c.as_micros() <= start.as_micros()) {
+			self.cuts.pop_front();
+		}
+
 		let Some((end, cut)) = self.boundary(start, finished) else {
 			return false;
 		};
@@ -254,6 +266,12 @@ impl State {
 			&& cut.as_micros() > start.as_micros()
 		{
 			return Some((cut, true));
+		}
+
+		// The application declared a boundary at some point, so it owns them all: pacing here
+		// would close a segment the caller is about to cut somewhere else.
+		if self.manual {
+			return None;
 		}
 
 		let threshold = start.as_micros() + self.config.duration_min.as_micros();
@@ -445,6 +463,7 @@ impl Producer {
 				sink: None,
 				start: None,
 				cuts: VecDeque::new(),
+				manual: false,
 				next_segment: 0,
 				tracks: BTreeMap::new(),
 				reservers: 0,
@@ -489,12 +508,20 @@ impl Producer {
 	/// would make a segment shorter than [`Config::duration_min`] is ignored, so several
 	/// producers declaring the same boundaries (the renditions of one import) cost nothing.
 	///
+	/// The first call takes over for good: [`Config::duration_min`] pacing stops, since it would
+	/// otherwise close a segment just before the caller declares where it really ends. Segments
+	/// then last exactly as long as the caller says, and the final one runs to the end of the
+	/// media.
+	///
 	/// Errors if a segment already overran [`Config::duration_max`].
 	pub fn cut(&self, pts: Timestamp) -> crate::Result<()> {
 		let mut state = self.state.lock().unwrap();
 		if let Some(err) = state.failure() {
 			return Err(err);
 		}
+
+		// Even a cut this rejects says the caller owns the boundaries.
+		state.manual = true;
 
 		let floor = state
 			.cuts
@@ -1232,5 +1259,33 @@ mod test {
 		section.timescale = 0;
 		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section).await;
 		assert!(matches!(err, Err(crate::Error::InvalidTimescale(0))));
+	}
+
+	// A cut registered before the media, landing exactly on the first reported group (what the
+	// fMP4 importer does: it cuts at the keyframe fragment's timestamp, then records that group).
+	#[tokio::test]
+	async fn a_cut_on_the_first_group_does_not_poison_later_cuts() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+
+		// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the
+		// duration_min pacing would produce on its own.
+		timeline.cut(ms(0)).unwrap();
+		video.record(0, ms(0), true);
+		for seq in 1..10u64 {
+			if seq % 3 == 0 {
+				timeline.cut(ms(seq * 1_000)).unwrap();
+			}
+			video.record(seq, ms(seq * 1_000), true);
+		}
+		drop(video);
+		timeline.finish().unwrap();
+
+		let entries = drain(&broadcast, &timeline).await;
+		assert_eq!(
+			entries[0],
+			entry(0, 0, 3_000, &[("video0", &[(0, 2)])]),
+			"the source's 3s boundaries should be reproduced, not duration_min pacing"
+		);
 	}
 }

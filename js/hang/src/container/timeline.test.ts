@@ -435,3 +435,26 @@ test("reservations nest", async () => {
 		tracks: { video0: [{ start: 1, end: 1 }], video1: [{ start: 1, end: 1 }] },
 	});
 });
+
+// A cut registered before the media, landing exactly on the first reported group (what the fMP4
+// importer does: it cuts at the keyframe fragment's timestamp, then records that group). The
+// spent cut must not block the ones behind it, and durationMin pacing must not race ahead of them.
+test("a cut on the first group does not poison later cuts", async () => {
+	const { timeline, records } = capture();
+	const video = timeline.track("video0");
+
+	// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the durationMin
+	// pacing would produce on its own.
+	timeline.cut(us(0));
+	video.record(0, us(0));
+	for (let seq = 1; seq < 10; seq++) {
+		if (seq % 3 === 0) timeline.cut(us(seq * 1000));
+		video.record(seq, us(seq * 1000));
+	}
+	video.close();
+	timeline.finish();
+
+	const out = await records();
+	expect(out[0]).toEqual({ segment: 0, pts: 0, duration: 3000, tracks: { video0: [{ start: 0, end: 2 }] } });
+	expect(out[1]).toEqual({ segment: 1, pts: 3000, duration: 3000, tracks: { video0: [{ start: 3, end: 5 }] } });
+});
