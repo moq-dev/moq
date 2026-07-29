@@ -103,6 +103,11 @@ impl Engine {
 		let (opened, ready) = tokio::sync::oneshot::channel();
 
 		let shared = Arc::new(driver::Shared::default());
+		// A canceller holds no `Handle`, so `Shared` is where it reaches the
+		// driver to ask for a retry.
+		#[cfg(feature = "aec")]
+		shared.wake_with(commands.clone());
+
 		let engine = Self {
 			handle: Arc::new(Handle {
 				commands: commands.clone(),

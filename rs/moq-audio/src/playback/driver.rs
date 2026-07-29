@@ -84,6 +84,13 @@ struct State {
 	/// command queue was full. Retried by [`Shared::sync`].
 	#[cfg(feature = "aec")]
 	detaching_reference: bool,
+	/// Posts [`Command::Sync`] so a retry actually happens. A plain sender, not
+	/// a [`Handle`](super::Handle): a canceller must not keep the output device
+	/// open, and shutdown is an explicit message rather than a disconnect.
+	///
+	/// `None` in tests that drive [`Shared`] without a driver behind it.
+	#[cfg(feature = "aec")]
+	waker: Option<Sender<Command>>,
 }
 
 impl Shared {
@@ -136,6 +143,25 @@ impl Shared {
 		}
 	}
 
+	/// Remember the channel that posts [`Command::Sync`], so a send the mixer's
+	/// command queue was too full to take gets retried.
+	#[cfg(feature = "aec")]
+	pub(super) fn wake_with(&self, waker: Sender<Command>) {
+		self.state.lock().unwrap().waker = Some(waker);
+	}
+
+	/// Ask the driver to retry whatever didn't get through.
+	///
+	/// The sink paths do this from [`Engine::sink`](super::Engine::sink) and
+	/// `Sink::drop`, which hold a [`Handle`](super::Handle). A canceller holds
+	/// no handle by design, so its retries are posted from here instead.
+	#[cfg(feature = "aec")]
+	fn wake(state: &State) {
+		if let Some(waker) = &state.waker {
+			let _ = waker.send(Command::Sync);
+		}
+	}
+
 	/// Start feeding an echo canceller the mix, replacing any previous one.
 	///
 	/// Registers with no device open too: the tap waits for the next restart,
@@ -154,6 +180,10 @@ impl Shared {
 		// producer arrives last.
 		state.detaching_reference = false;
 		state.reference = Some(reference);
+
+		// Covers the case where the mixer's command queue was momentarily full,
+		// so a canceller is never left silently unattached.
+		Self::wake(&state);
 	}
 
 	/// Stop feeding the canceller with this id, called when its last clone drops.
@@ -175,6 +205,11 @@ impl Shared {
 			// filling a ring nobody reads for the life of the stream.
 			state.detaching_reference = true;
 		}
+
+		// The mixer hands the retired tap back rather than dropping it on the
+		// audio thread, so somebody has to come collect it, and any failed send
+		// above still needs retrying.
+		Self::wake(&state);
 	}
 
 	/// Re-send whatever the mixer's command queue was too full to take.
@@ -421,9 +456,12 @@ impl Driver {
 		// its command channel on every pass, so registration does not race the
 		// build.
 		let (tx, rx) = sync_channel(COMMAND_QUEUE);
-		// One slot per sink the mixer can hold, so a burst of removals has
-		// somewhere to go even if this thread is slow to drain them.
-		let (retired_tx, retired_rx) = sync_channel(mixer::MAX_SINKS);
+		// One slot per command the mixer can drain in a single pass, since each
+		// retires at most one thing. Sized off the command queue rather than the
+		// sink count: a pass can retire every sink *and* the echo reference, and
+		// a full retirement channel is the one case where the mixer has to free
+		// on the audio thread after all.
+		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
 		let mixer = Mixer::new(rx, retired_tx, rate, channels);
 
 		self.generation += 1;

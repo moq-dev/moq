@@ -46,12 +46,17 @@ use crate::playback::{self, BUS_CHANNELS};
 /// 48 kHz far more often than not, in which case this resamples nothing.
 const REFERENCE_RATE: u32 = 48_000;
 
-/// Reference queued between the output callback and the microphone callback.
+/// Slack between the output callback and the microphone callback, for the
+/// jitter between two independently scheduled threads.
 ///
-/// Deliberately short. The reference has to reach the canceller *before* the
-/// echo it describes reaches the microphone, and everything queued here eats
-/// into the head start the output hardware's own buffering provides.
-const REFERENCE_LATENCY: f64 = 0.02;
+/// Not a target depth. The microphone callback drains this queue every pass, so
+/// what it holds is only what the output callback has produced since, and the
+/// reference keeps the full head start the output hardware's own buffering
+/// gives it. A standing queue here would be subtracted from that head start,
+/// and a device that buffers less than the queue holds would see its echo
+/// arrive before the reference describing it, which is a reference the model
+/// cannot use at all.
+const REFERENCE_LATENCY: f64 = 0.01;
 
 /// Ceiling on that queue, bounding what a closed microphone can pin.
 const REFERENCE_CAPACITY: f64 = 0.2;
@@ -372,15 +377,27 @@ impl State {
 		}
 		*running = true;
 
+		// The reference first: the echo model has to be told what was played
+		// before it is asked to find it in the microphone.
+		//
+		// Everything the mixer has produced goes in, rather than one frame per
+		// microphone frame. Pacing it against capture would leave whatever the
+		// queue starts out holding in it forever, as a fixed delay on top of the
+		// hardware's, and a reference that trails its own echo is one the model
+		// cannot subtract. Draining instead means the reference is never older
+		// than the last output callback, so it leads the echo by however much
+		// the output device buffers, however little that is.
+		if let Some(reference) = reference {
+			while reference.available_frames() >= REFERENCE_FRAME {
+				reference.read_interleaved(reference_frame, false);
+				deinterleave(reference_frame, render_in, BUS_CHANNELS);
+				let _ = process_render(processor, render_in, render_out);
+			}
+		}
+
 		pending.extend_from_slice(buf);
 
 		while pending.len() >= stride {
-			// The reference first: the echo model has to be told what was
-			// played before it is asked to find it in the microphone.
-			read_reference(reference, reference_frame);
-			deinterleave(reference_frame, render_in, BUS_CHANNELS);
-			let _ = process_render(processor, render_in, render_out);
-
 			deinterleave(&pending[..stride], capture_in, channels);
 			match process_capture(processor, capture, capture_in, capture_out) {
 				Ok(()) => interleave(capture_out, channels, processed),
@@ -437,17 +454,6 @@ fn process_capture(
 			let (left_out, right_out) = output.split_at_mut(frame);
 			processor.process_capture_f32_with_config(&[left, right], config, config, &mut [left_out, right_out])
 		}
-	}
-}
-
-/// Read one 10 ms reference frame, or silence when the output device is closed
-/// or behind.
-fn read_reference(reference: &mut Option<ResamplingCons<f32>>, frame: &mut [f32]) {
-	match reference {
-		Some(reference) => {
-			reference.read_interleaved(frame, false);
-		}
-		None => frame.fill(0.0),
 	}
 }
 
@@ -522,22 +528,33 @@ impl Reference {
 			return false;
 		}
 
-		let (prod, cons) = resampling_channel::<f32>(
-			BUS_CHANNELS,
-			rate,
-			REFERENCE_RATE,
-			true,
-			ResamplingChannelConfig {
-				latency_seconds: REFERENCE_LATENCY,
-				capacity_seconds: REFERENCE_CAPACITY,
-				..Default::default()
-			},
-		);
-
+		let (prod, cons) = channel(rate);
 		self.state.lock().unwrap().reference = Some(cons);
 		self.pending = Some(prod);
 		true
 	}
+}
+
+/// The tap itself: the mixer pushes the device's mix in at `rate` and the
+/// canceller reads it back at [`REFERENCE_RATE`].
+fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
+	resampling_channel::<f32>(
+		BUS_CHANNELS,
+		rate,
+		REFERENCE_RATE,
+		true,
+		ResamplingChannelConfig {
+			latency_seconds: REFERENCE_LATENCY,
+			capacity_seconds: REFERENCE_CAPACITY,
+			// A near-empty queue is the normal state here, not an underflow to
+			// correct: the microphone callback drains it every pass. Left on,
+			// the default would pad it back up to the target depth with silence
+			// the speaker never played, which is both a fabricated reference and
+			// the standing delay this is shaped to avoid.
+			underflow_autocorrect_percent_threshold: None,
+			..Default::default()
+		},
+	)
 }
 
 #[cfg(test)]
@@ -559,6 +576,19 @@ mod tests {
 		let canceller = detached();
 		canceller.open(sample_rate, channels).unwrap();
 		canceller
+	}
+
+	/// Give `canceller` a tap and hand back the end the mixer would push into,
+	/// built exactly as the driver builds it so the two can't drift.
+	fn tap(canceller: &Canceller) -> ResamplingProd<f32> {
+		let (prod, cons) = channel(REFERENCE_RATE);
+		canceller.inner.state.lock().unwrap().reference = Some(cons);
+		prod
+	}
+
+	/// Push one 10 ms stereo frame of `value` into the tap.
+	fn play(prod: &mut ResamplingProd<f32>, value: f32) {
+		prod.push_interleaved(&vec![value; REFERENCE_FRAME * BUS_CHANNELS]);
 	}
 
 	#[test]
@@ -694,6 +724,43 @@ mod tests {
 		assert!(buf.iter().all(|s| *s == 0.5));
 	}
 
+	/// Anything left queued in the tap is delay added on top of the hardware's,
+	/// and once it exceeds what the output device buffers, the echo reaches the
+	/// microphone before the reference describing it and cancellation is no
+	/// longer possible at all. So a pass has to take everything, not one frame
+	/// per microphone frame.
+	#[test]
+	fn a_pass_drains_the_whole_tap() {
+		let canceller = opened(48_000, 1);
+		let mut prod = tap(&canceller);
+		let frame = frame(48_000);
+
+		// The tap discards until the canceller has read once, so prime it.
+		canceller.process(&mut vec![0.0f32; frame]);
+		play(&mut prod, 0.5);
+		canceller.process(&mut vec![0.0f32; frame]);
+
+		// Ten frames of output against one frame of microphone, which is what a
+		// device with a long period against a short one looks like.
+		for _ in 0..10 {
+			play(&mut prod, 0.5);
+		}
+		canceller.process(&mut vec![0.0f32; frame]);
+
+		let queued = canceller
+			.inner
+			.state
+			.lock()
+			.unwrap()
+			.reference
+			.as_ref()
+			.map_or(0, |r| r.available_frames());
+		assert!(
+			queued < REFERENCE_FRAME,
+			"{queued} reference frames were left queued as standing delay"
+		);
+	}
+
 	/// A canceller that never sees a reference still has to hand the microphone
 	/// back, since the output device may simply not be open yet.
 	#[test]
@@ -734,18 +801,7 @@ mod tests {
 			state.resize();
 		}
 
-		let (mut prod, cons) = resampling_channel::<f32>(
-			BUS_CHANNELS,
-			REFERENCE_RATE,
-			REFERENCE_RATE,
-			true,
-			ResamplingChannelConfig {
-				latency_seconds: REFERENCE_LATENCY,
-				capacity_seconds: REFERENCE_CAPACITY,
-				..Default::default()
-			},
-		);
-		canceller.inner.state.lock().unwrap().reference = Some(cons);
+		let mut prod = tap(&canceller);
 
 		let frame = frame(48_000);
 		// Two frames of speaker-to-microphone delay, well inside what the
@@ -853,12 +909,10 @@ mod tests {
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
 			let mut state = canceller.inner.state.lock().unwrap();
-			while state
-				.reference
-				.as_ref()
-				.is_some_and(|r| r.available_frames() >= REFERENCE_FRAME)
+			while let Some(reference) = state.reference.as_mut()
+				&& reference.available_frames() >= REFERENCE_FRAME
 			{
-				read_reference(&mut state.reference, &mut buf);
+				reference.read_interleaved(&mut buf, false);
 				energy += buf.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
 			}
 		}
