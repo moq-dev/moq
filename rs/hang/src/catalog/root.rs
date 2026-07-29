@@ -448,6 +448,11 @@ mod test {
 
 		let catalog = Catalog::from_str(json).expect("unknown role rejected the catalog");
 		assert_eq!(catalog.text.renditions.len(), 1);
+		let encoded = catalog.to_json().expect("failed to encode unknown role");
+		assert!(
+			encoded.contains(r#""role":"commentary""#),
+			"unknown role was not preserved: {encoded}"
+		);
 	}
 
 	#[test]

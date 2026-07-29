@@ -144,7 +144,12 @@ describe("sanitizeCue", () => {
 	beforeAll(async () => {
 		const url = new URL("../../../../node_modules/media-captions/dist/prod/index.js", import.meta.url);
 		const src = await Bun.file(url).text();
-		const snippet = src.slice(src.indexOf("const DIGIT_RE"), src.indexOf("function updateTimedVTTCueNodes"));
+		const start = src.indexOf("const DIGIT_RE");
+		const end = src.indexOf("function updateTimedVTTCueNodes");
+		if (start < 0 || end < 0 || start >= end) {
+			throw new Error("media-captions internals moved; update the sanitizer test extraction markers");
+		}
+		const snippet = src.slice(start, end);
 		render = new Function(`${snippet}; return renderVTTCueString;`)() as (cue: VTTCue) => string;
 	});
 

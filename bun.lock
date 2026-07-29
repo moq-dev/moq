@@ -266,7 +266,7 @@
         "@moq/msf": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
-        "media-captions": "^0.0.18",
+        "media-captions": "0.0.18",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",

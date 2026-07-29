@@ -262,8 +262,8 @@ The `renditions` field maps track names to text configurations, typically one pe
 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
-- `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing.
-- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing.
+- `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
+- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
 - `utf8`: raw UTF-8 text with no embedded timing or styling. The cue is shown from its frame timestamp until the next cue; an empty payload clears it.
 
 A consumer MUST ignore a rendition whose `format` it does not recognize.
@@ -280,7 +280,7 @@ Unlike `format`, an unrecognized `role` never prevents rendering: it describes i
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
 The `label` field is a human-readable name for a track picker, useful when `lang` alone is ambiguous (for example distinguishing subtitles from same-language captions).
 
-Regardless of `format`, each frame's timestamp ({{container}}) carries the cue's start time on the media clock, so a relay and a consumer's jitter buffer can order and schedule cues without parsing the payload.
+Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
 
 For example:
@@ -356,7 +356,7 @@ An audio frame's duration is codec dependent.
 AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 23.
 
 # Container {#container}
-Audio and video tracks use a container to encapsulate the media payload.
+Audio, video, and text tracks use a container to encapsulate the media payload.
 A rendition declares its container via the `container` field of its catalog entry ({{common}}):
 
 ~~~
