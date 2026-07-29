@@ -37,6 +37,12 @@ export class Screen {
 
 	#signals = new Effect();
 
+	// Reruns #run once a track ends, so the run itself releases the share.
+	readonly #rerun = new Signal(0);
+
+	// Deliberately a plain field: effect reruns must not unwind it, or the share reopens itself.
+	#stopped = false;
+
 	constructor(props?: ScreenProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
@@ -49,7 +55,17 @@ export class Screen {
 
 	#run(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
+		if (!enabled) {
+			// Being switched off is the app's reset, so a later enable prompts again.
+			this.#stopped = false;
+			return;
+		}
+
+		effect.get(this.#rerun);
+
+		// The share is over and cannot be reopened without another user gesture. Returning here is
+		// what releases it: the previous run's cleanup stops every track and clears out.source.
+		if (this.#stopped) return;
 
 		const video = effect.get(this.video);
 		const audio = effect.get(this.audio);
@@ -89,12 +105,16 @@ export class Screen {
 			effect.cleanup(() => v?.stop());
 			effect.cleanup(() => a?.stop());
 
-			// The browser's own "Stop sharing" control ends the track. Unlike a camera we cannot
-			// re-open it (getDisplayMedia needs a user gesture), and the user just asked us to stop
-			// anyway, so drop the source and let the app pick a new one.
-			const primary = v ?? a;
-			if (primary) {
-				effect.event(primary, "ended", () => this.#out.source.set(undefined));
+			// The browser's own "Stop sharing" control ends a track. Either one ending means the
+			// share is over, and the tracks can end independently, so rerun into the stopped branch
+			// rather than clearing out.source here: that runs the cleanup above and releases the
+			// sibling track too.
+			for (const track of [v, a]) {
+				if (!track) continue;
+				effect.event(track, "ended", () => {
+					this.#stopped = true;
+					this.#rerun.update((rerun) => rerun + 1);
+				});
 			}
 
 			effect.set(this.#out.source, {

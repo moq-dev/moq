@@ -1,7 +1,7 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Audio from "../audio";
 import { Device, type DeviceProps } from "./device";
-import { Restart } from "./restart";
+import { Retry } from "./retry";
 
 // Signals the microphone reads.
 export type MicrophoneInput = {
@@ -38,7 +38,7 @@ export class Microphone {
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
-	#restart = new Restart();
+	#retry = new Retry();
 
 	constructor(props?: MicrophoneProps) {
 		this.in = {
@@ -52,9 +52,22 @@ export class Microphone {
 
 	#run(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
+		if (!enabled) {
+			// Being switched off is the app's reset, so a later enable starts with a full budget.
+			this.#retry.refund();
+			return;
+		}
 
-		this.#restart.subscribe(effect);
+		if (!this.#retry.begin(effect)) {
+			// Out of budget. Only a change to what is plugged in is new information worth another
+			// attempt, so watch the device list here and not while healthy, where a rerun would
+			// restart a working capture for unrelated device churn.
+			const spent = this.device.out.available.peek();
+			effect.subscribe(this.device.out.available, (available) => {
+				if (available !== spent) this.#retry.refund();
+			});
+			return;
+		}
 
 		const device = effect.get(this.device.out.requested);
 
@@ -77,20 +90,22 @@ export class Microphone {
 			);
 
 			const stream = await Promise.race([media, effect.cancel]);
-			if (!stream) return;
+
+			// A torn-down run is not a failed attempt: whatever cancelled it reruns us.
+			if (effect.abort.aborted) return;
+
+			if (!stream) return this.#retry.failed();
 
 			const track = stream.getAudioTracks()[0] as Audio.StreamTrack | undefined;
 			const settings = track?.getSettings();
 
 			// getUserMedia resolved, so we have permission even if no track came back.
 			effect.cleanup(this.device.capture(settings?.deviceId));
-			if (!track) return;
 
-			// A track that arrives dead has already fired "ended", so publishing it would strand a
-			// silent capture that nothing retries.
-			if (track.readyState === "ended") return;
+			// A track that arrives dead already fired "ended", so nothing would ever rerun us.
+			if (!track || track.readyState === "ended") return this.#retry.failed();
 
-			this.#restart.watch(effect, track);
+			this.#retry.succeeded(effect, track);
 			effect.set(this.#out.source, { track, kind: "voice" });
 		});
 	}
