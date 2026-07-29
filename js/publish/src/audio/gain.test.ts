@@ -5,6 +5,9 @@ import { Gain } from "./gain";
 
 const RATE = 48_000;
 
+// Half the rate covers the same fade in half the samples, so the ramp has to move twice as fast.
+const SLOW_RATE = RATE / 2;
+
 function ones(samples: number, channels = 1): AudioFrame {
 	return {
 		timestamp: 0 as Time.Micro,
@@ -55,12 +58,25 @@ describe("Gain", () => {
 
 	test("ramps every channel in step", () => {
 		const gain = new Gain();
-		const frame = ones(128, 2);
+
+		// Distinct amplitudes: two channels of the same value would compare equal even if one were
+		// overwritten with its neighbour rather than scaled in place.
+		const frame: AudioFrame = {
+			timestamp: 0 as Time.Micro,
+			channels: [new Float32Array(128).fill(1), new Float32Array(128).fill(-0.5)],
+		};
 
 		gain.set(0);
 		gain.apply(frame, RATE);
 
-		expect([...frame.channels[0]]).toEqual([...frame.channels[1]]);
+		// Every channel rides one level, so each keeps its own value and their ratio is untouched.
+		for (let index = 0; index < 128; index++) {
+			expect(frame.channels[1][index]).toBeCloseTo(frame.channels[0][index] * -0.5, 6);
+		}
+
+		// And the level actually moved, so the ratio above isn't just 0 === 0.
+		expect(frame.channels[0][127]).toBeLessThan(1);
+		expect(frame.channels[0][127]).toBeGreaterThan(0);
 	});
 
 	// The ramp is per-sample, so a slower rate has to cover the same fade in fewer samples.
@@ -73,8 +89,8 @@ describe("Gain", () => {
 
 		fast.set(0);
 		slow.set(0);
-		fast.apply(fastFrame, 48_000);
-		slow.apply(slowFrame, 24_000);
+		fast.apply(fastFrame, RATE);
+		slow.apply(slowFrame, SLOW_RATE);
 
 		expect(slowFrame.channels[0][127]).toBeLessThan(fastFrame.channels[0][127]);
 	});
