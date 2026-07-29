@@ -87,10 +87,8 @@ export default class MoqPublish extends HTMLElement {
 	};
 
 	connection: Moq.Connection.Reload;
-	/** The video capture, shared by every video rendition. */
+	/** The video capture, shared by every video rendition. Also reachable as `video.capture`. */
 	capture: Video.Capture;
-	/** The audio capture, shared by every audio rendition. */
-	audioCapture: Audio.Capture;
 	broadcast: Broadcast;
 
 	// The single video and audio encoders. For multiple renditions (e.g. simulcast), drop the element
@@ -108,7 +106,7 @@ export default class MoqPublish extends HTMLElement {
 	};
 
 	// The captured media tracks, written by #runSource. Fed to the video and audio captures, so
-	// consumers read them back via `capture.in.source` / `audioCapture.in.source` rather than here.
+	// consumers read them back via `capture.in.source` / `audio.capture.in.source` rather than here.
 	#videoSource = new Signal<Video.Source | undefined>(undefined);
 	#audioSource = new Signal<Audio.Source | undefined>(undefined);
 
@@ -209,11 +207,12 @@ export default class MoqPublish extends HTMLElement {
 		this.capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.capture.close());
 
-		this.audioCapture = new Audio.Capture({
+		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
+		const audioCapture = new Audio.Capture({
 			source: this.#audioSource,
 			enabled: this.#audioEnabled,
 		});
-		this.signals.cleanup(() => this.audioCapture.close());
+		this.signals.cleanup(() => audioCapture.close());
 
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
@@ -235,7 +234,7 @@ export default class MoqPublish extends HTMLElement {
 		this.audio = new Audio.Encoder("audio", {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
-			capture: this.audioCapture,
+			capture: audioCapture,
 		});
 		this.signals.cleanup(() => this.audio.close());
 

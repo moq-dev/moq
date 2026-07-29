@@ -103,6 +103,16 @@ export class Encoder {
 	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
 	config: Signal<Config | undefined>;
 
+	/**
+	 * The capture supplying this rendition, or undefined while none is wired.
+	 *
+	 * A snapshot. Read {@link in}.capture through an effect instead when you need to react to it
+	 * being swapped.
+	 */
+	get capture(): Capture | undefined {
+		return this.in.capture.peek();
+	}
+
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
 		resolved: new Signal<VideoEncoderConfig | undefined>(undefined),

@@ -166,8 +166,10 @@ ui.run((effect) => {
 // so rate and channel mix live on the capture rather than the encoder.
 ui.run((effect) => {
 	publish.audio.volume.set(effect.get(volume));
-	publish.audioCapture.sampleRate.set(effect.get(sampleRate));
-	publish.audioCapture.channelCount.set(effect.get(channelCount));
+
+	const capture = publish.audio.capture;
+	capture?.sampleRate.set(effect.get(sampleRate));
+	capture?.channelCount.set(effect.get(channelCount));
 });
 
 // Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on
