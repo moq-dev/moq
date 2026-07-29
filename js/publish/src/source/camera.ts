@@ -38,8 +38,8 @@ export class Camera {
 	/**
 	 * The live-editable capture constraints, merged over {@link DEFAULT_CONSTRAINTS}.
 	 *
-	 * `facingMode` picks the front or rear camera, but only while `device.preferred` is unset: an
-	 * explicit deviceId names one camera and wins.
+	 * `facingMode` picks the front or rear camera, unless `device.preferred` names one that is
+	 * actually available: an explicit deviceId wins.
 	 */
 	constraints: Signal<Video.Constraints | undefined>;
 
