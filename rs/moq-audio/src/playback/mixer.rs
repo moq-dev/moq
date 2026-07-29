@@ -172,10 +172,10 @@ impl Mixer {
 
 	/// Hand something the mixer is done with back to the driver to drop.
 	///
-	/// The channel holds [`MAX_SINKS`] entries and the driver drains it every
-	/// time a sink is dropped, so filling it takes a driver that has stopped
+	/// The channel holds one slot per command a pass can drain, and the driver
+	/// empties it on every sync, so filling it takes a driver that has stopped
 	/// running entirely. Dropping in place then costs one free on the audio
-	/// thread, which beats leaking the entry for the life of the stream.
+	/// thread, which beats leaking the item for the life of the stream.
 	fn retire(&mut self, item: Retired) {
 		if let Err(err) = self.retired.try_send(item) {
 			let (TrySendError::Full(item) | TrySendError::Disconnected(item)) = err;
