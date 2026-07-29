@@ -273,7 +273,7 @@ mod tests {
 	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
 		let origin = moq_net::Origin::new(100).unwrap().produce();
 		let nodes = crate::nodes::Nodes::new(origin);
-		let _connection = nodes.connect_outbound("https://relay-b.example/");
+		let _connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),

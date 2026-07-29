@@ -121,7 +121,7 @@ impl Connection {
 			request = request.with_subscriber(publish);
 		}
 		let session = request.ok().await?;
-		let _node_connection = peer_origin.map(|origin| self.cluster.nodes.connect_inbound(origin));
+		let _node_connection = peer_origin.map(|origin| self.cluster.nodes.connect_inbound(self.id, origin));
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 

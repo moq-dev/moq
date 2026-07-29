@@ -998,10 +998,13 @@ impl Request {
 		request_ref!(self, r => r.role())
 	}
 
-	/// Returns the origin identity declared by a moq-lite peer.
+	/// The origin identity the peer declared in its SETUP (moq-lite-05+).
 	///
 	/// A peer declares this when it attaches a publish or subscribe origin.
-	/// Protocol versions and peers without one return `None`.
+	/// Older versions and peers without one return `None`.
+	///
+	/// Self-declared, so treat it as a correlation hint rather than an
+	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_origin(&self) -> Option<moq_net::Origin> {
 		request_ref!(self, r => r.peer_origin())
 	}

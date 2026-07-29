@@ -1,7 +1,10 @@
 use std::{
 	collections::{HashMap, HashSet},
 	path::PathBuf,
-	sync::{Arc, Mutex},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicU64, Ordering},
+	},
 	time::{Duration, Instant},
 };
 
@@ -10,6 +13,7 @@ use moq_net::origin;
 use moq_net::{Origin, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
+use tracing::Instrument as _;
 use url::Url;
 
 use crate::{AuthToken, nodes::MESH_PREFIX};
@@ -362,6 +366,11 @@ pub struct Cluster {
 	client: Option<moq_native::Client>,
 	pub(crate) nodes: crate::nodes::Nodes,
 
+	/// Hands out the `conn` id every session logs under, inbound and outbound
+	/// alike, so one id space covers the whole process and an id in the `/nodes`
+	/// view always points at the same session in the logs.
+	connection_ids: Arc<AtomicU64>,
+
 	/// The origin's construction config (identity, cache pool, linger). Kept so
 	/// the `with_*` builders can rebuild the origin without losing each other's
 	/// settings.
@@ -410,6 +419,7 @@ impl Cluster {
 			config,
 			client: None,
 			nodes,
+			connection_ids: Arc::default(),
 			client_tls: None,
 			info,
 			origin,
@@ -451,6 +461,16 @@ impl Cluster {
 	pub fn with_client_tls(mut self, tls: rustls::ClientConfig) -> Self {
 		self.client_tls = Some(Arc::new(tls));
 		self
+	}
+
+	/// Reserve the next `conn` id, the handle a session is logged under.
+	///
+	/// One counter serves inbound accepts and outbound cluster dials, so an id in
+	/// the internal `/nodes` view names exactly one session in the logs. Use it for
+	/// the [`Connection::id`](crate::Connection::id) of every request you accept,
+	/// rather than counting separately.
+	pub fn next_connection_id(&self) -> u64 {
+		self.connection_ids.fetch_add(1, Ordering::Relaxed)
 	}
 
 	/// Attach a stats registry. Replaces the default disabled registry.
@@ -917,6 +937,15 @@ impl Cluster {
 	}
 
 	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+		// Each attempt is its own session, so it gets its own id. Matches the span an
+		// accepted connection runs under, so both directions log the same way.
+		let id = self.next_connection_id();
+		self.run_remote_session(id, url, cost)
+			.instrument(tracing::info_span!("conn", id))
+			.await
+	}
+
+	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
@@ -940,7 +969,7 @@ impl Cluster {
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
-		let _connection = self.nodes.connect_outbound(log_url.to_string());
+		let _connection = self.nodes.connect_outbound(id, log_url.to_string());
 
 		Err(cs.closed().await.into())
 	}

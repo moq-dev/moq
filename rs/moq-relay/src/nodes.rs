@@ -1,9 +1,12 @@
+//! The local cluster topology view behind the internal `/nodes` endpoint.
+//!
+//! Combines the node advertisements gossiped under [`MESH_PREFIX`] with the
+//! direct relay sessions this process currently holds, so an operator can see
+//! which peers are visible, which are connected, and who dialed whom.
+
 use std::{
 	collections::{BTreeMap, HashMap},
-	sync::{
-		Arc, Mutex,
-		atomic::{AtomicU64, Ordering},
-	},
+	sync::{Arc, Mutex},
 };
 
 use moq_net::{Origin, origin};
@@ -21,7 +24,6 @@ pub(crate) struct Nodes {
 
 #[derive(Default)]
 struct Connections {
-	next_id: AtomicU64,
 	entries: Mutex<HashMap<u64, ConnectionRecord>>,
 }
 
@@ -71,7 +73,8 @@ pub(crate) struct Announcement {
 /// An established direct cluster connection.
 #[derive(Debug, Serialize)]
 pub(crate) struct Connection {
-	/// Process-local connection identifier.
+	/// The session's `conn` id, matching the `conn{id}` span its log lines carry.
+	/// Process-local, and only meaningful while the session lasts.
 	pub id: u64,
 	/// Whether this relay accepted or initiated the connection.
 	pub direction: Direction,
@@ -93,6 +96,15 @@ struct NodeBuilder {
 	connections: Vec<Connection>,
 }
 
+/// The advertisements one scan of the discovery namespace turned up.
+#[derive(Default)]
+struct Announced {
+	nodes: BTreeMap<String, NodeBuilder>,
+	/// Origin id to the single node advertising it, or `None` once more than one
+	/// does and the id no longer identifies a peer.
+	origins: HashMap<u64, Option<String>>,
+}
+
 /// Removes a live connection from the topology view when its session ends.
 pub(crate) struct ConnectionGuard {
 	nodes: Nodes,
@@ -112,16 +124,23 @@ impl Nodes {
 		self
 	}
 
-	pub(crate) fn connect_outbound(&self, node: impl Into<String>) -> ConnectionGuard {
-		self.connect(Direction::Outbound, ConnectionTarget::Node(node.into()))
+	/// Record a dial this relay initiated, keyed by the URL it dialed.
+	///
+	/// `id` is the session's `conn` id from
+	/// [`Cluster::next_connection_id`](crate::Cluster::next_connection_id).
+	pub(crate) fn connect_outbound(&self, id: u64, node: impl Into<String>) -> ConnectionGuard {
+		self.connect(id, Direction::Outbound, ConnectionTarget::Node(node.into()))
 	}
 
-	pub(crate) fn connect_inbound(&self, origin: Origin) -> ConnectionGuard {
-		self.connect(Direction::Inbound, ConnectionTarget::Origin(origin))
+	/// Record a session this relay accepted, keyed by the origin the peer declared.
+	///
+	/// `id` is the session's `conn` id from
+	/// [`Cluster::next_connection_id`](crate::Cluster::next_connection_id).
+	pub(crate) fn connect_inbound(&self, id: u64, origin: Origin) -> ConnectionGuard {
+		self.connect(id, Direction::Inbound, ConnectionTarget::Origin(origin))
 	}
 
-	fn connect(&self, direction: Direction, target: ConnectionTarget) -> ConnectionGuard {
-		let id = self.connections.next_id.fetch_add(1, Ordering::Relaxed);
+	fn connect(&self, id: u64, direction: Direction, target: ConnectionTarget) -> ConnectionGuard {
 		self.connections
 			.entries
 			.lock()
@@ -133,45 +152,59 @@ impl Nodes {
 		}
 	}
 
-	pub(crate) fn snapshot(&self) -> Snapshot {
-		let mut nodes = BTreeMap::<String, NodeBuilder>::new();
-		let mut origins = HashMap::<u64, Option<String>>::new();
-
-		if let Some(consumer) = self.origin.consume().with_root(MESH_PREFIX) {
-			let mut announced = consumer.announced();
-			while let Some(moq_net::announce::Update {
-				path,
-				broadcast: Some(broadcast),
-			}) = announced.try_next()
-			{
-				let key = canonical_announced_node(path.as_str());
-				let route = broadcast.route();
-				let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
-				let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
-
-				origins
-					.entry(origin_id)
-					.and_modify(|current| {
-						if current.as_deref() != Some(&key) {
-							*current = None;
-						}
-					})
-					.or_insert_with(|| Some(key.clone()));
-
-				nodes.insert(
-					key,
-					NodeBuilder {
-						origin_id: Some(origin_id.to_string()),
-						announced: Some(Announcement {
-							hop_count: hop_ids.len(),
-							hops: hop_ids.into_iter().map(|origin| origin.to_string()).collect(),
-							cost: route.cost,
-						}),
-						connections: Vec::new(),
-					},
-				);
-			}
+	/// The node advertisements currently visible under [`MESH_PREFIX`].
+	fn announced(&self) -> Announced {
+		match self.origin.consume().with_root(MESH_PREFIX) {
+			Some(consumer) => self.scan_announced(&mut consumer.announced()),
+			None => Announced::default(),
 		}
+	}
+
+	/// Drain every update the cursor has buffered into a node map.
+	fn scan_announced(&self, announced: &mut moq_net::announce::Consumer) -> Announced {
+		let mut scanned = Announced::default();
+
+		while let Some(update) = announced.try_next() {
+			// The origin delivers a re-announce as unannounce-then-announce, so an
+			// unannounce can land mid-drain. Skip it rather than end the scan, which
+			// would drop every node still queued behind it.
+			let Some(broadcast) = update.broadcast else { continue };
+
+			let key = canonical_announced_node(update.path.as_str());
+			let route = broadcast.route();
+			let hop_ids = route.hops.iter().map(|origin| origin.id()).collect::<Vec<_>>();
+			// An advertisement with no hops never crossed a link, so it is our own.
+			let origin_id = hop_ids.first().copied().unwrap_or_else(|| self.origin.id());
+
+			scanned
+				.origins
+				.entry(origin_id)
+				.and_modify(|current| {
+					if current.as_deref() != Some(&key) {
+						*current = None;
+					}
+				})
+				.or_insert_with(|| Some(key.clone()));
+
+			scanned.nodes.insert(
+				key,
+				NodeBuilder {
+					origin_id: Some(origin_id.to_string()),
+					announced: Some(Announcement {
+						hop_count: hop_ids.len(),
+						hops: hop_ids.into_iter().map(|origin| origin.to_string()).collect(),
+						cost: route.cost,
+					}),
+					connections: Vec::new(),
+				},
+			);
+		}
+
+		scanned
+	}
+
+	pub(crate) fn snapshot(&self) -> Snapshot {
+		let Announced { mut nodes, origins } = self.announced();
 
 		let connections = self
 			.connections
@@ -270,8 +303,8 @@ mod tests {
 		let origin = Origin::new(100).unwrap().produce();
 		let nodes = Nodes::new(origin.clone());
 		let _remote = announced_node(&origin, "https://relay-b.example/", &[REMOTE_ID], 7).await;
-		let _outbound = nodes.connect_outbound("https://relay-b.example/");
-		let _inbound = nodes.connect_inbound(Origin::new(REMOTE_ID).unwrap());
+		let _outbound = nodes.connect_outbound(0, "https://relay-b.example/");
+		let _inbound = nodes.connect_inbound(1, Origin::new(REMOTE_ID).unwrap());
 
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 1);
@@ -304,7 +337,7 @@ mod tests {
 	fn snapshot_omits_unresolved_inbound_connections() {
 		let origin = Origin::new(100).unwrap().produce();
 		let nodes = Nodes::new(origin);
-		let _inbound = nodes.connect_inbound(Origin::new(200).unwrap());
+		let _inbound = nodes.connect_inbound(0, Origin::new(200).unwrap());
 
 		assert!(nodes.snapshot().nodes.is_empty());
 	}
@@ -313,7 +346,7 @@ mod tests {
 	fn snapshot_stops_reporting_closed_outbound_connections() {
 		let origin = Origin::new(100).unwrap().produce();
 		let nodes = Nodes::new(origin);
-		let connection = nodes.connect_outbound("https://relay-b.example/");
+		let connection = nodes.connect_outbound(0, "https://relay-b.example/");
 		assert_eq!(nodes.snapshot().nodes.len(), 1);
 
 		drop(connection);
@@ -324,9 +357,42 @@ mod tests {
 	fn outbound_node_omits_credentials_from_url() {
 		let origin = Origin::new(100).unwrap().produce();
 		let nodes = Nodes::new(origin);
-		let _connection = nodes.connect_outbound("https://relay-b.example/?jwt=secret");
+		let _connection = nodes.connect_outbound(0, "https://relay-b.example/?jwt=secret");
 
 		assert_eq!(nodes.snapshot().nodes[0].node, "https://relay-b.example/");
+	}
+
+	/// A re-announce reaches the cursor as unannounce-then-announce, so a bare
+	/// unannounce can sit ahead of nodes still queued behind it. Treating that as
+	/// the end of the scan would silently truncate `/nodes` whenever the cluster
+	/// churned mid-request.
+	#[tokio::test(start_paused = true)]
+	async fn scan_skips_an_unannounce_queued_ahead_of_another_node() {
+		let origin = Origin::new(100).unwrap().produce();
+		let nodes = Nodes::new(origin.clone());
+		let mut first = announced_node(&origin, "https://relay-a.example/", &[200], 1).await;
+		let _second = announced_node(&origin, "https://relay-b.example/", &[300], 1).await;
+
+		let consumer = origin.consume().with_root(MESH_PREFIX).expect("mesh prefix is in root");
+		let mut announced = consumer.announced();
+
+		// Take relay-a's replayed announce, then retire it so the cursor queues a
+		// bare unannounce ahead of relay-b's still-pending announce.
+		let first_update = announced.try_next().expect("replayed announce");
+		assert_eq!(
+			canonical_announced_node(first_update.path.as_str()),
+			"https://relay-a.example/"
+		);
+		first.finish();
+		// The origin retires a finished source on a spawned task; time is paused, so
+		// this advances the clock instantly.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let scanned = nodes.scan_announced(&mut announced);
+		assert!(
+			scanned.nodes.contains_key("https://relay-b.example/"),
+			"the unannounce ahead of relay-b truncated the scan"
+		);
 	}
 
 	#[tokio::test]
@@ -335,7 +401,7 @@ mod tests {
 		let nodes = Nodes::new(origin.clone());
 		let _first = announced_node(&origin, "https://relay-b.example/", &[200], 1).await;
 		let _second = announced_node(&origin, "https://relay-c.example/", &[200], 1).await;
-		let _inbound = nodes.connect_inbound(Origin::new(200).unwrap());
+		let _inbound = nodes.connect_inbound(0, Origin::new(200).unwrap());
 
 		let snapshot = nodes.snapshot();
 		assert_eq!(snapshot.nodes.len(), 2);

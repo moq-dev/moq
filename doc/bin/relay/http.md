@@ -137,8 +137,13 @@ without a unique match are omitted.
 advertisement, not every physical link in the cluster. A node can be visible
 without a direct connection, directly connected without an advertisement, or
 both. Origin ids are decimal strings because the wire supports values larger
-than JavaScript's precise integer range. Connection ids are process-local and
-last only for that session.
+than JavaScript's precise integer range.
+
+A connection `id` is the same id the session's log lines carry in their
+`conn{id=...}` span, so a row here grep's straight to that session's logs.
+Accepted sessions and outbound dials draw from one counter, so an id names
+exactly one session. It is process-local and only lasts for that session, so
+don't persist it or compare it across relays.
 
 Inbound association is best-effort correlation, not authenticated node
 identity. The SETUP origin id is self-declared, and `/nodes` associates it only

@@ -98,17 +98,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
-	let mut conn_id = 0;
-
 	while let Some(request) = server.accept().await {
 		let conn = Connection {
-			id: conn_id,
+			// Shared with outbound cluster dials so one id space covers every session.
+			id: cluster.next_connection_id(),
 			request,
 			cluster: cluster.clone(),
 			auth: auth.clone(),
 		};
 
-		conn_id += 1;
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {
 				tracing::warn!(%err, "connection closed");
