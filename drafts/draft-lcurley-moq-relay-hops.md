@@ -166,9 +166,10 @@ A relay MAY additionally avoid sending an advertisement back toward a peer it ca
 ## Path Selection
 A relay or subscriber that receives advertisements for the same namespace over multiple sessions MAY use the length of the HOP_PATH list as a tiebreaker, preferring the advertisement with the fewest hops (usually the lowest-latency path).
 This is advisory: the receiver MAY apply additional local policy (e.g. measured RTT or administrative preference) and is not required to prefer the shortest path.
+Advertisements that tie on every advertised property SHOULD be broken toward the most recently received, so a publisher reconnecting over a new session is not outranked by the session it replaced until the transport declares that one gone.
 
 Two advertisements for the same namespace whose HOP_PATH begins with the same Hop ID share an origin and therefore carry interchangeable content: a receiver MAY hold them as redundant paths and switch between them, including failing an active subscription over to the surviving path when the serving one ends.
-If the first Hop IDs differ, the advertisements come from distinct origins that happen to reuse a namespace, and a receiver MUST NOT treat them as interchangeable; it SHOULD keep serving the earlier one, treating the later as a replacement only once the earlier ends.
+If the first Hop IDs differ, the advertisements come from distinct origins that happen to reuse a namespace, and a receiver MUST NOT treat them as interchangeable; it SHOULD treat the later as a replacement for the earlier rather than serving the earlier until it ends on its own, which would hold the namespace for however long the transport takes to notice a publisher is gone.
 
 A publisher (or relay acting as one) SHOULD advertise, per session, the single best path it knows whose HOP_PATH does not contain the Hop ID the peer declared at setup; when every known path contains it, the publisher SHOULD advertise nothing for that namespace on that session.
 Selection is per session: a peer that the serving path flows through receives the best standby path instead of nothing, which is what lets it fail over to that standby if its own copy dies.
