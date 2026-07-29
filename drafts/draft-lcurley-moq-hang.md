@@ -254,7 +254,7 @@ type TextConfig = {
 	"role": "subtitle" | "caption" | string | undefined,
 	"lang": string | undefined,
 	"label": string | undefined,
-	// plus the common fields ({{common}})
+	// plus the common rendition fields
 }
 ~~~
 
