@@ -83,8 +83,8 @@ pub struct Route {
 	pub hops: OriginList,
 
 	/// The cost of pulling the broadcast via this route, accumulated per link:
-	/// lower wins, with ties broken by hop length and then a deterministic hash.
-	/// Capped at [`MAX_COST`].
+	/// lower wins, with ties broken by hop length, then a deterministic hash, and
+	/// finally the most recently attached route. Capped at [`MAX_COST`].
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,

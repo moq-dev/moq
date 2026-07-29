@@ -26,18 +26,24 @@ use objc2_core_media::{
 	CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::CVImageBuffer;
+use objc2_core_video::{
+	kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimaries_SMPTE_C,
+	kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+	kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+};
 use objc2_video_toolbox::{
 	VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
-	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ExpectedFrameRate,
-	kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
-	kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel,
-	kVTProfileLevel_HEVC_Main_AutoLevel,
+	kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ColorPrimaries,
+	kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+	kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+	kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+	kVTEncodeFrameOptionKey_ForceKeyFrame, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 
 use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::Surface;
-use crate::{Error, Frame};
+use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -130,6 +136,34 @@ impl VideoToolbox {
 			unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
 			config.framerate as i32,
 		)?;
+
+		// State the color space in the SPS so a decoder doesn't fall back to
+		// guessing it from the frame height. BT.601 goes out as SMPTE C primaries
+		// and the 601 matrix (both code point 6) with the BT.709 transfer curve (1),
+		// since 601 and 709 differ in primaries and matrix, not in gamma. CoreVideo
+		// does have a 170M transfer constant, but it is deprecated, and Media
+		// Foundation has none, so 1 is what every backend emits.
+		let (primaries, transfer, matrix) = unsafe {
+			match config.resolved_color() {
+				Color::Bt601Limited | Color::Bt601Full => (
+					kCVImageBufferColorPrimaries_SMPTE_C,
+					kCVImageBufferTransferFunction_ITU_R_709_2,
+					kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+				),
+				Color::Bt709Limited | Color::Bt709Full => (
+					kCVImageBufferColorPrimaries_ITU_R_709_2,
+					kCVImageBufferTransferFunction_ITU_R_709_2,
+					kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+				),
+			}
+		};
+		set_property(&session, unsafe { kVTCompressionPropertyKey_ColorPrimaries }, primaries)?;
+		set_property(
+			&session,
+			unsafe { kVTCompressionPropertyKey_TransferFunction },
+			transfer,
+		)?;
+		set_property(&session, unsafe { kVTCompressionPropertyKey_YCbCrMatrix }, matrix)?;
 
 		let force_keyframe = force_keyframe_dict()?;
 

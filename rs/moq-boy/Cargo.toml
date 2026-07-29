@@ -34,4 +34,3 @@ moq-video = { workspace = true, features = ["nvenc", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
-url = "2"

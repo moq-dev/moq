@@ -42,6 +42,11 @@ use std::sync::mpsc::Sender;
 pub use device::{Device, devices};
 pub use sink::{Control, Input, Sink};
 
+#[cfg(feature = "aec")]
+pub(crate) use driver::Shared;
+#[cfg(feature = "aec")]
+pub(crate) use mixer::BUS_CHANNELS;
+
 use crate::Error;
 
 /// Playback configuration.
@@ -98,6 +103,11 @@ impl Engine {
 		let (opened, ready) = tokio::sync::oneshot::channel();
 
 		let shared = Arc::new(driver::Shared::default());
+		// A canceller holds no `Handle`, so `Shared` is where it reaches the
+		// driver to ask for a retry.
+		#[cfg(feature = "aec")]
+		shared.wake_with(commands.clone());
+
 		let engine = Self {
 			handle: Arc::new(Handle {
 				commands: commands.clone(),
@@ -134,6 +144,20 @@ impl Engine {
 		// so a sink is never left silently unmixed.
 		self.handle.wake();
 		Ok(sink)
+	}
+
+	/// Build an echo canceller that subtracts this engine's mix from a
+	/// microphone.
+	///
+	/// Hand the result to
+	/// [`capture::Config::aec`](crate::capture::Config::aec). At most one is
+	/// live per engine: a second call replaces the first, which then cancels
+	/// nothing. Clone the canceller instead if two places need to reach it.
+	///
+	/// Requires the `aec` feature.
+	#[cfg(feature = "aec")]
+	pub fn canceller(&self, config: crate::aec::Config) -> crate::aec::Canceller {
+		crate::aec::Canceller::new(self.shared.clone(), config)
 	}
 
 	/// Move playback to the device `config` names, or back to the system default

@@ -9,9 +9,10 @@ export interface DeviceProps {
 type DeviceOutput = {
 	// The devices that are available, or undefined without permission to enumerate them.
 	available: Signal<MediaDeviceInfo[] | undefined>;
-	// The default device based on heuristics.
+	// The device the platform names as its default, or undefined when it names none.
+	// Informational only: it never pins a capture.
 	default: Signal<string | undefined>;
-	// The device we want to use next. (preferred ?? default)
+	// The device to pin the next capture to, or undefined to let the browser choose.
 	requested: Signal<string | undefined>;
 	// The device backing the live capture, as reported by the owner via capture().
 	active: Signal<string | undefined>;
@@ -23,13 +24,14 @@ type DeviceOutput = {
  * The available capture devices of one {@link kind}, and which of them to use.
  *
  * Owned by a source ({@link Camera}, {@link Microphone}), which reports the device backing its live
- * capture via {@link capture}. Set {@link preferred} to choose one; the rest is discovered.
+ * capture via {@link capture}. Set {@link preferred} to choose one; leave it unset and the capture
+ * omits the `deviceId` constraint, following the browser and OS.
  */
 export class Device<Kind extends "audio" | "video"> {
 	/** Whether this tracks audio inputs or video inputs. */
 	readonly kind: Kind;
 
-	/** The deviceId to use, or undefined to use the default. */
+	/** The deviceId to capture from, or undefined to let the browser and OS choose. Only the app writes this. */
 	preferred: Signal<string | undefined>;
 
 	readonly #out: DeviceOutput = {
@@ -106,33 +108,10 @@ export class Device<Kind extends "audio" | "video"> {
 		// Remove the default device from the list.
 		devices = devices.filter((d) => d.deviceId !== "default");
 
-		let defaultDevice: MediaDeviceInfo | undefined;
-		if (alias) {
-			// Find the device with the same groupId as the default alias.
-			defaultDevice = devices.find((d) => d.groupId === alias.groupId);
-		}
-
-		// If we couldn't find a default alias, time to scan labels.
-		if (!defaultDevice) {
-			if (this.kind === "audio") {
-				// Look for default or communications device
-				defaultDevice = devices.find((d) => {
-					const label = d.label.toLowerCase();
-					return label.includes("default") || label.includes("communications");
-				});
-			} else if (this.kind === "video") {
-				// On mobile, prefer front-facing camera
-				defaultDevice = devices.find((d) => {
-					const label = d.label.toLowerCase();
-					return label.includes("front") || label.includes("external") || label.includes("usb");
-				});
-			}
-		}
-
-		if (!defaultDevice) {
-			// Still nothing, then use the top one.
-			defaultDevice = devices.at(0);
-		}
+		// Only the alias resolves a default. Guessing by label or position is unsound: Android
+		// enumerates output routes ("Headset earpiece", "Speakerphone") as audioinput devices, so
+		// the first entry is a speaker rather than a microphone.
+		const defaultDevice = alias ? devices.find((d) => d.groupId === alias.groupId) : undefined;
 
 		this.#out.available.set(devices);
 		this.#out.default.set(defaultDevice?.deviceId);
@@ -140,13 +119,12 @@ export class Device<Kind extends "audio" | "video"> {
 
 	#runRequested(effect: Effect) {
 		const preferred = effect.get(this.preferred);
-		if (preferred && effect.get(this.out.available)?.some((d) => d.deviceId === preferred)) {
-			// Use the preferred device if it's in our devices list.
-			this.#out.requested.set(preferred);
-		} else {
-			// Otherwise use the default device.
-			this.#out.requested.set(effect.get(this.out.default));
-		}
+
+		// Pin only a device that was asked for and is still present. Without a preference the
+		// capture omits the constraint, which is the only way to follow the system default: a
+		// deviceId we picked ourselves would override it forever.
+		const known = effect.get(this.out.available)?.some((d) => d.deviceId === preferred) ?? false;
+		this.#out.requested.set(preferred && known ? preferred : undefined);
 	}
 
 	/** Manually request permission for the device, ignoring the result. */
@@ -157,12 +135,6 @@ export class Device<Kind extends "audio" | "video"> {
 			.getUserMedia({ [this.kind]: true })
 			.then((stream) => {
 				this.#out.permission.set(true);
-
-				// If the user selected a device during the dialog prompt, save it as the preferred device.
-				const deviceId = stream.getTracks().at(0)?.getSettings().deviceId;
-				if (deviceId) {
-					this.preferred.set(deviceId);
-				}
 
 				stream.getTracks().forEach((track) => {
 					track.stop();

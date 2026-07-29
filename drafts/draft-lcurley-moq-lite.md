@@ -299,10 +299,12 @@ The first entry of the reconstructed path identifies the original publisher (see
 A publisher MUST NOT keep multiple current advertisements for the same broadcast on the same stream: each broadcast has at most one current advertisement at a time, and a second ANNOUNCE_START for an already-available path is a protocol violation (use ANNOUNCE_RESTART).
 A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the lowest Route Cost after adding each arriving link's cost, breaking ties by the shortest total path length (see [ANNOUNCE_START](#announce-start)).
 Advertisements from peers that predate the Route Cost carry an effective cost of 0, so a mixed mesh degrades to shortest-path routing.
+Advertisements that tie on every advertised property SHOULD be broken toward the most recently received: they are indistinguishable to the rest of the mesh, and a publisher reconnecting over a new session is otherwise outranked by the session it replaced until the transport declares that one gone.
 
 Advertisements for the same broadcast path whose reconstructed paths share the same first entry carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary, e.g. when the serving route ends.
 Cooperating redundant publishers MAY share a Hop ID to opt into this.
-Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD keep serving the earlier one, treating the later as a replacement only once the earlier ends.
+Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD treat the later as a replacement for the earlier, ending the earlier advertisement before starting the later one.
+Serving the earlier until it ends on its own instead would hold the path for however long the transport takes to notice a publisher is gone, which is exactly the case a reconnecting publisher hits.
 
 When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
 A subscriber that declared no origin is served from the publisher's preferred source as usual.
@@ -1208,13 +1210,13 @@ The `Message Length` describes the payload size on the wire.
 - ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_RESTART; a second ANNOUNCE_START for an already-available path is now a protocol violation.
 - Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
-- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break.
+- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
 - Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
-- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the earlier is served until it ends.
+- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the later replacing the earlier.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 

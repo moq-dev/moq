@@ -12,6 +12,10 @@
 //! publish future (e.g. on Ctrl+C) cancels the read and releases the device. A
 //! reader that falls behind loses buffers rather than growing the queue, and
 //! each read reports whether that happened so the encoder can re-anchor.
+//!
+//! A microphone that can hear the speaker takes an
+//! [`aec::Canceller`](crate::aec::Canceller) through [`Config::aec`], which runs
+//! in that same callback so the buffers leaving here are already clean.
 
 use std::time::Duration;
 
@@ -70,6 +74,16 @@ pub struct Config {
 	pub sample_rate: Option<u32>,
 	/// Channels to ask the device for. `None` takes its default.
 	pub channels: Option<u32>,
+	/// Cancel the echo of what a speaker is playing, from
+	/// [`Engine::canceller`](crate::playback::Engine::canceller).
+	///
+	/// Applies to [`Source::Microphone`] only: system audio is already the
+	/// output, so there is nothing to subtract from it. Costs up to 10 ms of
+	/// capture latency while enabled.
+	///
+	/// Requires the `aec` feature.
+	#[cfg(feature = "aec")]
+	pub aec: Option<crate::aec::Canceller>,
 }
 
 /// One buffer read from a capture source.
@@ -174,26 +188,49 @@ impl Microphone {
 		let sample_rate = stream_config.sample_rate;
 		let channels = stream_config.channels as u32;
 
+		// Tell the canceller what it's listening to before the first callback
+		// arrives, so the buffers it needs are allocated off the audio thread.
+		#[cfg(feature = "aec")]
+		if let Some(aec) = &config.aec {
+			aec.open(sample_rate, channels)?;
+		}
+
 		let (tx, mut rx) = channel::bounded::<Vec<f32>>();
+
+		// What every sample format funnels into once it is interleaved `f32`.
+		// Echo cancellation edits the buffer in place, so it costs no allocation
+		// beyond the one the conversion already made.
+		let deliver = {
+			#[cfg(feature = "aec")]
+			let aec = config.aec.clone();
+
+			move |#[allow(unused_mut)] mut pcm: Vec<f32>| {
+				#[cfg(feature = "aec")]
+				if let Some(aec) = &aec {
+					aec.process(&mut pcm);
+				}
+				tx.push(pcm);
+			}
+		};
 
 		// The callback runs on cpal's realtime audio thread. Sample conversion
 		// allocates one Vec per callback; the bounded handoff never blocks.
 		let stream = match sample_format {
 			cpal::SampleFormat::F32 => device.build_input_stream(
 				stream_config,
-				move |data: &[f32], _: &_| tx.push(data.to_vec()),
+				move |data: &[f32], _: &_| deliver(data.to_vec()),
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::I16 => device.build_input_stream(
 				stream_config,
-				move |data: &[i16], _: &_| tx.push(data.iter().map(|&s| s as f32 / 32768.0).collect()),
+				move |data: &[i16], _: &_| deliver(data.iter().map(|&s| s as f32 / 32768.0).collect()),
 				stream_err,
 				None,
 			),
 			cpal::SampleFormat::U16 => device.build_input_stream(
 				stream_config,
-				move |data: &[u16], _: &_| tx.push(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
+				move |data: &[u16], _: &_| deliver(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect()),
 				stream_err,
 				None,
 			),
