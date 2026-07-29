@@ -92,6 +92,18 @@ export interface ProducerProps {
 	 * importing a source the publisher doesn't control.
 	 */
 	durationMax?: number;
+
+	/**
+	 * The wall-clock time of `pts` 0, advertised in the catalog when set.
+	 *
+	 * It anchors content time to an absolute clock, which is what an HLS
+	 * EXT-X-PROGRAM-DATE-TIME or a DASH availabilityStartTime needs: `new Date()` for a live
+	 * publisher whose timestamps start now, or the content's real start for a recording.
+	 *
+	 * Clamped to the moq epoch ({@link Catalog.MOQ_EPOCH_UNIX_MILLIS}, 2020), which the wire
+	 * format measures from: an earlier time isn't representable.
+	 */
+	wall?: Date;
 }
 
 /** One enrolled track's report state. */
@@ -137,6 +149,10 @@ export class Producer {
 		this.#trackName = track.name;
 		this.#durationMinUs = (props.durationMin ?? DEFAULT_DURATION_MIN_MS) * 1000;
 		this.#durationMaxUs = props.durationMax === undefined ? undefined : props.durationMax * 1000;
+		if (props.wall !== undefined) {
+			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
+			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
+		}
 		this.#stream = new Json.Stream.Producer<Record>(track, { compression: true });
 	}
 
@@ -208,24 +224,6 @@ export class Producer {
 			durationMax,
 			wall: this.#wall === undefined ? undefined : u53(this.#wall),
 		};
-	}
-
-	/**
-	 * Set (or replace) the wall-clock anchor advertised in the catalog section, from an observed
-	 * pairing of a media timestamp `pts` (microseconds) with its wall-clock time `wall` (defaulting
-	 * to now). Stored as the extrapolated wall-clock time of pts 0, the single value the catalog
-	 * `wall` field carries: in the timeline's timescale, measured from the moq epoch
-	 * ({@link Catalog.MOQ_EPOCH_UNIX_MILLIS}, 2020). Throws if `wall` predates the moq epoch
-	 * (unrepresentable).
-	 */
-	setWall(pts: Time.Micro, wall: Date = new Date()): void {
-		const unixMillis = wall.getTime();
-		if (unixMillis < MOQ_EPOCH_UNIX_MILLIS) {
-			throw new Error(`wall time ${unixMillis} predates the moq epoch ${MOQ_EPOCH_UNIX_MILLIS}`);
-		}
-		const ptsUnits = Math.floor((pts * DEFAULT_TIMESCALE) / 1_000_000);
-		const moqUnits = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
-		this.#wall = Math.max(0, moqUnits - ptsUnits);
 	}
 
 	/**
@@ -335,16 +333,17 @@ export class Producer {
 
 		let end: Time.Micro | undefined;
 		for (const track of this.#tracks.values()) {
-			if (track.closed) continue;
 			const candidate = track.pending.find((group) => group.pts >= threshold)?.pts;
 			if (candidate === undefined) {
 				// This track has produced nothing past the minimum yet, so ending the segment
-				// would strand it. On the terminal pass it never will, so let it go.
-				if (finished) continue;
+				// would strand it. A closed track never will, and neither does anything on the
+				// terminal pass, so neither one blocks.
+				if (finished || track.closed) continue;
 				return undefined;
 			}
-			// The latest vote wins: it is a group boundary on the coarsest track, and every
-			// finer track assigns its groups by start, so no group is split.
+			// The latest vote wins: it is a group boundary on the coarsest track, and every finer
+			// track assigns its groups by start, so no group is split. A closed track still votes:
+			// it can't report more, but the groups it did report are boundaries like any other.
 			if (end === undefined || candidate > end) end = candidate;
 		}
 

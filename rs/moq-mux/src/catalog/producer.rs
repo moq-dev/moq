@@ -251,19 +251,6 @@ impl<E: CatalogExt> Producer<E> {
 		self.timeline.clone()
 	}
 
-	/// Set the timeline's wall-clock anchor (see
-	/// [`timeline::Producer::set_wall`](crate::timeline::Producer::set_wall)) and re-advertise
-	/// the catalog's `timeline` section so consumers see it.
-	pub fn set_wall(&mut self, pts: moq_net::Timestamp, wall: std::time::SystemTime) {
-		self.timeline.set_wall(pts, wall);
-
-		let section = self.timeline.section();
-		let mut catalog = self.lock();
-		if catalog.timeline.is_some() {
-			catalog.timeline = Some(section);
-		}
-	}
-
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
 		Ok(Consumer::new(self.hang.consume()))

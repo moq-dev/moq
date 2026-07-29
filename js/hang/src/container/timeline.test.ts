@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
 import type { Time } from "@moq/net";
 import { Track } from "@moq/net";
-import { u53 } from "../catalog";
+import { MOQ_EPOCH_UNIX_MILLIS, u53 } from "../catalog";
 import { Producer, type Record } from "./timeline.ts";
 
 const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
@@ -373,4 +373,65 @@ test("a non-keyframe range start is flagged", async () => {
 
 	const out = await records();
 	expect(out[1]?.tracks?.video0[0].keyframe).toBe(false);
+});
+
+test("the wall-clock anchor is advertised from the config", () => {
+	expect(capture().timeline.section().wall).toBeUndefined();
+
+	// The wire counts from the moq epoch, so pts 0 at exactly the epoch advertises 0.
+	const epoch = new Date(MOQ_EPOCH_UNIX_MILLIS);
+	expect(capture({ wall: epoch }).timeline.section().wall).toBe(u53(0));
+	expect(capture({ wall: new Date(MOQ_EPOCH_UNIX_MILLIS + 1000) }).timeline.section().wall).toBe(u53(1000));
+
+	// A time before the epoch isn't representable, so it clamps rather than going negative.
+	expect(capture({ wall: new Date(0) }).timeline.section().wall).toBe(u53(0));
+});
+
+// Producers that each guard their own batch nest, so the first to finish doesn't publish
+// records the others are still filling in.
+test("holds nest", async () => {
+	const { timeline, records } = capture();
+
+	const outer = timeline.hold();
+	const inner = timeline.hold();
+
+	const first = timeline.track("video0");
+	for (const [seq, ms] of [
+		[0, 0],
+		[1, 2000],
+		[2, 4000],
+	] as const) {
+		first.record(seq, us(ms));
+	}
+
+	// If the holds didn't nest, releasing this one would publish segment 0 without video1.
+	inner();
+
+	const second = timeline.track("video1");
+	for (const [seq, ms] of [
+		[0, 0],
+		[1, 2000],
+		[2, 4000],
+	] as const) {
+		second.record(seq, us(ms));
+	}
+
+	outer();
+	first.close();
+	second.close();
+	timeline.finish();
+
+	const out = await records();
+	expect(out[0]).toEqual({
+		segment: 0,
+		pts: 0,
+		duration: 2000,
+		tracks: { video0: [{ start: 0, end: 0 }], video1: [{ start: 0, end: 0 }] },
+	});
+	expect(out[1]).toEqual({
+		segment: 1,
+		pts: 2000,
+		duration: 2000,
+		tracks: { video0: [{ start: 1, end: 1 }], video1: [{ start: 1, end: 1 }] },
+	});
 });

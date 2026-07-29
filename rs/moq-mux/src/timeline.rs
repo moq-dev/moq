@@ -79,6 +79,18 @@ pub struct Config {
 	/// catalog. Leave it `None` when the media decides, which is the common case for real-time
 	/// and for anything importing a source it doesn't control.
 	pub duration_max: Option<Duration>,
+
+	/// The wall-clock time of `pts` 0, advertised in the catalog when set.
+	///
+	/// It anchors content time to an absolute clock, which is what an HLS
+	/// `EXT-X-PROGRAM-DATE-TIME` or a DASH `availabilityStartTime` needs. A publisher stamping
+	/// timestamps from [`catalog::Producer::timestamp`](crate::catalog::Producer::timestamp) has
+	/// its `pts` 0 at construction, so `Some(SystemTime::now())` is the live answer; a recording
+	/// or an import passes the content's real start instead.
+	///
+	/// Clamped to the moq epoch ([`MOQ_EPOCH_UNIX_MILLIS`](hang::catalog::MOQ_EPOCH_UNIX_MILLIS),
+	/// 2020), which the wire format measures from: an earlier time isn't representable.
+	pub wall: Option<SystemTime>,
 }
 
 impl Default for Config {
@@ -86,6 +98,7 @@ impl Default for Config {
 		Self {
 			duration_min: DEFAULT_DURATION_MIN,
 			duration_max: None,
+			wall: None,
 		}
 	}
 }
@@ -134,8 +147,6 @@ struct State {
 	/// A segment overran [`Config::duration_max`]: `(segment, duration)`. The timeline stops
 	/// publishing, since the catalog's promise is already broken.
 	overrun: Option<(u64, Duration)>,
-	/// The wall-clock time of pts 0, in timescale units since the moq epoch.
-	wall: Option<u64>,
 	/// The wire timescale for `pts`/`duration` (the catalog section's default: milliseconds).
 	timescale: Timescale,
 }
@@ -247,20 +258,20 @@ impl State {
 
 		let mut end: Option<Timestamp> = None;
 		for track in self.tracks.values() {
-			if track.closed {
-				continue;
-			}
 			match track.candidate(threshold) {
 				// The latest vote wins: it is a group boundary on the coarsest track, and every
-				// finer track assigns its groups by start, so no group is split.
+				// finer track assigns its groups by start, so no group is split. A closed track
+				// still votes: it can't report more, but the groups it did report are boundaries
+				// like any other, and without them a backlog would collapse into one segment.
 				Some(pts) => {
 					if end.is_none_or(|e| pts.as_micros() > e.as_micros()) {
 						end = Some(pts);
 					}
 				}
 				// This track has produced nothing past the minimum yet, so ending the segment
-				// would strand it. On the terminal pass it never will, so let it go.
-				None if finished => continue,
+				// would strand it. A closed track never will, and neither does anything on the
+				// terminal pass, so neither one blocks.
+				None if finished || track.closed => continue,
 				None => return None,
 			}
 		}
@@ -393,7 +404,16 @@ impl State {
 		let mut section = Timeline::new(DEFAULT_NAME);
 		section.timescale = self.timescale.as_u64() as u32;
 		section.duration_max = self.config.duration_max.map(|max| self.units(max));
-		section.wall = self.wall;
+		section.wall = self.config.wall.map(|wall| {
+			// The wire measures from the moq epoch rather than the Unix one, so the value stays
+			// small enough for a 53-bit integer even at fine timescales.
+			let unix_millis = wall
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_millis();
+			let moq_millis = unix_millis.saturating_sub(hang::catalog::MOQ_EPOCH_UNIX_MILLIS as u128);
+			(moq_millis * self.timescale.as_u64() as u128 / 1000) as u64
+		});
 		section
 	}
 }
@@ -427,7 +447,6 @@ impl Producer {
 				tracks: BTreeMap::new(),
 				holds: 0,
 				overrun: None,
-				wall: None,
 				timescale: Timescale::MILLI,
 			})),
 		}
@@ -507,29 +526,6 @@ impl Producer {
 	/// The catalog's root section advertising this timeline.
 	pub fn section(&self) -> Timeline {
 		self.state.lock().unwrap().section()
-	}
-
-	/// Set (or replace) the wall-clock anchor advertised in the catalog section, from an
-	/// observed pairing of a media timestamp `pts` with its wall-clock time `wall`.
-	///
-	/// Stored as the extrapolated wall-clock time of pts 0, the single value the
-	/// [`Timeline::wall`](hang::catalog::Timeline::wall) field carries: in this timeline's
-	/// timescale, measured from the moq epoch
-	/// ([`MOQ_EPOCH_UNIX_MILLIS`](hang::catalog::MOQ_EPOCH_UNIX_MILLIS), 2020). The catalog
-	/// snapshots [`section`](Self::section) when it advertises the timeline, so go through
-	/// [`catalog::Producer::set_wall`](crate::catalog::Producer::set_wall) (which re-advertises)
-	/// rather than calling this after the timeline is advertised.
-	pub fn set_wall(&self, pts: Timestamp, wall: SystemTime) {
-		let mut state = self.state.lock().unwrap();
-		let unix_millis = wall
-			.duration_since(SystemTime::UNIX_EPOCH)
-			.unwrap_or_default()
-			.as_millis();
-		let scale = state.timescale.as_u64() as u128;
-		let pts_units = pts.as_scale(state.timescale);
-		let moq_millis = unix_millis.saturating_sub(hang::catalog::MOQ_EPOCH_UNIX_MILLIS as u128);
-		let moq_units = moq_millis * scale / 1000;
-		state.wall = Some(moq_units.saturating_sub(pts_units) as u64);
 	}
 
 	/// Flush the final (still open) segment and finish the track.
@@ -893,6 +889,7 @@ mod test {
 		let (broadcast, mut timeline) = setup_with(Config {
 			duration_min: Duration::from_secs(1),
 			duration_max: Some(Duration::from_secs(3)),
+			..Default::default()
 		});
 		let mut video = timeline.track("video0").unwrap();
 
@@ -1138,10 +1135,75 @@ mod test {
 		assert_eq!(section.timescale, 1000);
 		assert_eq!(section.wall, None);
 
-		// 2020-01-01T00:00:01Z paired with pts 1s puts pts 0 exactly at the moq epoch.
-		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_000);
-		timeline.set_wall(ms(1_000), wall);
+		// The wire counts from the moq epoch, so pts 0 at exactly the epoch advertises 0.
+		let (_broadcast, timeline) = setup_with(Config {
+			wall: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)),
+			..Default::default()
+		});
 		assert_eq!(timeline.section().wall, Some(0));
+
+		// A second later is a second's worth of timescale units.
+		let (_broadcast, timeline) = setup_with(Config {
+			wall: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_000)),
+			..Default::default()
+		});
+		assert_eq!(timeline.section().wall, Some(1_000));
+	}
+
+	// Producers that each guard their own batch nest, so the first to finish doesn't publish
+	// records the others are still filling in.
+	#[tokio::test]
+	async fn holds_nest() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+
+		let outer = timeline.hold();
+		let inner = timeline.hold();
+
+		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
+			video.record(seq, ms(t), true);
+		}
+
+		drop(inner);
+		assert!(
+			drain(&broadcast, &timeline).await.is_empty(),
+			"the outer hold still gates"
+		);
+
+		drop(outer);
+		assert_eq!(
+			drain(&broadcast, &timeline).await.len(),
+			2,
+			"the last hold released flushes"
+		);
+
+		drop(video);
+		timeline.finish().unwrap();
+	}
+
+	// A hold outstanding when the broadcast ends must not strand the terminal flush.
+	#[tokio::test]
+	async fn finish_overrides_an_outstanding_hold() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+		let hold = timeline.hold();
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		video.end(ms(4_000));
+		drop(video);
+
+		timeline.finish().unwrap();
+		assert_eq!(
+			drain(&broadcast, &timeline).await,
+			vec![
+				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
+				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
+			]
+		);
+
+		// Dropping it afterwards is a no-op rather than an underflow.
+		drop(hold);
 	}
 
 	#[tokio::test]
