@@ -1,12 +1,11 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 
-// The encoder pulls the capture processor in as a `?worklet` blob URL, which the bun test loader can't
+// The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: "blob:fake-capture" }));
 
-const { Encoder } = await import("./encoder.ts");
-type Codec = import("./encoder.ts").Codec;
+const { Capture } = await import("./capture.ts");
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 async function settle(times = 5): Promise<void> {
@@ -98,7 +97,7 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 	using webaudio = installFakeWebAudio();
 	const error = spyOn(console, "error").mockImplementation(() => {});
 
-	const encoder = new Encoder("audio", {
+	const capture = new Capture({
 		enabled: true,
 		source: new Signal(fakeSource()) as never,
 	});
@@ -108,7 +107,7 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 
 	// Tear the run down before the module finishes loading. cleanup() calls context.close(), which on
 	// Firefox/Safari leaves .state === "suspended", then effect.cancel wins the race.
-	encoder.close();
+	capture.close();
 	await settle();
 
 	expect(webaudio.audioWorkletNodes).toBe(0);
@@ -118,67 +117,110 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 // Regression: a Bluetooth mic on macOS reports 44100 after an A2DP flip. Capturing at that rate means
 // the encoder silently resamples to 48000 while the catalog advertises 44100, which no Opus decoder can
 // honor: Safari's AudioDecoder fails every decode with InternalAudioDecoderCocoa.
-async function requestedRate(sampleRate: number | undefined, codec?: "opus" | "aac") {
+async function requestedRate(sampleRate: number | undefined, override?: number) {
 	using webaudio = installFakeWebAudio();
 
-	const encoder = new Encoder("audio", {
+	const capture = new Capture({
 		enabled: true,
 		source: new Signal(fakeSource(sampleRate)) as never,
-		...(codec ? { codec } : {}),
+		...(override !== undefined ? { sampleRate: override } : {}),
 	});
 	await settle();
-	encoder.close();
+	capture.close();
 	await settle();
 
 	return webaudio.requestedRates.at(-1);
 }
 
-test("snaps the capture rate to one Opus supports", async () => {
+test("snaps a rate Opus can't decode up to full band", async () => {
 	expect(await requestedRate(44_100)).toBe(48_000);
-	expect(await requestedRate(22_050)).toBe(24_000);
+	expect(await requestedRate(22_050)).toBe(48_000);
 });
 
-test("leaves an Opus-native capture rate alone", async () => {
+// Every rate Opus takes is also in the AAC table, so a narrowband mic is left alone rather than
+// upsampled: a voice track has nothing above 8kHz to recover.
+test("leaves a rate both codecs support alone", async () => {
 	expect(await requestedRate(16_000)).toBe(16_000);
 	expect(await requestedRate(48_000)).toBe(48_000);
 });
 
 // captureStream() tracks report no rate, which would otherwise let the AudioContext fall back to the
 // machine's output rate (44100 on most Macs).
-test("requests full-band Opus when the source reports no rate", async () => {
+test("requests full band when the source reports no rate", async () => {
 	expect(await requestedRate(undefined)).toBe(48_000);
 });
 
-// 44100 is in the AAC sampling frequency table, so it must survive untouched.
-test("leaves an AAC-native capture rate alone", async () => {
-	expect(await requestedRate(44_100, "aac")).toBe(44_100);
+test("honors an explicit rate override", async () => {
+	expect(await requestedRate(48_000, 16_000)).toBe(16_000);
 });
 
-// Regression: only the codec's mime picks the capture rate, so tweaking an encode-only knob must not
-// tear down the microphone. Subscribing the capture to the whole codec signal rebuilt the AudioContext
-// on every change, which dropped #worklet and closed the track being published. The demo writes this
-// signal from live bitrate/complexity sliders, so it fired on every slider tick.
-test("does not rebuild the capture graph when an encode-only knob changes", async () => {
+// Regression: tweaking an encoder knob must not tear down the microphone. The capture used to take
+// the codec as an input, so it rebuilt the AudioContext on a codec change, dropping the worklet and
+// closing the track being published. Now the capture is codec-independent, which it has to be:
+// several renditions share one, and they can encode differently.
+test("never rebuilds the capture graph for encoder settings", async () => {
 	using webaudio = installFakeWebAudio();
 
-	const codec = new Signal<Codec>({ mime: "opus", bitrate: 32_000 });
-	const encoder = new Encoder("audio", {
+	const rate = new Signal<number | undefined>(undefined);
+	const capture = new Capture({
 		enabled: true,
 		source: new Signal(fakeSource()) as never,
-		codec,
+		sampleRate: rate,
 	});
 	await settle();
 	expect(webaudio.requestedRates.length).toBe(1);
 
-	codec.set({ mime: "opus", bitrate: 64_000 });
-	await settle();
-	expect(webaudio.requestedRates.length).toBe(1);
-
-	// A real codec switch still has to rebuild: AAC captures at rates Opus can't.
-	codec.set({ mime: "aac" });
+	// Only something that changes the capture itself may rebuild it.
+	rate.set(16_000);
 	await settle();
 	expect(webaudio.requestedRates.length).toBe(2);
 
-	encoder.close();
+	capture.close();
+	await settle();
+});
+
+// The gap this fanout closes: a decoded file exposes one ReadableStream, so the second rendition
+// used to throw on a locked stream and publish nothing while still advertising a catalog.
+test("feeds every rendition off one decoded source", async () => {
+	let push!: (value: number) => void;
+	const samples = new ReadableStream<AudioData>({
+		start(controller) {
+			push = (value) =>
+				controller.enqueue({
+					timestamp: value * 1000,
+					numberOfFrames: 4,
+					numberOfChannels: 1,
+					copyTo: (dest: Float32Array) => dest.fill(value),
+					close: () => {},
+				} as unknown as AudioData);
+		},
+	});
+
+	const capture = new Capture({
+		enabled: true,
+		source: new Signal({ samples, sampleRate: 48_000, channelCount: 1, kind: "auto" }) as never,
+	});
+	await settle();
+
+	const fanout = capture.out.frames.peek();
+	expect(fanout).toBeDefined();
+
+	// Both renditions attach before anything is published; a late one only sees what comes next.
+	const first = new Effect();
+	const second = new Effect();
+	const a = fanout?.subscribe(first).getReader();
+	const b = fanout?.subscribe(second).getReader();
+
+	for (const value of [1, 2, 3]) {
+		push(value);
+
+		// Both renditions see the same audio; neither steals it from the other.
+		expect((await a?.read())?.value?.channels[0][0]).toBe(value);
+		expect((await b?.read())?.value?.channels[0][0]).toBe(value);
+	}
+
+	first.close();
+	second.close();
+	capture.close();
 	await settle();
 });

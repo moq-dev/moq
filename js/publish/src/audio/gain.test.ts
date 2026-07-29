@@ -21,9 +21,9 @@ describe("Gain", () => {
 		const frame = ones(128);
 
 		gain.set(1);
-		gain.apply(frame, RATE);
+		const out = gain.apply(frame, RATE);
 
-		expect([...frame.channels[0]]).toEqual(Array.from({ length: 128 }, () => 1));
+		expect([...out.channels[0]]).toEqual(Array.from({ length: 128 }, () => 1));
 	});
 
 	// Jumping straight to the target is what clicks, so the level has to walk there.
@@ -32,13 +32,16 @@ describe("Gain", () => {
 		const frame = ones(128);
 
 		gain.set(0);
-		gain.apply(frame, RATE);
+		const out = gain.apply(frame, RATE);
 
 		// 128 samples is far less than the 0.2s fade, so it has barely moved.
-		expect(frame.channels[0][0]).toBeLessThan(1);
-		expect(frame.channels[0][0]).toBeGreaterThan(0.99);
-		expect(frame.channels[0][127]).toBeLessThan(frame.channels[0][0]);
-		expect(frame.channels[0][127]).toBeGreaterThan(0.98);
+		expect(out.channels[0][0]).toBeLessThan(1);
+		expect(out.channels[0][0]).toBeGreaterThan(0.99);
+		expect(out.channels[0][127]).toBeLessThan(out.channels[0][0]);
+		expect(out.channels[0][127]).toBeGreaterThan(0.98);
+
+		// The input is shared with every other rendition, so it must come back untouched.
+		expect(frame.channels[0][0]).toBe(1);
 	});
 
 	test("reaches silence after the full fade", () => {
@@ -49,8 +52,7 @@ describe("Gain", () => {
 		let last = 1;
 		for (let n = 0; n < Math.ceil(0.2 * RATE) / 128; n++) {
 			const frame = ones(128);
-			gain.apply(frame, RATE);
-			last = frame.channels[0][127];
+			last = gain.apply(frame, RATE).channels[0][127];
 		}
 
 		expect(last).toBeCloseTo(0, 5);
@@ -67,16 +69,16 @@ describe("Gain", () => {
 		};
 
 		gain.set(0);
-		gain.apply(frame, RATE);
+		const out = gain.apply(frame, RATE);
 
 		// Every channel rides one level, so each keeps its own value and their ratio is untouched.
 		for (let index = 0; index < 128; index++) {
-			expect(frame.channels[1][index]).toBeCloseTo(frame.channels[0][index] * -0.5, 6);
+			expect(out.channels[1][index]).toBeCloseTo(out.channels[0][index] * -0.5, 6);
 		}
 
 		// And the level actually moved, so the ratio above isn't just 0 === 0.
-		expect(frame.channels[0][127]).toBeLessThan(1);
-		expect(frame.channels[0][127]).toBeGreaterThan(0);
+		expect(out.channels[0][127]).toBeLessThan(1);
+		expect(out.channels[0][127]).toBeGreaterThan(0);
 	});
 
 	// The ramp is per-sample, so a slower rate has to cover the same fade in fewer samples.
@@ -89,9 +91,9 @@ describe("Gain", () => {
 
 		fast.set(0);
 		slow.set(0);
-		fast.apply(fastFrame, RATE);
-		slow.apply(slowFrame, SLOW_RATE);
+		const fastOut = fast.apply(fastFrame, RATE);
+		const slowOut = slow.apply(slowFrame, SLOW_RATE);
 
-		expect(slowFrame.channels[0][127]).toBeLessThan(fastFrame.channels[0][127]);
+		expect(slowOut.channels[0][127]).toBeLessThan(fastOut.channels[0][127]);
 	});
 });

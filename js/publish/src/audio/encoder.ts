@@ -5,10 +5,10 @@ import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { type AudioFrame, Capture, type Format, pickSampleRate } from "./capture";
+import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
-import type { CodecMime, Kind, Source } from "./types";
+import type { CodecMime, Kind } from "./types";
 import { sourceKind } from "./types";
 
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
@@ -69,8 +69,9 @@ export type EncoderInput = {
 	// The broadcast to register the rendition on. Undefined resolves the config but has nowhere to publish.
 	broadcast: Getter<Broadcast | undefined>;
 
-	// The microphone (or other) track supplying samples.
-	source: Getter<Source | undefined>;
+	// The capture supplying PCM. Shared: one capture feeds any number of renditions, so build it
+	// yourself and pass the same instance to each.
+	capture: Getter<Capture | undefined>;
 };
 
 /** Constructor options: the wired inputs plus the live-editable tuning knobs. */
@@ -78,8 +79,6 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// User tuning knobs. Seed a value or wire a Signal; also live-editable via the matching field.
 	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
-	sampleRate?: number | Signal<number | undefined>;
-	channelCount?: number | Signal<number | undefined>;
 
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
@@ -121,17 +120,8 @@ export class Encoder {
 	muted: Signal<boolean>;
 	/** Linear gain applied before encoding, where 1 is unity. */
 	volume: Signal<number>;
-	/** Override the capture sample rate in Hz. Defaults to the track's own rate. */
-	sampleRate: Signal<number | undefined>;
-	/** Override the captured channel count. Defaults to the track's requested count. */
-	channelCount: Signal<number | undefined>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
-
-	// Only the mime picks the capture sample rate, so the capture tracks this rather than the whole
-	// codec signal. Otherwise changing an encode-only knob (bitrate, complexity) would rebuild the
-	// AudioContext and close the track we're publishing.
-	#codecMime: Signal<CodecMime>;
 
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.AudioConfig | undefined>(undefined),
@@ -140,9 +130,6 @@ export class Encoder {
 		stats: new Signal<Stats>({ frames: 0, bytes: 0 }),
 	};
 	readonly out = readonlys(this.#out);
-
-	// Turns whichever kind of source we were handed into a stream of PCM.
-	#capture: Capture;
 
 	// The encode chain currently publishing, or undefined while nothing is. The read loop pushes
 	// into this; frames that arrive while it's undefined are dropped, which the framer treats as a
@@ -156,31 +143,17 @@ export class Encoder {
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
 			broadcast: getter(props?.broadcast),
-			source: getter(props?.source),
+			capture: getter(props?.capture),
 		};
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
-		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
-		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.#codecMime = new Signal(normalizeCodec(this.codec.peek()).mime);
 
+		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
-			this.#codecMime.set(normalizeCodec(effect.get(this.codec)).mime);
-		});
-
-		this.#capture = new Capture({
-			source: this.in.source,
-			enabled: this.in.enabled,
-			codec: this.#codecMime,
-			sampleRate: this.sampleRate,
-			channelCount: this.channelCount,
-		});
-		this.#signals.cleanup(() => this.#capture.close());
-
-		// The capture graph is the only thing that has a node to expose.
-		this.#signals.run((effect) => {
-			effect.proxy(this.#out.root, this.#capture.out.root);
+			const capture = effect.get(this.in.capture);
+			if (!capture) return;
+			effect.proxy(this.#out.root, capture.out.root);
 		});
 
 		this.#signals.run(this.#runCapture.bind(this));
@@ -192,10 +165,15 @@ export class Encoder {
 	// the way through. Tied to the capture's lifetime rather than the encoder's, so reconfiguring
 	// (or muting) never has to reacquire the stream, which for a decoded file would be fatal.
 	#runCapture(effect: Effect): void {
-		const frames = effect.get(this.#capture.out.frames);
-		if (!frames) return;
+		const capture = effect.get(this.in.capture);
+		if (!capture) return;
 
-		const reader = frames.getReader();
+		const fanout = effect.get(capture.out.frames);
+		if (!fanout) return;
+
+		// Our own stream off the shared capture, so another rendition reading slowly can't take
+		// frames from this one.
+		const reader = fanout.subscribe(effect).getReader();
 		effect.cleanup(() => void reader.cancel());
 
 		const gain = new Gain();
@@ -205,12 +183,13 @@ export class Encoder {
 				const next = await Promise.race([reader.read(), effect.cancel]);
 				if (!next?.value) break;
 
-				const frame = next.value;
-				const format = this.#capture.out.format.peek();
+				const format = capture.out.format.peek();
 				if (!format) continue;
 
+				// Every rendition shares the captured frame, so gain returns a copy rather than
+				// scaling in place; muting one rendition must not silence the rest.
+				const frame = gain.apply(next.value, format.sampleRate);
 				gain.set(this.muted.peek() ? 0 : this.volume.peek());
-				gain.apply(frame, format.sampleRate);
 
 				// The config rebuilds when the channel count moves, so skip anything that arrives
 				// mid-swap rather than framing it wrong.
@@ -234,7 +213,8 @@ export class Encoder {
 
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
-			const format = effect.get(this.#capture.out.format);
+			const capture = effect.get(this.in.capture);
+			const format = capture ? effect.get(capture.out.format) : undefined;
 			const track = effect.get(rendition.track);
 			effect.set(this.#out.active, enabled && !!format && !!track, false);
 			if (!enabled || !format || !track) return;
@@ -284,7 +264,8 @@ export class Encoder {
 	// Gated on `enabled` the same way the video encoder is: a disabled rendition has to drop out of
 	// the catalog, and a sample source keeps its format while muted rather than tearing down.
 	#runConfig(effect: Effect): void {
-		const captured = effect.get(this.#capture.out.format);
+		const capture = effect.get(this.in.capture);
+		const captured = capture ? effect.get(capture.out.format) : undefined;
 		if (!effect.get(this.in.enabled) || !captured) {
 			effect.set(this.#out.catalog, undefined);
 			return;
@@ -320,7 +301,8 @@ export class Encoder {
 				const config = effect.get(this.out.catalog);
 				if (!config) return;
 
-				const source = effect.get(this.in.source);
+				const capture = effect.get(this.in.capture);
+				const source = capture ? effect.get(capture.in.source) : undefined;
 				const kind: Kind = source ? sourceKind(source) : "auto";
 				const encoderConfig = toEncoderConfig(config, kind, this.#opusOptions(effect));
 
@@ -505,4 +487,22 @@ function toEncoderConfig(
 	}
 
 	return encoderConfig;
+}
+
+/**
+ * Snap a rate to one the codec can actually encode at.
+ *
+ * The capture runs at whatever suits the device, and several renditions may share it, so each
+ * rendition converts on its own. WebCodecs rejects input whose rate doesn't match the configured
+ * one rather than converting for us, which is what #encode's resampler is for.
+ */
+function pickSampleRate(mime: CodecMime, requested: number | undefined): number | undefined {
+	// Treat a nonsense rate as unknown, rather than snapping it to the codec's floor (7350Hz for AAC).
+	const rate = requested !== undefined && Number.isFinite(requested) && requested > 0 ? requested : undefined;
+
+	// Opus only decodes at a handful of rates, and 44.1kHz is not one of them.
+	if (mime === "opus") return Util.Opus.pickRate(rate ?? Util.Opus.DEFAULT_SAMPLE_RATE);
+
+	// The AAC table includes 44100, so an unknown rate can fall through to whatever we captured.
+	return rate !== undefined ? Util.Aac.pickRate(rate) : undefined;
 }

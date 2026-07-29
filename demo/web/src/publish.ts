@@ -162,11 +162,12 @@ ui.run((effect) => {
 	effect.set(source.constraints, cameraConstraints(readVideoTarget(effect)));
 });
 
-// Audio general settings (volume gain, output sample rate, channel mix).
+// Audio general settings. Volume is per-rendition; the capture format is shared by all of them,
+// so rate and channel mix live on the capture rather than the encoder.
 ui.run((effect) => {
 	publish.audio.volume.set(effect.get(volume));
-	publish.audio.sampleRate.set(effect.get(sampleRate));
-	publish.audio.channelCount.set(effect.get(channelCount));
+	publish.audioCapture.sampleRate.set(effect.get(sampleRate));
+	publish.audioCapture.channelCount.set(effect.get(channelCount));
 });
 
 // Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on

@@ -2,15 +2,9 @@ import * as Util from "@moq/hang/util";
 import type { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
+import { Fanout } from "../fanout";
 import CaptureWorklet from "./capture-worklet.ts?worklet";
-import {
-	type CodecMime,
-	isSampleSource,
-	normalizeSource,
-	type SampleSource,
-	type Source,
-	type SourceConfig,
-} from "./types";
+import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
 
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
 export interface AudioFrame {
@@ -30,10 +24,16 @@ export interface Format {
 	channelCount: number;
 }
 
-// How many capture quanta to hold before dropping. A worklet pushes on the audio thread and can't
-// be told to wait, so a reader that falls this far behind loses the oldest audio rather than
-// growing the queue without bound. Roughly 85ms at 48kHz.
+// How many capture quanta a rendition may fall behind before it starts losing the oldest. A worklet
+// pushes on the audio thread and can't be told to wait. Roughly 85ms at 48kHz.
 const QUEUE = 32;
+
+// The rate to run the capture graph at when nothing asks for another.
+//
+// Fixed rather than derived from the codec, because one capture feeds every rendition and they can
+// encode differently. 48kHz is the one rate both Opus and AAC take, so the usual case needs no
+// conversion at all, and Web Audio resamples the device to it far better than we could.
+const DEFAULT_SAMPLE_RATE = 48_000;
 
 // Signals the capture reads.
 export type CaptureInput = {
@@ -43,22 +43,19 @@ export type CaptureInput = {
 	// Whether to hold the capture device. Decoded samples ignore this: there's no device to release,
 	// and their stream is one-shot, so dropping it would mean never reading it again.
 	enabled: Getter<boolean>;
+};
 
-	// The codec the PCM is destined for. Codecs only encode at a discrete set of rates, so this
-	// picks the rate the capture graph runs at.
-	codec: Getter<CodecMime>;
-
-	// Override the capture rate in Hz. Defaults to the track's own.
-	sampleRate: Getter<number | undefined>;
-
-	// Force the captured channel count. Defaults to the track's requested count.
-	channelCount: Getter<number | undefined>;
+/** Constructor options: the wired inputs plus the live-editable format knobs. */
+export type CaptureProps = Inputs<CaptureInput> & {
+	// Seed a value or wire a Signal; also live-editable via the matching field.
+	sampleRate?: number | Signal<number | undefined>;
+	channelCount?: number | Signal<number | undefined>;
 };
 
 type CaptureOutput = {
-	// The PCM to encode, replaced whenever the source changes. Single consumer: audio can't be
-	// dropped on the floor the way a stale video frame can, so this is a stream, not a signal.
-	frames: Signal<ReadableStream<AudioFrame> | undefined>;
+	// The PCM to encode, replaced whenever the source changes. Subscribe for a stream of your own:
+	// several renditions share one capture, and each needs every frame rather than the newest.
+	frames: Signal<Fanout<AudioFrame> | undefined>;
 
 	// The format the frames arrive in, or undefined while there's no capture.
 	format: Signal<Format | undefined>;
@@ -79,8 +76,14 @@ type CaptureOutput = {
 export class Capture {
 	readonly in: Readonlys<CaptureInput>;
 
+	/** Override the capture rate in Hz. Defaults to the device's, snapped to one every codec takes. */
+	sampleRate: Signal<number | undefined>;
+
+	/** Force the captured channel count. Defaults to the track's requested count. */
+	channelCount: Signal<number | undefined>;
+
 	readonly #out: CaptureOutput = {
-		frames: new Signal<ReadableStream<AudioFrame> | undefined>(undefined),
+		frames: new Signal<Fanout<AudioFrame> | undefined>(undefined),
 		format: new Signal<Format | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
@@ -88,14 +91,13 @@ export class Capture {
 
 	#signals = new Effect();
 
-	constructor(props?: Inputs<CaptureInput>) {
+	constructor(props?: CaptureProps) {
 		this.in = {
 			source: getter(props?.source),
 			enabled: getter(props?.enabled ?? false),
-			codec: getter(props?.codec ?? "opus"),
-			sampleRate: getter(props?.sampleRate),
-			channelCount: getter(props?.channelCount),
 		};
+		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
+		this.channelCount = Signal.from<number | undefined>(props?.channelCount);
 
 		this.#signals.run(this.#run.bind(this));
 	}
@@ -118,8 +120,11 @@ export class Capture {
 	#runSamples(source: SampleSource, effect: Effect): void {
 		const { sampleRate, channelCount } = source;
 
+		const fanout = new Fanout(source.samples.pipeThrough(planar()), { queue: QUEUE });
+		effect.cleanup(() => fanout.close());
+
 		effect.set(this.#out.format, { sampleRate, channelCount }, undefined);
-		effect.set(this.#out.frames, source.samples.pipeThrough(planar()), undefined);
+		effect.set(this.#out.frames, fanout, undefined);
 	}
 
 	#runTrack(source: SourceConfig, effect: Effect): void {
@@ -127,19 +132,13 @@ export class Capture {
 		if (!effect.get(this.in.enabled)) return;
 
 		const settings = source.track.getSettings();
-		const overrideSampleRate = effect.get(this.in.sampleRate);
-		const mime = effect.get(this.in.codec);
-		const sampleRate = pickSampleRate(mime, overrideSampleRate ?? settings.sampleRate);
-
-		if (overrideSampleRate !== undefined && sampleRate !== overrideSampleRate) {
-			console.warn(`${mime} does not support ${overrideSampleRate}Hz, capturing at ${sampleRate}Hz`);
-		}
+		const sampleRate = effect.get(this.sampleRate) ?? pickCaptureRate(settings.sampleRate);
 
 		// macOS misreports a mono mic as stereo: getSettings().channelCount is undefined and
 		// MediaStreamAudioSourceNode.channelCount defaults to 2, so the graph carries (and Opus
 		// encodes) duplicated mono as stereo. Prefer an explicitly requested channel count, from
 		// the prop or the track's applied getUserMedia constraint, and force the worklet to mix to it.
-		const requestedChannels = effect.get(this.in.channelCount) ?? requestedChannelCount(source.track);
+		const requestedChannels = effect.get(this.channelCount) ?? requestedChannelCount(source.track);
 
 		const context = new AudioContext({
 			latencyHint: "interactive",
@@ -185,16 +184,17 @@ export class Capture {
 
 			root.connect(worklet);
 
-			const frames = this.#drain(worklet, context.sampleRate, effect);
+			const fanout = new Fanout(this.#drain(worklet, context.sampleRate, effect), { queue: QUEUE });
+			effect.cleanup(() => fanout.close());
 
 			effect.set(this.#out.root, root);
-			effect.set(this.#out.frames, frames);
+			effect.set(this.#out.frames, fanout);
 		});
 	}
 
 	// Turn the quanta the worklet pushes into a stream. The audio thread can't be asked to wait, so
-	// a reader that falls too far behind loses the oldest audio; downstream that reads as a
-	// timestamp gap, which the framer re-anchors on rather than silently sliding.
+	// this never applies backpressure; the fanout above bounds each reader instead. A drop shows up
+	// downstream as a timestamp gap, which the framer re-anchors on rather than silently sliding.
 	#drain(worklet: AudioWorkletNode, sampleRate: number, effect: Effect): ReadableStream<AudioFrame> {
 		return new ReadableStream<AudioFrame>(
 			{
@@ -253,25 +253,13 @@ function requestedChannelCount(track: MediaStreamTrack): number | undefined {
 	return constraint.exact ?? constraint.ideal ?? constraint.max ?? constraint.min;
 }
 
-/**
- * Pick the rate to run the capture graph at, given what the source reports (or the caller asked
- * for). Codecs only encode at a discrete set of rates, so snap to one they actually support.
- *
- * This has to happen at the AudioContext rather than just in the catalog. A context running at
- * 44100 hands 44100 AudioData to an encoder configured for 48000, which WebCodecs rejects outright.
- * Snapping here keeps one rate across the capture graph, the encoder config, and the catalog.
- */
-export function pickSampleRate(mime: CodecMime, requested: number | undefined): number | undefined {
-	// Treat a nonsense rate as unknown. It would otherwise snap to the codec's floor (7350Hz for AAC)
-	// instead of throwing NotSupportedError at the AudioContext where it's obvious.
-	const rate = requested !== undefined && Number.isFinite(requested) && requested > 0 ? requested : undefined;
-
-	if (mime === "opus") {
-		// An unknown rate (captureStream reports none) would let the AudioContext fall back to the
-		// machine's output rate, which is 44100 on most Macs. Ask for full-band Opus instead.
-		return Util.Opus.pickRate(rate ?? Util.Opus.DEFAULT_SAMPLE_RATE);
-	}
-
-	// The AAC table includes 44100, so an unknown rate can safely fall through to the context default.
-	return rate !== undefined ? Util.Aac.pickRate(rate) : undefined;
+// Pick the rate to run the capture graph at, given what the device reports.
+//
+// Every rate Opus encodes at is also in the AAC table, so staying on that set means one capture can
+// feed any rendition without conversion. A device reporting anything else (a Bluetooth mic drops to
+// 44.1kHz after an A2DP flip) gets resampled to 48kHz by Web Audio, which does it far better than
+// we would, and which keeps the catalog off a rate Opus cannot decode.
+function pickCaptureRate(reported: number | undefined): number {
+	if (reported === undefined || !Number.isFinite(reported) || reported <= 0) return DEFAULT_SAMPLE_RATE;
+	return Util.Opus.supportsRate(reported) ? reported : DEFAULT_SAMPLE_RATE;
 }
