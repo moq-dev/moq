@@ -1,20 +1,85 @@
-use std::{
-	sync::{Arc, atomic::Ordering},
-	task::Poll,
-};
+use std::{sync::atomic::Ordering, task::Poll};
 
 use crate::{
 	Closed, Counts, State,
 	consumer::Consumer,
 	lock::*,
 	producer::{Producer, Ref},
+	sync::Arc,
 	waiter::*,
 };
+
+/// A handle that owns nothing at all ([`Producer::downgrade`](crate::Producer::downgrade)).
+///
+/// Unlike [`ProducerWeak`], which keeps the state allocated so it stays readable after
+/// the channel closes, this drops with the last real handle. That makes it the one
+/// handle you can store *inside* the state it points at (a child holding a link back to
+/// its parent, say) without the two keeping each other alive forever.
+///
+/// [`upgrade`](Self::upgrade) it back to a [`Producer`] while the channel is still live.
+pub struct Weak<T> {
+	pub(crate) state: WeakLock<State<T>>,
+	pub(crate) counts: Arc<Counts>,
+}
+
+impl<T> Weak<T> {
+	/// A handle that never upgrades, mirroring [`std::sync::Weak::new`].
+	///
+	/// Useful as a placeholder for a link that isn't wired up yet, or that a
+	/// standalone (channel-less) value doesn't have.
+	pub fn new() -> Self {
+		Self {
+			state: WeakLock::new(),
+			counts: Arc::new(Counts::default()),
+		}
+	}
+
+	/// Recover a [`Producer`], or `None` once the state has been dropped or the
+	/// channel closed.
+	///
+	/// This counts: while the returned producer lives the channel stays open, and
+	/// dropping it can be what finally closes it.
+	pub fn upgrade(&self) -> Option<Producer<T>> {
+		// Reuse `produce`'s increment-then-check ordering, which is what keeps the
+		// last `Producer::drop` from closing the channel out from under us.
+		ProducerWeak {
+			state: self.state.upgrade()?,
+			counts: self.counts.clone(),
+		}
+		.produce()
+	}
+}
+
+impl<T> Default for Weak<T> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<T> Clone for Weak<T> {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+}
+
+impl<T> std::fmt::Debug for Weak<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Weak")
+			.field("alive", &self.state.upgrade().is_some())
+			.finish()
+	}
+}
 
 /// A weak handle from the producing side ([`Producer::weak`](crate::Producer::weak)).
 ///
 /// Holds no ref count, so it never keeps the channel open. Upgrade it back to a [`Producer`]
 /// (write access) or a [`Consumer`] (read access) while the channel is still live.
+///
+/// It does keep the state *allocated*, which is what lets it read a closed channel's final
+/// value. Reach for [`Weak`] instead when the handle is stored inside that same state.
 #[derive(Debug)]
 pub struct ProducerWeak<T> {
 	pub(crate) state: Lock<State<T>>,
@@ -24,16 +89,15 @@ pub struct ProducerWeak<T> {
 impl<T> ProducerWeak<T> {
 	/// Upgrade to a [`Producer`], returning `None` if the channel is already closed.
 	pub fn produce(&self) -> Option<Producer<T>> {
-		// Increment first to prevent the last Producer::drop from
-		// closing the state between our check and the return.
-		self.counts.producers.fetch_add(1, Ordering::Relaxed);
-
 		{
+			// Registering under the same lock that guards `closed` is what makes the
+			// returned producer keep the channel open: a concurrent last-producer drop
+			// either closes first (and we bail) or sees our count and doesn't close.
 			let state = self.state.lock();
 			if state.closed {
-				self.counts.producers.fetch_sub(1, Ordering::Relaxed);
 				return None;
 			}
+			self.counts.producers.fetch_add(1, Ordering::Relaxed);
 		}
 
 		Some(Producer {
@@ -247,7 +311,7 @@ impl<T> Clone for ConsumerWeak<T> {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
 
@@ -284,6 +348,103 @@ mod test {
 
 		drop(consumer);
 		assert_eq!(weak.unused().await, Ok(()));
+	}
+
+	/// A state holding a handle back to itself is still deallocated once the last real
+	/// handle drops. `ProducerWeak` would keep it (and everything it owns) alive forever.
+	#[test]
+	fn weak_breaks_a_self_reference() {
+		struct Node {
+			// Only its refcount matters: it's how the test sees the state deallocate.
+			_alive: Arc<()>,
+			back: Option<Weak<Node>>,
+		}
+
+		let alive = Arc::new(());
+		let producer = Producer::new(Node {
+			_alive: alive.clone(),
+			back: None,
+		});
+		producer.write().ok().expect("open").back = Some(producer.downgrade());
+		assert_eq!(Arc::strong_count(&alive), 2, "the state is alive");
+
+		let weak = producer.downgrade();
+		assert!(weak.upgrade().is_some(), "upgradeable while the channel is live");
+
+		drop(producer);
+		assert_eq!(Arc::strong_count(&alive), 1, "the state is gone despite the cycle");
+		assert!(weak.upgrade().is_none());
+	}
+
+	/// A closed channel never upgrades, even while a consumer is still draining it.
+	/// Producing into it again would resurrect a channel every reader has been told
+	/// is over.
+	#[test]
+	fn weak_does_not_upgrade_once_closed() {
+		let producer = Producer::new(0u32);
+		let weak = producer.downgrade();
+		let consumer = producer.consume();
+
+		drop(producer);
+		assert!(weak.upgrade().is_none(), "closed, despite the state being alive");
+
+		drop(consumer);
+		assert!(weak.upgrade().is_none());
+	}
+
+	/// An upgrade racing the last producer's drop either loses (no handle) or wins
+	/// (a handle that is genuinely open). It must never hand back a producer for a
+	/// channel that the drop is about to close.
+	///
+	/// A smoke test, not a reproducer: the window is a few instructions wide and this
+	/// doesn't trip on the unsynchronized ordering even with the barrier. What rules
+	/// the interleaving out is doing the count transition under the state lock.
+	#[test]
+	fn upgrade_never_wins_a_closing_channel() {
+		for _ in 0..2_000 {
+			let producer = Producer::new(0u32);
+			let weak = producer.downgrade();
+			// Keeps the state allocated so the upgrade is about the channel, not the
+			// allocation.
+			let consumer = producer.consume();
+
+			// Line both threads up on the drop/upgrade window.
+			let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+			let dropper = {
+				let gate = gate.clone();
+				std::thread::spawn(move || {
+					gate.wait();
+					drop(producer);
+				})
+			};
+
+			gate.wait();
+			if let Some(upgraded) = weak.upgrade() {
+				assert!(
+					upgraded.write().is_ok(),
+					"an upgrade must not resolve a closing channel"
+				);
+			}
+			dropper.join().expect("dropper panicked");
+			drop(consumer);
+		}
+	}
+
+	/// An upgrade counts as a producer for as long as it lives, so the channel can't
+	/// close underneath it.
+	#[test]
+	fn upgrade_holds_the_channel_open() {
+		let producer = Producer::new(0u32);
+		let weak = producer.downgrade();
+		let consumer = producer.consume();
+
+		let upgraded = weak.upgrade().expect("open");
+
+		drop(producer);
+		assert!(!consumer.is_closed(), "the upgrade keeps it open");
+
+		drop(upgraded);
+		assert!(consumer.is_closed(), "dropping the last one closes it");
 	}
 
 	#[tokio::test]

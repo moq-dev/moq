@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { RemoteError } from "./error.ts";
 import { Reader, Writer } from "./stream.ts";
 
 // Helper to create a writable stream that captures written data
@@ -287,4 +288,52 @@ test("Reader u53 decodes two-byte stream type prefixes", async () => {
 	const reader = new Reader(undefined, concatChunks(written));
 	expect(await reader.u53()).toBe(0x40);
 	expect(await reader.done()).toBe(true);
+});
+
+/** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */
+class Reset extends Error {
+	readonly source = "stream" as const;
+	readonly streamErrorCode: number;
+
+	constructor(code: number) {
+		super("");
+		this.streamErrorCode = code;
+	}
+}
+
+test("Reader closed rejects with the decoded reset code", async () => {
+	// Protocol paths race `closed` against a read, so the two must agree on the error
+	// shape: whichever wins, the reset code reaches the caller the same way.
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start: (controller) => controller.error(new Reset(2)),
+		}),
+	);
+
+	const err = await reader.closed.then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(2);
+});
+
+test("Writer closed rejects with the decoded reset code", async () => {
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({
+			start: (controller) => controller.error(new Reset(31)),
+		}),
+	);
+
+	const err = await writer.closed.then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(31);
+});
+
+test("closed is stable, so racing it per frame does not allocate", async () => {
+	const reader = new Reader(new ReadableStream<Uint8Array>());
+	expect(reader.closed).toBe(reader.closed);
 });

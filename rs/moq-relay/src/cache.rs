@@ -25,12 +25,13 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 #[non_exhaustive]
 #[group(id = "cache-config")]
 pub struct CacheConfig {
-	/// Maximum bytes of cached group payload, e.g. "8GiB", "512MB", or a
+	/// Target bytes of cached group payload, e.g. "8GiB", "512MB", or a
 	/// percentage of memory like "75%" (respecting the cgroup limit when set).
 	/// Unbounded when unset.
 	///
-	/// The budget counts payload bytes, not process RSS; leave some slack below
-	/// physical memory or combine with `headroom`.
+	/// A target that usage converges toward as tracks write, not a hard limit, and
+	/// it counts payload bytes, not process RSS; leave some slack below physical
+	/// memory or combine with `headroom`.
 	#[arg(long = "cache-capacity", env = "MOQ_CACHE_CAPACITY")]
 	pub capacity: Option<String>,
 
@@ -43,19 +44,22 @@ pub struct CacheConfig {
 	#[arg(long = "cache-headroom", env = "MOQ_CACHE_HEADROOM")]
 	pub headroom: Option<String>,
 
-	/// Maximum age of a non-latest cached group, e.g. "30s" or "500ms".
+	/// Maximum time a non-latest cached group is retained since it was last
+	/// written or served from cache by a FETCH, e.g. "30s" or "500ms".
 	///
 	/// Caps each track's own retention window: a publisher advertising a longer
 	/// window is clamped down to this, bounding how much history a track can
-	/// accumulate no matter what upstream asks for. This bounds memory by age
-	/// where `capacity` bounds it by bytes. Unbounded (each track keeps its own
-	/// window) when unset.
+	/// accumulate no matter what upstream asks for. A FETCH cache hit restarts
+	/// the clock, so actively-read history stays cached. This bounds memory by
+	/// age where `capacity` bounds it by bytes. Unbounded (each track keeps its
+	/// own window) when unset.
 	///
 	/// Two caveats on the ceiling. The latest group of every track is always
 	/// retained, since it is the live edge. And expiry is evaluated when a track
 	/// writes its next group, so a publisher that stops writing without
 	/// disconnecting keeps whatever it had cached until it resumes or the
-	/// broadcast closes; the `capacity` budget is what reclaims those.
+	/// broadcast closes; under memory pressure the `capacity` budget is repaid by
+	/// the tracks that are still writing.
 	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
 	#[serde(default, with = "humantime_serde")]
 	pub duration: Option<Duration>,
@@ -133,8 +137,8 @@ fn total_memory() -> u64 {
 }
 
 /// Re-size the pool periodically so at least `headroom` bytes of system memory
-/// stay available: the cache grows into idle memory and shrinks (evicting LRU
-/// groups) when the rest of the system needs it.
+/// stay available: the cache grows into idle memory and shrinks (tracks evict
+/// their stalest groups as they write) when the rest of the system needs it.
 async fn governor(pool: cache::Pool, capacity: Option<u64>, headroom: u64) {
 	let mut sys = sysinfo::System::new();
 	let mut interval = tokio::time::interval(GOVERNOR_INTERVAL);

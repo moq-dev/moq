@@ -197,12 +197,13 @@ export class Connection implements Established {
 	// path and leave routing to the URL. We advertise probe = Report (we measure and
 	// report bitrate over the PROBE stream, but don't actively pad the connection).
 	// Role stays Both: publish/consume are called after this point, so there is nothing
-	// to narrow yet.
+	// to narrow yet. The origin declares our session identity so the peer can filter
+	// reflected announcements (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it).
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic);
 		try {
 			await writer.u53(DataType.Setup);
-			await new Setup({ probe: ProbeLevel.Report }).encode(writer, this.#version);
+			await new Setup({ probe: ProbeLevel.Report, origin: this.origin }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);

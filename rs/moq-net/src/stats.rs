@@ -1070,24 +1070,6 @@ impl Scope {
 		}
 	}
 
-	/// Bump `subscriptions` once. The ingress (producer-lifetime) counterpart to
-	/// [`Self::subscribe`], which cannot use an RAII guard because the producer is
-	/// cloneable and closes only on the last clone drop. No viewer refcount (that is
-	/// egress-only). Pair with [`Self::close_subscription`].
-	pub(crate) fn open_subscription(&self) {
-		if let Some(counters) = self.counters() {
-			counters.subscriptions.fetch_add(1, Ordering::Relaxed);
-		}
-	}
-
-	/// Bump `subscriptions_closed` once. See [`Self::open_subscription`].
-	pub(crate) fn close_subscription(&self) {
-		if let Some(counters) = self.counters() {
-			// Release pairs with the readout's Acquire load of `subscriptions_closed`.
-			counters.subscriptions_closed.fetch_add(1, Ordering::Release);
-		}
-	}
-
 	/// Open an announce guard: bumps `announced` and adds the path length to
 	/// `announced_bytes` now; on drop bumps `announced_closed` and adds the path
 	/// length again. Used for egress announce-stream events and ingress
@@ -1559,18 +1541,17 @@ mod tests {
 
 	#[test]
 	fn ingress_subscription_has_no_viewer() {
-		// The ingress (producer-lifetime) subscription pair bumps subscriptions but
-		// never the viewer refcount.
+		// An ingress (producer-lifetime) subscription bumps subscriptions but never
+		// the viewer refcount, which is egress-only.
 		let stats = test_stats();
 		let ctx = stats.tier(Tier::default()).session("root");
-		let scope = ctx.ingress("demo/bbb");
-		scope.open_subscription();
+		let guard = ctx.ingress("demo/bbb").subscribe();
 		let sub = tier_counters(&stats, "demo/bbb", &Tier::default())
 			.subscriber
 			.snapshot();
 		assert_eq!(sub.subscriptions, 1);
 		assert_eq!(sub.broadcasts, 0, "ingress has no viewer refcount");
-		scope.close_subscription();
+		drop(guard);
 		assert_eq!(
 			tier_counters(&stats, "demo/bbb", &Tier::default())
 				.subscriber

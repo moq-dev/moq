@@ -64,6 +64,23 @@ See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/net/exa
 
 ## Advanced Usage
 
+### Remote errors
+
+When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.RemoteError` carrying it:
+
+```ts
+try {
+	frame = await group.readFrame();
+} catch (err) {
+	if (err instanceof Moq.RemoteError) console.warn("peer reset the group:", err.code);
+	throw err;
+}
+```
+
+The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`. The codes themselves are not standardized: each number means whatever the peer's implementation decided, so `@moq/net` hands it over without interpreting it. Code 0 is the exception worth knowing, since that is what a transport sends for a stream dropped or aborted with no code of its own.
+
+Errors this side detects keep their own messages, like the `Group.Lagged` a read throws after frames were evicted before it got to them.
+
 ### Authentication
 
 Pass JWT tokens via query parameters in the URL. See [Authentication guide](/bin/relay/auth) for details and [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts) for a working example.

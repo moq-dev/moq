@@ -1,5 +1,5 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-import { TrackProcessor } from "./polyfill";
+import { TrackProcessor } from "./processor";
 import type { Source } from "./types";
 
 // The raw capture source to pump frames from.

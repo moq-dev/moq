@@ -33,6 +33,19 @@ nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # libva-less host; automatic backend selection then falls back to the next encoder,
 # like the NVENC backend.
 vaapi = ["dep:moq-vaapi"]
+# GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
+# converts a frame to RGBA and hands back a texture the caller presents. Off by
+# default because wgpu pulls a graphics stack (and its backend drivers) that a
+# relay or a headless publisher has no use for; only an application that actually
+# draws video turns it on.
+render = [
+    "dep:bytemuck",
+    "dep:wgpu",
+    "dep:objc2-metal",
+    "objc2-core-video/CVMetalTexture",
+    "objc2-core-video/CVMetalTextureCache",
+    "objc2-core-video/objc2-metal",
+]
 # Screen capture on Linux via xdg-desktop-portal + PipeWire (Wayland and X11).
 # Off by default because the `pipewire` crate links libpipewire-0.3 via pkg-config
 # at build time (and its bindgen needs libclang), so it only belongs in builds
@@ -41,6 +54,9 @@ pipewire = ["dep:pipewire", "dep:ashpd"]
 
 [dependencies]
 anyhow = "1"
+# Casting the color-conversion uniform to the bytes wgpu wants, without an
+# unsafe reinterpret of our own. Already in the graph via wgpu.
+bytemuck = { version = "1", optional = true }
 bytes = "1"
 # CPU I420 resize (SIMD per-plane convolution), the software fallback for
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
@@ -63,6 +79,10 @@ openh264-sys2 = { version = "0.9.6", default-features = false }
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
+# GPU rendering behind the `render` feature. `wgpu::hal` is re-exported by wgpu
+# itself, so the zero-copy import paths reach the platform handles without a
+# separate wgpu-hal dependency that could drift to a different version.
+wgpu = { version = "30", optional = true }
 # RGBA -> I420 color conversion (replaces ffmpeg swscale).
 yuv = "0.8.14"
 
@@ -110,6 +130,10 @@ objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay"] }
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
 objc2-foundation = "0.3.2"
+# MTLDevice / MTLTexture for the `render` feature's zero-copy CVPixelBuffer
+# import (CVMetalTextureCache aliases the decoder's IOSurface as a Metal texture,
+# which wgpu then adopts).
+objc2-metal = { version = "0.3.2", optional = true }
 objc2-screen-capture-kit = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 
@@ -133,3 +157,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+
+[dev-dependencies]
+h264-reader = "0.8.0"

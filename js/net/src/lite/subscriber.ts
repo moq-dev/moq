@@ -3,12 +3,12 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
+import { error, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
-import { error, reason } from "../util/error.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { AnnounceInit, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -21,7 +21,7 @@ import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, decodeSubscribeResponseMaybe, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { hasAnnounceId, hasAnnounceOk, hasDatagrams, Version } from "./version.ts";
+import { hasAnnounceId, hasAnnounceOk, hasDatagrams, hasExcludeHop, Version } from "./version.ts";
 
 // Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
 // drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC
@@ -57,6 +57,10 @@ export interface AnnouncedOptions {
 	 * to false for backwards compatibility: existing code (notably hang.live)
 	 * relies on seeing its own publishes as the signal that a namespace
 	 * published successfully.
+	 *
+	 * Only meaningful on lite-04/05, where the peer filters reflected announces
+	 * on request (ANNOUNCE_REQUEST's `Exclude Hop`). Later versions dropped that
+	 * field, so reflected announces are always skipped.
 	 */
 	ignoreSelf?: boolean;
 }
@@ -149,10 +153,18 @@ export class Subscriber {
 
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		// Send our own session-level origin id so the peer can skip announces
-		// whose hop chain already passed through us. Matches the Rust subscriber's
-		// `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
+		// Lite04/05: send our own session-level origin id so the peer can skip announces
+		// whose hop chain already passed through us. Encoding drops it on every other
+		// version, where we drop the reflected announce on receipt instead. Matches the
+		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
 		const msg = new AnnounceRequest(prefix, this.origin);
+
+		// Drop reflected announces so callers asking for "someone else's broadcasts"
+		// don't re-see their own publishes. A caller can always ask for this, and it is
+		// required on versions that don't carry excludeHop above: there the peer isn't
+		// filtering them out for us, so filtering here keeps what the app sees the same
+		// as lite-05. Lite01-03 carry no real hop ids, so the check never matches there.
+		const dropReflected = options.ignoreSelf || !hasExcludeHop(this.version);
 
 		try {
 			// Open a stream and send the announce interest.
@@ -242,11 +254,9 @@ export class Subscriber {
 					}
 				}
 
-				// Optionally drop reflected announces so callers asking for
-				// "someone else's broadcasts" don't re-see their own publishes. In
-				// Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
+				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
-				if (hops !== undefined && options.ignoreSelf) {
+				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {
 						continue;

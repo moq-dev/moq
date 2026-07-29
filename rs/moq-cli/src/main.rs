@@ -27,6 +27,10 @@ use anyhow::Context;
 use clap::Parser;
 use tokio::task::JoinSet;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
+
 /// Everything needed to build MoQ clients/servers, encapsulating the optional
 /// iroh endpoint so the rest of the code is feature-agnostic.
 #[derive(Clone)]
@@ -83,19 +87,31 @@ async fn main() -> anyhow::Result<()> {
 		iroh: cli.moq.iroh.clone().bind(&cli.moq.client.quic).await?,
 	};
 
-	match cli.command {
-		Command::Import(import) => run_import(cli.moq, import, net).await,
-		Command::Export(export) => run_export(cli.moq, export, net).await,
-		#[cfg(feature = "transcode")]
-		Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
-		#[cfg(feature = "capture")]
-		Command::Devices => unreachable!("handled above, before the transport is bound"),
+	#[cfg(feature = "jemalloc")]
+	let jemalloc = moq_native::jemalloc::run();
+	#[cfg(not(feature = "jemalloc"))]
+	let jemalloc = std::future::pending::<anyhow::Result<()>>();
+
+	let run = async move {
+		match cli.command {
+			Command::Import(import) => run_import(cli.moq, import, net).await,
+			Command::Export(export) => run_export(cli.moq, export, net).await,
+			#[cfg(feature = "transcode")]
+			Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
+			#[cfg(feature = "capture")]
+			Command::Devices => unreachable!("handled above, before the transport is bound"),
+		}
+	};
+
+	tokio::select! {
+		result = run => result,
+		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 	}
 }
 
 /// Route one source INTO the shared Origin, exposing it to the MoQ network.
 async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
@@ -209,7 +225,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 
 /// Route the shared Origin OUT to one sink, filling it from the MoQ network.
 async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();

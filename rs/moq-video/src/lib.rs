@@ -2,9 +2,9 @@
 //!
 //! Counterpart to [`moq-audio`](https://crates.io/crates/moq-audio) for video
 //! tracks, and shaped the same way: both split into `capture` / `encode` /
-//! `decode` role modules over a shared root [`Error`]. Sits on top of [`moq_mux`]
-//! (and the `hang` catalog) and adds the native pieces a desktop/CLI publisher
-//! needs.
+//! `decode` role modules over a shared root [`Error`], with `render` as video's
+//! fourth. Sits on top of [`moq_mux`] (and the `hang` catalog) and adds the
+//! native pieces a desktop/CLI publisher needs.
 //!
 //! A raw picture is a [`Frame`] wherever it crosses the API: a timestamp and a
 //! [`Surface`] holding the pixels. Capture and [`decode`] produce them, [`encode`]
@@ -39,6 +39,11 @@
 //!   NVDEC frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
 //!   zero-copy (the transcode path), scaled in hardware via
 //!   [`decode::Config::resize`].
+//! - `render` draws a [`Frame`] on the GPU and hands back a `wgpu` texture to
+//!   present, importing a GPU frame's surface directly where the platform
+//!   allows and uploading I420 otherwise. Behind the non-default `render`
+//!   feature, since it pulls in a graphics stack a publisher or relay does not
+//!   need.
 //!
 //! ## API stability
 //!
@@ -61,7 +66,10 @@
 pub mod capture;
 pub mod decode;
 pub mod encode;
+#[cfg(feature = "render")]
+pub mod render;
 
+mod color;
 mod error;
 pub mod frame;
 mod size;
@@ -69,6 +77,7 @@ mod size;
 #[cfg(target_os = "windows")]
 mod mf;
 
+pub use color::Color;
 pub use error::Error;
 pub use frame::{Frame, I420, Surface};
 pub use size::Size;

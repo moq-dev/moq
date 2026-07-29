@@ -13,10 +13,12 @@ use crate::Waiter;
 /// Construct it once for a deadline (`Sleep::new(tokio::time::sleep_until(deadline))`), then
 /// [`poll`](Self::poll) it against a [`Waiter`] each time your `poll_*` runs. Reading the
 /// clock through `tokio::time` means a `tokio::time::pause()` test advances it in step.
+#[deprecated(note = "use kio::time::Deadline, which also works on wasm and can be re-armed in place")]
 pub struct Sleep {
 	inner: Pin<Box<::tokio::time::Sleep>>,
 }
 
+#[allow(deprecated)]
 impl Sleep {
 	/// Wrap a tokio sleep future.
 	pub fn new(sleep: ::tokio::time::Sleep) -> Self {
@@ -34,7 +36,8 @@ impl Sleep {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 	use ::tokio::time::Instant;

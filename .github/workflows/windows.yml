@@ -1,0 +1,66 @@
+name: Windows
+
+permissions:
+  contents: read
+
+# The main gate (check.yml) runs on Linux only, so `#[cfg(target_os = "windows")]`
+# code compiles for the first time in a tag-triggered release build, long after
+# review. This job compiles it on every Rust-touching PR instead. It's a plain
+# `cargo check`, not the full `just ci`: lint/format/test coverage stays on the
+# Linux gate, which is cheaper and where those results are platform-independent.
+on:
+  pull_request:
+    # `closed` is here only so merging/closing a PR cancels its in-flight run
+    # via the concurrency group below; the job itself is skipped on close.
+    types: [opened, synchronize, reopened, closed]
+    # Windows compilation can only break on a Rust or toolchain change, and a
+    # Windows runner is slow, so keep it off doc/JS/config PRs entirely.
+    paths:
+      - "rs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - ".github/workflows/windows.yml"
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Windows
+    if: github.event.action != 'closed'
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No toolchain step: rust-toolchain.toml pins the version and the runner's
+      # rustup installs it on the first cargo call, so this gate compiles with
+      # the same rustc as the Nix-pinned Linux one.
+
+      - name: Install just
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        with:
+          tool: just
+
+      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Check
+        shell: bash
+        run: just rs windows

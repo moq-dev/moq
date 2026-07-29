@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2](https://github.com/moq-dev/moq/compare/hang-v0.20.1...hang-v0.20.2) - 2026-07-27
+
+### Fixed
+
+- *(hang)* reject a non-hex catalog description instead of misreading it ([#2516](https://github.com/moq-dev/moq/pull/2516))
+
 ## [0.20.1](https://github.com/moq-dev/moq/compare/hang-v0.20.0...hang-v0.20.1) - 2026-07-25
 
 ### Added

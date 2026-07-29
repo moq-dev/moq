@@ -31,6 +31,11 @@ pub enum Error {
 	#[error("encoder {0} cannot change bitrate while running")]
 	BitrateUnsupported(&'static str),
 
+	/// GPU rendering failure: building the pipeline, importing a frame's surface
+	/// as a texture, or the device itself.
+	#[error("render: {0}")]
+	Render(#[source] anyhow::Error),
+
 	/// Capture / encode / codec failure (the message carries the detail).
 	#[error(transparent)]
 	Codec(#[from] anyhow::Error),

@@ -1,4 +1,9 @@
 import { defineConfig } from "vitepress";
+import { syncDrafts } from "./drafts";
+
+// Generated before VitePress enumerates routes, so the pages and this sidebar
+// list stay in sync with the kramdown-rfc sources under drafts/.
+const drafts = syncDrafts();
 
 export default defineConfig({
 	title: "Media over QUIC",
@@ -42,6 +47,7 @@ export default defineConfig({
 		nav: [
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
+			{ text: "Drafts", link: "/draft/" },
 			{ text: "Apps", link: "/bin/" },
 			{
 				text: "Libraries",
@@ -118,6 +124,14 @@ export default defineConfig({
 							],
 						},
 					],
+				},
+			],
+
+			"/draft/": [
+				{
+					text: "Internet-Drafts",
+					link: "/draft/",
+					items: drafts.map((draft) => ({ text: draft.title, link: draft.link })),
 				},
 			],
 
@@ -244,7 +258,18 @@ export default defineConfig({
 		],
 
 		editLink: {
-			pattern: "https://github.com/moq-dev/moq/edit/main/doc/:path",
+			// /draft/ pages are generated, so edits go to the kramdown-rfc source
+			// instead. VitePress ships this function to the browser by stringifying
+			// it, so it has to stay closure-free: no imports, no outer variables.
+			// The inverse of `slug()` in drafts.ts.
+			pattern: ({ filePath }) => {
+				const generated = filePath.startsWith("draft/") && filePath !== "draft/index.md";
+				const slug = filePath.slice("draft/".length);
+				const path = generated
+					? `drafts/${slug.startsWith("draft-") ? slug : `draft-lcurley-${slug}`}`
+					: `doc/${filePath}`;
+				return `https://github.com/moq-dev/moq/edit/main/${path}`;
+			},
 			text: "Edit this page on GitHub",
 		},
 

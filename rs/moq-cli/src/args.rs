@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use hang::moq_net;
 
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
@@ -55,6 +56,17 @@ pub struct MoqSide {
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
 
+	/// Fix this process's origin id instead of minting a fresh random one.
+	///
+	/// The origin id is the first hop of every announcement this process
+	/// publishes, and relays treat it as the broadcast's content identity:
+	/// redundant publishers of the same broadcast share an id so relays fail
+	/// over between them at a group boundary. Leave unset outside a redundant
+	/// (1+1) chain; the default fresh id per run is what makes a restarted
+	/// publisher look like new content instead of silently splicing.
+	#[arg(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
+	pub origin: Option<u64>,
+
 	/// MoQ client config (`--client-connect`, `--client-bind`, `--client-tls-*`, ...).
 	#[command(flatten)]
 	pub client: moq_native::ClientConfig,
@@ -70,6 +82,17 @@ pub struct MoqSide {
 }
 
 impl MoqSide {
+	/// Mint the origin all broadcasts route through: the pinned `--origin` id
+	/// when set, otherwise fresh and random.
+	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
+		use anyhow::Context;
+		Ok(match self.origin {
+			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
+			None => moq_net::Origin::random(),
+		}
+		.produce())
+	}
+
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
 	/// Stands in for the clap `required` the `moq` group can't carry, since
 	/// `devices` is exempt.

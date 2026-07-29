@@ -260,6 +260,12 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Whether the logical track ended in an error, as opposed to still being
+	/// servable or cleanly [`finish`](Self::finish)ed.
+	pub(crate) fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
+	}
+
 	/// Create a read handle for the logical track.
 	pub fn consume(&self) -> Consumer {
 		Consumer {

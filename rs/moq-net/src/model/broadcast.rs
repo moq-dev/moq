@@ -65,7 +65,8 @@ pub struct Route {
 	pub hops: OriginList,
 
 	/// The cost of pulling the broadcast via this route, accumulated per link:
-	/// lower wins, with ties broken by hop length and then a deterministic hash.
+	/// lower wins, with ties broken by hop length, then a deterministic hash, and
+	/// finally the most recently attached route.
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,
@@ -167,6 +168,16 @@ struct BroadcastState {
 	route: Route,
 	route_epoch: u64,
 
+	// Every route currently attached at this path, in preference order with the
+	// serving (active) route first. Mirrored from the origin's source table for
+	// route-fed broadcasts so sessions can pick a different route per peer; an
+	// ordinary broadcast holds just its own route. `routes_epoch` bumps on any
+	// table change, including ones that leave the active route untouched (a
+	// standby attaching or repricing), which is why it is tracked separately
+	// from `route_epoch`.
+	routes: Vec<Route>,
+	routes_epoch: u64,
+
 	// Set by an explicit `Producer::finish()` or `Producer::abort()` so `Drop` can
 	// tell a deliberate shutdown apart from a producer dropped by accident.
 	closing: bool,
@@ -260,9 +271,9 @@ pub struct Producer {
 	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
 	info: Arc<Info>,
 
-	// Broadcast liveness. Consumers watch this (read-only) for close; dropping every
-	// producer (this handle and every `Dynamic`) ends the broadcast.
-	alive: kio::Producer<()>,
+	// Broadcast liveness, shared with every `Dynamic`. Consumers watch it (read-only)
+	// for close; the guard ends the broadcast when the last of those handles drops.
+	alive: Arc<Alive>,
 
 	// Track registry plus the dynamic request queue, mutated by producers and
 	// consumers alike under one lock.
@@ -277,10 +288,11 @@ pub struct Producer {
 impl Producer {
 	/// Create a producer for the given broadcast metadata. Prefer [`Info::produce`].
 	pub fn new(info: Info) -> Self {
+		let state = kio::Shared::<BroadcastState>::default();
 		Self {
 			info: Arc::new(info),
-			alive: Default::default(),
-			state: Default::default(),
+			alive: Alive::new(state.clone()),
+			state,
 			stats: stats::Scope::default(),
 		}
 	}
@@ -296,13 +308,14 @@ impl Producer {
 	/// tracks that are spliced across per-session tracks, queued for a route to
 	/// serve. Used by the origin for broadcasts reached over the network.
 	pub(crate) fn new_spliced(info: Info) -> Self {
+		let state = kio::Shared::new(BroadcastState {
+			spliced: Some(SplicedState::default()),
+			..Default::default()
+		});
 		Self {
 			info: Arc::new(info),
-			alive: Default::default(),
-			state: kio::Shared::new(BroadcastState {
-				spliced: Some(SplicedState::default()),
-				..Default::default()
-			}),
+			alive: Alive::new(state.clone()),
+			state,
 			// The origin-owned spliced broadcast stays untagged: egress attribution is
 			// applied when a tagged `origin::Consumer` hands the consumer out.
 			stats: stats::Scope::default(),
@@ -317,7 +330,7 @@ impl Producer {
 	/// A watch-only handle to the broadcast's demand. See [`Demand`].
 	pub fn demand(&self) -> Demand {
 		Demand {
-			alive: self.alive.consume().weak(),
+			alive: self.alive.token.consume().weak(),
 			state: self.state.clone(),
 		}
 	}
@@ -404,9 +417,35 @@ impl Producer {
 		if state.route == route {
 			return Ok(());
 		}
-		state.route = route;
+		state.route = route.clone();
 		state.route_epoch += 1;
+		// An ordinary broadcast's table is just its own route; a route-fed one is
+		// overwritten by the next `set_routes` from the origin.
+		state.routes = vec![route];
+		state.routes_epoch += 1;
 		Ok(())
+	}
+
+	/// Replace the full route table, in preference order with the active route
+	/// first. Set by the origin's front on every source-table change; the active
+	/// route doubles as the broadcast's advertised [`Route`].
+	///
+	/// `routes` must be non-empty. A front whose table empties is on its way out,
+	/// and it unannounces and aborts rather than advertising a "no route" route,
+	/// so there is no such value to publish here.
+	pub(crate) fn set_routes(&mut self, routes: Vec<Route>) {
+		debug_assert!(!routes.is_empty(), "set_routes requires a non-empty table");
+		let mut state = self.state.lock();
+		if let Some(active) = routes.first()
+			&& state.route != *active
+		{
+			state.route = active.clone();
+			state.route_epoch += 1;
+		}
+		if state.routes != routes {
+			state.routes = routes;
+			state.routes_epoch += 1;
+		}
 	}
 
 	/// Poll for the next spliced track awaiting a serving route, returning its name
@@ -441,10 +480,12 @@ impl Producer {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			alive: self.alive.consume(),
+			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 
@@ -469,7 +510,7 @@ impl Producer {
 		}
 		// Ending the broadcast is what consumers wait on, so signal it here rather
 		// than leaving it to the last handle drop.
-		let _ = self.alive.close();
+		let _ = self.alive.token.close();
 	}
 
 	/// Abort the broadcast, ending it for consumers with `err`.
@@ -493,7 +534,7 @@ impl Producer {
 			state.closing = true;
 			state.abort = Some(err);
 		}
-		let _ = self.alive.close();
+		let _ = self.alive.token.close();
 		Ok(())
 	}
 
@@ -503,16 +544,30 @@ impl Producer {
 	}
 }
 
-impl Drop for Producer {
+/// Ends the broadcast when the last [`Producer`] or [`Dynamic`] drops, closing the
+/// liveness channel every [`Consumer`] watches.
+///
+/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
+/// a snapshot, and acting on it is exactly what invalidates it.
+struct Alive {
+	token: kio::Producer<()>,
+	state: kio::Shared<BroadcastState>,
+}
+
+impl Alive {
+	fn new(state: kio::Shared<BroadcastState>) -> Arc<Self> {
+		Arc::new(Self {
+			token: kio::Producer::default(),
+			state,
+		})
+	}
+}
+
+impl Drop for Alive {
 	fn drop(&mut self) {
-		// Only the last producer ending the broadcast matters; a clone dropping
-		// leaves it live (`alive` is shared with every `Dynamic` too). Warn if that
-		// last exit wasn't an explicit finish(), since consumers will then see
-		// Error::Dropped (classically a GC-collected handle in a language binding
-		// that tears the stream down mid-publish).
-		if !self.alive.is_last() {
-			return;
-		}
+		// Warn if the last exit wasn't an explicit finish(), since consumers will
+		// then see Error::Dropped (classically a GC-collected handle in a language
+		// binding that tears the stream down mid-publish).
 		if !self.state.read().closing {
 			tracing::warn!(
 				"broadcast::Producer dropped without finish(). Keep the producer alive while publishing, then call finish()."
@@ -589,7 +644,7 @@ impl Drop for SourceGuard {
 pub struct Dynamic {
 	info: Arc<Info>,
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
-	alive: kio::Producer<()>,
+	alive: Arc<Alive>,
 	state: kio::Shared<BroadcastState>,
 	// Ingress stats scope, applied to the tracks this handler serves. Empty (no-op)
 	// for an untagged broadcast.
@@ -613,7 +668,7 @@ impl Clone for Dynamic {
 }
 
 impl Dynamic {
-	fn new(info: Arc<Info>, alive: kio::Producer<()>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
+	fn new(info: Arc<Info>, alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
 		state.lock().requests.add_handler();
 
 		Self {
@@ -665,10 +720,12 @@ impl Dynamic {
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			info: self.info.clone(),
-			alive: self.alive.consume(),
+			alive: self.alive.token.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 
@@ -682,7 +739,7 @@ impl Dynamic {
 	/// [`Producer::abort`], or [`Error::Dropped`] for a [`Producer::finish`] or a
 	/// dropped producer (check [`Consumer::is_finished`] to tell those apart).
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		ready!(self.alive.poll_closed(waiter));
+		ready!(self.alive.token.poll_closed(waiter));
 		Poll::Ready(self.state.read().abort.clone().unwrap_or(Error::Dropped))
 	}
 
@@ -735,10 +792,18 @@ pub struct Consumer {
 	// The route epoch last yielded by `route_changed`, so each consumer clone
 	// observes the current route first and every change after it exactly once.
 	route_seen: Option<u64>,
+	// Same cursor for the full route table (`routes_changed`), tracked separately
+	// because the table can change without the active route moving.
+	routes_seen: Option<u64>,
 	// Egress stats scope, set by a tagged `origin::Consumer` at the broadcast
 	// handoff. Inherited by the tracks subscribed through this handle. Empty (no-op)
 	// for an untagged broadcast.
 	stats: stats::Scope,
+	// Keeps the origin's front off routes that flow back through the peer this
+	// handle was resolved for, released when the last clone drops. Only set on the
+	// shared front of a route-fed broadcast, and only for a peer that declared an
+	// origin; `None` everywhere else.
+	exclusion: Option<Arc<super::origin_impl::ExclusionGuard>>,
 }
 
 impl Clone for Consumer {
@@ -750,12 +815,22 @@ impl Clone for Consumer {
 			// Reset the cursor so the clone observes the current route first,
 			// even if the original already drained `route_changed`.
 			route_seen: None,
+			routes_seen: None,
 			stats: self.stats.clone(),
+			exclusion: self.exclusion.clone(),
 		}
 	}
 }
 
 impl Consumer {
+	/// Attach the guard that keeps the origin's front off routes flowing back
+	/// through the peer this handle was resolved for. Set once, at the origin's
+	/// broadcast handoff; the guard is shared by every clone of this handle.
+	pub(crate) fn with_exclusion(mut self, guard: Arc<super::origin_impl::ExclusionGuard>) -> Self {
+		self.exclusion = Some(guard);
+		self
+	}
+
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -800,6 +875,34 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_route_changed(waiter)).await
 	}
 
+	/// Every route currently attached at this path, in preference order with the
+	/// serving (active) route first. An ordinary broadcast holds just its own
+	/// route; a route-fed one mirrors the origin's source table so sessions can
+	/// advertise a different route per peer.
+	pub(crate) fn routes(&self) -> Vec<Route> {
+		self.state.read().routes.clone()
+	}
+
+	/// Poll for any change to the route table, including ones that leave the
+	/// active route untouched (a standby attaching, detaching, or repricing).
+	/// The first call is ready immediately; read the table with [`Self::routes`].
+	pub(crate) fn poll_routes_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let seen = self.routes_seen;
+		if let Poll::Ready(state) = self.state.poll(waiter, |state| {
+			if seen != Some(state.routes_epoch) {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			self.routes_seen = Some(state.routes_epoch);
+			return Poll::Ready(Ok(()));
+		}
+		// No pending change: surface the broadcast's end instead of parking forever.
+		ready!(self.alive.poll_closed(waiter));
+		Poll::Ready(Err(Error::Dropped))
+	}
+
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
 		// Tag the resolved track with this broadcast's egress scope so its
@@ -817,9 +920,23 @@ impl Consumer {
 
 		// A route-fed broadcast mints spliced logical tracks: they outlive any
 		// session, and a route is asked (via the pending queue) to start serving.
+		let closing = state.closing;
 		if let Some(spliced) = state.spliced.as_mut() {
+			// An aborted logical track is a verdict from the sources attached at
+			// the time, not a property of the name: a publisher that had not yet
+			// created the track may have it now. Drop it so this request reaches a
+			// source again, exactly as the plain lookup below reclaims a closed
+			// entry. A *finished* one stays, since its cache is still readable.
+			if spliced.tracks.get(name).is_some_and(|track| track.is_aborted()) {
+				spliced.tracks.remove(name);
+			}
 			if let Some(producer) = spliced.tracks.get(name) {
 				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+			}
+			// A deliberately-ended broadcast serves nothing new; nothing drains the
+			// pending queue once the front is torn down.
+			if closing {
+				return Err(Error::NotFound);
 			}
 			let name: Arc<str> = name.into();
 			let producer = super::resume::Producer::new();
@@ -950,7 +1067,9 @@ impl WeakConsumer {
 			alive: self.alive.consume(),
 			state: self.state.clone(),
 			route_seen: None,
+			routes_seen: None,
 			stats: stats::Scope::default(),
+			exclusion: None,
 		}
 	}
 }

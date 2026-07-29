@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.3...moq-cli-v0.9.4) - 2026-07-27
+
+### Added
+
+- *(cli)* add jemalloc heap profiling ([#2539](https://github.com/moq-dev/moq/pull/2539))
+
 ## [0.9.3](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.2...moq-cli-v0.9.3) - 2026-07-25
 
 ### Other

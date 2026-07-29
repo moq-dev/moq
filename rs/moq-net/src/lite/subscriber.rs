@@ -48,10 +48,11 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: origin::Producer,
 	recv_bandwidth: Option<bandwidth::Producer>,
-	// Session-level origin id shared with the Publisher. Used to filter out
-	// reflected announces: we ask the peer (via AnnounceInterest.exclude_hop)
-	// to skip broadcasts whose hop chain already passed through us, and we
-	// double-check incoming announces against it as defense in depth.
+	// Session-level origin id shared with the Publisher. Used to drop reflected
+	// announces: any incoming announce whose hop chain already passed through us
+	// has looped, so it is neither used as a route nor forwarded. On lite-04/05
+	// we also ask the peer to filter them out (AnnounceRequest.exclude_hop) so
+	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Origin,
 	// A random per-connection origin stamped into the hop chain of broadcasts
 	// from versions that don't carry real hop ids on the wire (Lite01/02/03).
@@ -229,9 +230,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
-		// Ask the peer to filter out announces that already passed through us, so
-		// reflected announces (the simple loop case) never hit the wire. Lite03
-		// peers ignore this field, in which case start_announce below still drops.
+		// Lite04/05: ask the peer to filter out announces that already passed through
+		// us, so the reflected ones never hit the wire. Encoding drops this on every
+		// other version, where start_announce below is the only filter.
 		let msg = lite::AnnounceRequest {
 			prefix: prefix.as_path(),
 			exclude_hop: self.self_origin.id(),
@@ -494,9 +495,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Drop announces that already passed through us. This connection is
-		// a reflection, not a new path. Peers should be filtering via
-		// AnnounceInterest.exclude_hop, but Lite03 peers can't, so this is
-		// the authoritative cluster-loop check on the receiver.
+		// a reflection, not a new path. Lite04/05 peers filter these out for us
+		// via AnnounceRequest.exclude_hop, but that is only an optimization:
+		// this is the authoritative cluster-loop check, and the only one on
+		// every other version.
 		if hops.contains(&self.self_origin) {
 			tracing::debug!(broadcast = %self.log_path(&path), "dropping reflected announce");
 			return Ok(false);

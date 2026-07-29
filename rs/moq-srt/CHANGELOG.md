@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.2...moq-srt-v0.2.3) - 2026-07-27
+
+### Other
+
+- *(moq-srt)* size the burst test below the SRT sender's drop window ([#2540](https://github.com/moq-dev/moq/pull/2540))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-srt-v0.2.1...moq-srt-v0.2.2) - 2026-07-25
 
 ### Fixed

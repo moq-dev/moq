@@ -26,7 +26,7 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 **Media bridge / codecs**
 
 - `moq-mux` (lib): the conversion layer. File/stream formats (`container/`: fmp4, flv, mkv, ts, loc) and codec parsers (`codec/`: h264, h265, av1, vp8/9, opus, aac, ...) <-> hang broadcasts. `Container` trait + generic `Producer<C>`/`Consumer<C>`. Dual catalog (`catalog::hang`, `catalog::msf`).
-- `moq-audio` (lib): native PCM <-> Opus (`unsafe-libopus`). Shaped like `moq-video`: `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`, plus root `Error`/`Format`/`Frame`. Optional `capture` feature (cpal microphone, macOS system audio), `resample`.
+- `moq-audio` (lib): native PCM <-> Opus/PCM (`unsafe-libopus`). Shaped like `moq-video`: `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`, plus root `Error`/`Format`/`Frame`. Playback is the extra role module `moq-video` has no counterpart for: `playback::{Engine, Config, Sink, Control, Input, Device, devices}`, where one `Engine` owns the output device and mixes up to 64 `Sink`s into it on a driver thread. `aec::{Canceller, Config}` closes the loop between the two: `Engine::canceller` taps the post-mix signal and `capture::Config::aec` subtracts it from the microphone (`sonora`, a pure-Rust WebRTC APM port), which is what a call on a laptop needs to not send itself back. Optional `capture` feature (cpal microphone, macOS system audio), `playback` feature (cpal output, `fixed-resample` ring buffers), and `aec` feature (implies both).
 - `moq-video` (lib): native video capture, H.264/H.265 encode, and decode; no ffmpeg. Hardware backends (VideoToolbox / Media Foundation / NVENC / VAAPI / NVDEC) with openh264 as the software H.264 fallback; NVDEC frames stay in CUDA memory and feed NVENC zero-copy. `capture::Config`, `encode::{Encoder, Producer, publish_capture}`, `decode::{Consumer, Decoder}`, root `Error`/`Size`.
 - `moq-transcode` (lib): just-in-time live transcoding of hang broadcasts. `run(source, output, config)` publishes a derivative catalog (ladder rungs + relative refs to the source) and encodes each rung only while subscribed/fetched, via `moq-video`. Live rungs share one decode per source (the `feed` module); output groups mirror source group sequences 1:1. Also a moq-cli verb (`moq ... transcode`, feature-gated).
 
@@ -139,7 +139,46 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `cargo test -p <crate>` for one crate.
+- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+
+- **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
+  `slow-timeout` with `terminate-after`, so a wedged test is reported as a
+  TIMEOUT and killed; under `cargo test`'s harness the same test hangs forever,
+  holding the target lock and burning a core. That matters here because a lost
+  `kio` wakeup parks a task with nothing to wake it, which is a hang rather than
+  a failure. `just rs test` and `just rs ci` both use nextest. Doctests are the
+  one thing it skips (`just rs doctest` covers them), and `just rs loom` stays on
+  `cargo test` since loom needs its own `--cfg loom` build.
+
+- **A test flagged SLOW is a bug to fix, not a threshold to raise.** The whole
+  workspace runs in well under a minute and the slowest single test is a few
+  seconds, which is what makes the timeout above a meaningful signal. When a
+  dependency is the reason (crypto and bignum code is orders of magnitude slower
+  unoptimized), give it an `opt-level` override in the root `Cargo.toml` rather
+  than shrinking what the test covers: `[profile.dev.package.<dep>]` applies to
+  test builds too, and took the moq-token RSA keygen tests from 16s to 0.8s while
+  still generating production-size 2048-bit keys.
+
 - Rust tests are `#[cfg(test)] mod tests` inline in the source file.
+
 - Async tests that depend on time call `tokio::time::pause()` first so timers fire instantly and deterministically (e.g. the tests in `moq-net/src/model/origin.rs`).
+
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
+
+- **`just check` only compiles the host's platform.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Each platform has its own gate, and each only runs on that platform's runner:
+
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, via `.github/workflows/windows.yml`. You can't reproduce it off Windows, since cross-compiling dies in openh264-sys2's vendored C++.
+  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, via `.github/workflows/macos.yml`. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
+  - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+
+  Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
+
+- **`just rs loom` is a manual gate. Run it by hand whenever you touch kio's refcount/waiter plumbing (`lock.rs`, `producer.rs`, `consumer.rs`, `weak.rs`, `waiter.rs`) or moq-net's model layer (`model/`), and mention the result in the PR.** Nothing else will run it: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`, so it's deliberately outside `check`/`ci`. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
+
+  Loom permutes every thread interleaving instead of hoping a stress loop hits the bad one. It caught a `ProducerWeak::produce` race that had been live for months, on iteration 4. Reading the results:
+
+  - A **hang is a finding, not a flake**: a parked `loom::future::block_on` that never wakes leaves every thread blocked, which loom reports as a deadlock. That's how a lost wakeup surfaces.
+  - **"Arc leaked"** means a reference cycle, usually a handle stored inside the state it points at. That's what `kio::Weak` (as opposed to `ProducerWeak`, which keeps the allocation) exists to avoid.
+  - Before trusting a *passing* model, mutate the code it covers and confirm it fails. A model that never exercises the race is worse than none.
+
+  Two constraints when adding to it: every non-loom `#[cfg(test)]` in kio must be `#[cfg(all(test, not(loom)))]`, or the tokio tests build loom primitives outside `loom::model` and panic; and loom's `Arc` has no `downgrade`, so `lock.rs` and `waiter.rs` keep std's (see `kio/src/sync.rs`).

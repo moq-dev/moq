@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { RemoteError } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -305,6 +306,54 @@ test("integration: lite draft-05 missing datagram reader does not close streams"
 	producer.writeString("group");
 
 	expect(await track.readString()).toBe("group");
+
+	broadcast.close();
+	remote.close();
+	client.close();
+	server.close();
+});
+
+/** A stream reset as a transport delivers one: the peer's code, and nothing else useful. */
+class Reset extends Error {
+	readonly source = "stream" as const;
+	readonly streamErrorCode: number;
+
+	constructor(code: number) {
+		super("");
+		this.streamErrorCode = code;
+	}
+}
+
+test("integration: a group reset carries the peer's code to the subscriber", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	server.publish(Path.from("test"), broadcast);
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+
+	const group = producer.appendGroup();
+	group.writeString("frame");
+
+	const consumer = await track.nextGroup();
+	if (!consumer) throw new Error("expected a group");
+	expect(await consumer.readString()).toBe("frame");
+
+	// Reset the group stream the way a peer that dropped the group does.
+	group.close(new Reset(2));
+
+	// The subscriber reads the code back off a typed error rather than whichever shape the
+	// transport produced, so nothing has to feature-detect a browser global.
+	const err = await consumer.readFrame().then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(RemoteError);
+	expect((err as RemoteError).code).toBe(2);
 
 	broadcast.close();
 	remote.close();

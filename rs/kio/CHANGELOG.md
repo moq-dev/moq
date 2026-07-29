@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/moq-dev/moq/compare/kio-v0.5.0...kio-v0.5.1) - 2026-07-27
+
+### Added
+
+- *(kio)* add a poll-native Deadline and adopt it in moq-net ([#2536](https://github.com/moq-dev/moq/pull/2536))
+
+### Other
+
+- *(net)* replace the global LRU cache pool with per-track write-time eviction ([#2526](https://github.com/moq-dev/moq/pull/2526))
+
 ## [0.5.0](https://github.com/moq-dev/moq/compare/kio-v0.4.4...kio-v0.5.0) - 2026-07-22
 
 ### Added

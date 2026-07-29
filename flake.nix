@@ -119,9 +119,15 @@
           ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
             # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
             pkgs.release-plz
-            # cpal's `alsa-sys` (moq-audio `capture` feature) links libasound on
-            # Linux via pkg-config; macOS uses CoreAudio, so no dep there.
+            # cpal's `alsa-sys` (moq-audio `capture` / `playback` features) links
+            # libasound on Linux via pkg-config; macOS uses CoreAudio, so no dep
+            # there. See `alsaPlugins` below for reaching the default device at
+            # runtime.
             pkgs.alsa-lib
+            # The `pulse` PCM, for a desktop whose default device routes through
+            # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
+            # only, via `alsaPlugins`.
+            pkgs.alsa-plugins
             # moq-video's VAAPI backend (always-on for Linux): moq-vaapi dlopen's
             # libva at runtime, so it isn't needed to build. This is here only to
             # actually run vaapi in the devShell; a libva-less host loads and falls
@@ -133,6 +139,25 @@
             # ScreenCaptureKit.
             pkgs.pipewire
           ];
+
+        # Where the shell's libasound looks for PCM plugins.
+        #
+        # ALSA's default device is a plugin on any desktop running a sound
+        # server: `pipewire` (shipped by pipewire itself) or `pulse` (from
+        # alsa-plugins). The shell's alsa-lib only searches its own store path,
+        # which holds neither, so opening the default device fails with ENXIO
+        # and audio only works against raw `hw:` devices. The host's plugins are
+        # not a substitute: they link the host's libasound and libpipewire, so
+        # loading them into a Nix-built binary hits a glibc version mismatch.
+        #
+        # ALSA_PLUGIN_DIR takes one directory, hence the join.
+        alsaPlugins = pkgs.symlinkJoin {
+          name = "moq-alsa-plugins";
+          paths = [
+            pkgs.alsa-plugins
+            pkgs.pipewire
+          ];
+        };
 
         # JavaScript dependencies
         jsDeps = with pkgs; [
@@ -314,6 +339,9 @@
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
           hardeningDisable = [ "fortify" ];
 
+          env = pkgs.lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
+            ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+          };
         };
 
         formatter = pkgs.nixfmt-tree;

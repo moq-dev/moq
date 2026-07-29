@@ -68,7 +68,12 @@ let
       filter =
         path: type: (final.lib.hasInfix "/test_data/" path) || (craneLib.filterCargoSources path type);
     };
-    cargoExtraArgs = "-p moq-cli";
+    cargoExtraArgs = "-p moq-cli --features jemalloc";
+    # Enable frame pointers so jemalloc profiles resolve complete call stacks.
+    RUSTFLAGS = "-C force-frame-pointers=yes";
+    # jemalloc's configure uses -O0 test builds, which conflict with
+    # Nix's _FORTIFY_SOURCE hardening (requires -O).
+    hardeningDisable = [ "fortify" ];
     # The crate is `moq-cli`, but its `[[bin]]` ships as `moq`.
     meta.mainProgram = "moq";
   };

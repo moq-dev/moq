@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/moq-json-v0.3.1...moq-json-v0.3.2) - 2026-07-27
+
+### Fixed
+
+- *(hang)* reject a non-hex catalog description instead of misreading it ([#2516](https://github.com/moq-dev/moq/pull/2516))
+
 ## [0.3.1](https://github.com/moq-dev/moq/compare/moq-json-v0.3.0...moq-json-v0.3.1) - 2026-07-23
 
 ### Other

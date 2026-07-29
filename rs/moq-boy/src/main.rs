@@ -31,7 +31,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use url::Url;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -46,10 +45,6 @@ mod video;
 
 #[derive(Parser, Clone)]
 pub struct Config {
-	/// Connect to the given relay URL.
-	#[arg(long)]
-	pub url: Url,
-
 	/// Path to the Game Boy ROM file.
 	#[arg(long)]
 	pub rom: PathBuf,
@@ -206,6 +201,7 @@ async fn run(config: &Config) -> Result<()> {
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
 
 	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
+	let url = config.client.connect.clone().context("--client-connect is required")?;
 	let client = config.client.clone().init()?;
 
 	// Publish origin: the game session broadcast.
@@ -231,12 +227,12 @@ async fn run(config: &Config) -> Result<()> {
 		.consume()
 		.announced();
 
-	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
+	tracing::info!(%url, %name, broadcast = %broadcast_path, "connecting to relay");
 
 	let reconnect = client
 		.with_publisher(&publish_origin)
 		.with_subscriber(consume_origin)
-		.reconnect(config.url.clone());
+		.reconnect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
@@ -482,5 +478,38 @@ async fn main() -> Result<()> {
 			tracing::error!(err = %format!("{err:#}"), "exiting");
 			std::process::exit(1);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// `--client-connect` is the only way to reach the relay: it must parse without
+	/// a connect flag of our own alongside it, and the URL must land where `run`
+	/// reads it. A second required flag would leave `--client-connect` inert.
+	///
+	/// The argv is a copy of `demo/boy/justfile`, not a read of it, so this pins the
+	/// binary's flag surface rather than the two staying in sync.
+	#[test]
+	fn matches_demo_invocation() {
+		let config = Config::try_parse_from([
+			"moq-boy",
+			"--client-connect",
+			"http://localhost:4443",
+			"--rom",
+			"rom/big2small.gb",
+			"--location",
+			"localhost",
+		])
+		.expect("demo/boy/justfile invocation should parse");
+
+		let connect = config
+			.client
+			.connect
+			.expect("--client-connect should reach the client config");
+		assert_eq!(connect.scheme(), "http");
+		assert_eq!(connect.host_str(), Some("localhost"));
+		assert_eq!(connect.port(), Some(4443));
 	}
 }
