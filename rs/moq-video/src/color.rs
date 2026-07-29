@@ -11,11 +11,12 @@ use crate::Size;
 /// is the classic tinted-video bug: it leaves grays untouched and skews
 /// saturated colors, so it survives a casual look at the picture.
 ///
-/// [`I420::color`](crate::I420::color) reports it where the crate knows, which
-/// is when the crate did the conversion itself. It is `None` for pixels that
-/// merely passed through (a decoder's output, a camera's), since the
-/// authoritative answer lives in the bitstream's VUI and does not survive into a
-/// decoded [`Frame`](crate::Frame). [`Color::infer`] is the fallback then.
+/// [`Surface::color`](crate::Surface::color) reports it where the crate knows:
+/// when the crate did the conversion itself, or when the surface carries the
+/// answer (a macOS pixel buffer names its matrix, which VideoToolbox copies out
+/// of the stream's VUI). It is `None` for pixels that merely passed through with
+/// nothing naming their space, a camera's raw YUYV among them.
+/// [`Color::infer`] is the fallback then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Color {

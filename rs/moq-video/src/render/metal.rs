@@ -109,8 +109,8 @@ impl Import {
 		let size = Size::new(buffer.width(), buffer.height());
 		let format = CVPixelBufferGetPixelFormatType(buffer.buffer());
 
-		// The pixel format carries the range (video swing vs full swing); the
-		// matrix it does not, so that half stays inferred.
+		// The pixel format names the layout and the range (video swing vs full
+		// swing).
 		let (layout, range_is_full) = match format {
 			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => (Layout::Nv12, false),
 			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => (Layout::Nv12, true),
@@ -121,7 +121,13 @@ impl Import {
 			f => return Err(err(format!("cannot import pixel format {f:#x}"))),
 		};
 
-		let color = Color::infer(size).with_range(!range_is_full);
+		// The matrix comes off the buffer's own attachment, which VideoToolbox
+		// copies out of the stream's VUI, so an imported frame and the same frame
+		// downloaded to the CPU are read the same way. The planar format carries no
+		// such attachment, so it falls back to the size guess.
+		let color = buffer
+			.color()
+			.unwrap_or_else(|| Color::infer(size).with_range(!range_is_full));
 
 		let (plane0, plane1, plane2) = match layout {
 			Layout::Nv12 => {
