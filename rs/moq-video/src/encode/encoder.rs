@@ -1006,12 +1006,11 @@ mod tests {
 	#[cfg(target_os = "macos")]
 	#[test]
 	fn videotoolbox_sps_declares_the_color_space() {
-		use super::backend::test_util::declared_color;
-		use crate::Color;
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
 
-		for (size, expected) in [
-			(Size::new(640, 480), Color::Bt601Limited),
-			(Size::new(1920, 1080), Color::Bt709Limited),
+		for (size, described) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1920, 1080), BT709_DESCRIBED),
 		] {
 			let config = Config {
 				kind: Kind::Named("videotoolbox".into()),
@@ -1027,7 +1026,7 @@ mod tests {
 				.unwrap();
 
 			let keyframe = frames.first().expect("a keyframe");
-			assert_eq!(declared_color(&keyframe.payload), Some(expected), "{size} SPS");
+			assert_eq!(declared_color(&keyframe.payload), Some(described), "{size} SPS");
 		}
 	}
 }

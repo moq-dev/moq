@@ -139,8 +139,10 @@ impl VideoToolbox {
 
 		// State the color space in the SPS so a decoder doesn't fall back to
 		// guessing it from the frame height. BT.601 goes out as SMPTE C primaries
-		// with the 709 transfer curve, which is the 170M set: 601 and 709 differ in
-		// primaries and matrix, not in gamma.
+		// and the 601 matrix (both code point 6) with the BT.709 transfer curve (1),
+		// since 601 and 709 differ in primaries and matrix, not in gamma. CoreVideo
+		// does have a 170M transfer constant, but it is deprecated, and Media
+		// Foundation has none, so 1 is what every backend emits.
 		let (primaries, transfer, matrix) = unsafe {
 			match config.resolved_color() {
 				Color::Bt601Limited | Color::Bt601Full => (

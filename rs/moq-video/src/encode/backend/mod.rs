@@ -143,15 +143,51 @@ pub(crate) mod test_util {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
 
-	use crate::Color;
+	/// A stream's VUI color description, as the raw code points ISO/IEC 23091-2
+	/// assigns them plus the range flag.
+	///
+	/// Deliberately not mapped onto [`Color`](crate::Color): the mapping is lossy
+	/// (several code points share a matrix, and BT.709 and SMPTE 170M define the
+	/// same transfer curve under different numbers), so a test that compared
+	/// `Color`s could not see a backend drift on the fields `Color` folds away.
+	#[derive(Debug, PartialEq, Eq)]
+	pub(crate) struct Described {
+		pub primaries: u8,
+		pub transfer: u8,
+		pub matrix: u8,
+		pub full_range: bool,
+	}
 
-	/// The color space an H.264 Annex-B stream declares in its SPS, or `None` if
-	/// it carries no color description and a decoder would have to guess.
+	/// The description we emit for BT.601 and BT.709 limited range, shared by the
+	/// backend tests so a backend drifting from the others fails rather than
+	/// quietly encoding its own dialect.
+	///
+	/// BT.601 goes out as SMPTE 170M primaries and matrix (code point 6) with the
+	/// BT.709 transfer curve (1). The two curves are defined identically, and
+	/// CoreVideo's SMPTE 170M transfer constant is deprecated while Media
+	/// Foundation has none at all, so 1 is the only value all four backends can
+	/// actually emit.
+	pub(crate) const BT601_DESCRIBED: Described = Described {
+		primaries: 6,
+		transfer: 1,
+		matrix: 6,
+		full_range: false,
+	};
+
+	pub(crate) const BT709_DESCRIBED: Described = Described {
+		primaries: 1,
+		transfer: 1,
+		matrix: 1,
+		full_range: false,
+	};
+
+	/// The color description an H.264 Annex-B stream carries in its SPS, or `None`
+	/// if it carries none and a decoder would have to guess.
 	///
 	/// Reads the bitstream rather than the encoder's config, so a backend that
 	/// quietly drops the VUI (or a driver that ignores it) fails the test instead
 	/// of passing on our own bookkeeping.
-	pub(crate) fn declared_color(annexb: &[u8]) -> Option<Color> {
+	pub(crate) fn declared_color(annexb: &[u8]) -> Option<Described> {
 		// Every 4-byte start code contains a 3-byte one at offset 1, so scanning
 		// for the short form finds both.
 		let starts: Vec<usize> = (0..annexb.len().saturating_sub(2))
@@ -172,13 +208,11 @@ pub(crate) mod test_util {
 
 		let signal = sps.vui_parameters.as_ref()?.video_signal_type.as_ref()?;
 		let description = signal.colour_description.as_ref()?;
-		let limited = !signal.video_full_range_flag;
-		Some(match (description.matrix_coefficients, limited) {
-			(1, true) => Color::Bt709Limited,
-			(1, false) => Color::Bt709Full,
-			(5 | 6, true) => Color::Bt601Limited,
-			(5 | 6, false) => Color::Bt601Full,
-			(other, _) => panic!("unexpected matrix_coefficients {other}"),
+		Some(Described {
+			primaries: description.colour_primaries,
+			transfer: description.transfer_characteristics,
+			matrix: description.matrix_coefficients,
+			full_range: signal.video_full_range_flag,
 		})
 	}
 }

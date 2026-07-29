@@ -6,7 +6,8 @@
 use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{
-	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, UsageType, VuiConfig,
+	BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, RateControlMode, TransferCharacteristics, UsageType,
+	VuiConfig,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
@@ -36,8 +37,16 @@ impl Openh264 {
 		let color = config.resolved_color();
 		// State the color space in the SPS so a decoder doesn't fall back to
 		// guessing it from the frame height.
+		//
+		// `VuiConfig::bt601()` would pair SMPTE 170M primaries and matrix with the
+		// SMPTE 170M transfer curve (code point 6). We override the curve to BT.709
+		// (1), which is defined identically, because CoreVideo's 170M transfer
+		// constant is deprecated and Media Foundation has none, so 1 is the only
+		// value every backend can emit. Same curve, one number across all of them.
 		let vui = match color {
-			Color::Bt601Limited | Color::Bt601Full => VuiConfig::bt601(),
+			Color::Bt601Limited | Color::Bt601Full => {
+				VuiConfig::bt601().transfer_characteristics(TransferCharacteristics::Bt709)
+			}
 			Color::Bt709Limited | Color::Bt709Full => VuiConfig::bt709(),
 		}
 		.full_range(!color.limited());
@@ -255,12 +264,12 @@ mod tests {
 	/// converted into. Read back out of the bitstream, not off our own config.
 	#[test]
 	fn the_sps_declares_the_color_space() {
-		use super::super::test_util::declared_color;
+		use super::super::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
 		use crate::{Color, Size};
 
-		for (size, expected) in [
-			(Size::new(640, 480), Color::Bt601Limited),
-			(Size::new(1920, 1080), Color::Bt709Limited),
+		for (size, described) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1920, 1080), BT709_DESCRIBED),
 		] {
 			let config = Config {
 				kind: Kind::Software,
@@ -277,11 +286,11 @@ mod tests {
 			let encoded = enc.encode(&frame, true).unwrap();
 			let annexb = &encoded.first().expect("a keyframe").payload;
 
-			assert_eq!(declared_color(annexb), Some(expected), "{size} SPS color description");
+			assert_eq!(declared_color(annexb), Some(described), "{size} SPS color description");
 
 			// The label has to match the pixels: same source of truth on both sides.
 			let i420 = frame.surface.to_i420().unwrap();
-			assert_eq!(i420.color(), Some(expected), "{size} converted pixels");
+			assert_eq!(i420.color(), Some(Color::infer(size)), "{size} converted pixels");
 		}
 	}
 }

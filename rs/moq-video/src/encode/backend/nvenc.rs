@@ -112,14 +112,15 @@ impl Nvenc {
 		//     random-access point), so each GOP boundary is joinable.
 
 		// State the color space in the SPS so a decoder doesn't fall back to
-		// guessing it from the frame height. BT.601 goes out as the SMPTE 170M set
-		// (the 525-line variant, code point 6), which is what every other encoder
-		// writes for standard definition.
+		// guessing it from the frame height. BT.601 goes out as SMPTE 170M primaries
+		// and matrix (code point 6) with the BT.709 transfer curve (1): the two
+		// curves are defined identically, and 1 is the only one CoreVideo and Media
+		// Foundation can name, so every backend emits the same triple.
 		let color = config.resolved_color();
 		let (primaries, transfer, matrix) = match color {
 			Color::Bt601Limited | Color::Bt601Full => (
 				NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M,
-				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M,
+				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
 				NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
 			),
 			Color::Bt709Limited | Color::Bt709Full => (
