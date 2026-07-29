@@ -121,7 +121,7 @@ impl<C: Container> Producer<C> {
 	/// this track in the broadcast's timeline so consumers can index the media without
 	/// downloading it.
 	///
-	/// Mint the recorder from the broadcast's [`Segmenter`](crate::timeline::Segmenter);
+	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer);
 	/// [`media_producer`](crate::catalog::Producer::media_producer) wires it for you.
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
@@ -161,7 +161,7 @@ impl<C: Container> Producer<C> {
 			};
 
 			// Report the group the moment it opens: its start is this frame's timestamp. The
-			// segmenter absorbs publish failures itself (the timeline is an optional sidecar),
+			// timeline absorbs publish failures itself (it is an optional sidecar),
 			// so reporting can't abort the media write.
 			if let Some(recorder) = self.recorder.as_mut() {
 				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
@@ -218,7 +218,7 @@ impl<C: Container> Producer<C> {
 		// Tell the timeline where this group's content stops: the caller's bound when it has
 		// one, otherwise the furthest point we wrote. Only the last group of a track actually
 		// needs this (every earlier one is bounded by its successor's open), but reporting it
-		// on every cut keeps the segmenter's frontier honest as we go.
+		// on every cut keeps the timeline's frontier honest as we go.
 		if let Some(recorder) = self.recorder.as_mut()
 			&& let Some(end) = end.max(self.end)
 		{

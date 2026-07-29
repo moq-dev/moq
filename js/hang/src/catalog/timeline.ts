@@ -26,13 +26,14 @@ export const TimelineSchema = z.object({
 	// Units per second for the records' `pts` (and `wall`). Defaults to 1000 (milliseconds).
 	timescale: z._default(u53Schema, u53(1000)),
 
-	// The declared upper bound on a segment's duration, in `timescale` units. The encoder
-	// knows its keyframe cadence (or the cutter its boundaries), so the bound is declared up
-	// front rather than observed: a consumer can size buffers, and an HLS exporter can write
-	// EXT-X-TARGETDURATION, from the catalog alone. A segment may exceed it only slightly
-	// (under half a second, the tolerance HLS's nearest-integer rounding grants), or
-	// arbitrarily when the media leaves no valid boundary (a GOP longer than the bound).
-	durationMax: u53Schema,
+	// The declared upper bound on a segment's duration, in `timescale` units, when the
+	// publisher can promise one. A publisher that controls its encoder knows its keyframe
+	// cadence up front, so a consumer can size buffers or write an HLS EXT-X-TARGETDURATION
+	// from the catalog alone, before observing a single segment; no record ever exceeds it.
+	// Absent when the media decides instead (real-time, where a GOP can be minutes long, or an
+	// import of a source the publisher doesn't control), and a consumer needing a bound then
+	// derives one from the records it has seen.
+	durationMax: z.optional(u53Schema),
 
 	// The wall-clock time of pts 0, in `timescale` units since the moq epoch
 	// ({@link MOQ_EPOCH_UNIX_MILLIS}, 2020-01-01), if known. A consumer derives any group's

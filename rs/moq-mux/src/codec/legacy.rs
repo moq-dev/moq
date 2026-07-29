@@ -143,11 +143,9 @@ impl<E: CatalogExt> Import<E> {
 		rendition.set(audio_config);
 
 		Ok(Self {
-			track: reserved.producer().media_producer(
-				track,
-				crate::catalog::hang::Container::Legacy,
-				crate::timeline::Kind::Audio,
-			)?,
+			track: reserved
+				.producer()
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
 		})
 	}

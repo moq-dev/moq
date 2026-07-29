@@ -32,15 +32,17 @@ pub struct Timeline {
 	pub timescale: u32,
 
 	/// The declared upper bound on a segment's duration, in [`timescale`](Self::timescale)
-	/// units.
+	/// units, when the publisher can promise one.
 	///
-	/// The encoder knows its keyframe cadence (or the cutter its boundaries), so the bound is
-	/// declared up front rather than observed: a consumer can size buffers, and an HLS
-	/// exporter can write `EXT-X-TARGETDURATION`, from the catalog alone. A segment may
-	/// exceed it only slightly (under half a second, the same tolerance HLS's
-	/// nearest-integer rounding grants), or arbitrarily when the media leaves no valid
-	/// boundary (a GOP longer than the bound).
-	pub duration_max: u64,
+	/// A publisher that controls its encoder knows its keyframe cadence up front, so a consumer
+	/// can size buffers or write an HLS `EXT-X-TARGETDURATION` from the catalog alone, before
+	/// observing a single segment. No record ever exceeds it: the publisher fails the timeline
+	/// rather than contradict this.
+	///
+	/// Absent when the media decides instead, which is the common case for real-time (where a
+	/// GOP can be minutes long) and for a publisher importing a source it doesn't control. A
+	/// consumer needing a bound then derives one from the records it has seen.
+	pub duration_max: Option<u64>,
 
 	/// The wall-clock time of `pts` 0, in [`timescale`](Self::timescale) units since the moq
 	/// epoch ([`MOQ_EPOCH_UNIX_MILLIS`], 2020-01-01), if known. A consumer derives the wall-clock
@@ -59,14 +61,15 @@ impl Timeline {
 		1000
 	}
 
-	/// A timeline section naming `track` with the declared segment-duration bound
-	/// `duration_max` (in timescale units), at the default millisecond timescale and with no
-	/// wall-clock anchor. Set [`timescale`](Self::timescale) / [`wall`](Self::wall) afterward.
-	pub fn new(track: impl Into<String>, duration_max: u64) -> Self {
+	/// A timeline section naming `track`, at the default millisecond timescale, with no
+	/// declared duration bound and no wall-clock anchor. Set
+	/// [`timescale`](Self::timescale) / [`duration_max`](Self::duration_max) /
+	/// [`wall`](Self::wall) afterward.
+	pub fn new(track: impl Into<String>) -> Self {
 		Self {
 			track: track.into(),
 			timescale: Self::default_timescale(),
-			duration_max,
+			duration_max: None,
 			wall: None,
 		}
 	}
@@ -82,19 +85,25 @@ mod test {
 		let decoded: Timeline = serde_json::from_str(json).unwrap();
 		assert_eq!(decoded.track, "timeline.z");
 		assert_eq!(decoded.timescale, 1000);
-		assert_eq!(decoded.duration_max, 2000);
+		assert_eq!(decoded.duration_max, Some(2000));
 		assert_eq!(decoded.wall, None);
 	}
 
 	#[test]
-	fn duration_max_is_required() {
+	fn duration_max_is_optional() {
 		let json = r#"{"track":"timeline.z"}"#;
-		assert!(serde_json::from_str::<Timeline>(json).is_err());
+		let decoded: Timeline = serde_json::from_str(json).unwrap();
+		assert_eq!(decoded.duration_max, None);
+		assert_eq!(
+			serde_json::to_string(&decoded).unwrap(),
+			r#"{"track":"timeline.z","timescale":1000}"#
+		);
 	}
 
 	#[test]
 	fn roundtrip_with_wall() {
-		let mut timeline = Timeline::new("timeline.z", 2000);
+		let mut timeline = Timeline::new("timeline.z");
+		timeline.duration_max = Some(2000);
 		timeline.wall = Some(1_751_846_400_000);
 		let json = serde_json::to_string(&timeline).unwrap();
 		assert_eq!(

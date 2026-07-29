@@ -40,14 +40,14 @@ exactly the groups that segment's ranges cover from the relay's cache and
 transmuxes them to CMAF (one moof+mdat per fetch). A broadcast whose catalog
 advertises no timeline can't be served this way and is skipped.
 
-`EXT-X-TARGETDURATION` starts from the timeline's declared `durationMax`,
-rounded up to whole seconds: the publisher knows its segment duration up front
-(the import declares the source playlist's target duration), so the very first
-playlist carries the real value instead of one grown from observation. The
-bound is a target rather than a guarantee, though, since a single GOP longer
-than it can't be split, so the exporter raises the target duration to cover any
-segment that overran. When the timeline advertises a wall-clock anchor, the
-playlist carries `EXT-X-PROGRAM-DATE-TIME`.
+`EXT-X-TARGETDURATION` starts from the timeline's `durationMax` when the
+publisher declared one, rounded up to whole seconds, so the very first playlist
+carries the real value instead of one grown from observation. Most publishers
+can't promise a bound (a real-time GOP can run for minutes), so the exporter
+also raises the target duration to cover every segment in the window: a
+playlist whose `EXTINF` exceeds its target duration is invalid. When the
+timeline advertises a wall-clock anchor, the playlist carries
+`EXT-X-PROGRAM-DATE-TIME`.
 
 One server is path-based, so it can expose many broadcasts at once:
 
@@ -105,8 +105,9 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
   own media playlist in an `AUDIO` group.
 - **Import** currently handles classic HLS (no LL-HLS partial segments on the
   import side) and prefers H.264 renditions. The source playlist's segmentation
-  is preserved: the primary variant cuts the broadcast's timeline at each
-  source segment, so exporting the import reproduces the original boundaries.
+  is preserved: every variant cuts the broadcast's timeline at each source
+  segment (duplicate cuts are ignored), so exporting the import reproduces the
+  original boundaries.
 - **LL-HLS parts and DASH** are not implemented yet. Parts need sub-group
   records in the timeline; an MPD generator can be added over the same
   timeline + FETCH machinery later.

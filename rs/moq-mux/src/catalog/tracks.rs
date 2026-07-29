@@ -56,7 +56,7 @@ use super::hang::{Catalog, CatalogExt};
 /// fights the media pipeline for those sections; stay in your own.
 ///
 /// To index a custom track in the broadcast's timeline, enroll it via
-/// [`catalog::Producer::segmenter`](crate::catalog::Producer::segmenter) (or build it through
+/// [`catalog::Producer::enroll`](crate::catalog::Producer::enroll) (or build it through
 /// [`media_producer`](crate::catalog::Producer::media_producer), which does so for you).
 ///
 /// Opting into detection is only half of it: something has to measure. Write the track through a
@@ -528,7 +528,8 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
 
-		let timeline = catalog.timeline().unwrap();
+		let _recorder = catalog.enroll("video0").unwrap();
+		let timeline = catalog.timeline();
 		assert_eq!(timeline.section().track, hang::timeline::DEFAULT_NAME);
 		assert_eq!(
 			catalog.snapshot().timeline,
@@ -627,11 +628,7 @@ mod tests {
 
 			let net = broadcast.create_track("gps", None).unwrap();
 			let mut track = catalog
-				.media_producer(
-					net,
-					crate::catalog::hang::Container::Legacy,
-					crate::timeline::Kind::Audio,
-				)
+				.media_producer(net, crate::catalog::hang::Container::Legacy)
 				.unwrap();
 
 			// 40ms records of 5 kB: 1 Mbps, over more than the bitrate window.

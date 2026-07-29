@@ -34,11 +34,9 @@ impl<E: CatalogExt> Import<E> {
 		let rendition = reserved.video(track.name());
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let mut import = Self {
-			track: reserved.producer().media_producer(
-				track,
-				crate::catalog::hang::Container::Legacy,
-				crate::timeline::Kind::Video,
-			)?,
+			track: reserved
+				.producer()
+				.media_producer(track, crate::catalog::hang::Container::Legacy)?,
 			rendition,
 			catalog,
 		};

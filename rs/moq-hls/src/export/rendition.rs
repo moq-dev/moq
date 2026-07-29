@@ -194,27 +194,26 @@ impl Rendition {
 	pub(crate) fn playlist(&self) -> Snapshot {
 		let window = self.live.window();
 
-		// EXT-X-TARGETDURATION starts from the catalog's declared bound: the encoder (or
-		// cutter) knows its segment duration up front, so the first playlist already carries
-		// the real value instead of a guess grown from observation. Rounded up, since HLS
-		// wants whole seconds and the advertised value must never understate the bound.
+		// EXT-X-TARGETDURATION starts from the catalog's declared bound when the publisher
+		// offered one: it knows its segment duration up front, so the first playlist already
+		// carries the real value instead of a guess grown from observation. Rounded up, since
+		// HLS wants whole seconds and the advertised value must never understate the bound.
 		let declared = self
 			.section
 			.duration_max
-			.div_ceil((self.section.timescale as u64).max(1))
-			.max(1);
+			.map(|max| max.div_ceil((self.section.timescale as u64).max(1)))
+			.unwrap_or(0);
 
-		// The bound is a target, not a guarantee: a single GOP longer than it cannot be split,
-		// so the segmenter publishes an honest long segment (and warns). HLS requires
-		// EXT-X-TARGETDURATION to be at least every EXTINF, so cover the window rather than
-		// render a playlist players are entitled to reject.
+		// Most publishers can't promise a bound (a real-time GOP can be minutes long), and even
+		// a declared one is only a promise about content the publisher controls. HLS requires
+		// EXT-X-TARGETDURATION to be at least every EXTINF, so cover the window either way.
 		let observed = window
 			.segments
 			.iter()
 			.map(|s| s.duration.ceil().max(0.0) as u64)
 			.max()
 			.unwrap_or(0);
-		let target_duration = declared.max(observed);
+		let target_duration = declared.max(observed).max(1);
 
 		let program_date_time = window.segments.first().and_then(|first| self.wall_clock(first.pts));
 

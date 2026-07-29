@@ -312,16 +312,11 @@ struct Sink {
 impl Sink {
 	/// Mint an fMP4 importer that publishes only the roles in `select`.
 	///
-	/// `cuts` states whether this rendition declares the broadcast's segment boundaries:
-	/// boundaries are broadcast-wide, so exactly one rendition (the primary variant) cuts and
-	/// the rest only report their groups.
-	fn importer(&self, select: &select::Broadcast, cuts: bool) -> Fmp4 {
+	fn importer(&self, select: &select::Broadcast) -> Fmp4 {
 		// `reserve()` (not `clone()`) so the catalog isn't published until every
 		// importer's tracks resolve, keeping one-shot muxers from seeing a partial
 		// catalog (moq-mux reservation gate).
-		Fmp4::new(self.broadcast.clone(), self.catalog.reserve())
-			.with_select(select.clone())
-			.with_cut_on_boundary(cuts)
+		Fmp4::new(self.broadcast.clone(), self.catalog.reserve()).with_select(select.clone())
 	}
 }
 
@@ -336,12 +331,6 @@ struct TrackState {
 	/// separate audio rendition publishes video only).
 	select: select::Broadcast,
 	sink: Sink,
-	/// Whether this rendition declares the broadcast's segment boundaries (the source
-	/// playlist's segmentation): one cut per pushed segment. Exactly one track cuts.
-	cuts: bool,
-	/// The cutting track already declared the source's target duration as the broadcast's
-	/// segment-duration bound.
-	declared: bool,
 	/// The importer for the current init segment generation, minted by [`Self::ensure_map`].
 	importer: Option<Fmp4>,
 	next_sequence: Option<u64>,
@@ -355,14 +344,12 @@ struct TrackState {
 }
 
 impl TrackState {
-	fn new(label: String, playlist: Url, select: select::Broadcast, sink: Sink, cuts: bool) -> Self {
+	fn new(label: String, playlist: Url, select: select::Broadcast, sink: Sink) -> Self {
 		Self {
 			label,
 			playlist,
 			select,
 			sink,
-			cuts,
-			declared: false,
 			importer: None,
 			next_sequence: None,
 			next_discontinuity: None,
@@ -391,21 +378,6 @@ impl TrackState {
 		let playlist = fetcher.media_playlist(self.playlist.clone()).await?;
 		if target_duration.is_none() {
 			*target_duration = Some(playlist.target_duration);
-		}
-
-		// The cutting track reproduces the source's segmentation, so the source's target
-		// duration is the broadcast's declared bound; declare it before consuming segments,
-		// since the first init segment advertises the timeline and freezes it.
-		if self.cuts && !self.declared {
-			self.declared = true;
-			match moq_net::Timestamp::new(playlist.target_duration.max(1), moq_net::Timescale::SECOND) {
-				Ok(bound) => {
-					if let Err(err) = self.sink.catalog.segmenter().set_duration_max(bound) {
-						warn!(label = %self.label, %err, "failed to declare the source target duration");
-					}
-				}
-				Err(err) => warn!(label = %self.label, %err, "unrepresentable source target duration"),
-			}
 		}
 
 		self.consume_segments(fetcher, &playlist).await
@@ -536,7 +508,7 @@ impl TrackState {
 		}
 
 		let bytes = fetcher.fetch(&resource).await?;
-		let mut importer = self.sink.importer(&self.select, self.cuts);
+		let mut importer = self.sink.importer(&self.select);
 
 		// The importer buffers internally, so a fully-parsed init segment leaves it
 		// initialized; any trailing partial atom just waits for the next segment. A
@@ -584,11 +556,10 @@ impl TrackState {
 		if reanchored {
 			importer.seek(group_sequence)?;
 		}
-		// Every playlist entry is a source segment boundary; declare it even when the media
-		// carries no styp (the importer dedupes, so a styp-bearing segment cuts only once).
-		if self.cuts {
-			importer.cut();
-		}
+		// Every playlist entry is a source segment boundary, so declare it even when the media
+		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
+		// that would land inside its minimum segment duration, so the duplicates cost nothing.
+		importer.cut();
 		importer.decode(&bytes)?;
 
 		self.media_range = range;
@@ -705,7 +676,7 @@ impl Import {
 		// record flushed mid-pass would omit every rendition that hasn't loaded its init
 		// segment yet (permanent EXT-X-GAP) and fold that rendition's first groups into
 		// whichever segment flushes next.
-		let _hold = self.sink.catalog.segmenter().hold();
+		let _hold = self.sink.catalog.timeline().hold();
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
@@ -739,8 +710,8 @@ impl Import {
 		})
 	}
 
-	fn track(&self, label: impl Into<String>, playlist: Url, select: select::Broadcast, cuts: bool) -> TrackState {
-		TrackState::new(label.into(), playlist, select, self.sink.clone(), cuts)
+	fn track(&self, label: impl Into<String>, playlist: Url, select: select::Broadcast) -> TrackState {
+		TrackState::new(label.into(), playlist, select, self.sink.clone())
 	}
 
 	async fn ensure_tracks(&mut self) -> Result<()> {
@@ -752,7 +723,7 @@ impl Import {
 		let body = self.fetcher.fetch_url(self.base_url.clone()).await?;
 		if !m3u8_rs::is_master_playlist(&body) {
 			// Fallback: treat the provided URL as a single (muxed) media playlist.
-			let track = self.track("video[0]", self.base_url.clone(), select_muxed(), true);
+			let track = self.track("video[0]", self.base_url.clone(), select_muxed());
 			self.video.push(track);
 			return Ok(());
 		}
@@ -770,7 +741,7 @@ impl Import {
 				if let Some(uri) = &audio_tag.uri {
 					let audio_url = resolve_uri(&self.base_url, uri)?;
 					// Boundaries follow the video variant; audio only reports its groups.
-					self.audio = Some(self.track("audio", audio_url, select_audio_only(), false));
+					self.audio = Some(self.track("audio", audio_url, select_audio_only()));
 				} else {
 					warn!(%group_id, "audio rendition missing URI");
 				}
@@ -788,9 +759,7 @@ impl Import {
 		};
 		for (index, variant) in variants.iter().enumerate() {
 			let video_url = resolve_uri(&self.base_url, &variant.uri)?;
-			// The first (primary) variant declares the broadcast's segment boundaries;
-			// sibling renditions are aligned to it by the segmenter.
-			let track = self.track(format!("video[{index}]"), video_url, variant_select.clone(), index == 0);
+			let track = self.track(format!("video[{index}]"), video_url, variant_select.clone());
 			self.video.push(track);
 		}
 
@@ -1089,7 +1058,6 @@ mod tests {
 			Url::parse("https://example.com/media.m3u8").unwrap(),
 			select_muxed(),
 			sink(),
-			true,
 		)
 	}
 

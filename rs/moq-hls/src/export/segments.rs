@@ -3,7 +3,7 @@
 //! The broadcast has a single timeline track; the catalog watcher reads it and fans each
 //! record out to every rendition as a row: the segment's number, timing, and this
 //! rendition's group ranges (empty when the record carries no content for it, a gap). Records
-//! are self-contained (the segmenter only publishes a segment once its content is final on
+//! are self-contained (the timeline only publishes a segment once its content is final on
 //! every track), so every row is immediately listable and fetchable. Two things read the
 //! window:
 //!

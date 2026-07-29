@@ -302,11 +302,7 @@ mod tests {
 		// Three GOPs, 2s apart: groups 0 and 1 are complete, group 2 is the live edge.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(1_000_000, false)).unwrap();
@@ -332,7 +328,7 @@ mod tests {
 		assert_eq!(playlist.segments[1].segment, 1);
 		assert_eq!(
 			playlist.target_duration, 2,
-			"the catalog's declared durationMax, in whole seconds"
+			"the observed segment duration, in whole seconds"
 		);
 		assert!(!playlist.finished);
 
@@ -363,11 +359,11 @@ mod tests {
 	// The property HLS needs from the timeline rework: audio and video renditions share one
 	// segment numbering, cut at the same boundaries. Video is one group per segment; an audio
 	// segment packs every audio group inside the video segment's span.
-	// The declared bound is a target, not a guarantee: a GOP longer than it can't be split, so
-	// the segmenter publishes an honest long segment. EXT-X-TARGETDURATION has to cover it,
-	// since a playlist whose EXTINF exceeds it is invalid.
+	// Most publishers declare no durationMax (a real-time GOP can be minutes long), so the
+	// exporter has to derive EXT-X-TARGETDURATION from the segments it has: a playlist whose
+	// EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
-	async fn target_duration_covers_a_segment_that_overran_the_bound() {
+	async fn target_duration_covers_the_window_without_a_declared_bound() {
 		let origin = moq_net::Origin::random().produce();
 		let mut broadcast = origin
 			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
@@ -380,14 +376,10 @@ mod tests {
 		registration.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8));
 		drop(reserved);
 
-		// 3s GOPs against the default 2s bound: every segment is one whole GOP.
+		// 3s GOPs against the default 1s minimum: every segment is one whole GOP.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(3_000_000, true)).unwrap();
@@ -403,7 +395,7 @@ mod tests {
 		assert_eq!(playlist.segments[0].duration, 3.0);
 		assert_eq!(
 			playlist.target_duration, 3,
-			"the declared bound is 2s, but a 3s segment must not exceed EXT-X-TARGETDURATION"
+			"no bound was declared, so the target duration must still cover the 3s segment"
 		);
 	}
 
@@ -428,19 +420,11 @@ mod tests {
 
 		let video_track = broadcast.create_track("video0", None).unwrap();
 		let mut video = catalog
-			.media_producer(
-				video_track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(video_track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		let audio_track = broadcast.create_track("audio0", None).unwrap();
 		let mut audio = catalog
-			.media_producer(
-				audio_track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Audio,
-			)
+			.media_producer(audio_track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 
 		// Interleaved by pts, as a muxer would demux them: video keyframes every 2s open the
@@ -522,11 +506,7 @@ mod tests {
 		// publisher finishes.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -579,7 +559,7 @@ mod tests {
 		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), media);
-		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME, 2000));
+		catalog.timeline = Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME));
 		renditions.sync(&source, &catalog);
 
 		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
@@ -587,7 +567,7 @@ mod tests {
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
 		let empty = moq_mux::catalog::hang::Catalog {
-			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME, 2000)),
+			timeline: Some(hang::catalog::Timeline::new(hang::timeline::DEFAULT_NAME)),
 			..Default::default()
 		};
 		renditions.sync(&source, &empty);
@@ -622,11 +602,7 @@ mod tests {
 
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
@@ -685,11 +661,7 @@ mod tests {
 		// Groups 0 and 1 are complete; group 2 is the live edge until the publisher drops.
 		let track = broadcast.create_track("video0", None).unwrap();
 		let mut media = catalog
-			.media_producer(
-				track,
-				moq_mux::catalog::hang::Container::Legacy,
-				moq_mux::timeline::Kind::Video,
-			)
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
 			.unwrap();
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();

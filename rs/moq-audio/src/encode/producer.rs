@@ -139,7 +139,7 @@ impl<E: CatalogExt> Producer<E> {
 			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec))?,
 		};
 		let name = track.name().to_string();
-		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire, moq_mux::timeline::Kind::Audio)?;
+		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;
 
 		let mut catalog_mut = catalog.clone();
 		let config = encoder.catalog();

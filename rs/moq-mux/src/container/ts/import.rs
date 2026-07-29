@@ -730,11 +730,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
 	// entry on drop only exists once this function returns successfully, so an entry
 	// published first would be stranded.
-	let media = catalog.media_producer(
-		track,
-		crate::catalog::hang::Container::Legacy,
-		crate::timeline::Kind::Video,
-	)?;
+	let media = catalog.media_producer(track, crate::catalog::hang::Container::Legacy)?;
 
 	let mut guard = catalog.lock();
 	let Some(mpegts) = guard.mpegts_mut() else {

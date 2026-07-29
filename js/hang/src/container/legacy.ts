@@ -50,7 +50,7 @@ export interface ProducerProps {
 	/**
 	 * Report each group open (sequence + start timestamp) into the broadcast's timeline, so
 	 * consumers can index the media without downloading it. Mint one via
-	 * {@link Timeline.Segmenter.track}.
+	 * {@link Timeline.Producer.track}.
 	 */
 	timeline?: TimelineRecorder;
 }
