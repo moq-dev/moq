@@ -35,7 +35,12 @@ export class Camera {
 	/** The available cameras and which one to use. */
 	readonly device: Device<"video">;
 
-	/** The live-editable capture constraints, merged over {@link DEFAULT_CONSTRAINTS}. */
+	/**
+	 * The live-editable capture constraints, merged over {@link DEFAULT_CONSTRAINTS}.
+	 *
+	 * `facingMode` picks the front or rear camera, but only while `device.preferred` is unset: an
+	 * explicit deviceId names one camera and wins.
+	 */
 	constraints: Signal<Video.Constraints | undefined>;
 
 	readonly #out: CameraOutput = {
