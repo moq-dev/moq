@@ -234,6 +234,30 @@ The first pad of each kind is always `video_0` / `audio_0` regardless of catalog
 | Audio | AAC   | `audio/mpeg` (v4)     |
 | Audio | MP3   | `audio/mpeg` (v1/v2, layer 3) |
 | Audio | Opus  | `audio/x-opus`        |
+| Text  | Captions | `text/x-raw` (utf8) |
+
+#### Captions
+
+A `text/x-raw` pad is published as a hang text rendition, one WebVTT cue per group. Each buffer is
+one decoded cue: the PTS is the cue's start on the same clock as audio and video, and the buffer
+duration is its end, so a cue without a duration is dropped rather than left on screen forever.
+
+This is where captions come from, because ffmpeg cannot mux a subtitle track into fragmented MP4
+and so the `moq import fmp4` path can't carry one. A demuxer that resolves timed text for you
+(`qtdemux` on a 3GPP timed-text track, for example) can feed the pad directly:
+
+```sh
+gst-launch-1.0 -e filesrc location=input.mp4 ! qtdemux name=demux \
+    demux.video_0 ! queue ! h264parse ! identity sync=true ! mux.sink_0 \
+    demux.audio_0 ! queue ! aacparse ! identity sync=true ! mux.sink_1 \
+    demux.subtitle_0 ! queue ! identity sync=true ! mux.sink_2 \
+    moqsink name=mux url="http://localhost:4443" broadcast="example.hang"
+```
+
+Cue text is escaped before it goes on the wire, so markup in the source shows as literal text
+rather than opening a WebVTT tag. Note that `gst-launch` builds every named branch up front: point
+`demux.subtitle_0` at a file with no text track and that branch never links, leaving its queue
+without EOS so the pipeline will not shut down.
 
 ### moqsrc (subscribe)
 
