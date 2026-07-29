@@ -20,7 +20,8 @@
 //! - **Records flush on completeness.** A segment's record is published only once every
 //!   enrolled track has reported a group at or past the segment's end (or closed), proving the
 //!   segment's group ranges are final on every track. The record is then self-contained and
-//!   immediately servable.
+//!   immediately servable. [`Producer::reserve`] extends that across a batch of enrollments,
+//!   the way the catalog's own reservation does.
 //!
 //! Alignment falls out of construction: every track maps its groups onto the same boundary
 //! list, so segment N covers the same span of content time on every track, which is what HLS
@@ -142,8 +143,9 @@ struct State {
 	next_segment: u64,
 	/// Every enrolled track, keyed by media track name.
 	tracks: BTreeMap<String, TrackState>,
-	/// Live [`Hold`]s: while any exists, no record flushes (more tracks are still enrolling).
-	holds: usize,
+	/// Live [`Reserved`] handles: while any exists, no record flushes (more tracks are still
+	/// enrolling). Mirrors the catalog's own reservation gate.
+	reservers: usize,
 	/// A segment overran [`Config::duration_max`]: `(segment, duration)`. The timeline stops
 	/// publishing, since the catalog's promise is already broken.
 	overrun: Option<(u64, Duration)>,
@@ -200,9 +202,9 @@ impl State {
 	/// reached a boundary stops voting instead of holding the timeline open forever.
 	fn pump(&mut self, finished: bool) {
 		// With nothing enrolled there is nothing to describe. A record is immutable once
-		// published, so a caller that knows more tracks are still enrolling holds it back (see
-		// [`Producer::hold`]), and an overrun has already broken the catalog's promise.
-		if self.tracks.is_empty() || self.holds > 0 || self.overrun.is_some() {
+		// published, so a caller that knows more tracks are still enrolling withholds it (see
+		// [`Producer::reserve`]), and an overrun has already broken the catalog's promise.
+		if self.tracks.is_empty() || self.reservers > 0 || self.overrun.is_some() {
 			return;
 		}
 
@@ -373,8 +375,8 @@ impl State {
 
 	/// The terminal flush: publish what the media finalized, then the open tail.
 	fn finish(&mut self) {
-		// Nothing more will enroll, so an outstanding hold has nothing left to wait for.
-		self.holds = 0;
+		// Nothing more will enroll, so an outstanding reservation has nothing left to wait for.
+		self.reservers = 0;
 		self.pump(true);
 
 		if self.overrun.is_some() {
@@ -445,7 +447,7 @@ impl Producer {
 				cuts: VecDeque::new(),
 				next_segment: 0,
 				tracks: BTreeMap::new(),
-				holds: 0,
+				reservers: 0,
 				overrun: None,
 				timescale: Timescale::MILLI,
 			})),
@@ -508,17 +510,23 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Hold record publishing back until the returned [`Hold`] drops.
+	/// Begin reserving the track set, returning a clonable [`Reserved`].
 	///
-	/// A record is immutable once published, and completeness is judged against the tracks
-	/// enrolled *at that moment*, so a segment that flushes while a sibling rendition is still
-	/// enrolling omits it for good (and that rendition's earlier groups then land in whatever
-	/// segment flushes next). Take a hold around a batch that enrolls or feeds several tracks
-	/// (an HLS import walking its renditions one at a time) so every one of them is accounted
-	/// for before anything is published. Holds nest; the last one to drop flushes.
-	pub fn hold(&self) -> Hold {
-		self.state.lock().unwrap().holds += 1;
-		Hold {
+	/// The counterpart to [`catalog::Producer::reserve`](crate::catalog::Producer::reserve), for
+	/// the same reason: while any `Reserved` clone is alive the track set may still grow, so
+	/// records are withheld from the broadcast. A record is immutable once published and its
+	/// completeness is judged against the tracks enrolled *at that moment*, so a segment that
+	/// flushes while a sibling rendition is still enrolling omits it for good, and that
+	/// rendition's earlier groups then land in whatever segment flushes next.
+	///
+	/// Hand it (or clones) to whatever brings the tracks up, so an importer that enrolls its
+	/// renditions one at a time publishes nothing until they are all in. Unlike the catalog's,
+	/// this gate is not one-shot: the catalog is a snapshot, so only its *first* publish needs
+	/// protecting, while every timeline record is an immutable log entry. Take a fresh
+	/// reservation around every batch.
+	pub fn reserve(&self) -> Reserved {
+		self.state.lock().unwrap().reservers += 1;
+		Reserved {
 			state: self.state.clone(),
 		}
 	}
@@ -551,17 +559,27 @@ impl Producer {
 	}
 }
 
-/// Holds [`Producer`] record publishing back while tracks are still enrolling.
+/// A clonable reservation withholding [`Producer`] records while tracks are still enrolling.
 ///
-/// Minted by [`Producer::hold`]; whatever became complete meanwhile flushes when it drops.
-pub struct Hold {
+/// Made via [`Producer::reserve`], mirroring [`catalog::Reserved`](crate::catalog::Reserved).
+/// Whatever became complete meanwhile flushes once the last clone drops.
+pub struct Reserved {
 	state: Arc<Mutex<State>>,
 }
 
-impl Drop for Hold {
+impl Clone for Reserved {
+	fn clone(&self) -> Self {
+		self.state.lock().unwrap().reservers += 1;
+		Self {
+			state: self.state.clone(),
+		}
+	}
+}
+
+impl Drop for Reserved {
 	fn drop(&mut self) {
 		let mut state = self.state.lock().unwrap();
-		state.holds = state.holds.saturating_sub(1);
+		state.reservers = state.reservers.saturating_sub(1);
 		state.pump(false);
 	}
 }
@@ -960,9 +978,9 @@ mod test {
 	// producer that enrolls its tracks one batch at a time (an HLS import walking its
 	// renditions) holds flushing back until they are all in.
 	#[tokio::test]
-	async fn a_hold_defers_flushing_until_every_track_enrolls() {
+	async fn a_reservation_defers_flushing_until_every_track_enrolls() {
 		let (broadcast, mut timeline) = setup();
-		let hold = timeline.hold();
+		let reserved = timeline.reserve();
 
 		// The primary rendition runs a whole batch of segments through before its sibling has
 		// even loaded an init segment.
@@ -976,12 +994,12 @@ mod test {
 			second.record(seq, ms(t), true);
 		}
 
-		drop(hold);
+		drop(reserved);
 		drop(first);
 		drop(second);
 		timeline.finish().unwrap();
 
-		// Both renditions are indexed from segment 0. Without the hold, segments 0 and 1 would
+		// Both renditions are indexed from segment 0. Without the reservation, segments 0 and 1 would
 		// have flushed knowing only video0 (a permanent gap for video1), and video1's first two
 		// groups would have folded into segment 2.
 		let entries = drain(&broadcast, &timeline).await;
@@ -1150,15 +1168,15 @@ mod test {
 		assert_eq!(timeline.section().wall, Some(1_000));
 	}
 
-	// Producers that each guard their own batch nest, so the first to finish doesn't publish
-	// records the others are still filling in.
+	// Clones nest like the catalog's, so the first batch to finish doesn't publish records the
+	// others are still filling in.
 	#[tokio::test]
-	async fn holds_nest() {
+	async fn reservations_nest() {
 		let (broadcast, mut timeline) = setup();
 		let mut video = timeline.track("video0").unwrap();
 
-		let outer = timeline.hold();
-		let inner = timeline.hold();
+		let outer = timeline.reserve();
+		let inner = outer.clone();
 
 		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
 			video.record(seq, ms(t), true);
@@ -1167,26 +1185,26 @@ mod test {
 		drop(inner);
 		assert!(
 			drain(&broadcast, &timeline).await.is_empty(),
-			"the outer hold still gates"
+			"the other clone still gates"
 		);
 
 		drop(outer);
 		assert_eq!(
 			drain(&broadcast, &timeline).await.len(),
 			2,
-			"the last hold released flushes"
+			"the last clone dropped flushes"
 		);
 
 		drop(video);
 		timeline.finish().unwrap();
 	}
 
-	// A hold outstanding when the broadcast ends must not strand the terminal flush.
+	// A reservation outstanding when the broadcast ends must not strand the terminal flush.
 	#[tokio::test]
-	async fn finish_overrides_an_outstanding_hold() {
+	async fn finish_overrides_an_outstanding_reservation() {
 		let (broadcast, mut timeline) = setup();
 		let mut video = timeline.track("video0").unwrap();
-		let hold = timeline.hold();
+		let reserved = timeline.reserve();
 
 		video.record(0, ms(0), true);
 		video.record(1, ms(2_000), true);
@@ -1203,7 +1221,7 @@ mod test {
 		);
 
 		// Dropping it afterwards is a no-op rather than an underflow.
-		drop(hold);
+		drop(reserved);
 	}
 
 	#[tokio::test]

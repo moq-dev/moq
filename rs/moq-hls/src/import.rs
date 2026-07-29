@@ -671,12 +671,12 @@ impl Import {
 	async fn step(&mut self, on_error: OnError) -> Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
-		// Hold the timeline back for the whole pass. Renditions are ingested one at a time, and
-		// a record is immutable once published against the tracks enrolled at that moment, so a
-		// record flushed mid-pass would omit every rendition that hasn't loaded its init
-		// segment yet (permanent EXT-X-GAP) and fold that rendition's first groups into
-		// whichever segment flushes next.
-		let _hold = self.sink.catalog.timeline().hold();
+		// Reserve the timeline for the whole pass, the way each importer reserves the catalog.
+		// Renditions are ingested one at a time, and a record is immutable once published
+		// against the tracks enrolled at that moment, so a record flushed mid-pass would omit
+		// every rendition that hasn't loaded its init segment yet (a permanent EXT-X-GAP) and
+		// fold that rendition's first groups into whichever segment flushes next.
+		let _reserved = self.sink.catalog.timeline().reserve();
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;

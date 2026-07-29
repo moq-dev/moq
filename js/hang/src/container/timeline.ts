@@ -137,8 +137,8 @@ export class Producer {
 	#cuts: Time.Micro[] = [];
 	#nextSegment = 0;
 	#tracks = new Map<string, TrackState>();
-	// Live holds: while any exists, no record flushes (more tracks are still enrolling).
-	#holds = 0;
+	// Live reservations: while any exists, no record flushes (more tracks are still enrolling).
+	#reservers = 0;
 	// A segment overran durationMax, so the timeline stopped publishing.
 	#overrun?: Error;
 	// The wall-clock time of pts 0, in timescale units since the moq epoch (advertised in the section).
@@ -192,22 +192,26 @@ export class Producer {
 	}
 
 	/**
-	 * Hold record publishing back until the returned dispose function is called.
+	 * Begin reserving the track set, returning a function that releases the reservation.
 	 *
-	 * A record is immutable once published, and completeness is judged against the tracks
-	 * enrolled *at that moment*, so a segment that flushes while a sibling rendition is still
-	 * enrolling omits it for good (and that rendition's earlier groups then land in whatever
-	 * segment flushes next). Take a hold around a batch that enrolls or feeds several tracks so
-	 * every one of them is accounted for before anything is published. Holds nest; the last one
-	 * released flushes.
+	 * The counterpart to the Rust catalog's `reserve`, for the same reason: while any
+	 * reservation is outstanding the track set may still grow, so records are withheld from the
+	 * broadcast. A record is immutable once published and its completeness is judged against the
+	 * tracks enrolled *at that moment*, so a segment that flushes while a sibling rendition is
+	 * still enrolling omits it for good, and that rendition's earlier groups then land in
+	 * whatever segment flushes next.
+	 *
+	 * Take one around whatever brings the tracks up, so a producer that enrolls its renditions
+	 * one at a time publishes nothing until they are all in. Reservations nest, and releasing
+	 * the same one twice is a no-op; the last one released flushes.
 	 */
-	hold(): () => void {
-		this.#holds += 1;
+	reserve(): () => void {
+		this.#reservers += 1;
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
-			this.#holds -= 1;
+			this.#reservers -= 1;
 			this.#pump(false);
 		};
 	}
@@ -232,8 +236,8 @@ export class Producer {
 	 * Throws if a segment exceeded {@link ProducerProps.durationMax}.
 	 */
 	finish(): void {
-		// Nothing more will enroll, so an outstanding hold has nothing left to wait for.
-		this.#holds = 0;
+		// Nothing more will enroll, so an outstanding reservation has nothing left to wait for.
+		this.#reservers = 0;
 		this.#pump(true);
 
 		if (this.#overrun) throw this.#overrun;
@@ -292,7 +296,7 @@ export class Producer {
 	// will report again, so one that never reached a boundary stops voting instead of holding
 	// the timeline open forever.
 	#pump(finished: boolean): void {
-		if (this.#tracks.size === 0 || this.#holds > 0 || this.#overrun) return;
+		if (this.#tracks.size === 0 || this.#reservers > 0 || this.#overrun) return;
 		while (this.#closeSegment(finished)) {
 			if (this.#overrun) break;
 		}

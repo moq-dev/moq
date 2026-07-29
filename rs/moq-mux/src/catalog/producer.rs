@@ -246,7 +246,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// section) when the first media track enrolls, so reading this costs nothing on a
 	/// broadcast that never segments. Use it to declare boundaries
 	/// ([`cut`](crate::timeline::Producer::cut)) or to hold publishing back while tracks
-	/// enroll ([`hold`](crate::timeline::Producer::hold)).
+	/// enroll ([`reserve`](crate::timeline::Producer::reserve), the timeline's counterpart to
+	/// this producer's own [`reserve`](Self::reserve)).
 	pub fn timeline(&self) -> crate::timeline::Producer {
 		self.timeline.clone()
 	}

@@ -231,9 +231,9 @@ test("the final segment runs to the reported end", async () => {
 
 // A record is immutable and judged against the tracks enrolled when it flushes, so a producer
 // that enrolls its tracks one batch at a time holds flushing back until they are all in.
-test("a hold defers flushing until every track enrolls", async () => {
+test("a reservation defers flushing until every track enrolls", async () => {
 	const { timeline, records } = capture();
-	const release = timeline.hold();
+	const release = timeline.reserve();
 
 	// The primary rendition runs a whole batch of segments through before its sibling exists.
 	const first = timeline.track("video0");
@@ -387,13 +387,13 @@ test("the wall-clock anchor is advertised from the config", () => {
 	expect(capture({ wall: new Date(0) }).timeline.section().wall).toBe(u53(0));
 });
 
-// Producers that each guard their own batch nest, so the first to finish doesn't publish
-// records the others are still filling in.
-test("holds nest", async () => {
+// Reservations nest like the catalog's, so the first batch to finish doesn't publish records
+// the others are still filling in.
+test("reservations nest", async () => {
 	const { timeline, records } = capture();
 
-	const outer = timeline.hold();
-	const inner = timeline.hold();
+	const outer = timeline.reserve();
+	const inner = timeline.reserve();
 
 	const first = timeline.track("video0");
 	for (const [seq, ms] of [
@@ -404,7 +404,7 @@ test("holds nest", async () => {
 		first.record(seq, us(ms));
 	}
 
-	// If the holds didn't nest, releasing this one would publish segment 0 without video1.
+	// If reservations didn't nest, releasing this one would publish segment 0 without video1.
 	inner();
 
 	const second = timeline.track("video1");
