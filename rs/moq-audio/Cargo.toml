@@ -67,12 +67,10 @@ rubato = { version = "4.0", default-features = false }
 # trade we refused for Opus. Optional, and BSD-3-Clause like the upstream it was
 # ported from.
 #
-# Caveat, and why `aec` is not on by default: 0.1.0 is the only release, and it
-# panics when the adaptive filter shrinks (dignifiedquire/sonora#14), which a
-# long call on real hardware does hit. The one-line fix is upstream but
-# unreleased (#15, tracked in #24), and this workspace builds `panic = "abort"`,
-# so there is nothing to catch. Bump to 0.1.1 the moment it exists.
-sonora = { version = "0.1", optional = true }
+# 0.2.0 or newer: 0.1.0 panics when the adaptive filter shrinks, which a call
+# whose echo path changes length does reach (dignifiedquire/sonora#14). The
+# `survives_a_moving_echo_delay` test covers that path.
+sonora = { version = "0.2", optional = true }
 thiserror = "2"
 # Only the device features need an async runtime: the on-demand capture loop
 # awaits frames and demand transitions, and playback awaits the driver thread.

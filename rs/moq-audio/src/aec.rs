@@ -559,6 +559,8 @@ fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::VecDeque;
+
 	use super::*;
 
 	/// Samples per channel in one 10 ms frame at `rate`.
@@ -774,74 +776,148 @@ mod tests {
 		assert!(buf.iter().any(|s| s.abs() > 0.01), "audio was dropped");
 	}
 
-	/// The point of the whole module: audio played out the speaker and picked up
-	/// by the microphone has to come back quieter than it went in.
-	///
-	/// A synthetic room, since a real one needs hardware: the reference is noise,
-	/// and the microphone hears that same noise attenuated and delayed, with
-	/// nobody talking over it.
-	#[test]
-	fn cancels_the_echo_of_what_was_played() {
-		// The echo canceller on its own. Noise suppression would also attenuate
-		// noise, and gain control would move the level under the measurement.
-		let canceller = detached();
-		canceller.inner.state.lock().unwrap().processor = Some(
-			AudioProcessing::builder()
-				.capture_config(StreamConfig::new(48_000, 1))
-				.render_config(reference_config())
-				.config(sonora::Config {
-					echo_canceller: Some(EchoCanceller::default()),
-					..Default::default()
-				})
-				.build(),
-		);
-		{
-			let mut state = canceller.inner.state.lock().unwrap();
-			state.capture = StreamConfig::new(48_000, 1);
-			state.resize();
+	/// A synthetic speaker-to-microphone path, since a real one needs hardware:
+	/// the reference is noise and the microphone hears that same noise
+	/// attenuated and delayed, with nobody talking over it.
+	struct Room {
+		canceller: Canceller,
+		prod: ResamplingProd<f32>,
+		noise: Noise,
+		/// Frames played, newest last, so the delay can move mid-run.
+		history: VecDeque<Vec<f32>>,
+		delay: usize,
+		frame: usize,
+	}
+
+	/// The most speaker-to-microphone delay [`Room`] can hold, in 10 ms frames.
+	const MAX_DELAY: usize = 12;
+
+	/// What a laptop lid does to its own speaker on the way to its own
+	/// microphone.
+	const ATTENUATION: f32 = 0.5;
+
+	impl Room {
+		/// The echo canceller on its own. Noise suppression would also attenuate
+		/// noise, and gain control would move the level under the measurement.
+		fn new(delay: usize) -> Self {
+			let canceller = detached();
+			let capture = StreamConfig::new(48_000, 1);
+			{
+				let mut state = canceller.inner.state.lock().unwrap();
+				state.processor = Some(
+					AudioProcessing::builder()
+						.capture_config(capture)
+						.render_config(reference_config())
+						.config(sonora::Config {
+							echo_canceller: Some(EchoCanceller::default()),
+							..Default::default()
+						})
+						.build(),
+				);
+				state.capture = capture;
+				state.resize();
+			}
+
+			let prod = tap(&canceller);
+			Self {
+				canceller,
+				prod,
+				noise: Noise::default(),
+				history: VecDeque::with_capacity(MAX_DELAY + 1),
+				delay,
+				frame: frame(48_000),
+			}
 		}
 
-		let mut prod = tap(&canceller);
+		/// Play 10 ms of noise, hear its echo, and report the energy the
+		/// microphone picked up against what came back out of the canceller.
+		fn round(&mut self) -> (f64, f64) {
+			let played: Vec<f32> = (0..self.frame).map(|_| self.noise.next()).collect();
 
-		let frame = frame(48_000);
-		// Two frames of speaker-to-microphone delay, well inside what the
-		// canceller searches, and the attenuation a laptop lid gives.
-		const DELAY: usize = 2;
-		const ATTENUATION: f32 = 0.5;
-
-		let mut noise = Noise::default();
-		let mut history = vec![vec![0.0f32; frame]; DELAY + 1];
-		let (mut echo_energy, mut output_energy, mut measured) = (0.0f64, 0.0f64, 0);
-
-		// Two seconds: the adaptive filter needs a moment before its output means
-		// anything, so only the last half second is measured.
-		for round in 0..200 {
-			let played: Vec<f32> = (0..frame).map(|_| noise.next()).collect();
-			let mut reference = vec![0.0f32; frame * BUS_CHANNELS];
+			let mut reference = vec![0.0f32; self.frame * BUS_CHANNELS];
 			for (i, sample) in played.iter().enumerate() {
 				reference[i * BUS_CHANNELS] = *sample;
 				reference[i * BUS_CHANNELS + 1] = *sample;
 			}
-			prod.push_interleaved(&reference);
+			self.prod.push_interleaved(&reference);
 
-			history.rotate_left(1);
-			history[DELAY].copy_from_slice(&played);
-			let mut heard: Vec<f32> = history[0].iter().map(|s| s * ATTENUATION).collect();
+			self.history.push_back(played);
+			if self.history.len() > MAX_DELAY + 1 {
+				self.history.pop_front();
+			}
 
-			let before: f64 = heard.iter().map(|s| (*s as f64).powi(2)).sum();
-			canceller.process(&mut heard);
-			let after: f64 = heard.iter().map(|s| (*s as f64).powi(2)).sum();
+			let echo = self.history.len().saturating_sub(1 + self.delay);
+			let mut heard: Vec<f32> = self.history[echo].iter().map(|s| s * ATTENUATION).collect();
 
+			let before = energy(&heard);
+			self.canceller.process(&mut heard);
+			(before, energy(&heard))
+		}
+	}
+
+	fn energy(samples: &[f32]) -> f64 {
+		samples.iter().map(|s| (*s as f64).powi(2)).sum()
+	}
+
+	/// The point of the whole module: audio played out the speaker and picked up
+	/// by the microphone has to come back quieter than it went in.
+	#[test]
+	fn cancels_the_echo_of_what_was_played() {
+		let mut room = Room::new(2);
+		let (mut heard, mut left, mut measured) = (0.0f64, 0.0f64, 0);
+
+		// Two seconds: the adaptive filter needs a moment before its output means
+		// anything, so only the last half second is measured.
+		for round in 0..200 {
+			let (before, after) = room.round();
 			if round >= 150 {
-				echo_energy += before;
-				output_energy += after;
+				heard += before;
+				left += after;
 				measured += 1;
 			}
 		}
 
 		assert!(measured > 0);
-		let attenuation = 10.0 * (echo_energy / output_energy.max(f64::MIN_POSITIVE)).log10();
+		let attenuation = 10.0 * (heard / left.max(f64::MIN_POSITIVE)).log10();
 		assert!(attenuation > 20.0, "echo was only attenuated by {attenuation:.1} dB");
+	}
+
+	/// A call where the echo path changes length, which is what a device switch,
+	/// an output stall, or somebody picking the laptop up looks like.
+	///
+	/// Reaching the end *is* the assertion. The adaptive filter grows to cover a
+	/// long delay and has to shrink again when it shortens, and until sonora
+	/// 0.2.0 that shrink indexed a slice backwards and panicked
+	/// (dignifiedquire/sonora#14, `slice index starts at 13 but ends at 12`).
+	/// Cargo builds test binaries with unwinding, so here that surfaces as a
+	/// failure; a real binary takes the workspace's `panic = "abort"` and dies.
+	#[test]
+	fn survives_a_moving_echo_delay() {
+		let mut room = Room::new(MAX_DELAY - 4);
+
+		// Long enough for the filter to grow past the size it starts at.
+		for _ in 0..400 {
+			room.round();
+		}
+
+		// Then the path shortens, and keeps changing, so the estimate has to
+		// keep moving rather than settling once.
+		for delay in [1, MAX_DELAY - 4, 2, MAX_DELAY - 2, 1] {
+			room.delay = delay;
+			for _ in 0..200 {
+				room.round();
+			}
+		}
+
+		// Still cancelling, so the filter recovered rather than merely surviving.
+		let (mut heard, mut left) = (0.0f64, 0.0f64);
+		for _ in 0..100 {
+			let (before, after) = room.round();
+			heard += before;
+			left += after;
+		}
+		let attenuation = 10.0 * (heard / left.max(f64::MIN_POSITIVE)).log10();
+		assert!(attenuation > 10.0, "the filter never re-converged: {attenuation:.1} dB");
 	}
 
 	/// Deterministic white-ish noise, so the test above measures the same room
