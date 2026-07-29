@@ -641,7 +641,7 @@ async fn run_session(
 ) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
-	let goaway = session.recv_goaway();
+	let goaway = session.draining();
 	let closed = session.closed();
 	tokio::pin!(closed);
 

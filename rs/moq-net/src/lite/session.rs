@@ -159,10 +159,14 @@ pub fn start<S: web_transport_trait::Session>(
 		});
 	}
 
-	// GOAWAY send task: parked on the send trigger; fires at most once (the
-	// producer is taken once per session). Races the transport close so a parked
-	// trigger never blocks the task set draining.
-	if version.has_goaway() {
+	// GOAWAY send task: parked on the send trigger; fires at most once (the trigger
+	// only accepts one payload). Races the transport close so a parked trigger
+	// never blocks the task set draining.
+	//
+	// Spawned on every version, including those with no GOAWAY message. The
+	// deadline is the sender's own timer, so a caller draining a lite-03 peer still
+	// gets the session closed on schedule; the peer just never learns why.
+	{
 		let session = session.clone();
 		let goaway = goaway.clone();
 		tasks.push(async move {
@@ -182,9 +186,12 @@ pub fn start<S: web_transport_trait::Session>(
 			};
 			// moq-lite has no timeout field on the wire; only the URI is sent. The
 			// deadline is still ours to honor, enforced locally below.
-			if let Err(err) = send_goaway(&session, &payload.uri, version).await {
+			if version.has_goaway()
+				&& let Err(err) = send_goaway(&session, &payload.uri, version).await
+			{
+				// Still enforce the deadline: the drain was requested, and failing to
+				// explain it to the peer is no reason to hold the session open.
 				tracing::warn!(%err, "failed to send goaway");
-				return;
 			}
 			crate::goaway::enforce(&session, payload.timeout).await;
 		});

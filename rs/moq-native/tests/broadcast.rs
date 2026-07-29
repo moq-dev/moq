@@ -2398,8 +2398,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 		start_drain_rx.await.expect("drain signal");
 		session
-			.send_goaway()
-			.expect("goaway must be available")
+			.drain()
 			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/").with_timeout(Duration::from_secs(5)))
 			.expect("send goaway");
 
@@ -2446,12 +2445,12 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 	// Trigger the drain and observe the GOAWAY.
 	start_drain_tx.send(()).expect("send drain signal");
-	let goaway = tokio::time::timeout(TIMEOUT, session.recv_goaway().recv())
+	let goaway = tokio::time::timeout(TIMEOUT, session.draining().recv())
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
 	assert_eq!(&*goaway.uri, "https://elsewhere.example/");
-	assert!(session.recv_goaway().peek().is_some());
+	assert!(session.draining().peek().is_some());
 	if expect_wire_timeout {
 		assert_eq!(
 			goaway.timeout,
@@ -2523,8 +2522,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		session
-			.send_goaway()
-			.expect("goaway")
+			.drain()
 			.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_millis(200)))
 			.expect("send goaway");
 		// The client deliberately overstays; this resolves via the force-close.
@@ -2539,7 +2537,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		.expect("client connect failed");
 
 	// Observe the GOAWAY but do NOT leave.
-	let goaway = tokio::time::timeout(TIMEOUT, session.recv_goaway().recv())
+	let goaway = tokio::time::timeout(TIMEOUT, session.draining().recv())
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");

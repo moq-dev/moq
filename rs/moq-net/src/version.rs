@@ -157,16 +157,6 @@ impl Version {
 			Self::Lite(_) => false,
 		}
 	}
-
-	/// Whether the version has a GOAWAY message for graceful shutdown and
-	/// migration: moq-lite-04+ (the dedicated Goaway stream) and every supported
-	/// moq-transport draft.
-	pub(crate) fn has_goaway(&self) -> bool {
-		match self {
-			Self::Lite(v) => v.has_goaway(),
-			Self::Ietf(_) => true,
-		}
-	}
 }
 
 impl fmt::Display for Version {

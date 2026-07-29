@@ -1,17 +1,20 @@
 //! GOAWAY, the graceful drain signal, split into a [Producer] and [Consumer] handle.
 //!
 //! A session sends its own GOAWAY through the [Producer] from
-//! [`Session::send_goaway`](crate::Session::send_goaway), and observes the peer's
-//! on the [Consumer] from [`Session::recv_goaway`](crate::Session::recv_goaway).
-//! Each session sends at most one, which is why the [Producer] is taken once and
-//! consumed by [`Producer::send`].
+//! [`Session::drain`](crate::Session::drain), and observes the peer's on the
+//! [Consumer] from [`Session::draining`](crate::Session::draining). A session
+//! sends at most one, which is why [`Producer::send`] consumes the handle.
+//!
+//! Draining works the same on a version with no GOAWAY message: the deadline is
+//! the sender's own timer, so it force-closes on schedule whether or not the peer
+//! could be told why. Callers do not branch on the negotiated version.
 //!
 //! Following the redirect is the caller's job. `moq_native::Reconnect` implements
 //! it for native clients.
 
 use std::{
 	sync::{
-		Arc, Mutex,
+		Arc,
 		atomic::{AtomicBool, Ordering},
 	},
 	task::Poll,
@@ -70,8 +73,7 @@ impl Goaway {
 
 /// Sends this session's single GOAWAY.
 ///
-/// Obtained from [`Session::send_goaway`](crate::Session::send_goaway), which
-/// yields it at most once per session.
+/// Obtained from [`Session::drain`](crate::Session::drain).
 pub struct Producer {
 	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI. A moq-transport client may not,
@@ -85,13 +87,18 @@ impl Producer {
 	/// The session must stay driven for the message to reach the wire. With
 	/// [`Goaway::timeout`] set, the driver force-closes the session once the
 	/// deadline passes, so awaiting [`Session::closed`](crate::Session::closed)
-	/// is how a caller observes the drain finishing either way.
+	/// is how a caller observes the drain finishing either way. That holds on a
+	/// version with no GOAWAY message too, where the deadline is all the peer gets.
 	///
 	/// # Errors
 	///
 	/// Returns [`Error::ProtocolViolation`] when a moq-transport client names a
 	/// redirect URI, which the peer would be required to close the session over,
 	/// or when the URI exceeds the 8,192-byte wire cap.
+	///
+	/// Returns [`Error::Duplicate`] if this session already sent one. The wire
+	/// carries at most one either way, so the second message is dropped rather
+	/// than replacing the first, but the caller is told rather than left guessing.
 	pub fn send(self, goaway: Goaway) -> Result<()> {
 		if !self.redirect && !goaway.uri.is_empty() {
 			return Err(Error::ProtocolViolation);
@@ -104,6 +111,9 @@ impl Producer {
 		}
 		// The session closing first is not an error: there is nothing left to drain.
 		if let Ok(mut state) = self.trigger.write() {
+			if state.is_some() {
+				return Err(Error::Duplicate);
+			}
 			*state = Some(goaway);
 		}
 		Ok(())
@@ -112,7 +122,7 @@ impl Producer {
 
 /// Observes the peer's GOAWAY.
 ///
-/// Obtained from [`Session::recv_goaway`](crate::Session::recv_goaway). Cheap to
+/// Obtained from [`Session::draining`](crate::Session::draining). Cheap to
 /// clone; every clone reports the same GOAWAY.
 #[derive(Clone)]
 pub struct Consumer {
@@ -287,9 +297,11 @@ pub(crate) async fn enforce<S: web_transport_trait::Session>(session: &S, timeou
 
 /// The halves held by the public [`crate::Session`].
 pub(crate) struct Handle {
-	/// Taken by the first [`crate::Session::send_goaway`] call; `None` after.
-	producer: Mutex<Option<Producer>>,
-	/// Handed out by [`crate::Session::recv_goaway`].
+	/// Cloned into each [`Producer`] handed out by [`crate::Session::drain`].
+	trigger: kio::Producer<Option<Goaway>>,
+	/// Whether this side may name a redirect URI in its own GOAWAY.
+	redirect: bool,
+	/// Handed out by [`crate::Session::draining`].
 	consumer: Consumer,
 }
 
@@ -309,10 +321,8 @@ impl Handle {
 		};
 
 		let handle = Self {
-			producer: Mutex::new(Some(Producer {
-				trigger: trigger.clone(),
-				redirect,
-			})),
+			trigger: trigger.clone(),
+			redirect,
 			consumer,
 		};
 		let protocol = Protocol {
@@ -324,9 +334,14 @@ impl Handle {
 		(handle, protocol)
 	}
 
-	/// Take the send half, leaving `None` behind so a session sends at most one GOAWAY.
-	pub fn producer(&self) -> Option<Producer> {
-		self.producer.lock().ok()?.take()
+	/// A send half. Handing one out is always allowed; sending twice is what
+	/// [`Producer::send`] refuses, so a caller never has to ask whether the slot
+	/// is still free before deciding how to shut down.
+	pub fn producer(&self) -> Producer {
+		Producer {
+			trigger: self.trigger.clone(),
+			redirect: self.redirect,
+		}
 	}
 
 	/// A fresh handle on the receive half.
@@ -339,12 +354,29 @@ impl Handle {
 mod tests {
 	use super::*;
 
-	/// A session sends at most one GOAWAY, so the producer is taken once.
+	/// A session sends at most one GOAWAY. Handing out the handle is always
+	/// allowed, so a caller never has to ask whether the slot is free; sending
+	/// twice is what gets refused, and the first payload is the one kept.
 	#[test]
-	fn producer_is_taken_once() {
-		let (handle, _protocol) = Handle::new(true);
-		assert!(handle.producer().is_some());
-		assert!(handle.producer().is_none());
+	fn only_the_first_send_wins() {
+		let (handle, protocol) = Handle::new(true);
+
+		handle
+			.producer()
+			.send(Goaway::redirect("https://first.example/"))
+			.unwrap();
+
+		let err = handle
+			.producer()
+			.send(Goaway::redirect("https://second.example/"))
+			.unwrap_err();
+		assert!(matches!(err, Error::Duplicate));
+
+		assert_eq!(
+			protocol.trigger.read().as_ref().map(|g| g.uri.as_str()),
+			Some("https://first.example/"),
+			"the peer must not see a URI replaced out from under it"
+		);
 	}
 
 	/// A moq-transport client cannot tell a server where to reconnect, so naming a
@@ -354,7 +386,6 @@ mod tests {
 		let (handle, _protocol) = Handle::new(false);
 		let err = handle
 			.producer()
-			.unwrap()
 			.send(Goaway {
 				uri: "https://elsewhere.example/".to_string(),
 				..Default::default()
@@ -364,7 +395,7 @@ mod tests {
 
 		// An empty URI ("I am going away") is still allowed.
 		let (handle, _protocol) = Handle::new(false);
-		handle.producer().unwrap().send(Goaway::default()).unwrap();
+		handle.producer().send(Goaway::default()).unwrap();
 	}
 
 	/// A URI past the wire cap is refused at the send chokepoint rather than
@@ -374,7 +405,6 @@ mod tests {
 		let (handle, _protocol) = Handle::new(true);
 		let err = handle
 			.producer()
-			.unwrap()
 			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
 			.unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
@@ -382,7 +412,6 @@ mod tests {
 		let (handle, _protocol) = Handle::new(true);
 		handle
 			.producer()
-			.unwrap()
 			.send(Goaway::redirect("x".repeat(MAX_URI)))
 			.expect("exactly at the cap is fine");
 	}

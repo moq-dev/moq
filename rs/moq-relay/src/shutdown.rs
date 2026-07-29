@@ -64,27 +64,21 @@ impl Shutdown {
 	/// the peer to leave.
 	///
 	/// The driver force-closes with [`moq_net::Error::GoawayTimeout`] once
-	/// [`drain_timeout`](Self::drain_timeout) passes, so this resolves either way.
-	/// Sessions on versions without GOAWAY (moq-lite-03 and earlier) are closed
-	/// immediately with [`moq_net::Error::GoingAway`]; there is no wire message to
-	/// warn them with.
+	/// [`drain_timeout`](Self::drain_timeout) passes, so this resolves either way,
+	/// on every version. A peer too old for GOAWAY (moq-lite-03 and earlier) keeps
+	/// being served for the same window and is then closed the same way; it simply
+	/// never learns why, which beats cutting it off with no warning and no grace.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
-		match session.send_goaway() {
-			Some(goaway) => {
-				// "Reconnect to me": the relay is restarting, not moving.
-				let sent = goaway.send(moq_net::goaway::Goaway::new().with_timeout(self.drain_timeout));
-				// An empty URI is legal from either side, so this cannot fail today.
-				// Close rather than hang if that ever changes.
-				if let Err(err) = sent {
-					session.abort(err);
-					return;
-				}
-				session.closed().await;
-			}
-			// No GOAWAY on this version, so there is no way to warn the peer.
-			// A session already drained (the handle was taken) can only happen if
-			// shutdown ran twice, where force-closing is the intent anyway.
-			None => session.abort(moq_net::Error::GoingAway),
+		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
+		// legal from either side and this runs once per session, so neither error
+		// is reachable; the deadline closes the session regardless.
+		if let Err(err) = session
+			.drain()
+			.send(moq_net::goaway::Goaway::new().with_timeout(self.drain_timeout))
+		{
+			tracing::warn!(%err, "failed to drain session");
 		}
+
+		session.closed().await;
 	}
 }

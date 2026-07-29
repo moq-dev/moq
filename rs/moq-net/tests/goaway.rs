@@ -29,7 +29,7 @@ const GOAWAY_VERSIONS: &[&str] = &[
 ];
 
 /// Server drains with a redirect URI; the client observes it through
-/// `Session::recv_goaway()`. Exercises every GOAWAY channel in the version
+/// `Session::draining()`. Exercises every GOAWAY channel in the version
 /// matrix, in both directions.
 #[tokio::test]
 async fn goaway_send_receive_all_versions() {
@@ -40,24 +40,29 @@ async fn goaway_send_receive_all_versions() {
 
 			// Server -> client.
 			pair.server
-				.send_goaway()
-				.expect("goaway must be available on GOAWAY versions")
+				.drain()
 				.send(Goaway::redirect("https://new.example.com"))
 				.expect("send goaway");
 
 			let goaway = pair
 				.client
-				.recv_goaway()
+				.draining()
 				.recv()
 				.await
 				.expect("session closed before GOAWAY");
 			assert_eq!(&*goaway.uri, "https://new.example.com", "version {version}");
-			assert!(pair.client.recv_goaway().peek().is_some(), "version {version}");
+			assert!(pair.client.draining().peek().is_some(), "version {version}");
 			// No deadline was advertised.
 			assert_eq!(goaway.timeout, None, "version {version}");
 
-			// A session sends at most one GOAWAY, so the handle is gone.
-			assert!(pair.server.send_goaway().is_none(), "version {version}");
+			// A session sends at most one GOAWAY: a second is refused, not silently
+			// swapped in behind the peer's back.
+			let err = pair
+				.server
+				.drain()
+				.send(Goaway::redirect("https://second.example.com"))
+				.expect_err("a session sends one GOAWAY");
+			assert!(matches!(err, moq_net::Error::Duplicate), "version {version}");
 
 			// Client leaves; the drain completes.
 			drop(pair.client);
@@ -77,14 +82,13 @@ async fn goaway_wire_timeout_moq_transport_17() {
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
-			.send_goaway()
-			.expect("goaway")
+			.drain()
 			.send(Goaway::redirect("moqt://relay.example/").with_timeout(Duration::from_secs(5)))
 			.expect("send goaway");
 
 		let goaway = pair
 			.client
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
@@ -105,20 +109,16 @@ async fn goaway_client_to_server_moq_lite_04() {
 		let version: Version = "moq-lite-04".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
-		pair.client
-			.send_goaway()
-			.expect("goaway")
-			.send(Goaway::new())
-			.expect("send goaway");
+		pair.client.drain().send(Goaway::new()).expect("send goaway");
 
 		let goaway = pair
 			.server
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
 		assert_eq!(&*goaway.uri, "", "empty URI = reconnect to the same endpoint");
-		assert!(pair.server.recv_goaway().peek().is_some());
+		assert!(pair.server.draining().peek().is_some());
 
 		drop(pair.server);
 		pair.client.closed().await;
@@ -127,19 +127,32 @@ async fn goaway_client_to_server_moq_lite_04() {
 	.expect("test timed out (likely a mock deadlock)");
 }
 
-/// Versions without GOAWAY (moq-lite-03 and earlier) yield no producer, rather
-/// than accepting a message no send path would ever put on the wire.
-#[tokio::test]
-async fn goaway_unavailable_moq_lite_03() {
+/// A version with no GOAWAY message (moq-lite-03 and earlier) still drains: the
+/// deadline is the sender's own timer, so the session closes on schedule even
+/// though the peer is never told why. Callers do not branch on the version.
+#[tokio::test(start_paused = true)]
+async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-03".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
-		assert!(pair.server.send_goaway().is_none());
-		assert!(pair.client.send_goaway().is_none());
+		pair.server
+			.drain()
+			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.expect("drain is available on every version");
+
+		// Nothing reaches the peer, since this version has no GOAWAY message.
+		assert!(pair.client.draining().peek().is_none());
+
+		// The deadline still force-closes the session on schedule.
+		let err = pair.server.closed().await;
+		assert!(
+			err.to_string().contains("goaway timeout") || matches!(err, moq_net::Error::GoawayTimeout),
+			"expected a GoawayTimeout close, got {err}"
+		);
 	})
 	.await
-	.expect("test timed out (likely a mock deadlock)");
+	.expect("test timed out (a version without GOAWAY must still honor the deadline)");
 }
 
 /// A moq-transport client cannot tell a server where to reconnect, so naming a
@@ -152,25 +165,20 @@ async fn goaway_client_redirect_refused_moq_transport_19() {
 
 		let err = pair
 			.client
-			.send_goaway()
-			.expect("goaway")
+			.drain()
 			.send(Goaway::redirect("https://elsewhere.example/"))
 			.expect_err("a client may not name a redirect URI");
 		assert!(matches!(err, moq_net::Error::ProtocolViolation));
-		// `send` consumes the handle either way: naming a URI as a client is a bug
-		// to fix, not a runtime condition to recover from.
-		assert!(pair.client.send_goaway().is_none());
+		// The refusal is local, so nothing was claimed: the client may still send the
+		// empty-URI GOAWAY it was always allowed to send.
+		pair.client.drain().send(Goaway::new()).expect("an empty URI is legal");
 
 		// An empty URI ("I am leaving") is what a client may send. Check it from the
 		// server side, which is the direction allowed to redirect at all.
-		pair.server
-			.send_goaway()
-			.expect("goaway")
-			.send(Goaway::new())
-			.expect("send goaway");
+		pair.server.drain().send(Goaway::new()).expect("send goaway");
 		let goaway = pair
 			.client
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
@@ -189,15 +197,14 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
-			.send_goaway()
-			.expect("goaway")
+			.drain()
 			.send(Goaway::redirect("moqt://relay.example/").with_timeout(Duration::from_millis(100)))
 			.expect("send goaway");
 
 		// The client observes the GOAWAY but deliberately does NOT leave.
 		let goaway = pair
 			.client
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
@@ -269,12 +276,12 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 		let recv_a = send_goaway_raw(&server_raw, "a").await;
 		wait_processed(recv_a).await;
 		let goaway = client_session
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
 		assert_eq!(&*goaway.uri, "a");
-		assert!(client_session.recv_goaway().peek().is_some());
+		assert!(client_session.draining().peek().is_some());
 
 		// Second GOAWAY: once the client has fully processed the stream, the
 		// observed payload must still carry the FIRST URI.
@@ -282,7 +289,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 		wait_processed(recv_b).await;
 
 		let goaway = client_session
-			.recv_goaway()
+			.draining()
 			.recv()
 			.await
 			.expect("session closed before GOAWAY");
@@ -346,12 +353,11 @@ async fn goaway_gates_new_subscribes_moq_lite_04() {
 
 		// Server drains; the client observes the GOAWAY.
 		server
-			.send_goaway()
-			.expect("drain")
+			.drain()
 			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/"))
 			.expect("send goaway");
-		client.recv_goaway().recv().await.expect("goaway");
-		assert!(client.recv_goaway().peek().is_some());
+		client.draining().recv().await.expect("goaway");
+		assert!(client.draining().peek().is_some());
 
 		// A NEW subscription must not reach the wire: the upstream open is gated
 		// with GoingAway. In the resume model a failed route delivers a stall
@@ -422,12 +428,8 @@ async fn goaway_drains_routes(version: Version) {
 			"a healthy route must not start out draining"
 		);
 
-		server
-			.send_goaway()
-			.expect("goaway producer")
-			.send(Goaway::new())
-			.expect("send goaway");
-		client.recv_goaway().recv().await.expect("goaway");
+		server.drain().send(Goaway::new()).expect("send goaway");
+		client.draining().recv().await.expect("goaway");
 
 		// Nothing else is sent on the announce stream, so this only resolves if the
 		// subscriber acted on the GOAWAY rather than on another message.

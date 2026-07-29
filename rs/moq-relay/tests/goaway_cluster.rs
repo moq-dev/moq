@@ -198,8 +198,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		// ── sibling A drains with a redirect to sibling B ────────────────
 		session_a
-			.send_goaway()
-			.expect("goaway")
+			.drain()
 			.send(moq_net::goaway::Goaway::redirect(format!("tcp://127.0.0.1:{port_b}/")))
 			.expect("send goaway");
 
@@ -441,8 +440,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TRIGGER: MID-A drains BOTTOM with a redirect to MID-B ───────────
 	session_bottom_on_a
-		.send_goaway()
-		.expect("goaway")
+		.drain()
 		.send(moq_net::goaway::Goaway::redirect(mid_b_url.clone()).with_timeout(Duration::from_secs(5)))
 		.expect("send goaway");
 
@@ -487,12 +485,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
-		sub_session.recv_goaway().peek().is_none(),
+		sub_session.draining().peek().is_none(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 2s of silence is decisive).
-	let leaked = tokio::time::timeout(Duration::from_secs(2), sub_session.recv_goaway().recv()).await;
+	let leaked = tokio::time::timeout(Duration::from_secs(2), sub_session.draining().recv()).await;
 	assert!(
 		leaked.is_err(),
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
@@ -595,8 +593,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	// Drain with an EMPTY URI: the cluster must fall back to redialing the
 	// originally configured endpoint.
 	first_dial
-		.send_goaway()
-		.expect("goaway")
+		.drain()
 		.send(moq_net::goaway::Goaway::new())
 		.expect("send goaway");
 

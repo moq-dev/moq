@@ -112,19 +112,18 @@ impl Session {
 		Error::Transport(self.shared.inner.closed().await)
 	}
 
-	/// The handle for sending this session's single GOAWAY, gracefully draining
-	/// the peer.
+	/// Drain the peer gracefully: the handle for sending this session's single
+	/// GOAWAY.
 	///
-	/// Returns `None` when the negotiated version has no GOAWAY message (moq-lite-03
-	/// and earlier), or when the handle was already taken. Send the message with
+	/// The graceful counterpart to [`abort`](Self::abort). Send the message with
 	/// [`goaway::Producer::send`], then await [`closed`](Self::closed) to observe
-	/// the peer leaving (or the deadline force-closing it).
-	pub fn send_goaway(&self) -> Option<goaway::Producer> {
-		// Pre-GOAWAY versions have no send path listening on the trigger, so the
-		// message would silently never reach the wire.
-		if !self.version.has_goaway() {
-			return None;
-		}
+	/// the peer leaving, or the deadline force-closing it.
+	///
+	/// Available on every version. A version with no GOAWAY message (moq-lite-03
+	/// and earlier) simply carries no explanation to the peer; the deadline is the
+	/// sender's own timer either way, so the session still closes on schedule and
+	/// the caller does not branch on the negotiated version.
+	pub fn drain(&self) -> goaway::Producer {
 		self.goaway.producer()
 	}
 
@@ -135,7 +134,7 @@ impl Session {
 	/// subscribe and announce-interest requests on this session are refused (both
 	/// drafts forbid opening new streams afterward); existing subscriptions keep
 	/// flowing until the session closes.
-	pub fn recv_goaway(&self) -> goaway::Consumer {
+	pub fn draining(&self) -> goaway::Consumer {
 		self.goaway.consumer()
 	}
 }
