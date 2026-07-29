@@ -229,6 +229,27 @@ impl Surface {
 		}
 	}
 
+	/// The color space these samples are in, when it is known rather than
+	/// guessed. `None` for a GPU surface whose format names none, and for pixels
+	/// that merely passed through without anything naming their space.
+	///
+	/// Worth reading before encoding pixels you resized: [`resize`](Self::resize)
+	/// carries the space across, so a frame scaled past 576 lines no longer
+	/// matches what an encoder sized for the result would infer. Pass this to
+	/// [`encode::Config::color`](crate::encode::Config::color) to keep the label
+	/// honest.
+	pub fn color(&self) -> Option<Color> {
+		match self {
+			#[cfg(target_os = "macos")]
+			Surface::PixelBuffer(s) => s.color(),
+			#[cfg(target_os = "windows")]
+			Surface::Texture(_) => None,
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Surface::Cuda(_) => None,
+			Surface::I420(i) => i.color(),
+		}
+	}
+
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
@@ -592,7 +613,8 @@ pub mod macos {
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
 		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-		CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+		CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+		kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
 		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
@@ -728,11 +750,57 @@ pub mod macos {
 			result
 		}
 
+		/// The color space this buffer's matrix attachment names, falling back to
+		/// [`Color::infer`] when it carries none.
+		///
+		/// VideoToolbox copies the matrix out of the stream's VUI onto every decoded
+		/// buffer, so this is the source's own answer wherever the source gave one.
+		/// The range is not in this attachment; the caller pairs it with the one the
+		/// pixel format names.
+		fn matrix(&self) -> Color {
+			let inferred = Color::infer(crate::Size::new(self.width, self.height));
+			// SAFETY: a null attachment mode is documented as "don't report it".
+			let Some(value) = (unsafe { self.buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()) }) else {
+				return inferred;
+			};
+			let Some(name) = value.downcast_ref::<CFString>() else {
+				return inferred;
+			};
+
+			// Compare against the constants rather than the string literals: these
+			// are CFString identities Apple owns, not values we should spell out.
+			if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 } {
+				Color::Bt709Limited
+			} else if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 } {
+				Color::Bt601Limited
+			} else {
+				// BT.2020 and the P3 matrices land here. We have no variant for them,
+				// so the size guess is the least wrong answer available.
+				inferred
+			}
+		}
+
+		/// The color space these samples are in: the matrix from the buffer's
+		/// attachment paired with the range its pixel format names. `None` for a
+		/// format that names neither.
+		pub(crate) fn color(&self) -> Option<Color> {
+			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
+			let limited = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+				true
+			} else if format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+				false
+			} else {
+				return None;
+			};
+			Some(self.matrix().with_range(limited))
+		}
+
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
 		///
 		/// A deinterleave, not a color conversion, so the samples keep whatever
-		/// space they arrived in. The pixel format names the range, which is
-		/// carried through; the matrix it does not, so that half stays inferred.
+		/// space they arrived in. The pixel format names the range and the buffer's
+		/// matrix attachment names the matrix, so a decoded frame reports the space
+		/// its own bitstream declared rather than one guessed from its size.
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -743,8 +811,7 @@ pub mod macos {
 				)));
 			}
 
-			let limited = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-			let color = Some(Color::infer(crate::Size::new(self.width, self.height)).with_range(limited));
+			let color = self.color();
 
 			let (w, h) = (self.width as usize, self.height as usize);
 			let (cw, ch) = (w / 2, h / 2);

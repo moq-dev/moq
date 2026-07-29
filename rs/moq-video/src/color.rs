@@ -58,10 +58,11 @@ impl Color {
 			(_, false) => Color::Bt709Full,
 		}
 	}
+
 	/// Whether luma is 16..235 rather than 0..255.
 	///
-	/// The encoders need it for the VUI's `video_full_range_flag`, so unlike
-	/// [`weights`](crate::render) it is not render-only.
+	/// The encoders need it for the VUI's `video_full_range_flag`, so unlike the
+	/// render module's `weights` it is not render-only.
 	pub(crate) fn limited(self) -> bool {
 		matches!(self, Color::Bt601Limited | Color::Bt709Limited)
 	}
