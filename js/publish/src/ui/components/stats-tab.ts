@@ -107,7 +107,9 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		if (!fanout) return;
 
 		const reader = fanout.subscribe(effect).getReader();
-		effect.cleanup(() => reader.cancel().catch(() => {}));
+		effect.cleanup(() => {
+			reader.cancel().catch(() => {});
+		});
 
 		effect.spawn(async () => {
 			for (;;) {

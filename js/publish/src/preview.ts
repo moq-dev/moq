@@ -111,7 +111,9 @@ export class Renderer {
 		if (!fanout) return;
 
 		const reader = fanout.subscribe(effect, 1).getReader();
-		effect.cleanup(() => reader.cancel().catch(() => {}));
+		effect.cleanup(() => {
+			reader.cancel().catch(() => {});
+		});
 
 		effect.cleanup(() => {
 			this.#latest.update((prev) => {
@@ -261,7 +263,9 @@ export class Transcode {
 
 			// Only the newest matters: this feeds a preview, not the wire.
 			const reader = fanout.subscribe(inner, 1).getReader();
-			inner.cleanup(() => reader.cancel().catch(() => {}));
+			inner.cleanup(() => {
+				reader.cancel().catch(() => {});
+			});
 
 			inner.spawn(async () => {
 				for (;;) {
