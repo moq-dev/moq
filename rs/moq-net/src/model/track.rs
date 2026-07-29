@@ -1879,20 +1879,18 @@ impl Consumer {
 
 		if unresolved {
 			let mut fetch = fetch.lock();
-			// Widening only reaches the handler while the attempt is still queued: once
-			// popped, its range is already on the wire and the `GroupRequest` holds an
-			// immutable copy. Writing it anyway would be a no-op that reads like a
-			// promise, so don't. What actually protects the late caller is the coverage
-			// check above: it won't accept a group that starts above what it asked for,
-			// so it fails and its retry queues a fresh attempt.
-			let queued = fetch.is_queued(&sequence);
 			if let Some(pending) = fetch.join(&sequence) {
 				// Join the in-flight attempt for this sequence (queued or already being
-				// served): share its result channel, raising its priority if ours is higher.
+				// served): share its result channel, raising its priority if ours is higher
+				// and widening its range if ours starts earlier.
+				//
+				// Widening only reaches the handler while the attempt is still queued;
+				// once popped, the `GroupRequest` holds an immutable copy and its range is
+				// already on the wire. What protects the late caller either way is the
+				// coverage check above: it refuses a group starting above what it asked
+				// for, so it fails cleanly and its retry queues a fresh attempt.
 				pending.priority = pending.priority.max(options.priority);
-				if queued {
-					pending.frame_start = pending.frame_start.min(options.frame_start);
-				}
+				pending.frame_start = pending.frame_start.min(options.frame_start);
 				result = Some(pending.result.consume());
 			} else {
 				// Queue a new attempt. The handler gate is atomic with a handler
@@ -4297,11 +4295,10 @@ mod test {
 		);
 	}
 
-	/// Widening a fetch's range reaches the handler only while the attempt is still
-	/// queued. Once popped, the range is already on the wire, and a caller wanting more
-	/// than it covers fails cleanly instead of being handed the narrower group.
+	/// Joining a queued fetch widens its range, and a caller that arrives once the range
+	/// is already on the wire fails cleanly rather than being handed the narrower group.
 	#[tokio::test]
-	async fn fetch_widens_only_while_queued() {
+	async fn fetch_widens_or_fails_cleanly() {
 		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -4318,8 +4315,8 @@ mod test {
 		let request = dynamic.requested_group().await.unwrap();
 		assert_eq!(request.frame_start(), 2, "widened while queued");
 
-		// Handed off now, so a later wider caller must not mutate it behind the
-		// handler's back.
+		// Handed off now: the handler holds its own copy of the range, so a later wider
+		// caller cannot move what is already being served.
 		let _widest = consumer.fetch_group(0, group::Fetch::default().with_frame_start(0));
 		let mut widest = std::pin::pin!(_widest);
 		assert!(futures::poll!(widest.as_mut()).is_pending());

@@ -921,6 +921,168 @@ mod tests {
 		assert_eq!(msg.track, "catalog.json");
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
+
+	/// Everything a `handle_subscription` test needs to stay alive for the call.
+	struct Harness {
+		serve: TrackServe<SinkSession>,
+		session: SinkSession,
+		producer: track::Producer,
+		_broadcast: crate::broadcast::Producer,
+		_gate: kio::Producer<bool>,
+		_tasks: TaskSet,
+	}
+
+	impl Harness {
+		/// A `TrackServe` writing straight to a sink session at `version`.
+		fn new(version: Version) -> Self {
+			// Open the gate up front: these tests assert what reached the wire, not
+			// what was true at the instant it would.
+			let gate = kio::Producer::new(true);
+			let session = SinkSession::gated_bi(gate.consume());
+			let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+			let (tasks, _tasks) = TaskSet::new();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				session: session.clone(),
+				origin,
+				recv_bandwidth: None,
+				version,
+				peer_setup: Default::default(),
+				cost: None,
+				tasks,
+			});
+			let mut broadcast = crate::broadcast::Info::new().produce();
+			let producer = broadcast.create_track("catalog.json", None).unwrap();
+
+			Self {
+				serve: TrackServe {
+					subscriber,
+					path: Path::new("room/host").to_owned(),
+					name: "catalog.json".to_string(),
+				},
+				session,
+				producer,
+				_broadcast: broadcast,
+				_gate: gate,
+				_tasks,
+			}
+		}
+
+		/// Everything written to the session so far.
+		fn wire(&self) -> Vec<u8> {
+			self.session.log.writes.lock().unwrap().clone()
+		}
+	}
+
+	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover.
+	fn mid_group_demand() -> Subscription {
+		Subscription::default()
+			.with_group_start(5)
+			.with_frame_start(3)
+			.with_group_end(5)
+			.with_frame_end(2)
+	}
+
+	/// A mid-group resume boundary handed to a peer that predates lite-06 is widened to
+	/// the whole group rather than refused.
+	///
+	/// The codec rejects a frame bound such a peer cannot carry, so passing the demand
+	/// through unchanged fails the SUBSCRIBE and hands the track back. The origin then
+	/// re-splices the same route indefinitely, since the splice itself keeps succeeding
+	/// and the retry budget never trips.
+	#[tokio::test]
+	async fn frame_bounds_widen_for_an_older_peer() {
+		let mut h = Harness::new(Version::Lite05);
+		let mut sub = Sub::None;
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(mid_group_demand()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.expect("an older peer must not fail the subscribe");
+
+		let wire = h.wire();
+		let mut wire = wire.as_slice();
+		assert_eq!(
+			lite::ControlType::decode(&mut wire, Version::Lite05).unwrap(),
+			lite::ControlType::Subscribe
+		);
+		let msg = lite::Subscribe::decode(&mut wire, Version::Lite05).unwrap();
+		// The group bounds survive; only the frame offsets are widened away.
+		assert_eq!((msg.start_group, msg.end_group), (Some(5), Some(5)));
+		assert_eq!((msg.start_frame, msg.end_frame), (0, None));
+	}
+
+	/// The same demand on a lite-06 peer keeps its frame offsets, so the widening is
+	/// version-gated rather than unconditional.
+	#[tokio::test]
+	async fn frame_bounds_survive_on_a_lite06_peer() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(mid_group_demand()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+
+		let wire = h.wire();
+		let mut wire = wire.as_slice();
+		assert_eq!(
+			lite::ControlType::decode(&mut wire, Version::Lite06Wip).unwrap(),
+			lite::ControlType::Subscribe
+		);
+		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
+		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(2)));
+	}
+
+	/// The widening covers SUBSCRIBE_UPDATE too: a downstream peer asking for a frame
+	/// offset must not tear down an older upstream that is already serving.
+	#[tokio::test]
+	async fn frame_bounds_widen_on_update() {
+		let mut h = Harness::new(Version::Lite05);
+		let mut sub = Sub::None;
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		let established = h.wire().len();
+
+		// A lite-06 subscriber downstream now wants to resume mid-group.
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(mid_group_demand()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.expect("a downstream frame offset must not tear down an older upstream");
+
+		// SUBSCRIBE_UPDATE rides the subscribe stream with no control type ahead of it.
+		let wire = h.wire();
+		let mut wire = &wire[established..];
+		let msg = lite::SubscribeUpdate::decode(&mut wire, Version::Lite05).unwrap();
+		assert_eq!((msg.start_group, msg.start_frame), (Some(5), 0));
+		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
+	}
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params
@@ -1246,6 +1408,34 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		Ok(model)
 	}
 
+	/// Widen a frame-precise request to whole groups when the peer predates lite-06.
+	///
+	/// The codec refuses to encode a frame bound an older peer cannot carry, since
+	/// widening at the message layer would hand the *caller* frames it excluded. Here we
+	/// are the caller, and we want the wider range: every group is positioned and capped
+	/// again on the read side ([`group::Consumer::start_at`] / `end_at`, driven by
+	/// [`crate::model::resume`]), so the extra frames are filtered locally and never
+	/// reach a subscriber. The only cost is transferring frames we already hold.
+	///
+	/// Passing the request through unchanged instead would fail the SUBSCRIBE, hand the
+	/// track back, and leave the origin re-splicing the same route indefinitely: the
+	/// splice itself keeps succeeding, so the retry budget never trips.
+	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
+		if self.subscriber.version.has_frame_bounds() {
+			return;
+		}
+
+		if subscription.frame_start != 0 || subscription.frame_end.is_some() {
+			tracing::debug!(
+				track = %self.name,
+				version = ?self.subscriber.version,
+				"widening frame bounds to whole groups for an older peer"
+			);
+		}
+		subscription.frame_start = 0;
+		subscription.frame_end = None;
+	}
+
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
 	/// subscriber, update it while live, or cancel it when the last one leaves.
 	async fn handle_subscription(
@@ -1257,25 +1447,28 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		match pref {
-			Some(subscription) => match sub {
-				Sub::None => {
-					// Open an upstream SUBSCRIBE for the first subscriber.
-					self.establish(producer, sub, subscription, timescale).await?;
-				}
-				Sub::Active(active) => {
-					// Downstream preferences changed: forward them upstream as a
-					// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
-					active.priority = subscription.priority;
-					active.ordered = subscription.ordered;
-					active.max_latency = subscription.latency_max;
-					active.start_group = subscription.group_start;
-					active.start_frame = subscription.frame_start;
-					if supports_update {
-						self.send_update(active, subscription.group_end, subscription.frame_end)
-							.await?;
+			Some(mut subscription) => {
+				self.widen_frame_bounds(&mut subscription);
+				match sub {
+					Sub::None => {
+						// Open an upstream SUBSCRIBE for the first subscriber.
+						self.establish(producer, sub, subscription, timescale).await?;
+					}
+					Sub::Active(active) => {
+						// Downstream preferences changed: forward them upstream as a
+						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
+						active.priority = subscription.priority;
+						active.ordered = subscription.ordered;
+						active.max_latency = subscription.latency_max;
+						active.start_group = subscription.group_start;
+						active.start_frame = subscription.frame_start;
+						if supports_update {
+							self.send_update(active, subscription.group_end, subscription.frame_end)
+								.await?;
+						}
 					}
 				}
-			},
+			}
 			None => {
 				// Last subscriber left: cancel the upstream subscription outright. An
 				// idle subscription still streams every group into a cache nobody
@@ -1437,13 +1630,23 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 		};
 
+		// A peer that predates lite-06 addresses whole groups only, so ask for the whole
+		// group and number the response from 0. The wider group still covers what the
+		// caller asked for (`fetch_group` positions their own consumer), and is more
+		// reusable in the cache than the tail would have been. Asking for the offset
+		// anyway would fail to encode and reject a fetch we can serve.
+		let frame_start = match subscriber.version.has_frame_bounds() {
+			true => request.frame_start(),
+			false => 0,
+		};
+
 		let send = async {
 			let msg = lite::Fetch {
 				broadcast: path.as_path(),
 				track: name.as_str().into(),
 				priority: request.priority(),
 				group,
-				start_frame: request.frame_start(),
+				start_frame: frame_start,
 				// Always through the end of the group: a fetch that stopped short would
 				// cache a group indistinguishable from a complete one. A downstream cap
 				// is applied when serving, not when fetching.
@@ -1464,7 +1667,6 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
 		// default scale defensively rather than panicking.
 		let group_info = track::Info::default().with_timescale(timescale.unwrap_or_default());
-		let frame_start = request.frame_start();
 		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {
@@ -1475,7 +1677,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			}
 		};
 
-		// The response starts at the requested frame, so number it from there rather
+		// The response starts at the frame we asked for, so number it from there rather
 		// than restarting the group at 0.
 		if let Err(err) = producer.start_at(frame_start) {
 			stream.writer.abort(&err);

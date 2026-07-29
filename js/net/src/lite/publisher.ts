@@ -48,11 +48,6 @@ function supportsTrackStream(version: Version): boolean {
 }
 
 /**
- * Handles publishing broadcasts and managing their lifecycle.
- *
- * @internal
- */
-/**
  * The frame bounds a subscription placed on its start and end group, as they stand
  * after any SUBSCRIBE_UPDATE.
  */
@@ -93,6 +88,11 @@ type ServeGroup = {
 	end?: number;
 };
 
+/**
+ * Handles publishing broadcasts and managing their lifecycle.
+ *
+ * @internal
+ */
 export class Publisher {
 	// The version of the connection.
 	readonly version: Version;

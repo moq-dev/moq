@@ -955,7 +955,7 @@ A non-zero value is the absolute group sequence + 1.
 
 **Frame Start**:
 The index of the first frame to deliver within the start group (see [Positions](#positions)).
-A value of 0 means the whole group (default).
+A value of 0 means from the start of that group (default), so the group is delivered whole.
 Unlike `Group Start` this is a plain absolute index, not the `absolute + 1` form: 0 is both a valid index and the default, so there is no absent case to encode around.
 Frames before this index are not delivered, even though the start group itself is.
 MUST be 0 when `Group Start` is 0, since the subscriber cannot number the frames of a group it has not seen.

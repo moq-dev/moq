@@ -1765,6 +1765,49 @@ mod test {
 		recv_pending(&mut sub);
 	}
 
+	/// A replacement that serves the whole group instead of the requested tail still
+	/// splices cleanly: the reader picks up at the seam and never sees the frames it
+	/// already has.
+	///
+	/// This is what a peer too old for frame bounds delivers. The lite subscriber widens
+	/// the request to the whole group for such a peer rather than failing to encode it
+	/// (see `TrackServe::widen_frame_bounds`), so the extra frames are filtered here.
+	#[tokio::test]
+	async fn takeover_splices_a_replacement_that_resends_the_head() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert_eq!(read(&mut reading), b"a1");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		recv_pending(&mut sub);
+
+		// B numbers the group from 0, as an older peer that cannot carry the offset does.
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"dup0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"dup1".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
+		group.finish().unwrap();
+
+		// The reader resumes at frame 2; the re-sent head is filtered, not replayed.
+		assert_eq!(read(&mut reading), b"b2");
+		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
+
+		// And the group is not surfaced a second time just because B served it whole.
+		recv_pending(&mut sub);
+	}
+
 	/// A route dying midway through a chunked frame resumes *at* that frame, not after
 	/// it. Only the dead route ever saw its payload, and only part of it, so nothing
 	/// downstream can use it.
