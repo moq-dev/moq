@@ -1052,9 +1052,13 @@ mod tests {
 		let mut h = Harness::new(Version::Lite06Wip);
 		let mut sub = Sub::None;
 
-		let mut demand = Subscription::default();
-		demand.frame_start = 3;
-		demand.frame_end = Some(7);
+		// Deliberately built by field rather than by builder: `with_start` and `with_end`
+		// are exactly what makes this unreachable through the intended surface.
+		let demand = Subscription {
+			frame_start: 3,
+			frame_end: Some(7),
+			..Default::default()
+		};
 
 		h.serve
 			.handle_subscription(
