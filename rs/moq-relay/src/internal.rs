@@ -13,6 +13,8 @@
 //!   aggregators).
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
+//! - `/nodes` - the cluster nodes visible through gossip plus established
+//!   direct relay connections.
 //!
 //! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
@@ -25,7 +27,7 @@ use std::net;
 
 use anyhow::Context as _;
 use axum::{
-	Router,
+	Json, Router,
 	extract::State,
 	http::{self, StatusCode},
 	response::{IntoResponse, Response},
@@ -39,7 +41,7 @@ use clap::Parser;
 #[non_exhaustive]
 pub struct InternalConfig {
 	/// Socket address for the internal listener (plain HTTP), serving the ops
-	/// endpoints (`/metrics`, `/health`).
+	/// endpoints (`/metrics`, `/health`, and `/nodes`).
 	///
 	/// These endpoints are unauthenticated, so bind it only to a trusted plane:
 	/// loopback (e.g. `127.0.0.1:9101`) for a co-located scraper/agent, or a
@@ -56,21 +58,43 @@ pub struct InternalConfig {
 pub struct Internal {
 	config: InternalConfig,
 	stats: moq_net::stats::Registry,
+	nodes: Option<crate::nodes::Nodes>,
+}
+
+#[derive(Clone)]
+struct InternalState {
+	stats: moq_net::stats::Registry,
+	nodes: Option<crate::nodes::Nodes>,
 }
 
 impl Internal {
 	/// Create the service from its config and the node's stats registry.
 	pub fn new(config: InternalConfig, stats: moq_net::stats::Registry) -> Self {
-		Self { config, stats }
+		Self {
+			config,
+			stats,
+			nodes: None,
+		}
 	}
 
-	/// Build the ops router (`/metrics` + `/health`), with the stats handle
-	/// applied as state. Exposed so embedders can mount it on their own listener.
+	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
+	pub fn with_cluster(mut self, cluster: &crate::Cluster) -> Self {
+		self.nodes = Some(cluster.nodes.clone());
+		self
+	}
+
+	/// Build the ops router (`/metrics`, `/health`, and `/nodes`).
+	///
+	/// Exposed so embedders can mount it on their own listener.
 	pub fn routes(&self) -> Router {
 		Router::new()
 			.route("/metrics", get(serve_metrics))
 			.route("/health", get(serve_health))
-			.with_state(self.stats.clone())
+			.route("/nodes", get(serve_nodes))
+			.with_state(InternalState {
+				stats: self.stats.clone(),
+				nodes: self.nodes.clone(),
+			})
 	}
 
 	/// Serve on [`InternalConfig::listen`] until it shuts down.
@@ -111,9 +135,18 @@ async fn serve_health() -> Response {
 /// exporter for those, per the relay's separation of concerns. Returns the
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
-async fn serve_metrics(State(stats): State<moq_net::stats::Registry>) -> Response {
-	let body = render_metrics(&stats.snapshot());
+async fn serve_metrics(State(state): State<InternalState>) -> Response {
+	let body = render_metrics(&state.stats.snapshot());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
+}
+
+/// Cluster nodes currently visible through gossip or a direct outbound dial.
+///
+/// Inbound connections appear only after their SETUP origin identity resolves
+/// to a unique `.internal/origins` node advertisement. Sessions without a
+/// unique match are omitted.
+async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::Snapshot> {
+	Json(state.nodes.map(|nodes| nodes.snapshot()).unwrap_or_default())
 }
 
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
@@ -224,6 +257,31 @@ fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn nodes_endpoint_is_empty_without_an_attached_cluster() {
+		let state = InternalState {
+			stats: moq_net::stats::Registry::disabled(),
+			nodes: None,
+		};
+
+		let Json(snapshot) = serve_nodes(State(state)).await;
+		assert!(snapshot.nodes.is_empty());
+	}
+
+	#[tokio::test]
+	async fn nodes_endpoint_uses_the_attached_cluster_registry() {
+		let origin = moq_net::Origin::new(100).unwrap().produce();
+		let nodes = crate::nodes::Nodes::new(origin);
+		let _connection = nodes.connect_outbound("https://relay-b.example/");
+		let state = InternalState {
+			stats: moq_net::stats::Registry::disabled(),
+			nodes: Some(nodes),
+		};
+
+		let Json(snapshot) = serve_nodes(State(state)).await;
+		assert_eq!(snapshot.nodes[0].node, "https://relay-b.example/");
+	}
 
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a
 	/// HELP/TYPE header per metric and a labeled line carrying the live counter

@@ -325,6 +325,18 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self.role
 	}
 
+	/// The origin identity declared by the peer, when the negotiated protocol carries one.
+	///
+	/// A moq-lite-05+ endpoint declares this when it attaches a publish or
+	/// subscribe origin. Protocol versions and endpoints without one return
+	/// `None`.
+	pub fn peer_origin(&self) -> Option<crate::Origin> {
+		match &self.inner.as_ref().expect("request already responded").handshake {
+			Handshake::LiteSetup { client_setup, .. } => client_setup.origin,
+			_ => None,
+		}
+	}
+
 	/// Publish to the connected client. Overrides any value from the [`Server`]
 	/// builder; typically set after inspecting [`path`](Self::path).
 	pub fn with_publisher(mut self, publish: impl Consume<origin::Consumer>) -> Self {
@@ -524,6 +536,7 @@ impl<S: web_transport_trait::Session> Drop for Request<S> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Origin;
 	use std::{
 		collections::VecDeque,
 		sync::{Arc, Mutex},
@@ -642,7 +655,7 @@ mod tests {
 	}
 
 	/// Encode a lite-05 Setup Stream: the `DataType::Setup` tag then the SETUP message.
-	fn lite05_setup(path: Option<&str>, role: Option<Role>) -> Vec<u8> {
+	fn lite05_setup(path: Option<&str>, role: Option<Role>, origin: Option<Origin>) -> Vec<u8> {
 		let v = lite::Version::Lite05;
 		let mut buf = Vec::new();
 		lite::DataType::Setup.encode(&mut buf, v).unwrap();
@@ -651,7 +664,7 @@ mod tests {
 			path: path.map(str::to_string),
 			role,
 			cost: None,
-			origin: None,
+			origin,
 		}
 		.encode(&mut buf, v)
 		.unwrap();
@@ -712,7 +725,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_path() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None, None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
@@ -720,7 +733,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_lite05_without_path_is_empty() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
@@ -729,14 +742,17 @@ mod tests {
 	async fn accept_request_lite05_empty_path_is_accepted() {
 		// An empty path is valid on the wire and means the same as omitting it, so a
 		// client that wants the root doesn't have to special-case the parameter.
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None)]);
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn accept_request_reads_lite05_role() {
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), Some(Role::Publisher))]);
+		let session = FakeSession::new(
+			ALPN_LITE_05,
+			[lite05_setup(Some("/team/room"), Some(Role::Publisher), None)],
+		);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.role(), Some(Role::Publisher));
 	}
@@ -745,8 +761,19 @@ mod tests {
 	async fn accept_request_skips_uni_stream_before_setup() {
 		// A GROUP racing ahead of the SETUP is STOP_SENDING-ed and skipped; the gate
 		// keeps reading until it finds the SETUP.
-		let session = FakeSession::new(ALPN_LITE_05, [lite05_group(), lite05_setup(Some("/team/room"), None)]);
+		let session = FakeSession::new(
+			ALPN_LITE_05,
+			[lite05_group(), lite05_setup(Some("/team/room"), None, None)],
+		);
 		let request = Server::new().accept_request(session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_reads_lite05_peer_origin() {
+		let origin = Origin::new(42).unwrap();
+		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(origin))]);
+		let request = Server::new().accept_request(session).await.unwrap();
+		assert_eq!(request.peer_origin(), Some(origin));
 	}
 }

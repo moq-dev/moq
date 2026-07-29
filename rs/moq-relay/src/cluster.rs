@@ -12,11 +12,7 @@ use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use url::Url;
 
-use crate::AuthToken;
-
-/// Path prefix under which cluster nodes advertise their own URLs for gossip-style
-/// peer discovery.
-const MESH_PREFIX: &str = ".internal/origins";
+use crate::{AuthToken, nodes::MESH_PREFIX};
 
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -364,6 +360,7 @@ pub struct ClusterConfig {
 pub struct Cluster {
 	config: ClusterConfig,
 	client: Option<moq_native::Client>,
+	pub(crate) nodes: crate::nodes::Nodes,
 
 	/// The origin's construction config (identity, cache pool, linger). Kept so
 	/// the `with_*` builders can rebuild the origin without losing each other's
@@ -407,10 +404,12 @@ impl Cluster {
 		};
 		let info = origin::Info::new(id).with_linger(config.linger.unwrap_or(DEFAULT_LINGER));
 		let origin = info.clone().produce();
+		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,
+			nodes,
 			client_tls: None,
 			info,
 			origin,
@@ -432,6 +431,7 @@ impl Cluster {
 			.with_pool(cache.pool)
 			.with_cache_duration(cache.duration);
 		self.origin = self.info.clone().produce();
+		self.nodes = self.nodes.with_origin(self.origin.clone());
 		self
 	}
 
@@ -940,6 +940,7 @@ impl Cluster {
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
+		let _connection = self.nodes.connect_outbound(log_url.to_string());
 
 		Err(cs.closed().await.into())
 	}
@@ -990,7 +991,6 @@ fn connect_api_is_http(source: &str) -> bool {
 /// verbatim. A bare host or `host:port` is still accepted for backwards
 /// compatibility and wrapped in `https://.../` (callers warn about this legacy
 /// form for user-supplied `--cluster-connect` entries).
-///
 fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
@@ -1020,7 +1020,7 @@ fn peer_url(peer: &str) -> anyhow::Result<Url> {
 /// A trailing slash on a non-empty URL path does not survive, since a path has no
 /// way to spell one. `https://a.example/edge/` advertises the same as
 /// `https://a.example/edge`.
-fn advertised_node_url(advertised: &str) -> String {
+pub(crate) fn advertised_node_url(advertised: &str) -> String {
 	match advertised.split_once('/') {
 		// The segment already ends in `:`, so this restores the `//` the path ate.
 		Some((scheme, rest)) if scheme.ends_with(':') => format!("{scheme}//{rest}"),
@@ -1040,7 +1040,7 @@ fn is_legacy_peer(peer: &str) -> bool {
 /// session. Drops the query (the jwt isn't part of a peer's identity) and lets
 /// `Url` normalize the scheme, host case, and default port. Falls back to the
 /// raw string if the peer can't be parsed.
-fn canonicalize_peer_key(peer: &str) -> String {
+pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	match peer_url(peer) {
 		Ok(mut url) => {
 			url.set_query(None);

@@ -14,6 +14,7 @@ mod config;
 mod connection;
 mod http_client;
 mod internal;
+mod nodes;
 mod stats;
 #[cfg(test)]
 mod test_env;

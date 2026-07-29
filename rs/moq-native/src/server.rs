@@ -998,6 +998,14 @@ impl Request {
 		request_ref!(self, r => r.role())
 	}
 
+	/// Returns the origin identity declared by a moq-lite peer.
+	///
+	/// A peer declares this when it attaches a publish or subscribe origin.
+	/// Protocol versions and peers without one return `None`.
+	pub fn peer_origin(&self) -> Option<moq_net::Origin> {
+		request_ref!(self, r => r.peer_origin())
+	}
+
 	/// The client certificate chain the peer presented, if any, validated
 	/// against a configured [`crate::tls::Server::root`] during the handshake.
 	///

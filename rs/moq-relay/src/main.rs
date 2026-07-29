@@ -66,9 +66,9 @@ async fn main() -> anyhow::Result<()> {
 	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-	// /metrics + /health, separate from the customer-facing web server. No-op
+	// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 	// when unconfigured.
-	let internal = Internal::new(config.internal, cluster.stats.clone());
+	let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);

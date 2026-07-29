@@ -93,6 +93,58 @@ Host overload monitoring (CPU, RAM, network, load average) belongs in a
 separate process that watches the host, not in the relay itself. Point your
 load balancer at that process for load shedding.
 
+## Internal Operations Endpoints
+
+The separate internal listener serves unauthenticated operational endpoints.
+Bind it only to loopback or a trusted private network:
+
+```toml
+[internal]
+listen = "127.0.0.1:9101"
+```
+
+It mirrors `/health`, exposes Prometheus traffic counters at `/metrics`, and
+adds the cluster topology endpoint below.
+
+### GET /nodes
+
+Returns this relay's local view of cluster nodes. A node is included when it is
+visible through the `.internal/origins` discovery namespace or has an
+established outbound cluster connection. An inbound connection is attached
+only after its SETUP origin id maps to one unique node advertisement. Sessions
+without a unique match are omitted.
+
+```json
+{
+  "nodes": [
+    {
+      "node": "https://relay-b.example/",
+      "origin_id": "200",
+      "announced": {
+        "hops": ["200"],
+        "hop_count": 1,
+        "cost": 1
+      },
+      "connections": [
+        { "id": 3, "direction": "inbound" }
+      ]
+    }
+  ]
+}
+```
+
+`announced` describes the selected route for the node's discovery
+advertisement, not every physical link in the cluster. A node can be visible
+without a direct connection, directly connected without an advertisement, or
+both. Origin ids are decimal strings because the wire supports values larger
+than JavaScript's precise integer range. Connection ids are process-local and
+last only for that session.
+
+Inbound association is best-effort correlation, not authenticated node
+identity. The SETUP origin id is self-declared, and `/nodes` associates it only
+when one visible advertisement has the same origin id. Do not use this endpoint
+for authorization or other security decisions.
+
 ## See Also
 
 - [Relay Configuration](/bin/relay/config) - Full config reference
