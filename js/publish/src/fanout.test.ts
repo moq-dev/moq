@@ -189,6 +189,62 @@ describe("Fanout", () => {
 		fanout.close();
 	});
 
+	// Without this the pump just logged and stopped, leaving every reader parked on read() forever:
+	// the encoders stalled with no terminal signal while still reporting themselves active.
+	test("surfaces a source failure to every reader", async () => {
+		let control!: ReadableStreamDefaultController<number>;
+		const source = new ReadableStream<number>({
+			start: (controller) => {
+				control = controller;
+			},
+		});
+
+		const fanout = new Fanout(source);
+		const effect = new Effect();
+
+		const a = fanout.subscribe(effect).getReader();
+		const b = fanout.subscribe(effect).getReader();
+
+		// Audio that already made it through is still delivered.
+		control.enqueue(1);
+		await flush();
+		await expect(a.read().then((r) => r.value)).resolves.toBe(1);
+		await expect(b.read().then((r) => r.value)).resolves.toBe(1);
+
+		control.error(new Error("capture died"));
+		await flush();
+
+		// Both readers learn it died, rather than parking on a read that never settles.
+		await expect(a.read()).rejects.toThrow("capture died");
+		await expect(b.read()).rejects.toThrow("capture died");
+
+		effect.close();
+		fanout.close();
+	});
+
+	// FrameSource and SampleSource both document that their stream is cancelled when dropped, and a
+	// one-shot decode keeps running (and holding the stream locked) if we don't.
+	test("cancels its source on close", async () => {
+		let cancelled = 0;
+		const source = new ReadableStream<number>({
+			cancel: () => {
+				cancelled++;
+			},
+		});
+
+		const fanout = new Fanout(source);
+		await flush();
+
+		fanout.close();
+		await flush();
+		expect(cancelled).toBe(1);
+
+		// Idempotent: the pump also closes on end-of-stream, so this must not double-cancel.
+		fanout.close();
+		await flush();
+		expect(cancelled).toBe(1);
+	});
+
 	test("closes its readers when the source ends", async () => {
 		const source = pushable<number>();
 		const fanout = new Fanout(source.stream);

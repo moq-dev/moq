@@ -460,7 +460,7 @@ viz.run((effect) => {
 	if (!fanout) return;
 
 	const reader = fanout.subscribe(effect).getReader();
-	effect.cleanup(() => void reader.cancel());
+	effect.cleanup(() => reader.cancel().catch(() => {}));
 
 	effect.spawn(async () => {
 		for (;;) {

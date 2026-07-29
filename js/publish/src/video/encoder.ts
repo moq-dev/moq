@@ -213,7 +213,7 @@ export class Encoder {
 				// Our own stream off the shared capture, so the preview or another rendition reading
 				// slowly can't take frames from this one.
 				const reader = fanout.subscribe(effect).getReader();
-				effect.cleanup(() => void reader.cancel());
+				effect.cleanup(() => reader.cancel().catch(() => {}));
 
 				effect.spawn(async () => {
 					for (;;) {

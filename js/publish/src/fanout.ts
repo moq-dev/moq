@@ -37,15 +37,21 @@ export class Fanout<T> {
 	readonly #release: ((value: T) => void) | undefined;
 
 	readonly #readers = new Set<Reader<T>>();
+	readonly #reader: ReadableStreamDefaultReader<T>;
 
 	#closed = false;
+
+	// Why the source stopped, when it stopped by failing. Readers surface this rather than seeing a
+	// clean end, so a consumer can tell "the capture died" from "the capture finished".
+	#failure: { error: unknown } | undefined;
 
 	constructor(source: ReadableStream<T>, props?: FanoutProps<T>) {
 		this.#queue = props?.queue ?? QUEUE;
 		this.#clone = props?.clone;
 		this.#release = props?.release;
+		this.#reader = source.getReader();
 
-		void this.#pump(source).catch((err) => console.error("fanout source failed:", err));
+		void this.#pump();
 	}
 
 	/**
@@ -77,7 +83,11 @@ export class Fanout<T> {
 						}
 
 						if (reader.done) {
-							controller.close();
+							// A source that failed has to reach the reader as an error. Closing
+							// cleanly would look like a finished capture, and the consumer would
+							// just stop rather than report it.
+							if (this.#failure) controller.error(this.#failure.error);
+							else controller.close();
 							return;
 						}
 
@@ -98,9 +108,16 @@ export class Fanout<T> {
 		);
 	}
 
-	/** Stop distributing and release anything still queued. */
+	/** Stop distributing, cancel the source, and release anything still queued. */
 	close(): void {
+		if (this.#closed) return;
 		this.#closed = true;
+
+		// The source is ours to release. Without this the pump stays parked on a read, holding the
+		// stream locked and letting a swapped-out capture keep producing into nothing.
+		// Cancelling an errored stream rejects with that error. We already recorded it, so swallow
+		// the rejection rather than letting it surface as unhandled.
+		this.#reader.cancel().catch(() => {});
 
 		for (const reader of this.#readers) {
 			this.#drain(reader);
@@ -112,11 +129,22 @@ export class Fanout<T> {
 		this.#readers.clear();
 	}
 
-	async #pump(source: ReadableStream<T>): Promise<void> {
-		const reader = source.getReader();
+	async #pump(): Promise<void> {
+		try {
+			await this.#read();
+		} catch (error) {
+			// Surface it through every reader rather than only logging: a silent stall would leave
+			// the encoders waiting on a source that is never coming back.
+			console.error("fanout source failed:", error);
+			this.#failure = { error };
+		}
 
+		this.close();
+	}
+
+	async #read(): Promise<void> {
 		for (;;) {
-			const { value } = await reader.read();
+			const { value } = await this.#reader.read();
 			if (value === undefined) break;
 
 			// Nobody attached, so this value has nowhere to go.
@@ -133,8 +161,6 @@ export class Fanout<T> {
 			// Every reader holds a clone of its own, so the original is ours to release.
 			if (this.#clone) this.#release?.(value);
 		}
-
-		this.close();
 	}
 
 	#push(reader: Reader<T>, value: T): void {

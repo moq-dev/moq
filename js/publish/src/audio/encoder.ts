@@ -149,6 +149,13 @@ export class Encoder {
 	#signals = new Effect();
 
 	constructor(name: string, props?: EncoderProps) {
+		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
+		// plain JS caller would otherwise get an encoder with nothing attached: no catalog, no
+		// audio, and nothing to explain why.
+		if (props && "source" in props) {
+			throw new Error("Audio.Encoder: `source` moved to Audio.Capture; construct one and pass `capture`");
+		}
+
 		this.name = name;
 		this.in = {
 			enabled: getter(props?.enabled ?? false),
@@ -184,7 +191,7 @@ export class Encoder {
 		// Our own stream off the shared capture, so another rendition reading slowly can't take
 		// frames from this one.
 		const reader = fanout.subscribe(effect).getReader();
-		effect.cleanup(() => void reader.cancel());
+		effect.cleanup(() => reader.cancel().catch(() => {}));
 
 		const gain = new Gain();
 

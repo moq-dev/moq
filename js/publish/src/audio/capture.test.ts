@@ -224,3 +224,13 @@ test("feeds every rendition off one decoded source", async () => {
 	capture.close();
 	await settle();
 });
+
+// The removed `source` prop would otherwise be ignored in plain JS: the encoder would build, the
+// catalog would never appear, and the audio would just be missing.
+test("rejects the removed source prop instead of publishing nothing", async () => {
+	const { Encoder } = await import("./encoder.ts");
+
+	expect(
+		() => new Encoder("audio", { enabled: true, source: new Signal(fakeSource()) } as never),
+	).toThrow("moved to Audio.Capture");
+});
