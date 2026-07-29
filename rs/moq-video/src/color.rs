@@ -58,6 +58,27 @@ impl Color {
 			(_, false) => Color::Bt709Full,
 		}
 	}
+
+	/// Whether luma is 16..235 rather than 0..255.
+	///
+	/// The encoders need it for the VUI's `video_full_range_flag`, so unlike the
+	/// render module's `weights` it is not render-only.
+	pub(crate) fn limited(self) -> bool {
+		matches!(self, Color::Bt601Limited | Color::Bt709Limited)
+	}
+
+	/// How the `yuv` crate names this color space, for the RGB conversions.
+	pub(crate) fn yuv(self) -> (yuv::YuvRange, yuv::YuvStandardMatrix) {
+		let range = match self.limited() {
+			true => yuv::YuvRange::Limited,
+			false => yuv::YuvRange::Full,
+		};
+		let matrix = match self {
+			Color::Bt601Limited | Color::Bt601Full => yuv::YuvStandardMatrix::Bt601,
+			Color::Bt709Limited | Color::Bt709Full => yuv::YuvStandardMatrix::Bt709,
+		};
+		(range, matrix)
+	}
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 
 use super::Encoded;
 use super::backend::{self, Backend};
-use crate::{Error, Frame, Size};
+use crate::{Color, Error, Frame, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -65,6 +65,14 @@ pub struct Config {
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
 	pub kind: Kind,
+	/// The color space of the input frames, written into the bitstream's VUI so a
+	/// decoder doesn't have to guess. `None` uses [`Color::infer`], which is both
+	/// what the crate's own RGB conversions produce and what a player falls back
+	/// to, so leaving it unset keeps the pixels and the label in agreement.
+	///
+	/// Set it only when feeding frames the crate did not convert and whose space
+	/// you know from elsewhere.
+	pub color: Option<Color>,
 }
 
 impl Config {
@@ -80,12 +88,21 @@ impl Config {
 			gop: framerate.saturating_mul(2).max(1),
 			codec: Codec::default(),
 			kind: Kind::Auto,
+			color: None,
 		}
 	}
 
 	/// The encoded resolution.
 	pub fn size(&self) -> Size {
 		Size::new(self.width, self.height)
+	}
+
+	/// Resolved input color space: explicit override, or the size-based guess
+	/// every player makes for an untagged stream. Backends write this into the
+	/// VUI; the crate's RGB conversions pick the same answer for the same size,
+	/// so the samples match what the bitstream claims.
+	pub(crate) fn resolved_color(&self) -> Color {
+		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
 	/// Resolved bitrate: explicit override, or a pixels-per-second estimate.
@@ -106,6 +123,9 @@ pub struct Encoder {
 	codec: Codec,
 	size: Size,
 	bitrate: u64,
+	/// What the backend wrote into the bitstream's VUI, kept so a frame declaring
+	/// a different space is caught rather than silently mislabeled.
+	color: Color,
 	/// A keyframe asked for by [`Encoder::keyframe`], applied to the next frame.
 	/// Held rather than applied immediately because the caller decides a group
 	/// boundary before it has the frame that opens it.
@@ -131,6 +151,7 @@ impl Encoder {
 			codec: config.codec,
 			size,
 			bitrate: config.resolved_bitrate(),
+			color: config.resolved_color(),
 			pending_keyframe: false,
 		})
 	}
@@ -221,6 +242,27 @@ impl Encoder {
 				"frame {size} does not match encoder {}",
 				self.size
 			)));
+		}
+		// The VUI is fixed when the session opens, so a frame in a different space
+		// gets encoded under the wrong label. Reached by resizing across the
+		// standard-definition boundary, where the pixels keep their space but the
+		// encoder was sized into another one; `Config::color` is the way to pin it.
+		//
+		// Warn rather than reject: a live gateway transcoding a source whose VUI
+		// disagrees with its resolution should keep serving a mislabeled stream
+		// rather than drop it, and this is no worse than the untagged stream that
+		// came before. Once, because it would otherwise fire every frame.
+		if let Some(color) = frame.surface.color()
+			&& color != self.color
+		{
+			static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+			WARN_ONCE.call_once(|| {
+				tracing::warn!(
+					frame = ?color,
+					encoder = ?self.color,
+					"frame color space differs from the one written into the bitstream; set encode::Config::color"
+				);
+			});
 		}
 		let encoded = self.backend.encode(frame, self.pending_keyframe)?;
 		// Cleared only once the frame is through: a failed encode produced no
@@ -803,6 +845,7 @@ mod tests {
 			codec: config.codec,
 			size: config.size(),
 			bitrate: config.resolved_bitrate(),
+			color: config.resolved_color(),
 			pending_keyframe: false,
 		}
 	}
@@ -980,5 +1023,91 @@ mod tests {
 				.unwrap()
 				.is_empty()
 		);
+	}
+
+	/// The hardware encoder states the color space too, and states the one the
+	/// pixels were actually converted into. VideoToolbox takes the three
+	/// properties as a request, so read the SPS back rather than trusting that it
+	/// honored them.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn videotoolbox_sps_declares_the_color_space() {
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
+
+		for (size, described) in [
+			(Size::new(640, 480), BT601_DESCRIBED),
+			(Size::new(1920, 1080), BT709_DESCRIBED),
+		] {
+			let config = Config {
+				kind: Kind::Named("videotoolbox".into()),
+				..Config::new(size.width, size.height, 30)
+			};
+			let mut encoder = Encoder::new(&config).expect("videotoolbox is available on macOS");
+
+			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
+			let surface = crate::frame::Surface::rgba(&rgba, size).unwrap();
+			encoder.keyframe();
+			let frames = encoder
+				.encode(&Frame::new(surface, moq_net::Timestamp::from_micros(0).unwrap()))
+				.unwrap();
+
+			let keyframe = frames.first().expect("a keyframe");
+			assert_eq!(declared_color(&keyframe.payload), Some(described), "{size} SPS");
+		}
+	}
+
+	/// Resizing across the standard-definition boundary keeps the pixels' color
+	/// space but moves the encoder into another one, which would emit BT.709
+	/// pixels under a BT.601 label. `Config::color` pins the real space, and the
+	/// bitstream then says so.
+	#[test]
+	fn config_color_pins_the_space_a_resize_carried() {
+		use crate::Color;
+
+		let big = Size::new(1280, 720);
+		let small = Size::new(640, 480);
+
+		// Converted at 720p, so the samples are BT.709.
+		let rgba = vec![0x80u8; big.pixels() as usize * 4];
+		let frame = Frame::new(
+			crate::frame::Surface::rgba(&rgba, big).unwrap(),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+		let scaled = frame.resize(small).unwrap();
+		assert_eq!(
+			scaled.surface.color(),
+			Some(Color::Bt709Limited),
+			"resize keeps the space"
+		);
+
+		// Left to infer, a 480p encoder writes BT.601 over those BT.709 samples. It
+		// still encodes (a live gateway keeps serving) but the label is wrong, which
+		// is what `Config::color` exists to fix.
+		let config = Config {
+			kind: Kind::Software,
+			..Config::new(small.width, small.height, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		encoder.keyframe();
+		let frames = encoder.encode(&scaled).expect("a mismatch warns rather than fails");
+		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
+		assert_eq!(
+			declared_color(&frames.first().expect("a keyframe").payload),
+			Some(BT601_DESCRIBED),
+			"the inferred label is the wrong one, which is the case Config::color covers"
+		);
+
+		// Declaring the real space fixes the label.
+		let config = Config {
+			kind: Kind::Software,
+			color: Some(Color::Bt709Limited),
+			..Config::new(small.width, small.height, 30)
+		};
+		let mut encoder = Encoder::new(&config).unwrap();
+		encoder.keyframe();
+		let frames = encoder.encode(&scaled).expect("a declared space encodes");
+
+		let keyframe = frames.first().expect("a keyframe");
+		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
 	}
 }
