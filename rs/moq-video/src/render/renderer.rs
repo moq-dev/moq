@@ -513,18 +513,22 @@ mod tests {
 		assert_eq!(actual[3], 255, "alpha should be opaque");
 	}
 
-	/// Above 576 lines the size heuristic guesses BT.709, but every RGB
-	/// conversion in this crate emits BT.601 limited whatever the resolution. So
-	/// an HD frame has to be converted back with the matrix it was actually made
-	/// with, not the one its size suggests, or saturated colors skew: red came
-	/// back as roughly (255, 25, 0) when the two disagreed.
+	/// The frame's declared color space wins over the guess its size would
+	/// suggest, or saturated colors skew: red came back as roughly (255, 25, 0)
+	/// when the two disagreed.
 	///
-	/// The sibling tests all run at 64x64, which sits below the threshold where
-	/// the guess happens to agree, so only this one pins the behavior down.
-	/// Ignored: needs a GPU, which CI lacks. Run with `--ignored`.
+	/// The crate's RGB conversions now convert *into* the inferred space, so the
+	/// two agree by construction and that half of this cannot fail on its own.
+	/// The second half is the one with teeth: a frame converted at SD and scaled
+	/// past 576 lines keeps its BT.601 samples while its size says BT.709, which
+	/// is exactly the case `Surface::color` exists to report.
+	///
+	/// The sibling tests all run at 64x64, below the threshold where the guess
+	/// happens to agree. Ignored: needs a GPU, which CI lacks. Run with
+	/// `--ignored`.
 	#[tokio::test]
 	#[ignore]
-	async fn hd_frames_use_the_matrix_they_were_converted_with() {
+	async fn the_declared_color_space_beats_the_size_guess() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(1280, 720);
 		let config = Config {
@@ -538,17 +542,32 @@ mod tests {
 		for rgba in [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]] {
 			let frame = solid(size, rgba);
 			assert_eq!(
-				frame.surface.to_i420().expect("i420").color(),
-				Some(crate::Color::Bt601Limited),
-				"the RGB conversion should report the space it used"
+				frame.surface.color(),
+				Some(crate::Color::infer(size)),
+				"the RGB conversion reports the space it converted into"
 			);
 
 			let texture = renderer.render(&frame).expect("a rendered frame");
 			let pixels = readback(&device, &queue, &texture).await;
-			assert_close(
-				pixels[(size.height as usize / 2) * size.width as usize + size.width as usize / 2],
-				rgba,
+			let center = (size.height as usize / 2) * size.width as usize + size.width as usize / 2;
+			assert_close(pixels[center], rgba);
+
+			// Convert at SD, where the crate picks BT.601, then scale past the
+			// threshold. The samples stay BT.601 while the size now implies
+			// BT.709, so rendering by size alone skews this back.
+			let sd = solid(Size::new(640, 480), rgba);
+			assert_eq!(sd.surface.color(), Some(crate::Color::Bt601Limited));
+			let scaled = sd.resize(size).expect("scale past 576 lines");
+			assert_eq!(
+				scaled.surface.color(),
+				Some(crate::Color::Bt601Limited),
+				"resize carries the space across rather than re-guessing"
 			);
+			assert_ne!(scaled.surface.color(), Some(crate::Color::infer(size)));
+
+			let texture = renderer.render(&scaled).expect("a rendered frame");
+			let pixels = readback(&device, &queue, &texture).await;
+			assert_close(pixels[center], rgba);
 		}
 	}
 
