@@ -80,6 +80,49 @@ fn cluster_diamond_goaway_seamless_failover() {
 }
 
 #[test]
+fn drain_session_with_zero_timeout_closes_at_once() {
+	run_cluster_test(drain_session_with_zero_timeout_closes_at_once_inner());
+}
+
+/// A zero drain window means no grace, so `drain_session` closes the session
+/// rather than sending a GOAWAY the peer has no time to act on.
+///
+/// The regression it guards: `Goaway::with_timeout(ZERO)` means "no deadline" on
+/// the wire, so passing the window straight through left the session with no
+/// force-close at all and `drain_session` awaiting a peer that never leaves.
+async fn drain_session_with_zero_timeout_closes_at_once_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let origin = Origin::random().produce();
+	let (port, mut accepted, _handle) = spawn_upstream(origin);
+	wait_listening(port).await;
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	let client = client_config.init().expect("client init");
+	let client_session = within("client connects", async {
+		client
+			.connect(format!("tcp://127.0.0.1:{port}/").parse().expect("parse url"))
+			.await
+	})
+	.await
+	.expect("connect");
+
+	let server_session = within("upstream accepts", accepted.recv())
+		.await
+		.expect("accept channel closed");
+
+	let (_trigger, shutdown) = moq_relay::Shutdown::new(Duration::ZERO);
+
+	// The assertion is that this resolves at all: with the window passed through as
+	// a wire timeout it would await a peer under no deadline to leave.
+	within("drain_session returns", shutdown.drain_session(&server_session)).await;
+
+	// The peer observes the close rather than being left connected.
+	within("client observes the close", client_session.closed()).await;
+}
+
+#[test]
 fn cluster_reconnects_on_empty_uri_goaway() {
 	run_cluster_test(cluster_reconnects_on_empty_uri_goaway_inner());
 }

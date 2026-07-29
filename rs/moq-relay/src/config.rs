@@ -62,7 +62,8 @@ pub struct Config {
 	/// How long accepted sessions may keep running after a shutdown signal, e.g.
 	/// "10s" or "500ms". The first signal sends every session a GOAWAY and waits
 	/// this long for clients to reconnect elsewhere before force-closing them; a
-	/// second signal exits immediately. Defaults to 10 seconds.
+	/// second signal exits immediately. Zero closes them at once, with no GOAWAY
+	/// they would have no time to act on. Defaults to 10 seconds.
 	#[arg(
 		id = "drain-timeout",
 		long = "drain-timeout",

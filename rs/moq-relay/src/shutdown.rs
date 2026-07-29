@@ -68,7 +68,18 @@ impl Shutdown {
 	/// on every version. A peer too old for GOAWAY (moq-lite-03 and earlier) keeps
 	/// being served for the same window and is then closed the same way; it simply
 	/// never learns why, which beats cutting it off with no warning and no grace.
+	///
+	/// A zero [`drain_timeout`](Self::drain_timeout) means no grace at all: the
+	/// session is closed at once.
 	pub async fn drain_session(&self, session: &moq_net::Session) {
+		// No grace window, so there is nothing to drain. Close now rather than send a
+		// GOAWAY: the peer would have no time to act on it, and a zero timeout means
+		// "no deadline" on the wire, which is the opposite of what was asked for.
+		if self.drain_timeout.is_zero() {
+			session.abort(moq_net::Error::GoingAway);
+			return;
+		}
+
 		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
 		// legal from either side and this runs once per session, so neither error
 		// is reachable; the deadline closes the session regardless.

@@ -117,7 +117,11 @@ impl Session {
 	///
 	/// The graceful counterpart to [`abort`](Self::abort). Send the message with
 	/// [`goaway::Producer::send`], then await [`closed`](Self::closed) to observe
-	/// the peer leaving, or the deadline force-closing it.
+	/// the peer leaving.
+	///
+	/// Only a [`Goaway`](goaway::Goaway) carrying a [`timeout`](goaway::Goaway::timeout)
+	/// schedules a close of our own, so without one this waits for a peer that may
+	/// never leave. Set a deadline when the drain has to finish.
 	///
 	/// Available on every version. A version with no GOAWAY message (moq-lite-03
 	/// and earlier) simply carries no explanation to the peer; the deadline is the
