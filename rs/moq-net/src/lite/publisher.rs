@@ -805,7 +805,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		match serving && demand.is_used() {
 			true => lite::RouteCost(0),
-			false => lite::RouteCost(route.cost),
+			// Clamp to what a varint can carry. Costs that arrive from a peer are
+			// already capped by `RouteCost::charged`, but a locally created route sets
+			// `Route::cost` directly and nothing stops it naming more than the wire can
+			// express. This is the single point every advertised cost passes through, so
+			// it is the one place that has to hold.
+			false => lite::RouteCost(route.cost.min(crate::broadcast::MAX_COST)),
 		}
 	}
 
@@ -1691,6 +1696,35 @@ mod announce_test {
 			other => panic!("expected the re-announce, got {other:?}"),
 		}
 		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
+	}
+
+	/// A locally created route may set `Route::cost` past what a varint can carry,
+	/// since nothing validates the public field. The advertised cost has to clamp,
+	/// or forwarding the announce fails to encode and takes the announce stream
+	/// with it.
+	#[test]
+	fn outgoing_cost_clamps_to_the_wire_ceiling() {
+		use crate::broadcast;
+
+		let mut producer = broadcast::Info::new().produce();
+		producer
+			.set_route(broadcast::Route::announced().with_cost(u64::MAX))
+			.unwrap();
+		let consumer = producer.consume();
+		let route = consumer.route();
+		let demand = consumer.demand();
+
+		let cost = Publisher::<crate::lite::test_transport::SinkSession>::outgoing_cost(
+			Version::Lite06Wip,
+			&demand,
+			&route,
+			false,
+		);
+		assert_eq!(cost, lite::RouteCost(broadcast::MAX_COST));
+
+		let mut buf = Vec::new();
+		cost.encode(&mut buf, Version::Lite06Wip)
+			.expect("an advertised cost must always encode");
 	}
 }
 

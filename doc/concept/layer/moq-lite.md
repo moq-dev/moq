@@ -142,13 +142,13 @@ It tells the peer to reconnect, either to a different endpoint (a URI in the mes
 
 The lifecycle on the sending side (Rust `moq-net`):
 
-1. `session.send_goaway()` yields the session's one GOAWAY handle, or `None` on versions without GOAWAY (moq-lite-03 and earlier).
-2. `producer.send(Goaway::new())` tells the peer to reconnect to the same endpoint; `Goaway::redirect(uri)` names a different one, and `.with_timeout(duration)` adds a deadline.
-3. `session.closed()` resolves once the peer leaves, or once the deadline force-closes it.
+1. `session.drain()` yields the session's one GOAWAY handle, the graceful counterpart to `session.abort()`. It works on every version: one without a GOAWAY message (moq-lite-03 and earlier) simply carries no explanation to the peer.
+2. `producer.send(Goaway::new())` tells the peer to reconnect to the same endpoint; `Goaway::redirect(uri)` names a different one, and `.with_timeout(duration)` adds a deadline. Sending a second is refused, so the peer never sees a URI replaced behind its back.
+3. `session.closed()` resolves once the peer leaves, or once the deadline force-closes it. Only a `Goaway` carrying a timeout schedules a close of our own, so set one when the drain has to finish.
 
 On the receiving side:
 
-1. `session.recv_goaway()` returns a consumer: `peek()` is a cheap synchronous check, `recv()` waits for the URI and optional deadline.
+1. `session.draining()` returns a consumer: `peek()` is a cheap synchronous check, `recv()` waits for the URI and optional deadline.
 2. New requests (subscribes, fetches, announce interests) on the session are then rejected; existing subscriptions keep flowing until the session closes.
 3. Connect a replacement session sharing the same origin. Its announcements attach as additional routes to the broadcasts the old session serves, and when the old session closes, live subscriptions resume on the new route at a group boundary. Applications reading through `moq-net` never observe the swap.
 

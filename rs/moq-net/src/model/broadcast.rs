@@ -84,7 +84,11 @@ pub struct Route {
 
 	/// The cost of pulling the broadcast via this route, accumulated per link:
 	/// lower wins, with ties broken by hop length, then a deterministic hash, and
-	/// finally the most recently attached route. Capped at [`MAX_COST`].
+	/// finally the most recently attached route.
+	///
+	/// Selection accepts any value, but only [`MAX_COST`] of it survives a hop:
+	/// forwarding clamps to what a varint can carry, so a cost set beyond the
+	/// ceiling ranks last locally and is advertised as the ceiling.
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,
