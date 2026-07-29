@@ -13,7 +13,7 @@ async function settle(times = 5): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
 }
 
-// Models the WebAudio surface `#runSource` touches. The key detail is `AudioContext.close()`: on
+// Models the WebAudio surface the audio Capture touches. The key detail is `AudioContext.close()`: on
 // Firefox and Safari it does NOT synchronously flip `.state` to "closed" (it stays "suspended"), which
 // is exactly the browser behavior the old `context.state === "closed"` guard failed to account for.
 function installFakeWebAudio() {
@@ -91,7 +91,7 @@ function fakeSource(sampleRate: number | undefined = 48_000) {
 	} as unknown as MediaStreamTrack;
 }
 
-// Regression: when the current run of #runSource is torn down while `audioWorklet.addModule` is still
+// Regression: when the current run of Capture's track path is torn down while `audioWorklet.addModule` is still
 // pending, no AudioWorkletNode may be constructed for that abandoned run. The old guard keyed off
 // `context.state === "closed"`, which is never true on Firefox/Safari, so it fell through and threw.
 test("does not construct an AudioWorkletNode when torn down mid worklet load", async () => {
@@ -103,7 +103,7 @@ test("does not construct an AudioWorkletNode when torn down mid worklet load", a
 		source: new Signal(fakeSource()) as never,
 	});
 
-	// Let #runSource spawn the task and park it on the pending addModule race.
+	// Let the capture spawn its task and park it on the pending addModule race.
 	await settle();
 
 	// Tear the run down before the module finishes loading. cleanup() calls context.close(), which on
@@ -155,7 +155,7 @@ test("leaves an AAC-native capture rate alone", async () => {
 });
 
 // Regression: only the codec's mime picks the capture rate, so tweaking an encode-only knob must not
-// tear down the microphone. Subscribing #runSource to the whole codec signal rebuilt the AudioContext
+// tear down the microphone. Subscribing the capture to the whole codec signal rebuilt the AudioContext
 // on every change, which dropped #worklet and closed the track being published. The demo writes this
 // signal from live bitrate/complexity sliders, so it fired on every slider tick.
 test("does not rebuild the capture graph when an encode-only knob changes", async () => {

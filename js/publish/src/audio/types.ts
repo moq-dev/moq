@@ -5,6 +5,10 @@
 // - "auto": let the encoder decide. Opus defaults (good for unknown sources like file playback).
 export type Kind = "voice" | "music" | "auto";
 
+// Which codec is in use, ignoring its tuning knobs. Lives here rather than next to the codec
+// configs so the capture can read it without depending on the encoder.
+export type CodecMime = "opus" | "aac";
+
 // Where audio comes from: a live capture track, or a stream of samples we decoded ourselves.
 // A bare track is accepted for backwards compatibility and treated as kind="auto".
 // Prefer the { track, kind } object form so the encoder can pick the right Opus settings.
