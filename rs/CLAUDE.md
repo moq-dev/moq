@@ -139,7 +139,25 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `cargo test -p <crate>` for one crate.
+- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+
+- **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
+  `slow-timeout` with `terminate-after`, so a wedged test is reported as a
+  TIMEOUT and killed; under `cargo test`'s harness the same test hangs forever,
+  holding the target lock and burning a core. That matters here because a lost
+  `kio` wakeup parks a task with nothing to wake it, which is a hang rather than
+  a failure. `just rs test` and `just rs ci` both use nextest. Doctests are the
+  one thing it skips (`just rs doctest` covers them), and `just rs loom` stays on
+  `cargo test` since loom needs its own `--cfg loom` build.
+
+- **A test flagged SLOW is a bug to fix, not a threshold to raise.** The whole
+  workspace runs in well under a minute and the slowest single test is a few
+  seconds, which is what makes the timeout above a meaningful signal. When a
+  dependency is the reason (crypto and bignum code is orders of magnitude slower
+  unoptimized), give it an `opt-level` override in the root `Cargo.toml` rather
+  than shrinking what the test covers: `[profile.dev.package.<dep>]` applies to
+  test builds too, and took the moq-token RSA keygen tests from 16s to 0.8s while
+  still generating production-size 2048-bit keys.
 
 - Rust tests are `#[cfg(test)] mod tests` inline in the source file.
 

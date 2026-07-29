@@ -123,6 +123,22 @@ web-transport-trait = "0.3.4"
 [profile.dev]
 panic = "abort"
 
+# Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
+# arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
+# moq-token key tests spend ~16s generating 2048-bit keys, versus well under a
+# second here. These are dependencies we never step through in a debugger, so
+# optimizing them costs nothing an unoptimized build was buying us, and the
+# tests keep exercising production key sizes rather than being weakened to
+# stay fast. `profile.test` inherits these overrides.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 

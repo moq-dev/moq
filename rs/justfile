@@ -99,8 +99,18 @@ fix:
     cargo shear --fix
     cargo sort --workspace --no-format
 
+# Run the test suite.
+#
+# nextest, not `cargo test`, so a wedged test is killed instead of pinning a core
+# until someone notices (`.config/nextest.toml` sets the timeout). It also
+# matches what `ci` runs. The trade is doctests, which nextest does not execute;
+# `just rs doctest` covers those.
 test *args:
-    cargo test --all-targets {{ args }}
+    cargo nextest run --all-targets {{ args }}
+
+# Compile and run the `/// ```` examples, which nextest skips.
+doctest *args:
+    cargo test --doc {{ args }}
 
 # Permutation-test the concurrent handoffs with loom.
 #
