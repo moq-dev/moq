@@ -4443,6 +4443,11 @@ mod tests {
 	/// the incumbent. An offline source (a cache, or an on-demand handler) is
 	/// ranked below every announced route, so arriving under a different
 	/// publisher must not unannounce a live broadcast and cut its subscribers.
+	///
+	/// The tail of this test covers the park's *exit*: the parked source has to
+	/// wake and attach once the incumbent ends. Nothing else drives that wait, so
+	/// without this a lost wakeup would strand the source invisibly forever
+	/// rather than failing anything.
 	#[tokio::test]
 	async fn test_offline_mismatch_never_evicts_a_live_front() {
 		tokio::time::pause();
@@ -4454,7 +4459,7 @@ mod tests {
 		let hops_live = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
 		let hops_cache = OriginList::try_from(vec![Origin::new(2).unwrap()]).unwrap();
 
-		let live = origin
+		let mut live = origin
 			.create_broadcast("test", announce().with_hops(hops_live.clone()))
 			.unwrap();
 		let mut live_dynamic = live.dynamic();
@@ -4471,14 +4476,28 @@ mod tests {
 
 		// An offline source for different content at the same path: it stays
 		// invisible rather than displacing the live one.
-		let _cache = origin
-			.create_broadcast("test", broadcast::Route::new().with_hops(hops_cache))
+		let cache = origin
+			.create_broadcast("test", broadcast::Route::new().with_hops(hops_cache.clone()))
 			.unwrap();
 		settle().await;
 		settle().await;
 		announced.assert_next_wait();
 		assert!(!face.is_closed(), "the live front must survive");
 		assert_eq!(consumer.get_broadcast("test").unwrap().route().hops, hops_live);
+
+		// The incumbent ending hands the path to the parked source, which is the
+		// only thing that ever wakes that wait.
+		live.finish();
+		settle().await;
+		settle().await;
+		announced.assert_next_none("test");
+		let taken = consumer
+			.get_broadcast("test")
+			.expect("the parked source must take over");
+		assert_eq!(taken.route().hops, hops_cache);
+		// Offline, so it holds the path without being advertised.
+		announced.assert_next_wait();
+		drop(cache);
 	}
 
 	/// A subscription from a peer the active chain flows through is served from
