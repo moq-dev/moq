@@ -975,11 +975,7 @@ mod tests {
 
 	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover.
 	fn mid_group_demand() -> Subscription {
-		Subscription::default()
-			.with_group_start(5)
-			.with_frame_start(3)
-			.with_group_end(5)
-			.with_frame_end(2)
+		Subscription::default().with_start(5, 3).with_end(5, 2)
 	}
 
 	/// A mid-group resume boundary handed to a peer that predates lite-06 is widened to
@@ -1043,6 +1039,40 @@ mod tests {
 		);
 		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
 		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(2)));
+	}
+
+	/// A frame index never reaches the wire without the group it counts from.
+	///
+	/// [`Subscription::with_start`] pairs the two, so the builder cannot express this.
+	/// The fields are still `pub`, so assigning one alone can; the encode path reads the
+	/// pair through `Subscription::start`, which drops a frame with no group rather than
+	/// emitting one the peer must reject as `InvalidSubscribeLocation`.
+	#[tokio::test]
+	async fn a_frame_bound_without_its_group_is_dropped() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		let mut demand = Subscription::default();
+		demand.frame_start = 3;
+		demand.frame_end = Some(7);
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(demand),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+
+		let wire = h.wire();
+		let mut wire = wire.as_slice();
+		lite::ControlType::decode(&mut wire, Version::Lite06Wip).unwrap();
+		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
+		assert_eq!((msg.start_group, msg.start_frame), (None, 0));
+		assert_eq!((msg.end_group, msg.end_frame), (None, None));
 	}
 
 	/// The widening covers SUBSCRIBE_UPDATE too: a downstream peer asking for a frame
@@ -1460,11 +1490,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						active.priority = subscription.priority;
 						active.ordered = subscription.ordered;
 						active.max_latency = subscription.latency_max;
-						active.start_group = subscription.group_start;
-						active.start_frame = subscription.frame_start;
+						let start = subscription.start();
+						active.start_group = start.map(|start| start.group);
+						active.start_frame = start.map_or(0, |start| start.frame);
 						if supports_update {
-							self.send_update(active, subscription.group_end, subscription.frame_end)
-								.await?;
+							let end_frame = subscription.group_end.and(subscription.frame_end);
+							self.send_update(active, subscription.group_end, end_frame).await?;
 						}
 					}
 				}
@@ -1508,6 +1539,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	) -> Result<(), Error> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
+		// Both halves of each bound come from the same position, so a frame can never
+		// reach the wire without the group it counts from (which the peer would reject).
+		let start = subscription.start();
 		let msg = lite::Subscribe {
 			id,
 			broadcast: self.path.as_path(),
@@ -1515,10 +1549,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			priority: subscription.priority,
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
-			start_group: subscription.group_start,
+			start_group: start.map(|start| start.group),
 			end_group: subscription.group_end,
-			start_frame: subscription.frame_start,
-			end_frame: subscription.frame_end,
+			start_frame: start.map_or(0, |start| start.frame),
+			end_frame: subscription.group_end.and(subscription.frame_end),
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");

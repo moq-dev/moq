@@ -41,15 +41,15 @@ pub struct Subscription {
 	/// First frame to deliver within [`Self::group_start`]'s group. `0` (the default)
 	/// starts at the beginning of that group.
 	///
-	/// Only meaningful alongside an explicit `group_start`: frames are numbered per
-	/// group, so there is nothing to count from until the group is pinned down. A
-	/// subscriber asking for the latest group must leave this at `0`.
+	/// Frames are numbered per group, so this counts from nothing without an explicit
+	/// `group_start` and is ignored when there is none. Set the pair together with
+	/// [`Self::with_start`], which is the only way to reach it.
 	pub frame_start: u64,
 	/// Last frame to deliver (inclusive) within [`Self::group_end`]'s group, or `None`
 	/// (the default) for through the end of that group.
 	///
-	/// Only meaningful alongside an explicit `group_end`, mirroring
-	/// [`Self::frame_start`].
+	/// Ignored without an explicit `group_end`, mirroring [`Self::frame_start`]. Set the
+	/// pair together with [`Self::with_end`].
 	pub frame_end: Option<u64>,
 }
 
@@ -100,21 +100,30 @@ impl Subscription {
 		self
 	}
 
-	/// Set the first frame to deliver within the start group, returning `self` for chaining.
-	pub fn with_frame_start(mut self, frame_start: u64) -> Self {
-		self.frame_start = frame_start;
+	/// Set the first position to deliver: frame `frame` of group `group`, returning `self`
+	/// for chaining.
+	///
+	/// The group comes with it because a frame index only means something relative to a
+	/// group, so there is no way to name a frame without the group it belongs to.
+	/// [`Self::with_group_start`] is the whole-group form, the same as `frame` 0.
+	pub fn with_start(mut self, group: u64, frame: u64) -> Self {
+		self.group_start = Some(group);
+		self.frame_start = frame;
 		self
 	}
 
-	/// Set the last frame to deliver (inclusive) within the end group, returning `self`
-	/// for chaining.
-	pub fn with_frame_end(mut self, frame_end: impl Into<Option<u64>>) -> Self {
-		self.frame_end = frame_end.into();
+	/// Set the last position to deliver (inclusive): frame `frame` of group `group`, or
+	/// all of `group` when `frame` is `None`. Returns `self` for chaining.
+	///
+	/// Pairs the group with the frame for the same reason as [`Self::with_start`].
+	pub fn with_end(mut self, group: u64, frame: impl Into<Option<u64>>) -> Self {
+		self.group_end = Some(group);
+		self.frame_end = frame.into();
 		self
 	}
 
 	/// The requested start as an ordered position, or `None` for the live edge.
-	pub(super) fn start(&self) -> Option<Position> {
+	pub(crate) fn start(&self) -> Option<Position> {
 		self.group_start.map(|group| Position {
 			group,
 			frame: self.frame_start,
@@ -124,7 +133,7 @@ impl Subscription {
 	/// The requested end as an ordered position, or `None` for unbounded. The frame is
 	/// `u64::MAX` when the whole end group is wanted, so the ordering matches the
 	/// "widest end wins" aggregate.
-	pub(super) fn end(&self) -> Option<Position> {
+	pub(crate) fn end(&self) -> Option<Position> {
 		self.group_end.map(|group| Position {
 			group,
 			frame: self.frame_end.unwrap_or(u64::MAX),
@@ -132,14 +141,14 @@ impl Subscription {
 	}
 
 	/// Apply an aggregated start position, or the live edge when `None`.
-	pub(super) fn set_start(&mut self, start: Option<Position>) {
+	pub(crate) fn set_start(&mut self, start: Option<Position>) {
 		self.group_start = start.map(|start| start.group);
 		self.frame_start = start.map_or(0, |start| start.frame);
 	}
 
 	/// Apply an aggregated end position, or unbounded when `None`. A `u64::MAX` frame
 	/// maps back to "the whole end group".
-	pub(super) fn set_end(&mut self, end: Option<Position>) {
+	pub(crate) fn set_end(&mut self, end: Option<Position>) {
 		self.group_end = end.map(|end| end.group);
 		self.frame_end = end.and_then(|end| (end.frame != u64::MAX).then_some(end.frame));
 	}
@@ -287,8 +296,8 @@ mod tests {
 
 	#[test]
 	fn combined_start_folds_the_whole_position() {
-		let early_frame = Subscription::default().with_group_start(5).with_frame_start(2);
-		let late_frame = Subscription::default().with_group_start(5).with_frame_start(9);
+		let early_frame = Subscription::default().with_start(5, 2);
+		let late_frame = Subscription::default().with_start(5, 9);
 
 		// Same group: the earlier frame wins.
 		let combined = combine(&[late_frame.clone(), early_frame.clone()]).unwrap();
@@ -296,15 +305,15 @@ mod tests {
 
 		// An earlier group wins outright, carrying its own frame rather than the
 		// smallest frame across the two.
-		let earlier_group = Subscription::default().with_group_start(4).with_frame_start(7);
+		let earlier_group = Subscription::default().with_start(4, 7);
 		let combined = combine(&[early_frame, earlier_group]).unwrap();
 		assert_eq!((combined.group_start, combined.frame_start), (Some(4), 7));
 	}
 
 	#[test]
 	fn combined_end_folds_the_whole_position() {
-		let short = Subscription::default().with_group_end(5).with_frame_end(2);
-		let long = Subscription::default().with_group_end(5).with_frame_end(9);
+		let short = Subscription::default().with_end(5, 2);
+		let long = Subscription::default().with_end(5, 9);
 
 		// Same group: the later frame wins.
 		let combined = combine(&[short.clone(), long.clone()]).unwrap();
@@ -316,7 +325,7 @@ mod tests {
 		assert_eq!((combined.group_end, combined.frame_end), (Some(5), None));
 
 		// A later group wins outright, carrying its own frame.
-		let later_group = Subscription::default().with_group_end(6).with_frame_end(1);
+		let later_group = Subscription::default().with_end(6, 1);
 		let combined = combine(&[short, later_group]).unwrap();
 		assert_eq!((combined.group_end, combined.frame_end), (Some(6), Some(1)));
 	}
