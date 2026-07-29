@@ -90,7 +90,9 @@ ci FILES="":
     # `cargo test`'s serial harness). It does not build or run
     # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an
     # accepted trade for speed (they still render in `cargo doc` output).
-    cargo nextest run --workspace --all-targets --all-features
+    # `--profile ci` picks up the longer hang timeout in .config/nextest.toml;
+    # without it a runner under load could trip the local one.
+    cargo nextest run --profile ci --workspace --all-targets --all-features
 
 # Auto-fix clippy/format/shear/sort.
 fix:
