@@ -153,6 +153,27 @@ pub struct MoqCatalogConsumer {
 	task: Task<Catalog>,
 }
 
+#[derive(uniffi::Object)]
+pub struct MoqTimelineConsumer {
+	task: Task<Timeline>,
+}
+
+struct Timeline {
+	inner: moq_mux::timeline::Consumer,
+}
+
+impl Timeline {
+	async fn next(&mut self) -> Result<Option<MoqTimelineEntry>, MoqError> {
+		let Some(entry) = self.inner.next().await? else {
+			return Ok(None);
+		};
+		Ok(Some(MoqTimelineEntry {
+			group: entry.group,
+			timestamp_us: timestamp_us(entry.pts)?,
+		}))
+	}
+}
+
 struct Catalog {
 	// Consume with the untyped `Extra` extension so application sections survive into
 	// `MoqCatalog.sections` instead of being dropped.
@@ -215,6 +236,15 @@ impl MoqBroadcastConsumer {
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
+		}))
+	}
+
+	/// Subscribe to a media track's timestamp-to-group timeline index.
+	pub async fn subscribe_timeline(&self, timeline: MoqTimeline) -> Result<Arc<MoqTimelineConsumer>, MoqError> {
+		let timeline: hang::catalog::Timeline = timeline.into();
+		let consumer = moq_mux::timeline::Consumer::subscribe(&self.inner, &timeline).await?;
+		Ok(Arc::new(MoqTimelineConsumer {
+			task: Task::new(Timeline { inner: consumer }),
 		}))
 	}
 
@@ -293,6 +323,18 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))
+	}
+}
+
+#[uniffi::export]
+impl MoqTimelineConsumer {
+	/// Return the next indexed group boundary, or `None` when the timeline ends.
+	pub async fn next(&self) -> Result<Option<MoqTimelineEntry>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	pub fn cancel(&self) {
+		self.task.cancel();
 	}
 }
 
