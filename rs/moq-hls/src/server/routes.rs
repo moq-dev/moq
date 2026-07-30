@@ -97,7 +97,7 @@ async fn init(
 		return not_found();
 	};
 	match rendition.init().await {
-		Ok(Some(bytes)) => media_bytes(bytes),
+		Ok(Some(bytes)) => media_bytes(bytes, &server),
 		Ok(None) => not_found(),
 		Err(err) => server_error(err),
 	}
@@ -126,7 +126,7 @@ async fn segment(
 		},
 	};
 	match result {
-		Ok(Some(bytes)) => media_bytes(bytes),
+		Ok(Some(bytes)) => media_bytes(bytes, &server),
 		Ok(None) => not_found(),
 		Err(err) => server_error(err),
 	}
@@ -154,12 +154,18 @@ fn mpd(body: String) -> Response {
 	([(header::CONTENT_TYPE, MPD), (header::CACHE_CONTROL, "no-cache")], body).into_response()
 }
 
-fn media_bytes(body: Bytes) -> Response {
-	// Init/segment bytes are content-addressed and immutable once produced.
+fn media_bytes(body: Bytes, server: &Server) -> Response {
+	// Init/segment bytes never change while their URL is listed, but the URL itself is not
+	// globally unique: a restarted publisher starts a new timeline whose segment numbers and
+	// pts can repeat the old ones with different media (and a reconfigured rendition rebuilds
+	// its init under the same init.mp4). Cap shared caching at the playlist window - every
+	// concurrent viewer of the live window still hits the cache, while a stale generation's
+	// bytes age out as fast as the window that stopped listing them.
+	let max_age = server.inner.config.window.as_secs().max(1);
 	(
 		[
-			(header::CONTENT_TYPE, MP4),
-			(header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+			(header::CONTENT_TYPE, MP4.to_string()),
+			(header::CACHE_CONTROL, format!("public, max-age={max_age}")),
 		],
 		body,
 	)

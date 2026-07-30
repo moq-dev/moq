@@ -40,8 +40,9 @@ pub(crate) struct Representation {
 	/// The timeline's timescale (units per second), for `SegmentTemplate@timescale`.
 	pub timescale: u32,
 	/// `(t, d)` per listed segment in `timescale` units, oldest first: the record's `pts` and
-	/// `duration` verbatim. Gap segments (no content for this rendition) are omitted; the next
-	/// entry's explicit `t` conveys the hole.
+	/// `duration` verbatim. Gap segments (no content for this rendition) and zero-duration
+	/// segments (unrequestable: they'd sit exactly at the presentation end) are omitted; the
+	/// next entry's explicit `t` conveys the hole.
 	pub segments: Vec<(u64, u64)>,
 	/// Whether this rendition's window has ended (the broadcast finished). Not rendered;
 	/// [`Manifest`] callers use it to pick static vs dynamic.
@@ -113,7 +114,7 @@ fn max_segment_duration<'a>(representations: impl Iterator<Item = &'a Representa
 		.max(1)
 }
 
-fn render_representation(out: &mut String, rep: &Representation, offset: u64, suffix: &str) {
+fn render_representation(out: &mut String, rep: &Representation, suffix: &str) {
 	let kind = rep.kind.as_str();
 	let name = escape(&rep.name);
 
@@ -142,7 +143,7 @@ fn render_representation(out: &mut String, rep: &Representation, offset: u64, su
 
 	let _ = writeln!(
 		out,
-		"        <SegmentTemplate timescale=\"{}\" presentationTimeOffset=\"{offset}\" initialization=\"{kind}/{name}/init.mp4{suffix}\" media=\"{kind}/{name}/seg/t$Time$.m4s{suffix}\">",
+		"        <SegmentTemplate timescale=\"{}\" initialization=\"{kind}/{name}/init.mp4{suffix}\" media=\"{kind}/{name}/seg/t$Time$.m4s{suffix}\">",
 		rep.timescale.max(1)
 	);
 	let _ = writeln!(out, "          <SegmentTimeline>");
@@ -156,7 +157,7 @@ fn render_representation(out: &mut String, rep: &Representation, offset: u64, su
 	let _ = writeln!(out, "      </Representation>");
 }
 
-fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], offset: u64, suffix: &str) {
+fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Representation], suffix: &str) {
 	// Representations in one AdaptationSet must be seamlessly switchable, so group by codec
 	// (mirroring the HLS master's audio groups).
 	let mut codecs = BTreeMap::<&str, Vec<&Representation>>::new();
@@ -181,7 +182,7 @@ fn render_adaptation_sets(out: &mut String, kind: Kind, representations: &[Repre
 			"    <AdaptationSet contentType=\"{content}\" mimeType=\"{mime}\" segmentAlignment=\"true\" startWithSAP=\"1\">"
 		);
 		for rep in representations {
-			render_representation(out, rep, offset, suffix);
+			render_representation(out, rep, suffix);
 		}
 		let _ = writeln!(out, "    </AdaptationSet>");
 	}
@@ -197,15 +198,6 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 	let representations = || manifest.video.iter().chain(&manifest.audio);
 	let target = max_segment_duration(representations());
 
-	// The earliest listed time across representations. Presentation time 0 is pts 0 while
-	// live (availabilityStartTime anchors it); a finished presentation starts at its first
-	// listed segment instead, so playback doesn't begin in a virtual gap.
-	let start = representations()
-		.filter_map(|rep| rep.segments.first().map(|(t, _)| *t))
-		.min()
-		.unwrap_or(0);
-	let offset = if manifest.finished { start } else { 0 };
-
 	let mut out = String::new();
 	let _ = writeln!(out, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
 	let _ = write!(
@@ -213,12 +205,18 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		"<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\""
 	);
 	if manifest.finished {
+		// Presentation time stays anchored at pts 0 in both states (no
+		// presentationTimeOffset), so a player that followed the live presentation keeps the
+		// same segment-to-time mapping when the manifest turns static; DASH forbids shifting
+		// representation timing across MPD updates. The duration therefore spans from pts 0,
+		// and a fresh static viewer starts at the earliest listed S@t (players seek to the
+		// first timeline entry, not to 0).
 		let duration = representations()
 			.filter_map(|rep| {
 				let (t, d) = rep.segments.last()?;
 				let timescale = rep.timescale.max(1) as u64;
 				Some(Duration::from_nanos(
-					((t + d).saturating_sub(offset) as u128 * 1_000_000_000 / timescale as u128) as u64,
+					((t + d) as u128 * 1_000_000_000 / timescale as u128) as u64,
 				))
 			})
 			.max()
@@ -252,8 +250,8 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 	);
 
 	let _ = writeln!(out, "  <Period id=\"0\" start=\"PT0.000S\">");
-	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, offset, &suffix);
-	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, offset, &suffix);
+	render_adaptation_sets(&mut out, Kind::Video, &manifest.video, &suffix);
+	render_adaptation_sets(&mut out, Kind::Audio, &manifest.audio, &suffix);
 	let _ = writeln!(out, "  </Period>");
 	let _ = writeln!(out, "</MPD>");
 	out
@@ -330,7 +328,7 @@ mod tests {
 			"<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\"/>"
 		));
 		assert!(out.contains(
-			"<SegmentTemplate timescale=\"1000\" presentationTimeOffset=\"0\" initialization=\"video/video0/init.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
+			"<SegmentTemplate timescale=\"1000\" initialization=\"video/video0/init.mp4\" media=\"video/video0/seg/t$Time$.m4s\">"
 		));
 		assert!(out.contains("<S t=\"0\" d=\"2000\"/>"));
 		assert!(out.contains("<S t=\"2000\" d=\"2000\"/>"));
@@ -344,16 +342,18 @@ mod tests {
 			publish: SystemTime::UNIX_EPOCH,
 			window: Duration::from_secs(16),
 			finished: true,
-			// The window starts mid-broadcast: the presentation is offset to its first segment.
+			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
+			// presentationTimeOffset), so the duration spans the lead-in and a live session
+			// keeps its segment-to-time mapping across the live-to-static reload.
 			video: vec![video(vec![(10_000, 2_000), (12_000, 2_500)], true)],
 			audio: Vec::new(),
 		};
 
 		let out = render_manifest(&manifest, None);
 		assert!(out.contains(" type=\"static\""));
-		assert!(out.contains(" mediaPresentationDuration=\"PT4.500S\""));
+		assert!(out.contains(" mediaPresentationDuration=\"PT14.500S\""));
 		assert!(out.contains(" maxSegmentDuration=\"PT3.000S\""));
-		assert!(out.contains("presentationTimeOffset=\"10000\""));
+		assert!(!out.contains("presentationTimeOffset"));
 		assert!(!out.contains("availabilityStartTime"));
 		assert!(!out.contains("minimumUpdatePeriod"));
 		assert!(!out.contains("timeShiftBufferDepth"));

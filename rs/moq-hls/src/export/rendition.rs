@@ -264,11 +264,16 @@ impl Rendition {
 			.segments
 			.iter()
 			.filter(|row| !row.ranges.is_empty())
-			.map(|row| {
+			.filter_map(|row| {
 				let t = row.pts.as_scale(timescale) as u64;
 				let span = row.end.saturating_sub(row.pts.into());
 				let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
-				(t, d)
+				// A zero-duration record (the terminal segment when the publisher couldn't
+				// bound its final sample) would sit exactly at the presentation end, so a
+				// conforming player would never request it; advertising it in a
+				// SegmentTimeline is contradictory timing, so leave it out. (HLS still lists
+				// it as EXTINF:0, which players fetch by URL rather than by timing.)
+				(d > 0).then_some((t, d))
 			})
 			.collect();
 		let (framerate, sample_rate, channel_count) = match &self.config {

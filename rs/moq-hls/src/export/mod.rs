@@ -547,10 +547,17 @@ mod tests {
 			assert!(tokio::time::Instant::now() < deadline, "manifest never turned static");
 			tokio::time::sleep(Duration::from_millis(50)).await;
 		};
-		// The clean finish promoted the live edge into a final (zero-duration: its single
-		// frame has no successor to bound it) segment, mirroring HLS's trailing EXTINF:0.
-		assert!(manifest.contains("<S t=\"2000\" d=\"0\"/>"));
+		// The clean finish promoted the live edge into a final zero-duration segment (its
+		// single frame has no successor to bound it). HLS lists it as a trailing EXTINF:0,
+		// but a SegmentTimeline entry at the presentation end would never be requested, so
+		// the manifest omits it and the presentation ends at the last bounded segment.
+		assert!(manifest.contains("<S t=\"0\" d=\"2000\"/>"));
+		assert!(
+			!manifest.contains("<S t=\"2000\""),
+			"the zero-duration tail is not listed"
+		);
 		assert!(manifest.contains(" mediaPresentationDuration=\"PT2.000S\""));
+		assert!(!manifest.contains("presentationTimeOffset"));
 		assert!(!manifest.contains("availabilityStartTime"));
 
 		drop((catalog, media, registration, broadcast));
