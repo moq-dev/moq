@@ -14,7 +14,7 @@ This crate provides `Producer` and `Consumer` types that share state through a m
 Producers can modify the state and consumers are automatically notified via async wakers.
 The channel auto-closes when all producers are dropped.
 
-`Shared` is the role-less sibling for state that both sides mutate, and `Deque` is a
+`Shared` is the role-less sibling for state that both sides mutate, and `Queue` is a
 poll-native FIFO queue (bounded or unbounded) built in the same style. `WaiterCell`
 bridges a `std::task::Context` to kio's waiter-based polls, for implementing
 `poll_*` trait methods on top of kio channels.

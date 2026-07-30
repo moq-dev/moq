@@ -19,7 +19,7 @@ use std::task::Poll;
 
 use loom::{future::block_on, thread};
 
-use crate::{Closed, Deque, Producer, Ref, Shared};
+use crate::{Closed, Producer, Queue, Ref, Shared};
 
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
@@ -185,32 +185,32 @@ fn shared_mutation_wakes_a_parked_handle() {
 	});
 }
 
-/// A push must reach a pop parked on an empty deque no matter how the two
+/// A push must reach a pop parked on an empty queue no matter how the two
 /// interleave.
 #[test]
-fn deque_push_wakes_a_parked_pop() {
+fn queue_push_wakes_a_parked_pop() {
 	loom::model(|| {
-		let deque = Deque::new();
-		let pusher = deque.clone();
+		let queue = Queue::new();
+		let pusher = queue.clone();
 
 		let push = thread::spawn(move || pusher.try_push(1u32).unwrap());
 
-		assert_eq!(block_on(deque.pop()), Ok(1), "the push was lost");
+		assert_eq!(block_on(queue.pop()), Ok(1), "the push was lost");
 		push.join().unwrap();
 	});
 }
 
-/// A pop freeing the only slot of a bounded deque must wake a push parked on it.
+/// A pop freeing the only slot of a bounded queue must wake a push parked on it.
 #[test]
-fn deque_pop_wakes_a_parked_push() {
+fn queue_pop_wakes_a_parked_push() {
 	loom::model(|| {
-		let deque = Deque::bounded(1);
-		deque.try_push(1u32).unwrap();
-		let popper = deque.clone();
+		let queue = Queue::bounded(1);
+		queue.try_push(1u32).unwrap();
+		let popper = queue.clone();
 
 		let pop = thread::spawn(move || assert_eq!(popper.try_pop().unwrap(), Some(1)));
 
-		assert_eq!(block_on(deque.push(2)), Ok(()), "the freed slot was missed");
+		assert_eq!(block_on(queue.push(2)), Ok(()), "the freed slot was missed");
 		pop.join().unwrap();
 	});
 }
@@ -218,14 +218,14 @@ fn deque_pop_wakes_a_parked_push() {
 /// A close racing a parked pop must still wake it; drained-then-closed is the
 /// only acceptable outcome.
 #[test]
-fn deque_close_wakes_a_parked_pop() {
+fn queue_close_wakes_a_parked_pop() {
 	loom::model(|| {
-		let deque = Deque::<u32>::new();
-		let closer = deque.clone();
+		let queue = Queue::<u32>::new();
+		let closer = queue.clone();
 
 		let close = thread::spawn(move || closer.close());
 
-		assert_eq!(block_on(deque.pop()), Err(Closed), "the close was lost");
+		assert_eq!(block_on(queue.pop()), Err(Closed), "the close was lost");
 		close.join().unwrap();
 	});
 }

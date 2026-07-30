@@ -9,7 +9,7 @@ use crate::{
 /// The push failed; the item is handed back.
 #[non_exhaustive]
 pub enum PushError<T> {
-	/// The queue is at capacity. Only a bounded [`Deque`]'s `try_push` reports this.
+	/// The queue is at capacity. Only a bounded [`Queue`]'s `try_push` reports this.
 	Full(T),
 	/// The queue was closed; nothing will ever pop the item.
 	Closed(T),
@@ -75,11 +75,11 @@ impl<T> State<T> {
 /// An event wakes *every* waiter parked on the affected side (there is no
 /// wake-one): with several handles racing to pop, one wins and the rest re-park.
 #[derive(Debug)]
-pub struct Deque<T> {
+pub struct Queue<T> {
 	state: Lock<State<T>>,
 }
 
-impl<T> Deque<T> {
+impl<T> Queue<T> {
 	/// Create an unbounded queue: pushes never park or report full.
 	pub fn new() -> Self {
 		Self::with_capacity(None)
@@ -89,7 +89,7 @@ impl<T> Deque<T> {
 	///
 	/// Panics if `capacity` is zero, which could never accept an item.
 	pub fn bounded(capacity: usize) -> Self {
-		assert!(capacity > 0, "a zero-capacity Deque could never accept an item");
+		assert!(capacity > 0, "a zero-capacity Queue could never accept an item");
 		Self::with_capacity(Some(capacity))
 	}
 
@@ -246,13 +246,13 @@ impl<T> Deque<T> {
 	}
 }
 
-impl<T> Default for Deque<T> {
+impl<T> Default for Queue<T> {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl<T> Clone for Deque<T> {
+impl<T> Clone for Queue<T> {
 	fn clone(&self) -> Self {
 		Self {
 			state: self.state.clone(),
@@ -296,70 +296,70 @@ mod test {
 
 	#[test]
 	fn fifo_order() {
-		let deque = Deque::new();
-		deque.try_push(1).unwrap();
-		deque.try_push(2).unwrap();
-		deque.try_push(3).unwrap();
+		let queue = Queue::new();
+		queue.try_push(1).unwrap();
+		queue.try_push(2).unwrap();
+		queue.try_push(3).unwrap();
 
-		assert_eq!(deque.try_pop().unwrap(), Some(1));
-		assert_eq!(deque.try_pop().unwrap(), Some(2));
-		assert_eq!(deque.try_pop().unwrap(), Some(3));
-		assert_eq!(deque.try_pop().unwrap(), None, "empty but open");
+		assert_eq!(queue.try_pop().unwrap(), Some(1));
+		assert_eq!(queue.try_pop().unwrap(), Some(2));
+		assert_eq!(queue.try_pop().unwrap(), Some(3));
+		assert_eq!(queue.try_pop().unwrap(), None, "empty but open");
 	}
 
 	#[test]
 	fn bounded_rejects_when_full_and_returns_the_item() {
-		let deque = Deque::bounded(1);
-		deque.try_push(1).unwrap();
+		let queue = Queue::bounded(1);
+		queue.try_push(1).unwrap();
 
-		match deque.try_push(2) {
+		match queue.try_push(2) {
 			Err(PushError::Full(item)) => assert_eq!(item, 2),
 			other => panic!("expected Full, got {other:?}"),
 		}
 
 		// Popping frees the slot.
-		assert_eq!(deque.try_pop().unwrap(), Some(1));
-		deque.try_push(2).unwrap();
+		assert_eq!(queue.try_pop().unwrap(), Some(1));
+		queue.try_push(2).unwrap();
 	}
 
 	#[test]
 	fn closed_rejects_pushes_and_drains_pops() {
-		let deque = Deque::new();
-		deque.try_push(1).unwrap();
-		deque.close();
-		deque.close(); // idempotent
+		let queue = Queue::new();
+		queue.try_push(1).unwrap();
+		queue.close();
+		queue.close(); // idempotent
 
-		match deque.try_push(2) {
+		match queue.try_push(2) {
 			Err(PushError::Closed(item)) => assert_eq!(item, 2),
 			other => panic!("expected Closed, got {other:?}"),
 		}
 
 		// The queued item drains before closure is reported.
-		assert_eq!(deque.try_pop().unwrap(), Some(1));
-		assert_eq!(deque.try_pop(), Err(Closed));
+		assert_eq!(queue.try_pop().unwrap(), Some(1));
+		assert_eq!(queue.try_pop(), Err(Closed));
 
 		let waiter = Waiter::noop();
-		assert_eq!(deque.poll_pop(&waiter), Poll::Ready(Err(Closed)));
-		assert_eq!(deque.poll_push_with(&waiter, || 3), Poll::Ready(Err(Closed)));
+		assert_eq!(queue.poll_pop(&waiter), Poll::Ready(Err(Closed)));
+		assert_eq!(queue.poll_push_with(&waiter, || 3), Poll::Ready(Err(Closed)));
 	}
 
 	#[test]
 	fn push_wakes_a_parked_pop() {
-		let deque = Deque::new();
+		let queue = Queue::new();
 		let (waker, w) = counting();
 		let mut cx = Context::from_waker(&w);
 		let mut cell = WaiterCell::new();
 
-		assert!(deque.poll_pop(cell.register(&mut cx)).is_pending());
-		deque.try_push(7).unwrap();
+		assert!(queue.poll_pop(cell.waiter(&mut cx)).is_pending());
+		queue.try_push(7).unwrap();
 		assert!(waker.count() >= 1, "push should wake the parked pop");
-		assert_eq!(deque.poll_pop(cell.register(&mut cx)), Poll::Ready(Ok(7)));
+		assert_eq!(queue.poll_pop(cell.waiter(&mut cx)), Poll::Ready(Ok(7)));
 	}
 
 	#[test]
 	fn pop_wakes_a_parked_push_and_defers_the_item() {
-		let deque = Deque::bounded(1);
-		deque.try_push(1).unwrap();
+		let queue = Queue::bounded(1);
+		queue.try_push(1).unwrap();
 
 		let (waker, w) = counting();
 		let mut cx = Context::from_waker(&w);
@@ -368,8 +368,8 @@ mod test {
 		// Full: the closure must not run, and the poll parks.
 		let made = std::cell::Cell::new(false);
 		assert!(
-			deque
-				.poll_push_with(cell.register(&mut cx), || {
+			queue
+				.poll_push_with(cell.waiter(&mut cx), || {
 					made.set(true);
 					2
 				})
@@ -378,109 +378,109 @@ mod test {
 		assert!(!made.get(), "the item must not be built while full");
 
 		// A pop frees the slot and wakes the parked push.
-		assert_eq!(deque.try_pop().unwrap(), Some(1));
+		assert_eq!(queue.try_pop().unwrap(), Some(1));
 		assert!(waker.count() >= 1, "pop should wake the parked push");
-		assert_eq!(deque.poll_push_with(cell.register(&mut cx), || 2), Poll::Ready(Ok(())));
-		assert_eq!(deque.try_pop().unwrap(), Some(2));
+		assert_eq!(queue.poll_push_with(cell.waiter(&mut cx), || 2), Poll::Ready(Ok(())));
+		assert_eq!(queue.try_pop().unwrap(), Some(2));
 	}
 
 	#[test]
 	fn close_wakes_both_sides() {
-		let deque = Deque::<u32>::bounded(1);
-		deque.try_push(1).unwrap();
+		let queue = Queue::<u32>::bounded(1);
+		queue.try_push(1).unwrap();
 
 		let (pop_waker, w1) = counting();
 		let mut cx1 = Context::from_waker(&w1);
 		let mut pop_cell = WaiterCell::new();
 		// Park a pop on a second handle (the queued item is popped first).
-		let popper = deque.clone();
-		assert_eq!(popper.poll_pop(pop_cell.register(&mut cx1)), Poll::Ready(Ok(1)));
-		assert!(popper.poll_pop(pop_cell.register(&mut cx1)).is_pending());
+		let popper = queue.clone();
+		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Ok(1)));
+		assert!(popper.poll_pop(pop_cell.waiter(&mut cx1)).is_pending());
 
 		// Refill so a push parks too.
-		deque.try_push(2).unwrap();
+		queue.try_push(2).unwrap();
 		let (push_waker, w2) = counting();
 		let mut cx2 = Context::from_waker(&w2);
 		let mut push_cell = WaiterCell::new();
-		assert!(deque.poll_push_with(push_cell.register(&mut cx2), || 3).is_pending());
+		assert!(queue.poll_push_with(push_cell.waiter(&mut cx2), || 3).is_pending());
 
-		deque.close();
+		queue.close();
 		assert!(pop_waker.count() >= 1, "close should wake the parked pop");
 		assert!(push_waker.count() >= 1, "close should wake the parked push");
 
 		// The parked pop drains the remaining item; the push observes closure.
-		assert_eq!(popper.poll_pop(pop_cell.register(&mut cx1)), Poll::Ready(Ok(2)));
-		assert_eq!(popper.poll_pop(pop_cell.register(&mut cx1)), Poll::Ready(Err(Closed)));
+		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Ok(2)));
+		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Err(Closed)));
 		assert_eq!(
-			deque.poll_push_with(push_cell.register(&mut cx2), || 3),
+			queue.poll_push_with(push_cell.waiter(&mut cx2), || 3),
 			Poll::Ready(Err(Closed))
 		);
 	}
 
 	#[test]
 	fn accessors() {
-		let deque = Deque::bounded(2);
-		assert_eq!(deque.capacity(), Some(2));
-		assert!(deque.is_empty());
-		deque.try_push(1).unwrap();
-		assert_eq!(deque.len(), 1);
-		assert!(!deque.is_empty());
-		assert!(!deque.is_closed());
+		let queue = Queue::bounded(2);
+		assert_eq!(queue.capacity(), Some(2));
+		assert!(queue.is_empty());
+		queue.try_push(1).unwrap();
+		assert_eq!(queue.len(), 1);
+		assert!(!queue.is_empty());
+		assert!(!queue.is_closed());
 
-		let clone = deque.clone();
-		let other = Deque::<u32>::new();
-		assert!(deque.same_channel(&clone));
-		assert!(!deque.same_channel(&other));
+		let clone = queue.clone();
+		let other = Queue::<u32>::new();
+		assert!(queue.same_channel(&clone));
+		assert!(!queue.same_channel(&other));
 		assert_eq!(other.capacity(), None);
 	}
 
 	#[test]
 	#[should_panic(expected = "zero-capacity")]
 	fn zero_capacity_panics() {
-		let _ = Deque::<u32>::bounded(0);
+		let _ = Queue::<u32>::bounded(0);
 	}
 
 	#[tokio::test]
 	async fn async_push_parks_until_popped() {
-		let deque = Deque::bounded(1);
-		deque.try_push(1u32).unwrap();
+		let queue = Queue::bounded(1);
+		queue.try_push(1u32).unwrap();
 
-		let pusher = deque.clone();
+		let pusher = queue.clone();
 		let task = tokio::spawn(async move { pusher.push(2).await });
 
 		// Let the push park on the full queue before making room.
 		tokio::task::yield_now().await;
-		assert_eq!(deque.pop().await, Ok(1));
+		assert_eq!(queue.pop().await, Ok(1));
 
 		task.await.unwrap().unwrap();
-		assert_eq!(deque.pop().await, Ok(2));
+		assert_eq!(queue.pop().await, Ok(2));
 	}
 
 	#[tokio::test]
 	async fn async_pop_parks_until_pushed() {
-		let deque = Deque::new();
-		let popper = deque.clone();
+		let queue = Queue::new();
+		let popper = queue.clone();
 		let task = tokio::spawn(async move { popper.pop().await });
 
 		tokio::task::yield_now().await;
-		deque.try_push(9u32).unwrap();
+		queue.try_push(9u32).unwrap();
 
 		assert_eq!(task.await.unwrap(), Ok(9));
 	}
 
 	#[tokio::test]
 	async fn async_ops_observe_close() {
-		let deque = Deque::<u32>::bounded(1);
-		deque.try_push(1).unwrap();
+		let queue = Queue::<u32>::bounded(1);
+		queue.try_push(1).unwrap();
 
-		let pusher = deque.clone();
+		let pusher = queue.clone();
 		let push = tokio::spawn(async move { pusher.push(2).await });
 		tokio::task::yield_now().await;
-		deque.close();
+		queue.close();
 
 		assert_eq!(push.await.unwrap(), Err(Closed));
 		// Pops still drain the queued item before reporting closure.
-		assert_eq!(deque.pop().await, Ok(1));
-		assert_eq!(deque.pop().await, Err(Closed));
+		assert_eq!(queue.pop().await, Ok(1));
+		assert_eq!(queue.pop().await, Err(Closed));
 	}
 }
