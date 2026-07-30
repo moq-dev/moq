@@ -233,6 +233,15 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		return;
 	}
 
+	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
+	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
+	// waiting for the next, the right trade for live. Video groups at its own keyframes.
+	result = moq_publish_media_cut(handle);
+	if (result < 0) {
+		LOG_ERROR("Failed to cut audio group: %d", result);
+		return;
+	}
+
 	total_bytes_sent += packet->size;
 }
 

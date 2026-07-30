@@ -117,6 +117,38 @@ impl Publish {
 		Ok(())
 	}
 
+	/// Draw a group boundary on this media importer.
+	///
+	/// On a codec track this ends the open group; the next frame starts a new one. Audio has no
+	/// boundary of its own (every frame is independently decodable), so this is the only thing
+	/// that gives it groups: call it per frame for one group (one QUIC stream) forwarded without
+	/// waiting, or at a segment cadence to align with video.
+	///
+	/// On a container importer this declares the start of a new segment, which rolls a group on
+	/// every track the container publishes.
+	pub fn media_cut(&mut self, media: Id) -> Result<(), Error> {
+		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		match media {
+			Media::Track(track) => track.cut(None)?,
+			Media::Container(container) => container.cut(),
+		}
+		Ok(())
+	}
+
+	/// Draw a group boundary and number the next group `sequence`.
+	///
+	/// [`media_cut`](Self::media_cut) with an explicit sequence, for a caller whose group numbers
+	/// have to be deterministic: two encoders publishing the same content align per GOP so a
+	/// consumer can fail over between them.
+	pub fn media_seek(&mut self, media: Id, sequence: u64) -> Result<(), Error> {
+		let media = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
+		match media {
+			Media::Track(track) => track.seek(sequence)?,
+			Media::Container(container) => container.seek(sequence)?,
+		}
+		Ok(())
+	}
+
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
 		let mut media = self.media.remove(media).ok_or(Error::MediaNotFound)?;
 		match &mut media {
