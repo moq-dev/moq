@@ -1911,9 +1911,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		// The countdown keys off the segment, not our handle on the route that
 		// produced it: a route that leaves (or a copy that dies) drops the handle
 		// while the segment stays spliced, and that segment is exactly what the
-		// release exists to reclaim. Keying off the handle would strand it until the
-		// front closes, and the next takeover would then splice above its edge,
-		// skipping a reconnecting publisher that restarts its group numbering.
+		// release exists to reclaim. Keying off the handle strands it until the front
+		// closes, which pins the departed source's cached groups for a linger that
+		// may never expire and leaves a dead segment's edge behind for the next
+		// takeover to splice above.
 		let used = resume.is_used();
 		idle_since = match (resume.is_spliced(), used) {
 			(true, false) => idle_since.or_else(|| Some(web_async::time::Instant::now())),
@@ -4249,13 +4250,12 @@ mod tests {
 	///
 	/// A departed route drops the loop's handle on it, so the idle countdown has to
 	/// key off the segment itself. Otherwise the segment is stranded for the life of
-	/// the front, and the boundary [`resume::Producer::takeover`] computes from it
-	/// silently swallows a reconnecting publisher that restarts its group numbering:
-	/// the new segment starts above the stale edge, so the republished group 0 is
-	/// filtered and a viewer waits forever for a track that only ever writes once.
+	/// the front, pinning the dead source's cached groups.
 	///
-	/// Observed through that boundary rather than the release itself, since delivery
-	/// is what a viewer actually feels.
+	/// Asserted through the boundary a stranded segment would leave behind, since
+	/// `resume` is private and delivery is what a viewer actually feels: a released
+	/// segment set splices the next source unbounded, so its first group arrives,
+	/// while a retained one caps it below that edge.
 	#[tokio::test(start_paused = true)]
 	async fn test_idle_release_survives_the_route_leaving() {
 		let origin = Info::new(Origin::random())
