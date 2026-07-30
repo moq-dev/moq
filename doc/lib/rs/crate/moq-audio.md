@@ -23,10 +23,16 @@ The native audio stack, and the counterpart to
 | `playback` | PCM out a speaker, mixing every track into one device stream | `playback` |
 | `aec` | Subtract what the speaker plays from what the microphone hears | `aec` |
 
-Everything is pure Rust. Opus is `unsafe-libopus`, devices are `cpal`, resampling
-is `rubato`, and echo cancellation is [`sonora`](https://crates.io/crates/sonora),
-a port of WebRTC's audio processing. There is no C toolchain, CMake step, or
-system codec anywhere in the graph.
+The codecs and DSP are Rust, all the way down. Opus is `unsafe-libopus` (libopus
+transpiled, not wrapped), resampling is `rubato`, echo cancellation is
+[`sonora`](https://crates.io/crates/sonora), a port of WebRTC's audio processing,
+and devices go through `cpal`. So there is no C toolchain, no CMake step, and no
+codec to install on the host.
+
+The one system dependency is the platform's audio API, and only when you enable
+`capture` or `playback`: CoreAudio and WASAPI ship with the OS, but a Linux build
+needs the ALSA development headers (`libasound2-dev` or your distro's equivalent)
+for cpal to link. A default build has neither feature and needs nothing.
 
 `Frame` is a timestamp and a payload. Layout lives on the producer or consumer
 (`encode::Input` / `decode::Config`) rather than on each frame, so you cannot
@@ -75,7 +81,10 @@ whatever rate you ask for. `playback::Engine` owns the output device, and each
 `playback::Sink` is one stream mixed into it:
 
 ```rust
-use moq_audio::playback;
+use moq_audio::{decode, playback};
+
+// `rendition` is the hang catalog's AudioConfig for the track you want.
+let mut audio = decode::Consumer::new(&broadcast, &rendition, "audio", decode::Config::default()).await?;
 
 let engine = playback::Engine::open(playback::Config::default()).await?;
 let mut sink = engine.sink(playback::Input {

@@ -84,15 +84,15 @@ GPU rendering of decoded frames.
 [![crates.io](https://img.shields.io/crates/v/moq-audio)](https://crates.io/crates/moq-audio)
 [![docs.rs](https://docs.rs/moq-audio/badge.svg)](https://docs.rs/moq-audio)
 
-Microphone and system-audio capture, Opus and PCM codecs, speaker playback, and
-acoustic echo cancellation.
+Microphone and macOS system-audio capture, Opus and PCM codecs, speaker playback,
+and acoustic echo cancellation.
 
 **Features:**
 
 - CoreAudio / WASAPI / ALSA devices via cpal
 - One output device mixing every track in a call
 - Echo cancellation so a laptop without a headset doesn't send itself back
-- Pure Rust throughout: no C toolchain, no CMake, no system codec
+- Rust codecs and DSP: no C toolchain, no CMake, no codec to install (ALSA headers are the one Linux build dependency)
 
 [Learn more](/lib/rs/crate/moq-audio)
 
