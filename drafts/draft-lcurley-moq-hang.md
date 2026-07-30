@@ -104,7 +104,6 @@ The root of the catalog is a JSON document with the following schema:
 type Catalog = {
 	"audio": AudioSchema | undefined,
 	"video": VideoSchema | undefined,
-	"text": TextSchema | undefined,
 	// ... any custom fields ...
 }
 ~~~
@@ -115,7 +114,7 @@ The catalog SHOULD be mostly static, delegating any dynamic content to other tra
 For example, a `"chat"` section should include the name of a chat track, not individual chat messages.
 This way catalog updates are rare and a client MAY choose to not subscribe.
 
-This specification defines audio, video, and text tracks.
+This specification currently only defines audio and video tracks.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -240,71 +239,6 @@ For example:
 }
 ~~~
 
-## Text
-A text track carries timed text: captions or subtitles.
-Unlike audio and video there is no WebCodecs decoder for text, so a consumer parses each cue directly and renders it as an overlay.
-
-~~~
-type TextSchema = {
-	"renditions": Map<TrackName, TextConfig>,
-}
-
-type TextConfig = {
-	"format": "vtt" | "ttml" | "utf8" | string,
-	"role": "subtitle" | "caption" | string | undefined,
-	"lang": string | undefined,
-	"label": string | undefined,
-	// plus the common rendition fields
-}
-~~~
-
-The `renditions` field maps track names to text configurations, typically one per language.
-
-The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
-
-- `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
-- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
-- `utf8`: raw UTF-8 text with no embedded timing or styling. The cue is shown from its frame timestamp until the next cue; an empty payload clears it.
-
-A consumer MUST ignore a rendition whose `format` it does not recognize.
-
-The `role` field describes the accessibility intent, defaulting to `subtitle`:
-
-- `subtitle`: a transcription of the spoken dialogue, same-language or translated.
-- `caption`: a textual representation of all audio, including non-speech sounds, for viewers who cannot hear it.
-
-The vocabulary is expected to grow, so a consumer MUST NOT reject a rendition whose `role` it does not recognize.
-It SHOULD keep such a rendition selectable and treat the role as `subtitle`, and MUST preserve the value verbatim if it republishes the catalog.
-Unlike `format`, an unrecognized `role` never prevents rendering: it describes intent, not the wire.
-
-The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
-The `label` field is a human-readable name for a track picker, useful when `lang` alone is ambiguous (for example distinguishing subtitles from same-language captions).
-
-Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
-A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
-
-For example:
-
-~~~
-{
-	"renditions": {
-		"captions.en": {
-			"format": "vtt",
-			"container": { "kind": "legacy" },
-			"role": "caption",
-			"lang": "en",
-			"label": "English"
-		},
-		"subtitles.es": {
-			"format": "vtt",
-			"container": { "kind": "legacy" },
-			"role": "subtitle",
-			"lang": "es"
-		}
-	}
-}
-~~~
-
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
@@ -314,7 +248,7 @@ Note that this differs from the `cmaf` container's `init` field ({{container}}),
 Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
 
 ## Common Rendition Fields {#common}
-Audio, video, and text renditions share the following fields, extending the WebCodecs decoder config for audio and video:
+Audio and video renditions share the following fields, extending the WebCodecs decoder config:
 
 ~~~
 type CommonExtensions = {
@@ -356,7 +290,7 @@ An audio frame's duration is codec dependent.
 AAC often uses 1024 samples per frame, so at 44100Hz an immediately-flushed track's `jitter` is 23.
 
 # Container {#container}
-Audio, video, and text tracks use a container to encapsulate the media payload.
+Audio and video tracks use a container to encapsulate the media payload.
 A rendition declares its container via the `container` field of its catalog entry ({{common}}):
 
 ~~~
@@ -380,7 +314,6 @@ Each frame starts with a timestamp, a QUIC variable-length integer (62-bit max) 
 The remainder of the payload is codec specific; see the WebCodecs specification for specifics.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
-For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
 
 ## cmaf
 Each frame is a complete fragmented MP4 fragment (`moof`+`mdat`), carrying its own timestamps.

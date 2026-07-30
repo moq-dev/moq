@@ -1,8 +1,8 @@
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
 
-/** The media kind of a rendition, selecting its catalog section (`video`, `audio`, or `text`). */
-export type Kind = "video" | "audio" | "text";
+/** The media kind of a rendition, selecting its catalog section (`video` or `audio`). */
+export type Kind = "video" | "audio";
 
 /**
  * A registered rendition track on a {@link Broadcast}: the catalog slot plus the demand-gated track.

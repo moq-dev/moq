@@ -84,18 +84,6 @@ export class Broadcast {
 		return this.#register<Catalog.AudioConfig>(name, "audio");
 	}
 
-	/**
-	 * Register a text (caption/subtitle) rendition under a full track name (e.g. `"captions/en"`).
-	 * Throws if the name is taken.
-	 *
-	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
-	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing.
-	 */
-	text(name: string): Rendition<Catalog.TextConfig> {
-		return this.#register<Catalog.TextConfig>(name, "text");
-	}
-
 	#register<C>(name: string, kind: Kind): Rendition<C> {
 		if (this.#renditions.peek()[name]) {
 			throw new Error(`rendition already registered: ${name}`);
@@ -134,7 +122,6 @@ export class Broadcast {
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
-		const text: Record<string, Catalog.TextConfig> = {};
 
 		for (const rendition of Object.values(renditions)) {
 			const config = enabled ? effect.get(rendition.config) : undefined;
@@ -142,10 +129,8 @@ export class Broadcast {
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
-			} else if (rendition.kind === "audio") {
-				audio[rendition.name] = config as Catalog.AudioConfig;
 			} else {
-				text[rendition.name] = config as Catalog.TextConfig;
+				audio[rendition.name] = config as Catalog.AudioConfig;
 			}
 		}
 
@@ -169,12 +154,6 @@ export class Broadcast {
 				catalog.audio = { renditions: audio };
 			} else {
 				delete catalog.audio;
-			}
-
-			if (Object.keys(text).length > 0) {
-				catalog.text = { renditions: text };
-			} else {
-				delete catalog.text;
 			}
 		});
 	}

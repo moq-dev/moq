@@ -1,24 +1,14 @@
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
-import {
-	captions as captionsIcon,
-	close,
-	gauge,
-	icon,
-	settings as settingsIcon,
-	stats as statsIcon,
-	video as videoIcon,
-} from "../icons";
+import { close, gauge, icon, settings as settingsIcon, stats as statsIcon, video as videoIcon } from "../icons";
 import type { Tab, UiState } from "../state";
 import { statsTab } from "../stats";
-import { captionsTab } from "./captions";
 import { latencyTab } from "./latency";
 import { qualityTab } from "./quality";
 
 const TABS: { id: Tab; label: string; svg: string }[] = [
 	{ id: "quality", label: "Quality", svg: videoIcon },
-	{ id: "captions", label: "Captions", svg: captionsIcon },
 	{ id: "latency", label: "Latency", svg: gauge },
 	{ id: "stats", label: "Stats", svg: statsIcon },
 ];
@@ -76,11 +66,9 @@ export function settingsPanel(parent: Effect, watch: MoqWatch, state: UiState): 
 		const content =
 			tab === "quality"
 				? qualityTab(effect, watch)
-				: tab === "captions"
-					? captionsTab(effect, watch)
-					: tab === "latency"
-						? latencyTab(effect, watch)
-						: statsTab(effect, watch);
+				: tab === "latency"
+					? latencyTab(effect, watch)
+					: statsTab(effect, watch);
 		DOM.render(effect, body, content);
 	});
 

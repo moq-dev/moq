@@ -12,7 +12,6 @@ import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat, parseCatalogFormat } from "./broadcast";
 import { type Bound, type Latency, latencyBounds, latencyFromBounds, Sync } from "./sync";
-import * as Text from "./text";
 import * as Video from "./video";
 
 const OBSERVED = [
@@ -28,7 +27,6 @@ const OBSERVED = [
 	"latency-max",
 	"jitter",
 	"catalog-format",
-	"captions",
 ] as const;
 type Observed = (typeof OBSERVED)[number];
 
@@ -83,12 +81,6 @@ export default class MoqWatch extends HTMLElement {
 	/** Plays decoded samples through the speakers. */
 	emitter: Audio.Emitter;
 
-	/** Selects the caption track. `text.out.available` lists the renditions for a picker. */
-	text: Text.Source;
-
-	/** Renders caption cues into an overlay above the canvas. */
-	captionsRenderer: Text.Renderer;
-
 	/** Keeps audio and video playing at the target latency. */
 	sync: Sync;
 
@@ -104,8 +96,6 @@ export default class MoqWatch extends HTMLElement {
 		latency: new Signal<Latency>("real-time"),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),
-		// The selected caption track name, or undefined for off (the default; captions are opt-in).
-		captions: new Signal<string | undefined>(undefined),
 	};
 
 	// Broadcast configuration owned here and wired into `broadcast` as inputs.
@@ -117,13 +107,7 @@ export default class MoqWatch extends HTMLElement {
 	// The canvas element to render into.
 	#canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
 
-	// The overlay element captions are drawn into, created lazily on connect (custom elements may not
-	// touch children in their constructor). Positioned to fill the element, above the canvas.
-	#captionsOverlay = new Signal<HTMLElement | undefined>(undefined);
-	#captionsOverlayEl?: HTMLDivElement;
-
 	// Whether to download. Driven by the renderer/emitter policy, read by the decoders.
-	#captionsEnabled = new Signal(false);
 	#videoEnabled = new Signal(false);
 	#audioEnabled = new Signal(false);
 
@@ -176,12 +160,6 @@ export default class MoqWatch extends HTMLElement {
 			audioSource.close();
 		});
 
-		this.text = new Text.Source({
-			broadcast: this.broadcast,
-			target: this.controls.captions,
-		});
-		this.signals.cleanup(() => this.text.close());
-
 		// Sources produce the per-rendition jitter that Sync reads, so they're created
 		// before Sync to avoid a construction cycle.
 		this.sync = new Sync({
@@ -211,18 +189,6 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.cleanup(() => {
 			this.emitter.close();
 			this.renderer.close();
-		});
-
-		this.captionsRenderer = new Text.Renderer(this.text, this.sync, {
-			container: this.#captionsOverlay,
-			enabled: this.#captionsEnabled,
-		});
-		this.signals.cleanup(() => this.captionsRenderer.close());
-
-		// Captions follow playback, like audio and video. The caption clock runs off wall time, so
-		// leaving them on while paused scrolls text over a frozen frame.
-		this.signals.run((effect) => {
-			this.#captionsEnabled.set(effect.get(this.#enabled) && !effect.get(this.controls.paused));
 		});
 
 		// Audio download follows the emitter's enable policy (paused/muted).
@@ -369,19 +335,6 @@ export default class MoqWatch extends HTMLElement {
 		this.#enabled.set(true);
 		this.style.display = "block";
 		this.style.position = "relative";
-
-		// Create the caption overlay once, on first connect (the constructor may not add children).
-		if (!this.#captionsOverlayEl) {
-			const overlay = document.createElement("div");
-			overlay.style.position = "absolute";
-			overlay.style.inset = "0";
-			overlay.style.pointerEvents = "none";
-			// Above the canvas, which paints at the default stacking level.
-			overlay.style.zIndex = "1";
-			this.appendChild(overlay);
-			this.#captionsOverlayEl = overlay;
-			this.#captionsOverlay.set(overlay);
-		}
 	}
 
 	disconnectedCallback() {
@@ -428,9 +381,6 @@ export default class MoqWatch extends HTMLElement {
 			this.latency = this.#parseBound(newValue);
 		} else if (name === "catalog-format") {
 			this.#catalogFormat.set(parseCatalogFormat(newValue));
-		} else if (name === "captions") {
-			// The selected caption track name; absent or empty turns captions off.
-			this.controls.captions.set(newValue || undefined);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -562,19 +512,6 @@ export default class MoqWatch extends HTMLElement {
 
 	set catalog(value: Catalog.Root | undefined) {
 		this.#catalog.set(value);
-	}
-
-	/**
-	 * The selected caption track name, or `undefined` for off (the default). Captions are opt-in:
-	 * assign a track name from `text.out.available` to turn them on. See the `text` source for the
-	 * list of renditions the broadcast publishes.
-	 */
-	get captions(): string | undefined {
-		return this.controls.captions.peek();
-	}
-
-	set captions(value: string | undefined) {
-		this.controls.captions.set(value || undefined);
 	}
 }
 

@@ -1,7 +1,6 @@
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
-import { TextSchema } from "./text";
 import { VideoSchema } from "./video";
 
 /**
@@ -15,10 +14,6 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// `text` is now a reserved media section, but a catalog that carried an unrelated `text` key
-	// before this existed must not fail to parse: fall back to `undefined` (dropping the section)
-	// rather than rejecting the whole catalog, so video/audio still play.
-	text: z.catch(z.optional(TextSchema), undefined),
 });
 
 /** The root catalog object, with optional video and audio sections plus any app extensions. */

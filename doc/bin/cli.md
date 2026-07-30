@@ -113,13 +113,6 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
-### Captions
-
-Subtitles ride in the source container. The current `moq import` path does not preserve subtitle
-tracks in fragmented MP4, so captions arrive over the GStreamer path instead: `moqsink` accepts a
-decoded text pad and publishes it as a caption track. See
-[GStreamer](gstreamer.md).
-
 ### Redundant Publishers (1+1)
 
 Relays key a broadcast's content identity on the publisher's origin id (the
@@ -152,6 +145,7 @@ incumbent rather than waiting behind it, so a reconnect is live again without
 waiting for the relay's transport to time out the connection it replaced. The
 last publisher to announce a path owns it, so use authorization to decide who
 may publish where.
+
 ### Capture a Webcam
 
 The `capture` subcommand captures and encodes from local devices directly, no

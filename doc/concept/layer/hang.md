@@ -75,20 +75,6 @@ For example, it's not possible to have a different `flip` or `rotation` value fo
 Each rendition is an extension of [VideoDecoderConfig](https://www.w3.org/TR/webcodecs/#video-decoder-config).
 This is the minimum amount of information required to initialize a video decoder.
 
-### Text
-
-[See the latest schema](https://github.com/moq-dev/moq/blob/main/js/hang/src/catalog/text.ts).
-
-Captions and subtitles are their own tracks, not part of the video bitstream, so the relay stays media-agnostic and a viewer only downloads the language it picked.
-Text is split into renditions the same way as audio and video, typically one per language.
-
-There is no WebCodecs decoder for text, so a consumer parses each cue itself and renders it as an overlay.
-The `format` field says how: `vtt` (a self-contained WebVTT segment per frame), `ttml`, or `utf8` (raw text shown until the next cue).
-The `role` field is `subtitle` (spoken dialogue) or `caption` (all audio, including non-speech sounds), and `lang` / `label` drive the track picker.
-
-The frame timestamp carries the cue's start time on the same media clock as audio and video, so cues schedule against the same playhead with no separate pacing.
-The section is omitted entirely when a broadcast publishes no captions.
-
 ### Cross-broadcast renditions
 
 A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"../source"`), pointing at another broadcast that publishes the actual track.
