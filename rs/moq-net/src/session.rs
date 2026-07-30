@@ -135,7 +135,7 @@ pub struct Driver {
 	// result) doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
 	// Retains the waiter across `Future` polls so its kio registrations stay live.
-	waiter: kio::WaiterCell,
+	cell: kio::WaiterCell,
 }
 
 impl Driver {
@@ -185,11 +185,10 @@ impl Future for Driver {
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = &mut *self;
-		// Take the cell so its borrow doesn't overlap the `&mut self` poll below.
-		let mut cell = std::mem::take(&mut this.waiter);
-		let result = this.poll(cell.register(cx));
-		this.waiter = cell;
-		result
+		// The clone shares the retained waiter's identity while ending the cell
+		// borrow, which the `&mut self` poll below would otherwise conflict with.
+		let waiter = this.cell.waiter(cx).clone();
+		this.poll(&waiter)
 	}
 }
 
@@ -248,7 +247,7 @@ impl Session {
 			protocol,
 			maintenance,
 			result: None,
-			waiter: kio::WaiterCell::new(),
+			cell: kio::WaiterCell::new(),
 		};
 
 		(session, driver)

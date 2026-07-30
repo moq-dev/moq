@@ -39,7 +39,7 @@ pub struct Pending<P> {
 	inner: P,
 	// Retains the waiter across polls so its weak registrations survive (and are
 	// reused when possible); see [`WaiterCell`].
-	waiter: WaiterCell,
+	cell: WaiterCell,
 }
 
 impl<P> Pending<P> {
@@ -47,7 +47,7 @@ impl<P> Pending<P> {
 	pub fn new(inner: P) -> Self {
 		Self {
 			inner,
-			waiter: WaiterCell::new(),
+			cell: WaiterCell::new(),
 		}
 	}
 
@@ -77,7 +77,7 @@ impl<P: Pollable> Future for Pending<P> {
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
 		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
-		let waiter = this.waiter.register(cx);
+		let waiter = this.cell.waiter(cx);
 		Pollable::poll(&this.inner, waiter)
 	}
 }
