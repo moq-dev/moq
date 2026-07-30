@@ -24,15 +24,18 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
 	CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
-	IMFMediaEvent, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformHaveOutput, METransformNeedInput,
-	MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
-	MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-	MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager,
-	MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-	MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN,
-	MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+	IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, METransformHaveOutput,
+	METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+	MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+	MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
+	MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC_UNLOCK,
+	MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+	MFMediaType_Video, MFNominalRange_0_255, MFNominalRange_16_235, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+	MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+	MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
+	MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
+	MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
+	MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709,
 	eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
@@ -42,7 +45,7 @@ use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
-use crate::{Error, Frame};
+use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
 
@@ -62,6 +65,9 @@ pub(crate) struct MediaFoundation {
 	framerate: u32,
 	bitrate: u32,
 	gop: u32,
+	/// The color space of the input frames, stamped onto both media types so the
+	/// encoder writes it into the bitstream's VUI.
+	color: Color,
 	/// Lazily configured on the first frame, since the Direct3D11 device to bind
 	/// (for zero-copy texture input) comes from the frame itself.
 	started: bool,
@@ -132,6 +138,7 @@ impl MediaFoundation {
 			framerate: config.framerate,
 			bitrate: clamp_u32(config.resolved_bitrate()),
 			gop: config.gop,
+			color: config.resolved_color(),
 			started: false,
 			provides_samples: false,
 			output_size: 0,
@@ -211,6 +218,39 @@ impl MediaFoundation {
 		Ok(())
 	}
 
+	/// Stamp the color space onto a media type. Media Foundation takes these as a
+	/// request rather than a guarantee, so a driver may still emit an untagged
+	/// stream; the conversion picks the matrix an untagged stream implies, which
+	/// is what keeps that case correct.
+	fn set_color(&self, media: &IMFMediaType) -> Result<(), Error> {
+		let (primaries, matrix) = match self.color {
+			Color::Bt601Limited | Color::Bt601Full => (MFVideoPrimaries_SMPTE170M, MFVideoTransferMatrix_BT601),
+			Color::Bt709Limited | Color::Bt709Full => (MFVideoPrimaries_BT709, MFVideoTransferMatrix_BT709),
+		};
+		// BT.601 and BT.709 share a transfer curve; only primaries and matrix differ.
+		let transfer = MFVideoTransFunc_709;
+		let range = match self.color.limited() {
+			true => MFNominalRange_16_235,
+			false => MFNominalRange_0_255,
+		};
+
+		unsafe {
+			media
+				.SetUINT32(&MF_MT_VIDEO_PRIMARIES, primaries.0 as u32)
+				.map_err(|e| mf_err("color primaries", e))?;
+			media
+				.SetUINT32(&MF_MT_TRANSFER_FUNCTION, transfer.0 as u32)
+				.map_err(|e| mf_err("transfer function", e))?;
+			media
+				.SetUINT32(&MF_MT_YUV_MATRIX, matrix.0 as u32)
+				.map_err(|e| mf_err("yuv matrix", e))?;
+			media
+				.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, range.0 as u32)
+				.map_err(|e| mf_err("nominal range", e))?;
+		}
+		Ok(())
+	}
+
 	fn set_output_type(&self) -> Result<(), Error> {
 		let format = OutputFormat::for_codec(self.codec);
 		let media = unsafe { MFCreateMediaType().map_err(|e| mf_err("create output type", e))? };
@@ -236,6 +276,7 @@ impl MediaFoundation {
 			media
 				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
 				.map_err(|e| mf_err("output frame rate", e))?;
+			self.set_color(&media)?;
 			self.transform
 				.SetOutputType(0, &media, 0)
 				.map_err(|e| mf_err("SetOutputType", e))?;
@@ -261,6 +302,7 @@ impl MediaFoundation {
 			media
 				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
 				.map_err(|e| mf_err("input frame rate", e))?;
+			self.set_color(&media)?;
 			self.transform
 				.SetInputType(0, &media, 0)
 				.map_err(|e| mf_err("SetInputType", e))?;

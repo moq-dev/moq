@@ -25,9 +25,101 @@ enum PadState {
 	Invalid,
 }
 
+/// Where a pad's buffers land: a codec importer, or a subtitle track written as WebVTT cues.
+///
+/// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
+/// enum small.
+enum Sink {
+	Media(Box<import::Track>),
+	Text(Box<Text>),
+}
+
+/// A subtitle pad. GStreamer hands us one decoded cue per buffer (`text/x-raw`, UTF-8) with the
+/// presentation time and duration already resolved by the demuxer, so each buffer becomes one
+/// self-contained WebVTT segment in its own group, on the same media clock as audio and video.
+///
+/// The rendition guard is held for the pad's lifetime: dropping it retires the catalog entry, so a
+/// pad that fails or finalizes stops advertising a track nobody is writing to.
+///
+/// No jitter is estimated. The estimator measures the smallest gap between consecutive frames,
+/// which for a codec is the frame duration but for cues is just how close two subtitles happen to
+/// sit. That says nothing about how long a consumer must buffer, and feeding it to the catalog
+/// would inflate every consumer's playback buffer by an arbitrary amount. Each cue is written and
+/// cut immediately, so the absent field says what is true: flushed as produced.
+struct Text {
+	producer: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
+	#[allow(dead_code, reason = "held so dropping the pad retires the catalog rendition")]
+	rendition: moq_mux::catalog::TextTrack,
+}
+
+impl Text {
+	/// Publish one cue spanning `[start, start + duration)` on the media clock.
+	///
+	/// A cue with no text after escaping is skipped rather than published: the `vtt` format carries
+	/// an explicit end time, so there is nothing for an empty cue to express.
+	fn write(&mut self, text: &str, start_micros: u64, duration_micros: u64) -> Result<()> {
+		let cue = escape_cue(text);
+		if cue.is_empty() {
+			return Ok(());
+		}
+
+		let payload = format!(
+			"WEBVTT\n\n{} --> {}\n{}\n",
+			format_timestamp(start_micros),
+			format_timestamp(start_micros + duration_micros),
+			cue
+		);
+
+		self.producer.write(moq_mux::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(start_micros)?,
+			duration: None,
+			payload: Bytes::from(payload.into_bytes()),
+			keyframe: true,
+		})?;
+		// One cue per group, so a late joiner tunes in on the current caption.
+		self.producer.cut(None)?;
+		Ok(())
+	}
+}
+
+/// Format microseconds as a WebVTT `HH:MM:SS.mmm` timestamp.
+fn format_timestamp(micros: u64) -> String {
+	let ms = micros / 1000;
+	format!(
+		"{:02}:{:02}:{:02}.{:03}",
+		ms / 3_600_000,
+		(ms / 60_000) % 60,
+		(ms / 1000) % 60,
+		ms % 1000
+	)
+}
+
+/// Make arbitrary demuxer text safe to drop into a WebVTT cue block.
+///
+/// Three things in the payload can corrupt the block rather than just render oddly: `<` and `&`
+/// open a WebVTT tag or escape, a blank line terminates the cue early (silently truncating a
+/// multi-line caption), and a line containing `-->` reads as another cue's timing. Escaping the
+/// markup characters covers the first and the third (`-->` becomes `--&gt;`); dropping blank lines
+/// covers the second.
+///
+/// Markup is escaped rather than forwarded, so a source that already carries `<i>` shows the tag
+/// instead of italics. That's the deliberate trade: the demuxers we read from (`qtdemux` on tx3g)
+/// hand us plain text, and passing arbitrary tags through risks an unbalanced one swallowing the
+/// caption. Forwarding a safelist of WebVTT-legal tags is the upgrade path if a source needs it.
+fn escape_cue(text: &str) -> String {
+	text.trim_end()
+		.lines()
+		// A blank line would end the cue, so drop it: the surrounding lines stay in one caption.
+		.filter(|line| !line.trim().is_empty())
+		// `&` first, so it doesn't double-escape the ampersands the others introduce.
+		.map(|line| line.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
 /// One sink pad's media producer plus its timeline policy.
 pub struct Pad {
-	track: Option<import::Track>,
+	track: Option<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going.
@@ -94,6 +186,18 @@ impl Pad {
 		// so negotiation rejects non-conforming caps before they reach here; only fields the template can't
 		// pin (the AAC codec_data) are checked below. The importer reserves a uniquely named track, which it
 		// accepts (setting the timescale) inside `Track::new`.
+		// Subtitles skip the codec importers entirely: the demuxer already resolved each cue to UTF-8
+		// text with a presentation time, so there is nothing to parse, only a text rendition to declare.
+		if structure.name().as_str() == "text/x-raw" {
+			self.track = Some(Sink::Text(Box::new(Self::reserve_text(
+				&mut broadcast,
+				catalog,
+				structure,
+			)?)));
+			self.caps = Some(caps.clone());
+			return Ok(());
+		}
+
 		let track: import::Track = match structure.name().as_str() {
 			"video/x-h264" => Self::reserve(&mut broadcast, catalog, ".avc3", "avc3", &[])?,
 			"video/x-h265" => Self::reserve(&mut broadcast, catalog, ".hev1", "hev1", &[])?,
@@ -150,9 +254,39 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
-		self.track = Some(track);
+		self.track = Some(Sink::Media(Box::new(track)));
 		self.caps = Some(caps.clone());
 		Ok(())
+	}
+
+	/// Declare a subtitle rendition: a plain track plus its catalog entry. Unlike the codec paths there
+	/// is no config to detect from the bitstream, so the entry is set complete up front, and the
+	/// returned guard retires it when the pad goes away.
+	fn reserve_text(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer,
+		structure: &gst::StructureRef,
+	) -> Result<Text> {
+		let name = broadcast.unique_name(".vtt");
+		let request = broadcast.reserve_track(name.clone())?;
+		let producer = request.accept(hang::container::track_info());
+
+		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+		// A demuxed text track is a subtitle track unless something says otherwise. Claiming
+		// `caption` would advertise a transcription of non-speech audio we have no evidence for.
+		config.role = hang::catalog::TextRole::Subtitle;
+		// GStreamer surfaces the track language as a BCP-47-ish tag when the container carries one.
+		config.lang = structure.get::<String>("language-code").ok();
+
+		// Go through the reservation like every codec pad, so the first catalog snapshot waits for
+		// this track and dropping the rendition removes it again.
+		let mut rendition = catalog.reserve().text(name);
+		rendition.set(config);
+
+		Ok(Text {
+			producer: moq_mux::container::Producer::new(producer, moq_mux::catalog::hang::Container::Legacy),
+			rendition,
+		})
 	}
 
 	/// Reserve a uniquely named track and hand it to the single-codec importer, which accepts the request
@@ -249,7 +383,7 @@ impl Pad {
 	/// pad.
 	/// Returns `true` the first time a buffer is dropped because the pad has no TIME segment, so the
 	/// caller can surface it once on the bus: without a timeline the pad can never publish.
-	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>) -> bool {
+	pub fn push_buffer(&mut self, data: Bytes, pts: Option<gst::ClockTime>, duration: Option<gst::ClockTime>) -> bool {
 		if self.failed {
 			return false;
 		}
@@ -260,9 +394,25 @@ impl Pad {
 		}
 		match timestamp {
 			Ok(micros) => {
-				let ts = hang::container::Timestamp::from_micros(micros).ok();
-				let track = self.track.as_mut().expect("track present");
-				if let Err(err) = track.decode(&data, ts) {
+				let result: Result<()> = match self.track.as_mut().expect("track present") {
+					Sink::Media(track) => {
+						let ts = hang::container::Timestamp::from_micros(micros).ok();
+						track.decode(&data, ts).map_err(Into::into)
+					}
+					Sink::Text(text) => match std::str::from_utf8(&data) {
+						// A cue with no duration would never be dismissed, so drop it rather than pin it
+						// on screen; the demuxer supplies one for every real subtitle sample.
+						Ok(cue) => match duration {
+							Some(duration) => text.write(cue, micros, duration.useconds()),
+							None => {
+								gst::warning!(CAT, "dropping subtitle cue without a duration");
+								return false;
+							}
+						},
+						Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
+					},
+				};
+				if let Err(err) = result {
 					gst::warning!(CAT, "invalidating pad: {err}");
 					self.fail();
 				}
@@ -283,10 +433,13 @@ impl Pad {
 	/// `finish()` is safe even when no frame was ever decoded.
 	pub fn finalize(&mut self) -> Result<bool> {
 		// take() up front makes this attempt-once: after a failed finish() the producer is already gone.
-		let Some(mut track) = self.track.take() else {
+		let Some(track) = self.track.take() else {
 			return Ok(false);
 		};
-		track.finish()?;
+		match track {
+			Sink::Media(mut track) => track.finish()?,
+			Sink::Text(mut text) => text.producer.finish()?,
+		}
 		Ok(true)
 	}
 }
@@ -298,7 +451,14 @@ pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 	let Some(s) = caps.structure(0) else { return false };
 	matches!(
 		s.name().as_str(),
-		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "audio/mpeg" | "audio/x-opus"
+		"video/x-h264"
+			| "video/x-h265"
+			| "video/x-av1"
+			| "video/x-vp8"
+			| "video/x-vp9"
+			| "audio/mpeg"
+			| "audio/x-opus"
+			| "text/x-raw"
 	)
 }
 
@@ -421,11 +581,11 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &h264_caps());
 		// No observe_segment: the pad stays in NoSegment.
 		assert!(
-			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None),
 			"first no-segment buffer is reported"
 		);
 		assert!(
-			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO)),
+			!pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None),
 			"subsequent no-segment buffers are not re-reported"
 		);
 	}
@@ -449,7 +609,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, &gst::Caps::builder("video/x-raw").build());
 		assert!(pad.is_failed());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(Bytes::from_static(b"x"), Some(gst::ClockTime::ZERO), None);
 	}
 
 	// A real IDR AU emits a frame to the published track (not just a rendition off the SPS).
@@ -460,7 +620,7 @@ mod tests {
 		let mut pad = Pad::new();
 		pad.observe_caps(&broadcast, &catalog, &h264_caps());
 		pad.observe_segment(time_segment());
-		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO));
+		pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::ZERO), None);
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
@@ -620,6 +780,111 @@ mod tests {
 		pad.flush();
 		assert!(!pad.is_failed());
 		assert!(!pad.finalize().unwrap(), "no producer to finalize");
+	}
+
+	fn text_caps() -> gst::Caps {
+		gst::Caps::builder("text/x-raw").field("format", "utf8").build()
+	}
+
+	// A subtitle pad declares a complete rendition up front, since nothing about a cue track is
+	// detected from the payload.
+	#[test]
+	fn text_caps_declares_a_subtitle_rendition() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &text_caps());
+		assert!(!pad.is_failed());
+
+		let snapshot = catalog.snapshot();
+		let (name, config) = snapshot.text.renditions.iter().next().expect("a text rendition");
+		assert!(name.ends_with(".vtt"), "unexpected track name: {name}");
+		assert_eq!(config.format, hang::catalog::TextFormat::Vtt);
+		// Not `Caption`: a demuxed text track carries no evidence that it transcribes non-speech audio.
+		assert_eq!(config.role, hang::catalog::TextRole::Subtitle);
+	}
+
+	// Dropping the pad retires the rendition, so a failed or finished subtitle track stops being
+	// advertised instead of pointing at a producer that is gone.
+	#[test]
+	fn failed_text_pad_retires_its_rendition() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &text_caps());
+		pad.observe_segment(time_segment());
+		assert_eq!(catalog.snapshot().text.renditions.len(), 1);
+
+		// Invalid UTF-8 fails the pad, which finalizes and drops the producer.
+		pad.push_buffer(
+			Bytes::from_static(&[0xff, 0xfe]),
+			Some(gst::ClockTime::ZERO),
+			Some(gst::ClockTime::from_seconds(1)),
+		);
+		assert!(pad.is_failed());
+		assert!(
+			catalog.snapshot().text.renditions.is_empty(),
+			"failed pad left a phantom rendition"
+		);
+	}
+
+	// Cue spacing is not a buffering requirement. Publishing it as `jitter` would inflate every
+	// consumer's shared playback buffer, so toggling captions on would re-anchor audio and video.
+	#[test]
+	fn text_rendition_declares_no_jitter() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &text_caps());
+		pad.observe_segment(time_segment());
+
+		// Two cues 500ms apart: the estimator's minimum-gap heuristic would report 500ms here.
+		for (start_ms, dur_ms) in [(0u64, 400u64), (500, 400)] {
+			pad.push_buffer(
+				Bytes::from_static(b"hello"),
+				Some(gst::ClockTime::from_mseconds(start_ms)),
+				Some(gst::ClockTime::from_mseconds(dur_ms)),
+			);
+		}
+		assert!(!pad.is_failed());
+
+		let snapshot = catalog.snapshot();
+		let config = snapshot.text.renditions.values().next().expect("a text rendition");
+		assert_eq!(config.jitter, None, "cue spacing leaked into the catalog as jitter");
+	}
+
+	// A cue with no duration has no end, so it would pin on screen forever: drop it instead.
+	#[test]
+	fn text_cue_without_duration_is_dropped() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, &text_caps());
+		pad.observe_segment(time_segment());
+		pad.push_buffer(Bytes::from_static(b"hello"), Some(gst::ClockTime::ZERO), None);
+		assert!(!pad.is_failed(), "a durationless cue drops the buffer, not the pad");
+	}
+
+	#[test]
+	fn vtt_timestamps_are_hms() {
+		assert_eq!(format_timestamp(0), "00:00:00.000");
+		assert_eq!(format_timestamp(1_500_000), "00:00:01.500");
+		assert_eq!(format_timestamp(3_661_042_000), "01:01:01.042");
+	}
+
+	// Cue text is arbitrary demuxer output: markup characters must not open a WebVTT tag, and a
+	// blank line must not truncate the cue at the first paragraph break.
+	#[test]
+	fn cue_text_is_escaped() {
+		assert_eq!(escape_cue("<i>hi</i>"), "&lt;i&gt;hi&lt;/i&gt;");
+		assert_eq!(escape_cue("Tom & Jerry"), "Tom &amp; Jerry");
+		// `&` is escaped first, so the ampersand it introduces isn't escaped again.
+		assert_eq!(escape_cue("a & <b"), "a &amp; &lt;b");
+		assert_eq!(escape_cue("first\n\nsecond"), "first\nsecond");
+		// An arrow in the text would otherwise read as another cue's timing.
+		assert!(!escape_cue("00:01 --> 00:02").contains("-->"));
+		// Nothing but whitespace leaves no cue to publish.
+		assert_eq!(escape_cue(" \n\n \n"), "");
 	}
 
 	// All decode-order frames, including B-frames, emit: frame_timestamp must not gate on PTS monotonicity.

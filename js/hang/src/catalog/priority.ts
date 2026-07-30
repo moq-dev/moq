@@ -2,6 +2,7 @@
 /** Delivery priority per track kind; higher is sent first. */
 export const PRIORITY = {
 	catalog: 100,
+	text: 90,
 	audio: 80,
 	video: 60,
 } as const;

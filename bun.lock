@@ -98,7 +98,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.9.8",
@@ -181,7 +181,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@moq/qmux": "^0.3.2",
         "@moq/signals": "workspace:*",
@@ -201,7 +201,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/net": "workspace:^",
@@ -264,12 +264,13 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/msf": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
+        "media-captions": "0.0.18",
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
@@ -1292,6 +1293,8 @@
     "mdast-util-to-markdown": ["mdast-util-to-markdown@2.1.2", "", { "dependencies": { "@types/mdast": "^4.0.0", "@types/unist": "^3.0.0", "longest-streak": "^3.0.0", "mdast-util-phrasing": "^4.0.0", "mdast-util-to-string": "^4.0.0", "micromark-util-classify-character": "^2.0.0", "micromark-util-decode-string": "^2.0.0", "unist-util-visit": "^5.0.0", "zwitch": "^2.0.0" } }, "sha512-xj68wMTvGXVOKonmog6LwyJKrYXZPvlwabaryTjLh9LuvovB/KAH+kvi8Gjj+7rJjsFi23nkUxRQv1KqSroMqA=="],
 
     "mdast-util-to-string": ["mdast-util-to-string@4.0.0", "", { "dependencies": { "@types/mdast": "^4.0.0" } }, "sha512-0H44vDimn51F0YwvxSJSm0eCDOJTRlmN0R1yBh4HLj9wiV1Dn0QoXGbvFAWj2hSItVTlCmBF1hqKlIyUBVFLPg=="],
+
+    "media-captions": ["media-captions@0.0.18", "", {}, "sha512-JW18P6FuHdyLSGwC4TQ0kF3WdNj/+wMw2cKOb8BnmY6vSJGtnwJ+vkYj+IjHOV34j3XMc70HDeB/QYKR7E7fuQ=="],
 
     "merge-anything": ["merge-anything@5.1.7", "", { "dependencies": { "is-what": "^4.1.8" } }, "sha512-eRtbOb1N5iyH0tkQDAoQ4Ipsp/5qSR79Dzrz8hEPxRX10RWWR/iQXdoKmBSRCThY1Fh5EhISDtpSc93fpxUniQ=="],
 

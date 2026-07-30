@@ -57,7 +57,7 @@ export class Microphone {
 		const constraints = effect.get(this.constraints) ?? {};
 		const finalConstraints: MediaTrackConstraints = {
 			...constraints,
-			deviceId: device !== undefined ? { exact: device } : undefined,
+			deviceId: device ? { exact: device } : undefined,
 		};
 
 		effect.spawn(async () => {
@@ -81,11 +81,6 @@ export class Microphone {
 			// getUserMedia resolved, so we have permission even if no track came back.
 			effect.cleanup(this.device.capture(settings?.deviceId));
 			if (!track) return;
-
-			if (device === undefined) {
-				// Save the device that the user selected during the dialog prompt.
-				this.device.preferred.set(settings?.deviceId);
-			}
 
 			effect.set(this.#out.source, { track, kind: "voice" });
 		});

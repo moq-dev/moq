@@ -19,9 +19,9 @@ use std::borrow::Cow;
 use bytes::Bytes;
 use moq_net::Timestamp;
 
-use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix, rgba_to_yuv420};
+use yuv::{YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, rgba_to_yuv420};
 
-use crate::{Error, Size};
+use crate::{Color, Error, Size};
 
 /// One raw (uncompressed) video frame: the pixels plus when they are shown.
 ///
@@ -128,8 +128,9 @@ impl Surface {
 	}
 
 	/// Convert tightly-packed RGBA (`width * height * 4` bytes, no row padding) to
-	/// a CPU I420 surface, BT.601 limited range (what H.264 decoders expect by
-	/// default).
+	/// a CPU I420 surface in [`Color::infer`]'s color space for `size`, limited
+	/// range. The result reports it via [`I420::color`], and an encoder writes it
+	/// into the bitstream, so the pixels and their label cannot disagree.
 	///
 	/// The bring-your-own-pixels entry point: wrap the result in a [`Frame`] to
 	/// encode it. A capture source or decoder hands you a surface directly, often a
@@ -188,9 +189,12 @@ impl Surface {
 		})
 	}
 
-	/// The pixels as tightly-packed I420 (YUV 4:2:0, BT.601 limited range): Y
-	/// (`width * height` bytes), then U, then V (`width/2 * height/2` each), no row
-	/// padding.
+	/// The pixels as tightly-packed I420 (YUV 4:2:0): Y (`width * height` bytes),
+	/// then U, then V (`width/2 * height/2` each), no row padding.
+	///
+	/// Bytes only, so the color space does not come along. Take it from
+	/// [`I420::color`] first if you need to interpret these samples, since this
+	/// consumes the surface.
 	///
 	/// Always available, whichever variant you hold, so it is the universal arm of
 	/// a `match`. Free for `Surface::I420`; downloads any GPU surface.
@@ -225,6 +229,27 @@ impl Surface {
 		}
 	}
 
+	/// The color space these samples are in, when it is known rather than
+	/// guessed. `None` for a GPU surface whose format names none, and for pixels
+	/// that merely passed through without anything naming their space.
+	///
+	/// Worth reading before encoding pixels you resized: [`resize`](Self::resize)
+	/// carries the space across, so a frame scaled past 576 lines no longer
+	/// matches what an encoder sized for the result would infer. Pass this to
+	/// [`encode::Config::color`](crate::encode::Config::color) to keep the label
+	/// honest.
+	pub fn color(&self) -> Option<Color> {
+		match self {
+			#[cfg(target_os = "macos")]
+			Surface::PixelBuffer(s) => s.color(),
+			#[cfg(target_os = "windows")]
+			Surface::Texture(_) => None,
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Surface::Cuda(_) => None,
+			Surface::I420(i) => i.color(),
+		}
+	}
+
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
 	pub(crate) fn to_i420(&self) -> Result<Cow<'_, I420>, Error> {
 		match self {
@@ -247,6 +272,11 @@ pub struct I420 {
 	pub(crate) height: u32,
 	/// Y plane (`width * height`) then U then V (`width/2 * height/2` each).
 	pub(crate) data: Vec<u8>,
+	/// The color space these samples are in, when it is known rather than
+	/// guessed. Set by the conversions that pick a matrix themselves; `None`
+	/// where the pixels only passed through (a decode, a camera) and the
+	/// bitstream's answer did not come with them.
+	pub(crate) color: Option<Color>,
 }
 
 impl I420 {
@@ -265,7 +295,12 @@ impl I420 {
 				data.len()
 			)));
 		}
-		Ok(Self { width, height, data })
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: None,
+		})
 	}
 
 	/// The frame width in pixels.
@@ -283,49 +318,58 @@ impl I420 {
 		&self.data
 	}
 
+	/// The color space these samples are in, or `None` when the crate does not
+	/// know: the pixels came out of a decoder or a camera, and the bitstream's
+	/// color description did not travel with them.
+	///
+	/// Anything converting these samples to RGB needs an answer either way, so
+	/// treat `None` as "fall back to [`Color::infer`]" rather than "does not
+	/// matter". Use [`with_color`](Self::with_color) if you know better.
+	pub fn color(&self) -> Option<Color> {
+		self.color
+	}
+
+	/// Declare the color space of these samples, for a caller who knows it (the
+	/// stream's VUI, a camera's documented output) where the crate cannot.
+	pub fn with_color(mut self, color: Color) -> Self {
+		self.color = Some(color);
+		self
+	}
+
 	/// Tightly-packed I420 byte length for the given even dimensions.
 	pub fn len(width: u32, height: u32) -> usize {
 		let luma = width as usize * height as usize;
 		luma + luma / 2
 	}
 
-	/// Convert RGBA (`stride` bytes per row, >= `width * 4`) to I420, BT.601
-	/// limited range (studio swing, what H.264 decoders expect by default). Used
-	/// by [`Surface::rgba`] (tightly packed) and
-	/// the screen-capture paths, whose surfaces carry a driver-chosen row pitch.
+	/// Convert RGBA (`stride` bytes per row, >= `width * 4`) to I420 in
+	/// [`Color::infer`]'s color space for this size, limited range. Used by
+	/// [`Surface::rgba`] (tightly packed) and the screen-capture paths, whose
+	/// surfaces carry a driver-chosen row pitch.
 	pub(crate) fn from_rgba(rgba: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
+		let color = Color::infer(Size::new(width, height));
+		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
-		rgba_to_yuv420(
-			&mut planar,
-			rgba,
-			stride,
-			YuvRange::Limited,
-			YuvStandardMatrix::Bt601,
-			YuvConversionMode::Balanced,
-		)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		rgba_to_yuv420(&mut planar, rgba, stride, range, matrix, YuvConversionMode::Balanced)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("rgba_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height, Some(color)))
 	}
 
-	/// Convert BGRA to I420, BT.601 limited range. `stride` is the source row
-	/// pitch in bytes (>= `width * 4`), so a padded surface maps directly. Used by
-	/// the screen-capture paths: Windows Desktop Duplication (BGRA staging
-	/// texture) and Linux PipeWire (BGRx/BGRA shared-memory buffers).
+	/// Convert BGRA to I420 in [`Color::infer`]'s color space for this size.
+	/// `stride` is the source row pitch in bytes (>= `width * 4`), so a padded
+	/// surface maps directly. Used by the screen-capture paths: Windows Desktop
+	/// Duplication (BGRA staging texture) and Linux PipeWire (BGRx/BGRA
+	/// shared-memory buffers).
 	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 
+		let color = Color::infer(Size::new(width, height));
+		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
-		bgra_to_yuv420(
-			&mut planar,
-			bgra,
-			stride,
-			YuvRange::Limited,
-			YuvStandardMatrix::Bt601,
-			YuvConversionMode::Balanced,
-		)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		bgra_to_yuv420(&mut planar, bgra, stride, range, matrix, YuvConversionMode::Balanced)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("bgra_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height, Some(color)))
 	}
 
 	/// Pack strided Y/U/V planes (4:2:0, full-size luma, half-size chroma) into a
@@ -357,26 +401,27 @@ impl I420 {
 			v_dst[row * cw..row * cw + cw].copy_from_slice(&v[row * uv_stride..row * uv_stride + cw]);
 		}
 
-		Self { width, height, data }
+		Self {
+			width,
+			height,
+			data,
+			color: None,
+		}
 	}
 
-	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420, BT.601
-	/// limited range. Used for MJPEG capture (Linux V4L2), which decodes to RGB.
+	/// Convert tightly-packed RGB (`width * height * 3` bytes) to I420 in
+	/// [`Color::infer`]'s color space for this size. Used for MJPEG capture
+	/// (Linux V4L2), which decodes to RGB.
 	#[cfg(target_os = "linux")]
 	pub(crate) fn from_rgb(rgb: &[u8], width: u32, height: u32) -> Result<Self, Error> {
 		use yuv::rgb_to_yuv420;
 
+		let color = Color::infer(Size::new(width, height));
+		let (range, matrix) = color.yuv();
 		let mut planar = YuvPlanarImageMut::alloc(width, height, YuvChromaSubsampling::Yuv420);
-		rgb_to_yuv420(
-			&mut planar,
-			rgb,
-			width * 3,
-			YuvRange::Limited,
-			YuvStandardMatrix::Bt601,
-			YuvConversionMode::Balanced,
-		)
-		.map_err(|e| Error::Codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		rgb_to_yuv420(&mut planar, rgb, width * 3, range, matrix, YuvConversionMode::Balanced)
+			.map_err(|e| Error::Codec(anyhow::anyhow!("rgb_to_yuv420 failed for {width}x{height}: {e}")))?;
+		Ok(Self::pack(&planar, width, height, Some(color)))
 	}
 
 	/// Convert packed YUYV (YUV 4:2:2, `stride` bytes per row) to I420. A chroma
@@ -395,7 +440,9 @@ impl I420 {
 		};
 		yuyv422_to_yuv420(&mut planar, &packed)
 			.map_err(|e| Error::Codec(anyhow::anyhow!("yuyv422_to_yuv420 failed for {width}x{height}: {e}")))?;
-		Ok(Self::pack(&planar, width, height))
+		// A chroma resample, not a color conversion: these samples are in
+		// whatever space the camera produced, which nothing here names.
+		Ok(Self::pack(&planar, width, height, None))
 	}
 
 	/// Split tightly-packed NV12 (Y plane `width * height`, then interleaved UV
@@ -419,7 +466,12 @@ impl I420 {
 		data[..luma].copy_from_slice(&nv12[..luma]);
 		let (u_dst, v_dst) = data[luma..].split_at_mut(chroma);
 		deinterleave_uv(&nv12[luma..need], u_dst, v_dst);
-		Ok(Self { width, height, data })
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: None,
+		})
 	}
 
 	/// Resize to `width` x `height` (both even) with a per-plane SIMD bilinear
@@ -472,17 +524,31 @@ impl I420 {
 			plane(resizer, self.v(), sw2, sh2, v_dst, dw2, dh2)
 		})?;
 
-		Ok(Self { width, height, data })
+		// Resampling moves samples around, it does not reinterpret them.
+		Ok(Self {
+			width,
+			height,
+			data,
+			color: self.color,
+		})
 	}
 
 	/// Flatten the three planes of a freshly-converted image into one tightly
 	/// packed I420 buffer (Y, then U, then V).
-	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32) -> Self {
+	/// `color` is what the caller's conversion produced: the RGB conversions pick
+	/// a matrix, so they know it outright, while a caller that only resamples
+	/// chroma passes `None` and leaves the samples' space open.
+	fn pack(planar: &YuvPlanarImageMut<u8>, width: u32, height: u32, color: Option<Color>) -> Self {
 		let mut data = Vec::with_capacity(Self::len(width, height));
 		data.extend_from_slice(planar.y_plane.borrow());
 		data.extend_from_slice(planar.u_plane.borrow());
 		data.extend_from_slice(planar.v_plane.borrow());
-		Self { width, height, data }
+		Self {
+			width,
+			height,
+			data,
+			color,
+		}
 	}
 
 	fn luma_len(&self) -> usize {
@@ -547,14 +613,15 @@ pub mod macos {
 	use objc2_core_video::{
 		CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
 		CVPixelBufferGetPixelFormatType, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-		CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+		CVPixelBufferUnlockBaseAddress, kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+		kCVImageBufferYCbCrMatrixKey, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
 		kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
 		kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
 	};
 	use objc2_video_toolbox::VTPixelTransferSession;
 
 	use super::I420;
-	use crate::Error;
+	use crate::{Color, Error};
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
 	const LOCK_READ_ONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
@@ -683,7 +750,57 @@ pub mod macos {
 			result
 		}
 
+		/// The color space this buffer's matrix attachment names, falling back to
+		/// [`Color::infer`] when it carries none.
+		///
+		/// VideoToolbox copies the matrix out of the stream's VUI onto every decoded
+		/// buffer, so this is the source's own answer wherever the source gave one.
+		/// The range is not in this attachment; the caller pairs it with the one the
+		/// pixel format names.
+		fn matrix(&self) -> Color {
+			let inferred = Color::infer(crate::Size::new(self.width, self.height));
+			// SAFETY: a null attachment mode is documented as "don't report it".
+			let Some(value) = (unsafe { self.buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()) }) else {
+				return inferred;
+			};
+			let Some(name) = value.downcast_ref::<CFString>() else {
+				return inferred;
+			};
+
+			// Compare against the constants rather than the string literals: these
+			// are CFString identities Apple owns, not values we should spell out.
+			if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 } {
+				Color::Bt709Limited
+			} else if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 } {
+				Color::Bt601Limited
+			} else {
+				// BT.2020 and the P3 matrices land here. We have no variant for them,
+				// so the size guess is the least wrong answer available.
+				inferred
+			}
+		}
+
+		/// The color space these samples are in: the matrix from the buffer's
+		/// attachment paired with the range its pixel format names. `None` for a
+		/// format that names neither.
+		pub(crate) fn color(&self) -> Option<Color> {
+			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
+			let limited = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+				true
+			} else if format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+				false
+			} else {
+				return None;
+			};
+			Some(self.matrix().with_range(limited))
+		}
+
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
+		///
+		/// A deinterleave, not a color conversion, so the samples keep whatever
+		/// space they arrived in. The pixel format names the range and the buffer's
+		/// matrix attachment names the matrix, so a decoded frame reports the space
+		/// its own bitstream declared rather than one guessed from its size.
 		pub(crate) fn download_i420(&self) -> Result<I420, Error> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			if format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -693,6 +810,8 @@ pub mod macos {
 					"cannot download pixel format {format:#x}; expected NV12"
 				)));
 			}
+
+			let color = self.color();
 
 			let (w, h) = (self.width as usize, self.height as usize);
 			let (cw, ch) = (w / 2, h / 2);
@@ -735,6 +854,7 @@ pub mod macos {
 				width: self.width,
 				height: self.height,
 				data,
+				color,
 			})
 		}
 	}
@@ -1119,6 +1239,9 @@ pub mod cuda {
 				width: self.width,
 				height: self.height,
 				data,
+				// A deinterleave, not a color conversion, and nothing here names
+				// the space these samples are in. Left unknown to be inferred.
+				color: None,
 			})
 		}
 
@@ -1362,6 +1485,9 @@ pub mod d3d11 {
 				width: self.width,
 				height: self.height,
 				data,
+				// A deinterleave, not a color conversion, and nothing here names
+				// the space these samples are in. Left unknown to be inferred.
+				color: None,
 			})
 		}
 	}
@@ -1380,6 +1506,52 @@ pub mod d3d11 {
 
 #[cfg(test)]
 mod tests {
+	/// A conversion that picks a matrix says so; one that only moves samples
+	/// around must not.
+	///
+	/// The distinction decides whether a renderer trusts the frame or guesses
+	/// from the resolution, and guessing wrong tints saturated colors (see the
+	/// render module's HD test). Labeling everything with the RGB matrix would be
+	/// worse than labeling nothing: a 720p camera's BT.709 samples would be
+	/// pinned to BT.601 rather than inferring BT.709 correctly.
+	#[test]
+	fn only_a_real_color_conversion_labels_its_output() {
+		use super::I420;
+		use crate::{Color, Size};
+
+		let size = Size::new(64, 64);
+		let rgba = vec![0u8; size.pixels() as usize * 4];
+		let converted = I420::from_rgba(&rgba, size.width * 4, size.width, size.height).expect("rgba to i420");
+		assert_eq!(
+			converted.color(),
+			Some(Color::Bt601Limited),
+			"an RGB conversion knows the matrix it used"
+		);
+
+		// Resampling moves samples around; it does not reinterpret them.
+		let resized = converted.resize(32, 32).expect("resize");
+		assert_eq!(resized.color(), Some(Color::Bt601Limited), "resize preserves the space");
+
+		// A passthrough leaves it open for the consumer to infer.
+		let raw = I420::new(64, 64, vec![0; I420::len(64, 64)]).expect("i420");
+		assert_eq!(raw.color(), None);
+		assert_eq!(raw.with_color(Color::Bt709Full).color(), Some(Color::Bt709Full));
+	}
+
+	/// V4L2 hands back YUYV already in the camera's color space, so the 4:2:2 ->
+	/// 4:2:0 chroma resample must not claim it is BT.601: a 720p camera is
+	/// usually BT.709, and mislabeling pins it to the wrong matrix instead of
+	/// letting the resolution heuristic get it right.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn yuyv_capture_keeps_its_color_space_open() {
+		let (width, height) = (1280, 720);
+		// YUYV packs two pixels into four bytes.
+		let yuyv = vec![0u8; width as usize * height as usize * 2];
+		let frame = super::I420::from_yuyv(&yuyv, width * 2, width, height).expect("yuyv to i420");
+		assert_eq!(frame.color(), None, "a chroma resample names no color space");
+	}
+
 	/// A short buffer is rejected at construction rather than panicking later: the
 	/// plane splits in `y`/`u`/`v` and the CoreVideo upload both index blindly, so
 	/// a public `I420` has to be impossible to build malformed.
@@ -1407,6 +1579,64 @@ mod tests {
 		assert!(Surface::rgba(&ok[..ok.len() - 4], Size::new(64, 32)).is_err());
 		assert!(Surface::rgba(&ok, Size::new(32, 32)).is_err());
 		assert!(Surface::rgba(&ok, Size::new(0, 32)).is_err());
+	}
+
+	/// The conversion picks its matrix by resolution, matching what a player
+	/// assumes for an untagged stream, and reports the one it used.
+	///
+	/// The regression: every RGB conversion hardcoded BT.601. A 1080p screen
+	/// capture was converted with BT.601, encoded untagged, and decoded with the
+	/// BT.709 inverse, which turns pure red into roughly (255, 24, 0). Grays are
+	/// unaffected, which is why it survived casual inspection.
+	#[test]
+	fn rgb_conversion_follows_the_size_heuristic() {
+		use yuv::{YuvPlanarImage, yuv420_to_rgba};
+
+		use crate::Color;
+
+		let red = |size: Size| {
+			let rgba = [255u8, 0, 0, 255].repeat(size.pixels() as usize);
+			I420::from_rgba(&rgba, size.width * 4, size.width, size.height).unwrap()
+		};
+
+		// Decode with the matrix a player picks for an untagged stream of this
+		// size, and sample the middle of the frame.
+		let decode = |i420: &I420| {
+			let (w, h) = (i420.width, i420.height);
+			let (range, matrix) = Color::infer(Size::new(w, h)).yuv();
+			let planar = YuvPlanarImage {
+				y_plane: i420.y(),
+				y_stride: w,
+				u_plane: i420.u(),
+				u_stride: w / 2,
+				v_plane: i420.v(),
+				v_stride: w / 2,
+				width: w,
+				height: h,
+			};
+			let mut rgba = vec![0u8; (w * h * 4) as usize];
+			yuv420_to_rgba(&planar, &mut rgba, w * 4, range, matrix).unwrap();
+			let px = ((h / 2 * w + w / 2) * 4) as usize;
+			[rgba[px], rgba[px + 1], rgba[px + 2]]
+		};
+
+		for (size, expected) in [
+			(Size::new(720, 480), Color::Bt601Limited),
+			(Size::new(720, 576), Color::Bt601Limited),
+			(Size::new(1280, 720), Color::Bt709Limited),
+			(Size::new(1920, 1080), Color::Bt709Limited),
+		] {
+			let i420 = red(size);
+			assert_eq!(i420.color(), Some(expected), "{size} reported color");
+
+			// Red survives the round trip at every size. Before the fix the 720p and
+			// 1080p cases came back around (255, 24, 0).
+			let rgb = decode(&i420);
+			assert!(
+				rgb[1] <= 2 && rgb[2] <= 2,
+				"{size} red came back as {rgb:?}, so the matrix and the label disagree"
+			);
+		}
 	}
 
 	/// The frame's size comes from the surface rather than a field alongside it,
@@ -1459,7 +1689,12 @@ mod tests {
 				v[row * cw + col] = (((row + col) * 255) / (ch + cw)) as u8;
 			}
 		}
-		I420 { width, height, data }
+		I420 {
+			width,
+			height,
+			data,
+			color: None,
+		}
 	}
 
 	/// Mean absolute error between two equal-length planes.

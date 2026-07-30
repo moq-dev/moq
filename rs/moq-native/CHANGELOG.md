@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.4](https://github.com/moq-dev/moq/compare/moq-native-v0.19.3...moq-native-v0.19.4) - 2026-07-29
+
+### Added
+
+- *(net)* fail over across redundant publishers via per-peer route selection ([#2473](https://github.com/moq-dev/moq/pull/2473))
+
+### Fixed
+
+- *(moq-boy,moq-native)* dial the relay via --client-connect again ([#2551](https://github.com/moq-dev/moq/pull/2551))
+
 ## [0.19.3](https://github.com/moq-dev/moq/compare/moq-native-v0.19.2...moq-native-v0.19.3) - 2026-07-25
 
 ### Fixed

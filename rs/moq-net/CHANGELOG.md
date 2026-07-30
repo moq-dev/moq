@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/moq-dev/moq/compare/moq-net-v0.2.4...moq-net-v0.2.5) - 2026-07-29
+
+### Added
+
+- *(net)* fail over across redundant publishers via per-peer route selection ([#2473](https://github.com/moq-dev/moq/pull/2473))
+- *(net)* drop Exclude Hop from ANNOUNCE_REQUEST in lite-06 ([#2550](https://github.com/moq-dev/moq/pull/2550))
+
+### Fixed
+
+- *(net)* prefer the newest route so a reconnect takes over immediately ([#2556](https://github.com/moq-dev/moq/pull/2556))
+
+### Other
+
+- *(kio,net)* model-check the concurrent handoffs with loom ([#2543](https://github.com/moq-dev/moq/pull/2543))
+
 ## [0.2.4](https://github.com/moq-dev/moq/compare/moq-net-v0.2.3...moq-net-v0.2.4) - 2026-07-27
 
 ### Added

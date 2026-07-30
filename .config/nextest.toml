@@ -1,0 +1,28 @@
+# Shared nextest settings, picked up by every `cargo nextest` run in the workspace.
+
+[profile.default]
+# Kill a test that stops making progress instead of letting it wedge.
+#
+# The failure mode this bounds: a lost `kio` wakeup parks a task with nothing to
+# wake it, which is a hang rather than a failure. Under the plain `cargo test`
+# harness that run never ends, holding the target lock and burning a core until
+# someone notices and kills it by hand.
+#
+# `terminate-after` counts periods, so a test is reported SLOW at 30s and killed
+# at a minute, failing the run with a TIMEOUT. The slowest honest test in the
+# workspace runs in about 9s, so 30s is several times the real ceiling and the
+# SLOW label stays worth reading; keep it that way by making a test fast rather
+# than by raising this.
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Retries hide flakes, and this repo treats an intermittent failure as a real
+# race until proven otherwise (see Root Cause First in CLAUDE.md).
+retries = 0
+
+# CI has noisier neighbours and cold caches, so give a test longer before
+# calling it wedged.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 2 }
+retries = 0
+# Repeat each failure at the end of the run, so it isn't buried in the log.
+failure-output = "immediate-final"

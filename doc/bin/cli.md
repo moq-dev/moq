@@ -113,6 +113,13 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
+### Captions
+
+Subtitles ride in the source container. The current `moq import` path does not preserve subtitle
+tracks in fragmented MP4, so captions arrive over the GStreamer path instead: `moqsink` accepts a
+decoded text pad and publishes it as a caption track. See
+[GStreamer](gstreamer.md).
+
 ### Redundant Publishers (1+1)
 
 Relays key a broadcast's content identity on the publisher's origin id (the
@@ -128,7 +135,7 @@ whenever routing prefers another (not only on failure), splicing at the next
 group boundary, so encoders that drift (for example segment-numbered tracks
 from processes started at different times) tear down subscribers on the
 switch. Independent publishers with different tracks or timelines MUST use
-different origin ids; the newcomer then waits as a replacement instead of
+different origin ids; the newcomer then takes the broadcast over instead of
 joining. Run the same command from two aligned encoders, pinning the same id
 on both:
 
@@ -139,10 +146,12 @@ moq --origin 42 --client-connect https://relay-b.example.com/anon --broadcast ev
 
 Leave `--origin` unset everywhere else. The default fresh id per run is what
 makes a restarted encoder look like new content (ending subscriptions and
-invalidating caches) instead of silently splicing mid-stream, and a second
-publisher with a *different* id waits invisibly until the first ends rather
-than joining it.
-
+invalidating caches) instead of silently splicing mid-stream. A publisher with
+a *different* id takes the broadcast over the moment it announces, ending the
+incumbent rather than waiting behind it, so a reconnect is live again without
+waiting for the relay's transport to time out the connection it replaced. The
+last publisher to announce a path owns it, so use authorization to decide who
+may publish where.
 ### Capture a Webcam
 
 The `capture` subcommand captures and encodes from local devices directly, no

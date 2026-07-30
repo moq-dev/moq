@@ -67,6 +67,7 @@ impl<E: CatalogExt> Stream for Consumer<E> {
 				Poll::Ready(Ok(media.map(|m| Catalog::<E> {
 					video: m.video,
 					audio: m.audio,
+					text: m.text,
 					ext: E::default(),
 				})))
 			}
