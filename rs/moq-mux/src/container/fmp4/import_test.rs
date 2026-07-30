@@ -677,3 +677,116 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 		);
 	}
 }
+
+/// Audio and video rarely start a segment at exactly the same timestamp: the boundary is nominal
+/// and each track begins at its own nearest sample. The timeline files a group under a segment by
+/// the group's start, so a boundary declared later than any track's first group files that whole
+/// group under the previous segment.
+///
+/// That was survivable when audio groups were one fragment. Now a group is a whole segment, so a
+/// 20ms skew moves an entire segment of audio into the wrong record: the previous segment gets a
+/// second copy's worth and the next one opens with no audio at all.
+///
+/// `video_offset_us` shifts video relative to audio, so the same source is exercised with audio
+/// leading and lagging.
+async fn segment_ranges_with_skew(
+	video_offset_us: i64,
+) -> Vec<(Vec<hang::timeline::Range>, Vec<hang::timeline::Range>)> {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	let section = snapshot.timeline.clone().unwrap();
+	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
+		.await
+		.unwrap();
+
+	for segment in 0..3u64 {
+		let base = segment * 1_000_000;
+		let video_base = (base as i64 + video_offset_us).max(0) as u64;
+		fmp4.decode(&styp()).unwrap();
+
+		// Audio first, so the segment transition is detected on the audio fragment and video's
+		// IDR lands after it. Two fragments each keeps the ranges unambiguous.
+		for offset in [0u64, 500_000] {
+			let frag = super::encode_fragment(
+				audio_id,
+				audio_scale,
+				segment as u32,
+				&[sample(base + offset, true, Some(500_000))],
+			)
+			.unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+		for (i, offset) in [0u64, 500_000].into_iter().enumerate() {
+			let frag = super::encode_fragment(
+				video_id,
+				video_scale,
+				segment as u32,
+				&[sample(video_base + offset, i == 0, Some(500_000))],
+			)
+			.unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+	}
+	fmp4.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let mut out = Vec::new();
+	while let Some(record) = timeline.next().await.unwrap() {
+		out.push((
+			record.tracks.get(&video_name).cloned().unwrap_or_default(),
+			record.tracks.get(&audio_name).cloned().unwrap_or_default(),
+		));
+	}
+	out
+}
+
+/// Video's IDR lands 20ms AFTER audio's first sample of the segment, the normal interleave.
+#[tokio::test]
+async fn audio_leading_video_still_indexes_one_group_each() {
+	let records = segment_ranges_with_skew(20_000).await;
+	assert_eq!(records.len(), 3, "one record per segment");
+	for (i, (video, audio)) in records.iter().enumerate() {
+		assert_eq!(video.len(), 1, "segment {i}: one video range, got {video:?}");
+		assert_eq!(audio.len(), 1, "segment {i}: one audio range, got {audio:?}");
+		assert_eq!(
+			(audio[0].start, audio[0].end),
+			(i as u64, i as u64),
+			"segment {i} audio"
+		);
+		assert_eq!(
+			(video[0].start, video[0].end),
+			(i as u64, i as u64),
+			"segment {i} video"
+		);
+	}
+}
+
+/// Video's IDR lands 20ms BEFORE audio's first sample, the other side of the same skew.
+#[tokio::test]
+async fn audio_lagging_video_still_indexes_one_group_each() {
+	let records = segment_ranges_with_skew(-20_000).await;
+	assert_eq!(records.len(), 3, "one record per segment");
+	for (i, (video, audio)) in records.iter().enumerate() {
+		assert_eq!(video.len(), 1, "segment {i}: one video range, got {video:?}");
+		assert_eq!(audio.len(), 1, "segment {i}: one audio range, got {audio:?}");
+		assert_eq!(
+			(audio[0].start, audio[0].end),
+			(i as u64, i as u64),
+			"segment {i} audio"
+		);
+		assert_eq!(
+			(video[0].start, video[0].end),
+			(i as u64, i as u64),
+			"segment {i} video"
+		);
+	}
+}
