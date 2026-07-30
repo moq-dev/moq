@@ -491,3 +491,189 @@ fn test_flac_catalog() {
 	let desc = a.description.as_ref().expect("flac description");
 	assert_eq!(&desc[..4], b"fLaC");
 }
+
+// ---- Segment-driven grouping ----
+
+/// bbb.mp4's init (ftyp + moov), plus the (track_id, timescale) of its video and audio traks.
+/// Reused to synthesize a segmented source against a real, valid moov.
+fn bbb_init() -> (bytes::BytesMut, (u32, moq_net::Timescale), (u32, moq_net::Timescale)) {
+	let data = include_bytes!("test_data/bbb.mp4");
+	let mut cursor = std::io::Cursor::new(&data[..]);
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	let moov = mp4_atom::Moov::decode(&mut cursor).unwrap();
+	let init = bytes::BytesMut::from(&data[..cursor.position() as usize]);
+
+	let mut video = None;
+	let mut audio = None;
+	for trak in &moov.trak {
+		let id = trak.tkhd.track_id;
+		let scale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64).unwrap();
+		match trak.mdia.hdlr.handler.as_ref() {
+			b"vide" => video = Some((id, scale)),
+			b"soun" => audio = Some((id, scale)),
+			_ => {}
+		}
+	}
+	(init, video.expect("video trak"), audio.expect("audio trak"))
+}
+
+/// A `styp`, marking the start of a CMAF segment on disk.
+fn styp() -> Vec<u8> {
+	let mut buf = Vec::new();
+	mp4_atom::Styp {
+		major_brand: mp4_atom::FourCC::new(b"msdh"),
+		minor_version: 0,
+		compatible_brands: vec![mp4_atom::FourCC::new(b"msdh")],
+	}
+	.encode(&mut buf)
+	.unwrap();
+	buf
+}
+
+/// Drain a track, returning how many frames each group carried.
+fn drain_group_frames(consumer: &mut moq_net::track::Subscriber) -> Vec<usize> {
+	let mut groups = Vec::new();
+	while let Some(mut group) = consumer.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
+		let mut frames = 0;
+		while group
+			.next_frame()
+			.now_or_never()
+			.and_then(|r| r.ok().flatten())
+			.is_some()
+		{
+			frames += 1;
+		}
+		groups.push(frames);
+	}
+	groups
+}
+
+/// A CMAF source that declares its segmentation with `styp` gets one group per *segment* on every
+/// track, with each fragment inside it a frame.
+///
+/// Regression guard for audio opening a group (a QUIC stream) per fragment: audio flags every
+/// sample a sync sample, so keying the group off the keyframe bit made audio's unit a fragment
+/// while video's stayed a segment. The two tracks then disagreed on where segments fell, which is
+/// what an HLS/DASH export needs them to agree on, and LL-HLS parts have no consistent unit at all.
+#[tokio::test]
+async fn segmented_source_groups_per_segment() {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	let mut video_track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
+	let mut audio_track = consumer.track(&audio_name).unwrap().subscribe(None).await.unwrap();
+
+	// Three 1s segments: 2 video fragments each (only the first an IDR) and 4 audio fragments,
+	// so a per-fragment grouping and a per-segment one can't be confused.
+	for segment in 0..3u64 {
+		let base = segment * 1_000_000;
+		fmp4.decode(&styp()).unwrap();
+
+		for (i, offset) in [0u64, 500_000].into_iter().enumerate() {
+			let frames = [sample(base + offset, i == 0, Some(500_000))];
+			let frag = super::encode_fragment(video_id, video_scale, segment as u32, &frames).unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+		for offset in [0u64, 250_000, 500_000, 750_000] {
+			let frames = [sample(base + offset, true, Some(250_000))];
+			let frag = super::encode_fragment(audio_id, audio_scale, segment as u32, &frames).unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+	}
+	fmp4.finish().unwrap();
+
+	assert_eq!(
+		drain_group_frames(&mut video_track),
+		vec![2, 2, 2],
+		"one video group per segment, each carrying its two fragments"
+	);
+	assert_eq!(
+		drain_group_frames(&mut audio_track),
+		vec![4, 4, 4],
+		"audio follows the same segmentation instead of opening a group per fragment"
+	);
+}
+
+/// The timeline indexes each segment as one group range per track, which is what makes the
+/// segment servable: an HLS/DASH export fetches `start..=end` and concatenates it into one CMAF
+/// segment. With audio grouping per fragment those ranges spanned many short groups, one FETCH
+/// round-trip each, and the two tracks' boundaries no longer coincided.
+#[tokio::test]
+async fn segmented_source_indexes_one_group_range_per_track() {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+
+	// Subscribe while the producer is alive so the reader terminates on finish rather than blocking.
+	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
+		.await
+		.unwrap();
+
+	for segment in 0..3u64 {
+		let base = segment * 1_000_000;
+		fmp4.decode(&styp()).unwrap();
+		for (i, offset) in [0u64, 500_000].into_iter().enumerate() {
+			let frag = super::encode_fragment(
+				video_id,
+				video_scale,
+				segment as u32,
+				&[sample(base + offset, i == 0, Some(500_000))],
+			)
+			.unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+		for offset in [0u64, 250_000, 500_000, 750_000] {
+			let frag = super::encode_fragment(
+				audio_id,
+				audio_scale,
+				segment as u32,
+				&[sample(base + offset, true, Some(250_000))],
+			)
+			.unwrap();
+			fmp4.decode(&frag).unwrap();
+		}
+	}
+	fmp4.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let mut records = Vec::new();
+	while let Some(record) = timeline.next().await.unwrap() {
+		records.push(record);
+	}
+	assert_eq!(records.len(), 3, "one record per declared segment");
+
+	for (i, record) in records.iter().enumerate() {
+		assert_eq!(record.segment, i as u64);
+		let video = record.tracks.get(&video_name).expect("video is indexed");
+		let audio = record.tracks.get(&audio_name).expect("audio is indexed");
+		assert_eq!(video.len(), 1, "segment {i}: video is one contiguous group range");
+		assert_eq!(audio.len(), 1, "segment {i}: audio is one contiguous group range");
+		assert_eq!(
+			(video[0].start, video[0].end),
+			(i as u64, i as u64),
+			"segment {i}: one video group"
+		);
+		assert_eq!(
+			(audio[0].start, audio[0].end),
+			(i as u64, i as u64),
+			"segment {i}: one audio group, not one per fragment"
+		);
+	}
+}

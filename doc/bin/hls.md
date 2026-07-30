@@ -108,8 +108,9 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
   is preserved: every variant cuts the broadcast's timeline at each source
   segment (duplicate cuts are ignored), so exporting the import reproduces the
   original boundaries.
-- **LL-HLS parts and DASH** are not implemented yet. Parts need sub-group
-  records in the timeline; an MPD generator can be added over the same
-  timeline + FETCH machinery later.
+- **LL-HLS parts** are not implemented on the export side yet. The import maps
+  a segment to a group and each fragment inside it to a frame, on audio and
+  video alike, so a part is already addressable as one frame of a group; what
+  is missing is rendering `EXT-X-PART` and sourcing each part's duration.
 
 (Written by Claude)
