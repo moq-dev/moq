@@ -168,8 +168,8 @@ impl WaiterCell {
 	/// The waiter to use for this poll.
 	///
 	/// The retained waiter is reused when it would wake the same task *and* has no
-	/// live list registrations — the common case after a wakeup, where every list
-	/// entry was drained — saving the `Arc` allocation and waker clone. Otherwise it
+	/// live list registrations (the common case after a wakeup, where every list
+	/// entry was drained), saving the `Arc` allocation and waker clone. Otherwise it
 	/// is replaced: a still-registered waiter must be retired, not re-registered,
 	/// because [`WaiterList`] reclaims slots only when their `Arc` dies. Reusing one
 	/// with live entries would stack duplicate live registrations on every

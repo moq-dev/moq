@@ -7,6 +7,7 @@ use crate::{
 };
 
 /// The push failed; the item is handed back.
+#[non_exhaustive]
 pub enum PushError<T> {
 	/// The queue is at capacity. Only a bounded [`Deque`]'s `try_push` reports this.
 	Full(T),
@@ -65,7 +66,7 @@ impl<T> State<T> {
 /// A poll-native FIFO queue with waker notification.
 ///
 /// Role-less like [`Shared`](crate::Shared): every clone can push, pop, or close,
-/// and there is no liveness of its own — closure is explicit via
+/// and there is no liveness of its own: closure is explicit via
 /// [`close`](Self::close), never implied by dropping handles. Bounded queues park
 /// pushes at capacity ([`poll_push_with`](Self::poll_push_with) /
 /// [`push`](Self::push)) or reject them ([`try_push`](Self::try_push)); pops park
@@ -125,7 +126,7 @@ impl<T> Deque<T> {
 	///
 	/// The item comes from a closure so a pending poll costs nothing: nothing is
 	/// built, nothing needs handing back, and the caller retries with a fresh
-	/// closure. `make` runs with the queue lock held — it must not touch this queue
+	/// closure. `make` runs with the queue lock held, so it must not touch this queue
 	/// (or anything that does).
 	///
 	/// Registers `waiter` while full; a pop or close re-polls it.
@@ -150,7 +151,7 @@ impl<T> Deque<T> {
 	/// Push, waiting for room while a bounded queue is full.
 	///
 	/// Returns [`Closed`] if the queue closes first (or already was); the item is
-	/// dropped in that case — use [`try_push`](Self::try_push) to get it back.
+	/// dropped in that case; use [`try_push`](Self::try_push) to get it back.
 	pub async fn push(&self, item: T) -> Result<(), Closed> {
 		let mut item = Some(item);
 		// Capture the slot by `&mut` so the closure is `Unpin` regardless of `T`.

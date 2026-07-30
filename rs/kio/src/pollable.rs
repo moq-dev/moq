@@ -38,7 +38,7 @@ pub trait Pollable: Unpin {
 pub struct Pending<P> {
 	inner: P,
 	// Retains the waiter across polls so its weak registrations survive (and are
-	// reused when possible) — see [`WaiterCell`].
+	// reused when possible); see [`WaiterCell`].
 	waiter: WaiterCell,
 }
 
