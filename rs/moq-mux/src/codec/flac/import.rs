@@ -13,8 +13,8 @@ use crate::container::Frame;
 /// independently decodable, so [`decode`](Self::decode) marks only the first frame of each group a
 /// keyframe (the rest extend it): frames accumulate into the current group until the caller
 /// [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track) facade
-/// cuts after every frame by default (one group per frame); a caller driving its own boundaries cuts
-/// less often.
+/// passes that through, so boundaries are the caller's either way: cut per frame for one group per
+/// frame, or at a segment cadence to align with video.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
