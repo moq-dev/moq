@@ -40,6 +40,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	pub cost: Option<u64>,
 	/// Driver-owned scope for broadcast and track handlers.
 	pub tasks: Tasks,
+	/// Set once the peer sends a GOAWAY; new request streams are then rejected
+	/// with [`Error::GoingAway`] (the peer told us to stop asking).
+	pub going_away: crate::goaway::GoingAway,
 }
 
 #[derive(Clone)]
@@ -69,6 +72,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	/// the dialer's SETUP carries the price instead.
 	cost: Option<u64>,
 	tasks: Tasks,
+	going_away: crate::goaway::GoingAway,
 }
 
 #[derive(Clone)]
@@ -98,7 +102,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			peer_setup: config.peer_setup,
 			cost: config.cost,
 			tasks: config.tasks,
+			going_away: config.going_away,
 		}
+	}
+
+	/// Reject a new request once the peer has sent a GOAWAY: it told us to stop
+	/// opening streams on this session (existing subscriptions keep flowing).
+	fn check_going_away(&self) -> Result<(), Error> {
+		if self.going_away.is_set() {
+			return Err(Error::GoingAway);
+		}
+		Ok(())
 	}
 
 	/// What crossing this session's link costs, added to the route cost of every
@@ -227,6 +241,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		prefix: PathOwned,
 		mut connecting: Option<ConnectingProducer>,
 	) -> Result<(), Error> {
+		// A peer that sent GOAWAY told us to stop opening streams on this session.
+		self.check_going_away()?;
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
@@ -452,6 +468,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_probe_stream(&self, bandwidth: &bandwidth::Producer) -> Result<(), Error> {
+		// After a GOAWAY the peer must not see new streams. Probe is best-effort;
+		// skip it rather than erroring.
+		if self.going_away.is_set() {
+			return Ok(());
+		}
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 
@@ -538,11 +559,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// (other sessions announcing the same path) join it silently as standbys.
 		// An error means the path is outside our scope, so don't serve it.
 		// Reflections are already filtered above.
-		let mut route = crate::broadcast::Route::new()
-			.with_hops(hops)
-			.with_cost(cost.charged(link_cost).0)
-			.with_announce(true);
-		route.advertised = cost.0;
+		let route = self.announced_route(hops, cost, link_cost);
 		let Ok(source) = self.origin.create_broadcast(&path, route) else {
 			return Ok(false);
 		};
@@ -564,6 +581,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// observe nothing. When the first hop differs, the original publisher was
 	/// replaced: the old route detaches gracefully and a fresh one attaches, so
 	/// downstream sees a real Ended + Active (a new broadcast, nothing resumes).
+	/// The route to attach to a broadcast this peer announced, charging our link's
+	/// price on top of the cost it advertised.
+	///
+	/// Once the peer has sent a GOAWAY every route it announces starts out draining,
+	/// including a restart of one already attached: a connection on its way out must
+	/// not win selection, however good the path it advertises looks.
+	fn announced_route(&self, hops: crate::OriginList, cost: RouteCost, link_cost: u64) -> crate::broadcast::Route {
+		let mut route = crate::broadcast::Route::new()
+			.with_hops(hops)
+			.with_cost(cost.charged(link_cost).0)
+			.with_announce(true);
+		route.advertised = cost.0;
+
+		if self.going_away.is_set() {
+			route.cost = crate::broadcast::DRAIN_COST;
+		}
+
+		route
+	}
+
 	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
 	/// route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
@@ -595,11 +632,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "restart");
 		let publisher = hops.iter().next().copied().unwrap_or(self.session_origin);
-		let mut metadata = crate::broadcast::Route::new()
-			.with_hops(hops)
-			.with_cost(cost.charged(link_cost).0)
-			.with_announce(true);
-		metadata.advertised = cost.0;
+		let metadata = self.announced_route(hops, cost, link_cost);
 
 		match routes.get_mut(&path) {
 			Some(entry) if entry.publisher != publisher => {
@@ -640,6 +673,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					kio::wait(|waiter| {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
+						}
+						// A draining peer usually stops announcing, so react to the signal
+						// itself; waiting for another message would leave the route primary
+						// until the session finally closed. Idempotent, since the signal
+						// stays set and this task wakes for other reasons too.
+						if self.going_away.poll(waiter).is_ready() {
+							dynamic.drain();
 						}
 						dynamic.poll_requested_track(waiter).map(Some)
 					})
@@ -876,6 +916,7 @@ mod tests {
 			peer_setup: Default::default(),
 			cost: None,
 			tasks,
+			going_away: Default::default(),
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
@@ -1406,6 +1447,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 	/// Open a TRACK stream, read the single TRACK_INFO, and map it to the model's
 	/// [`track::Info`]. Lite05+ only. Bails if the broadcast dies meanwhile.
 	async fn track_info(&self) -> Result<track::Info, Error> {
+		self.subscriber.check_going_away()?;
 		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Track).await?;
 		stream
@@ -1522,6 +1564,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 	/// Open the SUBSCRIBE control stream and send the request.
 	async fn open_subscribe(&self, msg: &lite::Subscribe<'_>) -> Result<Stream<S, Version>, Error> {
+		self.subscriber.check_going_away()?;
 		let mut stream = Stream::open(&self.subscriber.session, self.subscriber.version).await?;
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 		stream.writer.encode(msg).await?;
@@ -1658,6 +1701,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let group = request.sequence();
 
 		tracing::info!(broadcast = %subscriber.log_path(&path), track = %name, group, "fetch started");
+
+		// A peer that sent GOAWAY told us to stop opening streams on this session.
+		if subscriber.going_away.is_set() {
+			request.reject(Error::GoingAway);
+			return;
+		}
 
 		let mut stream = match Stream::open(&subscriber.session, subscriber.version).await {
 			Ok(stream) => stream,

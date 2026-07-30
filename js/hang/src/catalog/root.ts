@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
+import { TimelineSchema } from "./timeline";
 import { VideoSchema } from "./video";
 
 /**
@@ -14,6 +15,8 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
+	// The broadcast's timeline track (its aligned segment index), if the publisher offers one.
+	timeline: z.optional(TimelineSchema),
 });
 
 /** The root catalog object, with optional video and audio sections plus any app extensions. */

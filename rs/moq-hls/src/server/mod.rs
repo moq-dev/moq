@@ -6,7 +6,7 @@
 //! GET /{broadcast}/master.m3u8
 //! GET /{broadcast}/{kind}/{rendition}/media.m3u8
 //! GET /{broadcast}/{kind}/{rendition}/init.mp4
-//! GET /{broadcast}/{kind}/{rendition}/seg/{group}.m4s
+//! GET /{broadcast}/{kind}/{rendition}/seg/{segment}.m4s
 //! ```
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a

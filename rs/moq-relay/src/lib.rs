@@ -14,6 +14,7 @@ mod config;
 mod connection;
 mod http_client;
 mod internal;
+mod shutdown;
 mod stats;
 #[cfg(test)]
 mod test_env;
@@ -24,6 +25,11 @@ mod websocket;
 /// The relay needs higher stream limits than the library default
 /// to handle many concurrent subscriptions across connections.
 pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
+
+/// Default drain window for a shutdown GOAWAY: how long an accepted session may
+/// keep running after being told to leave, before being force-closed with
+/// [`moq_net::Error::GoawayTimeout`].
+pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
@@ -37,5 +43,6 @@ pub use cluster::*;
 pub use config::*;
 pub use connection::*;
 pub use internal::*;
+pub use shutdown::*;
 pub use stats::*;
 pub use web::*;

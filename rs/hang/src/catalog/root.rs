@@ -33,6 +33,11 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
+
+	/// The broadcast's timeline track (its aligned segment index), if the publisher offers
+	/// one. See [`Timeline`](crate::catalog::Timeline) and the [`timeline`](crate::timeline)
+	/// module.
+	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl Catalog {
@@ -219,7 +224,6 @@ mod test {
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(100)),
-				timeline: None,
 			},
 		);
 
@@ -235,7 +239,6 @@ mod test {
 				description: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(40)),
-				timeline: None,
 			},
 		);
 

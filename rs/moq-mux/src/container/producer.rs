@@ -49,6 +49,11 @@ pub struct Producer<C: Container> {
 	/// timeline track, when the producer was built with one.
 	recorder: Option<crate::timeline::Recorder>,
 
+	/// The furthest presentation point written, i.e. `max(timestamp + duration)`. Reported to
+	/// `recorder` on each [`cut`](Self::cut), since the last group of a track has no successor
+	/// to bound it and its segment would otherwise be published a group short.
+	end: Option<moq_net::Timestamp>,
+
 	/// Measures the jitter and bitrate of what gets written, for the catalog. Always on: it costs
 	/// two counters, and a caller who doesn't publish a rendition simply never reads it.
 	estimator: crate::catalog::Estimator,
@@ -69,6 +74,7 @@ impl<C: Container> Producer<C> {
 			latency: std::time::Duration::ZERO,
 			pending_sequence: None,
 			recorder: None,
+			end: None,
 			estimator: crate::catalog::Estimator::new(),
 		}
 	}
@@ -111,14 +117,12 @@ impl<C: Container> Producer<C> {
 		self
 	}
 
-	/// Record each group open (sequence + keyframe timestamp) through `recorder`, so consumers can
-	/// index the media without downloading it.
+	/// Report each group open (sequence, timestamp, keyframe) through `recorder`, enrolling
+	/// this track in the broadcast's timeline so consumers can index the media without
+	/// downloading it.
 	///
-	/// Mint the recorder from a [`timeline::Producer`](crate::timeline::Producer) (see
-	/// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline)). The record carries no
-	/// track id, so wire one recorder per timeline; a set of aligned renditions shares a timeline by
-	/// recording only the source and advertising the same section on the rest.
-	/// [`media_producer`](crate::catalog::Producer::media_producer) wires the 1:1 default for you.
+	/// Mint the recorder from the broadcast's [`timeline::Producer`](crate::timeline::Producer);
+	/// [`media_producer`](crate::catalog::Producer::media_producer) wires it for you.
 	pub fn with_recorder(mut self, recorder: crate::timeline::Recorder) -> Self {
 		self.recorder = Some(recorder);
 		self
@@ -156,16 +160,11 @@ impl<C: Container> Producer<C> {
 				None => self.inner.append_group()?,
 			};
 
-			// Index the group the moment it opens: its start is this keyframe's timestamp. The
-			// timeline is an optional sidecar (consumers tolerate gaps by extrapolating), so a
-			// recording failure must NOT abort the media write. Drop the recorder and carry on.
-			let timeline_err = match self.recorder.as_mut() {
-				Some(recorder) => recorder.record(group.sequence, frame.timestamp).err(),
-				None => None,
-			};
-			if let Some(err) = timeline_err {
-				tracing::warn!(?err, "timeline recording failed; dropping the timeline for this track");
-				self.recorder = None;
+			// Report the group the moment it opens: its start is this frame's timestamp. The
+			// timeline absorbs publish failures itself (it is an optional sidecar),
+			// so reporting can't abort the media write.
+			if let Some(recorder) = self.recorder.as_mut() {
+				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
 			}
 
 			self.group = Some(group);
@@ -174,17 +173,19 @@ impl<C: Container> Producer<C> {
 		// Buffer or write the frame.
 		if self.latency.is_zero() {
 			let group = self.group.as_mut().unwrap();
-			let (timestamp, bytes) = (frame.timestamp, frame.payload.len());
+			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
 			self.container.write(group, &[frame])?;
 
 			// Only what the container accepted is measured. A rejected frame (too large for the
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
 			// extrema never fall, so counting one would inflate the catalog for good.
 			self.estimator.write(timestamp, bytes);
+			self.observe_end(timestamp, duration);
 		} else {
 			// Buffered frames are measured on the way in instead. The flush that eventually writes
 			// them takes the track down with it when it fails, so there is nothing to unwind.
 			self.estimator.write(frame.timestamp, frame.payload.len());
+			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
 			// Flush if the buffered span has reached the latency budget. Compute
@@ -213,11 +214,39 @@ impl<C: Container> Producer<C> {
 		// Before the flush, which can fail: an unbounded cut leaves the measurement open to fold
 		// into the next group anyway, so cutting often costs the catalog nothing.
 		self.estimator.cut(end);
+
+		// Tell the timeline where this group's content stops: the caller's bound when it has
+		// one, otherwise the furthest point we wrote. Only the last group of a track actually
+		// needs this (every earlier one is bounded by its successor's open), but reporting it
+		// on every cut keeps the timeline's frontier honest as we go.
+		if let Some(recorder) = self.recorder.as_mut()
+			&& let Some(end) = end.max(self.end)
+		{
+			recorder.end(end);
+		}
+
 		self.flush(end)?;
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
+	}
+
+	/// Raise the furthest presentation point written, for [`cut`](Self::cut) to report.
+	fn observe_end(&mut self, timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) {
+		if self.recorder.is_none() {
+			return;
+		}
+		// Timestamp and duration can be at different scales, so add them in micros; the
+		// sub-microsecond rounding that costs is far below a segment boundary.
+		let micros = timestamp.as_micros() + duration.map(|d| d.as_micros()).unwrap_or(0);
+		let Ok(micros) = u64::try_from(micros) else { return };
+		let Ok(end) = moq_net::Timestamp::from_micros(micros) else {
+			return;
+		};
+		if self.end.is_none_or(|prev| end > prev) {
+			self.end = Some(end);
+		}
 	}
 
 	#[doc(hidden)]

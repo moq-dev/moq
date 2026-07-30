@@ -28,11 +28,9 @@ impl<E: CatalogExt> Import<E> {
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		mut config: hang::catalog::AudioConfig,
+		config: hang::catalog::AudioConfig,
 	) -> crate::Result<Self> {
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
-		// Advertise this rendition's timeline before publishing (the generic set() no longer does).
-		config.timeline = Some(reserved.producer().timeline(track.name())?.section());
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(config);
 		Ok(Self {

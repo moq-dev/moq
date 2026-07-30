@@ -139,6 +139,33 @@ When combined with a local jitter buffer, this should result in different user e
 There's no optimal solution for this, but we think these subscription properties provide a GOOD ENOUGH user experience for most use-cases.
 They're simple to implement and easy enough to understand.
 
+### GOAWAY (Graceful Shutdown)
+
+Either endpoint can gracefully drain a session by sending a `GOAWAY` message.
+It tells the peer to reconnect, either to a different endpoint (a URI in the message) or to the same endpoint (empty URI), instead of being cut off when the sender shuts down.
+
+The lifecycle on the sending side (Rust `moq-net`):
+
+1. `session.drain()` yields the session's one GOAWAY handle, the graceful counterpart to `session.abort()`. It works on every version: one without a GOAWAY message (moq-lite-03 and earlier) simply carries no explanation to the peer.
+2. `producer.send(Goaway::new())` tells the peer to reconnect to the same endpoint; `Goaway::redirect(uri)` names a different one, and `.with_timeout(duration)` adds a deadline. Sending a second is refused, so the peer never sees a URI replaced behind its back.
+3. `session.closed()` resolves once the peer leaves, or once the deadline force-closes it. Only a `Goaway` carrying a timeout schedules a close of our own, so set one when the drain has to finish.
+
+On the receiving side:
+
+1. `session.draining()` returns a consumer: `peek()` is a cheap synchronous check, `recv()` waits for the URI and optional deadline.
+2. New requests (subscribes, fetches, announce interests) on the session are then rejected; existing subscriptions keep flowing until the session closes.
+3. Connect a replacement session sharing the same origin. Its announcements attach as additional routes to the broadcasts the old session serves, and when the old session closes, live subscriptions resume on the new route at a group boundary. Applications reading through `moq-net` never observe the swap.
+
+A moq-transport client sends an empty URI: only a server can tell a peer where to reconnect. The URI is capped at 8,192 bytes on both wires, and a second GOAWAY on a session is a protocol violation that closes it.
+
+Native clients get step 3 for free from `moq_native::Client::reconnect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
+
+`moq-relay` uses this in both directions: on shutdown it drains its own downstream sessions (see [`--drain-timeout`](/bin/relay/config#drain-timeout)), and on a GOAWAY from a cluster peer the reconnect loop migrates transparently.
+
+GOAWAY is supported on moq-lite-04+ and IETF moq-transport draft-14+. The deadline is carried on the wire only for IETF draft-17+ (moq-lite carries no timeout, but the sender's local force-close timer still applies).
+
+The JS `@moq/net` package decodes GOAWAY on the wire but does not yet expose this lifecycle.
+
 ## Compatibility
 
 `moq-lite` is forward compatible with `moq-transport`.

@@ -333,7 +333,6 @@ pub struct ClusterConfig {
 	/// stats under. Defaults to the unprefixed tier.
 	#[arg(id = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
 	pub tier: Option<String>,
-
 	/// How long a broadcast stays alive and announced after abruptly losing its
 	/// last publisher (a session dying without unannouncing), e.g. "5s" or "500ms".
 	/// A publisher reconnecting within the window resumes the same broadcast and
@@ -933,12 +932,17 @@ impl Cluster {
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
 		}
-		let cs = client
-			.connect(url.clone())
-			.await
-			.context("failed to connect to cluster peer")?;
+		// The GOAWAY lifecycle lives in the reconnect loop: on an upstream GOAWAY it
+		// dials the replacement while the old session keeps serving, so the old
+		// routes stay attached and the origin hands live tracks over at a group
+		// boundary. A peer that redirects us straight after the handshake counts as
+		// a failed attempt, so an A-redirects-to-B-redirects-to-A loop escalates
+		// through backoff and eventually gives up instead of migrating forever.
+		// Downstream sessions never see a GOAWAY of their own.
+		let reconnect = client.reconnect(url.clone());
+		reconnect.closed().await?;
 
-		Err(cs.closed().await.into())
+		Ok(())
 	}
 }
 

@@ -396,10 +396,10 @@ fn rendition_is_not_published_when_the_media_producer_fails() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
-	// Squat the timeline track the first video rendition will want, so building its media
-	// producer fails. `unique_name` is deterministic, so this is the name it will pick. The
-	// handle must stay alive: the broadcast tracks names weakly, so dropping it frees the name.
-	let _squat = broadcast.create_track("0.mkv-v.timeline.z", None).unwrap();
+	// Squat the broadcast's timeline track, so building the media producer (which creates it
+	// on first use) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name.
+	let _squat = broadcast.create_track(hang::timeline::DEFAULT_NAME, None).unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);

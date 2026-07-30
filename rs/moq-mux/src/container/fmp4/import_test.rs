@@ -329,11 +329,11 @@ async fn test_msf_catalog_roundtrip() {
 }
 
 /// Passthrough writes groups by hand (no `container::Producer`), so the timeline recorder is fed
-/// directly. This guards that every rendition advertises a `<name>.timeline.z` section and that its
-/// group opens are actually recorded, the index the VOD/playlist export reads. Regression for the
-/// missing-timeline break that skipped VOD renditions.
+/// directly. This guards that the import advertises the broadcast's timeline at the catalog root
+/// and actually records both renditions' group opens into it, the index the VOD/playlist export
+/// reads. Regression for the missing-timeline break that skipped VOD renditions.
 #[tokio::test]
-async fn import_populates_per_rendition_timeline() {
+async fn import_populates_the_broadcast_timeline() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
@@ -346,43 +346,33 @@ async fn import_populates_per_rendition_timeline() {
 	fmp4.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
+	assert_eq!(snapshot.video.renditions.len(), 1, "bbb has one video rendition");
+	assert_eq!(snapshot.audio.renditions.len(), 1, "bbb has one audio rendition");
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
-	// Every rendition (one video + one audio) advertises a timeline named after its media track.
-	let mut sections = Vec::new();
-	for (name, config) in &snapshot.video.renditions {
-		let section = config
-			.timeline
-			.clone()
-			.unwrap_or_else(|| panic!("video {name} advertises no timeline"));
-		assert_eq!(section.track, format!("{name}.timeline.z"));
-		sections.push(section);
-	}
-	for (name, config) in &snapshot.audio.renditions {
-		let section = config
-			.timeline
-			.clone()
-			.unwrap_or_else(|| panic!("audio {name} advertises no timeline"));
-		assert_eq!(section.track, format!("{name}.timeline.z"));
-		sections.push(section);
-	}
-	assert_eq!(sections.len(), 2, "bbb has one video and one audio rendition");
+	// The one timeline is advertised at the catalog root, named by convention.
+	let section = snapshot.timeline.clone().expect("the import advertises a timeline");
+	assert_eq!(section.track, hang::timeline::DEFAULT_NAME);
 
-	// Subscribe while the producer is alive, then finish so each timeline group closes and the reader
-	// terminates rather than blocking; the first recorded group (sequence 0) must be present.
-	let mut timelines: Vec<crate::timeline::Consumer> = Vec::new();
-	for section in sections {
-		timelines.push(crate::timeline::Consumer::subscribe(&consumer, &section).await.unwrap());
-	}
+	// Subscribe while the producer is alive, then finish so the timeline group closes and the
+	// reader terminates rather than blocking.
+	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
+		.await
+		.unwrap();
 	catalog.finish().unwrap();
 
-	for mut timeline in timelines {
-		let first = timeline
-			.next()
-			.await
-			.unwrap()
-			.expect("a group open should be recorded in the timeline");
-		assert_eq!(first.group, 0, "the first recorded group is sequence 0");
-	}
+	// The first record indexes both renditions from their first group (sequence 0).
+	let first = timeline
+		.next()
+		.await
+		.unwrap()
+		.expect("a segment should be recorded in the timeline");
+	assert_eq!(first.segment, 0);
+	let video_ranges = first.tracks.get(&video_name).expect("video is indexed");
+	assert_eq!(video_ranges[0].start, 0, "the first video group is sequence 0");
+	let audio_ranges = first.tracks.get(&audio_name).expect("audio is indexed");
+	assert_eq!(audio_ranges[0].start, 0, "the first audio group is sequence 0");
 }
 
 // ---- Sample-duration handling in decode() ----

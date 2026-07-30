@@ -397,12 +397,9 @@ async fn spawn_stream_relay(config: moq_native::ServerConfig, auth_config: AuthC
 	tokio::spawn(async move {
 		let mut id = 0;
 		while let Some(request) = server.accept().await {
-			let conn = Connection {
-				id,
-				request,
-				cluster: cluster.clone(),
-				auth: auth.clone(),
-			};
+			let conn = Connection::new(request, cluster.clone(), auth.clone())
+				.with_id(id)
+				.with_shutdown(moq_relay::Shutdown::disabled());
 			id += 1;
 			tokio::spawn(async move {
 				let _ = conn.run().await;

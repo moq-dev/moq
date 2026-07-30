@@ -24,6 +24,16 @@ key = "key.pem"
 
 ## Full Reference
 
+### Top-level keys {#drain-timeout}
+
+```toml
+# How long accepted sessions may keep running after a shutdown signal
+# (SIGINT/ctrl-c, or SIGTERM on unix). The first signal sends every session a
+# GOAWAY (telling clients to reconnect) and waits this long before force-closing
+# them; a second signal exits immediately. Default: "10s".
+drain_timeout = "10s"
+```
+
 ### \[log]
 
 Logging configuration.
@@ -183,6 +193,17 @@ Client settings used when connecting to other relays (clustering).
 [client]
 # Disable TLS verification (development only!)
 tls.disable_verify = true
+
+# What to do with the URI an upstream peer names in its GOAWAY:
+# "follow" (default), "same-host", or "ignore". A followed redirect is dialed
+# exactly as given, so it must carry its own credentials; scheme downgrades and
+# redirects toward loopback/private/IPC addresses are always refused.
+goaway.redirect = "follow"
+
+# How long the old upstream keeps serving after its replacement connects. This
+# is a cap: a shorter deadline on the received GOAWAY wins, since the peer
+# force-closes then anyway, but a longer one does not extend it. Default: "10s".
+goaway.handover = "10s"
 
 # Or provide trusted root certificates. By default these replace the system
 # roots, so the relay trusts only these CAs.

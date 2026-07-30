@@ -1,7 +1,8 @@
 //! Hand-written HLS media playlist generation.
 //!
-//! Rendered purely from timeline records: each segment is a starting group plus the gap to
-//! the next record. URIs are relative to the media playlist
+//! Rendered purely from timeline records: each record is one complete aligned segment
+//! (numbered by the broadcast's shared segment sequence, so renditions cut at the same
+//! boundaries) carrying its own duration. URIs are relative to the media playlist
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
@@ -10,6 +11,9 @@ use std::time::SystemTime;
 
 /// fMP4 segments via `EXT-X-MAP` require protocol version 6.
 const VERSION: u32 = 6;
+
+/// `EXT-X-GAP` requires protocol version 8.
+const VERSION_GAP: u32 = 8;
 
 /// Everything a media playlist render needs; built by the crate-internal
 /// `Rendition::playlist`.
@@ -29,10 +33,15 @@ pub(crate) struct Snapshot {
 
 /// One listed segment.
 pub(crate) struct Segment {
-	/// The starting group sequence; the URI is `seg/{group}.m4s`.
-	pub group: u64,
+	/// The aligned segment number; the URI is `seg/{segment}.m4s`.
+	pub segment: u64,
 	/// `EXTINF` duration in seconds.
 	pub duration: f64,
+	/// The rendition has no content for this span (`EXT-X-GAP`): the segment keeps its slot in
+	/// the aligned numbering, but a player should not request it.
+	pub gap: bool,
+	/// Content time jumped before this segment (`EXT-X-DISCONTINUITY`).
+	pub discontinuity: bool,
 }
 
 /// Render a media playlist for one rendition from a [`Snapshot`].
@@ -43,9 +52,16 @@ pub(crate) struct Segment {
 pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 	let suffix = query.map(|q| format!("?{q}")).unwrap_or_default();
 
+	// EXT-X-GAP needs a newer protocol version; only require it when actually used.
+	let version = if snapshot.segments.iter().any(|s| s.gap) {
+		VERSION_GAP
+	} else {
+		VERSION
+	};
+
 	let mut out = String::new();
 	let _ = writeln!(out, "#EXTM3U");
-	let _ = writeln!(out, "#EXT-X-VERSION:{VERSION}");
+	let _ = writeln!(out, "#EXT-X-VERSION:{version}");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.mp4{suffix}\"");
@@ -60,8 +76,14 @@ pub(crate) fn render_media(snapshot: &Snapshot, query: Option<&str>) -> String {
 				humantime::format_rfc3339_millis(pdt)
 			);
 		}
+		if segment.discontinuity {
+			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
+		}
+		if segment.gap {
+			let _ = writeln!(out, "#EXT-X-GAP");
+		}
 		let _ = writeln!(out, "#EXTINF:{:.5},", segment.duration);
-		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.group);
+		let _ = writeln!(out, "seg/{}.m4s{suffix}", segment.segment);
 	}
 
 	if snapshot.finished {
@@ -84,12 +106,16 @@ mod tests {
 			media_sequence: 10,
 			segments: vec![
 				Segment {
-					group: 10,
+					segment: 10,
 					duration: 2.0,
+					gap: false,
+					discontinuity: false,
 				},
 				Segment {
-					group: 11,
+					segment: 11,
 					duration: 1.96,
+					gap: false,
+					discontinuity: false,
 				},
 			],
 			finished: false,
@@ -119,8 +145,10 @@ mod tests {
 			target_duration: 4,
 			media_sequence: 0,
 			segments: vec![Segment {
-				group: 0,
+				segment: 0,
 				duration: 4.0,
+				gap: false,
+				discontinuity: false,
 			}],
 			finished: true,
 			program_date_time: None,

@@ -23,20 +23,49 @@ impl From<AuthError> for StatusError {
 
 /// An incoming connection that has not yet been authenticated.
 ///
-/// Call [`run`](Self::run) to authenticate the request, wire up
-/// publish/subscribe origins, and serve the session until it closes.
+/// Build with [`new`](Self::new), attach the optional knobs, then call
+/// [`run`](Self::run) to authenticate the request, wire up publish/subscribe
+/// origins, and serve the session until it closes.
 pub struct Connection {
 	/// A numeric identifier for logging.
-	pub id: u64,
+	id: u64,
 	/// The raw QUIC/WebTransport request to accept or reject.
-	pub request: Request,
+	request: Request,
 	/// The cluster state used to resolve origins.
-	pub cluster: Cluster,
+	cluster: Cluster,
 	/// The authenticator used to verify credentials.
-	pub auth: Auth,
+	auth: Auth,
+	/// Relay-wide shutdown broadcast: when it fires, the session is drained with
+	/// a GOAWAY instead of being cut off.
+	shutdown: crate::Shutdown,
 }
 
 impl Connection {
+	/// Wrap an accepted request, resolving origins through `cluster` and
+	/// credentials through `auth`.
+	pub fn new(request: Request, cluster: Cluster, auth: Auth) -> Self {
+		Self {
+			id: 0,
+			request,
+			cluster,
+			auth,
+			shutdown: crate::Shutdown::disabled(),
+		}
+	}
+
+	/// Set the identifier this connection logs under. Defaults to 0.
+	pub fn with_id(mut self, id: u64) -> Self {
+		self.id = id;
+		self
+	}
+
+	/// Attach the relay-wide shutdown broadcast so the session drains with a
+	/// GOAWAY when it fires. Without it the session is cut off on process exit.
+	pub fn with_shutdown(mut self, shutdown: crate::Shutdown) -> Self {
+		self.shutdown = shutdown;
+		self
+	}
+
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -125,17 +154,32 @@ impl Connection {
 
 		// The credential (JWT `exp` or client cert `notAfter`) is only checked at
 		// connect time, so hold the session open no longer than the credential is
-		// valid. Without an expiry, just wait for the session to close.
-		let Some(expires) = token.expires else {
-			return Err(session.closed().await.into());
+		// valid; without an expiry, wait for the session to close. Either way, a
+		// relay shutdown drains the session with a GOAWAY instead of cutting it off.
+		let expiry = async {
+			match token.expires {
+				Some(expires) => {
+					let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
+					tokio::time::sleep(remaining).await
+				}
+				None => std::future::pending().await,
+			}
 		};
+		let mut shutdown = self.shutdown.clone();
 
-		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-		match tokio::time::timeout(remaining, session.closed()).await {
-			Ok(err) => Err(err.into()),
-			Err(_) => {
+		tokio::select! {
+			err = session.closed() => Err(err.into()),
+			_ = expiry => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);
+				Ok(())
+			}
+			_ = shutdown.started() => {
+				tracing::info!("relay shutting down; draining session");
+				// Empty URI: "reconnect to me" (the relay is restarting). The session
+				// driver was spawned by `request.ok()`, so the GOAWAY still reaches
+				// the wire while we wait here.
+				shutdown.drain_session(&session).await;
 				Ok(())
 			}
 		}

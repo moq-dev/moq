@@ -831,6 +831,7 @@ A relay that withholds its Hop ID (advertising 0) does not appear in the path un
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
 The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
 When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+Saturation MUST cap the sum at the largest value a variable-length integer can carry, since the sum is re-encoded when forwarded: a peer may legally advertise that largest value, and a wider ceiling would leave the relay unable to encode what it just computed.
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
 This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
@@ -1219,8 +1220,21 @@ GOAWAY Message {
 **New Session URI**:
 A URI for the peer to reconnect to.
 An empty string indicates no redirect; the peer should simply close the session.
+The URI MUST NOT exceed 8,192 bytes; a receiver MUST treat a longer URI as a protocol violation and MAY reject it based on the length prefix alone.
 A recipient MUST validate the URI against local policy before reconnecting, including verifying the scheme, authority, and port are permitted.
 If validation fails, the recipient MUST close the session without reconnecting.
+
+A client MUST send an empty New Session URI, as it cannot instruct a server to establish connections.
+A server that receives a non-empty New Session URI MUST close the session with a protocol violation.
+
+The new session URI SHOULD use the same scheme as the current session's URI.
+
+An endpoint MUST close the session with a protocol violation if it receives more than one GOAWAY.
+
+A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original.
+
+A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
+The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
@@ -1292,11 +1306,13 @@ The `Message Length` describes the payload size on the wire.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
 - Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
-- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across; differing first entries never splice, the later replacing the earlier.
+- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the later replacing the earlier.
 - Added `Frame Start` and `Frame End` to SUBSCRIBE and SUBSCRIBE_UPDATE, qualifying the start and end group with a frame index so a subscription can begin or end partway through a group. `Frame Start` is a plain index; `Frame End` is the index + 1, matching `Group End`. Both MUST be 0 when the group bound they qualify is absent.
 - Added `Frame Start` and `Frame End` to FETCH, bounding the returned frames within the group. A publisher that cannot serve the full range resets the stream.
 - Added `Frame Start` to GROUP, giving the index of the first FRAME on the stream so a partial group is self-describing.
 - Added the Positions section defining a (group, frame) position, its lexicographic ordering, and the rule that a partial group is only ever delivered to a subscriber that asked for one. A publisher that cannot serve a group from the requested frame skips it and resolves to a later group, so SUBSCRIBE_OK needs no frame field: the start frame follows from `Group` and the subscriber's own request.
+- Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
+- Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

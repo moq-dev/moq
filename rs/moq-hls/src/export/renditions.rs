@@ -1,19 +1,22 @@
 //! A broadcast's rendition set, as a `Producer`/[`Consumer`] pair.
 //!
-//! The `Producer` holds the current renditions, reconciled from the catalog by
-//! its `sync`; the HTTP serve path reads them synchronously (look one up, render
-//! the master playlist). A [`Consumer`] is a cursor for a recorder that mirrors the *whole*
-//! broadcast: [`next`](Consumer::next) yields one [`Event`] at a time as renditions are added
-//! or removed, replaying the current set as [`Added`](Event::Added) when first consumed, and
-//! returning `None` once the source closes.
+//! The `Producer` holds the current renditions, reconciled from the catalog by its `sync`;
+//! the HTTP serve path reads them synchronously (look one up, render the master playlist). It
+//! is also the fan-out point for the broadcast's single timeline: the timeline watcher's
+//! `Fanout` handle hands each record to every rendition, which keeps its own window over it.
+//! A [`Consumer`] is a cursor for a recorder that mirrors the *whole* broadcast: [`next`](Consumer::next)
+//! yields one [`Event`] at a time as renditions are added or removed, replaying the current
+//! set as [`Added`](Event::Added) when first consumed, and returning `None` once the source
+//! closes.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
+use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
+use moq_mux::timeline::Entry;
 
-use super::Config;
 use super::rendition::{Kind, Rendition};
 
 /// The `(kind, name)` identity of a rendition. Video and audio are separate axes, so a video
@@ -34,6 +37,23 @@ pub enum Event {
 	},
 }
 
+/// The timeline fan-out state: who gets fed, and what a late-created rendition replays.
+///
+/// Feeds by `Weak` reference rather than through the rendition map: a recording cursor's
+/// `Arc<Rendition>` must keep receiving records after `Broadcaster::drop` clears the map, or
+/// its final segments would be silently lost.
+struct Feed {
+	/// Every rendition ever created and still alive, pruned as they drop.
+	targets: Vec<Weak<Rendition>>,
+	/// Recent records, replayed into a rendition created mid-broadcast so its playlist window
+	/// isn't empty until the next record. Evicted with the same policy as the windows.
+	history: VecDeque<Entry>,
+	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
+	ended: bool,
+	/// The timeline stream is over (cleanly or not); late-created renditions start closed.
+	closed: bool,
+}
+
 /// The producing side of a broadcast's rendition set.
 ///
 /// [`sync`](Self::sync) reconciles it against a catalog snapshot; [`close`](Self::close) marks
@@ -43,13 +63,40 @@ pub enum Event {
 #[derive(Clone)]
 pub(crate) struct Producer {
 	state: kio::Producer<BTreeMap<Key, Arc<Rendition>>>,
+	fanout: Fanout,
+}
+
+/// The timeline fan-out handle: everything the timeline watcher needs, and nothing more.
+///
+/// Deliberately separate from [`Producer`]: the watcher outlives the `Broadcaster` while a
+/// recording cursor drains, and holding a full `Producer` there would keep the rendition-set
+/// channel open (so `renditions()` cursors would never terminate).
+#[derive(Clone)]
+pub(crate) struct Fanout {
+	feed: Arc<Mutex<Feed>>,
+	/// The playlist window duration (see [`Config::window`](super::Config::window)), applied on every push.
+	window: Duration,
 }
 
 impl Producer {
-	pub fn new() -> Self {
+	pub fn new(window: Duration) -> Self {
 		Self {
 			state: kio::Producer::new(BTreeMap::new()),
+			fanout: Fanout {
+				feed: Arc::new(Mutex::new(Feed {
+					targets: Vec::new(),
+					history: VecDeque::new(),
+					ended: false,
+					closed: false,
+				})),
+				window,
+			},
 		}
+	}
+
+	/// The timeline fan-out handle for the timeline watcher task.
+	pub fn fanout(&self) -> Fanout {
+		self.fanout.clone()
 	}
 
 	/// A cursor over rendition changes, replaying the current set as [`Event::Added`].
@@ -76,19 +123,22 @@ impl Producer {
 		self.state.read().is_empty()
 	}
 
+	/// Whether anything outside the map (a recording cursor, a handed-out `Arc`) still holds a
+	/// rendition. `Broadcaster::drop` checks this to decide whether the timeline watcher must
+	/// outlive it (so those holders keep receiving records) or can be aborted.
+	pub fn any_held_externally(&self) -> bool {
+		self.state.read().values().any(|r| Arc::strong_count(r) > 1)
+	}
+
 	/// Release every rendition the map is holding.
 	///
 	/// The map lives in shared state, so a surviving [`Consumer`] would otherwise keep every
-	/// rendition -- and the standing timeline subscription each watcher holds -- alive after the
-	/// owning `Broadcaster` is gone. `Broadcaster::drop` calls this so teardown doesn't depend on
-	/// consumers dropping first: a rendition nobody else holds drops here, and its `Drop` aborts
-	/// its watcher.
+	/// rendition alive after the owning `Broadcaster` is gone. `Broadcaster::drop` calls this
+	/// so teardown doesn't depend on consumers dropping first.
 	///
-	/// Deliberately drops rather than [`Rendition::close`]s. A rendition a cursor still holds is
-	/// left to finish on its own, because its watcher ends a cleanly-finished timeline with
-	/// `end()` *then* `close()`, and `end()` is what promotes the live-edge record into the final
-	/// segment. Force-closing here would race that: `end()` is a no-op on an already-closed
-	/// channel, so the last segment of a recording would be silently dropped.
+	/// Deliberately drops rather than [`Rendition::close`]s: a rendition a cursor still holds
+	/// keeps receiving timeline records through the [`Feed`]'s weak list, so a recording in
+	/// progress drains to the real end of the broadcast instead of being truncated here.
 	pub fn clear(&self) {
 		if let Ok(mut current) = self.state.write() {
 			current.clear();
@@ -97,16 +147,77 @@ impl Producer {
 
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
-	/// Deliberately does NOT cascade into the renditions' own segment channels, for two reasons.
-	/// On a clean end it's unnecessary and harmful: each rendition's watcher already ends its
-	/// timeline with `end()` then `close()`, and cascading a bare `close()` here would race that
-	/// and lose the final segment (see [`Self::clear`]). On a catalog-stream *error* the media
-	/// tracks are usually still fine, so cutting every in-flight segment cursor would truncate a
-	/// recording over a transient fault.
+	/// Deliberately does NOT cascade into the renditions' own segment windows: those are ended
+	/// or closed by the timeline watcher (see [`Fanout::end_windows`] /
+	/// [`Fanout::close_windows`]), whose clean-end path must run `end()` before `close()` or
+	/// the playlist never gets its `EXT-X-ENDLIST`.
 	pub fn close(&self) {
 		let _ = self.state.close();
 	}
+}
 
+impl Fanout {
+	/// Fan one timeline record out to every living rendition, and into the replay history.
+	pub fn push(&self, entry: Entry) {
+		let mut feed = self.feed.lock().unwrap();
+
+		// Same eviction policy as the per-rendition windows, so a replay reconstructs the
+		// same window a live rendition would have.
+		if let Some(back) = feed.history.back()
+			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.segment <= back.segment)
+		{
+			feed.history.clear();
+		}
+		feed.history.push_back(entry.clone());
+		while feed.history.len() >= 2 {
+			let newest = feed.history.back().unwrap();
+			let span =
+				(Duration::from(newest.pts) + newest.duration).saturating_sub(Duration::from(feed.history[1].pts));
+			if span < self.window {
+				break;
+			}
+			feed.history.pop_front();
+		}
+
+		let window = self.window;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.push(&entry, window);
+			true
+		});
+	}
+
+	/// Mark every living rendition's window ended (the timeline finished cleanly).
+	pub fn end_windows(&self) {
+		let mut feed = self.feed.lock().unwrap();
+		feed.ended = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.end();
+			true
+		});
+	}
+
+	/// Close every living rendition's window: no more records will arrive. Cursors drain what
+	/// they can still see and end; the serve path keeps reading the frozen windows.
+	pub fn close_windows(&self) {
+		let mut feed = self.feed.lock().unwrap();
+		feed.closed = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.close();
+			true
+		});
+	}
+}
+
+impl Producer {
 	/// Resolve once at least one rendition has been discovered. Bounding how long to wait is
 	/// the caller's policy, so wrap this in a timeout rather than passing one in.
 	pub async fn ready(&self) {
@@ -122,17 +233,43 @@ impl Producer {
 		.await;
 	}
 
+	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
+	/// (and the ended/closed markers) so its window matches its siblings'.
+	fn register(&self, rendition: &Arc<Rendition>) {
+		let mut feed = self.fanout.feed.lock().unwrap();
+		for entry in &feed.history {
+			rendition.push(entry, self.fanout.window);
+		}
+		if feed.ended {
+			rendition.end();
+		}
+		if feed.closed {
+			rendition.close();
+		}
+		feed.targets.push(Arc::downgrade(rendition));
+	}
+
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
-	/// renditions are dropped before replacements become visible, which also aborts their
-	/// timeline watchers and releases their subscriptions.
-	pub fn sync(&self, source: &moq_mux::Source, config: &Config, catalog: &Catalog) {
+	/// renditions are closed (so cursors over them end) before replacements become visible.
+	///
+	/// Renditions are only servable when the catalog advertises the broadcast's timeline (its
+	/// root `timeline` section): without one there is nothing to render playlists from, so the
+	/// whole catalog is skipped with a warning.
+	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
+		let Some(section) = catalog.timeline.clone() else {
+			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
+				tracing::warn!("catalog advertises no timeline; its renditions can't be served as HLS");
+			}
+			return;
+		};
+
 		let Ok(mut current) = self.state.write() else {
 			return;
 		};
 
 		// Renditions the catalog dropped or reconfigured. Close each as it goes so any cursor
-		// over it drains and ends, instead of parking on a timeline that never finishes -- the
-		// cursor's own `Arc<Rendition>` would otherwise keep it (and its subscription) alive.
+		// over it drains and ends, instead of parking on a window that never finishes -- the
+		// cursor's own `Arc<Rendition>` would otherwise keep it alive.
 		let stale: Vec<Key> = current
 			.iter()
 			.filter(|((kind, name), rendition)| match kind {
@@ -160,24 +297,18 @@ impl Producer {
 			if current.contains_key(&key) {
 				continue;
 			}
-			match Rendition::video(name.clone(), video, source, config.window) {
-				Some(rendition) => {
-					current.insert(key, Arc::new(rendition));
-				}
-				None => tracing::warn!(%name, "skipping video rendition without a timeline track"),
-			}
+			let rendition = Arc::new(Rendition::video(name.clone(), video, source, section.clone()));
+			self.register(&rendition);
+			current.insert(key, rendition);
 		}
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
 			if current.contains_key(&key) {
 				continue;
 			}
-			match Rendition::audio(name.clone(), audio, source, config.window) {
-				Some(rendition) => {
-					current.insert(key, Arc::new(rendition));
-				}
-				None => tracing::warn!(%name, "skipping audio rendition without a timeline track"),
-			}
+			let rendition = Arc::new(Rendition::audio(name.clone(), audio, source, section.clone()));
+			self.register(&rendition);
+			current.insert(key, rendition);
 		}
 	}
 }

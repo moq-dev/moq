@@ -7,7 +7,7 @@
 //!   segments into MoQ (an HTTP *client* that *publishes*).
 //! - [`server`] serves HLS playlists and CMAF segments over HTTP for MoQ
 //!   broadcasts (an HTTP *server*). It subscribes only to each broadcast's
-//!   catalog and per-rendition timeline tracks; media bytes are FETCHed from
+//!   catalog and timeline tracks; media bytes are FETCHed from
 //!   the relay one group at a time, only when a segment is actually requested.
 //!   It serves every request; gate access by layering your own middleware onto
 //!   [`Server::router`](server::Server::router).

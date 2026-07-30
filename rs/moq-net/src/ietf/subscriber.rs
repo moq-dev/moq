@@ -87,6 +87,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
+	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
+	// Error::GoingAway (the peer told us to stop opening streams).
+	going_away: crate::goaway::GoingAway,
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
@@ -108,7 +111,14 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: origin::Producer, control: Control, version: Version, tasks: Tasks) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Producer,
+		control: Control,
+		version: Version,
+		tasks: Tasks,
+		going_away: crate::goaway::GoingAway,
+	) -> Self {
 		Self {
 			session,
 			origin,
@@ -117,6 +127,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			state: Default::default(),
 			tasks,
 			version,
+			going_away,
 		}
 	}
 
@@ -147,6 +158,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		mut stream: Stream<T, Version>,
 	) -> Result<(), Error> {
+		// A peer that sent GOAWAY told us to stop opening requests on this session,
+		// announce-interest included (draft-19 sect 10.4).
+		if self.going_away.is_set() {
+			return Err(Error::GoingAway);
+		}
+
 		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
@@ -523,7 +540,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut hops = crate::OriginList::new();
 				hops.push(self.session_origin)
 					.expect("an empty hop chain has room for one entry");
-				let route = broadcast::Route::new().with_hops(hops).with_announce(true);
+				let mut route = broadcast::Route::new().with_hops(hops).with_announce(true);
+
+				// A namespace published after the peer's GOAWAY starts out draining, so
+				// a late arrival on a dying connection can't take over as primary. The
+				// per-source task only ever moves a route in this direction, so there is
+				// no race between the two.
+				if self.going_away.is_set() {
+					route.cost = broadcast::DRAIN_COST;
+				}
 
 				// Propagates Error::Unauthorized if the path is out of scope.
 				let broadcast = self.origin.create_broadcast(&path, route)?;
@@ -630,6 +655,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
 						}
+						// A draining peer usually stops publishing namespaces, so react to
+						// the signal itself; waiting for another message would leave the
+						// route primary until the session finally closed. Idempotent, since
+						// the signal stays set and this task wakes for other reasons too.
+						if self.going_away.poll(waiter).is_ready() {
+							broadcast.drain();
+						}
 						broadcast.poll_requested_track(waiter).map(Some)
 					})
 					.await
@@ -673,6 +705,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
 		let info = track::Info::default().with_timescale(crate::Timescale::MICRO);
 		let mut track = request.accept(info);
+
+		// A peer that sent GOAWAY told us to stop opening streams on this session.
+		if self.going_away.is_set() {
+			let _ = track.abort(Error::GoingAway);
+			return;
+		}
 
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,

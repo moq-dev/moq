@@ -1,4 +1,4 @@
-use crate::{Backoff, Error, QuicBackend, Reconnect};
+use crate::{Backoff, Error, GoawayConfig, QuicBackend, Reconnect};
 #[cfg(feature = "websocket")]
 use std::future::Future;
 use std::net;
@@ -60,6 +60,11 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub backoff: Backoff,
 
+	/// How [`Client::reconnect`] reacts to a peer's GOAWAY (`--goaway-*`).
+	#[command(flatten)]
+	#[serde(default)]
+	pub goaway: GoawayConfig,
+
 	/// WebSocket fallback settings (`--client-websocket-*`), used when QUIC is
 	/// blocked.
 	#[cfg(feature = "websocket")]
@@ -94,6 +99,7 @@ impl Default for ClientConfig {
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
 			backoff: Backoff::default(),
+			goaway: GoawayConfig::default(),
 			#[cfg(feature = "websocket")]
 			websocket: crate::websocket::Client::default(),
 		}
@@ -114,6 +120,7 @@ pub struct Client {
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
 	backoff: Backoff,
+	goaway: GoawayConfig,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
@@ -190,6 +197,7 @@ impl Client {
 			versions,
 			connect: config.connect,
 			backoff: config.backoff,
+			goaway: config.goaway,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -256,7 +264,7 @@ impl Client {
 	///
 	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
 	pub fn reconnect(&self, url: Url) -> Reconnect {
-		Reconnect::new(self.clone(), url, self.backoff.clone())
+		Reconnect::new(self.clone(), url, self.backoff.clone(), self.goaway.clone())
 	}
 
 	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it

@@ -6341,4 +6341,103 @@ mod tests {
 			"request should stay pending until served"
 		);
 	}
+
+	/// A draining route has to lose to every ordinary one. Cost is only the second
+	/// term of the ordering, so a draining route that ties on cost would fall
+	/// through to hop count, the hash, and recency, which is how a dying
+	/// connection could otherwise stay primary.
+	///
+	/// Every comparison here gives the draining route the highest id, so it is also
+	/// the most recently attached. That is the case that matters since recency
+	/// became a tie-break: a reconnect is supposed to take over immediately, but
+	/// not when the newcomer is the one going away.
+	#[test]
+	fn drain_cost_sorts_last() {
+		let name = Path::new("drainer");
+		let source = broadcast::Info::new().produce().consume();
+		let front = |id: u64, route: broadcast::Route| FrontRoute {
+			id,
+			route,
+			source: source.clone(),
+		};
+
+		let draining = front(9, announce().with_cost(broadcast::DRAIN_COST));
+
+		assert!(route_order(&name, &draining) > route_order(&name, &front(0, announce())));
+		assert!(route_order(&name, &draining) > route_order(&name, &front(0, announce().with_cost(1000))));
+
+		// Two hops beats one when the cheaper one is draining: the longer path is
+		// still the one that will still be there.
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(2).unwrap()]).unwrap();
+		let long = front(0, announce().with_hops(hops).with_cost(1));
+		assert!(route_order(&name, &draining) > route_order(&name, &long));
+	}
+
+	/// The whole point of the mechanism: with two sources for one broadcast,
+	/// draining the winner moves the origin onto the other one, and a broadcast
+	/// with nowhere else to go keeps being served by the draining route.
+	#[tokio::test(start_paused = true)]
+	async fn drain_migrates_best_route() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let path = PathOwned::from("drainer");
+
+		// Two paths to the same content, so they share a first hop: a differing one
+		// would be a different publisher, and the front would park it as new content
+		// instead of attaching it as an alternate route.
+		let publisher = Origin::new(1).unwrap();
+		let hops_a = OriginList::try_from(vec![publisher, Origin::new(2).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![publisher, Origin::new(3).unwrap()]).unwrap();
+
+		// The source that will drain, and the pricier live fallback.
+		let source_a = origin.create_broadcast(&path, announce().with_hops(hops_a)).unwrap();
+		settle().await;
+		announced.assert_next_some("drainer");
+
+		let _source_b = origin
+			.create_broadcast(&path, announce().with_hops(hops_b).with_cost(10))
+			.unwrap();
+		settle().await;
+
+		let mut broadcast = consumer.get_broadcast("drainer").unwrap();
+		assert_eq!(broadcast.route().cost, 0, "the cheaper source serves first");
+
+		// What the subscriber does when its peer sends a GOAWAY.
+		let mut draining = source_a.dynamic();
+		draining.drain();
+		settle().await;
+
+		let migrated = broadcast.route_changed().await.unwrap();
+		assert_eq!(migrated.cost, 10, "draining must hand over to the live source");
+		assert_ne!(
+			migrated.cost,
+			broadcast::DRAIN_COST,
+			"the draining source must not stay active"
+		);
+	}
+
+	/// A draining route is deprioritized, not withdrawn: while it is the only path
+	/// to the content it keeps serving, which is what makes the handover window
+	/// worth having.
+	#[tokio::test(start_paused = true)]
+	async fn drain_still_serves_when_it_is_the_only_route() {
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let path = PathOwned::from("lonely");
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast(&path, announce().with_hops(hops)).unwrap();
+		settle().await;
+		announced.assert_next_some("lonely");
+
+		let mut draining = source.dynamic();
+		draining.drain();
+		settle().await;
+
+		let broadcast = consumer.get_broadcast("lonely").expect("the path stays routable");
+		assert_eq!(broadcast.route().cost, broadcast::DRAIN_COST);
+	}
 }

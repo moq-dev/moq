@@ -67,7 +67,7 @@ pub(crate) async fn serve_ws(
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
 		let socket = WebSocketAdapter::new(socket);
-		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats).await;
+		let _ = handle_socket(id, socket, alpn, publish, subscribe, stats, state.shutdown.clone()).await;
 	}))
 }
 
@@ -86,6 +86,7 @@ async fn handle_socket<T>(
 	publish: Option<origin::Producer>,
 	subscribe: Option<origin::Producer>,
 	stats: Session,
+	mut shutdown: crate::Shutdown,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -121,8 +122,23 @@ where
 		server = server.with_subscriber(publish);
 	}
 	// Hold the session so it doesn't close early; the driver serves it in place.
-	let (_session, driver) = server.accept(ws).await?;
-	driver.await.map_err(Into::into)
+	let (session, mut driver) = server.accept(ws).await?;
+
+	tokio::select! {
+		res = &mut driver => res.map_err(Into::into),
+		_ = shutdown.started() => {
+			tracing::info!("relay shutting down; draining session");
+			// Unlike QUIC sessions (whose driver is spawned), this driver runs
+			// inline, so keep polling it while the drain waits: the GOAWAY only
+			// reaches the wire through it.
+			let drain = shutdown.drain_session(&session);
+			let mut drain = std::pin::pin!(drain);
+			tokio::select! {
+				res = &mut driver => res.map_err(Into::into),
+				_ = &mut drain => driver.await.map_err(Into::into),
+			}
+		}
+	}
 }
 
 /// QMux wire-format versions that can ride under a `{prefix}.{alpn}` pair.
@@ -617,6 +633,7 @@ mod tests {
 			None,
 			None,
 			Session::default(),
+			crate::Shutdown::disabled(),
 		));
 
 		// A real qmux peer, so the transport handshake completes and its 10s
