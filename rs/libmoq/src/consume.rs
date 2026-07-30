@@ -539,10 +539,11 @@ impl Consume {
 		subscription: Option<moq_net::track::Subscription>,
 	) {
 		let subscription = subscription.unwrap_or_default();
-		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
+		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		track.end_at(subscription.group_end);
+		// The read cursor is a group sequence, and its cap is inclusive.
+		track.end_at(subscription.end.map(|end| end.before().group));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}

@@ -2977,6 +2977,7 @@ mod tests {
 	use crate::group;
 
 	use super::*;
+	use crate::track::Position;
 
 	/// An announced direct route.
 	fn announce() -> broadcast::Route {
@@ -3557,7 +3558,7 @@ mod tests {
 		// Demand registers as the subscriber polls; a fresh segment carries no
 		// boundary, so the demand is the subscriber's own.
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, None);
+		assert_eq!(producer.subscription().unwrap().start, None);
 
 		producer.append_group().unwrap();
 		producer.append_group().unwrap();
@@ -3578,7 +3579,7 @@ mod tests {
 		let mut producer = accept_track(&mut dynamic_b, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer.subscription().unwrap().start, Some(Position::group(2)));
 		producer.create_group(group::Info { sequence: 1 }).unwrap();
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
@@ -3676,7 +3677,7 @@ mod tests {
 		// Demand registers as the subscriber polls; the new segment starts at the
 		// splice boundary.
 		sub.assert_no_group();
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(1));
+		assert_eq!(producer_b.subscription().unwrap().start, Some(Position::group(1)));
 		producer_b.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();
@@ -3824,8 +3825,8 @@ mod tests {
 		// The old copy's demand is capped at the boundary; the new copy's starts
 		// there. Both propagate as the subscriber polls.
 		sub.assert_no_group();
-		assert_eq!(producer_a.subscription().unwrap().group_end, Some(1));
-		assert_eq!(producer_b.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer_a.subscription().unwrap().end, Some(Position::group(2)));
+		assert_eq!(producer_b.subscription().unwrap().start, Some(Position::group(2)));
 
 		// The old copy racing past its cap is filtered; the new copy serves on.
 		producer_a.create_group(group::Info { sequence: 2 }).unwrap();
@@ -4095,7 +4096,7 @@ mod tests {
 		let mut producer = accept_track(&mut dynamic, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer.subscription().unwrap().group_start, Some(2));
+		assert_eq!(producer.subscription().unwrap().start, Some(Position::group(2)));
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2);
 		sub.assert_not_closed();
@@ -4731,7 +4732,7 @@ mod tests {
 		let mut producer_local = accept_track(&mut dynamic_local, "video").await;
 		settle().await;
 		sub.assert_no_group();
-		assert_eq!(producer_local.subscription().unwrap().group_start, Some(1));
+		assert_eq!(producer_local.subscription().unwrap().start, Some(Position::group(1)));
 		producer_local.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();

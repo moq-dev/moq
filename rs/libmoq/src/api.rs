@@ -229,10 +229,10 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 			.with_ordered(subscription.ordered)
 			.with_latency_max(std::time::Duration::from_millis(subscription.latency_max_ms));
 		if subscription.group_start_valid {
-			out = out.with_group_start(subscription.group_start);
+			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
 		if subscription.group_end_valid {
-			out = out.with_group_end(subscription.group_end);
+			out = out.with_end(moq_net::track::Position::after_group(subscription.group_end));
 		}
 		out
 	}

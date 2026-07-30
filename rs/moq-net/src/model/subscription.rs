@@ -23,34 +23,30 @@ pub struct Subscription {
 	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
 	/// locally, and a group is skipped once either measure exceeds it.
 	pub latency_max: Duration,
-	/// First group the publisher should deliver, or `None` to start at the latest group.
+	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
+	/// group.
 	///
 	/// A request, aggregated across every live subscriber (the earliest explicit start
 	/// wins), so it says what the publisher sends, not what any one subscriber sees.
 	/// [`crate::track::Subscriber::start_at`] is the local read cursor; setting one does
 	/// not imply the other. See [Local cursor vs wire
 	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
-	pub group_start: Option<u64>,
-	/// Last group the publisher should deliver (inclusive), or `None` for no end.
+	pub start: Option<Position>,
+	/// First [`Position`] the publisher should *not* deliver, or `None` for no end.
+	///
+	/// Exclusive, like the end of a [`std::ops::Range`], which is what lets one field
+	/// carry both "through the end of group 5" ([`Position::after_group(5)`](Position::after_group))
+	/// and "up to frame 2 of group 5" ([`Position::after(5, 2)`](Position::after)). An
+	/// inclusive end cannot express the first without a sentinel frame, and the ordering
+	/// falls out for free: group 6's head sorts above any frame of group 5, so a
+	/// whole-group subscriber correctly absorbs a frame-capped one in the aggregate.
+	///
+	/// The wire agrees: `Group End` and `Frame End` are both encoded as `absolute + 1`.
 	///
 	/// A request, aggregated across every live subscriber (any unbounded subscriber makes
 	/// the aggregate unbounded). [`crate::track::Subscriber::end_at`] is the local read
-	/// cursor; setting one does not imply the other. See [Local cursor vs wire
-	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
-	pub group_end: Option<u64>,
-	/// First frame to deliver within [`Self::group_start`]'s group. `0` (the default)
-	/// starts at the beginning of that group.
-	///
-	/// Frames are numbered per group, so this counts from nothing without an explicit
-	/// `group_start` and is ignored when there is none. Set the pair together with
-	/// [`Self::with_start`], which is the only way to reach it.
-	pub frame_start: u64,
-	/// Last frame to deliver (inclusive) within [`Self::group_end`]'s group, or `None`
-	/// (the default) for through the end of that group.
-	///
-	/// Ignored without an explicit `group_end`, mirroring [`Self::frame_start`]. Set the
-	/// pair together with [`Self::with_end`].
-	pub frame_end: Option<u64>,
+	/// cursor; setting one does not imply the other.
+	pub end: Option<Position>,
 }
 
 impl Default for Subscription {
@@ -59,10 +55,8 @@ impl Default for Subscription {
 			priority: 0,
 			ordered: false,
 			latency_max: Duration::ZERO,
-			group_start: None,
-			group_end: None,
-			frame_start: 0,
-			frame_end: None,
+			start: None,
+			end: None,
 		}
 	}
 }
@@ -88,69 +82,24 @@ impl Subscription {
 		self
 	}
 
-	/// Set the first group to deliver, returning `self` for chaining.
-	pub fn with_group_start(mut self, group_start: impl Into<Option<u64>>) -> Self {
-		self.group_start = group_start.into();
-		self
-	}
-
-	/// Set the last group to deliver (inclusive), returning `self` for chaining.
-	pub fn with_group_end(mut self, group_end: impl Into<Option<u64>>) -> Self {
-		self.group_end = group_end.into();
-		self
-	}
-
-	/// Set the first position to deliver: frame `frame` of group `group`, returning `self`
-	/// for chaining.
+	/// Start delivery at `start`, or at the latest group when `None`. Returns `self` for
+	/// chaining.
 	///
-	/// The group comes with it because a frame index only means something relative to a
-	/// group, so there is no way to name a frame without the group it belongs to.
-	/// [`Self::with_group_start`] is the whole-group form, the same as `frame` 0.
-	pub fn with_start(mut self, group: u64, frame: u64) -> Self {
-		self.group_start = Some(group);
-		self.frame_start = frame;
+	/// [`Position::group`] is the whole-group form.
+	pub fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
+		self.start = start.into();
 		self
 	}
 
-	/// Set the last position to deliver (inclusive): frame `frame` of group `group`, or
-	/// all of `group` when `frame` is `None`. Returns `self` for chaining.
+	/// Stop delivery at `end`, or leave the subscription unbounded when `None`. Returns
+	/// `self` for chaining.
 	///
-	/// Pairs the group with the frame for the same reason as [`Self::with_start`].
-	pub fn with_end(mut self, group: u64, frame: impl Into<Option<u64>>) -> Self {
-		self.group_end = Some(group);
-		self.frame_end = frame.into();
+	/// Exclusive, matching [`Self::end`], so pass the position *after* the last one you
+	/// want. [`Position::after`] and [`Position::after_group`] name that conversion so no
+	/// call site has to write the `+ 1` itself.
+	pub fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
+		self.end = end.into();
 		self
-	}
-
-	/// The requested start as an ordered position, or `None` for the live edge.
-	pub(crate) fn start(&self) -> Option<Position> {
-		self.group_start.map(|group| Position {
-			group,
-			frame: self.frame_start,
-		})
-	}
-
-	/// The requested end as an ordered position, or `None` for unbounded. The frame is
-	/// `u64::MAX` when the whole end group is wanted, so the ordering matches the
-	/// "widest end wins" aggregate.
-	pub(crate) fn end(&self) -> Option<Position> {
-		self.group_end.map(|group| Position {
-			group,
-			frame: self.frame_end.unwrap_or(u64::MAX),
-		})
-	}
-
-	/// Apply an aggregated start position, or the live edge when `None`.
-	pub(crate) fn set_start(&mut self, start: Option<Position>) {
-		self.group_start = start.map(|start| start.group);
-		self.frame_start = start.map_or(0, |start| start.frame);
-	}
-
-	/// Apply an aggregated end position, or unbounded when `None`. A `u64::MAX` frame
-	/// maps back to "the whole end group".
-	pub(crate) fn set_end(&mut self, end: Option<Position>) {
-		self.group_end = end.map(|end| end.group);
-		self.frame_end = end.and_then(|end| (end.frame != u64::MAX).then_some(end.frame));
 	}
 
 	// Fold this subscription into the running aggregate: Ready with the merged
@@ -161,18 +110,17 @@ impl Subscription {
 			return Poll::Ready(self.clone());
 		};
 
-		let mut merged = Subscription {
+		let merged = Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
 			latency_max: self.latency_max.max(combined.latency_max),
-			..Subscription::default()
+			// Bounds fold as whole positions. Two subscribers starting in the same group
+			// are separated only by their frame, so folding group and frame independently
+			// would invent a bound neither asked for.
+			start: min_some(self.start, combined.start),
+			end: max_unbounded(self.end, combined.end),
 		};
-		// Frame-precise bounds fold as whole positions: two subscribers starting in the
-		// same group are separated only by their frame, so folding the group and the
-		// frame independently would invent a start neither asked for.
-		merged.set_start(min_some(self.start(), combined.start()));
-		merged.set_end(max_unbounded(self.end(), combined.end()));
 
 		if &merged != combined {
 			return Poll::Ready(merged);
@@ -186,23 +134,47 @@ impl Subscription {
 ///
 /// Ordered lexicographically, so comparing positions is the same as comparing groups
 /// and only falling back to frames within one. This is the model's counterpart of the
-/// wire's (`Group`, `Frame`) pairs on SUBSCRIBE / SUBSCRIBE_OK / FETCH.
+/// wire's (`Group`, `Frame`) pairs on SUBSCRIBE and FETCH.
+///
+/// Pairing the two is the point: a frame index counts from the start of a group, so it
+/// means nothing on its own. Carrying them together makes "frame 5 of nothing"
+/// unrepresentable rather than merely undefined.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Position {
+pub struct Position {
 	/// The group sequence.
 	pub group: u64,
-	/// The frame index within the group.
+	/// The frame index within the group, numbered from 0 in write order.
 	pub frame: u64,
 }
 
 impl Position {
-	/// The start of a group.
+	/// The first frame of `group`.
+	///
+	/// As an exclusive end this means "everything before `group`"; as a start it means
+	/// "`group` from the beginning".
 	pub fn group(group: u64) -> Self {
 		Self { group, frame: 0 }
 	}
 
-	/// The last position strictly below this one, converting a half-open bound into the
-	/// inclusive one a [`Subscription`] carries.
+	/// The position just past `frame` of `group`: the exclusive end that includes it.
+	pub fn after(group: u64, frame: u64) -> Self {
+		Self {
+			group,
+			// Saturating so the last representable frame cannot wrap into an empty
+			// range. Unreachable from the wire, where varints cap at 2^62-1.
+			frame: frame.saturating_add(1),
+		}
+	}
+
+	/// The position just past every frame of `group`: the exclusive end that includes
+	/// the group whole.
+	pub fn after_group(group: u64) -> Self {
+		Self::group(group.saturating_add(1))
+	}
+
+	/// The last position strictly below this one, turning an exclusive bound such as
+	/// [`Subscription::end`] into the inclusive one an API like
+	/// [`crate::track::Subscriber::end_at`] wants.
 	///
 	/// A boundary at the head of a group backs up to all of the group below it, which
 	/// saturates at the very first frame. Nothing produces a boundary there: a segment
@@ -275,68 +247,72 @@ mod tests {
 
 	#[test]
 	fn combined_group_start_uses_earliest_explicit_start() {
-		let live = Subscription::default().with_group_start(None);
-		let catchup = Subscription::default().with_group_start(10);
-		let older_catchup = Subscription::default().with_group_start(5);
+		// No start at all is the live edge, which loses to any explicit one.
+		let live = Subscription::default();
+		let catchup = Subscription::default().with_start(Position::group(10));
+		let older_catchup = Subscription::default().with_start(Position::group(5));
 
 		let combined = combine(&[live, catchup, older_catchup]).unwrap();
 
-		assert_eq!(combined.group_start, Some(5));
+		assert_eq!(combined.start, Some(Position::group(5)));
 	}
 
 	#[test]
 	fn combined_group_end_keeps_live_subscription_unbounded() {
-		let live = Subscription::default().with_group_end(None);
-		let bounded = Subscription::default().with_group_end(10);
+		// No end at all is unbounded, which absorbs any explicit one.
+		let live = Subscription::default();
+		let bounded = Subscription::default().with_end(Position::after_group(10));
 
 		let combined = combine(&[live, bounded]).unwrap();
 
-		assert_eq!(combined.group_end, None);
+		assert_eq!(combined.end, None);
 	}
 
 	#[test]
 	fn combined_start_folds_the_whole_position() {
-		let early_frame = Subscription::default().with_start(5, 2);
-		let late_frame = Subscription::default().with_start(5, 9);
+		let early_frame = Subscription::default().with_start(Position { group: 5, frame: 2 });
+		let late_frame = Subscription::default().with_start(Position { group: 5, frame: 9 });
 
 		// Same group: the earlier frame wins.
 		let combined = combine(&[late_frame.clone(), early_frame.clone()]).unwrap();
-		assert_eq!((combined.group_start, combined.frame_start), (Some(5), 2));
+		assert_eq!(combined.start, Some(Position { group: 5, frame: 2 }));
 
 		// An earlier group wins outright, carrying its own frame rather than the
 		// smallest frame across the two.
-		let earlier_group = Subscription::default().with_start(4, 7);
+		let earlier_group = Subscription::default().with_start(Position { group: 4, frame: 7 });
 		let combined = combine(&[early_frame, earlier_group]).unwrap();
-		assert_eq!((combined.group_start, combined.frame_start), (Some(4), 7));
+		assert_eq!(combined.start, Some(Position { group: 4, frame: 7 }));
 	}
 
 	#[test]
 	fn combined_end_folds_the_whole_position() {
-		let short = Subscription::default().with_end(5, 2);
-		let long = Subscription::default().with_end(5, 9);
+		let short = Subscription::default().with_end(Position::after(5, 2));
+		let long = Subscription::default().with_end(Position::after(5, 9));
 
-		// Same group: the later frame wins.
+		// Same group: the later frame wins. Ends are exclusive, so an inclusive frame 9
+		// is stored as 10.
 		let combined = combine(&[short.clone(), long.clone()]).unwrap();
-		assert_eq!((combined.group_end, combined.frame_end), (Some(5), Some(9)));
+		assert_eq!(combined.end, Some(Position { group: 5, frame: 10 }));
 
-		// An unbounded frame is the whole group, so it absorbs any capped one.
-		let whole = Subscription::default().with_group_end(5);
+		// The whole group is the head of the next one, which outsorts every frame of
+		// this one, so it absorbs any capped end without a sentinel.
+		let whole = Subscription::default().with_end(Position::after_group(5));
 		let combined = combine(&[long, whole]).unwrap();
-		assert_eq!((combined.group_end, combined.frame_end), (Some(5), None));
+		assert_eq!(combined.end, Some(Position::group(6)));
 
 		// A later group wins outright, carrying its own frame.
-		let later_group = Subscription::default().with_end(6, 1);
+		let later_group = Subscription::default().with_end(Position::after(6, 1));
 		let combined = combine(&[short, later_group]).unwrap();
-		assert_eq!((combined.group_end, combined.frame_end), (Some(6), Some(1)));
+		assert_eq!(combined.end, Some(Position { group: 6, frame: 2 }));
 	}
 
 	#[test]
 	fn combined_group_end_uses_latest_bounded_end() {
-		let early = Subscription::default().with_group_end(10);
-		let late = Subscription::default().with_group_end(20);
+		let early = Subscription::default().with_end(Position::after_group(10));
+		let late = Subscription::default().with_end(Position::after_group(20));
 
 		let combined = combine(&[early, late]).unwrap();
 
-		assert_eq!(combined.group_end, Some(20));
+		assert_eq!(combined.end, Some(Position::group(21)));
 	}
 }

@@ -66,11 +66,13 @@ impl Segment {
 /// The demand to register on an underlying track: the subscriber's own
 /// preferences intersected with a segment's bounds.
 fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -> Subscription {
-	let mut sub = prefs.clone();
-	sub.set_start(max_unbounded_start(prefs.start(), start));
-	// The segment bound is exclusive and a subscription's is inclusive.
-	sub.set_end(min_some(prefs.end(), end.map(Position::before)));
-	sub
+	// A segment's bounds and a subscription's are both half-open, so they intersect
+	// directly with no inclusive/exclusive conversion in between.
+	Subscription {
+		start: max_unbounded_start(prefs.start, start),
+		end: min_some(prefs.end, end),
+		..prefs.clone()
+	}
 }
 
 /// The later of two optional start bounds, treating `None` as "the live edge" for the
@@ -1395,17 +1397,17 @@ mod test {
 
 		let mut sub = producer
 			.consume()
-			.subscribe(Subscription::default().with_group_start(0));
+			.subscribe(Subscription::default().with_start(Position::group(0)));
 		// Poll once so the subscriber registers on segment A.
 		recv_pending(&mut sub);
-		assert_eq!(track_a.subscription().unwrap().group_end, None);
+		assert_eq!(track_a.subscription().unwrap().end, None);
 
 		producer.switch(&consumer_b, Position::group(5)).unwrap();
 		recv_pending(&mut sub);
 
 		// The old session sees its demand capped; the new one starts at the boundary.
-		assert_eq!(track_a.subscription().unwrap().group_end, Some(4));
-		assert_eq!(track_b.subscription().unwrap().group_start, Some(5));
+		assert_eq!(track_a.subscription().unwrap().end, Some(Position::group(5)));
+		assert_eq!(track_b.subscription().unwrap().start, Some(Position::group(5)));
 	}
 
 	#[tokio::test]
@@ -1782,8 +1784,11 @@ mod test {
 		recv_pending(&mut sub);
 
 		let demand = track_b.subscription().unwrap();
-		assert_eq!(demand.group_start, Some(0), "resumes in the same group");
-		assert_eq!(demand.frame_start, 2, "resumes at the frame the old route stopped on");
+		assert_eq!(
+			demand.start,
+			Some(Position { group: 0, frame: 2 }),
+			"resumes in the same group, at the frame the old route stopped on"
+		);
 
 		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
 		group.start_at(2).unwrap();
@@ -1875,8 +1880,8 @@ mod test {
 
 		let demand = track_b.subscription().unwrap();
 		assert_eq!(
-			(demand.group_start, demand.frame_start),
-			(Some(0), 1),
+			demand.start,
+			Some(Position { group: 0, frame: 1 }),
 			"the half-written frame must be redelivered, not skipped"
 		);
 
@@ -1909,7 +1914,8 @@ mod test {
 		recv_pending(&mut sub);
 		// The old copy's demand is capped just below the boundary.
 		let demand = track_a.subscription().unwrap();
-		assert_eq!((demand.group_end, demand.frame_end), (Some(0), Some(0)));
+		// Exclusive: serve group 0 up to and including frame 0.
+		assert_eq!(demand.end, Some(Position { group: 0, frame: 1 }));
 
 		// A keeps writing anyway; those frames belong to B's range now.
 		group_a.write_frame(Timestamp::ZERO, b"a1-over-cap".to_vec()).unwrap();
@@ -1938,8 +1944,7 @@ mod test {
 		producer.takeover(&consumer_b).unwrap();
 		recv_pending(&mut sub);
 		let demand = track_b.subscription().unwrap();
-		assert_eq!(demand.group_start, Some(1));
-		assert_eq!(demand.frame_start, 0);
+		assert_eq!(demand.start, Some(Position::group(1)));
 	}
 
 	/// A copy dying mid-group stalls its readers instead of erroring them, the same

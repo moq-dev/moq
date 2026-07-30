@@ -18,9 +18,7 @@ use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
 
-pub use super::subscription::Subscription;
-
-pub(crate) use super::subscription::Position;
+pub use super::subscription::{Position, Subscription};
 
 use std::{
 	collections::{HashMap, VecDeque},
@@ -2283,7 +2281,7 @@ impl kio::Pollable for Fetching {
 ///
 /// - [`Self::start_at`] / [`Self::end_at`] move **this subscriber's read cursor**. They
 ///   filter exactly what this handle returns and are invisible to the publisher.
-/// - [`Subscription::group_start`] / [`Subscription::group_end`], set via [`Self::update`],
+/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
 ///   are a **request to the publisher**. They're aggregated across every live subscriber
 ///   (earliest start, widest end), so they say what the publisher should send, not what
 ///   this subscriber sees.
@@ -2589,7 +2587,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::group_start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
@@ -2603,7 +2601,7 @@ impl Subscriber {
 	///
 	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
 	///
-	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
+	/// A local filter, not a request; [`Subscription::end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
 	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
