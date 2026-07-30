@@ -67,6 +67,8 @@ impl Client {
 	///
 	/// Only for transports that carry no request URI of their own (native QUIC, qmux
 	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
+	/// Append `?` and the URI query when there is one: that is how a credential in the
+	/// query (`?jwt=`) reaches the server.
 	/// Bindings that already carry a URI (WebTransport, qmux over WebSocket) convey
 	/// the path there and MUST NOT send this; a server is entitled to treat it as a
 	/// protocol violation. An empty path is equivalent to omitting it. Ignored by

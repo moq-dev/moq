@@ -138,10 +138,11 @@ pub struct Setup {
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
 	/// The request path, for transports that carry no request URI (native QUIC,
-	/// qmux over TCP/TLS, unix sockets). Sent only by the client; a server never
-	/// sends one and a relay never forwards it. `None` on URI-carrying bindings,
-	/// where it would be a protocol violation. An empty path means the same thing
-	/// as `None`; both are on the wire so a client need not special-case the root.
+	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
+	/// there is one. Sent only by the client; a server never sends one and a relay
+	/// never forwards it. `None` on URI-carrying bindings, where it would be a
+	/// protocol violation. An empty path means the same thing as `None`; both are
+	/// on the wire so a client need not special-case the root.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a

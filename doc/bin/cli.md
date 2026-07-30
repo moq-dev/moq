@@ -152,6 +152,7 @@ incumbent rather than waiting behind it, so a reconnect is live again without
 waiting for the relay's transport to time out the connection it replaced. The
 last publisher to announce a path owns it, so use authorization to decide who
 may publish where.
+
 ### Capture a Webcam
 
 The `capture` subcommand captures and encodes from local devices directly, no

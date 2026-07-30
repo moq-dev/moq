@@ -186,9 +186,10 @@ export class Setup {
 
 	/**
 	 * The request path, for transports that carry no request URI (native QUIC, qmux over
-	 * TCP/TLS, unix sockets). Sent only by the client; a server never sends one and a relay
-	 * never forwards it. `undefined` on URI-carrying bindings such as WebTransport, where
-	 * sending one is a protocol violation. An empty string means the same as `undefined`.
+	 * TCP/TLS, unix sockets), with `?` and the URI query appended when there is one. Sent
+	 * only by the client; a server never sends one and a relay never forwards it.
+	 * `undefined` on URI-carrying bindings such as WebTransport, where sending one is a
+	 * protocol violation. An empty string means the same as `undefined`.
 	 */
 	path?: string;
 
