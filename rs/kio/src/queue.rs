@@ -350,10 +350,10 @@ mod test {
 		let mut cx = Context::from_waker(&w);
 		let mut cell = WaiterCell::new();
 
-		assert!(queue.poll_pop(cell.waiter(&mut cx)).is_pending());
+		assert!(queue.poll_pop(cell.hold(&mut cx)).is_pending());
 		queue.try_push(7).unwrap();
 		assert!(waker.count() >= 1, "push should wake the parked pop");
-		assert_eq!(queue.poll_pop(cell.waiter(&mut cx)), Poll::Ready(Ok(7)));
+		assert_eq!(queue.poll_pop(cell.hold(&mut cx)), Poll::Ready(Ok(7)));
 	}
 
 	#[test]
@@ -369,7 +369,7 @@ mod test {
 		let made = std::cell::Cell::new(false);
 		assert!(
 			queue
-				.poll_push_with(cell.waiter(&mut cx), || {
+				.poll_push_with(cell.hold(&mut cx), || {
 					made.set(true);
 					2
 				})
@@ -380,7 +380,7 @@ mod test {
 		// A pop frees the slot and wakes the parked push.
 		assert_eq!(queue.try_pop().unwrap(), Some(1));
 		assert!(waker.count() >= 1, "pop should wake the parked push");
-		assert_eq!(queue.poll_push_with(cell.waiter(&mut cx), || 2), Poll::Ready(Ok(())));
+		assert_eq!(queue.poll_push_with(cell.hold(&mut cx), || 2), Poll::Ready(Ok(())));
 		assert_eq!(queue.try_pop().unwrap(), Some(2));
 	}
 
@@ -394,25 +394,25 @@ mod test {
 		let mut pop_cell = WaiterCell::new();
 		// Park a pop on a second handle (the queued item is popped first).
 		let popper = queue.clone();
-		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Ok(1)));
-		assert!(popper.poll_pop(pop_cell.waiter(&mut cx1)).is_pending());
+		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Ok(1)));
+		assert!(popper.poll_pop(pop_cell.hold(&mut cx1)).is_pending());
 
 		// Refill so a push parks too.
 		queue.try_push(2).unwrap();
 		let (push_waker, w2) = counting();
 		let mut cx2 = Context::from_waker(&w2);
 		let mut push_cell = WaiterCell::new();
-		assert!(queue.poll_push_with(push_cell.waiter(&mut cx2), || 3).is_pending());
+		assert!(queue.poll_push_with(push_cell.hold(&mut cx2), || 3).is_pending());
 
 		queue.close();
 		assert!(pop_waker.count() >= 1, "close should wake the parked pop");
 		assert!(push_waker.count() >= 1, "close should wake the parked push");
 
 		// The parked pop drains the remaining item; the push observes closure.
-		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Ok(2)));
-		assert_eq!(popper.poll_pop(pop_cell.waiter(&mut cx1)), Poll::Ready(Err(Closed)));
+		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Ok(2)));
+		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Err(Closed)));
 		assert_eq!(
-			queue.poll_push_with(push_cell.waiter(&mut cx2), || 3),
+			queue.poll_push_with(push_cell.hold(&mut cx2), || 3),
 			Poll::Ready(Err(Closed))
 		);
 	}

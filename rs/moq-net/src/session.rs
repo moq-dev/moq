@@ -187,7 +187,7 @@ impl Future for Driver {
 		let this = &mut *self;
 		// The clone shares the retained waiter's identity while ending the cell
 		// borrow, which the `&mut self` poll below would otherwise conflict with.
-		let waiter = this.cell.waiter(cx).clone();
+		let waiter = this.cell.hold(cx).clone();
 		this.poll(&waiter)
 	}
 }
