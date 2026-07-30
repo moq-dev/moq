@@ -187,6 +187,8 @@ export default defineConfig({
 										{ text: "moq-native", link: "/lib/rs/crate/moq-native" },
 										{ text: "moq-token", link: "/lib/rs/crate/moq-token" },
 										{ text: "hang", link: "/lib/rs/crate/hang" },
+										{ text: "moq-video", link: "/lib/rs/crate/moq-video" },
+										{ text: "moq-audio", link: "/lib/rs/crate/moq-audio" },
 										{ text: "web-transport", link: "/lib/rs/crate/web-transport" },
 										{ text: "libmoq", link: "/lib/rs/crate/libmoq" },
 									],
