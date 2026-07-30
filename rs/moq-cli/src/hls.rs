@@ -1,5 +1,5 @@
-//! HLS endpoints: pull a remote playlist into MoQ (import), or serve HLS over
-//! HTTP from MoQ broadcasts (export), fetching media groups on demand.
+//! HLS endpoints: pull a remote playlist into MoQ (import), or serve HLS and
+//! DASH over HTTP from MoQ broadcasts (export), fetching media groups on demand.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -58,8 +58,9 @@ pub async fn import(origin: &moq_net::origin::Producer, name: String, playlist: 
 	Ok(importer.run().await?)
 }
 
-/// Serve HLS over HTTP for the single broadcast `name` (reached at
-/// `/<name>/master.m3u8`); other broadcasts in the Origin are not served.
+/// Serve HLS and DASH over HTTP for the single broadcast `name` (reached at
+/// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
+/// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
 	let scoped = origin
 		.scope(&[name.as_path()])

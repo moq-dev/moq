@@ -1,22 +1,25 @@
-//! Export: serve a MoQ broadcast as HLS, fetching media on demand.
+//! Export: serve a MoQ broadcast as HLS or DASH, fetching media on demand.
 //!
 //! A [`Broadcaster`] subscribes to one broadcast's catalog and its single timeline track (see
-//! [`hang::timeline`]). That is the *only* standing traffic: playlists are a pure function of
-//! the timeline records (each names a complete aligned segment with per-track group ranges),
-//! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly
-//! the groups that segment covers from the relay cache and transmuxes them to CMAF. A
-//! broadcast whose catalog advertises no timeline can't be served this way and is skipped.
+//! [`hang::timeline`]). That is the *only* standing traffic: playlists and manifests are a
+//! pure function of the timeline records (each names a complete aligned segment with
+//! per-track group ranges), and media bytes move only when an HTTP client requests a segment,
+//! which FETCHes exactly the groups that segment covers from the relay cache and transmuxes
+//! them to CMAF. A broadcast whose catalog advertises no timeline can't be served this way and
+//! is skipped.
 //!
 //! The same machinery serves two kinds of consumer:
 //!
-//! * the HTTP serve path (pull): [`Broadcaster::rendition`] / [`Broadcaster::master_playlist`]
-//!   and the crate-internal `Rendition::playlist` / `Rendition::segment`, rendered/fetched per
-//!   request (that pull surface is gated behind the `server` feature); and
+//! * the HTTP serve path (pull): [`Broadcaster::rendition`] /
+//!   [`Broadcaster::master_playlist`] / [`Broadcaster::manifest`] and the crate-internal
+//!   `Rendition::playlist` / `Rendition::segment`, rendered/fetched per request (that pull
+//!   surface is gated behind the `server` feature); and
 //! * a recorder (push): the [`renditions::Consumer`] and [`segments::Consumer`] cursors, which
 //!   yield every rendition and every finalized segment in order, for mirroring a broadcast to
 //!   storage.
 
 mod master;
+mod mpd;
 mod playlist;
 mod rendition;
 
@@ -24,7 +27,7 @@ pub mod renditions;
 pub mod segments;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 
@@ -151,6 +154,67 @@ impl Broadcaster {
 			}
 		}
 		master::render_master(&video, &audio, query)
+	}
+
+	/// Render the DASH manifest (MPD) from the current renditions and their views of the
+	/// broadcast timeline, or `None` while nothing is listable yet (every `SegmentTimeline`
+	/// would be empty, which players reject).
+	///
+	/// Live broadcasts render a `dynamic` presentation anchored at the catalog's declared
+	/// wall clock (or, absent one, at an anchor estimated from the first record's arrival); a
+	/// finished broadcast renders `static`. `query` propagates to every child URL exactly as
+	/// in [`master_playlist`](Self::master_playlist).
+	pub fn manifest(&self, query: Option<&str>) -> Option<String> {
+		let mut video = Vec::new();
+		let mut audio = Vec::new();
+		let mut availability_start = None;
+		for rendition in self.renditions.snapshot() {
+			// Every rendition shares the catalog's one timeline section, so any of them can
+			// supply the declared wall anchor.
+			if availability_start.is_none() {
+				availability_start = rendition.wall_clock(moq_net::Timestamp::ZERO);
+			}
+			let representation = rendition.representation();
+			match rendition.kind {
+				Kind::Video => video.push(representation),
+				Kind::Audio => audio.push(representation),
+			}
+		}
+
+		let representations = || video.iter().chain(&audio);
+		if representations().all(|rep| rep.segments.is_empty()) {
+			return None;
+		}
+		let finished = representations().any(|rep| rep.ended);
+		if !finished {
+			// A dynamic presentation needs pts 0 anchored to the wall clock. The fallback is
+			// set whenever a record has been pushed, which listing a segment implies.
+			availability_start = availability_start.or_else(|| self.renditions.anchor());
+			availability_start?;
+		}
+
+		Some(mpd::render_manifest(
+			&mpd::Manifest {
+				availability_start,
+				publish: SystemTime::now(),
+				window: self.renditions.window(),
+				finished,
+				video,
+				audio,
+			},
+			query,
+		))
+	}
+
+	/// Resolve once the broadcast has something listable (its first complete segment, or an
+	/// already-ended timeline). Every rendition's window is fed from the same timeline, so the
+	/// first rendition's readiness stands in for the broadcast's. Bounding the wait is the
+	/// caller's policy.
+	#[cfg(feature = "server")]
+	pub(crate) async fn playable(&self) {
+		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
+			rendition.playable().await;
+		}
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
@@ -354,6 +418,142 @@ mod tests {
 
 		// Keep the publisher alive for the whole test.
 		drop((media, registration, broadcast));
+	}
+
+	// The DASH half of the fetch-on-demand path: the manifest renders from the same timeline
+	// windows as the HLS playlists (dynamic while live, aligned S entries across renditions),
+	// and $Time$ addressing resolves a segment's pts to the same bytes its number does.
+	#[tokio::test]
+	async fn serves_dash_manifest_and_time_addressed_segments() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut video_registration = reserved.video("video0");
+		let mut video_config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		video_config.framerate = Some(30.0);
+		video_registration.set(video_config);
+		let mut audio_registration = reserved.audio("audio0");
+		let audio_config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio_registration.set(audio_config);
+		drop(reserved);
+
+		let video_track = broadcast.create_track("video0", None).unwrap();
+		let mut video = catalog
+			.media_producer(video_track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
+		let audio_track = broadcast.create_track("audio0", None).unwrap();
+		let mut audio = catalog
+			.media_producer(audio_track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
+
+		// Video keyframes every 2s cut the segments; audio contributes one group per cut.
+		let mut audio_write = |micros: u64| {
+			let keyframe = audio.needs_keyframe();
+			audio.write(frame(micros, keyframe)).unwrap();
+			audio.cut(None).unwrap();
+		};
+		video.write(frame(0, true)).unwrap();
+		audio_write(0);
+		video.write(frame(2_000_000, true)).unwrap();
+		audio_write(2_000_000);
+		video.write(frame(4_000_000, true)).unwrap(); // live edge
+		audio_write(4_000_000);
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
+		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
+		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
+		let _ = tokio::time::timeout(Duration::from_secs(5), video_rendition.playable()).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
+
+		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		assert!(manifest.contains(" type=\"dynamic\""), "live broadcast is dynamic");
+		assert!(
+			manifest.contains(" availabilityStartTime=\""),
+			"pts 0 is anchored even without a catalog wall clock"
+		);
+		assert!(manifest.contains("id=\"video/video0\""));
+		assert!(manifest.contains("id=\"audio/audio0\""));
+		assert!(manifest.contains("media=\"video/video0/seg/t$Time$.m4s\""));
+		// Both renditions list the same aligned segment spans (the live edge is not listed).
+		assert_eq!(manifest.matches("<S t=\"0\" d=\"2000\"/>").count(), 2);
+		assert_eq!(manifest.matches("<S t=\"2000\" d=\"2000\"/>").count(), 2);
+		assert!(!manifest.contains("<S t=\"4000\""), "the live-edge group is not listed");
+
+		// A credential rides every child URL.
+		let signed = broadcaster.manifest(Some("jwt=abc.def")).expect("manifest renders");
+		assert!(signed.contains("initialization=\"video/video0/init.mp4?jwt=abc.def\""));
+		assert!(signed.contains("media=\"video/video0/seg/t$Time$.m4s?jwt=abc.def\""));
+
+		// $Time$ resolves to the same bytes the aligned number does; unknown times miss.
+		let by_time = video_rendition
+			.segment_at(2_000)
+			.await
+			.unwrap()
+			.expect("segment fetched by pts");
+		let by_number = video_rendition.segment(1).await.unwrap().expect("segment by number");
+		assert_eq!(by_time, by_number);
+		assert!(video_rendition.segment_at(999).await.unwrap().is_none());
+
+		drop((video, audio, video_registration, audio_registration, broadcast));
+	}
+
+	// A finished broadcast renders a static presentation, offset to its first listed segment.
+	#[tokio::test]
+	async fn dash_manifest_turns_static_when_finished() {
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("publish allowed");
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+
+		let reserved = catalog.reserve();
+		let mut registration = reserved.video("video0");
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		registration.set(config);
+		drop(reserved);
+
+		let track = broadcast.create_track("video0", None).unwrap();
+		let mut media = catalog
+			.media_producer(track, moq_mux::catalog::hang::Container::Legacy)
+			.unwrap();
+		media.write(frame(0, true)).unwrap();
+		media.write(frame(2_000_000, true)).unwrap();
+
+		let source = moq_mux::Source::new(origin.consume(), "live");
+		let broadcaster = Broadcaster::new(source, Config::default()).await.unwrap();
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
+
+		// A clean finish promotes the live edge into the final segment and ends the windows.
+		media.finish().unwrap();
+		catalog.finish().unwrap();
+
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let manifest = loop {
+			let manifest = broadcaster.manifest(None).expect("manifest renders");
+			if manifest.contains(" type=\"static\"") {
+				break manifest;
+			}
+			assert!(tokio::time::Instant::now() < deadline, "manifest never turned static");
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		};
+		// The clean finish promoted the live edge into a final (zero-duration: its single
+		// frame has no successor to bound it) segment, mirroring HLS's trailing EXTINF:0.
+		assert!(manifest.contains("<S t=\"2000\" d=\"0\"/>"));
+		assert!(manifest.contains(" mediaPresentationDuration=\"PT2.000S\""));
+		assert!(!manifest.contains("availabilityStartTime"));
+
+		drop((catalog, media, registration, broadcast));
 	}
 
 	// The property HLS needs from the timeline rework: audio and video renditions share one

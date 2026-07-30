@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
@@ -52,6 +52,12 @@ struct Feed {
 	ended: bool,
 	/// The timeline stream is over (cleanly or not); late-created renditions start closed.
 	closed: bool,
+	/// The estimated wall-clock time of timeline `pts` 0, anchored when the first record
+	/// arrived (assuming its segment had just ended). The DASH manifest's
+	/// `availabilityStartTime` falls back to this when the catalog declares no `wall`; set
+	/// once so reloads see a stable presentation, and reset with the window when the
+	/// timeline restarts.
+	anchor: Option<SystemTime>,
 }
 
 /// The producing side of a broadcast's rendition set.
@@ -88,6 +94,7 @@ impl Producer {
 					history: VecDeque::new(),
 					ended: false,
 					closed: false,
+					anchor: None,
 				})),
 				window,
 			},
@@ -97,6 +104,17 @@ impl Producer {
 	/// The timeline fan-out handle for the timeline watcher task.
 	pub fn fanout(&self) -> Fanout {
 		self.fanout.clone()
+	}
+
+	/// The playlist window duration every rendition's window is trimmed to.
+	pub fn window(&self) -> Duration {
+		self.fanout.window
+	}
+
+	/// The estimated wall-clock time of timeline `pts` 0 (see [`Feed::anchor`]); `None` until
+	/// the first record arrives.
+	pub fn anchor(&self) -> Option<SystemTime> {
+		self.fanout.feed.lock().unwrap().anchor
 	}
 
 	/// A cursor over rendition changes, replaying the current set as [`Event::Added`].
@@ -167,6 +185,13 @@ impl Fanout {
 			&& (Duration::from(entry.pts) < Duration::from(back.pts) || entry.segment <= back.segment)
 		{
 			feed.history.clear();
+			feed.anchor = None;
+		}
+		if feed.anchor.is_none() {
+			// A record publishes once its segment is complete, so assume it ended just now:
+			// pts 0 then maps to `now - (pts + duration)`.
+			let end = Duration::from(entry.pts) + entry.duration;
+			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
 		}
 		feed.history.push_back(entry.clone());
 		while feed.history.len() >= 2 {

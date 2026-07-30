@@ -186,6 +186,20 @@ impl Producer {
 		Some(row.ranges.clone())
 	}
 
+	/// The number of the segment whose `pts` is exactly `time` in the timeline's timescale
+	/// (DASH `$Time$` addressing), or `None` when no listed row starts there. Exact match is
+	/// safe because the rendered `S@t` and this lookup convert the same [`Row::pts`] the same
+	/// way.
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub fn segment_number_at(&self, time: u64, timescale: moq_net::Timescale) -> Option<u64> {
+		let state = self.state.read();
+		state
+			.rows
+			.iter()
+			.find(|row| row.pts.as_scale(timescale) == time as u128)
+			.map(|row| row.segment)
+	}
+
 	/// The newest group known to start with a keyframe, used to bootstrap an init segment for
 	/// inline-parameter-set codecs.
 	pub fn latest_keyframe_group(&self) -> Option<u64> {

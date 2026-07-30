@@ -218,7 +218,7 @@ pub enum ExportSink {
 	H264(Container),
 	/// H.265 Annex-B elementary stream to stdout.
 	H265(Container),
-	/// Serve HLS / LL-HLS over HTTP.
+	/// Serve HLS / LL-HLS and DASH over HTTP.
 	Hls(crate::hls::ExportArgs),
 	/// RTMP: push to a remote (`--connect`) or serve plays (`--listen`).
 	Rtmp(crate::rtmp::ExportArgs),

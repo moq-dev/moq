@@ -14,6 +14,7 @@ use super::Server;
 use crate::export::{Kind, Rendition};
 
 const M3U8: &str = "application/vnd.apple.mpegurl";
+const MPD: &str = "application/dash+xml";
 const MP4: &str = "video/mp4";
 
 /// How long a rendition lookup waits for the catalog (and its first timeline records) to
@@ -23,6 +24,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn router(server: Server) -> Router {
 	Router::new()
 		.route("/{broadcast}/master.m3u8", get(master))
+		.route("/{broadcast}/manifest.mpd", get(manifest))
 		.route("/{broadcast}/{kind}/{rendition}/media.m3u8", get(media))
 		.route("/{broadcast}/{kind}/{rendition}/init.mp4", get(init))
 		.route("/{broadcast}/{kind}/{rendition}/seg/{file}", get(segment))
@@ -40,6 +42,23 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>, Raw
 	// Propagate whatever query reached the master (e.g. a credential a wrapping
 	// middleware required) down to the child media-playlist URLs.
 	m3u8(broadcaster.master_playlist(query.as_deref()))
+}
+
+async fn manifest(State(server): State<Server>, Path(broadcast): Path<String>, RawQuery(query): RawQuery) -> Response {
+	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
+		return not_found();
+	};
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	if broadcaster.is_empty() {
+		return not_found();
+	}
+	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
+	// to index its first complete segment before answering.
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	match broadcaster.manifest(query.as_deref()) {
+		Some(manifest) => mpd(manifest),
+		None => not_found(),
+	}
 }
 
 async fn media(
@@ -88,13 +107,25 @@ async fn segment(
 	State(server): State<Server>,
 	Path((broadcast, kind, rendition, file)): Path<(String, String, String, String)>,
 ) -> Response {
-	let Some(sequence) = file.strip_suffix(".m4s").and_then(|s| s.parse::<u64>().ok()) else {
+	let Some(stem) = file.strip_suffix(".m4s") else {
 		return not_found();
 	};
 	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
 		return not_found();
 	};
-	match rendition.segment(sequence).await {
+	// HLS addresses a segment by its aligned number (`seg/0.m4s`); DASH by its timeline pts
+	// (`seg/t2000.m4s`, the SegmentTemplate's `$Time$`). Same bytes either way.
+	let result = match stem.strip_prefix('t') {
+		Some(time) => match time.parse::<u64>() {
+			Ok(time) => rendition.segment_at(time).await,
+			Err(_) => return not_found(),
+		},
+		None => match stem.parse::<u64>() {
+			Ok(sequence) => rendition.segment(sequence).await,
+			Err(_) => return not_found(),
+		},
+	};
+	match result {
 		Ok(Some(bytes)) => media_bytes(bytes),
 		Ok(None) => not_found(),
 		Err(err) => server_error(err),
@@ -116,6 +147,11 @@ fn m3u8(body: String) -> Response {
 		body,
 	)
 		.into_response()
+}
+
+fn mpd(body: String) -> Response {
+	// Like the playlists: the manifest mutates as the live edge advances.
+	([(header::CONTENT_TYPE, MPD), (header::CACHE_CONTROL, "no-cache")], body).into_response()
 }
 
 fn media_bytes(body: Bytes) -> Response {

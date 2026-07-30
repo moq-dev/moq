@@ -1,16 +1,20 @@
-//! HTTP server: serves HLS for MoQ broadcasts, fetching media on demand.
+//! HTTP server: serves HLS and DASH for MoQ broadcasts, fetching media on demand.
 //!
 //! Routes are path-based, so one server can expose many broadcasts:
 //!
 //! ```text
 //! GET /{broadcast}/master.m3u8
+//! GET /{broadcast}/manifest.mpd
 //! GET /{broadcast}/{kind}/{rendition}/media.m3u8
 //! GET /{broadcast}/{kind}/{rendition}/init.mp4
 //! GET /{broadcast}/{kind}/{rendition}/seg/{segment}.m4s
+//! GET /{broadcast}/{kind}/{rendition}/seg/t{pts}.m4s
 //! ```
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
-//! name address distinct resources.
+//! name address distinct resources. The two `seg/` forms name the same bytes: HLS
+//! playlists address a segment by its aligned number, the DASH manifest by its
+//! timeline `pts` (`$Time$`).
 //!
 //! Every request is served. To gate access, wrap [`Server::router`] in your own
 //! [`axum`] middleware. It runs before routing, so a rejected request never reaches

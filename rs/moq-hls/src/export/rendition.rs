@@ -10,7 +10,7 @@ use moq_mux::container::fmp4::Muxer;
 use moq_mux::timeline::Entry;
 
 use super::playlist::{Segment, Snapshot};
-use super::segments;
+use super::{mpd, segments};
 use crate::Result;
 
 /// Fallback advertised bitrates when the catalog doesn't carry one.
@@ -252,6 +252,59 @@ impl Rendition {
 	/// already ended).
 	pub(crate) fn is_playable(&self) -> bool {
 		self.live.is_playable()
+	}
+
+	/// This rendition's DASH representation: its master-level metadata plus its slice of the
+	/// shared timeline as `(t, d)` pairs in the timeline's own timescale (the record values
+	/// verbatim, so `$Time$` addressing resolves exactly).
+	pub(crate) fn representation(&self) -> mpd::Representation {
+		let window = self.live.window();
+		let timescale = self.timescale();
+		let segments = window
+			.segments
+			.iter()
+			.filter(|row| !row.ranges.is_empty())
+			.map(|row| {
+				let t = row.pts.as_scale(timescale) as u64;
+				let span = row.end.saturating_sub(row.pts.into());
+				let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
+				(t, d)
+			})
+			.collect();
+		let (framerate, sample_rate, channel_count) = match &self.config {
+			Config::Video(config) => (config.framerate, None, None),
+			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
+		};
+		mpd::Representation {
+			name: self.name.clone(),
+			kind: self.kind,
+			bandwidth: self.bandwidth,
+			codec: self.codec.clone(),
+			width: self.width,
+			height: self.height,
+			framerate,
+			sample_rate,
+			channel_count,
+			timescale: self.section.timescale.max(1),
+			segments,
+			ended: window.ended,
+		}
+	}
+
+	/// Fetch and transmux the segment whose timeline `pts` is `time`, in the timeline's
+	/// timescale (DASH `$Time$` addressing of the same bytes [`segment`](Self::segment) serves
+	/// by aligned number).
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	pub(crate) async fn segment_at(&self, time: u64) -> Result<Option<Bytes>> {
+		let Some(segment) = self.live.segment_number_at(time, self.timescale()) else {
+			return Ok(None);
+		};
+		self.segment(segment).await
+	}
+
+	/// The timeline's timescale; a declared 0 is clamped rather than trusted.
+	fn timescale(&self) -> moq_net::Timescale {
+		moq_net::Timescale::new((self.section.timescale as u64).max(1)).expect("clamped nonzero timescale")
 	}
 
 	/// The wall-clock time of a media timestamp, when the timeline advertises an anchor.
