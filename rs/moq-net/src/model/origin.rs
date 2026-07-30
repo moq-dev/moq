@@ -4173,20 +4173,20 @@ mod tests {
 		drop(source);
 	}
 
-	/// A lingering broadcast with a live subscription must park, not spin.
+	/// A lingering broadcast with a live subscription parks, then resumes on the
+	/// reconnect.
 	///
 	/// An ungraceful loss empties the route table while the front waits out its
-	/// linger, so the route a track is spliced from is gone and no replacement can
-	/// serve it: the resweep. `serve_track` used to keep `serving_id` across it, so
-	/// the "route gone" edge re-fired on every poll, the wait returned Ready
-	/// immediately, and the loop ran hot for the whole linger. That burns a core per
-	/// subscribed track and starves the runtime that has to deliver the reconnect,
-	/// so a track written once (a catalog) never reaches the viewer again.
+	/// linger, so the route a track is spliced from is gone with no replacement to
+	/// serve it: the resweep. The task has to park for the whole window on the
+	/// strength of dropping the departed route, because nothing else bounds it. The
+	/// strike budget is gated on `!routes.is_empty()`, so an empty table never spends
+	/// one, and a "route gone" edge that keeps firing yields a wait that is Ready on
+	/// every poll: a full core per subscribed track, and the runtime that has to
+	/// deliver the reconnect starved along with it.
 	///
-	/// The empty table is what makes it unbounded: the strike budget is gated on
-	/// `!routes.is_empty()`, so the sweep at the top of the loop cannot spend one,
-	/// and every pass sees identical state. Under a paused clock the spin never
-	/// yields, so a regression hangs here rather than failing.
+	/// Under a paused clock that spin never yields, so a regression hangs here
+	/// rather than failing.
 	#[tokio::test(start_paused = true)]
 	async fn test_linger_parks_a_live_subscription() {
 		let origin = Info::new(Origin::random())
@@ -4218,6 +4218,12 @@ mod tests {
 		// spliced segment as ended: the departed route is the only edge left.
 		source.abort(Error::Dropped).unwrap();
 		settle().await;
+		settle().await;
+		sub.assert_not_closed();
+
+		// Most of the window with no source at all: the subscription stays parked
+		// rather than being cut, which is what the linger promises a reconnect.
+		tokio::time::sleep(Duration::from_secs(4)).await;
 		settle().await;
 		sub.assert_not_closed();
 
