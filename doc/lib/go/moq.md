@@ -125,6 +125,9 @@ if err != nil {
     log.Fatal(err)
 }
 _ = media.WriteFrame(moq.Frame{Payload: opusFrame, TimestampUs: 20_000})
+// Audio has no keyframes, so Cut is what gives it group boundaries. Once per
+// frame is the lowest latency; a segment cadence suits HLS/DASH.
+_ = media.Cut()
 ```
 
 Video catalog fields that are known before the first keyframe can be supplied

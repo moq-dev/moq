@@ -70,6 +70,29 @@ class MediaProducer:
         """Write one encoded frame with a presentation timestamp in microseconds."""
         self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
 
+    def cut(self) -> None:
+        """Draw a group boundary here.
+
+        Audio has no boundary of its own (every packet is independently
+        decodable), so this is the only thing that gives it groups: call it
+        after every frame for one group (one QUIC stream) the relay forwards
+        without waiting, or at a segment cadence to align with video. Video
+        groups at its own keyframes and needs this only to override that.
+
+        On a container this declares a new segment, rolling a group on every
+        track it publishes.
+        """
+        self._inner.cut()
+
+    def seek(self, sequence: int) -> None:
+        """Draw a group boundary and number the next group ``sequence``.
+
+        :meth:`cut` with an explicit sequence, for a publisher whose group
+        numbers have to be deterministic: two encoders aligning per GOP so a
+        consumer can fail over between them.
+        """
+        self._inner.seek(sequence)
+
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers."""
         self._inner.finish()

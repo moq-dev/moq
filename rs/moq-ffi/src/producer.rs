@@ -98,6 +98,25 @@ impl MediaDecoder {
 		}
 	}
 
+	fn cut(&mut self) -> moq_mux::Result<()> {
+		match self {
+			Self::Track(t) => t.cut(None),
+			// A container declares a segment boundary rather than ending one group: it may
+			// publish several tracks, and they all roll together.
+			Self::Container(c) => {
+				c.cut();
+				Ok(())
+			}
+		}
+	}
+
+	fn seek(&mut self, sequence: u64) -> moq_mux::Result<()> {
+		match self {
+			Self::Track(t) => t.seek(sequence),
+			Self::Container(c) => c.seek(sequence),
+		}
+	}
+
 	fn finish(&mut self) -> moq_mux::Result<()> {
 		match self {
 			Self::Track(t) => t.finish(),
@@ -924,6 +943,41 @@ impl MoqMediaProducer {
 			.decode(&frame.payload, Some(timestamp))
 			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
 
+		Ok(())
+	}
+
+	/// Draw a group boundary here.
+	///
+	/// Audio has no boundary of its own (every packet is independently decodable), so this is the
+	/// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
+	/// the relay forwards without waiting, or at a segment cadence to align with video for
+	/// HLS/DASH. Video groups at its own keyframes and needs this only to override that.
+	///
+	/// On a container this declares the start of a new segment, rolling a group on every track it
+	/// publishes.
+	pub fn cut(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media
+			.decoder
+			.cut()
+			.map_err(|err| MoqError::Codec(format!("cut failed: {err}")))?;
+		Ok(())
+	}
+
+	/// Draw a group boundary and number the next group `sequence`.
+	///
+	/// [`cut`](Self::cut) with an explicit sequence, for a publisher whose group numbers have to
+	/// be deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let media = guard.as_mut().ok_or(MoqError::Closed)?;
+		media
+			.decoder
+			.seek(sequence)
+			.map_err(|err| MoqError::Codec(format!("seek failed: {err}")))?;
 		Ok(())
 	}
 

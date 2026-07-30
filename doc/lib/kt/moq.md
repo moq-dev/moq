@@ -113,8 +113,12 @@ Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream")
     val audio = broadcast.publishMedia(Init(format = "opus", data = opusInitBytes, video = null))
 
+    // Audio has no keyframes, so `cut` is what gives it group boundaries. Once
+    // per frame is the lowest latency; a segment cadence suits HLS/DASH.
     audio.writeFrame(Frame(payload = payload))
+    audio.cut()
     audio.writeFrame(Frame(payload = payload, timestampUs = 20_000u))
+    audio.cut()
     audio.finish()
     broadcast.finish()
 }

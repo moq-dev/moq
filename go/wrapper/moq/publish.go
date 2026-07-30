@@ -248,6 +248,26 @@ func (m *MediaProducer) WriteFrame(frame Frame) error {
 	return m.inner.WriteFrame(frame)
 }
 
+// Cut draws a group boundary here.
+//
+// Audio has no boundary of its own (every packet is independently decodable), so this is
+// the only thing that gives it groups: call it after every frame for one group (one QUIC
+// stream) the relay forwards without waiting, or at a segment cadence to align with video.
+// Video groups at its own keyframes and needs this only to override that.
+//
+// On a container this declares a new segment, rolling a group on every track it publishes.
+func (m *MediaProducer) Cut() error {
+	return m.inner.Cut()
+}
+
+// Seek draws a group boundary and numbers the next group sequence.
+//
+// Cut with an explicit sequence, for a publisher whose group numbers have to be
+// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+func (m *MediaProducer) Seek(sequence uint64) error {
+	return m.inner.Seek(sequence)
+}
+
 // Finish closes the media track.
 func (m *MediaProducer) Finish() error {
 	return m.inner.Finish()
