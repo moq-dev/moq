@@ -14,8 +14,10 @@ a hardware codec, publish them as a [hang](/lib/rs/crate/hang) track, and do the
 same in reverse down to a texture on screen.
 
 This is what the browser gets from WebCodecs and `getUserMedia`. A native
-application has no such thing, so `moq-video` provides it: no ffmpeg, no GStreamer,
-just the platform APIs and a couple of pure-Rust fallbacks.
+application has no such thing, so `moq-video` provides it: no ffmpeg, no
+GStreamer, no system codec to install. Just the platform APIs, plus a vendored
+statically-linked openh264 so a build never depends on what the host happens to
+have.
 
 ## Overview
 
@@ -32,11 +34,17 @@ A picture is a `Frame` wherever it crosses the API: a `moq_net::Timestamp` and a
 `Surface` holding the pixels. Capture and decode produce them, encode and render
 consume them.
 
-Backend selection is automatic and degrading. Every hardware library is loaded at
-runtime (`dlopen`), so a binary built with NVENC still links and starts on a
-machine with no NVIDIA driver, falls through to the next encoder, and ends at the
-statically-linked openh264 software encoder. No public type, function, or error
-variant names a backend, so swapping one is never a breaking change for you.
+Backend selection is automatic and ordered: platform hardware first, then the
+software fallback. The Linux hardware libraries are loaded at runtime (`dlopen`),
+so a binary built with NVENC still links on a GPU-less builder and starts on a
+machine with no NVIDIA driver, falling through to the next backend instead of
+failing to load. No public type, function, or error variant names a backend, so
+swapping one is never a breaking change for you.
+
+**openh264 is the fallback for H.264 only.** It is statically linked and always
+compiled in, so H.264 encodes and decodes on any machine. H.265 is hardware-only:
+with no usable platform backend you get `NoEncoder` / `NoDecoder` rather than a
+slow path. AV1 is decode-only, via NVDEC.
 
 ## Installation
 
@@ -111,23 +119,33 @@ while let Some(frame) = video.read().await? {
 
 ## Zero-copy
 
-A hardware-decoded frame stays on the GPU. `Surface` is a `#[non_exhaustive]` enum
-naming what actually holds the pixels: a `CVPixelBuffer` on macOS, a Direct3D 11
-texture on Windows, CUDA memory on Linux, or plain I420 anywhere.
+`Surface` is a `#[non_exhaustive]` enum naming what actually holds a frame's
+pixels: a `CVPixelBuffer` on macOS, a Direct3D 11 texture on Windows, CUDA memory
+on Linux, or plain I420 anywhere. Keeping a decoded frame in the first three
+avoids a round trip through system memory on every frame.
 
-That matters for two paths that would otherwise pay for a round trip through
-system memory on every frame:
+How far that gets today depends on the platform, so here is the honest matrix
+rather than a blanket promise:
 
-- **Transcode.** A decoded NVDEC frame feeds NVENC without leaving the GPU, and
-  `decode::Config::resize` scales it there too.
-- **Playback.** The `render` module imports the decoder's surface as a texture
-  rather than copying it, converting YUV to RGB in a shader.
+| Platform | Decode output | Zero-copy transcode | Zero-copy render |
+| --- | --- | --- | --- |
+| macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
+| Linux | `Cuda` (NVDEC) | yes, straight into NVENC | no, downloaded to I420 first |
+| Windows | `I420` (Media Foundation downloads its DXVA texture) | no | no |
+
+So the transcode path is real on macOS and Linux: a decoded frame feeds the
+encoder without leaving the GPU, and `decode::Config::resize` scales it there too.
+Rendering is zero-copy on macOS only. The Vulkan and EGL importers that would
+extend it to Linux, and the Media Foundation decode-surface retention that would
+give Windows a GPU frame at all, are both tracked in
+[#2481](https://github.com/moq-dev/moq/issues/2481).
 
 Matching on `Surface` stays portable because every variant has a universal
 fallback in `Surface::into_i420()`: take the fast path you recognize and let the
 `_` arm download. The renderer does exactly this, and an import path that keeps
 failing retires itself after a few frames instead of paying for the attempt
-forever.
+forever. Set `render::Config::zero_copy` to `false` to force the download path
+when comparing output or working around a driver.
 
 ## Rendering
 
@@ -151,9 +169,17 @@ The `wgpu` version this was built against is re-exported as
 `moq_video::render::wgpu`, so you name the exact version rather than guessing at
 a compatible one.
 
-Color is carried end to end rather than assumed: `Color` names the matrix and
-range (BT.601 or BT.709, limited or full), capture labels what it produced, and
-the shader converts accordingly.
+`Color` names the matrix and range (BT.601 or BT.709, limited or full), and the
+shader converts per frame rather than assuming one space. A capture labels what it
+produced, so a locally captured frame renders correctly with no help from you.
+
+A decoded frame is the case to watch. The authoritative answer lives in the
+bitstream's VUI and does not survive decoding, and a Windows or CUDA surface
+carries no color metadata at all, so the renderer falls back to inferring from
+resolution (BT.601 at 576 lines or fewer, BT.709 above). That is a good guess, not
+a correct one: full-range content, or an unusual resolution, will render with the
+wrong range or matrix. Set `render::Config::color` when you know the stream's
+color space and the frame does not.
 
 ## Devices
 

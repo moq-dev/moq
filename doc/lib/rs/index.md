@@ -72,10 +72,10 @@ GPU rendering of decoded frames.
 
 **Features:**
 
-- VideoToolbox, Media Foundation, NVENC/NVDEC, VAAPI, openh264 fallback
-- Decoded frames stay on the GPU (transcode and render without a round trip)
-- `wgpu` renderer handing back a texture you present
-- Every hardware library `dlopen`'d, so a build degrades instead of failing
+- VideoToolbox, Media Foundation, NVENC/NVDEC, VAAPI, with openh264 as the H.264 software fallback
+- Decoded frames stay on the GPU where the platform allows, so transcoding skips the round trip
+- `wgpu` renderer handing back a texture you present, importing the decoder's surface zero-copy on macOS
+- Linux hardware libraries `dlopen`'d, so a build links and starts without a GPU
 
 [Learn more](/lib/rs/crate/moq-video)
 
