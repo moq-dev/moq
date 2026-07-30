@@ -88,6 +88,9 @@ type ServeGroup = {
 	end?: number;
 };
 
+/** What serving fetched frames needs beyond the group and destination stream. */
+type ServeFetch = Omit<ServeGroup, "sub">;
+
 /**
  * Handles publishing broadcasts and managing their lifecycle.
  *
@@ -397,7 +400,11 @@ export class Publisher {
 			// The timescale is immutable, so serve exactly what TRACK_INFO advertised.
 			const info = await this.#resolveTrackInfo(msg.broadcast, msg.track);
 			group = await broadcast.track(msg.track).fetchGroup(msg.group, { priority: msg.priority });
-			await this.#runFetchGroup(group, stream.writer, Timescale(info.timescale), msg.startFrame, msg.endFrame);
+			await this.#runFetchGroup(group, stream.writer, {
+				timescale: Timescale(info.timescale),
+				start: msg.startFrame,
+				end: msg.endFrame,
+			});
 			console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 			stream.close();
 			group.close();
@@ -577,9 +584,7 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		timescale: Timescale,
-		startFrame: number,
-		endFrame?: number,
+		{ timescale, start: startFrame, end: endFrame }: ServeFetch,
 	) {
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
@@ -607,7 +612,7 @@ export class Publisher {
 	async #runGroup(group: group.Consumer, { sub, timescale, start: startFrame, end: endFrame }: ServeGroup) {
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
-		const msg = new GroupMessage(sub, group.sequence, startFrame);
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		try {
 			const stream = await Writer.open(this.#quic);
 			await stream.u53(0); // stream type

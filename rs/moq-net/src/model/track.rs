@@ -838,7 +838,7 @@ impl TrackState {
 			return self.resume;
 		}
 
-		let max = self.max_sequence?;
+		let max = self.latest_group?;
 		match self.lookup.get(&max) {
 			// Still open *and* carrying frames, so the replacement continues it
 			// frame-by-frame. This holds even for an aborted group: readers that already
@@ -2933,6 +2933,46 @@ mod test {
 		assert_eq!(recv_datagram(&mut dg).sequence, 100);
 		// max_sequence advanced, so the next appended group/datagram continues past it.
 		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	/// Datagram sequence advances do not move a route takeover past an open group.
+	#[test]
+	fn resume_position_uses_the_latest_group() {
+		let mut datagram_only = track_producer("datagram-only", None);
+		let datagram_only_consumer = datagram_only.consume();
+		datagram_only
+			.write_datagram(Datagram {
+				sequence: 8,
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+		assert_eq!(
+			datagram_only_consumer.resume_position(),
+			None,
+			"a datagram creates no group position to resume"
+		);
+
+		let mut producer = track_producer("mixed", None);
+		let consumer = producer.consume();
+		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		producer
+			.write_datagram(Datagram {
+				sequence: 8,
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+
+		assert_eq!(
+			consumer.resume_position(),
+			Some(Position { group: 3, frame: 1 }),
+			"the replacement must continue the open group"
+		);
+		group.abort(Error::Cancel).unwrap();
 	}
 
 	#[tokio::test]

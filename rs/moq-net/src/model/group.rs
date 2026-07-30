@@ -346,6 +346,9 @@ impl Producer {
 	/// first frame; afterwards it returns [`Error::Closed`].
 	pub fn start_at(&mut self, index: u64) -> Result<()> {
 		let index = usize::try_from(index).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+		if index == usize::MAX {
+			return Err(Error::BoundsExceeded(crate::coding::BoundsExceeded));
+		}
 
 		let mut state = modify(&self.state)?;
 		// Every write advances `next_index` past `offset`, so this is "nothing written
@@ -379,12 +382,16 @@ impl Producer {
 		if state.fin.is_some() {
 			return Err(Error::Closed);
 		}
+		let next_index = state
+			.next_index
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
 		state.cache += size;
 		state.charge.add(size);
 		state.frames.push_back(Frame { timestamp, payload });
-		state.next_index += 1;
+		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.evict();
 		drop(state);
@@ -421,6 +428,10 @@ impl Producer {
 		if state.fin.is_some() {
 			return Err(Error::Closed);
 		}
+		let next_index = state
+			.next_index
+			.checked_add(1)
+			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		state.cache += frame.size;
 		state.charge.add(frame.size);
@@ -428,7 +439,7 @@ impl Producer {
 			timestamp,
 			buf: buf.clone(),
 		});
-		state.next_index += 1;
+		state.next_index = next_index;
 		state.evict();
 		drop(state);
 
@@ -1559,6 +1570,16 @@ mod test {
 		let mut producer = Info { sequence: 1 }.produce();
 		producer.finish().unwrap();
 		assert!(matches!(producer.start_at(1), Err(Error::Closed)));
+	}
+
+	/// The start must leave room for at least one frame index.
+	#[test]
+	fn start_at_rejects_the_largest_index() {
+		let mut producer = Info { sequence: 0 }.produce();
+		assert!(matches!(
+			producer.start_at(usize::MAX as u64),
+			Err(Error::BoundsExceeded(_))
+		));
 	}
 
 	/// The per-frame size cap (the group byte budget) is enforced before allocating.

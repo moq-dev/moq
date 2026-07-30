@@ -990,6 +990,7 @@ mod tests {
 				peer_setup: Default::default(),
 				cost: None,
 				tasks,
+				going_away: Default::default(),
 			});
 			let mut broadcast = crate::broadcast::Info::new().produce();
 			let producer = broadcast.create_track("catalog.json", None).unwrap();

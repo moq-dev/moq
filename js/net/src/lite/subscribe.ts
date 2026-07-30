@@ -7,7 +7,20 @@ import { hasFrameBounds, Version } from "./version.ts";
  * Encode the trailing `Frame Start` / `Frame End` pair shared by SUBSCRIBE and
  * SUBSCRIBE_UPDATE. A no-op before lite-06, which has nowhere to put them.
  */
-async function encodeFrameBounds(w: Writer, version: Version, startFrame: number, endFrame?: number) {
+async function encodeFrameBounds(
+	w: Writer,
+	version: Version,
+	{
+		startGroup,
+		startFrame,
+		endGroup,
+		endFrame,
+	}: { startGroup?: number; startFrame: number; endGroup?: number; endFrame?: number },
+) {
+	if ((startFrame !== 0 && startGroup === undefined) || (endFrame !== undefined && endGroup === undefined)) {
+		throw new Error("frame bound without a group bound");
+	}
+
 	if (!hasFrameBounds(version)) {
 		// Silently widening to the whole group would deliver frames we excluded.
 		if (startFrame !== 0 || endFrame !== undefined) {
@@ -87,7 +100,7 @@ export class SubscribeUpdate {
 				await w.u53(this.maxLatency);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
-				await encodeFrameBounds(w, version, this.startFrame, this.endFrame);
+				await encodeFrameBounds(w, version, this);
 				break;
 		}
 	}
@@ -196,7 +209,7 @@ export class Subscribe {
 				await w.u53(this.maxLatency);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
-				await encodeFrameBounds(w, version, this.startFrame, this.endFrame);
+				await encodeFrameBounds(w, version, this);
 				break;
 		}
 	}

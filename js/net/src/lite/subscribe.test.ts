@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
+	Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
@@ -36,6 +38,15 @@ async function encode(version: Version, resp: SubscribeResponse): Promise<Uint8A
 async function responseRoundtrip(version: Version, resp: SubscribeResponse): Promise<SubscribeResponse> {
 	const reader = new Reader(undefined, await encode(version, resp));
 	return decodeSubscribeResponse(reader, version);
+}
+
+async function encodeSubscribe(msg: Subscribe): Promise<void> {
+	const writer = new Writer(new WritableStream<Uint8Array>());
+	try {
+		await msg.encode(writer, Version.DRAFT_06);
+	} finally {
+		writer.close();
+	}
 }
 
 test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => {
@@ -80,4 +91,19 @@ test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
 
 test("SUBSCRIBE_OK is rejected on draft-05", async () => {
 	await expect(encode(Version.DRAFT_05, { ok: new SubscribeOk({ priority: 1 }) })).rejects.toThrow();
+});
+
+test("frame bounds without their group bounds are rejected before encoding", async () => {
+	const base = {
+		id: 1n,
+		broadcast: Path.from("room"),
+		track: "video",
+		priority: 0,
+	};
+	await expect(encodeSubscribe(new Subscribe({ ...base, startFrame: 3 }))).rejects.toThrow(
+		"frame bound without a group bound",
+	);
+	await expect(encodeSubscribe(new Subscribe({ ...base, endFrame: 7 }))).rejects.toThrow(
+		"frame bound without a group bound",
+	);
 });

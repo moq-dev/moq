@@ -521,7 +521,10 @@ export class Subscriber {
 
 			try {
 				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage(broadcast, track, priority, sequence).encode(stream.writer, this.version);
+				await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(
+					stream.writer,
+					this.version,
+				);
 			} catch (err: unknown) {
 				stream.abort(error(err));
 				throw err;

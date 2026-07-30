@@ -16,7 +16,15 @@ export class Group {
 	 */
 	frameStart: number;
 
-	constructor(subscribe: bigint, sequence: number, frameStart = 0) {
+	constructor({
+		subscribe,
+		sequence,
+		frameStart = 0,
+	}: {
+		subscribe: bigint;
+		sequence: number;
+		frameStart?: number;
+	}) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.frameStart = frameStart;
@@ -37,7 +45,7 @@ export class Group {
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
-		return new Group(subscribe, sequence, frameStart);
+		return new Group({ subscribe, sequence, frameStart });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

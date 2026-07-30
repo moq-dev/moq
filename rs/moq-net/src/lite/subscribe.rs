@@ -78,7 +78,14 @@ impl Message for Subscribe<'_> {
 			}
 		}
 
-		encode_frame_bounds(w, version, self.start_frame, self.end_frame)?;
+		encode_frame_bounds(
+			w,
+			version,
+			self.start_group,
+			self.start_frame,
+			self.end_group,
+			self.end_frame,
+		)?;
 
 		Ok(())
 	}
@@ -114,9 +121,15 @@ fn decode_frame_bounds<R: bytes::Buf>(
 fn encode_frame_bounds<W: bytes::BufMut>(
 	w: &mut W,
 	version: Version,
+	start_group: Option<u64>,
 	start_frame: u64,
+	end_group: Option<u64>,
 	end_frame: Option<u64>,
 ) -> Result<(), EncodeError> {
+	if (start_frame != 0 && start_group.is_none()) || (end_frame.is_some() && end_group.is_none()) {
+		return Err(EncodeError::InvalidState);
+	}
+
 	if !version.has_frame_bounds() {
 		// Nothing carries the bounds, so silently widening to the whole group would
 		// deliver frames the caller excluded. Refuse instead.
@@ -337,7 +350,14 @@ impl Message for SubscribeUpdate {
 			None => 0u64.encode(w, version)?,
 		}
 
-		encode_frame_bounds(w, version, self.start_frame, self.end_frame)?;
+		encode_frame_bounds(
+			w,
+			version,
+			self.start_group,
+			self.start_frame,
+			self.end_group,
+			self.end_frame,
+		)?;
 
 		Ok(())
 	}
@@ -601,10 +621,16 @@ mod test {
 		msg.end_frame = None;
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut buf, Version::Lite06Wip).unwrap();
 		assert!(matches!(
-			Subscribe::decode_msg(&mut buf.as_slice(), Version::Lite06Wip),
-			Err(DecodeError::InvalidSubscribeLocation)
+			msg.encode_msg(&mut buf, Version::Lite06Wip),
+			Err(EncodeError::InvalidState)
+		));
+
+		msg.start_frame = 0;
+		msg.end_frame = Some(7);
+		assert!(matches!(
+			msg.encode_msg(&mut buf, Version::Lite06Wip),
+			Err(EncodeError::InvalidState)
 		));
 	}
 

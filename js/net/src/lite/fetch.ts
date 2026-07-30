@@ -28,14 +28,21 @@ export class Fetch {
 	 */
 	endFrame?: number;
 
-	constructor(
-		broadcast: Path.Valid,
-		track: string,
-		priority: number,
-		group: number,
+	constructor({
+		broadcast,
+		track,
+		priority,
+		group,
 		startFrame = 0,
-		endFrame?: number,
-	) {
+		endFrame,
+	}: {
+		broadcast: Path.Valid;
+		track: string;
+		priority: number;
+		group: number;
+		startFrame?: number;
+		endFrame?: number;
+	}) {
 		this.broadcast = broadcast;
 		this.track = track;
 		this.priority = priority;
@@ -66,7 +73,7 @@ export class Fetch {
 		const group = await r.u53();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch(broadcast, track, priority, group);
+			return new Fetch({ broadcast, track, priority, group });
 		}
 
 		const startFrame = await r.u53();
@@ -75,7 +82,14 @@ export class Fetch {
 			throw new Error("fetch frame range ends before it starts");
 		}
 
-		return new Fetch(broadcast, track, priority, group, startFrame, endFrame > 0 ? endFrame - 1 : undefined);
+		return new Fetch({
+			broadcast,
+			track,
+			priority,
+			group,
+			startFrame,
+			endFrame: endFrame > 0 ? endFrame - 1 : undefined,
+		});
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
