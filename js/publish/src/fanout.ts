@@ -154,7 +154,8 @@ export class Fanout<T> {
 			}
 
 			for (const target of this.#readers) {
-				// The last reader can take the original; everyone before it needs its own copy.
+				// Every reader takes its own copy, including the last: handing one of them the
+				// original would leave it closing a value the fanout still owns.
 				this.#push(target, this.#clone ? this.#clone(value) : value);
 			}
 
