@@ -134,9 +134,8 @@ pub struct Driver {
 	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
 	// result) doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
-	// Retains the previous poll's waiter so its kio registrations stay live until
-	// the next poll replaces it (same dance as `kio::wait`).
-	waiter: Option<kio::Waiter>,
+	// Retains the waiter across `Future` polls so its kio registrations stay live.
+	waiter: kio::WaiterCell,
 }
 
 impl Driver {
@@ -186,11 +185,10 @@ impl Future for Driver {
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = &mut *self;
-		// Replacing drops the previous waiter, keeping this one live until the next
-		// poll so any kio registrations it made survive (see `kio::wait`).
-		let waiter = kio::Waiter::new(cx.waker().clone());
-		let result = this.poll(&waiter);
-		this.waiter = Some(waiter);
+		// Take the cell so its borrow doesn't overlap the `&mut self` poll below.
+		let mut cell = std::mem::take(&mut this.waiter);
+		let result = this.poll(cell.register(cx));
+		this.waiter = cell;
 		result
 	}
 }
@@ -250,7 +248,7 @@ impl Session {
 			protocol,
 			maintenance,
 			result: None,
-			waiter: None,
+			waiter: kio::WaiterCell::new(),
 		};
 
 		(session, driver)
