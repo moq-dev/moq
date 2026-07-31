@@ -3,7 +3,7 @@
 //! The IETF draft replacement for hang's Legacy format. Each moq frame
 //! holds a small property block (timestamp, optional per-frame
 //! timescale) followed by the codec bitstream. Defaults to microsecond
-//! timestamps. See [draft-ietf-moq-loc](https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html).
+//! timestamps. See [draft-ietf-moq-loc-04](https://www.ietf.org/archive/id/draft-ietf-moq-loc-04.html).
 
 use std::task::Poll;
 

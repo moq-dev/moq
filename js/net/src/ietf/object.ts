@@ -3,8 +3,16 @@ import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 const GROUP_END = 0x03;
-const PROP_TIMESTAMP = 0x06n;
+
+// MOQ Object Property ids, shared with draft-ietf-moq-loc-04.
 const PROP_TIMESCALE = 0x08n;
+const PROP_TIMESTAMP = 0x10n;
+
+// The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only. Draft-03's
+// body text and its IANA table disagreed (0x0A vs 0x06); this is the table's value,
+// which is what shipped. Draft-04 assigns 0x0A to Secure Objects private properties,
+// so it is not accepted here.
+const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
 // 11.4.2. moq-lite always starts subgroups at object 0, so the bit carries no
@@ -43,11 +51,13 @@ async function encodeObjectPropertyType(
 	await w.u62(encoded);
 }
 
+// Timescale is written first because property type deltas are unsigned, so
+// properties have to appear in ascending type order.
 async function encodeObjectTime(w: Writer, timestamp: Timestamp, version: IetfVersion | undefined): Promise<void> {
-	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
-	await w.u62(BigInt(Math.round(timestamp.value)));
-	await encodeObjectPropertyType(w, PROP_TIMESCALE, PROP_TIMESTAMP, version);
+	await encodeObjectPropertyType(w, PROP_TIMESCALE, 0n, version);
 	await w.u62(BigInt(timestamp.scale));
+	await encodeObjectPropertyType(w, PROP_TIMESTAMP, PROP_TIMESCALE, version);
+	await w.u62(BigInt(Math.round(timestamp.value)));
 }
 
 async function encodeObjectExtensions(
@@ -95,7 +105,7 @@ async function decodeObjectTime(r: Reader, version: IetfVersion | undefined): Pr
 
 		if (id % 2n === 0n) {
 			const value = await r.u62();
-			if (id === PROP_TIMESTAMP) {
+			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
 				timestamp = value;
 			} else if (id === PROP_TIMESCALE) {
 				timescale = value;

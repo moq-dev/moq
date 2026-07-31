@@ -7,9 +7,16 @@ use super::Version;
 use crate::ietf::Param;
 
 /// MOQ Object Property IDs (the MOQ Object Properties registry, shared with
-/// draft-ietf-moq-loc). Even type ids carry a single varint value.
-const PROP_TIMESTAMP: u64 = 0x06;
+/// draft-ietf-moq-loc-04). Even type ids carry a single varint value.
 const PROP_TIMESCALE: u64 = 0x08;
+const PROP_TIMESTAMP: u64 = 0x10;
+
+/// The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only.
+///
+/// Draft-03's body text and its IANA table disagreed (0x0A vs 0x06); this is the
+/// table's value, which is what we and other implementations shipped. Draft-04
+/// assigns 0x0A to Secure Objects private properties, so it is not accepted here.
+const PROP_TIMESTAMP_DRAFT03: u64 = 0x06;
 
 /// Encode a frame's presentation timestamp as moq-transport Object Properties.
 ///
@@ -17,15 +24,18 @@ const PROP_TIMESCALE: u64 = 0x08;
 /// reads the same bytes on drafts that delta-encode KVP type ids. The Timestamp
 /// value is always absolute. Writes the raw KVP bytes
 /// (no outer length prefix); the caller frames the block with its byte length.
+///
+/// Timescale is written first because KVP type deltas are unsigned, so properties
+/// have to appear in ascending type order.
 pub fn encode_object_time<W: bytes::BufMut>(
 	w: &mut W,
 	timestamp: Timestamp,
 	version: Version,
 ) -> Result<(), EncodeError> {
-	encode_object_property_type(w, PROP_TIMESTAMP, 0, version)?;
-	timestamp.value().encode(w, version)?;
-	encode_object_property_type(w, PROP_TIMESCALE, PROP_TIMESTAMP, version)?;
+	encode_object_property_type(w, PROP_TIMESCALE, 0, version)?;
 	u64::from(timestamp.scale()).encode(w, version)?;
+	encode_object_property_type(w, PROP_TIMESTAMP, PROP_TIMESCALE, version)?;
+	timestamp.value().encode(w, version)?;
 	Ok(())
 }
 
@@ -42,7 +52,7 @@ fn encode_object_property_type<W: bytes::BufMut>(
 	encoded.encode(w, version)
 }
 
-/// Decode the Timestamp (0x06) + Timescale (0x08) Object Properties from an object's
+/// Decode the Timescale (0x08) + Timestamp (0x10) Object Properties from an object's
 /// extension block, skipping any other properties. Returns `None` when no Timestamp
 /// property is present; a missing Timescale defaults to microseconds (the registry default).
 pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Option<Timestamp>, DecodeError> {
@@ -65,7 +75,7 @@ pub fn decode_object_time<R: bytes::Buf>(r: &mut R, version: Version) -> Result<
 			// Even type: a single varint value.
 			let value = u64::decode(r, version)?;
 			match abs {
-				PROP_TIMESTAMP => timestamp = Some(value),
+				PROP_TIMESTAMP | PROP_TIMESTAMP_DRAFT03 => timestamp = Some(value),
 				PROP_TIMESCALE => timescale = Some(value),
 				_ => {}
 			}
@@ -344,13 +354,13 @@ mod tests {
 		encode_object_time(&mut buf, ts, Version::Draft15).unwrap();
 
 		let mut bytes = buf.clone().freeze();
-		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), PROP_TIMESTAMP);
-		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), ts.value());
 		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), PROP_TIMESCALE);
 		assert_eq!(
 			u64::decode(&mut bytes, Version::Draft15).unwrap(),
 			u64::from(ts.scale())
 		);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), PROP_TIMESTAMP);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft15).unwrap(), ts.value());
 		assert!(!bytes.has_remaining());
 
 		let mut bytes = buf.freeze();
@@ -366,26 +376,26 @@ mod tests {
 		encode_object_time(&mut buf, ts, Version::Draft16).unwrap();
 
 		let mut bytes = buf.freeze();
-		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), PROP_TIMESTAMP);
-		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), ts.value());
-		assert_eq!(
-			u64::decode(&mut bytes, Version::Draft16).unwrap(),
-			PROP_TIMESCALE - PROP_TIMESTAMP
-		);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), PROP_TIMESCALE);
 		assert_eq!(
 			u64::decode(&mut bytes, Version::Draft16).unwrap(),
 			u64::from(ts.scale())
 		);
+		assert_eq!(
+			u64::decode(&mut bytes, Version::Draft16).unwrap(),
+			PROP_TIMESTAMP - PROP_TIMESCALE
+		);
+		assert_eq!(u64::decode(&mut bytes, Version::Draft16).unwrap(), ts.value());
 		assert!(!bytes.has_remaining());
 	}
 
 	#[test]
 	fn test_object_time_decodes_draft14_absolute_timescale() {
 		let mut buf = bytes::BytesMut::new();
-		PROP_TIMESTAMP.encode(&mut buf, Version::Draft14).unwrap();
-		42u64.encode(&mut buf, Version::Draft14).unwrap();
 		PROP_TIMESCALE.encode(&mut buf, Version::Draft14).unwrap();
 		u64::from(Timescale::MILLI).encode(&mut buf, Version::Draft14).unwrap();
+		PROP_TIMESTAMP.encode(&mut buf, Version::Draft14).unwrap();
+		42u64.encode(&mut buf, Version::Draft14).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = decode_object_time(&mut bytes, Version::Draft14).unwrap().unwrap();
@@ -397,13 +407,26 @@ mod tests {
 	#[test]
 	fn test_object_time_defaults_to_micros() {
 		let mut buf = bytes::BytesMut::new();
-		// Just a 0x06 Timestamp property, no 0x08.
+		// Just a 0x10 Timestamp property, no 0x08.
 		PROP_TIMESTAMP.encode(&mut buf, Version::Draft18).unwrap();
 		1234u64.encode(&mut buf, Version::Draft18).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
 		assert_eq!(decoded.value(), 1234);
+		assert_eq!(decoded.scale(), Timescale::MICRO);
+	}
+
+	/// A peer on draft-ietf-moq-loc-03 wrote the Timestamp at 0x06; still decode it.
+	#[test]
+	fn test_object_time_decodes_draft03_timestamp() {
+		let mut buf = bytes::BytesMut::new();
+		PROP_TIMESTAMP_DRAFT03.encode(&mut buf, Version::Draft18).unwrap();
+		777u64.encode(&mut buf, Version::Draft18).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = decode_object_time(&mut bytes, Version::Draft18).unwrap().unwrap();
+		assert_eq!(decoded.value(), 777);
 		assert_eq!(decoded.scale(), Timescale::MICRO);
 	}
 
