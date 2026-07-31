@@ -104,8 +104,17 @@ Negotiating this extension on a session also enables the extended NAMESPACE mess
 A relay that negotiated this extension on a downstream session MUST include the HOP_PATH parameter on every PUBLISH_NAMESPACE and NAMESPACE it sends on that session, and MUST apply the peer's declared Hop ID as described in [Path Selection](#path-selection).
 A receiver that negotiated this extension and receives a PUBLISH_NAMESPACE or NAMESPACE without HOP_PATH MUST close the session with a PROTOCOL_VIOLATION.
 
-Message parameters in {{moqt}} have no generic skip rule: a receiver must know a parameter's serialization to parse past it, so an endpoint MUST NOT send HOP_PATH on a session that did not negotiate the extension.
-A relay forwarding an advertisement into a non-supporting session therefore strips HOP_PATH and ROUTE_COST (and, for NAMESPACE, the appended Parameters field); the advertisement loses its hop and cost information.
+Message parameters in {{moqt}} have no skip rule at all: an endpoint that receives a Message Parameter it does not know MUST close the session with a PROTOCOL_VIOLATION ({{moqt}} Section 2.5), even when the type is even and its value would be trivially parseable.
+An endpoint therefore MUST NOT send HOP_PATH or ROUTE_COST on a session that did not negotiate the extension.
+A relay forwarding an advertisement into a non-supporting session strips both (and, for NAMESPACE, the appended Parameters field); the advertisement loses its hop and cost information.
+
+The two parameters are one capability, not two.
+An endpoint that sends the RELAY_HOPS Setup Option asserts that it understands HOP_PATH **and** ROUTE_COST, and a peer that negotiated RELAY_HOPS MAY send either without further signalling.
+Splitting them would gain nothing and cost correctness: because an unknown parameter is fatal rather than ignorable, a receiver that opted into one but not the other would have to be told which, and every sender would have to track it per session.
+
+That fatality also constrains how this extension may grow.
+A future revision MUST NOT add a third parameter under the RELAY_HOPS option, because an endpoint implementing this document would negotiate RELAY_HOPS, receive the unknown parameter, and be required to close the session.
+Any new parameter needs its own Setup Option, which the same {{moqt}} section makes safe: unknown *Setup Options* are ignored, so an endpoint that does not recognize the new option simply never receives the parameter.
 
 
 # Hop IDs
