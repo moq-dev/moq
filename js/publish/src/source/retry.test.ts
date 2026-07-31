@@ -205,6 +205,58 @@ test("a replug recovers a capture whose retries all failed", async () => {
 	camera.close();
 });
 
+test("picking a different device revives a capture whose retries all failed", async () => {
+	const media = install(new FakeMediaDevices());
+	media.devices = [device("cam"), device("cam2")];
+
+	const camera = new Camera({ enabled: true });
+	await settle();
+
+	// Burn the budget: every attempt hands back a dead track.
+	media.bornDead = true;
+	camera.device.preferred.set("cam");
+	await settle(40);
+
+	const spent = media.tracks.length;
+	expect(camera.out.source.peek()).toBeUndefined();
+
+	// Selecting another device is the user's obvious recovery, and the device list has not changed,
+	// so nothing else would rerun the capture.
+	media.bornDead = false;
+	camera.device.preferred.set("cam2");
+	await settle(40);
+
+	expect(media.tracks.length).toBeGreaterThan(spent);
+	expect(published(camera.out.source.peek())).toBe(media.latest());
+
+	camera.close();
+});
+
+test("fixing a constraint revives a capture whose retries all failed", async () => {
+	const media = install(new FakeMediaDevices());
+
+	const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
+	await settle();
+
+	// An impossible constraint fails instantly on every attempt, which is the quickest way to spend
+	// the whole budget.
+	media.missing = true;
+	mic.constraints.set({ channelCount: 98 });
+	await settle(40);
+
+	const spent = media.tracks.length;
+	expect(mic.out.source.peek()).toBeUndefined();
+
+	media.missing = false;
+	mic.constraints.set({ channelCount: 1 });
+	await settle(40);
+
+	expect(media.tracks.length).toBeGreaterThan(spent);
+	expect(published(mic.out.source.peek())).toBe(media.latest());
+
+	mic.close();
+});
+
 test("unrelated device churn does not disturb a healthy capture", async () => {
 	const media = install(new FakeMediaDevices());
 

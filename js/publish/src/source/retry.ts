@@ -20,17 +20,28 @@ export class Retry {
 
 	readonly #rerun = new Signal(0);
 
-	// Deliberately a plain field: effect reruns must not unwind it, or the budget never runs out.
+	// Deliberately plain fields: effect reruns must not unwind them, or the budget never runs out.
 	#failures = 0;
+	#settings: unknown[] | undefined;
 
 	/**
 	 * Subscribe the capture effect and report whether an attempt is still worth making.
 	 *
 	 * False means the budget is spent: return from the run without capturing, and the previous run's
 	 * cleanup clears whatever it published.
+	 *
+	 * The budget belongs to `settings`, the caller's live capture settings. Changing any of them is
+	 * new intent rather than another go at the same thing, so it starts a fresh budget: picking a
+	 * different device, or fixing a constraint no device could satisfy, revives a spent capture.
 	 */
-	begin(effect: Effect): boolean {
+	begin(effect: Effect, settings: unknown[]): boolean {
 		effect.get(this.#rerun);
+
+		if (settings.some((setting, i) => setting !== this.#settings?.[i])) {
+			this.#settings = settings;
+			this.#failures = 0;
+		}
+
 		return this.#failures <= Retry.LIMIT;
 	}
 

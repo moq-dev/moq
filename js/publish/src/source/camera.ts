@@ -70,19 +70,21 @@ export class Camera {
 			return;
 		}
 
-		if (!this.#retry.begin(effect)) {
-			// Out of budget. Only a change to what is plugged in is new information worth another
-			// attempt, so watch the device list here and not while healthy, where a rerun would
-			// restart a working capture for unrelated device churn.
+		// Read the settings before checking the budget, so changing one both reruns this effect and
+		// buys it a fresh budget.
+		const device = effect.get(this.device.out.requested);
+		const constraints = effect.get(this.constraints);
+
+		if (!this.#retry.begin(effect, [device, constraints])) {
+			// Out of budget with the same settings. Only a change to what is plugged in is new
+			// information worth another attempt, so watch the device list here and not while
+			// healthy, where a rerun would restart a working capture for unrelated device churn.
 			const spent = this.device.out.available.peek();
 			effect.subscribe(this.device.out.available, (available) => {
 				if (available !== spent) this.#retry.refund();
 			});
 			return;
 		}
-
-		const device = effect.get(this.device.out.requested);
-		const constraints = effect.get(this.constraints) ?? {};
 
 		// Build final constraints with device selection, defaulting resolution unless overridden.
 		const finalConstraints: MediaTrackConstraints = {
