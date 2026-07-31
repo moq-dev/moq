@@ -57,14 +57,16 @@ That reuse is deliberate: a timestamp is only useful to a relay if every publish
 An endpoint that implements this document interoperates with a LOC endpoint without negotiation, and an endpoint that implements both writes one copy of each property, not two.
 
 These properties are self-describing and require no SETUP negotiation: a receiver that understands them uses them directly, and one that does not ignores them per {{moqt}}.
-Whenever a property is absent, including when neither endpoint implements this document, the defaults defined below apply: a Timescale of `1000` (milliseconds), and for an object with no Timestamp, the wall-clock arrival time of the object.
+TIMESCALE is what opts a track in.
+A track that carries it declares that its objects have media times and states the units; a track without it declares no timeline at all, and a receiver falls back to wall-clock arrival time for any age-based decision.
 
-That default differs from {{loc}}, which reads a track with no Timescale as microseconds.
-The difference is unreachable between conforming implementations because a publisher following this document always sends TIMESCALE explicitly (see [TIMESCALE Track Property](#timescale-track-property)), so the two never disagree about a timeline that is actually on the wire.
+There is deliberately no default timescale.
+A default would have to be guessed at exactly the moment the publisher said nothing, and a wrong guess is off by a factor of 1000 rather than detectably broken.
+Making presence the signal also keeps this document from contradicting {{loc}}, which reads a bare Timestamp as microseconds: a track this document describes always carries its own units, so the two never interpret the same bytes differently.
 
 
 # TIMESCALE Track Property
-The TIMESCALE property establishes the units for every Timestamp on a track.
+The TIMESCALE property opts a track into timestamps and establishes the units for every Timestamp on it.
 It is a track-level Key-Value-Pair, carried with the track's properties (see {{moqt}} Section 2.5 and Section 12).
 Because the value is a single integer, TIMESCALE uses an even Type so the value is a bare varint with no length prefix:
 
@@ -78,17 +80,21 @@ TIMESCALE Track Property {
 **Value**:
 The number of timestamp units per second.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (a typical audio sample rate), and `90000` (the RTP video clock).
-A publisher MUST send TIMESCALE on every track that carries timestamps, even when the value equals the default.
-Sending it always is what keeps a track readable by any receiver: {{loc}} defaults an absent Timescale to microseconds while this document defaults it to milliseconds, and an explicit value removes the question.
+A value of `0` is invalid; a receiver MUST treat a track that declares it as carrying no timeline.
 
-The absence of the property defaults to `1000` (milliseconds), so a track from a publisher that predates this document still has a usable timeline. A value of `0` is invalid and MUST be treated as this default.
+Absence is meaningful and is not an error.
+A track with no TIMESCALE has no media timeline: a receiver MUST NOT infer units for it, and MUST use wall-clock arrival time for age-based decisions on that track, exactly as it would for an object with no Timestamp.
+Publishing a timestamp is therefore a per-track decision the publisher states once, rather than something a receiver discovers by watching objects go by.
+
+A publisher that emits Timestamps MUST send TIMESCALE, including when the units are ones a receiver might otherwise assume.
+{{loc}} permits a bare Timestamp and reads it as microseconds; a receiver that also implements LOC MAY apply that interpretation to a track that omits TIMESCALE, and MUST NOT apply any other.
 
 The Timescale is fixed for the lifetime of the track and MUST NOT change.
 {{loc}} also registers TIMESCALE with Object scope, allowing a per-object override.
 A receiver that implements both applies such an override to that object alone; it does not redefine the track's timeline, and a publisher following this document SHOULD NOT send one.
 
-The Timescale is required to interpret the units of every Timestamp.
-The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12); a receiver that begins receiving objects before it has them cannot yet know whether a non-default Timescale applies, so it MUST fall back to wall-clock arrival time for any age-based decision until the properties arrive.
+The track's properties are delivered in SUBSCRIBE_OK or TRACK_STATUS ({{moqt}} Section 12).
+A receiver that begins receiving objects before it has them does not yet know whether the track is opted in, so it MUST fall back to wall-clock arrival time for any age-based decision until the properties arrive.
 
 
 # TIMESTAMP Object Property
@@ -113,8 +119,9 @@ TIMESTAMP (0x10) therefore follows any lower-numbered property in the same block
 Each Timestamp is absolute, not delta-encoded against a previous object.
 {{moqt}} does not guarantee reliable delivery of every object within a group or subgroup, so an object may be dropped or lost independently; an absolute timestamp remains correct regardless, whereas a delta would be corrupted by any missing predecessor.
 
-A publisher SHOULD attach TIMESTAMP to every object that has a media time.
+On a track that declares a TIMESCALE, a publisher SHOULD attach TIMESTAMP to every object that has a media time.
 An object with no TIMESTAMP has no media time; for age comparisons a receiver MUST treat its effective time as the wall-clock arrival time of the object, which avoids stalling expiration on objects that intentionally carry no timestamp (e.g. keep-alives or gap markers).
+The same fallback covers every object on a track that declares no TIMESCALE, so a receiver needs one rule, not two.
 
 ## Age-Based Dropping
 Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
