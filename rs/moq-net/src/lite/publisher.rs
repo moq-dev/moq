@@ -329,7 +329,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.to_owned();
 					let absolute = origin.absolute(&path).to_owned();
 
-					if broadcast.is_some() {
+					if let Some(broadcast) = broadcast {
+						// The same per-peer selection as the live loop: an initial path
+						// with no advertisable route (a reflection, or every hop through
+						// the peer's assigned identity) is filtered like a live announce.
+						let selected = Self::select_route(
+							&broadcast.routes(),
+							&broadcast.demand(),
+							self_origin,
+							exclude_hop,
+							version,
+							&absolute,
+						);
+						if selected.is_none() {
+							continue;
+						}
 						tracing::debug!(broadcast = %absolute, "announce");
 						if !init.contains(&suffix) {
 							init.push(suffix);
@@ -2236,5 +2250,74 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::lite::test_transport::SinkSession;
+
+	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
+	/// same per-peer route selection as the live loop: a broadcast whose only
+	/// route flows through the excluded hop (here the peer's assigned identity,
+	/// `Client::with_peer_origin`) is filtered from the initial set too.
+	#[tokio::test]
+	async fn announce_init_applies_route_selection() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let clean_publisher = crate::Origin::new(778).unwrap();
+		let self_origin = crate::Origin::new(1).unwrap();
+		let origin = crate::origin::Info::new(self_origin).produce();
+
+		let mut tainted_hops = OriginList::new();
+		tainted_hops.push(assigned).unwrap();
+		let _tainted = origin
+			.create_broadcast(
+				"echoed",
+				crate::broadcast::Route::new()
+					.with_hops(tainted_hops)
+					.with_announce(true),
+			)
+			.unwrap();
+
+		let mut clean_hops = OriginList::new();
+		clean_hops.push(clean_publisher).unwrap();
+		let _clean = origin
+			.create_broadcast(
+				"local",
+				crate::broadcast::Route::new().with_hops(clean_hops).with_announce(true),
+			)
+			.unwrap();
+
+		// Broadcast visibility is deferred until the executor ticks.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let mut stream = Stream::open(&session, Version::Lite01).await.unwrap();
+
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_announce(
+			&mut stream,
+			&consumer,
+			&mut announced,
+			crate::Path::new(""),
+			self_origin,
+			assigned.id(),
+			Version::Lite01,
+		));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let writes = log.writes.lock().unwrap();
+		assert!(
+			writes.windows(b"local".len()).any(|w| w == b"local"),
+			"clean broadcast in ANNOUNCE_INIT"
+		);
+		assert!(
+			!writes.windows(b"echoed".len()).any(|w| w == b"echoed"),
+			"echoed broadcast filtered from ANNOUNCE_INIT"
+		);
 	}
 }
