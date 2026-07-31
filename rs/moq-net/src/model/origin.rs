@@ -2576,7 +2576,7 @@ impl Consumer {
 
 	/// [`Self::resolve`] reduced to "can I read it": the peek the tests assert on.
 	#[cfg(test)]
-	fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
+	pub(crate) fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
 		match self.resolve(path) {
 			Resolved::Found(broadcast) => Some(broadcast),
 			Resolved::Excluded | Resolved::Missing => None,

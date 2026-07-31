@@ -58,6 +58,9 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// The peer's SETUP (lite-05+), shared with the subscriber half that reads
 	/// it. Carries the peer's declared origin id for split-horizon serving.
 	pub peer_setup: super::PeerSetup,
+	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	/// declare one itself. See `Client::with_peer_origin`.
+	pub peer_origin: Option<Origin>,
 }
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -68,6 +71,11 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
+	// The identity assigned to the peer by `Client::with_peer_origin`, standing
+	// in wherever the peer declines to declare one. The data-plane half (serving
+	// from a chain that excludes it) is applied by the client on the origin
+	// handle itself; here it only backs the announce filter.
+	peer_origin: Option<Origin>,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
@@ -86,6 +94,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			origin: config.origin,
 			self_origin,
 			peer_setup: config.peer_setup,
+			peer_origin: config.peer_origin,
 			serving: std::sync::OnceLock::new(),
 			priority: Default::default(),
 			version: config.version,
@@ -222,13 +231,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// The identity whose routes we filter out. Lite-04/05 carry it per
 		// announce stream; lite-06+ reads the session-wide SETUP Origin
-		// parameter, the same identity the subscribe path excludes.
+		// parameter, the same identity the subscribe path excludes. A peer that
+		// declares nothing falls back to the identity the caller assigned it
+		// (`with_peer_origin`), if any.
+		let assigned = self.peer_origin.map(|origin| origin.id()).unwrap_or(0);
 		let exclude_hop = if self.version.has_exclude_hop() {
-			interest.exclude_hop
+			match interest.exclude_hop {
+				0 => assigned,
+				id => id,
+			}
 		} else if self.version.has_setup_stream() {
-			self.peer_setup.origin().await.map(|origin| origin.id()).unwrap_or(0)
+			self.peer_setup
+				.origin()
+				.await
+				.map(|origin| origin.id())
+				.unwrap_or(assigned)
 		} else {
-			0
+			assigned
 		};
 
 		// If the requested prefix is outside our scope (an empty origin, or a token

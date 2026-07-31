@@ -64,6 +64,9 @@ pub fn start<S: web_transport_trait::Session>(
 	// Traffic stats are attributed through these origin handles: tag them with
 	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
 	subscribe: Option<origin::Producer>,
+	// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	// declare one itself. See `Client::with_peer_origin`.
+	peer_origin: Option<Origin>,
 	// The version of the protocol to use.
 	version: Version,
 	// The capabilities (and optional request path) we advertise in our SETUP message.
@@ -157,6 +160,7 @@ pub fn start<S: web_transport_trait::Session>(
 		origin: publish,
 		version,
 		peer_setup: peer_setup.clone(),
+		peer_origin,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -164,6 +168,7 @@ pub fn start<S: web_transport_trait::Session>(
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
+		peer_origin,
 		// The dialing side prices the link in its own SETUP, so that is also where the
 		// subscriber reads our price from. A server never sets one, leaving the
 		// subscriber to take the price out of the client's SETUP instead.

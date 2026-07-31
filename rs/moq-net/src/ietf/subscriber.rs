@@ -78,11 +78,13 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// A random per-connection origin stamped into the hop chain of every
-	// broadcast. moq-transport never carries hop ids on the wire, so each
-	// upstream session needs a stable, unique identity in the hop list for two
-	// sessions publishing the same path to resolve as distinct routes instead
-	// of colliding on an empty chain.
+	// The origin stamped into the hop chain of every broadcast. moq-transport
+	// never carries hop ids on the wire, so each upstream session needs a stable
+	// identity in the hop list for two sessions publishing the same path to
+	// resolve as distinct routes instead of colliding on an empty chain. Random
+	// per connection unless the caller assigned the peer an identity
+	// (`Client::with_peer_origin`), which then also makes the route recognizable
+	// across sessions dialing the same relay.
 	session_origin: crate::Origin,
 	state: Lock<State>,
 	tasks: Tasks,
@@ -108,12 +110,19 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: origin::Producer, control: Control, version: Version, tasks: Tasks) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Producer,
+		control: Control,
+		peer_origin: Option<crate::Origin>,
+		version: Version,
+		tasks: Tasks,
+	) -> Self {
 		Self {
 			session,
 			origin,
 			control,
-			session_origin: crate::Origin::random(),
+			session_origin: peer_origin.unwrap_or_else(crate::Origin::random),
 			state: Default::default(),
 			tasks,
 			version,
@@ -994,5 +1003,38 @@ mod tests {
 		remove_track_alias(&aliases, 7, RequestId(13));
 
 		assert_eq!(aliases.read().get(&7), Some(&RequestId(11)));
+	}
+
+	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
+	/// attributed to a random per-connection origin. An identity assigned via
+	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
+	/// resolve to one recognizable route.
+	#[tokio::test]
+	async fn assigned_peer_origin_attributes_announces() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			Some(assigned),
+			Version::Draft14,
+			tasks,
+		);
+
+		let _producer = subscriber
+			.start_announce(crate::Path::new("room/host").to_owned())
+			.unwrap();
+
+		// Broadcast visibility is deferred until the executor ticks.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		assert_eq!(hops, vec![assigned]);
 	}
 }

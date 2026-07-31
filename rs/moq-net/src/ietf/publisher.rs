@@ -20,17 +20,45 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
 	control: Control,
+	// The identity assigned to the peer by `Client::with_peer_origin`.
+	// moq-transport has no exclude-hop on the wire, so this is the only signal
+	// for filtering announces that would echo the peer's own broadcasts back at
+	// it; the data plane is covered by the exclusion the client set on `origin`.
+	peer_origin: Option<crate::Origin>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: origin::Consumer, control: Control, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Consumer,
+		control: Control,
+		peer_origin: Option<crate::Origin>,
+		version: Version,
+	) -> Self {
 		Self {
 			session,
 			origin,
 			control,
+			peer_origin,
 			version,
 		}
+	}
+
+	/// Whether an announced broadcast should be advertised to this peer: it needs
+	/// at least one advertisable route that doesn't flow through the identity the
+	/// peer was assigned. Checked at announce time only; a later route change
+	/// doesn't re-cross the filter (unlike moq-lite, which watches routes and
+	/// restarts announces), which is fine for the intended use of a fixed origin
+	/// standing in for an entire remote relay network.
+	fn advertisable(&self, broadcast: &crate::broadcast::Consumer) -> bool {
+		let Some(peer) = self.peer_origin else {
+			return true;
+		};
+		broadcast
+			.routes()
+			.iter()
+			.any(|route| route.announce && !route.hops.contains(&peer))
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
@@ -533,9 +561,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let suffix = path.to_owned();
 
 			match broadcast {
-				Some(_) => {
+				// A broadcast with no route avoiding the peer would only echo its own
+				// content back; skip it. The unannounce side is naturally a no-op for a
+				// namespace that was never announced (no stream to tear down).
+				Some(broadcast) if self.advertisable(&broadcast) => {
 					self.announce_namespace(suffix, &mut namespace_streams).await?;
 				}
+				Some(_) => {}
 				None => {
 					self.unannounce_namespace(&suffix, &mut namespace_streams).await;
 				}
@@ -681,14 +713,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			_ => {
 				let mut announced = origin.announced();
 
+				// Namespaces actually sent to the peer, so a filtered announce (no
+				// route avoiding the peer's assigned identity) never gets a dangling
+				// NamespaceDone.
+				let mut sent: std::collections::HashSet<crate::PathOwned> = std::collections::HashSet::new();
+
 				// Send initial NAMESPACE messages for currently active namespaces.
 				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
-					if broadcast.is_some() {
+					if let Some(broadcast) = broadcast {
+						if !self.advertisable(&broadcast) {
+							continue;
+						}
 						let suffix = path
 							.strip_prefix(&prefix)
 							.expect("origin returned invalid path")
 							.to_owned();
 						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+						sent.insert(suffix.clone());
 						stream.writer.encode(&ietf::Namespace::ID).await?;
 						stream.writer.encode(&ietf::Namespace { suffix }).await?;
 					}
@@ -723,19 +764,80 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let absolute = origin.absolute(&path).to_owned();
 
 					match broadcast {
-						Some(_) => {
+						Some(broadcast) if self.advertisable(&broadcast) => {
 							tracing::debug!(broadcast = %absolute, "namespace");
+							sent.insert(suffix.clone());
 							stream.writer.encode(&ietf::Namespace::ID).await?;
 							stream.writer.encode(&ietf::Namespace { suffix }).await?;
 						}
+						Some(_) => {}
 						None => {
-							tracing::debug!(broadcast = %absolute, "namespace_done");
-							stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-							stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							// Only close out namespaces the peer actually saw.
+							if sent.remove(&suffix) {
+								tracing::debug!(broadcast = %absolute, "namespace_done");
+								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							}
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A broadcast whose every route flows through the peer's assigned identity
+	/// (`Client::with_peer_origin`) is never advertised to that peer; it would only
+	/// echo the peer's own content back at it. A broadcast with an independent
+	/// route still is.
+	#[tokio::test]
+	async fn assigned_peer_origin_filters_echoed_announces() {
+		let assigned = crate::Origin::new(777).unwrap();
+		let other = crate::Origin::new(778).unwrap();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let publisher = Publisher::new(
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			Some(assigned),
+			Version::Draft16,
+		);
+
+		let mut echoed_hops = crate::OriginList::new();
+		echoed_hops.push(assigned).unwrap();
+		let _echoed = origin
+			.create_broadcast(
+				"from/peer",
+				crate::broadcast::Route::new()
+					.with_hops(echoed_hops)
+					.with_announce(true),
+			)
+			.unwrap();
+
+		let mut local_hops = crate::OriginList::new();
+		local_hops.push(other).unwrap();
+		let _local = origin
+			.create_broadcast(
+				"from/us",
+				crate::broadcast::Route::new().with_hops(local_hops).with_announce(true),
+			)
+			.unwrap();
+
+		// Broadcast visibility is deferred until the executor ticks.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let echoed = consumer.get_broadcast("from/peer").unwrap();
+		assert!(!publisher.advertisable(&echoed));
+
+		let local = consumer.get_broadcast("from/us").unwrap();
+		assert!(publisher.advertisable(&local));
 	}
 }

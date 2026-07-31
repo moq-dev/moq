@@ -251,6 +251,13 @@ impl Client {
 		self
 	}
 
+	/// Assign an origin (hop) id to the peers this client dials, used whenever a
+	/// peer doesn't declare one itself; see [`moq_net::Client::with_peer_origin`].
+	pub fn with_peer_origin(mut self, origin: moq_net::Origin) -> Self {
+		self.moq = self.moq.with_peer_origin(origin);
+		self
+	}
+
 	/// Start a background reconnect loop that connects to the given URL,
 	/// waits for the session to close, then reconnects with exponential backoff.
 	///

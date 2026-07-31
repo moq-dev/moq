@@ -34,6 +34,9 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
+	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	/// declare one itself. See `Client::with_peer_origin`.
+	pub peer_origin: Option<crate::Origin>,
 	/// What this session's link costs, when we are the side that dialed it and so
 	/// owns the price. `None` on an accepted session, which reads the dialer's
 	/// price out of its SETUP instead so both ends agree.
@@ -54,12 +57,18 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// we also ask the peer to filter them out (AnnounceRequest.exclude_hop) so
 	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Origin,
-	// A random per-connection origin stamped into the hop chain of broadcasts
-	// from versions that don't carry real hop ids on the wire (Lite01/02/03).
-	// It gives each upstream session a stable, unique identity in the hop list
-	// so two sessions publishing the same path resolve as distinct routes
-	// instead of colliding on an empty/placeholder chain.
+	// The origin stamped into the hop chain of broadcasts from versions that
+	// don't carry real hop ids on the wire (Lite01/02/03). It gives each
+	// upstream session a stable identity in the hop list so two sessions
+	// publishing the same path resolve as distinct routes instead of colliding
+	// on an empty/placeholder chain. Random per connection unless the caller
+	// assigned the peer an identity (`peer_origin`), which then also makes the
+	// route recognizable across sessions.
 	session_origin: crate::Origin,
+	// The identity assigned to the peer by `Client::with_peer_origin`, standing
+	// in wherever the peer declines to declare one (an AnnounceOk reporting
+	// origin id 0).
+	peer_origin: Option<crate::Origin>,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -91,7 +100,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: crate::Origin::random(),
+			session_origin: config.peer_origin.unwrap_or_else(crate::Origin::random),
+			peer_origin: config.peer_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version: config.version,
@@ -244,7 +254,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// count of initial active announces that follow immediately.
 		let (responder_origin, initial_count) = if self.version.has_announce_ok() {
 			let ok: lite::AnnounceOk = stream.reader.decode().await?;
-			(Some(ok.origin), ok.active)
+			// A peer may legally report id 0 (no identity). When the caller assigned
+			// it one, stand that in so the route isn't loop-blind.
+			let origin = match ok.origin.id() {
+				0 => self.peer_origin.unwrap_or(ok.origin),
+				_ => ok.origin,
+			};
+			(Some(origin), ok.active)
 		} else {
 			(None, 0)
 		};
@@ -515,7 +531,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Guarantee at least one attributable hop for versions that did not provide
 		// one. Lite05 peers may legally advertise responder id 0; preserve it above
-		// rather than replacing it, even though that route stays loop-blind.
+		// rather than replacing it, even though that route stays loop-blind (the
+		// caller can assign an identity via `with_peer_origin`, substituted where
+		// the AnnounceOk is read).
 		if hops.is_empty() {
 			hops.push(self.session_origin)
 				.expect("an empty hop chain always has room for one entry");
@@ -870,6 +888,7 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
+			peer_origin: None,
 			cost: None,
 			tasks,
 		});
@@ -916,6 +935,51 @@ mod tests {
 		assert_eq!(msg.id, 0);
 		assert_eq!(msg.track, "catalog.json");
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
+	}
+
+	/// A peer that declares no identity gets attributed the origin the caller
+	/// assigned it (`Client::with_peer_origin`), so every session dialing the same
+	/// relay yields one recognizable hop instead of a random id per connection.
+	#[tokio::test]
+	async fn assigned_peer_origin_attributes_announces() {
+		let session = SinkSession::new(Default::default());
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session,
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			peer_origin: Some(assigned),
+			cost: None,
+			tasks,
+		});
+
+		// An announce with an empty chain and no responder id: the versions that
+		// carry no hop information on the wire.
+		let mut routes = HashMap::new();
+		let accepted = subscriber
+			.start_announce(
+				Path::new("room/host").to_owned(),
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				None,
+				&mut routes,
+			)
+			.unwrap();
+		assert!(accepted);
+
+		// Broadcast visibility is deferred until the executor ticks.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		assert_eq!(hops, vec![assigned]);
 	}
 }
 
