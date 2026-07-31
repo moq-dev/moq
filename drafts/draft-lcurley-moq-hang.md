@@ -469,10 +469,14 @@ Numbers are consecutive within a broadcast, anchoring HLS `EXT-X-MEDIA-SEQUENCE`
 The `pts` field is the segment's start and `duration` its length, both in the timeline's timescale.
 The next record's `pts` equals `pts + duration` unless content time itself jumped; a consumer SHOULD treat such a jump as a discontinuity.
 
-The `tracks` field maps each participating media track name to the group ranges it contributes.
+The `tracks` field maps each participating track name to the group ranges it contributes.
 Each range covers groups `start` through `end` inclusive, as used by moq-lite FETCH and SUBSCRIBE.
 More than one range means the group sequence is discontinuous inside the segment: the skipped groups never existed.
 A track absent from the map has no content for the span (a gap; HLS `EXT-X-GAP`).
+
+Participating tracks need not be audio or video.
+A catalog, or an application's own metadata track such as a chat log, is listed exactly like a media track, which is what lets a recording ({{recording}}) address all of them the same way.
+A consumer that only wants renditions therefore MUST select tracks by consulting the catalog rather than by assuming every name in the map is media.
 A record MUST tolerate and SHOULD preserve unknown fields, like the catalog.
 
 The `keyframe` field states whether the range's first group starts with a keyframe, i.e. whether a player can join or switch renditions there.
@@ -488,9 +492,19 @@ A publisher pacing itself SHOULD end a segment at the earliest point that is a g
 A minimum is always satisfiable, whereas a maximum is not: a single group longer than it cannot be divided.
 Where no such point exists because two tracks have different coarse cadences, a publisher MUST choose one of them rather than a point interior to any track's group.
 
-Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every participating track's groups for the span are known.
+Whatever the policy, a publisher MUST NOT emit a record until the segment is complete: every *pacing* track's groups for the span are known.
 Records are therefore self-contained and immediately servable, and the newest record is the live edge.
-An enrolled track that has produced nothing for the span holds the record back; a publisher that knows a track has stopped for good closes it, and the record then simply omits it (a gap).
+A pacing track that has produced nothing for the span holds the record back; a publisher that knows a track has stopped for good closes it, and the record then simply omits it (a gap).
+
+A pacing track is one whose groups arrive continuously, which is what makes them usable as boundaries.
+A track that publishes on its own schedule cannot pace: a catalog emits a group only when the renditions change, so a timeline waiting for it would stall the moment it went quiet.
+Such a track is *passive*: its groups are listed in whichever segment is open when they arrive, but it never determines a boundary and never holds a record back.
+A publisher SHOULD record its catalog this way, so a recording can resolve the renditions in effect at any segment.
+
+Placement of a passive track's groups is therefore by arrival rather than by content time: nothing waits for them, so a group that arrives after its segment has already been published is listed in the next one.
+The frames still carry their own timestamps, so no timing information is lost.
+A passive track whose group never closes (an append-log such as a `moq-json` stream) is listed once, in the segment its group opened in.
+A publisher that needs such content addressable per segment SHOULD roll the group at segment boundaries, which costs the shared compression window but makes each segment self-contained.
 
 A group that starts before the first boundary belongs to the first segment.
 The final segment of an ended broadcast has no closing boundary; its `duration` runs to the newest known content.
@@ -512,13 +526,15 @@ A broadcast with no timeline has no segments and cannot be recorded this way.
 A recording is a set of objects under a common prefix:
 
 ~~~
-<prefix>/.catalog/<segment>
 <prefix>/.timeline
 <prefix>/<track>/<segment>
 ~~~
 
-`<track>` is the media track's name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded.
-An encoded name therefore never contains `/` and never begins with `.`, so a track can neither collide with the reserved `.catalog` and `.timeline` names nor address anything outside the prefix.
+`<track>` is the track's name with every byte outside `A-Z a-z 0-9 _ -` percent-encoded.
+An encoded name therefore never contains `/` and never begins with `.`, so a track can neither collide with the reserved `.timeline` name nor address anything outside the prefix.
+
+Every track the timeline lists is stored the same way, including a passively enrolled catalog or metadata track ({{timeline-segmentation}}).
+There is no separate rule for non-media content: the catalog in effect at segment N is the newest catalog object numbered at or before N, found the same way a player finds the media.
 
 `<segment>` is the timeline record's `segment` value in decimal without leading zeros, so an object name is computed from a record rather than discovered by listing.
 
@@ -556,16 +572,13 @@ The timeline is needed to *find* an object, not to read one.
 
 Segment objects are immutable once written.
 
-## Timeline and Catalog Objects {#recording-metadata}
+## The Timeline Object {#recording-metadata}
 `.timeline` holds the frames of the timeline track verbatim, in order, using the track's own framing ({{timeline-framing}}).
+It is the one track not addressed by segment, because it is the index that names the segments.
 The object grows as the broadcast does, and its content is append-only: bytes once written never change.
 
 A reader starting fresh reads the object from the beginning, which the shared DEFLATE window requires anyway.
 A reader following a live recording issues a ranged GET from the offset it last read and feeds the new bytes to the decompressor it already holds: each frame's sync-flush block terminates its own compressed data, so the appended bytes decode without re-reading earlier ones.
-
-`.catalog/<segment>` holds one catalog frame ({{catalog}}), where `<segment>` is the first segment it applies to.
-The catalog in effect for segment N is the object with the highest number not greater than N, so a reader resolves the renditions available at any point in the recording without scanning.
-A publisher that updates the catalog more than once within a single segment records only the last, since the earlier states were never in effect at a segment boundary.
 
 ## Writer Behavior {#recording-writer}
 A writer subscribes to the broadcast, buffers each track's groups, and writes a track's segment object once that track's groups for the span are known.

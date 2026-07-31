@@ -114,6 +114,9 @@ interface TrackState {
 	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
 	closed: boolean;
+	// Never paces boundaries or gates completeness, even while open: groups are recorded into
+	// whichever segment is open when they arrive. See Producer.passive.
+	passive: boolean;
 }
 
 /**
@@ -161,16 +164,44 @@ export class Producer {
 	}
 
 	/**
-	 * Enroll the media track `name`, returning the {@link Recorder} it reports through.
+	 * Enroll the media track `name` as a pacing track, returning the {@link Recorder} it reports
+	 * through.
 	 *
 	 * The segment records key ranges by this name, and the track paces boundaries and gates
 	 * completeness until its recorder closes. Enroll a track when it is about to produce: an
 	 * enrolled but silent track holds every record back, by design, since a segment isn't
 	 * complete until every track's content is known. One recorder per track: enrolling the same
 	 * name again resets its state.
+	 *
+	 * This is for tracks whose groups arrive continuously, which is what makes them usable as
+	 * boundaries. A track that publishes on its own schedule belongs in {@link passive}.
 	 */
 	track(name: string): Recorder {
-		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false });
+		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false, passive: false });
+		return new Recorder(this, name);
+	}
+
+	/**
+	 * Enroll the track `name` without letting it influence segmentation, returning its
+	 * {@link Recorder}.
+	 *
+	 * A passive track's groups are recorded into whichever segment is open when they arrive, but
+	 * it never votes on where a boundary falls and never holds a record back. That is what a track
+	 * publishing on its own schedule needs: a catalog that emits a group only when the renditions
+	 * change, or an application's metadata track. Enrolling such a track with {@link track}
+	 * instead would stall the timeline for good, since a segment cannot end until every pacing
+	 * track has reported past its boundary.
+	 *
+	 * The trade is that a passive track's groups are placed by arrival rather than by content
+	 * time: nothing waits for them, so a group that shows up after its segment already flushed is
+	 * recorded in the next one. The frames still carry their own timestamps.
+	 *
+	 * A group that never closes (a `@moq/json` stream log) is recorded once, in the segment its
+	 * group opened in, and never again. Roll the group at segment boundaries if its content needs
+	 * to be addressable per segment.
+	 */
+	passive(name: string): Recorder {
+		this.#tracks.set(name, { pending: [], frontier: undefined, closed: false, passive: true });
 		return new Recorder(this, name);
 	}
 
@@ -295,9 +326,11 @@ export class Producer {
 	#advance(track: TrackState, pts: Time.Micro): void {
 		if (track.frontier === undefined || pts > track.frontier) track.frontier = pts;
 
-		// The first thing anybody reports anchors the first segment, so content produced before
-		// any boundary exists belongs to the oldest segment rather than to nowhere.
-		if (this.#start === undefined) this.#start = pts;
+		// The first thing a pacing track reports anchors the first segment, so content produced
+		// before any boundary exists belongs to the oldest segment rather than to nowhere. A
+		// passive track must not anchor it: a catalog published while the encoder is still warming
+		// up would otherwise stretch segment 0 across the whole startup gap.
+		if (this.#start === undefined && !track.passive) this.#start = pts;
 
 		this.#pump(false);
 	}
@@ -326,12 +359,13 @@ export class Producer {
 		if (!boundary) return false;
 		const [end, cut] = boundary;
 
-		// Every open track has to have reported at or past the boundary, proving its ranges for
-		// this segment are final. The track that voted for `end` has by construction; a track
-		// with shorter groups can still be behind it.
+		// Every open pacing track has to have reported at or past the boundary, proving its ranges
+		// for this segment are final. The track that voted for `end` has by construction; a track
+		// with shorter groups can still be behind it. A passive track is excluded: it may publish
+		// rarely or never again, so waiting on it would stall the timeline for good.
 		if (!finished) {
 			for (const track of this.#tracks.values()) {
-				if (track.closed) continue;
+				if (track.closed || track.passive) continue;
 				if (track.frontier === undefined || track.frontier < end) return false;
 			}
 		}
@@ -357,6 +391,7 @@ export class Producer {
 
 		let end: Time.Micro | undefined;
 		for (const track of this.#tracks.values()) {
+			if (track.passive) continue;
 			const candidate = track.pending.find((group) => group.pts >= threshold)?.pts;
 			if (candidate === undefined) {
 				// This track has produced nothing past the minimum yet, so ending the segment
