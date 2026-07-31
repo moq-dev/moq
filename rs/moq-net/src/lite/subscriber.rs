@@ -1127,6 +1127,56 @@ mod tests {
 		assert_eq!((bounds.start_group, bounds.start_frame), (Some(5), 3));
 	}
 
+	/// A subscription that asks for nothing opens nothing.
+	///
+	/// `Position::group(0)` is the empty range: nothing sorts below it. The wire cannot
+	/// say that, and the nearest thing it can say is "through group 0", which would
+	/// deliver the single group the caller excluded.
+	#[tokio::test]
+	async fn an_empty_range_opens_no_subscription() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		let empty = Subscription::default().with_end(Position::group(0));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "must not open a subscription");
+		assert!(h.wire().is_empty(), "nothing reached the wire");
+	}
+
+	/// Demand collapsing to nothing cancels the upstream rather than sending a bound
+	/// that means the opposite.
+	#[tokio::test]
+	async fn an_empty_range_cancels_a_live_subscription() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
+
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
+		let established = h.wire().len();
+
+		let empty = Subscription::default().with_end(Position::group(0));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "the upstream must be canceled");
+		assert_eq!(h.wire().len(), established, "no SUBSCRIBE_UPDATE claiming group 0");
+	}
+
 	/// The widening covers SUBSCRIBE_UPDATE too: a downstream peer asking for a frame
 	/// offset must not tear down an older upstream that is already serving.
 	#[tokio::test]
@@ -1181,10 +1231,16 @@ struct WireBounds {
 
 impl WireBounds {
 	fn new(start: Option<Position>, end: Option<Position>) -> Self {
+		// The empty range has no wire encoding, and flooring it below would ask for the
+		// group it excludes. `handle_subscription` drops such a subscription instead.
+		debug_assert!(
+			end != Some(Position::group(0)),
+			"an empty range cannot be encoded; it should have been dropped as no demand"
+		);
+
 		let (end_group, end_frame) = match end {
 			// An exclusive end at the head of a group means the group below it is the
-			// last one, and it is served whole. Saturating covers an end of (0, 0),
-			// which would serve nothing and which nothing produces.
+			// last one, and it is served whole.
 			Some(end) if end.frame == 0 => (Some(end.group.saturating_sub(1)), None),
 			Some(end) => (Some(end.group), Some(end.frame - 1)),
 			None => (None, None),
@@ -1568,6 +1624,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		supports_update: bool,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
+		// A range ending at the very first position asks for nothing. The wire has no
+		// encoding for that (`Group End` = 0 already means unbounded), and the closest it
+		// can say is "through group 0", which would deliver the one group the caller
+		// excluded. No demand at all is the faithful translation, and it is reachable
+		// only from a caller: every internal bound sits at or above the first frame.
+		let pref = pref.filter(|sub| sub.end != Some(Position::group(0)));
+
 		match pref {
 			Some(mut subscription) => {
 				self.widen_frame_bounds(&mut subscription);
