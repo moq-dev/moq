@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.5](https://github.com/moq-dev/moq/compare/moq-native-v0.19.4...moq-native-v0.19.5) - 2026-07-31
+
+### Added
+
+- *(relay)* expose internal nodes endpoint ([#2555](https://github.com/moq-dev/moq/pull/2555))
+
 ## [0.19.4](https://github.com/moq-dev/moq/compare/moq-native-v0.19.3...moq-native-v0.19.4) - 2026-07-29
 
 ### Added
