@@ -597,6 +597,11 @@ struct Current {
 	group: group::Consumer,
 }
 
+/// A route covering one position: the segment id, its track, and the segment's
+/// exclusive frame bound on the group (outer `None` when the group escapes the
+/// segment's range entirely, from [`frames`]).
+type Covering = (u64, track::Consumer, Option<Option<u64>>);
+
 impl Clone for Group {
 	fn clone(&self) -> Self {
 		// Cursors are per-reader, so the clone re-latches its own cursor over the
@@ -668,12 +673,7 @@ impl Group {
 	/// Locate the route owning `position`: the shared resolve behind the read
 	/// cursor and the finish probe. `dead` is the segment already given up on
 	/// for these frames. `Ready(None)` once nothing can ever serve them.
-	fn poll_covering(
-		&self,
-		position: Position,
-		dead: Option<u64>,
-		waiter: &kio::Waiter,
-	) -> Poll<Option<(u64, track::Consumer, Option<Option<u64>>)>> {
+	fn poll_covering(&self, position: Position, dead: Option<u64>, waiter: &kio::Waiter) -> Poll<Option<Covering>> {
 		let sequence = self.sequence;
 		let located = self.state.poll(waiter, |state| {
 			// Waiting for a replacement route only makes sense while one can still

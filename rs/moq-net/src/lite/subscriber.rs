@@ -1216,27 +1216,26 @@ mod tests {
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
 	}
 
-	/// A buffered SUBSCRIBE_START must not land once an update moved the start:
-	/// the declaration describes establish-time demand, no fresh START follows an
-	/// update, and applying it in either direction can strand readers (a stale
-	/// START(5) after an update to 8 would reopen 5..8 that the publisher no
-	/// longer serves). `updated` is what the response handler gates on.
+	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
+	/// it applies exactly while the current start matches that demand: an update
+	/// that moves the start makes it stale (applying it could reopen a range the
+	/// publisher no longer serves, or clamp one it still does), and an update
+	/// that moves back restores it (the publisher declared that range gone and
+	/// sends no replacement START).
 	#[tokio::test]
-	async fn buffered_start_is_stale_after_updates() {
+	async fn buffered_start_applies_iff_demand_matches() {
 		let mut h = Harness::new(Version::Lite05);
 		let mut sub = Sub::None;
 
 		let demand = |group: u64| Some(Subscription::default().with_start(Position::group(group)));
+		let applies = |sub: &Sub<SinkSession>| matches!(sub, Sub::Active(active) if active.start == active.requested);
 
 		// Establish from group 3; the peer's START is considered in flight.
 		h.serve
 			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
 			.await
 			.unwrap();
-		assert!(
-			matches!(&sub, Sub::Active(active) if !active.updated),
-			"a fresh subscription accepts its START"
-		);
+		assert!(applies(&sub), "a fresh subscription accepts its START");
 
 		// An end-only update leaves the start intact: the START stays valid.
 		h.serve
@@ -1253,20 +1252,22 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		assert!(
-			matches!(&sub, Sub::Active(active) if !active.updated),
-			"an unmoved start keeps the START applicable"
-		);
+		assert!(applies(&sub), "an unmoved start keeps the START applicable");
 
-		// The start moves: any buffered START is stale from here on.
+		// The start moves: a buffered START is stale while it sits elsewhere.
 		h.serve
 			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
 			.await
 			.unwrap();
-		assert!(
-			matches!(&sub, Sub::Active(active) if active.updated),
-			"a moved start must invalidate a buffered START"
-		);
+		assert!(!applies(&sub), "a moved start must invalidate a buffered START");
+
+		// The start returns: the declaration matches the demand again, so the
+		// publisher's skip (it sends no replacement START) must land.
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+		assert!(applies(&sub), "demand returning restores the START");
 	}
 
 	/// The permanent-miss floor follows the demand in every direction: an update
@@ -1366,11 +1367,12 @@ struct SubStream<S: web_transport_trait::Session> {
 	max_latency: Duration,
 	start: Option<Position>,
 	priority: u8,
-	/// Whether an update has moved the requested start since establish. A
-	/// SUBSCRIBE_START describes the demand at establish time and no fresh one
-	/// follows an update, so once this is set a buffered START is stale in
-	/// either direction and must be ignored (the request-tracked floor stands).
-	updated: bool,
+	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
+	/// SUBSCRIBE_START describes this demand and no fresh one follows an update,
+	/// so a buffered START only applies while `start` still equals it: while the
+	/// start sits elsewhere the request-tracked floor stands instead, and demand
+	/// returning here makes the declaration valid again.
+	requested: Option<Position>,
 }
 
 enum Sub<S: web_transport_trait::Session> {
@@ -1597,12 +1599,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// frame). Record it as a drop signal, so a spliced reader waiting on a
 					// skipped group fails over instead of stalling on a live route.
 					lite::SubscribeResponse::Start(start) => {
-						// A START describes the demand at establish time. Once an update
-						// has moved the start it may be stale in either direction (no
-						// fresh START follows an update) and the request-tracked floor
-						// already stands, so it is ignored rather than guessed at.
+						// A START describes the demand the SUBSCRIBE carried. It applies
+						// only while the current start still matches that demand (updates
+						// get no fresh START, so an update that moved the start makes it
+						// stale, and one that moved back restores it); elsewhere the
+						// request-tracked floor stands rather than a guess.
 						if let Sub::Active(active) = &sub
-							&& !active.updated
+							&& active.start == active.requested
 						{
 							let _ = serving.start_at(start.group);
 						}
@@ -1772,12 +1775,11 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 							// (the peer may serve them now), moving forward retires the
 							// skipped range (the peer stops serving it, and no fresh START
 							// will say so), and dropping to the live edge clears it until
-							// the next declaration. Once the start moved, a buffered START
-							// from the original request is stale and must not land (see
-							// `updated`).
+							// the next declaration. A buffered START re-applies only if the
+							// start returns to the demand that produced it (see
+							// `SubStream::requested`).
 							if start_moved {
 								let _ = producer.start_at(active.start.map(|start| start.group));
-								active.updated = true;
 							}
 							self.send_update(active, subscription.end).await?;
 						}
@@ -1905,7 +1907,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			max_latency: subscription.latency_max,
 			start: subscription.start,
 			priority: subscription.priority,
-			updated: false,
+			requested: subscription.start,
 		});
 
 		Ok(())
