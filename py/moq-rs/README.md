@@ -2,15 +2,20 @@
 
 Python bindings for [Media over QUIC](https://github.com/moq-dev/moq): real-time pub/sub with built-in caching, fan-out, and prioritization, on top of QUIC.
 
-`moq` wraps the auto-generated [`moq-ffi`](https://pypi.org/project/moq-ffi/) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
+Installed as [`moq-rs`](https://pypi.org/project/moq-rs/) (the `moq` name is taken on PyPI), imported as `moq`.
+
+It wraps the auto-generated [`moq-ffi`](https://pypi.org/project/moq-ffi/) UniFFI bindings with a Pythonic API: no `Moq` prefixes, async iterators, context managers, and simplified connection setup. At session setup it negotiates either the `moq-lite` or `moq-transport` wire protocol.
 
 ## Installation
 
 ```bash
-pip install moq
+pip install moq-rs
+
+# or with uv
+uv add moq-rs
 ```
 
-This pulls in the `moq-ffi` native bindings automatically. `moq` is pure Python and is versioned independently of `moq-ffi`; it floats to the latest compatible `moq-ffi` patch.
+This pulls in the `moq-ffi` native bindings automatically. `moq-rs` is pure Python and is versioned independently of `moq-ffi`; it floats to the latest compatible `moq-ffi` patch.
 
 ## Quick Start
 
