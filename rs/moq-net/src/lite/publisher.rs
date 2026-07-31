@@ -790,10 +790,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// production cost and for a pure forwarder is the price of the fetch a
 	/// subscription would trigger.
 	///
-	/// A draining route pierces the carrying discount: the paid-for ingress it
-	/// rests on is going away, so advertising zero would keep pulling subscribers
-	/// onto a path about to vanish when a peer with any other edge should move
-	/// there now, while the seam is seamless.
+	/// A ceiling-cost route pierces the carrying discount. For a drain (the
+	/// ceiling's primary producer) the paid-for ingress is going away, so
+	/// advertising zero would keep pulling subscribers onto a path about to
+	/// vanish when a peer with any other edge should move now, while the seam is
+	/// seamless. The rule keys on the value, not the reason: the reason does not
+	/// travel on the wire, and a cost that saturated through charges marks a
+	/// path of last resort all the same.
 	///
 	/// The receiving side adds its own link price on top, so we never account for
 	/// the link we are sending over. Pre-lite-06 peers get nothing (the field isn't
