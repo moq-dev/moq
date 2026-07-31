@@ -105,16 +105,17 @@ export class Screen {
 			effect.cleanup(() => v?.stop());
 			effect.cleanup(() => a?.stop());
 
+			// A track that arrives dead already fired "ended", so the listener below would never run
+			// and we would publish a corpse.
+			if (v?.readyState === "ended" || a?.readyState === "ended") return this.#stop();
+
 			// The browser's own "Stop sharing" control ends a track. Either one ending means the
 			// share is over, and the tracks can end independently, so rerun into the stopped branch
 			// rather than clearing out.source here: that runs the cleanup above and releases the
 			// sibling track too.
 			for (const track of [v, a]) {
 				if (!track) continue;
-				effect.event(track, "ended", () => {
-					this.#stopped = true;
-					this.#rerun.update((rerun) => rerun + 1);
-				});
+				effect.event(track, "ended", () => this.#stop());
 			}
 
 			effect.set(this.#out.source, {
@@ -122,6 +123,13 @@ export class Screen {
 				audio: a ? { track: a, kind: "music" } : undefined,
 			});
 		});
+	}
+
+	// End the share. The rerun is what releases it: the run's own cleanup stops every track and
+	// clears out.source, so this never has to touch either.
+	#stop(): void {
+		this.#stopped = true;
+		this.#rerun.update((rerun) => rerun + 1);
 	}
 
 	/** Stop the capture and release the surface. */

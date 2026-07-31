@@ -77,6 +77,11 @@ class FakeScreenDevices extends EventTarget {
 	readonly audio = new FakeTrack();
 	displays = 0;
 
+	constructor(bornDead = false) {
+		super();
+		if (bornDead) this.video.readyState = "ended";
+	}
+
 	async getDisplayMedia(): Promise<MediaStream> {
 		this.displays += 1;
 		return {
@@ -307,6 +312,21 @@ test("screen capture releases every track when the audio ends", async () => {
 
 	expect(screen.out.source.peek()).toBeUndefined();
 	expect(media.video.stopped).toBe(true);
+	expect(media.displays).toBe(1);
+
+	screen.close();
+});
+
+test("screen capture releases a share whose track arrives dead", async () => {
+	const media = install(new FakeScreenDevices(true));
+
+	const screen = new Screen({ enabled: true });
+	await settle();
+
+	// It fired "ended" before anything could listen, so publishing it would strand a dead share that
+	// nothing clears.
+	expect(screen.out.source.peek()).toBeUndefined();
+	expect(media.audio.stopped).toBe(true);
 	expect(media.displays).toBe(1);
 
 	screen.close();
