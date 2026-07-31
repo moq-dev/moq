@@ -204,6 +204,11 @@ pub(crate) struct TrackState {
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
 
+	// The first sequence the live feed serves, once the publisher declared one
+	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
+	// fetch can still create them.
+	start_sequence: Option<u64>,
+
 	// Where production stopped, snapshotted when the cached groups are released (an
 	// abort, or the last producer dropping). Computed live from the cache otherwise;
 	// see [`Self::resume_position`].
@@ -801,6 +806,15 @@ impl TrackState {
 		}
 	}
 
+	/// Record the declared first sequence of the live feed. Monotonic: a later
+	/// declaration only moves forward, so racing signals can't reopen a range
+	/// readers already gave up on.
+	fn set_start(&mut self, start_sequence: u64) {
+		if self.start_sequence.is_none_or(|start| start_sequence > start) {
+			self.start_sequence = Some(start_sequence);
+		}
+	}
+
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
 	/// would orphan already-produced groups.
 	fn set_final(&mut self, final_sequence: u64) -> Result<()> {
@@ -1133,6 +1147,16 @@ impl Producer {
 	/// boundary. Use [`Self::finish`] to finish exactly at the live edge.
 	pub fn finish_at(&mut self, final_sequence: u64) -> Result<()> {
 		self.modify()?.set_final(final_sequence)
+	}
+
+	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START):
+	/// groups below `sequence` will never arrive on their own, so a reader waiting
+	/// for one fails over instead of stalling. A fetch can still retrieve them.
+	///
+	/// Monotonic: a declaration below an earlier one is ignored.
+	pub fn start_at(&mut self, sequence: u64) -> Result<()> {
+		self.modify()?.set_start(sequence);
+		Ok(())
 	}
 
 	/// The exclusive final sequence, once [`Self::finish`] or [`Self::finish_at`] declared one.
@@ -1821,6 +1845,8 @@ impl Consumer {
 				Some(_) => Poll::Ready(None),
 				// Past the declared end, so it can never exist.
 				None if state.final_sequence.is_some_and(|fin| sequence >= fin) => Poll::Ready(None),
+				// Below the declared start, so the live feed skipped it for good.
+				None if state.start_sequence.is_some_and(|start| sequence < start) => Poll::Ready(None),
 				None => Poll::Pending,
 			}
 		});
@@ -2886,6 +2912,34 @@ mod test {
 			.expect("datagram would have blocked")
 			.expect("would have errored")
 			.expect("track was closed")
+	}
+
+	/// A declared start (SUBSCRIBE_START) resolves a peek below it as a permanent
+	/// miss, while a group that is already cached below the start stays readable
+	/// (a fetch can create one; the declaration only covers the live feed).
+	#[tokio::test]
+	async fn peek_resolves_below_the_declared_start() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+
+		let mut cached = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		cached.write_frame(Timestamp::ZERO, b"backfill".to_vec()).unwrap();
+		cached.finish().unwrap();
+
+		// Nothing declared yet: a missing group parks.
+		let waiter = kio::Waiter::noop();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
+
+		// The declaration turns the missing group into a permanent miss, but the
+		// cached one below it still resolves.
+		producer.start_at(3).unwrap();
+		assert!(matches!(consumer.poll_peek_group(0, &waiter), Poll::Ready(None)));
+		assert!(matches!(consumer.poll_peek_group(1, &waiter), Poll::Ready(Some(_))));
+		assert!(consumer.poll_peek_group(3, &waiter).is_pending());
+
+		// Monotonic: a lower re-declaration is ignored.
+		producer.start_at(2).unwrap();
+		assert!(matches!(consumer.poll_peek_group(2, &waiter), Poll::Ready(None)));
 	}
 
 	#[tokio::test]

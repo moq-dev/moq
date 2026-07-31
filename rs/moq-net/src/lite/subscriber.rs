@@ -1379,13 +1379,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					}
 				}
 				Event::FetchDone => {}
-				Event::SubResponse(msg) => {
+				Event::SubResponse(msg) => match &msg {
 					// SUBSCRIBE_END declares the track's exclusive final sequence, which may
 					// arrive while trailing groups are still in flight. Record it on this
 					// segment's producer so consumers learn the boundary early; the later
-					// stream FIN then finds the track already finished. START/DROP just
-					// resolve the range (the producer already orders groups), so log on.
-					if let lite::SubscribeResponse::End(end) = &msg {
+					// stream FIN then finds the track already finished.
+					lite::SubscribeResponse::End(end) => {
 						// finish_at rejects a boundary at or below the live edge, which is what a
 						// peer sending an inclusive bound looks like once the final group has
 						// already arrived. Don't abort: the stream FIN still finishes the track,
@@ -1394,10 +1393,17 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						if let Err(err) = serving.finish_at(end.group) {
 							tracing::warn!(track = %self.name, group = end.group, %err, "invalid subscribe end");
 						}
-					} else {
-						tracing::debug!(track = %self.name, ?msg, "subscribe response");
 					}
-				}
+					// SUBSCRIBE_START names the first group this feed serves: the publisher
+					// skipped everything below it (e.g. it could not serve the requested
+					// frame). Record it as a drop signal, so a spliced reader waiting on a
+					// skipped group fails over instead of stalling on a live route.
+					lite::SubscribeResponse::Start(start) => {
+						let _ = serving.start_at(start.group);
+					}
+					// OK/DROP just resolve the range (the producer already orders groups).
+					_ => tracing::debug!(track = %self.name, ?msg, "subscribe response"),
+				},
 				Event::SubClosed(Ok(())) => {
 					tracing::info!(broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe complete");
 					// Upstream FIN'd the subscription: the publisher only FINs once the
