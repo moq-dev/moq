@@ -1867,6 +1867,42 @@ impl Consumer {
 		}
 	}
 
+	/// Poll for a live cached copy of `sequence` that can serve frame `index`,
+	/// parking until one exists.
+	///
+	/// Unlike [`Self::poll_peek_group`] this never gives a verdict: a missing
+	/// group parks (registered for its arrival) even below the declared start,
+	/// since demand may move backward and revive it. The spliced reader uses it
+	/// to reconsider a route it gave up on, so it must be exact about what
+	/// "available" means: a copy that cannot start at `index` (its head is gone)
+	/// leaves the route buried rather than reviving it into a peek that would
+	/// bury it again.
+	pub(crate) fn poll_serving_group(&self, sequence: u64, index: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			// A segment's track is never itself spliced.
+			return Poll::Pending;
+		};
+		let res = state.poll(waiter, |state| match state.lookup.get(&sequence) {
+			Some(slot) if !slot.group.is_aborted() => {
+				// `start_at` clamps up, so landing higher means the copy no longer
+				// holds this position.
+				let mut group = slot.group.consume();
+				group.start_at(index);
+				match group.index() == index {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}
+			}
+			_ => Poll::Pending,
+		});
+		match res {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			// The track died; whatever would arrive never will, and the caller's
+			// terminal checks settle the wait.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
