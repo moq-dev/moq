@@ -597,14 +597,27 @@ struct Current {
 
 impl Clone for Group {
 	fn clone(&self) -> Self {
-		// Cursors are per-reader, so a clone re-resolves its own positioned copy and
-		// then runs in parallel.
+		// Cursors are per-reader, so the clone re-latches its own cursor over the
+		// same copy at this reader's position. Re-resolving from the segment list
+		// instead would break fanout for a pruned segment's group: the list has
+		// forgotten the route, but the latch still holds its frames.
+		let current = self.current.as_ref().and_then(|current| {
+			let mut group = current.group.clone();
+			group.start_at(self.index);
+			// The copy no longer holds this position (evicted); the clone
+			// re-resolves like any unlatched reader rather than misaligning.
+			(group.index() == self.index).then_some(Current {
+				segment: current.segment,
+				cap: current.cap,
+				group,
+			})
+		});
 		Self {
 			state: self.state.clone(),
 			sequence: self.sequence,
 			index: self.index,
 			end: self.end,
-			current: None,
+			current,
 			dead: self.dead.clone(),
 		}
 	}
@@ -650,6 +663,60 @@ impl Group {
 		self.end = index;
 	}
 
+	/// Locate the route owning `position`: the shared resolve behind the read
+	/// cursor and the finish probe. `dead` is the segment already given up on
+	/// for these frames. `Ready(None)` once nothing can ever serve them.
+	fn poll_covering(
+		&self,
+		position: Position,
+		dead: Option<u64>,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<(u64, track::Consumer, Option<Option<u64>>)>> {
+		let sequence = self.sequence;
+		let located = self.state.poll(waiter, |state| {
+			// Waiting for a replacement route only makes sense while one can still
+			// arrive. A finished logical track has no more switches coming, and an
+			// aborted one is over outright, so a dead copy is the end of the group
+			// rather than a gap to park on.
+			//
+			// Nor can one arrive below the resume point. [`Producer::takeover`]
+			// derives every boundary from [`ResumeState::resume_position`], which
+			// only moves forward, so once it is past this position no future segment
+			// will ever cover it and nobody will be asked for these frames again.
+			//
+			// Only once a route has been given up on, though: a live route that has
+			// not delivered this group yet may still do so out of order, and its own
+			// progress is what moved the resume point past us.
+			let stranded = dead.is_some() && state.resume_position().is_some_and(|resume| resume > position);
+			// Below the pruned floor no segment exists and none can arrive:
+			// the coverage was dropped along with the segments that held it.
+			let lost = state.pruned.is_some_and(|floor| position < floor);
+			let terminal = state.finished || state.abort.is_some() || stranded || lost;
+			match state.segments.iter().find(|segment| segment.covers(position)) {
+				// The route that owns these frames died: wait for a replacement.
+				Some(segment) if dead == Some(segment.id) => match terminal {
+					true => Poll::Ready(None),
+					false => Poll::Pending,
+				},
+				Some(segment) => Poll::Ready(Some((
+					segment.id,
+					segment.track.clone(),
+					frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+				))),
+				// No route owns them yet; park unless none is coming.
+				None if terminal => Poll::Ready(None),
+				None => Poll::Pending,
+			}
+		});
+
+		match located {
+			Poll::Ready(Ok(found)) => Poll::Ready(found),
+			// The producer is gone, so the segment list is frozen.
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Point `current` at the route owning frame `index` of this group.
 	///
 	/// `Ready(Ok(false))` once the group can produce nothing more, and `Ready(Err(_))`
@@ -662,52 +729,7 @@ impl Group {
 			};
 			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
 			let sequence = self.sequence;
-
-			// Scoped so the poll's state borrow ends before `self` is touched again.
-			let found = {
-				let located = self.state.poll(waiter, |state| {
-					// Waiting for a replacement route only makes sense while one can still
-					// arrive. A finished logical track has no more switches coming, and an
-					// aborted one is over outright, so a dead copy is the end of the group
-					// rather than a gap to park on.
-					//
-					// Nor can one arrive below the resume point. [`Producer::takeover`]
-					// derives every boundary from [`ResumeState::resume_position`], which
-					// only moves forward, so once it is past this position no future segment
-					// will ever cover it and nobody will be asked for these frames again.
-					//
-					// Only once a route has been given up on, though: a live route that has
-					// not delivered this group yet may still do so out of order, and its own
-					// progress is what moved the resume point past us.
-					let stranded = dead.is_some() && state.resume_position().is_some_and(|resume| resume > position);
-					// Below the pruned floor no segment exists and none can arrive:
-					// the coverage was dropped along with the segments that held it.
-					let lost = state.pruned.is_some_and(|floor| position < floor);
-					let terminal = state.finished || state.abort.is_some() || stranded || lost;
-					match state.segments.iter().find(|segment| segment.covers(position)) {
-						// The route that owns these frames died: wait for a replacement.
-						Some(segment) if dead == Some(segment.id) => match terminal {
-							true => Poll::Ready(None),
-							false => Poll::Pending,
-						},
-						Some(segment) => Poll::Ready(Some((
-							segment.id,
-							segment.track.clone(),
-							frames(segment.start, segment.end, sequence).map(|(_, end)| end),
-						))),
-						// No route owns them yet; park unless none is coming.
-						None if terminal => Poll::Ready(None),
-						None => Poll::Pending,
-					}
-				});
-
-				match located {
-					Poll::Ready(Ok(found)) => found,
-					// The producer is gone, so the segment list is frozen.
-					Poll::Ready(Err(_)) => None,
-					Poll::Pending => return Poll::Pending,
-				}
-			};
+			let found = ready!(self.poll_covering(position, dead, waiter));
 
 			let Some((segment, track, Some(cap))) = found else {
 				// No segment covers the position, but a latched copy still drains:
@@ -847,33 +869,35 @@ impl Group {
 			return Poll::Ready(Ok(self.index));
 		}
 		let current = self.current.as_mut().expect("resolved above");
-		if let Some(cap) = current.cap {
-			// A bounded copy can't declare the end; the continuation does, unless
-			// it can never arrive: once the seam at the cap is below the pruned
-			// floor (or the track ended with nothing covering it), the cap is the
-			// group's end. Checked here, not left to `poll_current`: a latched
-			// bounded copy resolves without consulting the segment list, so this
-			// is the poll that must park on it (or a caller that never drains to
-			// the seam would hang with no waiter registered).
-			let seam = Position {
-				group: self.sequence,
-				frame: cap,
+		let Some(cap) = current.cap else {
+			return current.group.poll_finished(waiter);
+		};
+
+		// A bounded copy can't declare the end; the continuation does, unless it
+		// can never arrive: then the cap is the group's end. Probed here, not
+		// left to `poll_current`: a latched bounded copy resolves without
+		// consulting the segment list, so this is the poll that must park on the
+		// seam (or a caller that never drains to it would hang with no waiter
+		// registered). The covering route's own copy is consulted too, since a
+		// route that skip-declared this group (SUBSCRIBE_START above it) never
+		// delivers the seam even though its segment covers it.
+		let seam = Position {
+			group: self.sequence,
+			frame: cap,
+		};
+		loop {
+			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
+			let Some((segment, track, _)) = ready!(self.poll_covering(seam, dead, waiter)) else {
+				return Poll::Ready(Ok(cap));
 			};
-			let lost = self.state.poll(waiter, |state| {
-				let lost = state.pruned.is_some_and(|floor| seam < floor);
-				let terminal = state.finished || state.abort.is_some();
-				match lost || (terminal && !state.segments.iter().any(|segment| segment.covers(seam))) {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				}
-			});
-			return match lost {
-				// The producer is gone: the frozen list can never cover the seam.
-				Poll::Ready(_) => Poll::Ready(Ok(cap)),
-				Poll::Pending => Poll::Pending,
-			};
+			match ready!(track.poll_peek_group(self.sequence, waiter)) {
+				// The continuation's copy declares the count: its own count
+				// already includes the frames it skipped.
+				Some(mut continuation) => return continuation.poll_finished(waiter),
+				// This route will never have it; wait for whatever replaces it.
+				None => self.dead = Some((segment, Error::NotFound)),
+			}
 		}
-		current.group.poll_finished(waiter)
 	}
 }
 
@@ -2577,11 +2601,10 @@ mod test {
 		);
 	}
 
-	/// A handed-out group survives its segment's prune: the delivering copy is
-	/// latched into the spliced reader at hand-out, so the payload the cursor
-	/// already carried is read out even though the segment list has forgotten
-	/// the route. A re-resolving reader (a clone re-latches its own copy) finds
-	/// the range below the floor and gives up instead of parking forever.
+	/// A handed-out group survives its segment's prune, for every reader: the
+	/// delivering copy is latched at hand-out and a clone re-latches it at its
+	/// own position (fanout must not depend on the segment list remembering the
+	/// route), so both read the payload out and end cleanly instead of stalling.
 	#[tokio::test]
 	async fn group_reader_gives_up_below_the_pruned_floor() {
 		let mut producer = Producer::new();
@@ -2594,7 +2617,7 @@ mod test {
 		write_group(&mut track, 0, "kept");
 		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(reading.sequence, 0);
-		let mut resolving = reading.clone();
+		let mut cloned = reading.clone();
 		track.abort(Error::Dropped).unwrap();
 
 		for sequence in 1..=MAX_SEGMENTS as u64 {
@@ -2609,23 +2632,54 @@ mod test {
 			"the first segment should be pruned"
 		);
 
-		// The latched copy still delivers, then the group ends cleanly.
-		assert_eq!(read(&mut reading), b"kept");
-		assert!(
-			reading.read_frame().now_or_never().unwrap().unwrap().is_none(),
-			"the group ends at what the route produced"
-		);
+		// Both readers still deliver, then the group ends cleanly at what the
+		// pruned route produced.
+		for reader in [&mut reading, &mut cloned] {
+			assert_eq!(read(reader), b"kept");
+			assert!(
+				reader.read_frame().now_or_never().unwrap().unwrap().is_none(),
+				"the group ends at what the route produced"
+			);
+		}
+	}
 
-		// The clone re-resolves through the segment list, where the range is
-		// gone for good: it resolves (empty) rather than stalling.
-		assert!(
-			resolving
-				.read_frame()
+	/// `finished()` resolves when the seam's covering route skip-declared the
+	/// group: its segment geometrically covers the continuation, but its
+	/// SUBSCRIBE_START floor proves the group will never arrive, so the cap is
+	/// the end. Polled without draining, and woken by the successor's track (the
+	/// seam probe parks on the peek), not just the segment list.
+	#[tokio::test]
+	async fn finished_resolves_when_the_successor_skips_the_seam() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves two frames of an open group; B splices at the seam.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f1".to_vec()).unwrap();
+		producer.takeover(&consumer_b).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		drop(group);
+		track_a.abort(Error::Dropped).unwrap();
+
+		// B covers the seam, so the count is still open.
+		assert!(reading.finished().now_or_never().is_none(), "the seam is coverable");
+
+		// B declares it starts at group 1 and produces it: group 0's continuation
+		// is skipped for good, so the cap is the end.
+		track_b.start_at(1).unwrap();
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+		assert_eq!(
+			reading
+				.finished()
 				.now_or_never()
-				.expect("should not park below the pruned floor")
-				.expect("a pruned range ends the group, it does not error")
-				.is_none(),
-			"an unlatched reader below the floor is lost"
+				.expect("a skip-declared seam must resolve the count")
+				.unwrap(),
+			2
 		);
 	}
 
