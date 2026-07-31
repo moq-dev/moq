@@ -505,7 +505,10 @@ impl Client {
 	feature = "uds"
 ))]
 fn request_target(url: &Url) -> Option<String> {
-	let target = match url.query() {
+	// A trailing `?` parses as an empty query, which is not a query: appending it would
+	// spell one target two ways, and `moqt://host?` would yield a bare "?" rather than
+	// the empty value that means the default path.
+	let target = match url.query().filter(|query| !query.is_empty()) {
 		Some(query) => format!("{}?{}", url.path(), query),
 		None => url.path().to_owned(),
 	};
@@ -646,6 +649,12 @@ mod tests {
 			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
 			("moql://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
 			("moqt://relay.example.com", None),
+			// The fragment is processed by the client and never sent (draft-19 3.1.2).
+			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
+			("moqt://relay.example.com/anon#pos:12", Some("/anon")),
+			// A trailing `?` is an empty query, not a query.
+			("moqt://relay.example.com/anon?", Some("/anon")),
+			("moqt://relay.example.com?", None),
 			// The transport's own request URI carries the path, so sending one here
 			// would be a protocol violation.
 			("https://relay.example.com/anon?jwt=abc", None),

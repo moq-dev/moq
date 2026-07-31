@@ -536,9 +536,10 @@ async fn iroh_connect() {
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
 		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
-		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC, whose only
-		// place for the request target is the SETUP.
+		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
+		// URL, leaving the SETUP as the only place for the request target.
 		assert_eq!(request.transport(), moq_native::Transport::Iroh);
+		assert_eq!(request.url(), None);
 		assert_eq!(request.path(), "/room?jwt=abc");
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
