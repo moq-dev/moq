@@ -622,6 +622,17 @@ impl Group {
 		}
 	}
 
+	/// Pre-latch the delivering route's own copy, so the payload it already
+	/// delivered survives even if its segment is pruned before the reader drains
+	/// it. Costs nothing otherwise: the per-frame reuse check validates the latch
+	/// against the live segment list, so a moved cap still re-routes the reader.
+	fn latched(mut self, segment: u64, cap: Option<u64>, mut group: group::Consumer) -> Self {
+		// The segment bound is exclusive; a group consumer's cap is inclusive.
+		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
+		self.current = Some(Current { segment, cap, group });
+		self
+	}
+
 	pub fn index(&self) -> u64 {
 		self.index
 	}
@@ -1056,11 +1067,16 @@ impl Subscriber {
 	fn hand_out(&self, segment: usize, group: group::Consumer) -> Option<group::Consumer> {
 		let seg = &self.segments[segment];
 		let sequence = group.sequence;
-		let (start, _) = frames(seg.start, seg.end, sequence)?;
+		let (start, end) = frames(seg.start, seg.end, sequence)?;
 		if start != 0 {
 			return None;
 		}
-		Some(group.into_spliced(Group::new(self.state.clone(), sequence, 0)))
+		// Latch the delivering copy: the spliced reader otherwise re-resolves it
+		// through the segment list, which forgets this route the moment its
+		// segment is pruned, turning a group the cursor already delivered into an
+		// empty husk.
+		let spliced = Group::new(self.state.clone(), sequence, 0).latched(seg.id, end, group.clone());
+		Some(group.into_spliced(spliced))
 	}
 
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
@@ -2414,20 +2430,24 @@ mod test {
 		recv_pending(&mut sub);
 	}
 
-	/// A group reader below the pruned floor gives up instead of parking forever:
-	/// the coverage is gone and no future segment can serve it.
+	/// A handed-out group survives its segment's prune: the delivering copy is
+	/// latched into the spliced reader at hand-out, so the payload the cursor
+	/// already carried is read out even though the segment list has forgotten
+	/// the route. A re-resolving reader (a clone re-latches its own copy) finds
+	/// the range below the floor and gives up instead of parking forever.
 	#[tokio::test]
 	async fn group_reader_gives_up_below_the_pruned_floor() {
 		let mut producer = Producer::new();
 		let mut sub = producer.consume().subscribe(None);
 
 		// Group 0 is handed out but never read; its route dies and enough
-		// failovers follow to prune the segment (and cache) that held it.
+		// failovers follow to prune the segment that held it.
 		let (mut track, consumer) = track_pair("t0");
 		producer.takeover(&consumer).unwrap();
-		write_group(&mut track, 0, "gone");
+		write_group(&mut track, 0, "kept");
 		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(reading.sequence, 0);
+		let mut resolving = reading.clone();
 		track.abort(Error::Dropped).unwrap();
 
 		for sequence in 1..=MAX_SEGMENTS as u64 {
@@ -2442,16 +2462,23 @@ mod test {
 			"the first segment should be pruned"
 		);
 
-		// The held group resolves (short) rather than stalling for a replacement
-		// that cannot arrive.
+		// The latched copy still delivers, then the group ends cleanly.
+		assert_eq!(read(&mut reading), b"kept");
 		assert!(
-			reading
+			reading.read_frame().now_or_never().unwrap().unwrap().is_none(),
+			"the group ends at what the route produced"
+		);
+
+		// The clone re-resolves through the segment list, where the range is
+		// gone for good: it resolves (empty) rather than stalling.
+		assert!(
+			resolving
 				.read_frame()
 				.now_or_never()
 				.expect("should not park below the pruned floor")
 				.expect("a pruned range ends the group, it does not error")
 				.is_none(),
-			"the pruned frames are lost"
+			"an unlatched reader below the floor is lost"
 		);
 	}
 
