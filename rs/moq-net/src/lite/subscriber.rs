@@ -1198,6 +1198,39 @@ mod tests {
 		// Narrowed demand never raises the floor above the declaration.
 		assert_eq!(sub.start_floor(2), 2);
 	}
+
+	/// The permanent-miss floor follows the demand in both directions: an update
+	/// that moves the start forward retires the skipped range (the publisher
+	/// stops serving it and no fresh START says so), and one that moves it
+	/// backward reopens it.
+	#[tokio::test]
+	async fn updates_move_the_declared_floor_both_ways() {
+		let mut h = Harness::new(Version::Lite05);
+		let mut sub = Sub::None;
+
+		let demand = |group: u64| Some(Subscription::default().with_group_start(group));
+
+		// Establish from group 5: the floor tracks the request until START lands.
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, demand(5), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+		assert_eq!(h.producer.start_sequence(), Some(5));
+
+		// Forward: a reader waiting in [5, 8) must fail over, not stall.
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+		assert_eq!(h.producer.start_sequence(), Some(8));
+
+		// Backward: the reopened range must stop being a permanent miss.
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+		assert_eq!(h.producer.start_sequence(), Some(3));
+	}
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params
@@ -1598,11 +1631,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						active.start_group = start.map(|start| start.group);
 						active.start_frame = start.map_or(0, |start| start.frame);
 						if supports_update {
-							// Demand moving below a declared SUBSCRIBE_START reopens
-							// those groups: the peer may serve them now, so they must
-							// not stay a permanent miss for the spliced reader.
+							// The floor follows the demand, in both directions: moving
+							// below a declared SUBSCRIBE_START reopens those groups (the
+							// peer may serve them now), and moving forward retires the
+							// skipped range (the peer stops serving it, and no fresh
+							// START will say so).
 							if let Some(group) = active.start_group {
-								let _ = producer.widen_start(group);
+								let _ = producer.start_at(group);
 							}
 							let end_frame = subscription.group_end.and(subscription.frame_end);
 							self.send_update(active, subscription.group_end, end_frame).await?;
@@ -1654,12 +1689,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// reach the wire without the group it counts from (which the peer would reject).
 		let start = subscription.start();
 
-		// A re-subscription may start below the previous one's SUBSCRIBE_START.
-		// Lower the stale floor now so peeks in the reopened range park for the
-		// new feed instead of resolving as permanent misses before its own
-		// declaration lands.
+		// The floor tracks the requested start until this subscription's own
+		// SUBSCRIBE_START refines it: the peer never serves below the request,
+		// and a previous subscription's declaration (higher or lower) must not
+		// outlive its demand.
 		if let Some(start) = &start {
-			let _ = producer.widen_start(start.group);
+			let _ = producer.start_at(start.group);
 		}
 
 		let msg = lite::Subscribe {

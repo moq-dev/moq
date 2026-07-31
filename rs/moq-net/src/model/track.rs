@@ -807,19 +807,10 @@ impl TrackState {
 	}
 
 	/// Record the declared first sequence of the live feed, replacing any earlier
-	/// declaration: the signal is scoped to the current subscription, and a
-	/// re-subscription may legitimately start earlier.
+	/// declaration: the signal is scoped to the current subscription's demand,
+	/// which may legitimately move in either direction.
 	fn set_start(&mut self, start_sequence: u64) {
 		self.start_sequence = Some(start_sequence);
-	}
-
-	/// Lower the declared start to cover widened demand: the subscription now
-	/// asks for `sequence` onward, so groups from there up may arrive after all.
-	/// Never raises; only a declaration ([`Self::set_start`]) does that.
-	fn widen_start(&mut self, sequence: u64) {
-		if self.start_sequence.is_some_and(|start| sequence < start) {
-			self.start_sequence = Some(sequence);
-		}
 	}
 
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
@@ -1156,25 +1147,24 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
-	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START):
-	/// groups below `sequence` will never arrive on their own, so a reader waiting
-	/// for one fails over instead of stalling. A fetch can still retrieve them.
+	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
+	/// or the start the subscription itself requested): groups below `sequence`
+	/// will never arrive on their own, so a reader waiting for one fails over
+	/// instead of stalling. A fetch can still retrieve them.
 	///
-	/// Scoped to the current subscription: a later declaration replaces this one
-	/// (a re-subscription may start earlier), and widening the subscription's
-	/// demand below it lowers it (the crate-internal `widen_start`).
+	/// Scoped to the current subscription's demand, so a later declaration
+	/// replaces this one in either direction: a re-subscription may start
+	/// earlier, and a narrowed subscription skips groups an earlier declaration
+	/// still promised.
 	pub fn start_at(&mut self, sequence: u64) -> Result<()> {
 		self.modify()?.set_start(sequence);
 		Ok(())
 	}
 
-	/// Lower the declared start when subscription demand widens below it: the
-	/// peer may then serve earlier groups, so they are no longer a permanent
-	/// miss. No-op without a declaration, or when the declaration is already
-	/// at or below `sequence`.
-	pub(crate) fn widen_start(&mut self, sequence: u64) -> Result<()> {
-		self.modify()?.widen_start(sequence);
-		Ok(())
+	/// The declared first sequence of the live feed, once [`Self::start_at`]
+	/// declared one. `None` while nothing was declared.
+	pub fn start_sequence(&self) -> Option<u64> {
+		self.state.read().start_sequence
 	}
 
 	/// The exclusive final sequence, once [`Self::finish`] or [`Self::finish_at`] declared one.
@@ -2955,17 +2945,10 @@ mod test {
 		assert!(matches!(consumer.poll_peek_group(1, &waiter), Poll::Ready(Some(_))));
 		assert!(consumer.poll_peek_group(3, &waiter).is_pending());
 
-		// Widened demand reopens the range up to the new start; below it stays a
-		// permanent miss, and widening never raises the floor.
-		producer.widen_start(2).unwrap();
-		assert!(consumer.poll_peek_group(2, &waiter).is_pending());
-		assert!(matches!(consumer.poll_peek_group(0, &waiter), Poll::Ready(None)));
-		producer.widen_start(5).unwrap();
-		assert!(consumer.poll_peek_group(2, &waiter).is_pending());
-
-		// A re-subscription's declaration replaces the floor in either direction.
+		// The declaration follows the demand in either direction: forward retires
+		// the skipped range, backward reopens it.
 		producer.start_at(4).unwrap();
-		assert!(matches!(consumer.poll_peek_group(2, &waiter), Poll::Ready(None)));
+		assert!(matches!(consumer.poll_peek_group(3, &waiter), Poll::Ready(None)));
 		producer.start_at(0).unwrap();
 		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
 	}
