@@ -5,7 +5,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use crate::{Waiter, WaiterCell};
+use crate::{Park, Waiter};
 
 /// A pollable computation backed by kio channels.
 ///
@@ -14,8 +14,8 @@ use crate::{Waiter, WaiterCell};
 ///
 /// This exists because a kio [`Waiter`] holds the strong `Arc<Waker>` while the
 /// channel's [`crate::WaiterList`] keeps only a `Weak`. A bare [`Future`] would have
-/// to stash the strong `Waiter` in a field and replace it every poll (or lose its
-/// wakeup); [`Pending`] does that once so each implementor doesn't have to.
+/// to park the strong `Waiter` in a field for as long as it stays pending (or lose
+/// its wakeup); [`Pending`] does that once so each implementor doesn't have to.
 pub trait Pollable: Unpin {
 	/// The value the computation resolves to.
 	type Output;
@@ -29,7 +29,7 @@ pub trait Pollable: Unpin {
 	fn poll(&self, waiter: &Waiter) -> Poll<Self::Output>;
 }
 
-/// Adapts a [`Pollable`] into a [`Future`], retaining the strong [`Waiter`] between
+/// Adapts a [`Pollable`] into a [`Future`], parking the strong [`Waiter`] between
 /// polls so its weak registration stays live.
 ///
 /// Derefs to the inner value, so any inherent methods you define on it are
@@ -37,9 +37,8 @@ pub trait Pollable: Unpin {
 /// `update`).
 pub struct Pending<P> {
 	inner: P,
-	// Retains the waiter across polls so its weak registrations survive (and are
-	// reused when possible); see [`WaiterCell`].
-	cell: WaiterCell,
+	// Retains a parked waiter across polls so its weak registrations survive; see [`Park`].
+	park: Park,
 }
 
 impl<P> Pending<P> {
@@ -47,7 +46,7 @@ impl<P> Pending<P> {
 	pub fn new(inner: P) -> Self {
 		Self {
 			inner,
-			cell: WaiterCell::new(),
+			park: Park::default(),
 		}
 	}
 
@@ -77,8 +76,9 @@ impl<P: Pollable> Future for Pending<P> {
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
 		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
-		let waiter = this.cell.hold(cx);
-		Pollable::poll(&this.inner, waiter)
+		let waiter = this.park.take(cx);
+		let poll = Pollable::poll(&this.inner, &waiter);
+		this.park.hold(waiter, poll)
 	}
 }
 

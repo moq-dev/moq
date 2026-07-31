@@ -267,11 +267,10 @@ mod test {
 			Arc,
 			atomic::{AtomicUsize, Ordering},
 		},
-		task::{Context, Wake, Waker},
+		task::{Wake, Waker},
 	};
 
 	use super::*;
-	use crate::WaiterCell;
 
 	/// A waker that counts how many times it was woken (mirrors `tests.rs`).
 	struct CountWaker(AtomicUsize);
@@ -347,13 +346,13 @@ mod test {
 	fn push_wakes_a_parked_pop() {
 		let queue = Queue::new();
 		let (waker, w) = counting();
-		let mut cx = Context::from_waker(&w);
-		let mut cell = WaiterCell::new();
+		// One waiter across both polls, standing in for what a `Park` retains.
+		let waiter = Waiter::new(w);
 
-		assert!(queue.poll_pop(cell.hold(&mut cx)).is_pending());
+		assert!(queue.poll_pop(&waiter).is_pending());
 		queue.try_push(7).unwrap();
 		assert!(waker.count() >= 1, "push should wake the parked pop");
-		assert_eq!(queue.poll_pop(cell.hold(&mut cx)), Poll::Ready(Ok(7)));
+		assert_eq!(queue.poll_pop(&waiter), Poll::Ready(Ok(7)));
 	}
 
 	#[test]
@@ -362,14 +361,13 @@ mod test {
 		queue.try_push(1).unwrap();
 
 		let (waker, w) = counting();
-		let mut cx = Context::from_waker(&w);
-		let mut cell = WaiterCell::new();
+		let waiter = Waiter::new(w);
 
 		// Full: the closure must not run, and the poll parks.
 		let made = std::cell::Cell::new(false);
 		assert!(
 			queue
-				.poll_push_with(cell.hold(&mut cx), || {
+				.poll_push_with(&waiter, || {
 					made.set(true);
 					2
 				})
@@ -380,7 +378,7 @@ mod test {
 		// A pop frees the slot and wakes the parked push.
 		assert_eq!(queue.try_pop().unwrap(), Some(1));
 		assert!(waker.count() >= 1, "pop should wake the parked push");
-		assert_eq!(queue.poll_push_with(cell.hold(&mut cx), || 2), Poll::Ready(Ok(())));
+		assert_eq!(queue.poll_push_with(&waiter, || 2), Poll::Ready(Ok(())));
 		assert_eq!(queue.try_pop().unwrap(), Some(2));
 	}
 
@@ -390,31 +388,26 @@ mod test {
 		queue.try_push(1).unwrap();
 
 		let (pop_waker, w1) = counting();
-		let mut cx1 = Context::from_waker(&w1);
-		let mut pop_cell = WaiterCell::new();
+		let pop_waiter = Waiter::new(w1);
 		// Park a pop on a second handle (the queued item is popped first).
 		let popper = queue.clone();
-		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Ok(1)));
-		assert!(popper.poll_pop(pop_cell.hold(&mut cx1)).is_pending());
+		assert_eq!(popper.poll_pop(&pop_waiter), Poll::Ready(Ok(1)));
+		assert!(popper.poll_pop(&pop_waiter).is_pending());
 
 		// Refill so a push parks too.
 		queue.try_push(2).unwrap();
 		let (push_waker, w2) = counting();
-		let mut cx2 = Context::from_waker(&w2);
-		let mut push_cell = WaiterCell::new();
-		assert!(queue.poll_push_with(push_cell.hold(&mut cx2), || 3).is_pending());
+		let push_waiter = Waiter::new(w2);
+		assert!(queue.poll_push_with(&push_waiter, || 3).is_pending());
 
 		queue.close();
 		assert!(pop_waker.count() >= 1, "close should wake the parked pop");
 		assert!(push_waker.count() >= 1, "close should wake the parked push");
 
 		// The parked pop drains the remaining item; the push observes closure.
-		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Ok(2)));
-		assert_eq!(popper.poll_pop(pop_cell.hold(&mut cx1)), Poll::Ready(Err(Closed)));
-		assert_eq!(
-			queue.poll_push_with(push_cell.hold(&mut cx2), || 3),
-			Poll::Ready(Err(Closed))
-		);
+		assert_eq!(popper.poll_pop(&pop_waiter), Poll::Ready(Ok(2)));
+		assert_eq!(popper.poll_pop(&pop_waiter), Poll::Ready(Err(Closed)));
+		assert_eq!(queue.poll_push_with(&push_waiter, || 3), Poll::Ready(Err(Closed)));
 	}
 
 	#[test]
