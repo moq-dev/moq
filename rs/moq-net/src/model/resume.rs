@@ -873,11 +873,13 @@ impl SegmentSub {
 	}
 
 	/// Whether a producer-dropped segment is spent and can be removed. A capped
-	/// cursor is kept until it drains (it may hold delivered-but-unread groups,
-	/// including one parked at the cap); an uncapped one was replaced before
-	/// producing, so it holds nothing.
+	/// cursor is kept until it drains (it may hold delivered-but-unread groups);
+	/// an uncapped one was replaced before producing, so it holds nothing. A
+	/// parked group never blocks retirement: it is cleared when the segment is
+	/// pruned, since its frames resolve through the pruned-away segment list and
+	/// could no longer deliver anyway (see [`Subscriber::apply`]).
 	fn retired(&self) -> bool {
-		self.pruned && (self.end.is_none() || (matches!(self.sub, SubState::Done(_)) && self.parked.is_none()))
+		self.pruned && (self.end.is_none() || matches!(self.sub, SubState::Done(_)))
 	}
 }
 
@@ -996,10 +998,17 @@ impl Subscriber {
 
 		// Mark segments the producer dropped: replaced (never produced anything,
 		// so their cursor holds nothing and retires at once) or pruned (capped;
-		// the cursor may still hold delivered-but-unread groups, including one
-		// parked at the cap, so it drains before retiring; see `poll_segment`).
+		// the cursor may still hold delivered-but-unread groups, so it drains
+		// before retiring; see `poll_segment`). A parked group is dropped with
+		// the prune: re-offering it would hand out a group whose frames resolve
+		// through the segment list (see `hand_out`), where the pruned range is
+		// lost, so it could only ever deliver an empty husk while pinning the
+		// cursor (and its track subscription) forever.
 		for s in &mut self.segments {
 			s.pruned = !segments.iter().any(|n| n.id == s.id);
+			if s.pruned {
+				s.parked = None;
+			}
 		}
 		self.segments.retain(|s| !s.retired());
 
@@ -2361,6 +2370,48 @@ mod test {
 			tracks[0].subscription().is_none(),
 			"a retired cursor releases its demand"
 		);
+	}
+
+	/// A capped subscriber riding out route churn must not accumulate parked
+	/// cursors: a pruned segment's parked group can no longer deliver (its frames
+	/// resolve through the pruned-away segment list), so it drops with the prune
+	/// and the whole entry retires, subscription and demand included.
+	#[tokio::test]
+	async fn capped_subscriber_retires_pruned_parked_segments() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		// Every round parks one group beyond the cap, then fails over to a live
+		// replacement route.
+		let mut tracks = Vec::new();
+		let rounds = 2 * MAX_SEGMENTS as u64;
+		for round in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, round + 1, "beyond-the-cap");
+			recv_pending(&mut sub);
+			tracks.push(track);
+		}
+
+		recv_pending(&mut sub);
+		assert_eq!(
+			sub.segments.len(),
+			MAX_SEGMENTS,
+			"pruned parked entries must retire, not accumulate"
+		);
+		assert!(
+			tracks[0].subscription().is_none(),
+			"a retired entry releases its demand"
+		);
+
+		// Raising the cap delivers what the surviving segments still cover; the
+		// pruned ranges are lost with their routes.
+		sub.end_at(None);
+		for sequence in (MAX_SEGMENTS as u64 + 1)..=rounds {
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		recv_pending(&mut sub);
 	}
 
 	/// A group reader below the pruned floor gives up instead of parking forever:
