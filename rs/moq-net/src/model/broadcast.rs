@@ -60,8 +60,10 @@ pub const MAX_COST: u64 = (1 << 62) - 1;
 /// The cost given to a route whose session is draining, so every other candidate
 /// outranks it while it stays selectable as the last path to the content.
 ///
-/// A session sets this on its routes when its peer sends a GOAWAY, so seeing it
-/// on a [`Route`] means the path still works but is on its way out.
+/// A session sets this on its routes when its peer sends a GOAWAY. Draining is
+/// deliberately not a distinct state: cost is the whole mechanism, so a route
+/// whose accumulated cost saturates the wire ceiling ranks (and is treated)
+/// identically, as a path of last resort.
 ///
 /// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
 /// draining route is still announced downstream, so its cost has to fit the wire.

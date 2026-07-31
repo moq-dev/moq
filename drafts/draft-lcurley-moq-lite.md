@@ -838,6 +838,9 @@ This is what lets a cluster deduplicate: a subscriber that sees both a warm copy
 The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose declared origin filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
 
+A carrying relay whose serving path arrived on a session that has received a GOAWAY (see [GOAWAY](#goaway-message)) SHOULD forgo the discount and advertise the saturation ceiling instead: the ingress the discount priced in is going away, and a zero-cost advertisement would keep attracting subscribers to a path a subscriber with any alternative should leave while the handover window is open.
+Forgoing the discount is also what carries a drain across a mesh: each carrying relay along the path repeats it, so the ceiling survives hops that would otherwise re-mask it as 0.
+
 Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
 An actively-carrying relay SHOULD therefore apply a deterministic tie-break before re-parenting onto a strictly cheaper advertisement from another actively-carrying relay (one that advertised a Route Cost of 0 from a path of two or more hops; a single-hop path is the original publisher, which can never adopt a route to its own broadcast), such as comparing a stable hash of the broadcast path and each endpoint's Hop ID, so that exactly one side moves.
 Cheaper advertisements from anything else, e.g. a forwarding relay or a repriced upstream, carry no such hazard and SHOULD be adopted immediately.
@@ -1207,7 +1210,7 @@ A value of 0 means unknown.
 
 > NOTE: RTT is included in the PROBE message because not all QUIC implementations and browser WebTransport APIs expose RTT statistics directly. This field may be deprecated once RTT is universally available via the underlying transport API.
 
-## GOAWAY
+## GOAWAY {#goaway-message}
 A GOAWAY message is sent to initiate a graceful session shutdown with an optional redirect.
 
 ~~~
@@ -1313,6 +1316,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the Positions section defining a (group, frame) position, its lexicographic ordering, and the rule that a partial group is only ever delivered to a subscriber that asked for one. A publisher that cannot serve a group from the requested frame skips it and resolves to a later group, so SUBSCRIBE_OK needs no frame field: the start frame follows from `Group` and the subscriber's own request.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
+- Exempted a draining serving path from the actively-carrying cost discount: a relay whose serving session received a GOAWAY advertises the saturation ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
