@@ -327,6 +327,23 @@ impl Client {
 		Ok(crate::spawn_session(pair))
 	}
 
+	/// The moq client builder, advertising `path` in the SETUP when there is one.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	fn moq_with_path(&self, path: Option<String>) -> moq_net::Client {
+		match path {
+			Some(path) => self.moq.clone().with_path(path),
+			None => self.moq.clone(),
+		}
+	}
+
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -337,13 +354,10 @@ impl Client {
 		feature = "uds"
 	))]
 	async fn connect_inner(&self, url: Url) -> crate::Result<(moq_net::Session, moq_net::Driver)> {
-		// Transports with no request URI of their own advertise the resource path in the
+		// Transports with no request URI of their own advertise the request target in the
 		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
 		// sending it again is a protocol violation.
-		let moq = match setup_path(&url) {
-			Some(path) => self.moq.clone().with_path(path),
-			None => self.moq.clone(),
-		};
+		let moq = self.moq_with_path(setup_path(&url));
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -361,12 +375,22 @@ impl Client {
 			return Ok(moq.connect(session).await?);
 		}
 
+		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
+		// QUIC, which carries no request URI. The scheme can't tell us which we got, so the
+		// request target waits on the negotiated binding: the SETUP for raw QUIC, the
+		// CONNECT URL for H3 (where a SETUP path would be a protocol violation).
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
-			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
-			let session = moq.connect(session).await?;
-			return Ok(session);
+			let target = request_target(&url);
+			let (session, binding) = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
+
+			let moq = match binding {
+				crate::iroh::Binding::Raw => self.moq_with_path(target),
+				crate::iroh::Binding::H3 => self.moq.clone(),
+			};
+
+			return Ok(moq.connect(session).await?);
 		}
 
 		#[cfg(feature = "noq")]
@@ -465,13 +489,37 @@ impl Client {
 	}
 }
 
-/// The resource path to advertise in the SETUP, derived from the dial URL.
+/// The request target a URI-less transport advertises in its SETUP: the URL path, plus
+/// `?` and the query when there is one (draft-ietf-moq-transport-19, section 10.3.1.2).
+/// That query is how `?jwt=` reaches a relay.
+///
+/// `None` when the result is empty, which means the same as omitting the parameter: the
+/// server's default path. A peer on published lite-05 rejects an empty value outright.
+#[cfg(any(
+	feature = "noq",
+	feature = "quinn",
+	feature = "quiche",
+	feature = "iroh",
+	feature = "websocket",
+	feature = "tcp",
+	feature = "uds"
+))]
+fn request_target(url: &Url) -> Option<String> {
+	let target = match url.query() {
+		Some(query) => format!("{}?{}", url.path(), query),
+		None => url.path().to_owned(),
+	};
+
+	(!target.is_empty()).then_some(target)
+}
+
+/// The request target to advertise in the SETUP, chosen by the dial URL's scheme.
 ///
 /// `None` for the schemes whose transport carries a request URI of its own
-/// (WebTransport, qmux over WebSocket): they convey the path there, and a SETUP path
-/// on top of it is a protocol violation. `iroh` is one of those too whenever it lands
-/// on H3, and the binding is picked by ALPN negotiation rather than by the scheme, so
-/// it can't be decided here.
+/// (WebTransport, qmux over WebSocket): they convey the target there, and a SETUP path
+/// on top of it is a protocol violation. `iroh` is `None` here because its binding is
+/// picked by ALPN negotiation rather than by the scheme; that dial reads the negotiated
+/// [`crate::iroh::Binding`] and calls [`request_target`] itself.
 #[cfg(any(
 	feature = "noq",
 	feature = "quinn",
@@ -482,28 +530,20 @@ impl Client {
 	feature = "uds"
 ))]
 fn setup_path(url: &Url) -> Option<String> {
-	let path = match url.scheme() {
-		// A Unix socket URL's path is the socket file, so the resource path rides in
+	match url.scheme() {
+		// A Unix socket URL's path is the socket file, so the request target rides in
 		// the `?path=` query, query string and all. It is one form-encoded value, so a
-		// resource path that carries its own `?query` percent-encodes it.
+		// target that carries its own `?query` percent-encodes it.
 		"unix" => url
 			.query_pairs()
 			.find(|(k, _)| k == "path")
-			.map(|(_, v)| v.into_owned()),
+			.map(|(_, v)| v.into_owned())
+			.filter(|path| !path.is_empty()),
 		// Raw QUIC and qmux over TCP negotiate an ALPN and nothing else, so the whole
-		// request target travels in the SETUP: the path, plus `?` and the query when
-		// there is one (draft-ietf-moq-transport-19, section 10.3.1.2). That query is
-		// how `?jwt=` reaches a relay.
-		"moqt" | "moql" | "tcp" => Some(match url.query() {
-			Some(query) => format!("{}?{}", url.path(), query),
-			None => url.path().to_owned(),
-		}),
+		// request target travels in the SETUP.
+		"moqt" | "moql" | "tcp" => request_target(url),
 		_ => None,
-	};
-
-	// An empty path means the same as omitting the parameter, so send neither. A peer
-	// on published lite-05 rejects an empty value outright, and `?path=` yields one.
-	path.filter(|path| !path.is_empty())
+	}
 }
 
 #[cfg(feature = "websocket")]
@@ -611,12 +651,42 @@ mod tests {
 			("https://relay.example.com/anon?jwt=abc", None),
 			("http://relay.example.com/anon", None),
 			("wss://relay.example.com/anon?jwt=abc", None),
+			// Decided after the ALPN is negotiated, not here.
 			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/anon", None),
 		];
 
 		for (url, want) in cases {
 			let url = Url::parse(url).unwrap();
 			let got = setup_path(&url);
+			assert_eq!(got.as_deref(), want, "{url}");
+		}
+	}
+
+	/// The iroh dial derives its target here rather than through [`setup_path`], since
+	/// only the negotiated binding says whether to send one.
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
+	#[test]
+	fn request_target_joins_the_path_and_query() {
+		const PEER: &str = "k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa";
+
+		let cases = [
+			(format!("iroh://{PEER}/room?jwt=abc"), Some("/room?jwt=abc")),
+			(format!("iroh://{PEER}/room"), Some("/room")),
+			(format!("iroh://{PEER}"), None),
+			(format!("iroh://{PEER}/"), Some("/")),
+		];
+
+		for (url, want) in cases {
+			let url = Url::parse(&url).unwrap();
+			let got = request_target(&url);
 			assert_eq!(got.as_deref(), want, "{url}");
 		}
 	}

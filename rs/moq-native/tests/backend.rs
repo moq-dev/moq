@@ -527,7 +527,7 @@ async fn iroh_connect() {
 		.with_iroh(client_endpoint)
 		.with_iroh_addrs(server_addrs);
 
-	let url: url::Url = format!("iroh://{server_endpoint_id}").parse().unwrap();
+	let url: url::Url = format!("iroh://{server_endpoint_id}/room?jwt=abc").parse().unwrap();
 
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
@@ -536,6 +536,10 @@ async fn iroh_connect() {
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
 		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
+		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC, whose only
+		// place for the request target is the SETUP.
+		assert_eq!(request.transport(), moq_native::Transport::Iroh);
+		assert_eq!(request.path(), "/room?jwt=abc");
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
