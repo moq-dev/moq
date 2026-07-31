@@ -1159,6 +1159,45 @@ mod tests {
 		assert_eq!((msg.start_group, msg.start_frame), (Some(5), 0));
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
 	}
+
+	/// A buffered SUBSCRIBE_START must not install a floor above demand that
+	/// widened while it sat in the queue: an update gets no fresh START, so the
+	/// stale declaration is the last word unless it is clamped to the current
+	/// request.
+	#[tokio::test]
+	async fn buffered_start_clamps_to_widened_demand() {
+		let mut h = Harness::new(Version::Lite05);
+		let mut sub = Sub::None;
+
+		// Subscribe from group 5; the peer's START(5) is considered in flight.
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default().with_group_start(5)),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		assert_eq!(sub.start_floor(5), 5, "START matches the demand that produced it");
+
+		// Demand widens backward before the START is processed.
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default().with_group_start(3)),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		assert_eq!(sub.start_floor(5), 3, "a stale START must clamp to the widened demand");
+
+		// Narrowed demand never raises the floor above the declaration.
+		assert_eq!(sub.start_floor(2), 2);
+	}
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params
@@ -1178,6 +1217,18 @@ struct SubStream<S: web_transport_trait::Session> {
 enum Sub<S: web_transport_trait::Session> {
 	None,
 	Active(SubStream<S>),
+}
+
+impl<S: web_transport_trait::Session> Sub<S> {
+	/// The floor a SUBSCRIBE_START establishes, clamped to the demand currently
+	/// on the wire: the START may predate a widening SUBSCRIBE_UPDATE (an update
+	/// gets no fresh START), and the peer may serve down to whichever is lower.
+	fn start_floor(&self, declared: u64) -> u64 {
+		match self {
+			Sub::Active(active) => active.start_group.map_or(declared, |requested| declared.min(requested)),
+			Sub::None => declared,
+		}
+	}
 }
 
 /// The source created for one received announce, remembering the publisher
@@ -1399,7 +1450,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// frame). Record it as a drop signal, so a spliced reader waiting on a
 					// skipped group fails over instead of stalling on a live route.
 					lite::SubscribeResponse::Start(start) => {
-						let _ = serving.start_at(start.group);
+						let _ = serving.start_at(sub.start_floor(start.group));
 					}
 					// OK/DROP just resolve the range (the producer already orders groups).
 					_ => tracing::debug!(track = %self.name, ?msg, "subscribe response"),

@@ -1162,7 +1162,7 @@ impl Producer {
 	///
 	/// Scoped to the current subscription: a later declaration replaces this one
 	/// (a re-subscription may start earlier), and widening the subscription's
-	/// demand below it lowers it ([`Self::widen_start`]).
+	/// demand below it lowers it (the crate-internal `widen_start`).
 	pub fn start_at(&mut self, sequence: u64) -> Result<()> {
 		self.modify()?.set_start(sequence);
 		Ok(())

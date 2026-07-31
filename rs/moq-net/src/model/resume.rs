@@ -847,9 +847,31 @@ impl Group {
 			return Poll::Ready(Ok(self.index));
 		}
 		let current = self.current.as_mut().expect("resolved above");
-		if current.cap.is_some() {
-			// A bounded copy can't declare the end; wait for the continuation.
-			return Poll::Pending;
+		if let Some(cap) = current.cap {
+			// A bounded copy can't declare the end; the continuation does, unless
+			// it can never arrive: once the seam at the cap is below the pruned
+			// floor (or the track ended with nothing covering it), the cap is the
+			// group's end. Checked here, not left to `poll_current`: a latched
+			// bounded copy resolves without consulting the segment list, so this
+			// is the poll that must park on it (or a caller that never drains to
+			// the seam would hang with no waiter registered).
+			let seam = Position {
+				group: self.sequence,
+				frame: cap,
+			};
+			let lost = self.state.poll(waiter, |state| {
+				let lost = state.pruned.is_some_and(|floor| seam < floor);
+				let terminal = state.finished || state.abort.is_some();
+				match lost || (terminal && !state.segments.iter().any(|segment| segment.covers(seam))) {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}
+			});
+			return match lost {
+				// The producer is gone: the frozen list can never cover the seam.
+				Poll::Ready(_) => Poll::Ready(Ok(cap)),
+				Poll::Pending => Poll::Pending,
+			};
 		}
 		current.group.poll_finished(waiter)
 	}
@@ -1119,15 +1141,7 @@ impl Subscriber {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					if Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter).is_pending() {
-						if seg.pruned {
-							// Never activated and the producer dropped the segment:
-							// nothing will ever arrive, so retire instead of parking.
-							seg.sub = SubState::Done(None);
-							return Poll::Ready(None);
-						}
-						return Poll::Pending;
-					}
+					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -1155,17 +1169,12 @@ impl Subscriber {
 						seg.sub = SubState::Done(None);
 						return Poll::Ready(None);
 					}
-					Poll::Pending => {
-						if seg.pruned {
-							// A segment is only pruned once it produced everything it
-							// owns, so an empty cursor is a drained one. Retire it,
-							// releasing the track subscription and its demand; a live
-							// track would otherwise pin them for the subscriber's life.
-							seg.sub = SubState::Done(None);
-							return Poll::Ready(None);
-						}
-						return Poll::Pending;
-					}
+					// An empty cursor on a pruned segment is NOT proof it drained:
+					// groups below the cap may still arrive out of order, and this
+					// cursor's demand is what keeps the upstream serving them. The
+					// reap in `poll_recv_group` bounds how many such stragglers may
+					// linger instead.
+					Poll::Pending => return Poll::Pending,
 				},
 				SubState::Done(_) => return Poll::Ready(None),
 			}
@@ -1183,10 +1192,31 @@ impl Subscriber {
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
 
-		// Reap cursors retired by an earlier pass; retirement happens while
-		// polling (see `poll_segment`), which cannot remove from the list it is
-		// iterating.
+		// Reap retired cursors, then bound the live stragglers: a pruned
+		// segment's cursor keeps draining (groups below its cap may still arrive
+		// out of order, and its demand keeps the upstream serving them), but only
+		// the newest few. Beyond the bound the oldest are cut, mirroring the
+		// producer-side policy: a reader that far behind loses the range.
 		self.segments.retain(|s| !s.retired());
+		let mut cut = self
+			.segments
+			.iter()
+			.filter(|s| s.pruned)
+			.count()
+			.saturating_sub(MAX_SEGMENTS);
+		if cut > 0 {
+			for seg in &mut self.segments {
+				if cut == 0 {
+					break;
+				}
+				if seg.pruned {
+					seg.sub = SubState::Done(None);
+					seg.parked = None;
+					cut -= 1;
+				}
+			}
+			self.segments.retain(|s| !s.retired());
+		}
 
 		let end_sequence = self.end_sequence;
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
@@ -2356,16 +2386,16 @@ mod test {
 
 	/// A long-lived subscriber must not accumulate a cursor per takeover when the
 	/// old routes stay alive: their tracks never end, so nothing else would ever
-	/// retire the cursors, pinning a track subscription (and its demand) each.
-	/// A pruned segment produced everything it owns, so an empty cursor is a
-	/// drained one and retires.
+	/// cut them. A bounded number of pruned cursors linger to drain out-of-order
+	/// stragglers; beyond the bound the oldest are cut, subscription, demand,
+	/// and all.
 	#[tokio::test]
-	async fn pruned_cursors_retire_once_drained() {
+	async fn pruned_cursors_stay_bounded() {
 		let mut producer = Producer::new();
 		let mut sub = producer.consume().subscribe(None);
 
 		let mut tracks = Vec::new();
-		let rounds = 2 * MAX_SEGMENTS as u64;
+		let rounds = 3 * MAX_SEGMENTS as u64;
 		for sequence in 0..rounds {
 			let (mut track, consumer) = track_pair("t");
 			producer.takeover(&consumer).unwrap();
@@ -2374,24 +2404,25 @@ mod test {
 			tracks.push(track);
 		}
 
-		// Retirement happens while polling and the next poll reaps the entries.
+		// The cut happens while polling and the next poll reaps the entries.
 		recv_pending(&mut sub);
 		recv_pending(&mut sub);
 		assert_eq!(
 			sub.segments.len(),
-			MAX_SEGMENTS,
-			"pruned cursors must retire once drained"
+			2 * MAX_SEGMENTS,
+			"pruned cursors beyond the bound must be cut"
 		);
+		assert!(tracks[0].subscription().is_none(), "a cut cursor releases its demand");
 		assert!(
-			tracks[0].subscription().is_none(),
-			"a retired cursor releases its demand"
+			tracks[rounds as usize - MAX_SEGMENTS - 1].subscription().is_some(),
+			"a pruned cursor within the bound keeps draining"
 		);
 	}
 
 	/// A capped subscriber riding out route churn must not accumulate parked
 	/// cursors: a pruned segment's parked group can no longer deliver (its frames
-	/// resolve through the pruned-away segment list), so it drops with the prune
-	/// and the whole entry retires, subscription and demand included.
+	/// resolve through the pruned-away segment list), so it drops with the prune,
+	/// and the straggler bound cuts the oldest entries whole.
 	#[tokio::test]
 	async fn capped_subscriber_retires_pruned_parked_segments() {
 		let mut producer = Producer::new();
@@ -2401,7 +2432,7 @@ mod test {
 		// Every round parks one group beyond the cap, then fails over to a live
 		// replacement route.
 		let mut tracks = Vec::new();
-		let rounds = 2 * MAX_SEGMENTS as u64;
+		let rounds = 3 * MAX_SEGMENTS as u64;
 		for round in 0..rounds {
 			let (mut track, consumer) = track_pair("t");
 			producer.takeover(&consumer).unwrap();
@@ -2413,21 +2444,99 @@ mod test {
 		recv_pending(&mut sub);
 		assert_eq!(
 			sub.segments.len(),
-			MAX_SEGMENTS,
-			"pruned parked entries must retire, not accumulate"
+			2 * MAX_SEGMENTS,
+			"pruned parked entries must stay bounded, not accumulate"
 		);
-		assert!(
-			tracks[0].subscription().is_none(),
-			"a retired entry releases its demand"
-		);
+		assert!(tracks[0].subscription().is_none(), "a cut entry releases its demand");
 
 		// Raising the cap delivers what the surviving segments still cover; the
 		// pruned ranges are lost with their routes.
 		sub.end_at(None);
-		for sequence in (MAX_SEGMENTS as u64 + 1)..=rounds {
+		for sequence in (rounds - MAX_SEGMENTS as u64 + 1)..=rounds {
 			assert_eq!(recv(&mut sub), sequence);
 		}
 		recv_pending(&mut sub);
+	}
+
+	/// An out-of-order group that lands after its segment was pruned still drains:
+	/// the cursor lingers (within the straggler bound) exactly because an empty
+	/// poll is not proof of completeness, and its demand is what keeps the
+	/// upstream serving the stragglers.
+	#[tokio::test]
+	async fn late_group_drains_from_a_pruned_cursor() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A delivers group 1 first; group 0 is still in flight when A is outranked
+		// and enough failovers prune its segment.
+		let (mut track_a, consumer_a) = track_pair("a");
+		producer.takeover(&consumer_a).unwrap();
+		write_group(&mut track_a, 1, "a1");
+		assert_eq!(recv(&mut sub), 1);
+
+		for sequence in 2..=(1 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// The straggler finally lands and surfaces through the lingering cursor.
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+	}
+
+	/// `finished()` on a group bounded by a mid-group takeover resolves once no
+	/// segment can serve the seam: the continuation owns the count, and when the
+	/// covering segments are pruned away the cap is the group's end. Polled
+	/// without draining first, which is exactly the caller the seam check must
+	/// park (and wake) rather than hang.
+	#[tokio::test]
+	async fn finished_resolves_for_a_pruned_bounded_group() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves two frames of an open group; B splices at the seam, so the
+		// reader's copy is handed out bounded at (0, 2).
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f1".to_vec()).unwrap();
+		let (mut track_b, consumer_b) = track_pair("b");
+		producer.takeover(&consumer_b).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		drop(group);
+		track_a.abort(Error::Dropped).unwrap();
+
+		// While B covers the seam the count is still open: B may serve frame 2.
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+		assert!(
+			reading.finished().now_or_never().is_none(),
+			"the seam is still coverable"
+		);
+
+		// Enough failovers prune A and B: nothing can serve the seam anymore, so
+		// the cap is the end.
+		for sequence in 2..=(1 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert_eq!(
+			reading
+				.finished()
+				.now_or_never()
+				.expect("the lost seam must resolve the count")
+				.unwrap(),
+			2
+		);
 	}
 
 	/// A handed-out group survives its segment's prune: the delivering copy is
