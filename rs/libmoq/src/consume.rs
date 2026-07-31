@@ -542,8 +542,14 @@ impl Consume {
 		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		// The read cursor is a group sequence, and its cap is inclusive.
-		track.end_at(subscription.end.map(|end| end.before().group));
+		// The read cursor is a group sequence, and its cap is inclusive. An end at the
+		// very first position is the empty range, which no inclusive group can express;
+		// leaving it uncapped would serve everything, so cap at the first group and let
+		// the empty demand stop delivery upstream.
+		track.end_at(match subscription.end {
+			Some(end) => Some(end.before().map_or(0, |end| end.group)),
+			None => None,
+		});
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}

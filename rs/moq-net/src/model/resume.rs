@@ -805,7 +805,17 @@ impl SegmentSub {
 	/// The last group this segment can serve (inclusive), for the underlying read
 	/// cursor. `None` while it is the newest segment.
 	fn last_group(&self) -> Option<u64> {
-		self.end.map(|end| end.before().group)
+		let end = self.end?;
+		// An empty segment would serve nothing, and no switch produces one: every
+		// boundary comes from `resume_position`, which sits at or above the first frame.
+		// `None` here reads as "no cap", which is why it is asserted rather than relied
+		// on; the authoritative filter is `Segment::covers`, which uses the exclusive
+		// bound directly.
+		debug_assert!(
+			end != Position::default(),
+			"a segment cannot end at the start of the track"
+		);
+		Some(end.before()?.group)
 	}
 }
 

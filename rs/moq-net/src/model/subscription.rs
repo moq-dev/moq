@@ -157,40 +157,45 @@ impl Position {
 	}
 
 	/// The position just past `frame` of `group`: the exclusive end that includes it.
-	pub fn after(group: u64, frame: u64) -> Self {
-		Self {
-			group,
-			// Saturating so the last representable frame cannot wrap into an empty
-			// range. Unreachable from the wire, where varints cap at 2^62-1.
-			frame: frame.saturating_add(1),
+	///
+	/// `None` when there is no such position, i.e. the very last frame of the very last
+	/// group. That is past everything, which [`Subscription::end`] spells `None` too, so
+	/// the two meanings line up and `with_end` can take this directly.
+	pub fn after(group: u64, frame: u64) -> Option<Self> {
+		match frame.checked_add(1) {
+			Some(frame) => Some(Self { group, frame }),
+			// Past the last frame of a group is the head of the next one.
+			None => Self::after_group(group),
 		}
 	}
 
 	/// The position just past every frame of `group`: the exclusive end that includes
 	/// the group whole.
-	pub fn after_group(group: u64) -> Self {
-		Self::group(group.saturating_add(1))
+	///
+	/// `None` past the last group, for the reason given on [`Self::after`].
+	pub fn after_group(group: u64) -> Option<Self> {
+		Some(Self::group(group.checked_add(1)?))
 	}
 
 	/// The last position strictly below this one, turning an exclusive bound such as
 	/// [`Subscription::end`] into the inclusive one an API like
 	/// [`crate::track::Subscriber::end_at`] wants.
 	///
-	/// A boundary at the head of a group backs up to all of the group below it, which
-	/// saturates at the very first frame. Nothing produces a boundary there: a segment
-	/// capped at the start of the track would serve nothing, and such a segment is
-	/// replaced outright rather than capped.
-	pub fn before(self) -> Self {
-		match self.frame.checked_sub(1) {
-			Some(frame) => Self {
+	/// `None` for the very first position, which is the empty range: nothing sorts below
+	/// it, so there is no inclusive bound to convert to. Saturating instead would return
+	/// a position *above* the input and quietly include the group it excludes.
+	pub fn before(self) -> Option<Self> {
+		if let Some(frame) = self.frame.checked_sub(1) {
+			return Some(Self {
 				group: self.group,
 				frame,
-			},
-			None => Self {
-				group: self.group.saturating_sub(1),
-				frame: u64::MAX,
-			},
+			});
 		}
+
+		Some(Self {
+			group: self.group.checked_sub(1)?,
+			frame: u64::MAX,
+		})
 	}
 }
 
@@ -243,6 +248,39 @@ mod tests {
 		let combined = combine(&[unordered, ordered]).unwrap();
 
 		assert!(!combined.ordered);
+	}
+
+	/// The exclusive representation runs out at both extremes, and `Option` says so
+	/// rather than saturating into a bound that contradicts the request.
+	#[test]
+	fn positions_are_total_at_the_extremes() {
+		// Past the last frame of a group is the head of the next one, not a wider frame
+		// in the same group.
+		assert_eq!(Position::after(5, u64::MAX), Some(Position::group(6)));
+
+		// Past everything has no position. `Subscription::end` spells that `None` too,
+		// so the meanings coincide and the group is included rather than dropped.
+		assert_eq!(Position::after_group(u64::MAX), None);
+		assert_eq!(Position::after(u64::MAX, u64::MAX), None);
+		assert_eq!(
+			Subscription::default().with_end(Position::after_group(u64::MAX)).end,
+			None
+		);
+
+		// Nothing sorts below the first position, so there is no inclusive bound for the
+		// empty range. Saturating would return one *above* the input.
+		assert_eq!(Position::group(0).before(), None);
+		assert_eq!(
+			Position::group(1).before(),
+			Some(Position {
+				group: 0,
+				frame: u64::MAX
+			})
+		);
+		assert_eq!(
+			Position::after(4, 7).unwrap().before(),
+			Some(Position { group: 4, frame: 7 })
+		);
 	}
 
 	#[test]

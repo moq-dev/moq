@@ -73,7 +73,7 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 			.with_ordered(s.ordered)
 			.with_latency_max(std::time::Duration::from_millis(s.latency_max_ms))
 			.with_start(s.group_start.map(moq_net::track::Position::group))
-			.with_end(s.group_end.map(moq_net::track::Position::after_group))
+			.with_end(s.group_end.and_then(moq_net::track::Position::after_group))
 	}
 }
 
