@@ -790,3 +790,62 @@ async fn audio_lagging_video_still_indexes_one_group_each() {
 		);
 	}
 }
+
+/// A source that emits one leading `styp` and then never another still segments on its video
+/// keyframes, rather than collapsing the whole stream into a single group.
+///
+/// Trusting a `styp` to keep arriving cost exactly that: one group per track holding every
+/// fragment, which strands late subscribers, never leaves the cache, and gives the timeline no
+/// second boundary. A keyframe is always a legal segment start, so it is the honest fallback.
+/// Sub-segment IDRs may therefore split a declared segment into several groups, which is
+/// harmless: a timeline range spans as many groups as the segment needs.
+#[tokio::test]
+async fn a_single_leading_styp_still_segments_on_keyframes() {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	let mut video_track = consumer.track(&video_name).unwrap().subscribe(None).await.unwrap();
+	let mut audio_track = consumer.track(&audio_name).unwrap().subscribe(None).await.unwrap();
+
+	// One styp up front, then four segments' worth of fragments each opening on an IDR.
+	fmp4.decode(&styp()).unwrap();
+	for segment in 0..4u64 {
+		let base = segment * 1_000_000;
+		let frag = super::encode_fragment(
+			video_id,
+			video_scale,
+			segment as u32,
+			&[sample(base, true, Some(1_000_000))],
+		)
+		.unwrap();
+		fmp4.decode(&frag).unwrap();
+		let frag = super::encode_fragment(
+			audio_id,
+			audio_scale,
+			segment as u32,
+			&[sample(base, true, Some(1_000_000))],
+		)
+		.unwrap();
+		fmp4.decode(&frag).unwrap();
+	}
+	fmp4.finish().unwrap();
+
+	assert_eq!(
+		drain_group_frames(&mut video_track),
+		vec![1, 1, 1, 1],
+		"each keyframe fragment opens its own segment"
+	);
+	assert_eq!(
+		drain_group_frames(&mut audio_track),
+		vec![1, 1, 1, 1],
+		"audio follows the same boundaries rather than trailing a segment behind"
+	);
+}

@@ -62,11 +62,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
 
-	// The source declared its own segmentation with a `styp` at least once, so a bare video
-	// keyframe is no longer taken as a boundary: a sub-segment IDR would otherwise split a
-	// segment that the source said was whole.
-	saw_styp: bool,
-
 	// Which segment the fragments arriving now belong to. Bumped at each boundary; a track whose
 	// open group belongs to an older one rolls, so every track segments identically.
 	segment: u64,
@@ -157,7 +152,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			buffer: BytesMut::new(),
 			pending_cut: false,
-			saw_styp: false,
 			segment: 0,
 			pending_timeline_cut: false,
 			segment_start: None,
@@ -236,10 +230,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				Any::Ftyp(_) => {}
 				// A styp opens a CMAF segment: the on-disk segmentation is the boundary,
 				// landing on the next fragment.
-				Any::Styp(_) => {
-					self.pending_cut = true;
-					self.saw_styp = true;
-				}
+				Any::Styp(_) => self.pending_cut = true,
 				Any::Moov(moov) => {
 					self.init(moov)?;
 				}
@@ -608,16 +599,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Ok(true);
 		}
 
-		// A source that declares its segmentation owns it completely: a sub-segment IDR is a
-		// place a segment *could* start, not one the source said it does.
-		if self.saw_styp {
-			return Ok(false);
-		}
-
 		if !has_video {
 			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
 			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
 			return Ok(true);
+		}
+
+		// A video keyframe starts a segment, but only once the current segment already has its
+		// video group open. Otherwise this IS that segment's opening fragment, arriving after a
+		// `styp` or a `cut()` that already declared the boundary, and bumping a second time would
+		// strand video a segment ahead of the audio that rolled on the declaration.
+		if !self.video_rolled() {
+			return Ok(false);
 		}
 
 		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
@@ -641,6 +634,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				)
 			})
 		}))
+	}
+
+	/// Whether every video track has already opened its group for the current segment.
+	fn video_rolled(&self) -> bool {
+		self.tracks
+			.values()
+			.filter(|track| track.kind == TrackKind::Video)
+			.all(|track| track.segment == Some(self.segment))
 	}
 
 	// Extract all frames out of an mdat atom using CMAF passthrough.
