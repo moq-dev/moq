@@ -806,12 +806,19 @@ impl TrackState {
 		}
 	}
 
-	/// Record the declared first sequence of the live feed. Monotonic: a later
-	/// declaration only moves forward, so racing signals can't reopen a range
-	/// readers already gave up on.
+	/// Record the declared first sequence of the live feed, replacing any earlier
+	/// declaration: the signal is scoped to the current subscription, and a
+	/// re-subscription may legitimately start earlier.
 	fn set_start(&mut self, start_sequence: u64) {
-		if self.start_sequence.is_none_or(|start| start_sequence > start) {
-			self.start_sequence = Some(start_sequence);
+		self.start_sequence = Some(start_sequence);
+	}
+
+	/// Lower the declared start to cover widened demand: the subscription now
+	/// asks for `sequence` onward, so groups from there up may arrive after all.
+	/// Never raises; only a declaration ([`Self::set_start`]) does that.
+	fn widen_start(&mut self, sequence: u64) {
+		if self.start_sequence.is_some_and(|start| sequence < start) {
+			self.start_sequence = Some(sequence);
 		}
 	}
 
@@ -1153,9 +1160,20 @@ impl Producer {
 	/// groups below `sequence` will never arrive on their own, so a reader waiting
 	/// for one fails over instead of stalling. A fetch can still retrieve them.
 	///
-	/// Monotonic: a declaration below an earlier one is ignored.
+	/// Scoped to the current subscription: a later declaration replaces this one
+	/// (a re-subscription may start earlier), and widening the subscription's
+	/// demand below it lowers it ([`Self::widen_start`]).
 	pub fn start_at(&mut self, sequence: u64) -> Result<()> {
 		self.modify()?.set_start(sequence);
+		Ok(())
+	}
+
+	/// Lower the declared start when subscription demand widens below it: the
+	/// peer may then serve earlier groups, so they are no longer a permanent
+	/// miss. No-op without a declaration, or when the declaration is already
+	/// at or below `sequence`.
+	pub(crate) fn widen_start(&mut self, sequence: u64) -> Result<()> {
+		self.modify()?.widen_start(sequence);
 		Ok(())
 	}
 
@@ -2937,9 +2955,19 @@ mod test {
 		assert!(matches!(consumer.poll_peek_group(1, &waiter), Poll::Ready(Some(_))));
 		assert!(consumer.poll_peek_group(3, &waiter).is_pending());
 
-		// Monotonic: a lower re-declaration is ignored.
-		producer.start_at(2).unwrap();
+		// Widened demand reopens the range up to the new start; below it stays a
+		// permanent miss, and widening never raises the floor.
+		producer.widen_start(2).unwrap();
+		assert!(consumer.poll_peek_group(2, &waiter).is_pending());
+		assert!(matches!(consumer.poll_peek_group(0, &waiter), Poll::Ready(None)));
+		producer.widen_start(5).unwrap();
+		assert!(consumer.poll_peek_group(2, &waiter).is_pending());
+
+		// A re-subscription's declaration replaces the floor in either direction.
+		producer.start_at(4).unwrap();
 		assert!(matches!(consumer.poll_peek_group(2, &waiter), Poll::Ready(None)));
+		producer.start_at(0).unwrap();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
 	}
 
 	#[tokio::test]

@@ -1547,6 +1547,12 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						active.start_group = start.map(|start| start.group);
 						active.start_frame = start.map_or(0, |start| start.frame);
 						if supports_update {
+							// Demand moving below a declared SUBSCRIBE_START reopens
+							// those groups: the peer may serve them now, so they must
+							// not stay a permanent miss for the spliced reader.
+							if let Some(group) = active.start_group {
+								let _ = producer.widen_start(group);
+							}
 							let end_frame = subscription.group_end.and(subscription.frame_end);
 							self.send_update(active, subscription.group_end, end_frame).await?;
 						}
@@ -1596,6 +1602,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// Both halves of each bound come from the same position, so a frame can never
 		// reach the wire without the group it counts from (which the peer would reject).
 		let start = subscription.start();
+
+		// A re-subscription may start below the previous one's SUBSCRIBE_START.
+		// Lower the stale floor now so peeks in the reopened range park for the
+		// new feed instead of resolving as permanent misses before its own
+		// declaration lands.
+		if let Some(start) = &start {
+			let _ = producer.widen_start(start.group);
+		}
+
 		let msg = lite::Subscribe {
 			id,
 			broadcast: self.path.as_path(),
