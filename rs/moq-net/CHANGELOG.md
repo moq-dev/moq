@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6](https://github.com/moq-dev/moq/compare/moq-net-v0.2.5...moq-net-v0.2.6) - 2026-07-31
+
+### Added
+
+- *(relay)* expose internal nodes endpoint ([#2555](https://github.com/moq-dev/moq/pull/2555))
+
+### Fixed
+
+- *(net)* stop a lingering track spinning on its departed route, and still release it when idle ([#2565](https://github.com/moq-dev/moq/pull/2565))
+
 ## [0.2.5](https://github.com/moq-dev/moq/compare/moq-net-v0.2.4...moq-net-v0.2.5) - 2026-07-29
 
 ### Added

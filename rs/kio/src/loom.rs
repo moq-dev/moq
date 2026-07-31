@@ -19,7 +19,7 @@ use std::task::Poll;
 
 use loom::{future::block_on, thread};
 
-use crate::{Producer, Ref, Shared};
+use crate::{Closed, Producer, Queue, Ref, Shared};
 
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
@@ -182,5 +182,50 @@ fn shared_mutation_wakes_a_parked_handle() {
 
 		drop(block_on(shared.wait(equals(1))));
 		writer.join().unwrap();
+	});
+}
+
+/// A push must reach a pop parked on an empty queue no matter how the two
+/// interleave.
+#[test]
+fn queue_push_wakes_a_parked_pop() {
+	loom::model(|| {
+		let queue = Queue::new();
+		let pusher = queue.clone();
+
+		let push = thread::spawn(move || pusher.try_push(1u32).unwrap());
+
+		assert_eq!(block_on(queue.pop()), Ok(1), "the push was lost");
+		push.join().unwrap();
+	});
+}
+
+/// A pop freeing the only slot of a bounded queue must wake a push parked on it.
+#[test]
+fn queue_pop_wakes_a_parked_push() {
+	loom::model(|| {
+		let queue = Queue::bounded(1);
+		queue.try_push(1u32).unwrap();
+		let popper = queue.clone();
+
+		let pop = thread::spawn(move || assert_eq!(popper.try_pop().unwrap(), Some(1)));
+
+		assert_eq!(block_on(queue.push(2)), Ok(()), "the freed slot was missed");
+		pop.join().unwrap();
+	});
+}
+
+/// A close racing a parked pop must still wake it; drained-then-closed is the
+/// only acceptable outcome.
+#[test]
+fn queue_close_wakes_a_parked_pop() {
+	loom::model(|| {
+		let queue = Queue::<u32>::new();
+		let closer = queue.clone();
+
+		let close = thread::spawn(move || closer.close());
+
+		assert_eq!(block_on(queue.pop()), Err(Closed), "the close was lost");
+		close.join().unwrap();
 	});
 }

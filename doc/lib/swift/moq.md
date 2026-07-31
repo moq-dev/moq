@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.1"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.2"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -101,8 +101,12 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
 
+// Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
+// frame is the lowest latency; a segment cadence suits HLS/DASH.
 try audio.writeFrame(payload, timestampUs: 0)
+try audio.cut()
 try audio.writeFrame(payload, timestampUs: 20_000)
+try audio.cut()
 try audio.finish()
 try broadcast.finish()
 ```

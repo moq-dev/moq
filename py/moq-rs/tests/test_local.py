@@ -84,6 +84,27 @@ def test_publish_media_lifecycle():
     broadcast.finish()
 
 
+def test_publish_media_cut_and_seek():
+    """Audio has no keyframes, so `cut` is the only thing that bounds its groups.
+
+    Without it every packet lands in one group that never closes, which strands
+    late subscribers and the timeline alike.
+    """
+    broadcast = moq.BroadcastProducer()
+    media = broadcast.publish_media("opus", opus_head())
+
+    for i in range(3):
+        media.write_frame(b"opus frame", i * 20_000)
+        media.cut()
+
+    # The same boundary, with the next group explicitly numbered.
+    media.write_frame(b"opus frame", 60_000)
+    media.seek(42)
+
+    media.finish()
+    broadcast.finish()
+
+
 def test_video_properties_use_defaulted_fields():
     broadcast = moq.BroadcastProducer()
     properties = moq.VideoProperties(rotation=315.0)

@@ -5,7 +5,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use crate::Waiter;
+use crate::{Waiter, WaiterCell};
 
 /// A pollable computation backed by kio channels.
 ///
@@ -37,15 +37,18 @@ pub trait Pollable: Unpin {
 /// `update`).
 pub struct Pending<P> {
 	inner: P,
-	// Retain the previous waiter so its Weak registration survives until the next
-	// poll replaces it (see [`crate::WaiterList`]).
-	waiter: Option<Waiter>,
+	// Retains the waiter across polls so its weak registrations survive (and are
+	// reused when possible); see [`WaiterCell`].
+	cell: WaiterCell,
 }
 
 impl<P> Pending<P> {
 	/// Wrap a [`Pollable`] so it can be `.await`ed.
 	pub fn new(inner: P) -> Self {
-		Self { inner, waiter: None }
+		Self {
+			inner,
+			cell: WaiterCell::new(),
+		}
 	}
 
 	/// Consume the wrapper, returning the inner value.
@@ -72,12 +75,10 @@ impl<P: Pollable> Future for Pending<P> {
 	type Output = P::Output;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
-		// Replacing drops the previous waiter, killing its Weak ref in the list so
-		// the inner poll's register call can recycle the slot (see `WaiterList`).
 		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
-		this.waiter = Some(Waiter::new(cx.waker().clone()));
-		Pollable::poll(&this.inner, this.waiter.as_ref().unwrap())
+		let waiter = this.cell.hold(cx);
+		Pollable::poll(&this.inner, waiter)
 	}
 }
 

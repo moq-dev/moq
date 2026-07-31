@@ -66,9 +66,9 @@ async fn main() -> anyhow::Result<()> {
 	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-	// /metrics + /health, separate from the customer-facing web server. No-op
+	// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 	// when unconfigured.
-	let internal = Internal::new(config.internal, cluster.stats.clone());
+	let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
 
 	// Graceful shutdown: the first signal drains every accepted session with a
 	// GOAWAY; a second signal (or the drain window elapsing) exits.
@@ -148,14 +148,11 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 }
 
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
-	let mut conn_id = 0;
-
 	while let Some(request) = server.accept().await {
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(conn_id)
+			.with_id(cluster.next_connection_id())
 			.with_shutdown(shutdown.clone());
 
-		conn_id += 1;
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {
 				tracing::warn!(%err, "connection closed");

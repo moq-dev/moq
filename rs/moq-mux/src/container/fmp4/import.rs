@@ -59,9 +59,36 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// here for the rest to arrive on the next call.
 	buffer: BytesMut,
 
-	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next keyframe
-	// fragment, where it becomes a timeline cut at that fragment's timestamp.
+	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
+
+	// Which segment the fragments arriving now belong to. Bumped at each boundary; a track whose
+	// open group belongs to an older one rolls, so every track segments identically.
+	segment: u64,
+
+	// A boundary the source declared (rather than one inferred from a keyframe) still has to
+	// reach the timeline.
+	pending_timeline_cut: bool,
+
+	// Where the current segment starts: the timestamp the FIRST track to open a group for it
+	// reported, which every other track then reports too.
+	//
+	// Tracks do not start a segment at the same instant. The boundary is nominal and each begins
+	// at its own nearest sample, so audio's first sample routinely sits a frame either side of
+	// video's IDR. The timeline files a group under a segment by the pts reported for it, so
+	// reporting each track's own first sample would file whichever track ran early under the
+	// previous record. That was a rounding error when an audio group was one fragment; now a
+	// group is a whole segment, so a 20ms skew moves a segment's entire audio into its
+	// predecessor and leaves the next record with none.
+	//
+	// Anchoring on the first roll rather than the earliest also keeps the declared cut on the
+	// source's own cadence: the timeline drops a cut landing within `duration_min` of the last
+	// one, so a boundary pulled 20ms earlier than a 1 second source's would be discarded and two
+	// segments would merge.
+	//
+	// Only the timeline report is anchored. Each fragment still carries its own timestamp on the
+	// wire, and `Recorder::end` still reports real content time.
+	segment_start: Option<Timestamp>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -93,6 +120,10 @@ struct Fmp4Track {
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
 
+	// The segment this track's open group belongs to. A mismatch with `Import::segment` rolls the
+	// group, which is what keeps audio on the same boundaries as video.
+	segment: Option<u64>,
+
 	// Measures the track bitrate from fragment sizes, used only when the CMAF descriptor didn't
 	// declare one. Jitter comes from the fragment timing above, not this estimator.
 	estimator: Estimator,
@@ -121,16 +152,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			broadcast,
 			buffer: BytesMut::new(),
 			pending_cut: false,
+			segment: 0,
+			pending_timeline_cut: false,
+			segment_start: None,
 		}
 	}
 
-	/// Declare that the next keyframe fragment starts a new segment, for callers that know the
-	/// source's segmentation out of band (e.g. an HLS import following its playlist).
+	/// Declare that the next fragment starts a new segment, for callers that know the source's
+	/// segmentation out of band (e.g. an HLS import following its playlist).
 	///
 	/// A `styp` atom (a CMAF segment on disk) does this on its own, so an importer reading a
 	/// segmented file needs no help. Boundaries are broadcast-wide, but redundant ones cost
 	/// nothing: the timeline ignores a cut that would land inside its minimum segment duration,
 	/// so several renditions of one source may all declare the same boundaries.
+	///
+	/// This is where groups are drawn too: every track rolls its group at a segment boundary, so
+	/// a group is a segment and each fragment inside it is a frame.
 	pub fn cut(&mut self) {
 		self.pending_cut = true;
 	}
@@ -191,8 +228,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for (atom, start, size) in parsed {
 			match atom {
 				Any::Ftyp(_) => {}
-				// A styp opens a CMAF segment: the on-disk segmentation is the boundary
-				// hint, landing on the next keyframe fragment.
+				// A styp opens a CMAF segment: the on-disk segmentation is the boundary,
+				// landing on the next fragment.
 				Any::Styp(_) => self.pending_cut = true,
 				Any::Moov(moov) => {
 					self.init(moov)?;
@@ -291,6 +328,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					track,
 					group: None,
+					segment: None,
 					recorder: Some(recorder),
 					jitter: None,
 					last_timestamp: None,
@@ -551,15 +589,81 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(config)
 	}
 
+	/// Whether the fragments in `moof` open a new segment, and so roll a group on every track.
+	///
+	/// A segment is the unit a group carries: each fragment inside it becomes a frame, which is
+	/// what lets audio (whose samples are all independently decodable, so it has no boundary of
+	/// its own) follow the same segmentation as video instead of opening a group per fragment.
+	fn starts_segment(&self, moof: &Moof, has_video: bool) -> Result<bool> {
+		if self.pending_cut {
+			return Ok(true);
+		}
+
+		if !has_video {
+			// Audio-only and unsegmented: nothing in the container says where a segment ends, so
+			// fall back to a group per fragment. Bounded, unlike one group for the whole source.
+			return Ok(true);
+		}
+
+		// A video keyframe starts a segment, but only once the current segment already has its
+		// video group open. Otherwise this IS that segment's opening fragment, arriving after a
+		// `styp` or a `cut()` that already declared the boundary, and bumping a second time would
+		// strand video a segment ahead of the audio that rolled on the declaration.
+		if !self.video_rolled() {
+			return Ok(false);
+		}
+
+		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
+		Ok(moof.traf.iter().any(|traf| {
+			let track_id = traf.tfhd.track_id;
+			if self.tracks.get(&track_id).map(|t| &t.kind) != Some(&TrackKind::Video) {
+				return false;
+			}
+			let trex_flags = moov
+				.mvex
+				.as_ref()
+				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id))
+				.map(|trex| trex.default_sample_flags)
+				.unwrap_or_default();
+
+			traf.trun.iter().flat_map(|trun| trun.entries.iter()).any(|entry| {
+				is_sync_sample(
+					entry
+						.flags
+						.unwrap_or(traf.tfhd.default_sample_flags.unwrap_or(trex_flags)),
+				)
+			})
+		}))
+	}
+
+	/// Whether every video track has already opened its group for the current segment.
+	fn video_rolled(&self) -> bool {
+		self.tracks
+			.values()
+			.filter(|track| track.kind == TrackKind::Video)
+			.all(|track| track.segment == Some(self.segment))
+	}
+
 	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> Result<()> {
-		// A pending cut waits for a video keyframe; only an import with no video at all may
-		// anchor a boundary on another track's fragment.
 		let has_video = self.tracks.values().any(|t| t.kind == TrackKind::Video);
-		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
+
+		// Resolve the segment boundary BEFORE the per-track loop. A moof can carry both an audio
+		// and a video traf, and whichever comes first must see the same answer, or the other rolls
+		// a fragment late and the two tracks stop agreeing on where segments fall.
+		if self.starts_segment(&moof, has_video)? {
+			self.segment += 1;
+			// A boundary the source declared is also a timeline boundary; one merely inferred
+			// from a keyframe is not, since the default pacing already sees that group open.
+			self.pending_timeline_cut |= self.pending_cut;
+			self.pending_cut = false;
+			self.segment_start = None;
+		}
+
+		let moov = self.moov.as_ref().ok_or(Error::NoMoov)?;
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
@@ -660,11 +764,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					}
 
 					let keyframe = match track.kind {
-						TrackKind::Video => {
-							let keyframe = (flags >> 24) & 0x3 == 0x2;
-							let non_sync = (flags >> 16) & 0x1 == 0x1;
-							keyframe && !non_sync
-						}
+						TrackKind::Video => is_sync_sample(flags),
 						TrackKind::Audio => true,
 					};
 
@@ -779,11 +879,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let fragment_bytes = Bytes::from(moof_buf);
 
-			// Write the per-track fragment as a single MoQ frame (passthrough).
-			let mut g = if contains_keyframe {
+			// Write the per-track fragment as a single MoQ frame (passthrough). The group rolls
+			// once per segment, so a group is a segment and the fragments inside it are frames.
+			// The keyframe bit no longer decides that: audio flags every sample a sync sample, so
+			// keying off it opened a group (a QUIC stream) per audio fragment.
+			let new_segment = track.segment != Some(self.segment);
+			let start_group = track.group.is_none() || new_segment;
+			let mut g = if start_group {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 				}
+				track.segment = Some(self.segment);
 				match track.pending_sequence.take() {
 					Some(sequence) => track.track.create_group(moq_net::group::Info { sequence })?,
 					None => track.track.append_group()?,
@@ -797,25 +903,32 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// consumer still drives playback from the fragment's internal timing.
 			let timestamp = min_timestamp.ok_or(Error::MissingTrun)?;
 
-			if contains_keyframe {
-				// A pending segment boundary (a styp, or an explicit `cut()`) lands on the next
-				// keyframe fragment: for video that is where a segment can start, and for an
-				// audio-only import the audio fragment is the best anchor there is.
-				if self.pending_cut && (track.kind == TrackKind::Video || !has_video) {
-					self.pending_cut = false;
-					self.catalog.timeline().cut(timestamp)?;
-				}
-
-				// A keyframe fragment just opened a new group; report it so the broadcast's
-				// timeline can index the segment (the timeline absorbs publish failures).
+			if start_group {
+				// A group just opened; report it so the broadcast's timeline can index the segment
+				// (the timeline absorbs publish failures). Audio is always independently decodable;
+				// video says whether this segment really begins on an IDR, which is what an HLS
+				// export reads to bootstrap an init segment. A group reopened mid-segment (after a
+				// `seek`) reports its own timestamp: it does not start a segment.
+				let reported = match new_segment {
+					false => timestamp,
+					true => match self.segment_start {
+						Some(start) => start,
+						None => {
+							self.segment_start = Some(timestamp);
+							if self.pending_timeline_cut {
+								self.pending_timeline_cut = false;
+								self.catalog.timeline().cut(timestamp)?;
+							}
+							timestamp
+						}
+					},
+				};
 				if let Some(recorder) = track.recorder.as_mut() {
-					recorder.record(g.sequence, timestamp, true);
+					recorder.record(g.sequence, reported, contains_keyframe);
 				}
-			}
 
-			// A keyframe fragment starts a new group: close the previous one for the bitrate
-			// estimator (used only when the descriptor didn't declare a bitrate).
-			if contains_keyframe {
+				// Close the previous group for the bitrate estimator (used only when the
+				// descriptor didn't declare a bitrate).
 				track.estimator.cut(Some(timestamp));
 				sync_bitrate(&mut self.catalog, track)?;
 			}
@@ -934,6 +1047,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(())
 	}
+}
+
+/// Whether a sample's `trun` flags mark it a sync sample (an IDR): `sample_depends_on == 2` and
+/// `sample_is_non_sync_sample` clear, per ISO/IEC 14496-12.
+fn is_sync_sample(flags: u32) -> bool {
+	let depends_on_none = (flags >> 24) & 0x3 == 0x2;
+	let non_sync = (flags >> 16) & 0x1 == 0x1;
+	depends_on_none && !non_sync
 }
 
 /// Advertise the measured bitrate when it moves, for a passthrough track whose CMAF descriptor

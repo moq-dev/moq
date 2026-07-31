@@ -14,7 +14,7 @@ use crate::{
 	AsPath, Error, Path, PathOwned, Timescale, Timestamp, bandwidth,
 	coding::{Decode, Reader, Stream},
 	lite,
-	track::Subscription,
+	track::{Position, Subscription},
 };
 
 use super::{ConnectingProducer, RouteCost, Version};
@@ -1017,7 +1017,9 @@ mod tests {
 
 	/// The `(group, frame)` bounds `resume::slice` produces after a mid-group takeover.
 	fn mid_group_demand() -> Subscription {
-		Subscription::default().with_start(5, 3).with_end(5, 2)
+		Subscription::default()
+			.with_start(Position { group: 5, frame: 3 })
+			.with_end(Position::after(5, 2))
 	}
 
 	/// A mid-group resume boundary handed to a peer that predates lite-06 is widened to
@@ -1083,42 +1085,96 @@ mod tests {
 		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(2)));
 	}
 
-	/// A frame index never reaches the wire without the group it counts from.
+	/// The model's exclusive end maps back to the wire's inclusive pair.
 	///
-	/// [`Subscription::with_start`] pairs the two, so the builder cannot express this.
-	/// The fields are still `pub`, so assigning one alone can; the encode path reads the
-	/// pair through `Subscription::start`, which drops a frame with no group rather than
-	/// emitting one the peer must reject as `InvalidSubscribeLocation`.
+	/// The two disagree deliberately (see [`Subscription::end`]), so this pins the seam:
+	/// an end at the head of a group means the group below it, served whole, while one
+	/// mid-group caps the frame below it. Off by one here would silently drop or
+	/// duplicate a frame at every relay hop.
+	#[test]
+	fn wire_bounds_convert_the_exclusive_end() {
+		// The whole of group 5 is the head of group 6.
+		let bounds = WireBounds::new(None, Some(Position::group(6)));
+		assert_eq!((bounds.end_group, bounds.end_frame), (Some(5), None));
+
+		// Group 5 through frame 2 is the head of frame 3.
+		let bounds = WireBounds::new(None, Some(Position { group: 5, frame: 3 }));
+		assert_eq!((bounds.end_group, bounds.end_frame), (Some(5), Some(2)));
+
+		// Unbounded stays unbounded.
+		let bounds = WireBounds::new(None, None);
+		assert_eq!((bounds.end_group, bounds.end_frame), (None, None));
+
+		// Starts are inclusive on both sides, so they pass straight through.
+		let bounds = WireBounds::new(Some(Position { group: 5, frame: 3 }), None);
+		assert_eq!((bounds.start_group, bounds.start_frame), (Some(5), 3));
+	}
+
+	/// The builders produce exactly what the wire conversion expects, so an inclusive
+	/// bound survives the trip out to a peer unchanged.
+	#[test]
+	fn wire_bounds_match_the_builders() {
+		let whole = Subscription::default().with_end(Position::after_group(5));
+		let bounds = WireBounds::new(whole.start, whole.end);
+		assert_eq!((bounds.end_group, bounds.end_frame), (Some(5), None));
+
+		let capped = Subscription::default().with_end(Position::after(5, 2));
+		let bounds = WireBounds::new(capped.start, capped.end);
+		assert_eq!((bounds.end_group, bounds.end_frame), (Some(5), Some(2)));
+
+		let started = Subscription::default().with_start(Position { group: 5, frame: 3 });
+		let bounds = WireBounds::new(started.start, started.end);
+		assert_eq!((bounds.start_group, bounds.start_frame), (Some(5), 3));
+	}
+
+	/// A subscription that asks for nothing opens nothing.
+	///
+	/// `Position::group(0)` is the empty range: nothing sorts below it. The wire cannot
+	/// say that, and the nearest thing it can say is "through group 0", which would
+	/// deliver the single group the caller excluded.
 	#[tokio::test]
-	async fn a_frame_bound_without_its_group_is_dropped() {
+	async fn an_empty_range_opens_no_subscription() {
 		let mut h = Harness::new(Version::Lite06Wip);
 		let mut sub = Sub::None;
 
-		// Deliberately built by field rather than by builder: `with_start` and `with_end`
-		// are exactly what makes this unreachable through the intended surface.
-		let demand = Subscription {
-			frame_start: 3,
-			frame_end: Some(7),
-			..Default::default()
-		};
+		let empty = Subscription::default().with_end(Position::group(0));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "must not open a subscription");
+		assert!(h.wire().is_empty(), "nothing reached the wire");
+	}
+
+	/// Demand collapsing to nothing cancels the upstream rather than sending a bound
+	/// that means the opposite.
+	#[tokio::test]
+	async fn an_empty_range_cancels_a_live_subscription() {
+		let mut h = Harness::new(Version::Lite06Wip);
+		let mut sub = Sub::None;
 
 		h.serve
 			.handle_subscription(
 				&mut h.producer,
 				&mut sub,
-				Some(demand),
+				Some(Subscription::default()),
 				true,
 				Some(Timescale::default()),
 			)
 			.await
 			.unwrap();
+		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
+		let established = h.wire().len();
 
-		let wire = h.wire();
-		let mut wire = wire.as_slice();
-		lite::ControlType::decode(&mut wire, Version::Lite06Wip).unwrap();
-		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06Wip).unwrap();
-		assert_eq!((msg.start_group, msg.start_frame), (None, 0));
-		assert_eq!((msg.end_group, msg.end_frame), (None, None));
+		let empty = Subscription::default().with_end(Position::group(0));
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, Some(empty), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+
+		assert!(matches!(sub, Sub::None), "the upstream must be canceled");
+		assert_eq!(h.wire().len(), established, "no SUBSCRIBE_UPDATE claiming group 0");
 	}
 
 	/// The widening covers SUBSCRIBE_UPDATE too: a downstream peer asking for a frame
@@ -1160,55 +1216,69 @@ mod tests {
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
 	}
 
-	/// A buffered SUBSCRIBE_START must not install a floor above demand that
-	/// widened while it sat in the queue: an update gets no fresh START, so the
-	/// stale declaration is the last word unless it is clamped to the current
-	/// request.
+	/// A buffered SUBSCRIBE_START must not land once an update moved the start:
+	/// the declaration describes establish-time demand, no fresh START follows an
+	/// update, and applying it in either direction can strand readers (a stale
+	/// START(5) after an update to 8 would reopen 5..8 that the publisher no
+	/// longer serves). `updated` is what the response handler gates on.
 	#[tokio::test]
-	async fn buffered_start_clamps_to_widened_demand() {
+	async fn buffered_start_is_stale_after_updates() {
 		let mut h = Harness::new(Version::Lite05);
 		let mut sub = Sub::None;
 
-		// Subscribe from group 5; the peer's START(5) is considered in flight.
+		let demand = |group: u64| Some(Subscription::default().with_start(Position::group(group)));
+
+		// Establish from group 3; the peer's START is considered in flight.
+		h.serve
+			.handle_subscription(&mut h.producer, &mut sub, demand(3), true, Some(Timescale::default()))
+			.await
+			.unwrap();
+		assert!(
+			matches!(&sub, Sub::Active(active) if !active.updated),
+			"a fresh subscription accepts its START"
+		);
+
+		// An end-only update leaves the start intact: the START stays valid.
 		h.serve
 			.handle_subscription(
 				&mut h.producer,
 				&mut sub,
-				Some(Subscription::default().with_group_start(5)),
+				Some(
+					Subscription::default()
+						.with_start(Position::group(3))
+						.with_end(Position::group(9)),
+				),
 				true,
 				Some(Timescale::default()),
 			)
 			.await
 			.unwrap();
-		assert_eq!(sub.start_floor(5), 5, "START matches the demand that produced it");
+		assert!(
+			matches!(&sub, Sub::Active(active) if !active.updated),
+			"an unmoved start keeps the START applicable"
+		);
 
-		// Demand widens backward before the START is processed.
+		// The start moves: any buffered START is stale from here on.
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default().with_group_start(3)),
-				true,
-				Some(Timescale::default()),
-			)
+			.handle_subscription(&mut h.producer, &mut sub, demand(8), true, Some(Timescale::default()))
 			.await
 			.unwrap();
-		assert_eq!(sub.start_floor(5), 3, "a stale START must clamp to the widened demand");
-
-		// Narrowed demand never raises the floor above the declaration.
-		assert_eq!(sub.start_floor(2), 2);
+		assert!(
+			matches!(&sub, Sub::Active(active) if active.updated),
+			"a moved start must invalidate a buffered START"
+		);
 	}
 
-	/// The permanent-miss floor follows the demand in both directions: an update
+	/// The permanent-miss floor follows the demand in every direction: an update
 	/// that moves the start forward retires the skipped range (the publisher
-	/// stops serving it and no fresh START says so), and one that moves it
-	/// backward reopens it.
+	/// stops serving it and no fresh START says so), one that moves it backward
+	/// reopens it, and dropping to the live edge clears it entirely.
 	#[tokio::test]
 	async fn updates_move_the_declared_floor_both_ways() {
 		let mut h = Harness::new(Version::Lite05);
 		let mut sub = Sub::None;
 
-		let demand = |group: u64| Some(Subscription::default().with_group_start(group));
+		let demand = |group: u64| Some(Subscription::default().with_start(Position::group(group)));
 
 		// Establish from group 5: the floor tracks the request until START lands.
 		h.serve
@@ -1230,6 +1300,58 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), Some(3));
+
+		// Live edge: the floor is unknown until the next declaration, so a
+		// group below the stale one must not be a permanent miss.
+		h.serve
+			.handle_subscription(
+				&mut h.producer,
+				&mut sub,
+				Some(Subscription::default()),
+				true,
+				Some(Timescale::default()),
+			)
+			.await
+			.unwrap();
+		assert_eq!(h.producer.start_sequence(), None);
+	}
+}
+
+/// The four wire fields a subscription's half-open range encodes to.
+///
+/// The inverse of the publisher's `Bounds::positions`: the model carries whole
+/// positions with an exclusive end, while the wire splits each bound into a group and a
+/// frame and states both ends inclusive.
+struct WireBounds {
+	start_group: Option<u64>,
+	start_frame: u64,
+	end_group: Option<u64>,
+	end_frame: Option<u64>,
+}
+
+impl WireBounds {
+	fn new(start: Option<Position>, end: Option<Position>) -> Self {
+		// The empty range has no wire encoding, and flooring it below would ask for the
+		// group it excludes. `handle_subscription` drops such a subscription instead.
+		debug_assert!(
+			end != Some(Position::group(0)),
+			"an empty range cannot be encoded; it should have been dropped as no demand"
+		);
+
+		let (end_group, end_frame) = match end {
+			// An exclusive end at the head of a group means the group below it is the
+			// last one, and it is served whole.
+			Some(end) if end.frame == 0 => (Some(end.group.saturating_sub(1)), None),
+			Some(end) => (Some(end.group), Some(end.frame - 1)),
+			None => (None, None),
+		};
+
+		Self {
+			start_group: start.map(|start| start.group),
+			start_frame: start.map_or(0, |start| start.frame),
+			end_group,
+			end_frame,
+		}
 	}
 }
 
@@ -1242,26 +1364,18 @@ struct SubStream<S: web_transport_trait::Session> {
 	/// downstream aggregate changes.
 	ordered: bool,
 	max_latency: Duration,
-	start_group: Option<u64>,
-	start_frame: u64,
+	start: Option<Position>,
 	priority: u8,
+	/// Whether an update has moved the requested start since establish. A
+	/// SUBSCRIBE_START describes the demand at establish time and no fresh one
+	/// follows an update, so once this is set a buffered START is stale in
+	/// either direction and must be ignored (the request-tracked floor stands).
+	updated: bool,
 }
 
 enum Sub<S: web_transport_trait::Session> {
 	None,
 	Active(SubStream<S>),
-}
-
-impl<S: web_transport_trait::Session> Sub<S> {
-	/// The floor a SUBSCRIBE_START establishes, clamped to the demand currently
-	/// on the wire: the START may predate a widening SUBSCRIBE_UPDATE (an update
-	/// gets no fresh START), and the peer may serve down to whichever is lower.
-	fn start_floor(&self, declared: u64) -> u64 {
-		match self {
-			Sub::Active(active) => active.start_group.map_or(declared, |requested| declared.min(requested)),
-			Sub::None => declared,
-		}
-	}
 }
 
 /// The source created for one received announce, remembering the publisher
@@ -1483,7 +1597,15 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					// frame). Record it as a drop signal, so a spliced reader waiting on a
 					// skipped group fails over instead of stalling on a live route.
 					lite::SubscribeResponse::Start(start) => {
-						let _ = serving.start_at(sub.start_floor(start.group));
+						// A START describes the demand at establish time. Once an update
+						// has moved the start it may be stale in either direction (no
+						// fresh START follows an update) and the request-tracked floor
+						// already stands, so it is ignored rather than guessed at.
+						if let Sub::Active(active) = &sub
+							&& !active.updated
+						{
+							let _ = serving.start_at(start.group);
+						}
 					}
 					// OK/DROP just resolve the range (the producer already orders groups).
 					_ => tracing::debug!(track = %self.name, ?msg, "subscribe response"),
@@ -1592,15 +1714,23 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			return;
 		}
 
-		if subscription.frame_start != 0 || subscription.frame_end.is_some() {
+		// Round both bounds outward to the enclosing group, so the peer sends at least
+		// what was asked for and never less.
+		let start = subscription.start.map(|start| Position::group(start.group));
+		let end = subscription.end.map(|end| match end.frame {
+			0 => end,
+			_ => Position::group(end.group.saturating_add(1)),
+		});
+
+		if (start, end) != (subscription.start, subscription.end) {
 			tracing::debug!(
 				track = %self.name,
 				version = ?self.subscriber.version,
 				"widening frame bounds to whole groups for an older peer"
 			);
 		}
-		subscription.frame_start = 0;
-		subscription.frame_end = None;
+		subscription.start = start;
+		subscription.end = end;
 	}
 
 	/// Apply a subscription-demand change: open the upstream SUBSCRIBE on the first
@@ -1613,6 +1743,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		supports_update: bool,
 		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
+		// A range ending at the very first position asks for nothing. The wire has no
+		// encoding for that (`Group End` = 0 already means unbounded), and the closest it
+		// can say is "through group 0", which would deliver the one group the caller
+		// excluded. No demand at all is the faithful translation, and it is reachable
+		// only from a caller: every internal bound sits at or above the first frame.
+		let pref = pref.filter(|sub| sub.end != Some(Position::group(0)));
+
 		match pref {
 			Some(mut subscription) => {
 				self.widen_frame_bounds(&mut subscription);
@@ -1624,23 +1761,25 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 					Sub::Active(active) => {
 						// Downstream preferences changed: forward them upstream as a
 						// SUBSCRIBE_UPDATE (Lite03+ only; older peers can't carry one).
+						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
 						active.ordered = subscription.ordered;
 						active.max_latency = subscription.latency_max;
-						let start = subscription.start();
-						active.start_group = start.map(|start| start.group);
-						active.start_frame = start.map_or(0, |start| start.frame);
+						active.start = subscription.start;
 						if supports_update {
-							// The floor follows the demand, in both directions: moving
-							// below a declared SUBSCRIBE_START reopens those groups (the
-							// peer may serve them now), and moving forward retires the
-							// skipped range (the peer stops serving it, and no fresh
-							// START will say so).
-							if let Some(group) = active.start_group {
-								let _ = producer.start_at(group);
+							// The floor follows the requested start, in both directions:
+							// moving below a declared SUBSCRIBE_START reopens those groups
+							// (the peer may serve them now), moving forward retires the
+							// skipped range (the peer stops serving it, and no fresh START
+							// will say so), and dropping to the live edge clears it until
+							// the next declaration. Once the start moved, a buffered START
+							// from the original request is stale and must not land (see
+							// `updated`).
+							if start_moved {
+								let _ = producer.start_at(active.start.map(|start| start.group));
+								active.updated = true;
 							}
-							let end_frame = subscription.group_end.and(subscription.frame_end);
-							self.send_update(active, subscription.group_end, end_frame).await?;
+							self.send_update(active, subscription.end).await?;
 						}
 					}
 				}
@@ -1687,16 +1826,13 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 
 		// Both halves of each bound come from the same position, so a frame can never
 		// reach the wire without the group it counts from (which the peer would reject).
-		let start = subscription.start();
-
 		// The floor tracks the requested start until this subscription's own
-		// SUBSCRIBE_START refines it: the peer never serves below the request,
-		// and a previous subscription's declaration (higher or lower) must not
-		// outlive its demand.
-		if let Some(start) = &start {
-			let _ = producer.start_at(start.group);
-		}
+		// SUBSCRIBE_START refines it: the peer never serves below the request, a
+		// previous subscription's declaration must not outlive its demand, and
+		// live-edge demand (None) starts with no floor at all.
+		let _ = producer.start_at(subscription.start.map(|start| start.group));
 
+		let bounds = WireBounds::new(subscription.start, subscription.end);
 		let msg = lite::Subscribe {
 			id,
 			broadcast: self.path.as_path(),
@@ -1704,10 +1840,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			priority: subscription.priority,
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
-			start_group: start.map(|start| start.group),
-			end_group: subscription.group_end,
-			start_frame: start.map_or(0, |start| start.frame),
-			end_frame: subscription.group_end.and(subscription.frame_end),
+			start_group: bounds.start_group,
+			end_group: bounds.end_group,
+			start_frame: bounds.start_frame,
+			end_frame: bounds.end_frame,
 		};
 
 		tracing::info!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
@@ -1767,30 +1903,25 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			id,
 			ordered: subscription.ordered,
 			max_latency: subscription.latency_max,
-			start_group: subscription.group_start,
-			start_frame: subscription.frame_start,
+			start: subscription.start,
 			priority: subscription.priority,
+			updated: false,
 		});
 
 		Ok(())
 	}
 
-	/// Echo the current params upstream as a SUBSCRIBE_UPDATE, varying only the end bound
-	/// (`end_group` and the `end_frame` qualifying it).
-	async fn send_update(
-		&self,
-		active: &mut SubStream<S>,
-		end_group: Option<u64>,
-		end_frame: Option<u64>,
-	) -> Result<(), Error> {
+	/// Echo the current params upstream as a SUBSCRIBE_UPDATE, varying only the end bound.
+	async fn send_update(&self, active: &mut SubStream<S>, end: Option<Position>) -> Result<(), Error> {
+		let bounds = WireBounds::new(active.start, end);
 		let update = lite::SubscribeUpdate {
 			priority: active.priority,
 			ordered: active.ordered,
 			max_latency: active.max_latency,
-			start_group: active.start_group,
-			end_group,
-			start_frame: active.start_frame,
-			end_frame,
+			start_group: bounds.start_group,
+			end_group: bounds.end_group,
+			start_frame: bounds.start_frame,
+			end_frame: bounds.end_frame,
 		};
 		active.stream.writer.encode(&update).await
 	}

@@ -18,9 +18,7 @@ use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
 
-pub use super::subscription::Subscription;
-
-pub(crate) use super::subscription::Position;
+pub use super::subscription::{Position, Subscription};
 
 use std::{
 	collections::{HashMap, VecDeque},
@@ -808,9 +806,10 @@ impl TrackState {
 
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
-	/// which may legitimately move in either direction.
-	fn set_start(&mut self, start_sequence: u64) {
-		self.start_sequence = Some(start_sequence);
+	/// which may legitimately move in either direction. `None` clears it (the
+	/// demand dropped to the live edge, whose floor is unknown until declared).
+	fn set_start(&mut self, start_sequence: Option<u64>) {
+		self.start_sequence = start_sequence;
 	}
 
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
@@ -1155,9 +1154,10 @@ impl Producer {
 	/// Scoped to the current subscription's demand, so a later declaration
 	/// replaces this one in either direction: a re-subscription may start
 	/// earlier, and a narrowed subscription skips groups an earlier declaration
-	/// still promised.
-	pub fn start_at(&mut self, sequence: u64) -> Result<()> {
-		self.modify()?.set_start(sequence);
+	/// still promised. Pass `None` to clear it, for demand at the live edge:
+	/// its floor is unknown until the feed declares one.
+	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
+		self.modify()?.set_start(sequence.into());
 		Ok(())
 	}
 
@@ -2317,7 +2317,7 @@ impl kio::Pollable for Fetching {
 ///
 /// - [`Self::start_at`] / [`Self::end_at`] move **this subscriber's read cursor**. They
 ///   filter exactly what this handle returns and are invisible to the publisher.
-/// - [`Subscription::group_start`] / [`Subscription::group_end`], set via [`Self::update`],
+/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
 ///   are a **request to the publisher**. They're aggregated across every live subscriber
 ///   (earliest start, widest end), so they say what the publisher should send, not what
 ///   this subscriber sees.
@@ -2623,7 +2623,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::group_start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
@@ -2637,7 +2637,7 @@ impl Subscriber {
 	///
 	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
 	///
-	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
+	/// A local filter, not a request; [`Subscription::end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
 	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's

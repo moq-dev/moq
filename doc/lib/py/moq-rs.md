@@ -61,7 +61,10 @@ except moq.Error as err:
 broadcast = client.create_broadcast("my-stream")
 audio = broadcast.publish_media("opus", opus_init_bytes)
 
+# Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
+# frame is the lowest latency; a segment cadence suits HLS/DASH.
 audio.write_frame(payload, timestamp_us=0)
+audio.cut()
 audio.finish()
 broadcast.finish()
 ```

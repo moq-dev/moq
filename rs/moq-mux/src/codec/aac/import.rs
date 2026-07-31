@@ -8,9 +8,10 @@ use crate::container::Frame;
 /// ESDS atom); build the config with [`config`]. Every AAC packet is independently decodable, so
 /// [`decode`](Self::decode) marks only the first frame of each group a keyframe (the rest extend it):
 /// frames accumulate into the current group until the caller [`cut`](Self::cut)s or [`seek`](Self::seek)s.
-/// The [`import::Track`](crate::import::Track) facade cuts after every packet by default (one group
-/// per frame, so the relay forwards without waiting); a caller that drives its own boundaries (a
-/// segment cadence) cuts less often. The codec's packet loss concealment handles drops.
+/// The [`import::Track`](crate::import::Track) facade passes that through, so boundaries are the
+/// caller's either way: cut per packet for one group (one QUIC stream) the relay forwards without
+/// waiting, or at a segment cadence to align with video. The codec's packet loss concealment
+/// handles drops.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,

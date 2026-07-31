@@ -930,11 +930,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
 			latency_max: subscribe.max_latency,
-			group_start: subscribe.start_group,
-			group_end: subscribe.end_group,
-			frame_start: subscribe.start_frame,
-			frame_end: subscribe.end_frame,
-			..Default::default()
+			..Bounds::from(subscribe).positions()
 		};
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
@@ -1975,6 +1971,29 @@ struct Bounds {
 }
 
 impl Bounds {
+	/// The requested range as the model's half-open pair of [`track::Position`]s.
+	///
+	/// The wire carries the two halves of each bound separately and both ends
+	/// inclusive; the model carries whole positions with an exclusive end. The
+	/// [`Subscription`] builders own that conversion, so this goes through them
+	/// rather than repeating it.
+	fn positions(&self) -> crate::track::Subscription {
+		let mut sub = crate::track::Subscription::default();
+		if let Some(group) = self.start_group {
+			sub = sub.with_start(track::Position {
+				group,
+				frame: self.start_frame,
+			});
+		}
+		if let Some(group) = self.end_group {
+			sub = sub.with_end(match self.end_frame {
+				Some(frame) => track::Position::after(group, frame),
+				None => track::Position::after_group(group),
+			});
+		}
+		sub
+	}
+
 	/// The group to apply a frame offset to and the offset itself, or `None` when
 	/// delivery starts on a group boundary.
 	fn start_frame(&self) -> Option<(u64, u64)> {
@@ -2156,21 +2175,17 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					}
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
+					let bounds = Bounds::from(&upd);
 					let _ = track.update(crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
 						latency_max: upd.max_latency,
-						group_start: upd.start_group,
-						group_end: upd.end_group,
-						frame_start: upd.start_frame,
-						frame_end: upd.end_frame,
-						..Default::default()
+						..bounds.positions()
 					});
 					if let Some(start_group) = upd.start_group {
 						track.start_at(start_group);
 					}
 					track.end_at(upd.end_group);
-					let bounds = Bounds::from(&upd);
 					start_frame = bounds.start_frame();
 					end_frame = bounds.end_frame();
 				}
@@ -2423,6 +2438,48 @@ mod serve_group_test {
 	use super::*;
 	use crate::lite::test_transport::*;
 	use crate::{Timestamp, broadcast};
+
+	/// The wire's inclusive pair maps to the model's exclusive end.
+	///
+	/// The inverse of the subscriber's `WireBounds`, and the same off-by-one risk: a
+	/// whole end group becomes the head of the next one, a capped frame becomes the head
+	/// of the frame above it.
+	#[test]
+	fn bounds_convert_to_positions() {
+		let whole = Bounds {
+			start_group: None,
+			start_frame: 0,
+			end_group: Some(5),
+			end_frame: None,
+		};
+		assert_eq!(whole.positions().end, Some(track::Position::group(6)));
+
+		let capped = Bounds {
+			end_frame: Some(2),
+			..whole
+		};
+		assert_eq!(capped.positions().end, Some(track::Position { group: 5, frame: 3 }));
+
+		let started = Bounds {
+			start_group: Some(5),
+			start_frame: 3,
+			end_group: None,
+			end_frame: None,
+		};
+		let positions = started.positions();
+		assert_eq!(positions.start, Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(positions.end, None);
+
+		// A frame bound the peer sent without its group has nothing to count from, so it
+		// cannot reach the model at all.
+		let orphan = Bounds {
+			start_group: None,
+			start_frame: 3,
+			end_group: None,
+			end_frame: Some(7),
+		};
+		assert_eq!((orphan.positions().start, orphan.positions().end), (None, None));
+	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:
 	/// only a subscriber that asked for a partial group may receive one.

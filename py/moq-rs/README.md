@@ -48,8 +48,11 @@ async def main():
         audio = broadcast.publish_media("opus", opus_init_bytes)
 
         # Write frames
+        # Audio has no keyframes, so `cut` is what gives it group boundaries.
         audio.write_frame(payload, timestamp_us=0)
+        audio.cut()
         audio.write_frame(payload, timestamp_us=20000)
+        audio.cut()
 
         # Clean up
         audio.finish()
@@ -133,6 +136,7 @@ client = moq.Client(
   - Async iterator yielding `TrackRequest`
 - **`MediaProducer`**. Write frames to a track.
   - `.write_frame(payload, timestamp_us=0)`
+  - `.cut()` / `.seek(sequence)` draw a group boundary (audio has none of its own)
   - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp_us=0)` writes a payload with a presentation timestamp in microseconds.

@@ -1,7 +1,10 @@
 use std::{
 	collections::{HashMap, HashSet},
 	path::PathBuf,
-	sync::{Arc, Mutex},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicU64, Ordering},
+	},
 	time::{Duration, Instant},
 };
 
@@ -10,13 +13,10 @@ use moq_net::origin;
 use moq_net::{Origin, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
+use tracing::Instrument as _;
 use url::Url;
 
-use crate::AuthToken;
-
-/// Path prefix under which cluster nodes advertise their own URLs for gossip-style
-/// peer discovery.
-const MESH_PREFIX: &str = ".internal/origins";
+use crate::{AuthToken, nodes::MESH_PREFIX};
 
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -363,6 +363,12 @@ pub struct ClusterConfig {
 pub struct Cluster {
 	config: ClusterConfig,
 	client: Option<moq_native::Client>,
+	pub(crate) nodes: crate::nodes::Nodes,
+
+	/// Hands out the `conn` id every session logs under, inbound and outbound
+	/// alike, so one id space covers the whole process and an id in the `/nodes`
+	/// view always points at the same session in the logs.
+	connection_ids: Arc<AtomicU64>,
 
 	/// The origin's construction config (identity, cache pool, linger). Kept so
 	/// the `with_*` builders can rebuild the origin without losing each other's
@@ -406,10 +412,13 @@ impl Cluster {
 		};
 		let info = origin::Info::new(id).with_linger(config.linger.unwrap_or(DEFAULT_LINGER));
 		let origin = info.clone().produce();
+		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
 			config,
 			client: None,
+			nodes,
+			connection_ids: Arc::default(),
 			client_tls: None,
 			info,
 			origin,
@@ -431,6 +440,7 @@ impl Cluster {
 			.with_pool(cache.pool)
 			.with_cache_duration(cache.duration);
 		self.origin = self.info.clone().produce();
+		self.nodes = self.nodes.with_origin(self.origin.clone());
 		self
 	}
 
@@ -450,6 +460,16 @@ impl Cluster {
 	pub fn with_client_tls(mut self, tls: rustls::ClientConfig) -> Self {
 		self.client_tls = Some(Arc::new(tls));
 		self
+	}
+
+	/// Reserve the next `conn` id, the handle a session is logged under.
+	///
+	/// One counter serves inbound accepts and outbound cluster dials, so an id in
+	/// the internal `/nodes` view names exactly one session in the logs. Pass it to
+	/// [`Connection::with_id`](crate::Connection::with_id) for every request you
+	/// accept, rather than counting separately.
+	pub fn next_connection_id(&self) -> u64 {
+		self.connection_ids.fetch_add(1, Ordering::Relaxed)
 	}
 
 	/// Attach a stats registry. Replaces the default disabled registry.
@@ -916,6 +936,15 @@ impl Cluster {
 	}
 
 	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+		// Each attempt is its own session, so it gets its own id. Matches the span an
+		// accepted connection runs under, so both directions log the same way.
+		let id = self.next_connection_id();
+		self.run_remote_session(id, url, cost)
+			.instrument(tracing::info_span!("conn", id))
+			.await
+	}
+
+	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
@@ -942,10 +971,18 @@ impl Cluster {
 		// a failed attempt, so an A-redirects-to-B-redirects-to-A loop escalates
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
-		let reconnect = client.reconnect(url.clone());
-		reconnect.closed().await?;
-
-		Ok(())
+		let mut reconnect = client.reconnect(url.clone());
+		let mut connection = None;
+		loop {
+			match reconnect.status().await? {
+				moq_native::Status::Connected if connection.is_none() => {
+					connection = Some(self.nodes.connect_outbound(id, log_url.to_string()));
+				}
+				moq_native::Status::Disconnected => connection = None,
+				moq_native::Status::Migrating => {}
+				_ => {}
+			}
+		}
 	}
 }
 
@@ -994,7 +1031,6 @@ fn connect_api_is_http(source: &str) -> bool {
 /// verbatim. A bare host or `host:port` is still accepted for backwards
 /// compatibility and wrapped in `https://.../` (callers warn about this legacy
 /// form for user-supplied `--cluster-connect` entries).
-///
 fn peer_url(peer: &str) -> anyhow::Result<Url> {
 	// A full URL has a scheme separator; a bare host or `host:port` does not
 	// (and `Url::parse` would otherwise mis-read `host:port` as scheme `host`).
@@ -1024,7 +1060,7 @@ fn peer_url(peer: &str) -> anyhow::Result<Url> {
 /// A trailing slash on a non-empty URL path does not survive, since a path has no
 /// way to spell one. `https://a.example/edge/` advertises the same as
 /// `https://a.example/edge`.
-fn advertised_node_url(advertised: &str) -> String {
+pub(crate) fn advertised_node_url(advertised: &str) -> String {
 	match advertised.split_once('/') {
 		// The segment already ends in `:`, so this restores the `//` the path ate.
 		Some((scheme, rest)) if scheme.ends_with(':') => format!("{scheme}//{rest}"),
@@ -1044,7 +1080,7 @@ fn is_legacy_peer(peer: &str) -> bool {
 /// session. Drops the query (the jwt isn't part of a peer's identity) and lets
 /// `Url` normalize the scheme, host case, and default port. Falls back to the
 /// raw string if the peer can't be parsed.
-fn canonicalize_peer_key(peer: &str) -> String {
+pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	match peer_url(peer) {
 		Ok(mut url) => {
 			url.set_query(None);

@@ -53,7 +53,7 @@ pub struct Config {
 	#[serde(default)]
 	pub cache: CacheConfig,
 
-	/// Internal (ops) listener for `/metrics`, `/health`, etc. Disabled unless
+	/// Internal (ops) listener for `/metrics`, `/health`, and `/nodes`. Disabled unless
 	/// `internal.listen` is set.
 	#[command(flatten)]
 	#[serde(default)]
