@@ -850,6 +850,10 @@ struct SegmentSub {
 	start: Option<Position>,
 	end: Option<Position>,
 	sub: SubState,
+	/// The producer dropped this segment (pruned, or replaced before producing).
+	/// The cursor drains what it already holds, then retires; see
+	/// [`Self::retired`].
+	pruned: bool,
 	/// A received group held back by the subscriber's [`Subscriber::end_at`] cap,
 	/// re-offered once the cap rises (arrival-order reads consume the underlying
 	/// cursor, so the group is parked here instead of dropped).
@@ -866,6 +870,14 @@ impl SegmentSub {
 	/// cursor. `None` while it is the newest segment.
 	fn last_group(&self) -> Option<u64> {
 		self.end.map(|end| end.before().group)
+	}
+
+	/// Whether a producer-dropped segment is spent and can be removed. A capped
+	/// cursor is kept until it drains (it may hold delivered-but-unread groups,
+	/// including one parked at the cap); an uncapped one was replaced before
+	/// producing, so it holds nothing.
+	fn retired(&self) -> bool {
+		self.pruned && (self.end.is_none() || (matches!(self.sub, SubState::Done(_)) && self.parked.is_none()))
 	}
 }
 
@@ -982,15 +994,14 @@ impl Subscriber {
 		self.finished = finished;
 		self.abort = abort;
 
-		// Segments removed by the producer: replaced (never produced anything, so
-		// their cursor holds nothing) or pruned. A pruned segment is capped, and
-		// its cursor may still hold delivered-but-unread groups (including one
-		// parked at the cap), so it is kept until it runs dry; its cap keeps it
-		// from ever serving outside the range it owned.
-		self.segments.retain(|s| {
-			segments.iter().any(|n| n.id == s.id)
-				|| (s.end.is_some() && (!matches!(s.sub, SubState::Done(_)) || s.parked.is_some()))
-		});
+		// Mark segments the producer dropped: replaced (never produced anything,
+		// so their cursor holds nothing and retires at once) or pruned (capped;
+		// the cursor may still hold delivered-but-unread groups, including one
+		// parked at the cap, so it drains before retiring; see `poll_segment`).
+		for s in &mut self.segments {
+			s.pruned = !segments.iter().any(|n| n.id == s.id);
+		}
+		self.segments.retain(|s| !s.retired());
 
 		for segment in segments {
 			match self.segments.iter_mut().find(|s| s.id == segment.id) {
@@ -1018,6 +1029,7 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						sub: SubState::Pending(sub),
+						pruned: false,
 						parked: None,
 					});
 				}
@@ -1082,7 +1094,15 @@ impl Subscriber {
 		loop {
 			match &mut seg.sub {
 				SubState::Pending(_) => {
-					ready!(Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter));
+					if Self::poll_activate(seg, prefs, min_sequence, end_sequence, waiter).is_pending() {
+						if seg.pruned {
+							// Never activated and the producer dropped the segment:
+							// nothing will ever arrive, so retire instead of parking.
+							seg.sub = SubState::Done(None);
+							return Poll::Ready(None);
+						}
+						return Poll::Pending;
+					}
 				}
 				SubState::Active(sub) => match sub.poll_recv_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
@@ -1110,7 +1130,17 @@ impl Subscriber {
 						seg.sub = SubState::Done(None);
 						return Poll::Ready(None);
 					}
-					Poll::Pending => return Poll::Pending,
+					Poll::Pending => {
+						if seg.pruned {
+							// A segment is only pruned once it produced everything it
+							// owns, so an empty cursor is a drained one. Retire it,
+							// releasing the track subscription and its demand; a live
+							// track would otherwise pin them for the subscriber's life.
+							seg.sub = SubState::Done(None);
+							return Poll::Ready(None);
+						}
+						return Poll::Pending;
+					}
 				},
 				SubState::Done(_) => return Poll::Ready(None),
 			}
@@ -1127,6 +1157,11 @@ impl Subscriber {
 	/// segment completed, and `Poll::Ready(Err(_))` only if the producer aborted.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
+
+		// Reap cursors retired by an earlier pass; retirement happens while
+		// polling (see `poll_segment`), which cannot remove from the list it is
+		// iterating.
+		self.segments.retain(|s| !s.retired());
 
 		let end_sequence = self.end_sequence;
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
@@ -2292,6 +2327,40 @@ mod test {
 		group.start_at(1).unwrap();
 		group.write_frame(Timestamp::ZERO, b"c1".to_vec()).unwrap();
 		assert_eq!(read(&mut reading), b"c1");
+	}
+
+	/// A long-lived subscriber must not accumulate a cursor per takeover when the
+	/// old routes stay alive: their tracks never end, so nothing else would ever
+	/// retire the cursors, pinning a track subscription (and its demand) each.
+	/// A pruned segment produced everything it owns, so an empty cursor is a
+	/// drained one and retires.
+	#[tokio::test]
+	async fn pruned_cursors_retire_once_drained() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut tracks = Vec::new();
+		let rounds = 2 * MAX_SEGMENTS as u64;
+		for sequence in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			tracks.push(track);
+		}
+
+		// Retirement happens while polling and the next poll reaps the entries.
+		recv_pending(&mut sub);
+		recv_pending(&mut sub);
+		assert_eq!(
+			sub.segments.len(),
+			MAX_SEGMENTS,
+			"pruned cursors must retire once drained"
+		);
+		assert!(
+			tracks[0].subscription().is_none(),
+			"a retired cursor releases its demand"
+		);
 	}
 
 	/// A group reader below the pruned floor gives up instead of parking forever:
