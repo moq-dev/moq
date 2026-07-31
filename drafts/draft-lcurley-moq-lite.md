@@ -838,7 +838,7 @@ This is what lets a cluster deduplicate: a subscriber that sees both a warm copy
 The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose declared origin filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
 When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
 
-A carrying relay whose serving path arrived on a session that has received a GOAWAY (see [GOAWAY](#goaway-message)) SHOULD forgo the discount and advertise the saturation ceiling instead: the ingress the discount priced in is going away, and a zero-cost advertisement would keep attracting subscribers to a path a subscriber with any alternative should leave while the handover window is open.
+A carrying relay whose serving path arrived on a session that has received a GOAWAY (see [GOAWAY](#goaway-message)) SHOULD forgo the discount and advertise the saturation ceiling instead: the ingress the discount priced in is going away, and a zero-cost advertisement would keep attracting subscribers to a path that a subscriber with any alternative should leave while the handover window is open.
 Forgoing the discount is also what carries a drain across a mesh: each carrying relay along the path repeats it, so the ceiling survives hops that would otherwise re-mask it as 0.
 
 Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
