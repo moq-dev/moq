@@ -1101,6 +1101,44 @@ mod test {
 		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
 	}
 
+	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
+	/// served group resolves the start, the cursor floor rises to it, so a lower
+	/// group arriving late (unordered delivery) is never served after the range
+	/// was declared dropped.
+	#[tokio::test]
+	async fn start_floor_suppresses_late_lower_arrivals() {
+		use futures::FutureExt;
+
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		let write = |producer: &mut track::Producer, sequence: u64| {
+			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		};
+
+		// Group 7 arrives first: run_track resolves the start there and raises
+		// the floor.
+		write(&mut producer, 7);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => {
+				assert_eq!(group.sequence, 7);
+				subscriber.start_at(group.sequence);
+			}
+			_ => panic!("expected the first group"),
+		}
+
+		// Group 5 lands late: below the resolved start, it must not be served.
+		write(&mut producer, 5);
+		assert!(
+			recv_next(&mut subscriber, false, false).now_or_never().is_none(),
+			"a group below the resolved start must be suppressed"
+		);
+	}
+
 	#[tokio::test]
 	async fn recv_next_drains_datagram_before_finished() {
 		let mut producer = track_producer("test");
@@ -2145,6 +2183,12 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 									group: sequence,
 								}))
 								.await?;
+							// SUBSCRIBE_OK is an implicit drop of everything below the
+							// resolved start (the subscriber records it as a permanent
+							// miss), so a lower group arriving late must not be served
+							// after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
+							// renegotiating the resolved start along with the demand.
+							track.start_at(sequence);
 						}
 						self.queue_serve(group, &mut tasks);
 					}

@@ -646,10 +646,19 @@ impl Group {
 	/// delivered survives even if its segment is pruned before the reader drains
 	/// it. Costs nothing otherwise: the per-frame reuse check validates the latch
 	/// against the live segment list, so a moved cap still re-routes the reader.
+	///
+	/// The copy must actually hold this reader's position: a partial copy that
+	/// starts higher (a peer delivering a partial group nobody asked for) is not
+	/// latched, since the reuse path trusts the latch's alignment and would
+	/// misnumber its frames. The reader re-resolves instead, and the peek path's
+	/// own check buries the copy as lagged.
 	fn latched(mut self, segment: u64, cap: Option<u64>, mut group: group::Consumer) -> Self {
 		// The segment bound is exclusive; a group consumer's cap is inclusive.
 		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
-		self.current = Some(Current { segment, cap, group });
+		group.start_at(self.index);
+		if group.index() == self.index {
+			self.current = Some(Current { segment, cap, group });
+		}
 		self
 	}
 
@@ -662,8 +671,17 @@ impl Group {
 			return;
 		}
 		self.index = index;
-		// A different route may own the new cursor.
-		self.current = None;
+		// Keep the latch when its copy still covers the new cursor: for a pruned
+		// segment it is the only copy left, and the per-read reuse check still
+		// re-routes if a different route owns the position. A copy that cannot
+		// land exactly there (or whose bound the cursor passed) is dropped, and
+		// the next read re-resolves.
+		if let Some(current) = &mut self.current {
+			current.group.start_at(index);
+			if current.group.index() != index || current.cap.is_some_and(|cap| index >= cap) {
+				self.current = None;
+			}
+		}
 	}
 
 	pub fn end_at(&mut self, index: Option<u64>) {
@@ -2506,6 +2524,68 @@ mod test {
 			assert_eq!(recv(&mut sub), sequence);
 		}
 		recv_pending(&mut sub);
+	}
+
+	/// A partial copy nobody asked for (its first frame above the reader's
+	/// position, from a protocol-violating peer) is never latched: the latch is
+	/// trusted for alignment, so a misaligned one would surface its frames under
+	/// the wrong indices. The reader buries the copy as lagged instead.
+	#[tokio::test]
+	async fn misaligned_copy_is_never_latched() {
+		let (mut track, consumer) = track_pair("t");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// The copy of group 0 starts at frame 5 while the segment owes the whole
+		// group.
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(5).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f5".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.index(), 0);
+		assert!(
+			matches!(reading.read_frame().now_or_never(), Some(Err(_))),
+			"a misaligned copy surfaces as a loss, never as misnumbered frames"
+		);
+	}
+
+	/// Seeking forward keeps a latched copy that still covers the new position:
+	/// for a pruned segment it is the only copy left, so clearing it would lose
+	/// frames the reader still holds.
+	#[tokio::test]
+	async fn seek_keeps_a_pruned_latch() {
+		let (mut track, consumer) = track_pair("t");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in [b"f0", b"f1", b"f2"] {
+			group.write_frame(Timestamp::ZERO, payload.to_vec()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"f0");
+		track.abort(Error::Dropped).unwrap();
+
+		// Failovers prune the segment; the latch is all that remains of group 0.
+		for sequence in 1..=MAX_SEGMENTS as u64 {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			track.abort(Error::Dropped).unwrap();
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// The seek lands inside the latch: the frame survives the prune.
+		reading.start_at(2);
+		assert_eq!(read(&mut reading), b"f2");
 	}
 
 	/// The straggler bound holds on every polling entry point: a subscriber
