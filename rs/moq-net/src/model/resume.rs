@@ -965,6 +965,43 @@ impl Subscriber {
 	/// Sync with the producer and preferences: pick up new segments, apply moved
 	/// boundaries, re-slice demand, and register the waiter for the next change.
 	fn poll_sync(&mut self, waiter: &kio::Waiter) {
+		self.sync(waiter);
+		self.reap();
+	}
+
+	/// Reap retired cursors, then bound the live stragglers: a pruned segment's
+	/// cursor keeps draining (groups below its cap may still arrive out of
+	/// order, and its demand keeps the upstream serving them), but only the
+	/// newest few. Beyond the bound the oldest are cut, mirroring the
+	/// producer-side policy: a reader that far behind loses the range.
+	///
+	/// Runs from [`Self::poll_sync`] so every polling entry point enforces the
+	/// bound; a subscriber driven only through datagrams or `poll_finished`
+	/// accumulates cursors all the same.
+	fn reap(&mut self) {
+		self.segments.retain(|s| !s.retired());
+		let mut cut = self
+			.segments
+			.iter()
+			.filter(|s| s.pruned)
+			.count()
+			.saturating_sub(MAX_SEGMENTS);
+		if cut > 0 {
+			for seg in &mut self.segments {
+				if cut == 0 {
+					break;
+				}
+				if seg.pruned {
+					seg.sub = SubState::Done(None);
+					seg.parked = None;
+					cut -= 1;
+				}
+			}
+			self.segments.retain(|s| !s.retired());
+		}
+	}
+
+	fn sync(&mut self, waiter: &kio::Waiter) {
 		// Preference changes re-derive every segment's demand. Loop: a poll that
 		// consumes a change leaves no waiter registered, so re-poll until Pending
 		// (mirroring the state loop below), or the next update is silently lost.
@@ -1191,32 +1228,6 @@ impl Subscriber {
 	/// segment completed, and `Poll::Ready(Err(_))` only if the producer aborted.
 	pub fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_sync(waiter);
-
-		// Reap retired cursors, then bound the live stragglers: a pruned
-		// segment's cursor keeps draining (groups below its cap may still arrive
-		// out of order, and its demand keeps the upstream serving them), but only
-		// the newest few. Beyond the bound the oldest are cut, mirroring the
-		// producer-side policy: a reader that far behind loses the range.
-		self.segments.retain(|s| !s.retired());
-		let mut cut = self
-			.segments
-			.iter()
-			.filter(|s| s.pruned)
-			.count()
-			.saturating_sub(MAX_SEGMENTS);
-		if cut > 0 {
-			for seg in &mut self.segments {
-				if cut == 0 {
-					break;
-				}
-				if seg.pruned {
-					seg.sub = SubState::Done(None);
-					seg.parked = None;
-					cut -= 1;
-				}
-			}
-			self.segments.retain(|s| !s.retired());
-		}
 
 		let end_sequence = self.end_sequence;
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
@@ -2456,6 +2467,33 @@ mod test {
 			assert_eq!(recv(&mut sub), sequence);
 		}
 		recv_pending(&mut sub);
+	}
+
+	/// The straggler bound holds on every polling entry point: a subscriber
+	/// driven only through datagrams accumulates a cursor per takeover all the
+	/// same, so the reap must run from the shared sync, not just the group path.
+	#[tokio::test]
+	async fn datagram_poller_bounds_pruned_cursors() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		for sequence in 0..(3 * MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert!(
+				kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+					.now_or_never()
+					.is_none(),
+				"no datagram expected"
+			);
+		}
+
+		assert_eq!(
+			sub.segments.len(),
+			2 * MAX_SEGMENTS,
+			"the reap must run on the datagram path too"
+		);
 	}
 
 	/// An out-of-order group that lands after its segment was pruned still drains:
