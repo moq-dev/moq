@@ -484,7 +484,8 @@ impl Client {
 fn setup_path(url: &Url) -> Option<String> {
 	let path = match url.scheme() {
 		// A Unix socket URL's path is the socket file, so the resource path rides in
-		// the `?path=` query, query string and all.
+		// the `?path=` query, query string and all. It is one form-encoded value, so a
+		// resource path that carries its own `?query` percent-encodes it.
 		"unix" => url
 			.query_pairs()
 			.find(|(k, _)| k == "path")
@@ -591,6 +592,9 @@ mod tests {
 		// neither. A peer on published lite-05 rejects an empty value outright.
 		let cases = [
 			("unix:///run/moq.sock?path=/room", Some("/room")),
+			// The whole resource path is one form-encoded value, so a `?query` inside it
+			// arrives percent-encoded and comes back out whole.
+			("unix:///run/moq.sock?path=/room%3Fjwt%3Dabc", Some("/room?jwt=abc")),
 			("unix:///run/moq.sock?path=", None),
 			("unix:///run/moq.sock", None),
 			("tcp://localhost:4443/room", Some("/room")),

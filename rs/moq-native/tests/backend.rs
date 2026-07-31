@@ -375,6 +375,14 @@ async fn quinn_raw_quic_path() {
 	path_test("moqt", moq_native::QuicBackend::Quinn).await;
 }
 
+/// `moql://` derives its SETUP path exactly like `moqt://`; only the scheme differs.
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_raw_quic_moql_path() {
+	path_test("moql", moq_native::QuicBackend::Quinn).await;
+}
+
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
