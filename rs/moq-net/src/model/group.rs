@@ -241,19 +241,32 @@ struct Alive {
 
 impl Drop for Alive {
 	fn drop(&mut self) {
+		// `Producer::abort()` records `abort` then closes the channel. `write()` /
+		// `modify()` then fail, so the cleanliness check must use `read()` or a
+		// deliberate abort looks like an unfinished drop once the producer is gone.
+		{
+			let state = self.state.read();
+			if state.fin.is_some() || state.abort.is_some() {
+				return;
+			}
+		}
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
-		if let Ok(mut state) = modify(&self.state)
-			&& state.fin.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
+		if let Ok(mut state) = modify(&self.state) {
+			if state.fin.is_some() || state.abort.is_some() {
+				return;
+			}
 			tracing::warn!(
 				sequence = self.info.sequence,
 				"group::Producer dropped without finish() or abort()"
 			);
 			state.release();
+		} else {
+			tracing::warn!(
+				sequence = self.info.sequence,
+				"group::Producer dropped without finish() or abort()"
+			);
 		}
 	}
 }
@@ -802,6 +815,55 @@ mod test {
 	use super::*;
 	use bytes::Bytes;
 	use futures::FutureExt;
+	use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+	use tracing::field::{Field, Visit};
+	use tracing::span::{Attributes, Id, Record};
+	use tracing::{Event, Level, Metadata, Subscriber};
+
+	/// Count `group::Producer` unfinished-drop WARN events while running `f`.
+	/// Uses only the existing `tracing` dependency (no tracing-subscriber).
+	fn count_drop_warnings(f: impl FnOnce()) -> usize {
+		struct Count(std::sync::Arc<AtomicUsize>);
+		struct Msg(bool);
+		impl Visit for Msg {
+			fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+				if field.name() == "message" {
+					let s = format!("{value:?}");
+					if s.contains("group::Producer dropped without finish") {
+						self.0 = true;
+					}
+				}
+			}
+			fn record_str(&mut self, field: &Field, value: &str) {
+				if field.name() == "message" && value.contains("group::Producer dropped without finish") {
+					self.0 = true;
+				}
+			}
+		}
+		impl Subscriber for Count {
+			fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+				*metadata.level() <= Level::WARN
+			}
+			fn new_span(&self, _span: &Attributes<'_>) -> Id {
+				Id::from_u64(1)
+			}
+			fn record(&self, _span: &Id, _values: &Record<'_>) {}
+			fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+			fn event(&self, event: &Event<'_>) {
+				let mut msg = Msg(false);
+				event.record(&mut msg);
+				if msg.0 {
+					self.0.fetch_add(1, AtomicOrdering::SeqCst);
+				}
+			}
+			fn enter(&self, _span: &Id) {}
+			fn exit(&self, _span: &Id) {}
+		}
+
+		let hits = std::sync::Arc::new(AtomicUsize::new(0));
+		tracing::subscriber::with_default(Count(hits.clone()), f);
+		hits.load(AtomicOrdering::SeqCst)
+	}
 
 	#[test]
 	fn basic_frame_reading() {
@@ -956,6 +1018,37 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Dropped)));
+	}
+
+	#[test]
+	fn drop_after_abort_does_not_warn() {
+		let warns = count_drop_warnings(|| {
+			let producer = Info { sequence: 0 }.produce();
+			let keep = producer.clone();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			writer.abort(crate::Error::Cancel).unwrap();
+			drop(keep);
+		});
+		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[test]
+	fn drop_unfinished_warns() {
+		let warns = count_drop_warnings(|| {
+			let producer = Info { sequence: 0 }.produce();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			drop(writer);
+			drop(producer);
+		});
+		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
 	}
 
 	#[test]
