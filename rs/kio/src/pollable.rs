@@ -76,9 +76,8 @@ impl<P: Pollable> Future for Pending<P> {
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
 		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
-		let waiter = this.park.take(cx);
-		let poll = Pollable::poll(&this.inner, &waiter);
-		this.park.hold(waiter, poll)
+		let waiter = this.park.hold(cx);
+		Pollable::poll(&this.inner, waiter)
 	}
 }
 
