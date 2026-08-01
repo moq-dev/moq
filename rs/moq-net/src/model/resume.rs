@@ -2584,8 +2584,16 @@ mod test {
 	/// position, from a protocol-violating peer) is never latched: the latch is
 	/// trusted for alignment, so a misaligned one would surface its frames under
 	/// the wrong indices. The reader buries the copy as lagged instead.
+	///
+	/// This is also the guard on the revival in [`Group::poll_covering`], which
+	/// reconsiders a buried route ahead of the terminal checks: revival keys on
+	/// [`track::Consumer::poll_serving_group`], and if that stopped requiring the
+	/// copy to serve the requested frame, the copy here would revive, re-bury on
+	/// the very next peek, and loop forever inside one poll. That regression
+	/// surfaces as a hang rather than a failed assertion, which nextest reports
+	/// as a TIMEOUT.
 	#[tokio::test]
-	async fn misaligned_copy_is_never_latched() {
+	async fn misaligned_copy_is_lost_without_spinning() {
 		let (mut track, consumer) = track_pair("t");
 		let mut producer = Producer::new();
 		producer.takeover(&consumer).unwrap();
@@ -2599,10 +2607,15 @@ mod test {
 
 		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(reading.index(), 0);
-		assert!(
-			matches!(reading.read_frame().now_or_never(), Some(Err(_))),
-			"a misaligned copy surfaces as a loss, never as misnumbered frames"
-		);
+
+		// The head is gone for good, so the group ends as a loss naming the copy
+		// that could not cover it, rather than surfacing misnumbered frames.
+		let err = reading
+			.read_frame()
+			.now_or_never()
+			.expect("the loss must resolve rather than park")
+			.expect_err("a misaligned copy is a loss, never misnumbered frames");
+		assert!(matches!(err, Error::Lagged), "expected a lagged copy, got {err:?}");
 	}
 
 	/// Seeking forward keeps a latched copy that still covers the new position:

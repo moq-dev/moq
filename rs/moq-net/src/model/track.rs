@@ -1876,7 +1876,11 @@ impl Consumer {
 	/// to reconsider a route it gave up on, so it must be exact about what
 	/// "available" means: a copy that cannot start at `index` (its head is gone)
 	/// leaves the route buried rather than reviving it into a peek that would
-	/// bury it again.
+	/// bury it again. That exactness is load-bearing, since the reader consults
+	/// this ahead of its terminal checks: relaxing it to "the group exists" makes
+	/// revive and re-bury alternate forever inside one poll
+	/// (`resume::test::misaligned_copy_is_lost_without_spinning`, where the
+	/// regression surfaces as a hang).
 	pub(crate) fn poll_serving_group(&self, sequence: u64, index: u64, waiter: &kio::Waiter) -> Poll<()> {
 		let ConsumerKind::Plain(state) = &self.inner else {
 			// A segment's track is never itself spliced.
