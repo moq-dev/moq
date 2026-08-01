@@ -12,10 +12,10 @@ use std::ffi::c_void;
 use std::ptr;
 use std::slice;
 
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Media::MediaFoundation::{
-	IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaSource, IMFSample,
-	IMFSourceReader, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+	IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaSource, IMFSample, IMFSourceReader,
+	MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
 	MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
 	MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READER_D3D_MANAGER,
 	MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
@@ -210,29 +210,8 @@ impl Camera {
 
 	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Surface::Texture`].
 	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Surface, Error> {
-		let buffer = unsafe { sample.GetBufferByIndex(0).map_err(|e| mf_err("get buffer", e))? };
-		let dxgi = buffer
-			.cast::<IMFDXGIBuffer>()
-			.map_err(|e| mf_err("buffer is not a DXGI surface", e))?;
-		// GetResource returns a fresh ref (`AddRef`) we take ownership of.
-		let mut raw: *mut c_void = ptr::null_mut();
-		unsafe {
-			dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
-				.map_err(|e| mf_err("get DXGI resource", e))?;
-		}
-		let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
-		let subresource = unsafe {
-			dxgi.GetSubresourceIndex()
-				.map_err(|e| mf_err("get subresource index", e))?
-		};
-
-		Ok(Surface::Texture(Texture::new(
-			device.clone(),
-			texture,
-			subresource,
-			self.width,
-			self.height,
-		)))
+		let texture = Texture::from_sample(device, sample, self.width, self.height)?;
+		Ok(Surface::Texture(texture))
 	}
 
 	/// Copy a CPU sample's NV12 to a packed [`Surface::I420`] (the fallback path).
