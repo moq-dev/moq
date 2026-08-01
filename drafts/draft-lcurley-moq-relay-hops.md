@@ -240,14 +240,19 @@ The HOP_PATH loop check remains the authority on loop freedom; this tie-break on
 
 ## Updating an Advertisement
 The values this extension carries change over the life of an advertisement: a route fails over and HOP_PATH changes, or a relay starts or stops carrying the namespace and its ROUTE_COST swings to or from 0.
-An endpoint updates an advertisement by re-sending it for the same namespace on the same session, carrying the new parameters.
-The new advertisement replaces the prior one in place, and a receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
+An endpoint updates an advertisement by re-sending it with the new parameters **on the stream that already carries it**: the request stream of the original PUBLISH_NAMESPACE, or the SUBSCRIBE_NAMESPACE response stream the original NAMESPACE arrived on.
+A receiver MUST NOT treat that repeat as a duplicate or a protocol violation.
+
+Reusing the stream is what makes the update unambiguous.
+In {{moqt}} an advertisement lives for the lifetime of its request stream, so an update sent on a *new* stream would leave two streams claiming one namespace, and closing the superseded one would retract an advertisement the peer had already replaced.
+Binding the update to the existing stream keeps one stream owning one advertisement: its parameters are whatever was sent most recently, and closing it retracts whatever is current.
+An endpoint MUST NOT open a second stream to advertise a namespace it already advertises on this session.
 
 Replacement is atomic: there is no window in which the namespace is unadvertised, so a receiver MUST NOT tear down subscriptions or forget cached state merely because an update arrived.
 What an update means for existing subscriptions depends on the first HOP_PATH entry, exactly as in [Path Selection](#path-selection): unchanged, the content is continuous and a receiver MAY resume in-flight subscriptions on the new route at a group boundary; changed, a different origin has replaced the namespace and existing subscriptions do not carry over.
 
 An update whose only change is ROUTE_COST is the expected case, and is how a relay tells its downstream that it started or stopped carrying the namespace.
-Because an update is indistinguishable from a fresh advertisement on the wire, an endpoint MAY send one whenever its state changes without coordinating with the receiver.
+An endpoint MAY send one whenever its state changes, without coordinating with the receiver.
 Retracting an advertisement is unchanged from {{moqt}}: NAMESPACE_DONE ({{moqt}} Section 10.17) carries no Relay Hops state and is not an update.
 
 

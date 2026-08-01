@@ -51,17 +51,24 @@ async function encodeObjectPropertyType(
 	await w.u62(encoded);
 }
 
-// Timescale is written first because property type deltas are unsigned, so
-// properties have to appear in ascending type order.
-async function encodeObjectTime(w: Writer, timestamp: Timestamp, version: IetfVersion | undefined): Promise<void> {
-	await encodeObjectPropertyType(w, PROP_TIMESCALE, 0n, version);
-	await w.u62(BigInt(timestamp.scale));
-	await encodeObjectPropertyType(w, PROP_TIMESTAMP, PROP_TIMESCALE, version);
-	await w.u62(BigInt(Math.round(timestamp.value)));
+// The units come from the track's TIMESCALE property, not from here: repeating the
+// timescale on every object would cost bytes per frame to restate something fixed for
+// the track's lifetime. The timestamp is converted into the track's units so the value
+// on the wire matches what the track declared.
+async function encodeObjectTime(
+	w: Writer,
+	timestamp: Timestamp,
+	timescale: Timescale,
+	version: IetfVersion | undefined,
+): Promise<void> {
+	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
+	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
+	await w.u62(BigInt(value));
 }
 
 async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
+	timescale: Timescale,
 	version: IetfVersion | undefined,
 ): Promise<Uint8Array> {
 	if (timestamp === undefined) {
@@ -77,7 +84,7 @@ async function encodeObjectExtensions(
 		}),
 		version,
 	);
-	await encodeObjectTime(writer, timestamp, version);
+	await encodeObjectTime(writer, timestamp, timescale, version);
 	writer.close();
 	await writer.closed;
 
@@ -91,9 +98,13 @@ async function encodeObjectExtensions(
 	return result;
 }
 
-async function decodeObjectTime(r: Reader, version: IetfVersion | undefined): Promise<Timestamp | undefined> {
+async function decodeObjectTime(
+	r: Reader,
+	timescale: Timescale,
+	version: IetfVersion | undefined,
+): Promise<Timestamp | undefined> {
 	let timestamp: bigint | undefined;
-	let timescale: bigint | undefined;
+	let overrideScale: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
 
@@ -108,7 +119,7 @@ async function decodeObjectTime(r: Reader, version: IetfVersion | undefined): Pr
 			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
 				timestamp = value;
 			} else if (id === PROP_TIMESCALE) {
-				timescale = value;
+				overrideScale = value;
 			}
 		} else {
 			const size = await r.u53();
@@ -120,7 +131,8 @@ async function decodeObjectTime(r: Reader, version: IetfVersion | undefined): Pr
 		return undefined;
 	}
 
-	return new Timestamp(Number(timestamp), Timescale(Number(timescale ?? BigInt(Timescale.MICRO))));
+	// An object-scope Timescale (which LOC permits) overrides the track's for this object.
+	return new Timestamp(Number(timestamp), overrideScale !== undefined ? Timescale(Number(overrideScale)) : timescale);
 }
 
 export interface GroupFlags {
@@ -244,11 +256,11 @@ export class Frame {
 	}
 
 	/** Encode this frame using the group flags and negotiated IETF version. */
-	async encode(w: Writer, flags: GroupFlags, version = w.version): Promise<void> {
+	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version = w.version): Promise<void> {
 		await w.u53(0); // id_delta = 0
 
 		if (flags.hasExtensions) {
-			const extensions = await encodeObjectExtensions(this.timestamp, version);
+			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
 			await w.u53(extensions.byteLength);
 			await w.write(extensions);
 		}
@@ -268,7 +280,12 @@ export class Frame {
 	}
 
 	/** Decode a frame using the group flags and negotiated IETF version. */
-	static async decode(r: Reader, flags: GroupFlags, version = r.version): Promise<Frame> {
+	static async decode(
+		r: Reader,
+		flags: GroupFlags,
+		timescale: Timescale | undefined,
+		version = r.version,
+	): Promise<Frame> {
 		const delta = await r.u53();
 		if (delta !== 0) {
 			throw new Error(`object ID delta is not supported: ${delta}`);
@@ -278,7 +295,11 @@ export class Frame {
 		if (flags.hasExtensions) {
 			const extensionsLength = await r.u53();
 			const extensions = await r.read(extensionsLength);
-			timestamp = await decodeObjectTime(new Reader(undefined, extensions, version), version);
+			// A track that declared no timescale opted out of timestamps, so its objects
+			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
+			if (timescale !== undefined) {
+				timestamp = await decodeObjectTime(new Reader(undefined, extensions, version), timescale, version);
+			}
 		}
 
 		const payloadLength = await r.u53();

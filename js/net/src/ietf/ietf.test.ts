@@ -62,10 +62,15 @@ async function decodeVersioned<T>(
 	return await decoder(reader, version);
 }
 
-async function encodeFrameVersioned(frame: Frame, flags: GroupFlags, version: IetfVersion): Promise<Uint8Array> {
+async function encodeFrameVersioned(
+	frame: Frame,
+	flags: GroupFlags,
+	version: IetfVersion,
+	timescale: Timescale = Timescale.MILLI,
+): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, flags, version);
+	await frame.encode(writer, flags, timescale, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -1150,13 +1155,16 @@ test("Frame object time: draft-15 uses absolute property types", async () => {
 	expect(await reader.u53()).toBe(0);
 	const extensions = await reader.read(await reader.u53());
 	const props = new Reader(undefined, extensions, Version.DRAFT_15);
-	expect(await props.u62()).toBe(0x08n);
-	expect(await props.u62()).toBe(1_000n);
 	expect(await props.u62()).toBe(0x10n);
 	expect(await props.u62()).toBe(96_000n);
 	expect(await props.done()).toBe(true);
 
-	const decoded = await Frame.decode(new Reader(undefined, encoded, Version.DRAFT_15), flags, Version.DRAFT_15);
+	const decoded = await Frame.decode(
+		new Reader(undefined, encoded, Version.DRAFT_15),
+		flags,
+		Timescale.MILLI,
+		Version.DRAFT_15,
+	);
 	expect(decoded.timestamp?.value).toBe(96_000);
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });
@@ -1177,13 +1185,16 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 	expect(await reader.u53()).toBe(0);
 	const extensions = await reader.read(await reader.u53());
 	const props = new Reader(undefined, extensions, Version.DRAFT_16);
-	expect(await props.u62()).toBe(0x08n);
-	expect(await props.u62()).toBe(1_000n);
-	expect(await props.u62()).toBe(0x08n);
+	expect(await props.u62()).toBe(0x10n);
 	expect(await props.u62()).toBe(96_000n);
 	expect(await props.done()).toBe(true);
 
-	const decoded = await Frame.decode(new Reader(undefined, encoded, Version.DRAFT_16), flags, Version.DRAFT_16);
+	const decoded = await Frame.decode(
+		new Reader(undefined, encoded, Version.DRAFT_16),
+		flags,
+		Timescale.MILLI,
+		Version.DRAFT_16,
+	);
 	expect(decoded.timestamp?.value).toBe(96_000);
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });

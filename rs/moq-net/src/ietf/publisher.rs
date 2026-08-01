@@ -5,7 +5,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error,
+	AsPath, Error, Timescale,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	track::Subscription,
@@ -236,6 +236,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => None,
 				},
 				track_alias: request_id.0,
+				// Declaring the timescale is what opts the track into timestamps; every
+				// object Timestamp below is in these units.
+				timescale: Some(track.info().timescale),
 			})
 			.await?;
 
@@ -356,8 +359,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				group_id: sequence,
 				sub_group_id: 0,
 				publisher_priority: 0,
-				// Carry per-object timestamps as extension headers (Timestamp/Timescale
-				// Object Properties) so moq-transport peers get the real PTS.
+				// Carry per-object timestamps as extension headers (the Timestamp Object
+				// Property) so moq-transport peers get the real PTS. The units are the
+				// track's, declared once in SUBSCRIBE_OK.
 				flags: ietf::GroupFlags {
 					has_extensions: true,
 					..Default::default()
@@ -365,7 +369,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = track.subscription().priority;
-			tasks.push(Self::run_group(self.session.clone(), msg, priority, group, self.version).map(|_| ()));
+			let timescale = track.info().timescale;
+			tasks
+				.push(Self::run_group(self.session.clone(), msg, priority, group, timescale, self.version).map(|_| ()));
 		}
 	}
 
@@ -374,6 +380,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: group::Consumer,
+		timescale: Timescale,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -407,7 +414,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Per-object extension headers carry the frame's presentation timestamp.
 			if msg.flags.has_extensions {
 				let mut ext = bytes::BytesMut::new();
-				ietf::encode_object_time(&mut ext, frame.timestamp, version)?;
+				ietf::encode_object_time(&mut ext, frame.timestamp, timescale, version)?;
 				stream.encode(&(ext.len() as u64)).await?;
 				stream.write_chunk(ext.freeze()).await?;
 			}
