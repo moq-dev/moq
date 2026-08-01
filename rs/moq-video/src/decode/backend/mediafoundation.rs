@@ -288,12 +288,19 @@ impl MediaFoundation {
 	/// Pull every frame the MFT has ready, stopping when it asks for more input.
 	/// No-op until the output type is configured (the decoder rejects
 	/// `ProcessOutput` before then).
-	fn drain_output(&mut self, out: &mut Vec<Surface>) -> Result<(), Error> {
+	///
+	/// Reports whether the decoder got anywhere, which is not the same as whether
+	/// it handed back a picture: renegotiating the output type is progress too, and
+	/// it produces no frame.
+	fn drain_output(&mut self, out: &mut Vec<Surface>) -> Result<bool, Error> {
 		if !self.output_configured {
-			return Ok(());
+			return Ok(false);
 		}
-		while self.process_output(out)? {}
-		Ok(())
+		let mut progressed = false;
+		while self.process_output(out)? {
+			progressed = true;
+		}
+		Ok(progressed)
 	}
 
 	/// One `ProcessOutput`. Returns `true` if it produced a frame or handled a
@@ -381,12 +388,15 @@ impl Backend for MediaFoundation {
 			match unsafe { self.transform.ProcessInput(0, &sample, 0) } {
 				Ok(()) => break,
 				Err(e) if e.code() == MF_E_NOTACCEPTING => {
-					// A drain that produces nothing means the MFT will not take this
-					// access unit and has nothing to hand back either, so retrying can
-					// only spin. Report it instead of hanging the decode task.
-					let before = out.len();
-					self.drain_output(&mut out)?;
-					if out.len() == before {
+					// A drain that gets nowhere means the MFT will not take this access
+					// unit and has nothing to hand back either, so retrying can only
+					// spin. Report it instead of hanging the decode task.
+					//
+					// Progress, not frames: a stream that changes resolution mid-track
+					// renegotiates the output type here and produces no picture doing
+					// it, and that is exactly the case where feeding the same access
+					// unit again is the right move.
+					if !self.drain_output(&mut out)? {
 						return Err(Error::Codec(anyhow::anyhow!(
 							"decoder rejected the access unit with no output to drain"
 						)));
