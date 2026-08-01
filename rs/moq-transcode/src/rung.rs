@@ -144,6 +144,13 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 
 			match item {
 				Some(Item::Group(sequence)) => {
+					// Empty the codec before opening the next group even though this one
+					// is being abandoned: a pipelined encoder still holding the previous
+					// group's tail would otherwise emit it into the new group, ahead of
+					// the keyframe requested just below.
+					if let Some(encoder) = &mut encoder {
+						encoder.flush()?;
+					}
 					if let Some(output) = current.take() {
 						// A group boundary without an end: treat as incomplete.
 						output.abort(moq_net::Error::Cancel)?;
@@ -205,6 +212,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 				}
 				Some(Item::End) => {
 					if let Some(mut output) = current.take() {
+						// The source group is complete, so this one has to be too: a
+						// hardware encoder is still holding its last frames.
+						if let Some(encoder) = &mut encoder {
+							write(&mut output, encoder.flush()?)?;
+						}
 						output.finish()?;
 					}
 				}

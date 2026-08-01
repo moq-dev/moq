@@ -156,6 +156,11 @@ impl Backend for Openh264 {
 		})
 	}
 
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		// Low-delay: nothing is buffered, so there's nothing to flush.
+		Ok(Vec::new())
+	}
+
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// Low-delay: nothing is buffered, so there's nothing to flush.
 		Ok(Vec::new())

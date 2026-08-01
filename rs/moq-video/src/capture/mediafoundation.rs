@@ -3,10 +3,11 @@
 //! Drives an [`IMFSourceReader`] over the selected capture device. When a
 //! Direct3D11 device is available the reader runs with that device's DXGI
 //! manager and the advanced video processor, so each sample arrives as a
-//! GPU-resident NV12 texture ([`Surface::Texture`]) that the hardware encoder MFT
-//! consumes zero-copy. Without a GPU (e.g. a headless VM) it falls back to the
-//! source reader's software video processor, copying each sample to a packed CPU
-//! [`I420`] ([`Surface::I420`]) the encoder uploads.
+//! GPU-resident NV12 texture: one blit out of the reader's pool (see
+//! [`Texture::copy_from_sample`]) and it is a [`Surface::Texture`] the hardware
+//! encoder MFT consumes with no further copy. Without a GPU (e.g. a headless VM)
+//! it falls back to the source reader's software video processor, copying each
+//! sample to a packed CPU [`I420`] ([`Surface::I420`]) the encoder uploads.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -208,9 +209,15 @@ impl Camera {
 		})
 	}
 
-	/// Wrap a GPU sample's DXGI texture as a zero-copy [`Surface::Texture`].
+	/// Take a GPU sample's picture into a [`Surface::Texture`] of our own, on the
+	/// GPU.
+	///
+	/// The reader hands out textures from a pool it recycles as soon as the sample
+	/// is released, and a captured frame outlives that: it waits in the frame
+	/// channel while the pump reads on. Blitting it out is what stops the next
+	/// picture landing on a frame the encoder has not reached yet.
 	fn sample_to_texture(&self, device: &ID3D11Device, sample: &IMFSample) -> Result<Surface, Error> {
-		let texture = Texture::from_sample(device, sample, self.width, self.height)?;
+		let texture = Texture::copy_from_sample(device, sample, self.width, self.height)?;
 		Ok(Surface::Texture(texture))
 	}
 

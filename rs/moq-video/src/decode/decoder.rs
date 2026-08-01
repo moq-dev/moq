@@ -450,7 +450,7 @@ mod tests {
 	/// Foundation hardware decoder, holding every picture rather than consuming it
 	/// as it arrives. `None` when this machine has no hardware decoder.
 	#[cfg(target_os = "windows")]
-	fn decode_levels(count: u64, size: crate::Size) -> Option<Vec<Frame>> {
+	fn decode_levels(count: u64, size: crate::Size) -> Option<(Vec<Frame>, Box<dyn backend::Backend>)> {
 		let mut encoder = h264_software_encoder(size);
 		let decoder = backend::open(
 			Codec::H264,
@@ -473,7 +473,11 @@ mod tests {
 		}
 
 		assert!(!decoded.is_empty(), "decoder produced no frames");
-		Some(decoded)
+		// The decoder goes back to the caller rather than being dropped here: its
+		// `ComGuard` tears Media Foundation down for the whole thread, and a test
+		// that keeps working with the frames afterwards would be doing so in a
+		// process no application resembles.
+		Some((decoded, decoder))
 	}
 
 	/// Every plane of a decoded flat frame: its average luma, and its average U and
@@ -494,7 +498,7 @@ mod tests {
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn mediafoundation_decode_stays_gpu_resident() {
-		let Some(decoded) = decode_levels(3, gray_size()) else {
+		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
 			return;
 		};
 		for out in &decoded {
@@ -519,7 +523,7 @@ mod tests {
 		// More frames than the decoder's pool has slices (8 on the hardware this
 		// was written against, one per picture), so it has to recycle the slices
 		// the earliest frames came out of.
-		let Some(decoded) = decode_levels(12, gray_size()) else {
+		let Some((decoded, _decoder)) = decode_levels(12, gray_size()) else {
 			return;
 		};
 
@@ -545,7 +549,9 @@ mod tests {
 	#[test]
 	fn mediafoundation_decode_crops_coded_padding() {
 		let size = crate::Size::new(320, 180);
-		let Some(decoded) = decode_levels(3, size) else { return };
+		let Some((decoded, _decoder)) = decode_levels(3, size) else {
+			return;
+		};
 
 		for (i, out) in decoded.iter().enumerate() {
 			assert_eq!(out.size(), size, "frame {i} came back at the coded size");
@@ -574,7 +580,9 @@ mod tests {
 	#[test]
 	fn mediafoundation_decoded_texture_reencodes_in_place() {
 		let size = gray_size();
-		let Some(decoded) = decode_levels(3, size) else { return };
+		let Some((decoded, _decoder)) = decode_levels(3, size) else {
+			return;
+		};
 		for out in &decoded {
 			assert!(
 				matches!(out.surface, Surface::Texture(_)),

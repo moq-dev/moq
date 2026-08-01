@@ -272,6 +272,24 @@ impl Encoder {
 		Ok(encoded)
 	}
 
+	/// Return every access unit the codec is still holding, leaving the encoder
+	/// ready for the frames that follow. Each keeps the timestamp of the raw frame
+	/// it was encoded from, so a drained tail stays in step with what came before
+	/// it.
+	///
+	/// Reach for this at a boundary the output has to respect, which for a live
+	/// broadcast is a group: a hardware codec that pipelines holds the last frames
+	/// of a group past its end, and they would otherwise be published into the next
+	/// group ahead of its keyframe, where a consumer joining there cannot decode
+	/// them. Publishing frame-by-frame with no group structure needs none of this.
+	///
+	/// Not free: emptying the pipeline gives up the overlap between one frame's
+	/// encode and the next frame's submission, so flush at boundaries rather than
+	/// per frame.
+	pub fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.backend.flush()
+	}
+
 	/// Flush the encoder, returning any buffered frames. Each keeps the timestamp
 	/// of the raw frame it was encoded from, so a drained tail stays in step with
 	/// what was published before it.
@@ -824,8 +842,12 @@ mod tests {
 			Ok(previous.into_iter().collect())
 		}
 
-		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
 			Ok(self.pending.take().into_iter().collect())
+		}
+
+		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+			self.flush()
 		}
 
 		fn set_bitrate(&mut self, _bitrate: u64) -> Result<(), Error> {
@@ -857,6 +879,10 @@ mod tests {
 	impl Backend for Recorder {
 		fn encode(&mut self, _frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error> {
 			self.0.lock().unwrap().push(keyframe);
+			Ok(Vec::new())
+		}
+
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
 			Ok(Vec::new())
 		}
 
@@ -949,6 +975,10 @@ mod tests {
 			Err(Error::Codec(anyhow::anyhow!("no")))
 		}
 
+		fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			Ok(Vec::new())
+		}
+
 		fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 			Ok(Vec::new())
 		}
@@ -1023,6 +1053,37 @@ mod tests {
 				.unwrap()
 				.is_empty()
 		);
+	}
+
+	/// A group has to contain its own frames. A codec that pipelines is still
+	/// holding the last of them when the group ends, so the boundary flushes it;
+	/// without that they surface in the *next* group, ahead of its keyframe, where
+	/// a subscriber joining there cannot decode them.
+	///
+	/// The encoder stays usable afterwards, which is what separates this from
+	/// `finish`: a live track flushes at every group and keeps going.
+	#[test]
+	fn a_flush_empties_a_pipelined_backend_and_leaves_it_running() {
+		let config = Config::new(320, 240, 30);
+		let mut encoder = encoder_with(Box::new(Delayed { pending: None }), &config);
+
+		let mut group = Vec::new();
+		for i in 0..3 {
+			group.extend(encoder.encode(&gray_frame(320, 240, i)).unwrap());
+		}
+		group.extend(encoder.flush().unwrap());
+
+		// All three frames land in the group they belong to, in order.
+		let times: Vec<_> = group.iter().map(|packet| packet.timestamp).collect();
+		assert_eq!(times, vec![at(0), at(1), at(2)], "the group lost or reordered frames");
+
+		// The next group starts clean: nothing carried over, and the encoder still
+		// takes frames.
+		let mut next = encoder.encode(&gray_frame(320, 240, 3)).unwrap();
+		assert!(next.is_empty(), "frame 3 is buffered, so nothing comes back yet");
+		next.extend(encoder.finish().unwrap());
+		let times: Vec<_> = next.iter().map(|packet| packet.timestamp).collect();
+		assert_eq!(times, vec![at(3)], "the flush left something behind");
 	}
 
 	/// The hardware encoder states the color space too, and states the one the

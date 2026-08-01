@@ -467,10 +467,10 @@ fn enumerate_decoder(subtype: GUID) -> Result<IMFTransform, Error> {
 	let mut transform: Option<IMFTransform> = None;
 	for slot in entries.iter_mut() {
 		let Some(activate) = slot.take() else { continue };
-		if transform.is_none() {
-			if let Ok(mft) = unsafe { activate.ActivateObject::<IMFTransform>() } {
-				transform = Some(mft);
-			}
+		if transform.is_none()
+			&& let Ok(mft) = unsafe { activate.ActivateObject::<IMFTransform>() }
+		{
+			transform = Some(mft);
 		}
 	}
 	unsafe {

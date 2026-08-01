@@ -4,12 +4,12 @@
 //! - `Surface::PixelBuffer` is a macOS `CVPixelBuffer` (IOSurface-backed NV12).
 //!   Capture and the VideoToolbox decoder both produce it, and the VideoToolbox
 //!   encoder consumes it directly, no copy and no color conversion.
-//! - `Surface::Texture` is a Windows Direct3D11 NV12 texture. Media Foundation
-//!   capture produces it on a shared D3D11 device and the hardware encoder MFT
-//!   consumes it on that same device, also zero-copy. A Media Foundation decode
-//!   produces one too, one GPU blit removed from the decoder's own picture
-//!   buffers, so a decoded frame never touches the CPU on its way to a renderer
-//!   or a re-encode.
+//! - `Surface::Texture` is a Windows Direct3D11 NV12 texture, produced by Media
+//!   Foundation capture and decode one GPU blit removed from their own pools
+//!   (which they recycle, so a frame has to be lifted out of them), and consumed
+//!   by the hardware encoder MFT on the same device with no copy at all. Nothing
+//!   on the path from a camera or a decoder to a renderer or an encoder touches
+//!   the CPU.
 //! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
@@ -1345,7 +1345,7 @@ pub mod d3d11 {
 		D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
 		ID3D11DeviceContext, ID3D11Texture2D,
 	};
-	use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
@@ -1403,51 +1403,28 @@ pub mod d3d11 {
 	}
 
 	impl Texture {
-		/// Wrap the GPU texture behind a Media Foundation sample, zero-copy.
-		///
-		/// The picture stays in the pool its producer allocated it from, so the
-		/// caller owns the timing: these pixels are this frame's only until the
-		/// producer reuses the slot, which it is free to do the moment the sample is
-		/// released. That holds only where the caller paces the producer. Where it
-		/// does not, or where the pool's textures are not ones a consumer can bind,
-		/// take [`copy_from_sample`](Self::copy_from_sample).
-		///
-		/// `width` and `height` are the display size, which the texture itself does
-		/// not know. Errors if the sample is system-memory backed, which is the
-		/// caller's cue to take its CPU path.
-		pub(crate) fn from_sample(
-			device: &ID3D11Device,
-			sample: &IMFSample,
-			width: u32,
-			height: u32,
-		) -> Result<Self, Error> {
-			let (texture, subresource) = resolve(sample)?;
-			Ok(Self {
-				device: device.clone(),
-				texture,
-				subresource,
-				width,
-				height,
-			})
-		}
-
 		/// Blit the `width` x `height` picture out of a Media Foundation sample into
 		/// a texture we own, staying on `device` and on the GPU.
 		///
-		/// The exit from a decoder's pool, which a frame cannot simply be handed out
-		/// of. A DXVA decoder decodes into a short texture array (8 slices on the
-		/// hardware this was written against) bound `D3D11_BIND_DECODER` and nothing
-		/// else, so a slice is unusable to every other consumer (no shader samples
-		/// it, no encoder reads it) and is recycled the moment its sample is
-		/// released. Handing slices out instead wedges the decoder as soon as a
-		/// consumer buffers a pool's worth of frames, with no error to report: the
-		/// MFT blocks inside `ProcessInput` waiting for a picture buffer that a
-		/// consumer is holding.
+		/// The exit from a Media Foundation pool, which a frame cannot simply be
+		/// handed out of. Both producers here allocate their output from a pool and
+		/// recycle a slot the moment its sample is released, so a texture handle
+		/// alone is not ownership: the next picture is written over a frame a
+		/// consumer is still holding. Keeping the sample instead is worse, because a
+		/// decoder's pool is short (8 slices on the hardware this was written
+		/// against) and it has no error to report when it runs dry: the MFT blocks
+		/// inside `ProcessInput` waiting for a picture buffer a consumer is holding.
+		/// A decoder's slices are bound `D3D11_BIND_DECODER` and nothing else, on
+		/// top of that, so no shader can sample one and no encoder can read it.
 		///
-		/// One GPU-to-GPU copy buys a frame that outlives the decoder, holds nothing
-		/// back, and can be bound. It also crops the coded size (a decoder allocates
-		/// in whole macroblocks) to the display size, so the result is exactly the
-		/// picture.
+		/// One GPU-to-GPU copy buys a frame that outlives its producer, holds
+		/// nothing back, and can be bound. It also crops the coded size (a decoder
+		/// allocates in whole macroblocks) to the display size, so the result is
+		/// exactly the picture. `width` and `height` are that display size, which
+		/// the texture itself does not know.
+		///
+		/// Errors if the sample is system-memory backed, which is the caller's cue
+		/// to take its CPU path.
 		pub(crate) fn copy_from_sample(
 			device: &ID3D11Device,
 			sample: &IMFSample,
@@ -1456,25 +1433,10 @@ pub mod d3d11 {
 		) -> Result<Self, Error> {
 			let (source, subresource) = resolve(sample)?;
 
-			// Same format and sample count as the decoder's, one plain slice of it.
+			// One plain slice in the producer's own format.
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
-			desc.Width = width;
-			desc.Height = height;
-			desc.ArraySize = 1;
-			desc.MipLevels = 1;
-			desc.Usage = D3D11_USAGE_DEFAULT;
-			desc.BindFlags = bind_flags(device, desc.Format);
-			desc.CPUAccessFlags = 0;
-			desc.MiscFlags = 0;
-
-			let mut texture: Option<ID3D11Texture2D> = None;
-			unsafe {
-				device
-					.CreateTexture2D(&desc, None, Some(&mut texture))
-					.map_err(|e| err("CreateTexture2D (decoded frame)", e))?;
-			}
-			let texture = texture.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))?;
+			let texture = alloc(device, width, height, desc.Format)?;
 
 			// Every edge has to be even for 4:2:0 chroma; the decoder's frame size is
 			// validated even before it reaches here.
@@ -1613,6 +1575,31 @@ pub mod d3d11 {
 				color: None,
 			})
 		}
+	}
+
+	/// A plain single-slice texture on `device`, bound for whatever the driver
+	/// supports. Where every frame this module hands out is allocated.
+	fn alloc(device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT) -> Result<ID3D11Texture2D, Error> {
+		let desc = D3D11_TEXTURE2D_DESC {
+			Width: width,
+			Height: height,
+			MipLevels: 1,
+			ArraySize: 1,
+			Format: format,
+			SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+			Usage: D3D11_USAGE_DEFAULT,
+			BindFlags: bind_flags(device, format),
+			CPUAccessFlags: 0,
+			MiscFlags: 0,
+		};
+
+		let mut texture: Option<ID3D11Texture2D> = None;
+		unsafe {
+			device
+				.CreateTexture2D(&desc, None, Some(&mut texture))
+				.map_err(|e| err("CreateTexture2D", e))?;
+		}
+		texture.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))
 	}
 
 	/// The Direct3D11 texture behind a Media Foundation sample, and which slice of
