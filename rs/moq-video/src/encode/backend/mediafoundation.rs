@@ -31,13 +31,13 @@ use windows::Win32::Media::MediaFoundation::{
 	MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
 	MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
 	MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_0_255, MFNominalRange_16_235,
-	MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN,
-	MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-	MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M, MFVideoTransFunc_709, MFVideoTransferMatrix_BT601,
-	MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
-	eAVEncH265VProfile_Main_420_8,
+	MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+	MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M,
+	MFVideoTransFunc_709, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
+	eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
@@ -82,6 +82,9 @@ pub(crate) struct MediaFoundation {
 	/// True once the MFT has reported its drain complete, so a drain knows the
 	/// tail is out rather than still coming.
 	drained: bool,
+	/// Set while the next sample is the first of a restarted stream, so it can be
+	/// marked as such.
+	discontinuity: bool,
 	sample_index: i64,
 	/// Frames handed to the MFT that haven't come back out, oldest first: the
 	/// sample time we gave the codec paired with the frame's real timestamp. This
@@ -148,6 +151,7 @@ impl MediaFoundation {
 			output_size: 0,
 			needs_input: false,
 			drained: false,
+			discontinuity: false,
 			sample_index: 0,
 			pending: VecDeque::new(),
 			last_timestamp: None,
@@ -588,11 +592,21 @@ impl Backend for MediaFoundation {
 		}
 
 		let sample = self.build_sample(&frame.surface)?;
+		if self.discontinuity {
+			// The first picture of a restarted stream is not temporally continuous
+			// with the one before the drain, and only this says so: the encoder would
+			// otherwise be free to predict across the seam.
+			unsafe { sample.SetUINT32(&MFSampleExtension_Discontinuity, 1) }
+				.map_err(|e| mf_err("mark discontinuity", e))?;
+		}
 		unsafe {
 			self.transform
 				.ProcessInput(0, &sample, 0)
 				.map_err(|e| mf_err("ProcessInput", e))?;
 		}
+		// Cleared only once the sample is in: a rejected one never carried the mark
+		// anywhere, so the next attempt still owns it.
+		self.discontinuity = false;
 		self.needs_input = false;
 		// Record the pairing before advancing the index, so this is the sample time
 		// `build_sample` just stamped the sample with.
@@ -615,6 +629,7 @@ impl Backend for MediaFoundation {
 					.map_err(|e| mf_err("start of stream", e))?;
 			}
 			self.needs_input = false;
+			self.discontinuity = true;
 		}
 		Ok(out)
 	}
