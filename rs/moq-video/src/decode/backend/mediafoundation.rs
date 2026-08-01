@@ -216,7 +216,15 @@ impl MediaFoundation {
 				.map_err(|e| mf_err("frame size", e))?
 		};
 		let (coded_width, coded_height) = unpack_2x32(packed);
-		let (width, height) = display_aperture(media).unwrap_or((coded_width, coded_height));
+		// Clamped to what the decoder actually allocated, because the aperture comes
+		// from the stream and the stream comes off the network. A larger one would
+		// put the GPU copy's source region outside the decoder's texture, and
+		// `CopySubresourceRegion` returns no status: the frame would report the
+		// oversized dimensions over a texture nothing ever wrote.
+		let (width, height) = match display_aperture(media) {
+			Some((width, height)) => (width.min(coded_width), height.min(coded_height)),
+			None => (coded_width, coded_height),
+		};
 
 		// I420 chroma is 2x2 subsampled, so the download needs even dimensions.
 		if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {

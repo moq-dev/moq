@@ -91,3 +91,10 @@ pub use objc2_core_foundation;
 /// at a matching one. A major bump here is a breaking change for this crate.
 #[cfg(target_os = "macos")]
 pub use objc2_core_video;
+/// The Direct3D11 bindings [`frame::d3d11::Texture`] hands back, re-exported for
+/// the same reason as the Apple ones above: name the exact version this crate
+/// links rather than guessing at a matching one, since a device and a texture
+/// from a different `windows` build are different types. A major bump here is a
+/// breaking change for this crate.
+#[cfg(target_os = "windows")]
+pub use windows;

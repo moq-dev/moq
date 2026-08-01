@@ -7,9 +7,12 @@
 //! - `Surface::Texture` is a Windows Direct3D11 NV12 texture, produced by Media
 //!   Foundation capture and decode one GPU blit removed from their own pools
 //!   (which they recycle, so a frame has to be lifted out of them), and consumed
-//!   by the hardware encoder MFT on the same device with no copy at all. Nothing
-//!   on the path from a camera or a decoder to a renderer or an encoder touches
-//!   the CPU.
+//!   by the hardware encoder MFT on the same device with no copy at all, so a
+//!   camera or a decoder reaches an encoder without touching the CPU. Drawing one
+//!   still goes through `into_i420`, since the render module imports a
+//!   `PixelBuffer` but has no Direct3D11 path yet.
+// `render` is deliberately not a doc link: the module sits behind a non-default
+// feature, so linking it fails the `-D warnings` rustdoc build of a plain build.
 //! - `Surface::I420` is CPU-resident planar I420, for the CPU encode path and
 //!   platforms without a zero-copy capture.
 //!
@@ -1395,9 +1398,6 @@ pub mod d3d11 {
 	pub struct Texture {
 		pub(crate) device: ID3D11Device,
 		pub(crate) texture: ID3D11Texture2D,
-		/// The texture-array slice this frame lives in. Media Foundation pools its
-		/// output as one texture array and reports the index per sample.
-		pub(crate) subresource: u32,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
 	}
@@ -1456,26 +1456,21 @@ pub mod d3d11 {
 			Ok(Self {
 				device: device.clone(),
 				texture,
-				subresource: 0,
 				width,
 				height,
 			})
 		}
 
-		/// The Direct3D11 texture holding the pixels, and the array slice they live
-		/// in ([`subresource`](Self::subresource)). Borrowing keeps them on the GPU.
+		/// The Direct3D11 texture holding the pixels. Borrowing keeps them on the
+		/// GPU.
 		///
-		/// NV12, and allocated by whatever produced the frame, so it carries only
-		/// the bind flags that producer asked for and may be taller than the frame
-		/// ([`width`](Self::width) / [`height`](Self::height) are the display size).
+		/// NV12, one slice, exactly [`width`](Self::width) x
+		/// [`height`](Self::height), and bound for everything the driver supports
+		/// for the format: sampling in a shader, drawing into, and the hardware
+		/// encoder. This crate allocated it, so none of that is the producer's
+		/// choice leaking through.
 		pub fn texture(&self) -> &ID3D11Texture2D {
 			&self.texture
-		}
-
-		/// Which slice of [`texture`](Self::texture) this frame is, since Media
-		/// Foundation pools its output as a texture array.
-		pub fn subresource(&self) -> u32 {
-			self.subresource
 		}
 
 		/// The Direct3D11 device the texture belongs to. Anything reading the
@@ -1519,7 +1514,7 @@ pub mod d3d11 {
 			let staging = staging.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))?;
 
 			unsafe {
-				context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &self.texture, self.subresource, None);
+				context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &self.texture, 0, None);
 			}
 
 			let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();

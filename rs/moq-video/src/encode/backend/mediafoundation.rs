@@ -320,9 +320,8 @@ impl MediaFoundation {
 	fn build_sample(&self, frame: &Surface) -> Result<IMFSample, Error> {
 		let buffer = match frame {
 			Surface::Texture(texture) => unsafe {
-				let buffer =
-					MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, texture.subresource, false)
-						.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
+				let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, 0, false)
+					.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
 				let length = buffer
 					.cast::<windows::Win32::Media::MediaFoundation::IMF2DBuffer>()
 					.map_err(|e| mf_err("DXGI buffer is not 2D", e))?
@@ -506,7 +505,10 @@ impl MediaFoundation {
 	///
 	/// An async MFT owes a `METransformDrainComplete` for every drain, and a failed
 	/// event surfaces through [`handle_event`](Self::handle_event) as an error
-	/// rather than a silence, so the wait terminates either way.
+	/// rather than a silence, so the wait terminates either way. Both messages that
+	/// set that up are checked for the same reason: the wait is only bounded by an
+	/// MFT that accepted the drain, so failing to reach that state has to be an
+	/// error here rather than a block later.
 	fn drain(&mut self) -> Result<Vec<Encoded>, Error> {
 		let mut out = Vec::new();
 		if !self.started {
@@ -518,7 +520,9 @@ impl MediaFoundation {
 		// drain believe it was already done.
 		self.drained = false;
 		unsafe {
-			let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+			self.transform
+				.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
+				.map_err(|e| mf_err("end of stream", e))?;
 			self.transform
 				.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
 				.map_err(|e| mf_err("drain", e))?;

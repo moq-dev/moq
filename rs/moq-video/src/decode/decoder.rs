@@ -624,7 +624,10 @@ mod tests {
 			);
 		}
 
-		assert!(!out.is_empty(), "re-encoded stream decoded to no frames");
+		// Every frame, not merely some: a hardware encoder holding its tail back is
+		// what this file's flush exists to stop, and a per-frame check alone cannot
+		// see a stream that came back one short.
+		assert_eq!(out.len(), decoded.len(), "the re-encoded stream lost frames");
 		for (i, frame) in out.iter().enumerate() {
 			assert_eq!(frame.size(), size, "re-encoded frame {i} changed size");
 			let (luma, _, _) = plane_averages(frame);
