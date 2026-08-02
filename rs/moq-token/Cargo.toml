@@ -15,8 +15,8 @@ tokio = ["dep:tokio"]
 
 [dependencies]
 aws-lc-rs = "1"
-base64 = "0.22"
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+base64 = "0.23"
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
