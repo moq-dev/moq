@@ -136,7 +136,14 @@ let
     };
     cargoExtraArgs = "-p libmoq";
     doCheck = false;
-    nativeBuildInputs = with final; [ pkg-config ];
+    nativeBuildInputs = with final; [
+      pkg-config
+      # libmoq is the only nix-built package that pulls moq-video, and on Linux
+      # that brings v4l -> v4l2-sys-mit, whose build.rs runs bindgen over
+      # <linux/videodev2.h>. Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so it
+      # finds libclang and the libc headers, same as the devShell in flake.nix.
+      rustPlatform.bindgenHook
+    ];
 
     # libmoq.a carries moq-ffi's whole dep tree, so an unstripped build is
     # ~75 MB+. Thin LTO with a single codegen unit dead-strips the unused
