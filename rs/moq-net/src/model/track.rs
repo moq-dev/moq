@@ -1459,20 +1459,15 @@ impl Drop for Alive {
 		if !self.published.load(Ordering::Relaxed) {
 			return;
 		}
-		// `Producer::abort()` records `abort` then closes the channel. `write()` then
-		// fails, so the cleanliness check must use `read()` or a deliberate abort is
-		// indistinguishable from an unfinished drop once the producer is gone.
-		{
-			let state = self.state.read();
-			if state.final_sequence.is_some() || state.abort.is_some() {
-				return;
-			}
-		}
 		// The last producer going away without finishing is an abrupt teardown:
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		if let Ok(mut state) = self.state.write() {
+		//
+		// `abort()`/`finish()` close the channel, so `write()` returns `Err(Ref)`.
+		// Check Ok and Err: Ok is unreachable after a deliberate close.
+		match self.state.write() {
+			Ok(mut state) => {
 			if state.final_sequence.is_some() || state.abort.is_some() {
 				return;
 			}
@@ -1482,15 +1477,18 @@ impl Drop for Alive {
 			);
 			state.clear_cache();
 			state.datagrams.clear();
-		} else {
-			// Closed without finish/abort — still an abrupt teardown (e.g. cancelled
-			// before abort ran). After a real abort(), the read() check above returned.
+			}
+			Err(state) => {
+				if state.final_sequence.is_some() || state.abort.is_some() {
+					return;
+				}
 			tracing::warn!(
 				track = %self.name,
 				"track::Producer dropped without finish() or abort()"
 			);
 		}
 	}
+}
 }
 
 /// Aggregate every live subscriber's preferences into the most demanding request.

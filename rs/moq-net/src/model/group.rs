@@ -241,19 +241,13 @@ struct Alive {
 
 impl Drop for Alive {
 	fn drop(&mut self) {
-		// `Producer::abort()` records `abort` then closes the channel. `write()` /
-		// `modify()` then fail, so the cleanliness check must use `read()` or a
-		// deliberate abort looks like an unfinished drop once the producer is gone.
-		{
-			let state = self.state.read();
-			if state.fin.is_some() || state.abort.is_some() {
-				return;
-			}
-		}
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
-		if let Ok(mut state) = modify(&self.state) {
+		//
+		// Check Ok and Err: Ok is unreachable after a deliberate close.
+		match self.state.write() {
+			Ok(mut state) => {
 			if state.fin.is_some() || state.abort.is_some() {
 				return;
 			}
@@ -262,13 +256,18 @@ impl Drop for Alive {
 				"group::Producer dropped without finish() or abort()"
 			);
 			state.release();
-		} else {
+			}
+			Err(state) => {
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
 			tracing::warn!(
 				sequence = self.info.sequence,
 				"group::Producer dropped without finish() or abort()"
 			);
 		}
 	}
+}
 }
 
 impl std::ops::Deref for Producer {
