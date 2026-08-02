@@ -48,6 +48,10 @@ moq-token generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 
 A random key ID is generated if `--id` is not specified.
 
+Any file holding private key material is written owner-only (mode `0600` on
+Unix), so a relay running as another user needs the public half instead. Public
+key files keep the default permissions.
+
 ### Scope a Key
 
 Keys can embed immutable publish and subscribe limits. Every token signed or

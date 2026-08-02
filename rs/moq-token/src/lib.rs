@@ -8,6 +8,7 @@
 mod algorithm;
 mod claims;
 mod error;
+mod fs;
 mod generate;
 mod key;
 mod key_id;
