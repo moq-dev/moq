@@ -207,7 +207,15 @@ tls.disable_verify = true
 # e.g. to dial a local relay with a private CA and a remote one with a public CA.
 # Defaults to true only when no custom root is set.
 # tls.system_roots = true
+
+# Delay before also dialing the next resolved address (Happy Eyeballs).
+# When DNS returns both IPv6 and IPv4, attempts alternate between the families,
+# each starting this long after the previous one, and the first connection to
+# complete wins. "0s" dials every address at once. Defaults to 250ms.
+# failover_delay = "250ms"
 ```
+
+Also available as `--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`.
 
 ### \[server.quic] and \[client.quic]
 

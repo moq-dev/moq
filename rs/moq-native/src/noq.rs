@@ -109,7 +109,7 @@ pub enum Error {
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
-	/// DNS resolved, but no address matched the local socket's family.
+	/// DNS resolved the host to no addresses at all.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
@@ -222,6 +222,8 @@ pub(crate) struct NoqClient {
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: Duration,
 }
 
 impl NoqClient {
@@ -246,6 +248,7 @@ impl NoqClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
+			failover_delay: config.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY),
 		})
 	}
 
@@ -261,16 +264,17 @@ impl NoqClient {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Look up the DNS entry.
-		// Noq doesn't support happy eyeballs, so we pick a single address,
-		// preferring one whose family matches the local socket so the OS
-		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
-		// dual-stack by default).
+		// Resolve every DNS entry, adapted to the local socket's family; the dial
+		// below races them Happy Eyeballs style so one broken family can't stall
+		// the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
+		let candidates = crate::failover::match_local(addrs, local);
+		if candidates.is_empty() {
+			return Err(Error::NoDnsEntries);
+		}
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -318,12 +322,21 @@ impl NoqClient {
 		let mut config = noq::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, %ip, "connecting");
+		tracing::debug!(%url, ?candidates, "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);
 
-		let connection = self.quic.connect_with(config, ip, &host_name)?.await?;
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let endpoint = self.quic.clone();
+			let config = config.clone();
+			let host_name = host_name.clone();
+			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
+		})
+		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
