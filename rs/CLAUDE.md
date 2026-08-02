@@ -40,7 +40,8 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 - `moq-hls` (lib): HLS / LL-HLS gateway (import + export, playlists + fMP4 via `moq-mux`).
 - `moq-bench` (bin): relay load generator. `JoinSet`-spawned staggered connections, rand sampling.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
-- `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. The generate/sign/verify command surface is `cli::Args` behind the crate's `cli` feature, flattened by both the `moq-token` binary and `moq token`, so there's one implementation and two entry points.
+- `moq-token` (lib): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. No clap, no anyhow: the command surface lives a layer up.
+- `moq-token-cli` (lib+bin, `moq-token`): the generate/sign/verify commands, as `moq_token_cli::Args`. The `moq-token` binary flattens it and `moq token` (moq-cli) nests it, so there's one implementation and two entry points. It's a lib so moq-cli can reuse it without pulling clap and anyhow into the `moq-token` library's API.
 
 **Bindings**
 
