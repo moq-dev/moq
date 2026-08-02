@@ -43,7 +43,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
-bytesize = { version = "2.4.2", default-features = false }
+bytesize = "2.4.2"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 http-body = "1"
