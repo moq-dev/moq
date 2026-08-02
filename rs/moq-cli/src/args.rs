@@ -132,7 +132,7 @@ pub enum Command {
 	#[cfg(feature = "transcode")]
 	Transcode(crate::transcode::Args),
 	/// Generate, sign, and verify the JWT tokens a relay authenticates with.
-	Token(moq_token::cli::Args),
+	Token(moq_token_cli::Args),
 	/// List the capture devices `import capture` can name.
 	#[cfg(feature = "capture")]
 	Devices,
@@ -289,8 +289,19 @@ mod tests {
 	fn token_verb() {
 		let cli = Cli::try_parse_from(["moq", "token", "generate", "--algorithm", "ES256"]).unwrap();
 		assert!(matches!(cli.command, Command::Token(_)));
-		// Local verb: no MoQ side needed, and passing one is an error rather than a no-op.
+		// Local verb: it needs no MoQ side, so what every other verb demands...
 		assert!(cli.moq.validate().is_err());
 		assert!(cli.moq.reject("token").is_ok());
+
+		// ...this one refuses, rather than accepting the flag and ignoring it.
+		let cli = Cli::try_parse_from([
+			"moq",
+			"--client-connect",
+			"https://relay.example.com",
+			"token",
+			"generate",
+		])
+		.unwrap();
+		assert!(cli.moq.reject("token").is_err());
 	}
 }

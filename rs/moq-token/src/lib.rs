@@ -7,8 +7,6 @@
 
 mod algorithm;
 mod claims;
-#[cfg(feature = "cli")]
-pub mod cli;
 mod error;
 mod generate;
 mod key;

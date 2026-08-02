@@ -101,7 +101,8 @@ Run `moq import --help` / `moq export --help` to see the endpoints, and
 
 Two verbs sit outside this grammar because they never touch the network:
 [`moq token`](#authentication) manages relay JWTs, and `moq devices` lists the
-capture devices. Both take no MoQ side and reject one if given.
+capture devices in a build with the `capture` feature enabled. Both take no MoQ
+side and reject one if given.
 
 ## Basic Usage
 

@@ -1,13 +1,14 @@
-//! The token command line surface, behind the `cli` feature.
+//! The token command line surface: generate, sign, and verify tokens for moq-relay.
 //!
-//! Flatten [`Args`] into a `clap` command and call [`Args::run`]. Both the standalone
-//! `moq-token` binary and `moq token` are built from this module, so they stay in sync.
+//! Flatten [`Args`] into a `clap` command and call [`Args::run`]. The standalone
+//! `moq-token` binary and moq-cli's `moq token` are both built from this crate, so
+//! they stay in sync. The `moq-token` library underneath stays free of clap.
 
 use anyhow::Context;
 use clap::Subcommand;
 use std::{io, path::PathBuf};
 
-use crate::Algorithm;
+use moq_token::Algorithm;
 
 /// Generate, sign, and verify tokens for moq-relay.
 #[derive(clap::Args, Clone, Debug)]
@@ -33,13 +34,13 @@ impl Args {
 				subscribe,
 			} => {
 				let id = match id {
-					Some(id) => crate::KeyId::decode(&id)?,
-					None => crate::KeyId::random(),
+					Some(id) => moq_token::KeyId::decode(&id)?,
+					None => moq_token::KeyId::random(),
 				};
 
-				let mut key = crate::Key::generate(algorithm, Some(id.clone()))?;
+				let mut key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
 				if !publish.is_empty() || !subscribe.is_empty() {
-					key = key.with_scope(crate::Scope {
+					key = key.with_scope(moq_token::Scope {
 						root,
 						publish,
 						subscribe,
@@ -82,7 +83,7 @@ impl Args {
 			} => {
 				let key = read_key(&key)?;
 
-				let payload = crate::Claims::default()
+				let payload = moq_token::Claims::default()
 					.with_root(root)
 					.with_publish(publish)
 					.with_subscribe(subscribe)
@@ -140,7 +141,7 @@ enum Command {
 		#[arg(long, conflicts_with = "public")]
 		public_dir: Option<PathBuf>,
 
-		/// Root path for the optional key scope.
+		/// Root path for the optional key scope. Only applied alongside --publish or --subscribe.
 		#[arg(long, default_value = "")]
 		root: String,
 
@@ -196,7 +197,7 @@ fn is_dash(path: &std::path::Path) -> bool {
 	path == std::path::Path::new("-")
 }
 
-fn write_key(key: &crate::Key, path: &std::path::Path) -> anyhow::Result<()> {
+fn write_key(key: &moq_token::Key, path: &std::path::Path) -> anyhow::Result<()> {
 	if is_dash(path) {
 		println!("{}", key.to_str()?);
 		Ok(())
@@ -206,12 +207,12 @@ fn write_key(key: &crate::Key, path: &std::path::Path) -> anyhow::Result<()> {
 	}
 }
 
-fn read_key(path: &std::path::Path) -> anyhow::Result<crate::Key> {
+fn read_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
 	if is_dash(path) {
 		let contents = io::read_to_string(io::stdin())?;
-		crate::Key::from_str(contents.trim()).context("failed to parse key from stdin")
+		moq_token::Key::from_str(contents.trim()).context("failed to parse key from stdin")
 	} else {
-		crate::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
+		moq_token::Key::from_file(path).with_context(|| format!("failed to read key from {}", path.display()))
 	}
 }
 
@@ -227,7 +228,12 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 fn parse_unix_timestamp(s: &str) -> anyhow::Result<std::time::SystemTime> {
 	let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 	let timestamp = timestamp.try_into().context("timestamp out of range")?;
-	Ok(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(timestamp))
+	// checked_add, because plain `+` panics on overflow and how far a SystemTime
+	// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
+	// counts 100ns ticks and runs out far sooner.
+	std::time::SystemTime::UNIX_EPOCH
+		.checked_add(std::time::Duration::from_secs(timestamp))
+		.context("timestamp out of range")
 }
 
 #[cfg(test)]
@@ -247,18 +253,11 @@ mod tests {
 		Harness::try_parse_from(args)?.args.run()
 	}
 
-	fn scratch(name: &str) -> PathBuf {
-		let dir = std::env::temp_dir().join(name);
-		let _ = std::fs::remove_dir_all(&dir);
-		std::fs::create_dir_all(&dir).expect("scratch dir");
-		dir
-	}
-
 	#[test]
 	fn generate_writes_a_usable_keypair() {
-		let dir = scratch("moq-token-cli-keypair");
-		let private = dir.join("private.jwk");
-		let public = dir.join("public.jwk");
+		let dir = tempfile::tempdir().unwrap();
+		let private = dir.path().join("private.jwk");
+		let public = dir.path().join("public.jwk");
 
 		run(&[
 			"moq-token",
@@ -273,13 +272,32 @@ mod tests {
 		])
 		.unwrap();
 
+		// Sign through the CLI grammar rather than the library, so the value parsers
+		// behind --expires / --issued are covered too.
+		run(&[
+			"moq-token",
+			"sign",
+			"--key",
+			private.to_str().unwrap(),
+			"--root",
+			"demo",
+			"--publish",
+			"alice",
+			"--issued",
+			"1700000000",
+			"--expires",
+			"4102444800",
+		])
+		.unwrap();
+
 		// What the relay actually does with these two files: the public half has to
-		// verify what the private half signed.
-		let token = crate::Key::from_file(&private)
+		// verify what the private half signed. `sign` only prints to stdout, so the
+		// token itself comes from the library.
+		let token = moq_token::Key::from_file(&private)
 			.unwrap()
-			.sign(&crate::Claims::default().with_root("demo").with_publish(["alice"]))
+			.sign(&moq_token::Claims::default().with_root("demo").with_publish(["alice"]))
 			.unwrap();
-		let path = dir.join("alice.jwt");
+		let path = dir.path().join("alice.jwt");
 		std::fs::write(&path, &token).unwrap();
 
 		run(&[
@@ -295,13 +313,16 @@ mod tests {
 
 	#[test]
 	fn generate_to_a_directory_names_the_file_after_the_kid() {
-		let dir = scratch("moq-token-cli-outdir");
+		let dir = tempfile::tempdir().unwrap();
 
-		run(&["moq-token", "generate", "--out-dir", dir.to_str().unwrap()]).unwrap();
+		run(&["moq-token", "generate", "--out-dir", dir.path().to_str().unwrap()]).unwrap();
 
-		let written: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+		let written: Vec<_> = std::fs::read_dir(dir.path())
+			.unwrap()
+			.map(|e| e.unwrap().path())
+			.collect();
 		assert_eq!(written.len(), 1, "expected exactly one key, got {written:?}");
-		let key = crate::Key::from_file(&written[0]).unwrap();
+		let key = moq_token::Key::from_file(&written[0]).unwrap();
 		let kid = key.kid.as_ref().expect("generate assigns a kid");
 		assert_eq!(written[0].file_name().unwrap().to_str().unwrap(), format!("{kid}.jwk"));
 	}
@@ -318,5 +339,18 @@ mod tests {
 	fn both_inputs_from_stdin_is_rejected() {
 		let err = run(&["moq-token", "verify", "--key", "-", "--in", "-"]).unwrap_err();
 		assert!(err.to_string().contains("cannot both read from stdin"), "{err}");
+	}
+
+	#[test]
+	fn timestamp_before_the_epoch_is_rejected() {
+		assert!(parse_unix_timestamp("-1").is_err());
+		assert!(parse_unix_timestamp("not-a-number").is_err());
+	}
+
+	// Whether the largest parseable timestamp is representable depends on the
+	// platform's SystemTime, so assert only that it never panics.
+	#[test]
+	fn timestamp_at_the_maximum_does_not_panic() {
+		let _ = parse_unix_timestamp(&i64::MAX.to_string());
 	}
 }
