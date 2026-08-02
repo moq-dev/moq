@@ -289,19 +289,27 @@ impl QuicheClient {
 		let addrs = tokio::net::lookup_host((host.as_str(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let candidates = crate::failover::match_local(addrs, self.bind);
+		let mut candidates = crate::failover::match_local(addrs, self.bind);
 		if candidates.is_empty() {
 			return Err(Error::NoDnsEntries);
+		}
+
+		// Each attempt binds its own socket, and a pinned non-zero source port only
+		// fits one socket at a time: an overlapping attempt would fail its bind with
+		// AddrInUse and burn a candidate for nothing. The attempts can't share a
+		// socket either (each quiche instance owns its socket and would consume the
+		// other's packets), so keep the preferred candidate only, the same single
+		// dial as before failover existed.
+		if self.bind.port() != 0 {
+			tracing::debug!("client bind port is pinned; address failover disabled");
+			candidates.truncate(1);
 		}
 
 		tracing::debug!(%url, ?candidates, "connecting via quiche");
 
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many
-		// addresses were dialed. Each attempt binds its own socket, matching how a
-		// single connect already worked. A pinned non-zero bind port only fits one
-		// socket, so there the extra attempts fail their bind (logged) and the
-		// first attempt runs alone.
+		// addresses were dialed.
 		let conn = crate::failover::race(candidates, self.failover_delay, |addr| {
 			let this = self.clone();
 			let alpns = alpns.clone();
