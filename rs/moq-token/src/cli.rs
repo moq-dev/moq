@@ -229,3 +229,94 @@ fn parse_unix_timestamp(s: &str) -> anyhow::Result<std::time::SystemTime> {
 	let timestamp = timestamp.try_into().context("timestamp out of range")?;
 	Ok(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(timestamp))
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use clap::Parser;
+
+	/// Drive the same clap grammar the binaries expose, rather than building
+	/// `Command` directly, so the flags stay part of what's under test.
+	#[derive(Parser)]
+	struct Harness {
+		#[command(flatten)]
+		args: Args,
+	}
+
+	fn run(args: &[&str]) -> anyhow::Result<()> {
+		Harness::try_parse_from(args)?.args.run()
+	}
+
+	fn scratch(name: &str) -> PathBuf {
+		let dir = std::env::temp_dir().join(name);
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).expect("scratch dir");
+		dir
+	}
+
+	#[test]
+	fn generate_writes_a_usable_keypair() {
+		let dir = scratch("moq-token-cli-keypair");
+		let private = dir.join("private.jwk");
+		let public = dir.join("public.jwk");
+
+		run(&[
+			"moq-token",
+			"generate",
+			// ES256 rather than an RSA algorithm: keygen dominates this test's runtime.
+			"--algorithm",
+			"ES256",
+			"--out",
+			private.to_str().unwrap(),
+			"--public",
+			public.to_str().unwrap(),
+		])
+		.unwrap();
+
+		// What the relay actually does with these two files: the public half has to
+		// verify what the private half signed.
+		let token = crate::Key::from_file(&private)
+			.unwrap()
+			.sign(&crate::Claims::default().with_root("demo").with_publish(["alice"]))
+			.unwrap();
+		let path = dir.join("alice.jwt");
+		std::fs::write(&path, &token).unwrap();
+
+		run(&[
+			"moq-token",
+			"verify",
+			"--key",
+			public.to_str().unwrap(),
+			"--in",
+			path.to_str().unwrap(),
+		])
+		.unwrap();
+	}
+
+	#[test]
+	fn generate_to_a_directory_names_the_file_after_the_kid() {
+		let dir = scratch("moq-token-cli-outdir");
+
+		run(&["moq-token", "generate", "--out-dir", dir.to_str().unwrap()]).unwrap();
+
+		let written: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+		assert_eq!(written.len(), 1, "expected exactly one key, got {written:?}");
+		let key = crate::Key::from_file(&written[0]).unwrap();
+		let kid = key.kid.as_ref().expect("generate assigns a kid");
+		assert_eq!(written[0].file_name().unwrap().to_str().unwrap(), format!("{kid}.jwk"));
+	}
+
+	// Both halves on stdout would interleave into one unparseable blob, so it's
+	// rejected up front rather than written.
+	#[test]
+	fn both_keys_to_stdout_is_rejected() {
+		let err = run(&["moq-token", "generate", "--algorithm", "ES256", "--public", "-"]).unwrap_err();
+		assert!(err.to_string().contains("cannot write both keys to stdout"), "{err}");
+	}
+
+	#[test]
+	fn both_inputs_from_stdin_is_rejected() {
+		let err = run(&["moq-token", "verify", "--key", "-", "--in", "-"]).unwrap_err();
+		assert!(err.to_string().contains("cannot both read from stdin"), "{err}");
+	}
+}

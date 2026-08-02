@@ -544,19 +544,19 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
 `moq token` mints those tokens, so a relay operator needs no extra tool:
 
 ```bash
-# Generate a signing key, and give the relay the public half (the same file for
-# a symmetric key).
-moq token generate --algorithm ES256 --out private.jwk --public-dir ./keys/
+# Generate a signing key. Only private.jwk has to stay secret; the relay
+# verifies with public.jwk.
+moq token generate --algorithm ES256 --out private.jwk --public public.jwk
 
 # Sign a token letting the bearer publish `rooms/123/alice` and watch the room.
+# Add `--expires <unix-timestamp>` to bound how long it stays valid.
 moq token sign --key private.jwk \
     --root "rooms/123" \
     --publish "alice" \
-    --subscribe "" \
-    --expires 1735689600
+    --subscribe "" > alice.jwt
 
 # Inspect a token's claims.
-moq token verify --key private.jwk --in alice.jwt
+moq token verify --key public.jwk --in alice.jwt
 ```
 
 See [Authentication](/bin/relay/auth) for the key formats, scoping rules, and
