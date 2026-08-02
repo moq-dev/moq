@@ -261,11 +261,8 @@ impl NoqClient {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Look up the DNS entry.
-		// Noq doesn't support happy eyeballs, so we pick a single address,
-		// preferring one whose family matches the local socket so the OS
-		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
-		// dual-stack by default).
+		// Look up the DNS entry. Noq doesn't support happy eyeballs, so we commit to
+		// a single address; `pick_addr` documents how that one is chosen.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await

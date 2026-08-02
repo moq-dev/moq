@@ -15,34 +15,38 @@ pub(crate) fn resolve(addr: Option<&str>, default: &str) -> std::io::Result<Sock
 		.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses resolved"))
 }
 
-/// Pick a single DNS entry from `addrs`, preferring one whose address family
-/// matches `local`. Falls back to the first entry when no family match exists.
+/// Pick a single DNS entry from `addrs`: the first one the local socket can
+/// address, keeping the order the resolver returned them in.
 ///
-/// Each entry is normalized to the local socket's family when possible: an
-/// IPv4-mapped IPv6 address is unwrapped for an IPv4 socket, and a plain IPv4
-/// address is wrapped for an IPv6 socket. Quinn doesn't support happy eyeballs
-/// and the local socket may be bound to a single family (especially on
-/// Windows, where IPv6 sockets are not dual-stack by default), so a
-/// family-mismatched destination causes `sendmsg` to fail with
-/// `AddrNotAvailable`. See <https://github.com/moq-dev/moq/issues/1375>.
+/// That order is the whole point. `getaddrinfo` has already sorted its answer
+/// per RFC 6724, whose first rule demotes a destination the host has no usable
+/// source address for, so an unroutable IPv6 record sinks below the IPv4 ones.
+/// Reordering on top of that throws away the only reachability signal we have:
+/// a socket bound to `[::]` is dual-stack (see [`crate::bind`]) and matches
+/// *both* families, so preferring an address-family match would promote every
+/// AAAA over every A and hand back the one destination the host can't reach.
+/// Quinn doesn't support happy eyeballs, so that single choice is the whole
+/// dial: `sendmsg` then fails with `Network is unreachable` for every packet
+/// until the handshake times out.
+///
+/// Each entry is converted to the local socket's family when that's lossless:
+/// an IPv4-mapped IPv6 address is unwrapped for an IPv4 socket, and a plain
+/// IPv4 address is wrapped for an IPv6 socket. An entry that can't be converted
+/// is one this socket can't send to, so it's skipped in favor of one that can
+/// (a socket explicitly bound to a single family, and on Windows an IPv6 socket
+/// whose dual-stack option didn't take). Falls back to the first entry when
+/// none of them convert, so the OS reports the failure rather than us inventing
+/// one. See <https://github.com/moq-dev/moq/issues/1375>.
 pub(crate) fn pick_addr(addrs: impl IntoIterator<Item = SocketAddr>, local: SocketAddr) -> Option<SocketAddr> {
-	let mut converted = None;
-	let mut other = None;
+	let mut fallback = None;
 	for addr in addrs {
-		// A native family match wins outright.
+		let addr = normalize_family(addr, local);
 		if addr.is_ipv4() == local.is_ipv4() {
 			return Some(addr);
 		}
-		let normalized = normalize_family(addr, local);
-		if normalized.is_ipv4() == local.is_ipv4() {
-			if converted.is_none() {
-				converted = Some(normalized);
-			}
-		} else if other.is_none() {
-			other = Some(addr);
-		}
+		fallback.get_or_insert(addr);
 	}
-	converted.or(other)
+	fallback
 }
 
 /// Convert `addr` to match the family of `local` when the conversion is
@@ -83,52 +87,57 @@ mod tests {
 		assert_eq!(addr.port(), 1234);
 	}
 
-	#[test]
-	fn pick_addr_prefers_matching_family() {
-		let v4: SocketAddr = "127.0.0.1:443".parse().unwrap();
-		let v6: SocketAddr = "[::1]:443".parse().unwrap();
-		let local_v4: SocketAddr = "0.0.0.0:0".parse().unwrap();
-		let local_v6: SocketAddr = "[::]:0".parse().unwrap();
+	const V4: &str = "192.0.2.1:443";
+	const V4_MAPPED: &str = "[::ffff:192.0.2.1]:443";
+	const V6: &str = "[2001:db8::1]:443";
+	const LOCAL_V4: &str = "0.0.0.0:0";
+	const LOCAL_V6: &str = "[::]:0";
 
-		// IPv6 listed first, but local socket is IPv4: pick IPv4.
-		assert_eq!(pick_addr([v6, v4], local_v4), Some(v4));
-		// IPv4 listed first, but local socket is IPv6: pick IPv6.
-		assert_eq!(pick_addr([v4, v6], local_v6), Some(v6));
+	fn addr(s: &str) -> SocketAddr {
+		s.parse().unwrap()
+	}
+
+	/// A dual-stack socket can reach both families, so the resolver's ranking is
+	/// the only thing that says which destination actually works. A host with no
+	/// route to the AAAA gets it ranked last by RFC 6724; preferring an address
+	/// family match promoted it back to the front and dialed the one destination
+	/// the host couldn't reach.
+	#[test]
+	fn pick_addr_keeps_the_resolver_ranking() {
+		assert_eq!(pick_addr([addr(V4), addr(V6)], addr(LOCAL_V6)), Some(addr(V4_MAPPED)));
+		// And the other way around: a host with working IPv6 ranks the AAAA first,
+		// so that's what gets dialed.
+		assert_eq!(pick_addr([addr(V6), addr(V4)], addr(LOCAL_V6)), Some(addr(V6)));
+	}
+
+	/// A socket bound to one family skips what it can't send to, whatever the
+	/// ranking, since the alternative is a guaranteed `sendmsg` failure.
+	#[test]
+	fn pick_addr_skips_a_family_the_socket_cant_send_to() {
+		assert_eq!(pick_addr([addr(V6), addr(V4)], addr(LOCAL_V4)), Some(addr(V4)));
 	}
 
 	#[test]
 	fn pick_addr_wraps_v4_for_v6_socket() {
-		let v4: SocketAddr = "127.0.0.1:443".parse().unwrap();
-		let mapped: SocketAddr = "[::ffff:127.0.0.1]:443".parse().unwrap();
-		let local_v6: SocketAddr = "[::]:0".parse().unwrap();
-
 		// IPv6 socket with only an IPv4 DNS entry: wrap as IPv4-mapped IPv6.
-		assert_eq!(pick_addr([v4], local_v6), Some(mapped));
+		assert_eq!(pick_addr([addr(V4)], addr(LOCAL_V6)), Some(addr(V4_MAPPED)));
 	}
 
 	#[test]
 	fn pick_addr_unwraps_v4_mapped_for_v4_socket() {
-		let mapped: SocketAddr = "[::ffff:127.0.0.1]:443".parse().unwrap();
-		let v4: SocketAddr = "127.0.0.1:443".parse().unwrap();
-		let local_v4: SocketAddr = "0.0.0.0:0".parse().unwrap();
-
 		// IPv4 socket given an IPv4-mapped IPv6 entry: unwrap to plain IPv4.
-		assert_eq!(pick_addr([mapped], local_v4), Some(v4));
+		assert_eq!(pick_addr([addr(V4_MAPPED)], addr(LOCAL_V4)), Some(addr(V4)));
 	}
 
 	#[test]
 	fn pick_addr_falls_back_for_unmappable_v6() {
-		let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
-		let local_v4: SocketAddr = "0.0.0.0:0".parse().unwrap();
-
-		// IPv4 socket with only a true IPv6 entry: no conversion possible,
-		// fall back to the entry as-is so the OS surfaces a clear error.
-		assert_eq!(pick_addr([v6], local_v4), Some(v6));
+		// IPv4 socket with only a true IPv6 entry: no conversion possible, so hand
+		// it back as-is and let the OS surface a clear error.
+		assert_eq!(pick_addr([addr(V6)], addr(LOCAL_V4)), Some(addr(V6)));
 	}
 
 	#[test]
 	fn pick_addr_empty() {
-		let local: SocketAddr = "0.0.0.0:0".parse().unwrap();
-		assert_eq!(pick_addr(std::iter::empty(), local), None);
+		assert_eq!(pick_addr(std::iter::empty(), addr(LOCAL_V4)), None);
 	}
 }
