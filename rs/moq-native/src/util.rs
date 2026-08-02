@@ -31,22 +31,42 @@ pub(crate) fn resolve(addr: Option<&str>, default: &str) -> std::io::Result<Sock
 ///
 /// Each entry is converted to the local socket's family when that's lossless:
 /// an IPv4-mapped IPv6 address is unwrapped for an IPv4 socket, and a plain
-/// IPv4 address is wrapped for an IPv6 socket. An entry that can't be converted
-/// is one this socket can't send to, so it's skipped in favor of one that can
-/// (a socket explicitly bound to a single family, and on Windows an IPv6 socket
-/// whose dual-stack option didn't take). Falls back to the first entry when
-/// none of them convert, so the OS reports the failure rather than us inventing
-/// one. See <https://github.com/moq-dev/moq/issues/1375>.
+/// IPv4 address is wrapped for an IPv6 socket. An entry the socket can't send
+/// to (see [`addressable`]) is skipped in favor of one it can, which is what a
+/// socket bound to a single family needs. Falls back to the first entry when
+/// there's no usable one, so the OS reports the failure rather than us
+/// inventing one. See <https://github.com/moq-dev/moq/issues/1375>.
 pub(crate) fn pick_addr(addrs: impl IntoIterator<Item = SocketAddr>, local: SocketAddr) -> Option<SocketAddr> {
 	let mut fallback = None;
 	for addr in addrs {
 		let addr = normalize_family(addr, local);
-		if addr.is_ipv4() == local.is_ipv4() {
+		if addressable(addr, local) {
 			return Some(addr);
 		}
 		fallback.get_or_insert(addr);
 	}
 	fallback
+}
+
+/// Whether a socket bound to `local` can send to `dest`.
+///
+/// Mostly this is the address family, but a dual-stack socket has a wrinkle: it
+/// reaches IPv4 by sending to an IPv4-mapped destination, which the kernel turns
+/// back into a real IPv4 packet. That needs an IPv4 source address, so it only
+/// works when the bind left the socket one to use. `[::]` does, since the kernel
+/// picks the source; an IPv4-mapped bind is already one. A concrete IPv6 bind is
+/// not, and the mirror holds: an IPv4-mapped bind can't reach a real IPv6
+/// destination.
+fn addressable(dest: SocketAddr, local: SocketAddr) -> bool {
+	let (SocketAddr::V6(dest), SocketAddr::V6(local)) = (dest, local) else {
+		return dest.is_ipv4() == local.is_ipv4();
+	};
+
+	match (dest.ip().to_ipv4_mapped(), local.ip().to_ipv4_mapped()) {
+		(Some(_), None) => local.ip().is_unspecified(),
+		(None, Some(_)) => false,
+		_ => true,
+	}
 }
 
 /// Convert `addr` to match the family of `local` when the conversion is
@@ -92,6 +112,9 @@ mod tests {
 	const V6: &str = "[2001:db8::1]:443";
 	const LOCAL_V4: &str = "0.0.0.0:0";
 	const LOCAL_V6: &str = "[::]:0";
+	/// `--client-bind` pinned to a concrete source rather than the wildcard.
+	const BOUND_V6: &str = "[2001:db8::5]:0";
+	const BOUND_V4_MAPPED: &str = "[::ffff:192.0.2.5]:0";
 
 	fn addr(s: &str) -> SocketAddr {
 		s.parse().unwrap()
@@ -115,6 +138,24 @@ mod tests {
 	#[test]
 	fn pick_addr_skips_a_family_the_socket_cant_send_to() {
 		assert_eq!(pick_addr([addr(V6), addr(V4)], addr(LOCAL_V4)), Some(addr(V4)));
+
+		// A bind pinned to a concrete IPv6 source has no IPv4 source to send an
+		// IPv4-mapped destination from, so the native IPv6 entry wins even though
+		// the resolver ranked the A record first.
+		assert_eq!(pick_addr([addr(V4), addr(V6)], addr(BOUND_V6)), Some(addr(V6)));
+		// The mirror: an IPv4-mapped bind is an IPv4 socket, so a real IPv6
+		// destination is out of reach.
+		assert_eq!(
+			pick_addr([addr(V6), addr(V4)], addr(BOUND_V4_MAPPED)),
+			Some(addr(V4_MAPPED))
+		);
+	}
+
+	/// Nothing else to try, so hand back the unusable entry and let the OS report
+	/// it. Silently failing the dial would be worse than a clear `sendmsg` error.
+	#[test]
+	fn pick_addr_still_returns_an_unusable_only_entry() {
+		assert_eq!(pick_addr([addr(V4)], addr(BOUND_V6)), Some(addr(V4_MAPPED)));
 	}
 
 	#[test]
