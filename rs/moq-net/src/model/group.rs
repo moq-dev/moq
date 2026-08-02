@@ -248,26 +248,26 @@ impl Drop for Alive {
 		// Check Ok and Err: Ok is unreachable after a deliberate close.
 		match self.state.write() {
 			Ok(mut state) => {
-			if state.fin.is_some() || state.abort.is_some() {
-				return;
-			}
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
-			state.release();
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+				state.release();
 			}
 			Err(state) => {
 				if state.fin.is_some() || state.abort.is_some() {
 					return;
 				}
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+			}
 		}
 	}
-}
 }
 
 impl std::ops::Deref for Producer {
@@ -813,56 +813,8 @@ impl Fetch {
 mod test {
 	use super::*;
 	use bytes::Bytes;
+	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
-	use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-	use tracing::field::{Field, Visit};
-	use tracing::span::{Attributes, Id, Record};
-	use tracing::{Event, Level, Metadata, Subscriber};
-
-	/// Count `group::Producer` unfinished-drop WARN events while running `f`.
-	/// Uses only the existing `tracing` dependency (no tracing-subscriber).
-	fn count_drop_warnings(f: impl FnOnce()) -> usize {
-		struct Count(std::sync::Arc<AtomicUsize>);
-		struct Msg(bool);
-		impl Visit for Msg {
-			fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-				if field.name() == "message" {
-					let s = format!("{value:?}");
-					if s.contains("group::Producer dropped without finish") {
-						self.0 = true;
-					}
-				}
-			}
-			fn record_str(&mut self, field: &Field, value: &str) {
-				if field.name() == "message" && value.contains("group::Producer dropped without finish") {
-					self.0 = true;
-				}
-			}
-		}
-		impl Subscriber for Count {
-			fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-				*metadata.level() <= Level::WARN
-			}
-			fn new_span(&self, _span: &Attributes<'_>) -> Id {
-				Id::from_u64(1)
-			}
-			fn record(&self, _span: &Id, _values: &Record<'_>) {}
-			fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-			fn event(&self, event: &Event<'_>) {
-				let mut msg = Msg(false);
-				event.record(&mut msg);
-				if msg.0 {
-					self.0.fetch_add(1, AtomicOrdering::SeqCst);
-				}
-			}
-			fn enter(&self, _span: &Id) {}
-			fn exit(&self, _span: &Id) {}
-		}
-
-		let hits = std::sync::Arc::new(AtomicUsize::new(0));
-		tracing::subscriber::with_default(Count(hits.clone()), f);
-		hits.load(AtomicOrdering::SeqCst)
-	}
 
 	#[test]
 	fn basic_frame_reading() {
@@ -1021,7 +973,7 @@ mod test {
 
 	#[test]
 	fn drop_after_abort_does_not_warn() {
-		let warns = count_drop_warnings(|| {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
 			let producer = Info { sequence: 0 }.produce();
 			let keep = producer.clone();
 			let mut writer = producer.clone();
@@ -1037,7 +989,7 @@ mod test {
 
 	#[test]
 	fn drop_unfinished_warns() {
-		let warns = count_drop_warnings(|| {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
 			let producer = Info { sequence: 0 }.produce();
 			let mut writer = producer.clone();
 			writer
