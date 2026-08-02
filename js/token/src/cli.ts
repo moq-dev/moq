@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
@@ -138,7 +138,8 @@ function writePrivateFileSync(path: string, contents: string) {
 		if (process.platform !== "win32") {
 			fchmodSync(fd, 0o600);
 		}
-		writeSync(fd, contents);
+		// writeFileSync loops until every byte lands, unlike writeSync's single short-write-prone call.
+		writeFileSync(fd, contents);
 	} finally {
 		closeSync(fd);
 	}
