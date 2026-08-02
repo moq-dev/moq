@@ -35,7 +35,8 @@ moq-token = "0.1"
 cargo install moq-token-cli
 ```
 
-The binary is named `moq-token`.
+The binary is named `moq-token`. [moq-cli](/bin/cli) ships the same commands as
+`moq token ...`, so a machine that already has `moq` needs nothing extra.
 
 #### Using Nix
 

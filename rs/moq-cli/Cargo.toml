@@ -68,6 +68,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
+moq-token = { workspace = true, features = ["cli"] }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

@@ -29,7 +29,8 @@ For production use with key rotation. Keys are resolved on demand by extracting 
 
 ### Generate a Key
 
-Using the Rust CLI:
+Using the Rust CLI. The same commands are available as `moq token ...` if you
+already have [moq-cli](/bin/cli) installed:
 
 ```bash
 # Symmetric key (simpler, key must stay secret)

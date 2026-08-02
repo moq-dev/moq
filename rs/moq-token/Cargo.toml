@@ -10,12 +10,17 @@ edition = "2024"
 rust-version.workspace = true
 
 [features]
+# The `generate`/`sign`/`verify` command line surface, shared by the `moq-token`
+# and `moq` binaries.
+cli = ["dep:anyhow", "dep:clap"]
 jwks-loader = ["reqwest"]
 tokio = ["dep:tokio"]
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 aws-lc-rs = "1"
 base64 = "0.22"
+clap = { version = "4", features = ["derive"], optional = true }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = "0.14.0"
 p384 = "0.14.0"

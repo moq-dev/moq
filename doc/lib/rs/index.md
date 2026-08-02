@@ -175,7 +175,8 @@ ffmpeg -i input.mp4 -f mpegts - | \
 
 ### moq-token CLI
 
-Command-line tool for JWT token management (binary name: `moq-token`).
+Command-line tool for JWT token management (binary name: `moq-token`). The same
+commands are built into moq-cli as `moq token ...`.
 
 **Installation:**
 

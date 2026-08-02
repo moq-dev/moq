@@ -8,9 +8,10 @@
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
-//! - `devices` touches no network at all, so it's the one verb that takes no MoQ
-//!   side. That's why the requirement is enforced per-verb ([`MoqSide::validate`])
-//!   rather than by clap: an `ArgGroup` can't be conditional on the subcommand.
+//! - `devices` and `token` touch no network at all, so they're the verbs that take
+//!   no MoQ side. That's why the requirement is enforced per-verb
+//!   ([`MoqSide::validate`]) rather than by clap: an `ArgGroup` can't be
+//!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
 //!   `rtmp`, `srt`, `rtc`). Exactly one per invocation, so "which endpoint" is
@@ -44,8 +45,9 @@ pub struct Cli {
 /// The MoQ attachment. At least one of `--client-connect` / `--server-bind`;
 /// both may be given at once.
 ///
-/// The group is not `required`, because `devices` runs without a MoQ side. Every
-/// verb that does need one calls [`validate`](Self::validate).
+/// The group is not `required`, because the local verbs (`token`, `devices`) run
+/// without a MoQ side. Every verb that does need one calls
+/// [`validate`](Self::validate).
 #[derive(Args, Clone)]
 #[command(group = ArgGroup::new("moq").multiple(true).args(["client-connect", "server-bind"]))]
 pub struct MoqSide {
@@ -105,8 +107,7 @@ impl MoqSide {
 	}
 
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
-	/// silently ignoring them. Only `devices` qualifies, hence the gate.
-	#[cfg(feature = "capture")]
+	/// silently ignoring them.
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			self.client.connect.is_none() && self.server.bind.is_none(),
@@ -130,6 +131,8 @@ pub enum Command {
 	/// only encoded while watched (just-in-time).
 	#[cfg(feature = "transcode")]
 	Transcode(crate::transcode::Args),
+	/// Generate, sign, and verify the JWT tokens a relay authenticates with.
+	Token(moq_token::cli::Args),
 	/// List the capture devices `import capture` can name.
 	#[cfg(feature = "capture")]
 	Devices,
@@ -266,4 +269,28 @@ pub struct Fragmented {
 	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
 	#[arg(long, value_parser = humantime::parse_duration)]
 	pub fragment_duration: Option<Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use clap::CommandFactory;
+
+	// Catches the conflicts clap only panics on at runtime: a duplicate long, a
+	// dangling `conflicts_with`, a flattened arg colliding with an existing one.
+	// The token verb flattens a whole command tree from another crate, so this is
+	// the only thing standing between a rename there and a broken `moq`.
+	#[test]
+	fn valid() {
+		Cli::command().debug_assert();
+	}
+
+	#[test]
+	fn token_verb() {
+		let cli = Cli::try_parse_from(["moq", "token", "generate", "--algorithm", "ES256"]).unwrap();
+		assert!(matches!(cli.command, Command::Token(_)));
+		// Local verb: no MoQ side needed, and passing one is an error rather than a no-op.
+		assert!(cli.moq.validate().is_err());
+		assert!(cli.moq.reject("token").is_ok());
+	}
 }

@@ -99,6 +99,10 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
 Run `moq import --help` / `moq export --help` to see the endpoints, and
 `moq import rtmp --help` for a specific one.
 
+Two verbs sit outside this grammar because they never touch the network:
+[`moq token`](#authentication) manages relay JWTs, and `moq devices` lists the
+capture devices. Both take no MoQ side and reject one if given.
+
 ## Basic Usage
 
 `moq <MoQ side> import <format>` reads a container from stdin;
@@ -537,7 +541,26 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
 ```
 
-See [Authentication](/bin/relay/auth) for token generation.
+`moq token` mints those tokens, so a relay operator needs no extra tool:
+
+```bash
+# Generate a signing key, and give the relay the public half (the same file for
+# a symmetric key).
+moq token generate --algorithm ES256 --out private.jwk --public-dir ./keys/
+
+# Sign a token letting the bearer publish `rooms/123/alice` and watch the room.
+moq token sign --key private.jwk \
+    --root "rooms/123" \
+    --publish "alice" \
+    --subscribe "" \
+    --expires 1735689600
+
+# Inspect a token's claims.
+moq token verify --key private.jwk --in alice.jwt
+```
+
+See [Authentication](/bin/relay/auth) for the key formats, scoping rules, and
+relay configuration.
 
 ## Test Videos
 
