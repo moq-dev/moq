@@ -107,12 +107,23 @@ impl MoqSide {
 	}
 
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
-	/// silently ignoring them.
+	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
+	/// next to `token generate` it reads like it scopes the key, which `--root` does.
+	///
+	/// `--origin` is left out on purpose. It reads `MOQ_ORIGIN`, so rejecting it would
+	/// fail `moq token` in any shell that exports the variable for a publisher, and an
+	/// ambient env value is not the deliberate request this is meant to catch.
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
-		anyhow::ensure!(
-			self.client.connect.is_none() && self.server.bind.is_none(),
-			"`{command}` runs locally and takes no MoQ side; drop --client-connect / --server-bind"
-		);
+		let ignored = [
+			("--client-connect", self.client.connect.is_some()),
+			("--server-bind", self.server.bind.is_some()),
+			("--broadcast", self.broadcast.is_some()),
+		];
+
+		if let Some((flag, _)) = ignored.into_iter().find(|(_, given)| *given) {
+			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
+		}
+
 		Ok(())
 	}
 }
@@ -293,15 +304,14 @@ mod tests {
 		assert!(cli.moq.validate().is_err());
 		assert!(cli.moq.reject("token").is_ok());
 
-		// ...this one refuses, rather than accepting the flag and ignoring it.
-		let cli = Cli::try_parse_from([
-			"moq",
-			"--client-connect",
-			"https://relay.example.com",
-			"token",
-			"generate",
-		])
-		.unwrap();
-		assert!(cli.moq.reject("token").is_err());
+		// ...these it refuses, rather than accepting the flag and ignoring it.
+		for flag in [
+			["--client-connect", "https://relay.example.com"],
+			["--broadcast", "room"],
+		] {
+			let cli = Cli::try_parse_from(["moq", flag[0], flag[1], "token", "generate"]).unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains(flag[0]), "{err}");
+		}
 	}
 }
