@@ -222,11 +222,16 @@ pub(crate) struct NoqClient {
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
+	/// Whether the bound socket really came back dual-stack, which decides
+	/// whether an IPv4 destination is reachable at all. Captured here because the
+	/// endpoint owns the socket from here on and `local_addr` can't tell us.
+	dual_stack: bool,
 }
 
 impl NoqClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
 		let mut transport = noq::TransportConfig::default();
 		let quic = config.quic.resolve();
@@ -246,6 +251,7 @@ impl NoqClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
+			dual_stack,
 		})
 	}
 
@@ -267,7 +273,7 @@ impl NoqClient {
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let ip = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
+		let ip = crate::util::pick_addr(addrs, local, self.dual_stack).ok_or(Error::NoDnsEntries)?;
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
