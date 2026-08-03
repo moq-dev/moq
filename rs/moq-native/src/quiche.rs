@@ -215,6 +215,15 @@ impl QuicheClient {
 			_ => return Err(crate::tls::Error::IncompleteClientAuth.into()),
 		};
 
+		// Warn once here rather than on every dial: the constraint is a property of
+		// the config, and a relay reconnecting to its peers would repeat it forever.
+		if config.bind.port() != 0 {
+			tracing::warn!(
+				bind = %config.bind,
+				"pinned client bind port; only the first resolved address is dialed (address failover needs an ephemeral port on this backend)"
+			);
+		}
+
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,
@@ -299,9 +308,8 @@ impl QuicheClient {
 		// AddrInUse and burn a candidate for nothing. The attempts can't share a
 		// socket either (each quiche instance owns its socket and would consume the
 		// other's packets), so keep the preferred candidate only, the same single
-		// dial as before failover existed.
+		// dial as before failover existed. `new` warns about this once.
 		if self.bind.port() != 0 {
-			tracing::debug!("client bind port is pinned; address failover disabled");
 			candidates.truncate(1);
 		}
 

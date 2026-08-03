@@ -217,6 +217,13 @@ tls.disable_verify = true
 
 Also available as `--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`.
 
+Pinning the source port (a non-zero port in `--client-bind`) disables address
+failover on the `quiche` backend, which binds a fresh socket per attempt and so
+can only dial one address at a time from a fixed port. The relay logs a warning
+at startup when both are set. Leave the bind port at `0` to keep failover, or
+use the `quinn` or `noq` backend, which share one socket across attempts and are
+unaffected.
+
 ### \[server.quic] and \[client.quic]
 
 Per-connection QUIC transport knobs, applied to incoming connections

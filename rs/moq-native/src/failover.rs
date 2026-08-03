@@ -88,8 +88,12 @@ fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
 /// The remaining attempts are dropped, which aborts them.
 ///
 /// A `delay` of zero dials every candidate at once. When every attempt fails,
-/// the error of the earliest (most preferred) candidate is returned and the
-/// rest are logged.
+/// the error of the last attempt to finish is returned and the rest are logged.
+/// That attempt is the one that survived longest, which is the one that got
+/// furthest: a wrong-family address fails at the socket in microseconds, while a
+/// rejected certificate or a refused port costs at least a round trip. Reporting
+/// the most preferred candidate instead would surface the broken family that
+/// failover exists to route around, burying the error worth acting on.
 ///
 /// `candidates` must not be empty; callers map an empty DNS answer to their own
 /// error before racing.
@@ -101,7 +105,6 @@ where
 {
 	let mut remaining = candidates.into_iter();
 	let mut attempts = FuturesUnordered::new();
-	let mut first_err: Option<(usize, E)> = None;
 
 	let mut next_index = 0;
 	let mut start = |addr: SocketAddr, attempts: &mut FuturesUnordered<_>| {
@@ -124,18 +127,20 @@ where
 			res = attempts.next() => {
 				let (index, addr, res) = res.expect("attempts can't be empty here");
 				match res {
-					Ok(conn) => return Ok(conn),
+					Ok(conn) => {
+						tracing::debug!(%addr, index, "connected");
+						return Ok(conn);
+					}
 					Err(err) => {
 						tracing::warn!(%addr, %err, "connection attempt failed");
-						if first_err.as_ref().is_none_or(|(first, _)| index < *first) {
-							first_err = Some((index, err));
-						}
 						// A failure starts the next candidate immediately (RFC 8305
 						// section 5) rather than waiting out the stagger delay.
 						if let Some(addr) = remaining.next() {
 							start(addr, &mut attempts);
 						} else if attempts.is_empty() {
-							return Err(first_err.expect("at least one error recorded").1);
+							// Nothing left to try, so this attempt outlived every
+							// other one and its error is the one worth reporting.
+							return Err(err);
 						}
 					}
 				}
@@ -278,22 +283,23 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn all_failures_return_the_preferred_error() {
-		// The first candidate fails last, but its error is still the one reported.
+	async fn all_failures_return_the_error_that_got_furthest() {
+		// The preferred candidate fails instantly, the way a wrong-family address
+		// does; the fallback that survived a round trip carries the real problem.
 		let res: Result<&str, &str> = race(
-			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2"), v4("3.3.3.3:3")],
+			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
 			Duration::from_millis(10),
 			|addr| async move {
 				if addr == v4("1.1.1.1:1") {
-					tokio::time::sleep(Duration::from_secs(1)).await;
-					Err("first")
+					Err("network unreachable")
 				} else {
-					Err("later")
+					tokio::time::sleep(Duration::from_secs(1)).await;
+					Err("invalid peer certificate")
 				}
 			},
 		)
 		.await;
-		assert_eq!(res, Err("first"));
+		assert_eq!(res, Err("invalid peer certificate"));
 	}
 
 	#[tokio::test(start_paused = true)]
