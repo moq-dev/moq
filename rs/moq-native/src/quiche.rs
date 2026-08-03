@@ -145,6 +145,13 @@ pub enum Error {
 	/// The TLS configuration was invalid. See [`crate::tls::Error`].
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Every resolved address failed to connect, paired with its own error in
+	/// dial order. All of them are kept: picking one to report would bury a
+	/// rejected certificate or a refused port behind whichever address happened
+	/// to be unroutable or to blackhole until its timeout.
+	#[error("all {} addresses failed: {}", .0.len(), crate::failover::describe(.0))]
+	AllAddresses(Vec<(std::net::SocketAddr, Error)>),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -336,7 +343,8 @@ impl QuicheClient {
 				Ok::<_, Error>(conn)
 			}
 		})
-		.await?;
+		.await
+		.map_err(Error::AllAddresses)?;
 
 		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
 		for alpn in versions.alpns() {
@@ -443,6 +451,7 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::ClientConnect(err) => classify_client_error(err),
+			Self::AllAddresses(failures) => failures.iter().find_map(|(_, err)| err.connect_error()),
 			_ => None,
 		}
 	}

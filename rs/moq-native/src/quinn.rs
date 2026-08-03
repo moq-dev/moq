@@ -221,6 +221,13 @@ pub enum Error {
 	/// The TLS configuration or certificates couldn't be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Every resolved address failed to connect, paired with its own error in
+	/// dial order. All of them are kept: picking one to report would bury a
+	/// rejected certificate or a refused port behind whichever address happened
+	/// to be unroutable or to blackhole until its timeout.
+	#[error("all {} addresses failed: {}", .0.len(), crate::failover::describe(.0))]
+	AllAddresses(Vec<(std::net::SocketAddr, Error)>),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -349,7 +356,8 @@ impl QuinnClient {
 			let host_name = host_name.clone();
 			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
 		})
-		.await?;
+		.await
+		.map_err(Error::AllAddresses)?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
@@ -386,6 +394,7 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::Client(err) => classify_client_error(err),
+			Self::AllAddresses(failures) => failures.iter().find_map(|(_, err)| err.connect_error()),
 			_ => None,
 		}
 	}

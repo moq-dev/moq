@@ -83,21 +83,34 @@ fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
 	}
 }
 
+/// Render each failed attempt as `addr: error`, joined by `; `.
+pub(crate) fn describe<E: std::fmt::Display>(failures: &[(SocketAddr, E)]) -> String {
+	failures
+		.iter()
+		.map(|(addr, err)| format!("{addr}: {err}"))
+		.collect::<Vec<_>>()
+		.join("; ")
+}
+
 /// Dial `candidates` in order, starting the next attempt `delay` after the
 /// previous one (or immediately when it fails), and return the first success.
 /// The remaining attempts are dropped, which aborts them.
 ///
 /// A `delay` of zero dials every candidate at once. When every attempt fails,
-/// the error of the last attempt to finish is returned and the rest are logged.
-/// That attempt is the one that survived longest, which is the one that got
-/// furthest: a wrong-family address fails at the socket in microseconds, while a
-/// rejected certificate or a refused port costs at least a round trip. Reporting
-/// the most preferred candidate instead would surface the broken family that
-/// failover exists to route around, burying the error worth acting on.
+/// every error is returned, ordered by candidate rather than by when it
+/// finished. Singling one out means guessing, and both obvious guesses are
+/// wrong in a case this exists to handle: the most preferred candidate is the
+/// broken family failover routes around, while the last to finish is whichever
+/// address blackholed until its timeout, and either can bury a rejected
+/// certificate or a refused port that the caller could act on.
 ///
 /// `candidates` must not be empty; callers map an empty DNS answer to their own
 /// error before racing.
-pub(crate) async fn race<C, E, F, Fut>(candidates: Vec<SocketAddr>, delay: Duration, mut dial: F) -> Result<C, E>
+pub(crate) async fn race<C, E, F, Fut>(
+	candidates: Vec<SocketAddr>,
+	delay: Duration,
+	mut dial: F,
+) -> Result<C, Vec<(SocketAddr, E)>>
 where
 	F: FnMut(SocketAddr) -> Fut,
 	Fut: Future<Output = Result<C, E>>,
@@ -105,6 +118,7 @@ where
 {
 	let mut remaining = candidates.into_iter();
 	let mut attempts = FuturesUnordered::new();
+	let mut failures: Vec<(usize, SocketAddr, E)> = Vec::new();
 
 	let mut next_index = 0;
 	let mut start = |addr: SocketAddr, attempts: &mut FuturesUnordered<_>| {
@@ -133,14 +147,16 @@ where
 					}
 					Err(err) => {
 						tracing::warn!(%addr, %err, "connection attempt failed");
+						failures.push((index, addr, err));
 						// A failure starts the next candidate immediately (RFC 8305
 						// section 5) rather than waiting out the stagger delay.
 						if let Some(addr) = remaining.next() {
 							start(addr, &mut attempts);
 						} else if attempts.is_empty() {
-							// Nothing left to try, so this attempt outlived every
-							// other one and its error is the one worth reporting.
-							return Err(err);
+							// Report in candidate order, not the order they finished,
+							// so the same DNS answer always reads the same way.
+							failures.sort_by_key(|(index, _, _)| *index);
+							return Err(failures.into_iter().map(|(_, addr, err)| (addr, err)).collect());
 						}
 					}
 				}
@@ -165,6 +181,9 @@ mod tests {
 	fn v4(s: &str) -> SocketAddr {
 		s.parse().unwrap()
 	}
+
+	/// What `race` hands back when every candidate fails.
+	type Failures = Vec<(SocketAddr, &'static str)>;
 
 	#[test]
 	fn interleave_alternates_families() {
@@ -235,7 +254,7 @@ mod tests {
 	async fn first_success_returns_immediately() {
 		let dials = Arc::new(AtomicUsize::new(0));
 		let counter = dials.clone();
-		let res: Result<&str, &str> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], DEFAULT_DELAY, move |_| {
+		let res: Result<&str, Failures> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], DEFAULT_DELAY, move |_| {
 			counter.fetch_add(1, Ordering::SeqCst);
 			async { Ok("winner") }
 		})
@@ -247,7 +266,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn second_wins_when_first_hangs() {
 		let start = tokio::time::Instant::now();
-		let res: Result<&str, &str> = race(
+		let res: Result<&str, Failures> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
 			DEFAULT_DELAY,
 			|addr| async move {
@@ -266,7 +285,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn failure_starts_the_next_attempt_immediately() {
 		let start = tokio::time::Instant::now();
-		let res: Result<&str, &str> = race(
+		let res: Result<&str, Failures> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
 			DEFAULT_DELAY,
 			|addr| async move {
@@ -282,11 +301,12 @@ mod tests {
 		assert_eq!(start.elapsed(), Duration::ZERO, "failure must not wait for the timer");
 	}
 
+	/// The preferred candidate fails instantly, the way an unroutable address
+	/// does, and the fallback that reached the server fails later. Reporting the
+	/// most preferred error alone would bury the actionable one.
 	#[tokio::test(start_paused = true)]
-	async fn all_failures_return_the_error_that_got_furthest() {
-		// The preferred candidate fails instantly, the way a wrong-family address
-		// does; the fallback that survived a round trip carries the real problem.
-		let res: Result<&str, &str> = race(
+	async fn all_failures_are_reported_when_the_preferred_fails_first() {
+		let res: Result<&str, Failures> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
 			Duration::from_millis(10),
 			|addr| async move {
@@ -299,7 +319,47 @@ mod tests {
 			},
 		)
 		.await;
-		assert_eq!(res, Err("invalid peer certificate"));
+		assert_eq!(
+			res,
+			Err(vec![
+				(v4("1.1.1.1:1"), "network unreachable"),
+				(v4("2.2.2.2:2"), "invalid peer certificate"),
+			])
+		);
+	}
+
+	/// The inverse: the preferred candidate blackholes until its timeout while
+	/// the fallback reports the actionable error early. Reporting the last error
+	/// to finish would bury it just as badly, so the order attempts finish in
+	/// must not change what comes back.
+	#[tokio::test(start_paused = true)]
+	async fn all_failures_are_reported_when_the_preferred_times_out_last() {
+		let res: Result<&str, Failures> = race(
+			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
+			Duration::from_millis(10),
+			|addr| async move {
+				if addr == v4("1.1.1.1:1") {
+					tokio::time::sleep(Duration::from_secs(30)).await;
+					Err("timed out")
+				} else {
+					Err("invalid peer certificate")
+				}
+			},
+		)
+		.await;
+		assert_eq!(
+			res,
+			Err(vec![
+				(v4("1.1.1.1:1"), "timed out"),
+				(v4("2.2.2.2:2"), "invalid peer certificate"),
+			])
+		);
+	}
+
+	#[test]
+	fn describe_lists_every_attempt() {
+		let failures = [(v4("1.1.1.1:1"), "timed out"), (v4("2.2.2.2:2"), "bad cert")];
+		assert_eq!(describe(&failures), "1.1.1.1:1: timed out; 2.2.2.2:2: bad cert");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -314,7 +374,7 @@ mod tests {
 
 		let dropped = Arc::new(AtomicUsize::new(0));
 		let count = dropped.clone();
-		let res: Result<&str, &str> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], Duration::ZERO, move |addr| {
+		let res: Result<&str, Failures> = race(vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")], Duration::ZERO, move |addr| {
 			let guard = Guard(count.clone());
 			async move {
 				if addr == v4("1.1.1.1:1") {
@@ -335,7 +395,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn zero_delay_dials_all_at_once() {
 		let start = tokio::time::Instant::now();
-		let res: Result<&str, &str> = race(
+		let res: Result<&str, Failures> = race(
 			vec![v4("1.1.1.1:1"), v4("2.2.2.2:2")],
 			Duration::ZERO,
 			|addr| async move {
