@@ -125,6 +125,15 @@ impl Session {
 /// On native, driving requires a tokio runtime with a time driver (timers go
 /// through `web_async::time`); see the crate-level Async docs.
 pub struct Driver {
+	state: DriverState,
+	// Retains the waiter across `Future` polls so its kio registrations stay live.
+	// Kept out of `DriverState` so the borrow `hold` hands back doesn't collide with
+	// the `&mut` that polling the state needs.
+	park: kio::Park,
+}
+
+/// Everything the driver polls, split from the park so the two borrow disjointly.
+struct DriverState {
 	protocol: MaybeSendBox<'static, Result<(), Error>>,
 	// Bandwidth sampling, polled alongside the protocol. Its completion never ends
 	// the driver: the protocol owns the teardown. `None` once finished (or when the
@@ -134,8 +143,6 @@ pub struct Driver {
 	// Cached so a poll after completion (e.g. after `wait_ready` consumed the
 	// result) doesn't re-poll a finished future.
 	result: Option<Result<(), Error>>,
-	// Retains the waiter across `Future` polls so its kio registrations stay live.
-	cell: kio::WaiterCell,
 }
 
 impl Driver {
@@ -144,22 +151,7 @@ impl Driver {
 	/// The `poll_*` counterpart of `.await`ing the driver, for callers composing it
 	/// into their own [`kio`]-style poll functions.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Some(result) = &self.result {
-			return Poll::Ready(result.clone());
-		}
-
-		if let Some(maintenance) = &mut self.maintenance
-			&& waiter.poll_future(maintenance.as_mut()).is_ready()
-		{
-			self.maintenance = None;
-		}
-
-		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
-		self.result = Some(result.clone());
-		// The session is over; release the maintenance future now rather than on
-		// Drop, since it holds a transport clone.
-		self.maintenance = None;
-		Poll::Ready(result)
+		self.state.poll(waiter)
 	}
 
 	/// Drive the session until the readiness condition resolves, so `connect` can block on the
@@ -180,15 +172,36 @@ impl Driver {
 	}
 }
 
+impl DriverState {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(result) = &self.result {
+			return Poll::Ready(result.clone());
+		}
+
+		if let Some(maintenance) = &mut self.maintenance
+			&& waiter.poll_future(maintenance.as_mut()).is_ready()
+		{
+			self.maintenance = None;
+		}
+
+		let result = std::task::ready!(waiter.poll_future(self.protocol.as_mut()));
+		self.result = Some(result.clone());
+		// The session is over; release the maintenance future now rather than on
+		// Drop, since it holds a transport clone.
+		self.maintenance = None;
+		Poll::Ready(result)
+	}
+}
+
 impl Future for Driver {
 	type Output = Result<(), Error>;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = &mut *self;
-		// The clone shares the retained waiter's identity while ending the cell
-		// borrow, which the `&mut self` poll below would otherwise conflict with.
-		let waiter = this.cell.hold(cx).clone();
-		this.poll(&waiter)
+		// Disjoint field borrows: `hold` borrows the park for as long as the waiter
+		// lives, while the state is polled through its own `&mut`.
+		let waiter = this.park.hold(cx);
+		this.state.poll(waiter)
 	}
 }
 
@@ -244,10 +257,12 @@ impl Session {
 			recv_bandwidth,
 		};
 		let driver = Driver {
-			protocol,
-			maintenance,
-			result: None,
-			cell: kio::WaiterCell::new(),
+			state: DriverState {
+				protocol,
+				maintenance,
+				result: None,
+			},
+			park: kio::Park::default(),
 		};
 
 		(session, driver)

@@ -244,11 +244,16 @@ pub(crate) struct QuinnClient {
 	pub host_name: Option<String>,
 	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
 	pub failover_delay: Duration,
+	/// Whether the bound socket really came back dual-stack, which decides
+	/// whether an IPv4 destination is reachable at all. Captured here because the
+	/// endpoint owns the socket from here on and `local_addr` can't tell us.
+	dual_stack: bool,
 }
 
 impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> Result<Self> {
 		let socket = crate::bind::udp(config.bind).map_err(Error::BindSocket)?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
 		let quic = config.quic.resolve();
 		let mut transport = quinn::TransportConfig::default();
@@ -269,6 +274,7 @@ impl QuinnClient {
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
 			failover_delay: config.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY),
+			dual_stack,
 		})
 	}
 
@@ -291,7 +297,7 @@ impl QuinnClient {
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let candidates = crate::failover::match_local(addrs, local);
+		let candidates = crate::failover::match_local(addrs, local, self.dual_stack);
 		if candidates.is_empty() {
 			return Err(Error::NoDnsEntries);
 		}

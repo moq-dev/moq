@@ -299,13 +299,20 @@ impl QuicheClient {
 			_ => Vec::new(),
 		};
 
-		// Resolve every DNS entry, adapted to the bind address's family; the dial
+		// Bind the first attempt now so candidate selection uses the socket's actual
+		// family and dual-stack state. Later attempts bind their own ephemeral
+		// sockets because each quiche connection must own its socket.
+		let socket = crate::bind::udp(self.bind)?;
+		let local = socket.local_addr()?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+
+		// Resolve every DNS entry, adapted to the bound socket's reachability; the dial
 		// below races them Happy Eyeballs style so one broken family can't stall
 		// the connect.
 		let addrs = tokio::net::lookup_host((host.as_str(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let mut candidates = crate::failover::match_local(addrs, self.bind);
+		let mut candidates = crate::failover::match_local(addrs, local, dual_stack);
 		if candidates.is_empty() {
 			return Err(Error::NoDnsEntries);
 		}
@@ -325,14 +332,20 @@ impl QuicheClient {
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many
 		// addresses were dialed.
+		let mut first_socket = Some(socket);
 		let conn = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let socket = first_socket.take();
 			let this = self.clone();
 			let alpns = alpns.clone();
 			let verification = verification.clone();
 			let roots = roots.clone();
 			let host = host.clone();
 			async move {
-				let builder = this.builder(alpns, &verification, roots, &host)?;
+				let socket = match socket {
+					Some(socket) => socket,
+					None => crate::bind::udp(this.bind)?,
+				};
+				let builder = this.builder(socket, alpns, &verification, roots, &host)?;
 				let conn = builder
 					.connect(&addr.ip().to_string(), addr.port())
 					.await
@@ -371,11 +384,12 @@ impl QuicheClient {
 		}
 	}
 
-	/// Assemble the per-attempt client builder: settings, a fresh socket bound to
-	/// the configured address, SNI, client identity, and the verification policy
+	/// Assemble the per-attempt client builder: settings, its bound socket, SNI,
+	/// client identity, and the verification policy
 	/// (with `roots` already resolved by the caller).
 	fn builder(
 		&self,
+		socket: net::UdpSocket,
 		alpns: Vec<Vec<u8>>,
 		verification: &crate::tls::Verification,
 		roots: Vec<CertificateDer<'static>>,
@@ -387,8 +401,6 @@ impl QuicheClient {
 		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
 		apply_settings(&mut settings, &self.quic)?;
-
-		let socket = crate::bind::udp(self.bind)?;
 
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)

@@ -33,14 +33,15 @@ Layered roughly transport -> container/format -> media -> apps/bindings.
 **Apps / binaries**
 
 - `moq-relay` (lib+bin): clusterable, media-agnostic relay. axum HTTP API, JWT auth, WebSocket fallback, clustering. Config/TOML merge pattern lives here (see below).
-- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here.
+- `moq-cli` (bin, `moq`): the unified media router (`moq <MoQ side> <import|export> <endpoint>`, plus the feature-gated `transcode` verb); stdin/stdout media piping. The CLI surface for the gateway library crates below lives here. `token` and `devices` are the local verbs: they run before any transport is bound and reject a MoQ side rather than ignoring it.
 - `moq-rtc` (lib): WebRTC (WHIP/WHEP) gateway. Bridges browser WebRTC ingest/playback to MoQ broadcasts (str0m ICE/DTLS, A/V sync, NACK). Embeddable axum routers / `Client`; the CLI surface lives in `moq-cli`.
 - `moq-rtmp` (lib): RTMP / enhanced-RTMP gateway (ingest + egress, `rml_rtmp`, FLV via `moq-mux`). RTMPS (rustls + tokio-rustls) is the optional `tls` feature.
 - `moq-srt` (lib): bidirectional SRT gateway (MPEG-TS via `srt-tokio` + `moq-mux`).
 - `moq-hls` (lib): HLS / LL-HLS gateway (import + export, playlists + fMP4 via `moq-mux`).
 - `moq-bench` (bin): relay load generator. `JoinSet`-spawned staggered connections, rand sampling.
 - `moq-boy` (bin): crowd-controlled Game Boy emulator publisher (blocking emulator thread + async monitor tasks).
-- `moq-token` (lib) / `moq-token` (bin from the `moq-token-cli` crate): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. CLI does generate/sign/verify.
+- `moq-token` (lib): JWT auth. `Claims`, `Algorithm`, `KeyMaterial` (EC/RSA/OCT/OKP), JWKS. No clap, no anyhow: the command surface lives a layer up.
+- `moq-token-cli` (lib+bin, `moq-token`): the generate/sign/verify commands, as `moq_token_cli::Args`. The `moq-token` binary flattens it and `moq token` (moq-cli) nests it, so there's one implementation and two entry points. It's a lib so moq-cli can reuse it without pulling clap and anyhow into the `moq-token` library's API.
 
 **Bindings**
 
@@ -165,13 +166,19 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
 
-- **`just check` only compiles the host's platform.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Each platform has its own gate, and each only runs on that platform's runner:
+- **`just check` only compiles the host's platform, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
-  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, via `.github/workflows/windows.yml`. You can't reproduce it off Windows, since cross-compiling dies in openh264-sys2's vendored C++.
-  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, via `.github/workflows/macos.yml`. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
+  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
+  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
 
-  Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
+  What still compiles these automatically, and when:
+
+  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and both Apple targets. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
+  - **moq-audio's macOS capture has no automated backstop at all.** ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). `just rs macos` is the only thing that compiles it, ever.
+  - `.github/workflows/swift.yml` still runs on a Mac for `swift/**` and `rs/moq-ffi/**` PRs, so moq-ffi and the Swift wrapper keep a PR-time gate.
+
+  Run the matching recipe by hand when you touch this code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it.
 
 - **`just rs loom` is a manual gate. Run it by hand whenever you touch kio's refcount/waiter plumbing (`lock.rs`, `producer.rs`, `consumer.rs`, `weak.rs`, `waiter.rs`) or moq-net's model layer (`model/`), and mention the result in the PR.** Nothing else will run it: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`, so it's deliberately outside `check`/`ci`. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
 

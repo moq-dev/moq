@@ -159,69 +159,91 @@ impl fmt::Debug for WaiterList {
 	}
 }
 
-/// Retains a [`Waiter`] across `poll` calls, bridging a [`Context`] to kio's
-/// waiter-based polls.
+/// Holds a parked [`Waiter`] between polls, so the registrations it made outlive the
+/// poll that made them.
 ///
-/// kio's `poll_*` methods take a `&Waiter` whose registrations a [`WaiterList`]
-/// holds only weakly, so whoever drives them from a [`Context`]-based poll (a
-/// `Future`, or a `poll_*` trait method) must keep the strong `Waiter` alive
-/// between polls or the registration dies the moment the poll returns. Embed one
-/// cell per logical operation and call [`hold`](Self::hold) at the top of
-/// each poll.
+/// A [`WaiterList`] keeps only a `Weak`, so a waiter built inside a poll dies the
+/// moment that poll returns, taking its registrations with it. Whoever drives kio's
+/// `poll_*` methods from a [`Context`]-based poll (a `Future`, or a `poll_*` trait
+/// method) embeds one `Park` per logical operation and calls [`hold`](Self::hold) at
+/// the top of each poll:
 ///
-/// The returned borrow is tied to the cell, so when the rest of the poll needs
-/// `&mut self` of the type holding it, `clone()` the waiter to end the borrow;
-/// the clone shares the retained waiter's identity, so nothing is lost.
+/// ```
+/// # use std::task::{Context, Poll};
+/// # use kio::{Park, Waiter};
+/// # struct State;
+/// # impl State {
+/// #     fn poll_step(&mut self, _: &Waiter) -> Poll<()> { Poll::Pending }
+/// # }
+/// # struct Driver { park: Park, state: State }
+/// # impl Driver {
+/// fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+///     let waiter = self.park.hold(cx);
+///     self.state.poll_step(waiter)
+/// }
+/// # }
+/// ```
 ///
-/// `Clone` yields an *empty* cell: an in-progress registration belongs to the
-/// handle that parked it, so a cloned handle starts idle. This is what lets a
-/// containing type stay `Clone` while holding cells.
+/// Keep the park in a field *disjoint* from the state the body polls, as above. The
+/// returned borrow lives as long as the waiter does, so a park bundled into the same
+/// `&mut self` the body needs would collide with it.
+///
+/// `Clone` yields an *empty* park: an in-progress registration belongs to the handle
+/// that parked it, so a cloned handle starts idle. This is what lets a containing
+/// type stay `Clone`.
 #[derive(Default)]
-pub struct WaiterCell(Option<Waiter>);
+pub struct Park(Option<Waiter>);
 
-impl WaiterCell {
-	/// Create an empty cell.
-	pub const fn new() -> Self {
-		Self(None)
+impl Park {
+	/// Create a park already holding `waiter`, for the rarer case where one exists
+	/// before the first poll (a `poll_*` method stashing the waiter its caller passed
+	/// in, say). Use [`Default`] for an empty park.
+	pub fn new(waiter: Waiter) -> Self {
+		Self(Some(waiter))
 	}
 
 	/// Hold a waiter for this poll, keeping it (and its registrations) alive until
 	/// the next call.
 	///
-	/// The held waiter is reused when it would wake the same task *and* has no
-	/// live list registrations (the common case after a wakeup, where every list
-	/// entry was drained), saving the `Arc` allocation and waker clone. Otherwise it
-	/// is replaced: a still-registered waiter must be retired, not re-registered,
-	/// because [`WaiterList`] reclaims slots only when their `Arc` dies. Reusing one
-	/// with live entries would stack duplicate live registrations on every
-	/// (spuriously re-polled) `Pending`, and the list would grow without bound.
-	pub fn hold(&mut self, cx: &mut Context<'_>) -> &Waiter {
+	/// Retention happens here, *before* the body runs, so a body that returns early
+	/// (the usual `ready!` on a nested poll) still leaves its registrations live.
+	/// There is no second call to forget.
+	///
+	/// The held waiter is reused when it would wake the same task *and* has no live
+	/// list registrations (the usual case after a wakeup, which drains every entry),
+	/// so a steady-state park allocates nothing. Otherwise it is retired for a fresh
+	/// one: a still-registered waiter must not be registered again, because
+	/// [`WaiterList`] reclaims a slot only once its `Arc` dies, so reusing one with
+	/// live entries would stack duplicates the list could never collect.
+	pub fn hold(&mut self, cx: &Context<'_>) -> &Waiter {
 		let reuse = self.0.as_ref().is_some_and(|waiter| {
 			cx.waker().will_wake(&waiter.waker) && waiter.shared.get().is_none_or(|shared| Arc::weak_count(shared) == 0)
 		});
 		if !reuse {
+			// The outgoing waiter drops here, killing its registrations so the lists
+			// can reclaim those slots.
 			self.0 = Some(Waiter::new(cx.waker().clone()));
 		}
 		self.0.as_ref().unwrap()
 	}
 }
 
-impl Clone for WaiterCell {
+impl Clone for Park {
 	fn clone(&self) -> Self {
 		Self(None)
 	}
 }
 
-impl fmt::Debug for WaiterCell {
+impl fmt::Debug for Park {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("WaiterCell").field("armed", &self.0.is_some()).finish()
+		f.debug_struct("Park").field("parked", &self.0.is_some()).finish()
 	}
 }
 
 /// Future that drives a poll function, managing waiter lifetime across polls.
 struct WaiterFn<F, R> {
 	poll: F,
-	cell: WaiterCell, // Retain the waiter so its registrations survive.
+	park: Park, // Retain a parked waiter so its registrations survive.
 	// `fn() -> R` keeps the marker `Unpin` (and `Send`/`Sync`) regardless of `R`:
 	// the output is only ever moved out of `Poll::Ready`, never stored.
 	_marker: PhantomData<fn() -> R>,
@@ -237,7 +259,7 @@ where
 {
 	WaiterFn {
 		poll,
-		cell: WaiterCell::new(),
+		park: Park::default(),
 		_marker: PhantomData,
 	}
 }
@@ -250,7 +272,7 @@ where
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
 		let this = &mut *self;
-		let waiter = this.cell.hold(cx);
+		let waiter = this.park.hold(cx);
 		(this.poll)(waiter)
 	}
 }
@@ -288,33 +310,63 @@ mod tests {
 	};
 
 	#[test]
-	fn waiter_cell_replaces_while_registered_and_reuses_after_wake() {
+	fn park_survives_a_poll_that_returns_early() {
 		let waker = Waker::noop().clone();
-		let mut cx = Context::from_waker(&waker);
-		let mut cell = WaiterCell::new();
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
 		let mut list = WaiterList::new();
 
-		// Poll 1 parks: the waiter registers with a list.
-		cell.hold(&mut cx).register(&mut list);
-		// Hold the Arc so a pointer comparison can't alias a recycled allocation.
-		let first = cell.0.as_ref().unwrap().shared().clone();
+		// A poll body that bails out the moment a nested poll is pending (the `ready!`
+		// idiom) never runs any bookkeeping of its own after registering, so retention
+		// has to be in place already or the wakeup is lost forever.
+		fn poll_step(park: &mut Park, cx: &Context<'_>, list: &mut WaiterList, nested: Poll<u8>) -> Poll<u8> {
+			let waiter = park.hold(cx);
+			waiter.register(list);
+			// Returns straight out of the function, running nothing below it.
+			let value = std::task::ready!(nested);
+			Poll::Ready(value + 1)
+		}
 
-		// Poll 2 with the registration still live must replace the waiter: reusing
-		// it would stack a duplicate live entry the list could never reclaim.
-		let second = cell.hold(&mut cx);
-		assert!(!Arc::ptr_eq(&first, second.shared()), "a registered waiter was reused");
-		second.register(&mut list);
-		let second = second.shared().clone();
+		assert!(poll_step(&mut park, &cx, &mut list, Poll::Pending).is_pending());
+		assert_eq!(
+			list.entries[0].strong_count(),
+			1,
+			"an early return must leave the registration live"
+		);
 
-		// The wake drains the list, so poll 3 can reuse the waiter: same task, no
-		// live registrations left to duplicate.
+		// The wakeup still reaches it.
 		list.wake();
-		let third = cell.hold(&mut cx);
-		assert!(Arc::ptr_eq(&second, third.shared()), "a drained waiter was not reused");
 	}
 
 	#[test]
-	fn waiter_cell_replaces_for_a_different_task() {
+	fn park_reuses_a_drained_waiter_and_retires_a_registered_one() {
+		let waker = Waker::noop().clone();
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
+		let mut list = WaiterList::new();
+
+		// Poll 1 parks with a live registration. Hold the Arc so a pointer comparison
+		// can't alias a recycled allocation.
+		let waiter = park.hold(&cx);
+		waiter.register(&mut list);
+		let first = waiter.shared().clone();
+
+		// Poll 2 with that registration still live must retire the waiter: reusing it
+		// would stack a duplicate entry the list could never reclaim.
+		let waiter = park.hold(&cx);
+		assert!(!Arc::ptr_eq(&first, waiter.shared()), "a registered waiter was reused");
+		waiter.register(&mut list);
+		let second = waiter.shared().clone();
+
+		// The wake drains the list, so poll 3 reuses: same task, nothing left to
+		// duplicate, and no allocation.
+		list.wake();
+		let waiter = park.hold(&cx);
+		assert!(Arc::ptr_eq(&second, waiter.shared()), "a drained waiter was not reused");
+	}
+
+	#[test]
+	fn park_retires_a_waiter_for_another_task() {
 		struct Nop;
 		impl std::task::Wake for Nop {
 			fn wake(self: Arc<Self>) {}
@@ -322,50 +374,70 @@ mod tests {
 
 		let waker_a = Waker::from(Arc::new(Nop));
 		let waker_b = Waker::from(Arc::new(Nop));
-		let mut cell = WaiterCell::new();
+		let mut park = Park::default();
 
-		let first = cell.hold(&mut Context::from_waker(&waker_a)).shared().clone();
-		let second = cell.hold(&mut Context::from_waker(&waker_b));
+		let first = park.hold(&Context::from_waker(&waker_a)).shared().clone();
+
+		// A different task must not inherit the parked waiter, or its wakeup goes to
+		// whoever polled last.
+		let waiter = park.hold(&Context::from_waker(&waker_b));
 		assert!(
-			!Arc::ptr_eq(&first, second.shared()),
+			!Arc::ptr_eq(&first, waiter.shared()),
 			"a waiter for another task was reused"
 		);
 	}
 
 	#[test]
-	fn waiter_cell_clone_is_idle() {
+	fn park_new_starts_holding() {
 		let waker = Waker::noop().clone();
-		let mut cell = WaiterCell::new();
-		cell.hold(&mut Context::from_waker(&waker));
-		assert!(cell.0.is_some());
+		let cx = Context::from_waker(&waker);
+		let mut list = WaiterList::new();
+
+		let waiter = Waiter::new(cx.waker().clone());
+		waiter.register(&mut list);
+		let mut park = Park::new(waiter);
+		assert_eq!(list.entries[0].strong_count(), 1, "a constructed park must hold");
+
+		// A wakeup drains the entry, so the next poll picks that same waiter back up
+		// rather than allocating another.
+		let shared = park.0.as_ref().unwrap().shared().clone();
+		list.wake();
+		assert!(
+			Arc::ptr_eq(&shared, park.hold(&cx).shared()),
+			"the constructed waiter was not reused"
+		);
+	}
+
+	#[test]
+	fn park_clone_is_idle() {
+		let waker = Waker::noop().clone();
+		let cx = Context::from_waker(&waker);
+		let mut park = Park::default();
+		park.hold(&cx);
+		assert!(park.0.is_some());
 
 		// An in-progress registration belongs to the original handle.
-		let clone = cell.clone();
-		assert!(clone.0.is_none(), "a cloned cell must start idle");
+		assert!(park.clone().0.is_none(), "a cloned park must start idle");
 	}
 
 	#[test]
 	fn waiter_clone_shares_identity() {
 		let waker = Waker::noop().clone();
-		let mut cx = Context::from_waker(&waker);
-		let mut cell = WaiterCell::new();
+		let cx = Context::from_waker(&waker);
 		let mut list = WaiterList::new();
 
-		// The clone shares the retained waiter's allocation, so a registration made
-		// through it belongs to the retained waiter and outlives the clone.
-		let clone = cell.hold(&mut cx).clone();
-		assert!(Arc::ptr_eq(clone.shared(), cell.0.as_ref().unwrap().shared()));
+		let waiter = Waiter::new(cx.waker().clone());
+		let clone = waiter.clone();
+		assert!(Arc::ptr_eq(waiter.shared(), clone.shared()));
+
+		// A registration made through the clone belongs to the shared identity, so
+		// dropping the clone alone must not kill it.
 		clone.register(&mut list);
 		drop(clone);
+		assert_eq!(list.entries[0].strong_count(), 1, "the original must keep it live");
 
-		// The cell still sees that registration as live, so the next poll must
-		// replace the waiter rather than stack a duplicate entry.
-		let first = cell.0.as_ref().unwrap().shared().clone();
-		let second = cell.hold(&mut cx);
-		assert!(
-			!Arc::ptr_eq(&first, second.shared()),
-			"a waiter with a clone's live registration was reused"
-		);
+		drop(waiter);
+		assert_eq!(list.entries[0].strong_count(), 0, "the last handle must release it");
 	}
 
 	#[test]

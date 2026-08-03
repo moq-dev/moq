@@ -27,6 +27,10 @@ check *args:
 # builds vendored C++ that needs an MSVC toolchain and openh264 is a
 # non-optional dependency.
 #
+# Nothing in CI runs this. Windows runners cost too much for a per-PR gate, so
+# the code compiles for the first time in a tag-triggered release build unless
+# someone runs this by hand on a Windows host.
+#
 # Default features rather than `--all-features`: jemalloc and the quiche
 # backend don't build on MSVC, while moq-video's Linux-only nvenc/vaapi/nvdec
 # defaults are already no-ops off Linux. moq-gst is excluded because it links
@@ -39,6 +43,12 @@ windows *args:
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,
 # plus moq-audio's ScreenCaptureKit system audio and TCC permission pre-check.
+#
+# Nothing in CI runs this either; Mac runners cost too much for a per-PR gate.
+# The moq-video half has a release-time backstop, since libmoq's `libmoq-v*` tag
+# build compiles it on both Apple targets. The moq-audio half has none: its
+# capture backend is behind an off-by-default feature no release build enables,
+# so this recipe is the only thing that ever compiles it.
 #
 # Scoped to those two crates instead of the workspace, because they hold all
 # the Apple-gated code the Linux gate misses. moq-ffi (and through it the

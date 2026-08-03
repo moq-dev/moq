@@ -31,6 +31,20 @@ pub fn udp(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 	Ok(socket.into())
 }
 
+/// Whether `socket` also reaches IPv4, through IPv4-mapped addresses.
+///
+/// [`udp`] clears `IPV6_V6ONLY` best-effort, so this reads back what the
+/// platform actually did rather than assuming it took. A socket that stayed
+/// v6-only can't send to a mapped destination, and it looks identical from the
+/// outside: `local_addr` reads `[::]` either way. Always false for an IPv4
+/// socket, which reaches IPv4 natively rather than through mapping.
+pub(crate) fn udp_is_dual_stack(socket: &UdpSocket) -> bool {
+	match socket.local_addr() {
+		Ok(addr) if addr.is_ipv6() => socket2::SockRef::from(socket).only_v6().is_ok_and(|only| !only),
+		_ => false,
+	}
+}
+
 /// Bind a TCP listener, making an IPv6 socket dual-stack so it also serves IPv4.
 ///
 /// The returned listener is non-blocking, ready for

@@ -1,0 +1,83 @@
+name: Alert
+
+# Posts to the Discord #alerts channel when a workflow fails outside of a pull
+# request.
+#
+# Why this exists: GitHub only notifies the user who *triggered* a run, and the
+# runs that matter most here are triggered by moq-bot (release tags) or by cron,
+# so without this nobody is notified when a release breaks.
+#
+# Pull request failures are deliberately excluded, both pull_request and
+# pull_request_target. The author already sees them as a check on the PR, and
+# that noise is what drives people to mute Actions notifications wholesale.
+#
+# Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
+# Webhooks). Nothing else reads it.
+
+on:
+  workflow_run:
+    # Matched by workflow `name:`, not filename. Every workflow that can run
+    # outside a pull request belongs here; the pull-request-only ones (Check,
+    # macOS, Swift, Windows) are omitted so they don't spawn a skipped Alert run
+    # on every push to every PR. `just gh check` enforces both halves of that.
+    workflows:
+      - apt-repo
+      - Cachix
+      - Docker
+      - libmoq
+      - moq-cli
+      - moq-gst
+      - moq-relay
+      - moq-token-cli
+      - release-brew
+      - Release Go
+      - Release Go FFI
+      - Release JS
+      - Release Kotlin FFI
+      - Release Kotlin lib
+      - Release Py
+      - Release Py FFI
+      - Release RS
+      - Release Swift FFI
+      - Release Swift Lib
+      - release-winget
+      - rpm-repo
+      - Smoke
+      - Update Flake
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  discord:
+    name: Discord
+    # `cancelled` is excluded: concurrency groups cancel in-flight runs as a
+    # matter of course, and paging on that would be pure noise.
+    #
+    # Note the chained cases (a release tag -> release-brew -> here) sit at the
+    # third and final level workflow_run supports; a fourth would never fire.
+    if: >-
+      (github.event.workflow_run.conclusion == 'failure' ||
+      github.event.workflow_run.conclusion == 'timed_out') &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.event != 'pull_request_target'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_REF: ${{ github.event.workflow_run.head_branch }}
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          RUN_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+        run: .github/scripts/alert.sh discord

@@ -53,21 +53,52 @@ pub(crate) fn interleave(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Soc
 /// The QUIC backends send from one already-bound socket, so a candidate the
 /// socket can't reach is converted when the conversion is lossless (IPv4 to
 /// IPv4-mapped IPv6 for a dual-stack socket, and the reverse) and dropped when
-/// it isn't. When every candidate would be dropped, they are kept as-is so the
-/// dial surfaces the OS error instead of a confusing "no DNS entries". See
+/// it isn't. `dual_stack` is [`crate::bind::udp_is_dual_stack`] for that socket.
+/// When every candidate would be dropped, the normalized candidates are kept so
+/// the dial surfaces the OS error instead of a confusing "no DNS entries". See
 /// <https://github.com/moq-dev/moq/issues/1375> for the Windows failure this
 /// family matching originally fixed.
-pub(crate) fn match_local(addrs: impl IntoIterator<Item = SocketAddr>, local: SocketAddr) -> Vec<SocketAddr> {
-	let candidates = interleave(addrs);
+pub(crate) fn match_local(
+	addrs: impl IntoIterator<Item = SocketAddr>,
+	local: SocketAddr,
+	dual_stack: bool,
+) -> Vec<SocketAddr> {
+	let mut candidates: Vec<SocketAddr> = interleave(addrs)
+		.into_iter()
+		.map(|addr| normalize_family(addr, local))
+		.collect();
+	candidates.dedup();
 
 	let mut usable: Vec<SocketAddr> = candidates
 		.iter()
-		.map(|addr| normalize_family(*addr, local))
-		.filter(|addr| addr.is_ipv4() == local.is_ipv4())
+		.copied()
+		.filter(|addr| addressable(*addr, local, dual_stack))
 		.collect();
 	usable.dedup();
 
 	if usable.is_empty() { candidates } else { usable }
+}
+
+/// Whether a socket bound to `local` can send to `dest`.
+///
+/// Mostly this is the address family, but reaching IPv4 from an IPv6 socket has
+/// a wrinkle: it means sending to an IPv4-mapped destination, which the kernel
+/// turns back into a real IPv4 packet, and that needs an IPv4 source address. So
+/// it takes both a socket that is actually dual-stack (`IPV6_V6ONLY` cleared,
+/// which [`crate::bind::udp`] only attempts) and a bind that left an IPv4 source
+/// to use: `[::]` does, since the kernel picks the source, and an IPv4-mapped
+/// bind already is one, but a concrete IPv6 bind is not. The mirror holds too:
+/// an IPv4-mapped bind can't reach a real IPv6 destination.
+fn addressable(dest: SocketAddr, local: SocketAddr, dual_stack: bool) -> bool {
+	let (SocketAddr::V6(dest), SocketAddr::V6(local)) = (dest, local) else {
+		return dest.is_ipv4() == local.is_ipv4();
+	};
+
+	match (dest.ip().to_ipv4_mapped(), local.ip().to_ipv4_mapped()) {
+		(Some(_), None) => dual_stack && local.ip().is_unspecified(),
+		(None, Some(_)) => false,
+		_ => true,
+	}
 }
 
 /// Convert `addr` to match the family of `local` when the conversion is
@@ -223,18 +254,41 @@ mod tests {
 		let a6 = v4("[::1]:443");
 
 		// IPv6 listed first, but local socket is IPv4: only IPv4 is usable.
-		assert_eq!(match_local([a6, a4], v4("0.0.0.0:0")), vec![a4]);
+		assert_eq!(match_local([a6, a4], v4("0.0.0.0:0"), false), vec![a4]);
 		// IPv4 wraps to IPv4-mapped for an IPv6 (dual-stack) socket.
 		assert_eq!(
-			match_local([a4, a6], v4("[::]:0")),
+			match_local([a4, a6], v4("[::]:0"), true),
 			vec![v4("[::ffff:127.0.0.1]:443"), a6]
+		);
+	}
+
+	#[test]
+	fn match_local_skips_mapped_ipv4_on_a_v6_only_socket() {
+		let a4 = v4("192.0.2.1:443");
+		let a6 = v4("[2001:db8::1]:443");
+		assert_eq!(match_local([a4, a6], v4("[::]:0"), false), vec![a6]);
+	}
+
+	#[test]
+	fn match_local_skips_ipv4_for_a_concrete_v6_bind() {
+		let a4 = v4("192.0.2.1:443");
+		let a6 = v4("[2001:db8::1]:443");
+		assert_eq!(match_local([a4, a6], v4("[2001:db8::5]:0"), true), vec![a6]);
+	}
+
+	#[test]
+	fn match_local_keeps_normalized_fallback_when_none_are_usable() {
+		let a4 = v4("192.0.2.1:443");
+		assert_eq!(
+			match_local([a4], v4("[::]:0"), false),
+			vec![v4("[::ffff:192.0.2.1]:443")]
 		);
 	}
 
 	#[test]
 	fn match_local_unwraps_v4_mapped_for_v4_socket() {
 		let mapped = v4("[::ffff:127.0.0.1]:443");
-		assert_eq!(match_local([mapped], v4("0.0.0.0:0")), vec![v4("127.0.0.1:443")]);
+		assert_eq!(match_local([mapped], v4("0.0.0.0:0"), false), vec![v4("127.0.0.1:443")]);
 	}
 
 	#[test]
@@ -242,12 +296,12 @@ mod tests {
 		// IPv4 socket with only a true IPv6 entry: no conversion possible, keep it
 		// so the OS surfaces a clear error.
 		let a6 = v4("[2001:db8::1]:443");
-		assert_eq!(match_local([a6], v4("0.0.0.0:0")), vec![a6]);
+		assert_eq!(match_local([a6], v4("0.0.0.0:0"), false), vec![a6]);
 	}
 
 	#[test]
 	fn match_local_empty() {
-		assert!(match_local(std::iter::empty(), v4("0.0.0.0:0")).is_empty());
+		assert!(match_local(std::iter::empty(), v4("0.0.0.0:0"), false).is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
