@@ -166,13 +166,13 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
 
-- **`just check` only compiles the host's platform.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Each platform has its own gate, and each only runs on that platform's runner:
+- **`just check` only compiles the host's platform, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
-  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, via `.github/workflows/windows.yml`. You can't reproduce it off Windows, since cross-compiling dies in openh264-sys2's vendored C++.
-  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, via `.github/workflows/macos.yml`. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: no separate gate needed. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
+  - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
+  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
 
-  Both extra gates are path-filtered, so a change outside their trigger paths that breaks them surfaces on the merge commit rather than the PR.
+  Nothing catches a Windows or Apple break until the tag-triggered release build. Run the matching recipe by hand when you touch that code, and if you can't (no such host), say plainly in the PR that it's uncompiled rather than implying CI covered it. The one exception still on a Mac runner is `.github/workflows/swift.yml`, which compiles moq-ffi and the Swift wrapper on `swift/**` and `rs/moq-ffi/**` PRs.
 
 - **`just rs loom` is a manual gate. Run it by hand whenever you touch kio's refcount/waiter plumbing (`lock.rs`, `producer.rs`, `consumer.rs`, `weak.rs`, `waiter.rs`) or moq-net's model layer (`model/`), and mention the result in the PR.** Nothing else will run it: `--cfg loom` swaps kio's Mutex/atomics for loom's instrumented ones, which rebuilds the whole dependency tree and can't share artifacts with a normal `cargo test`, so it's deliberately outside `check`/`ci`. Budget about a minute of model checking on top of that build. The search is exhaustive on purpose, so don't reach for `preemption_bound` to speed it up; the recipe already buys the speed back with `--release`, which matters here because a model check reruns the body once per interleaving.
 
