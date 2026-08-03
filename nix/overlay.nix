@@ -124,13 +124,15 @@ let
     # generate the pkgconfig file. craneLib.cleanCargoSource's default filter
     # drops both, which makes build.rs skip pkgconfig generation (see the
     # `if let Ok(template)` in rs/libmoq/build.rs) or fail reading the lib list,
-    # and the installPhase's `cp .../moq.pc` then fails.
+    # and the installPhase's `cp .../moq.pc` then fails. moq-video's Linux NVDEC
+    # path also includes a vendored PTX kernel at compile time.
     src = final.lib.cleanSourceWith {
       src = ../.;
       name = "source";
       filter =
         path: type:
         (final.lib.hasSuffix ".pc.in" path)
+        || (final.lib.hasSuffix ".ptx" path)
         || (final.lib.hasInfix "/rs/libmoq/native-libs/" path)
         || (craneLib.filterCargoSources path type);
     };

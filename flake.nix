@@ -357,7 +357,20 @@
         # environment), so a Cargo.lock change recompiles only the changed crate
         # + its reverse-deps. That's a runner-side concern -- nothing here or in
         # the workflows configures it.
-        checks = { };
+        checks = {
+          libmoq-source-assets = pkgs.runCommand "libmoq-source-assets" { } ''
+            for asset in \
+              rs/libmoq/moq.pc.in \
+              rs/libmoq/native-libs/apple.txt \
+              rs/libmoq/native-libs/linux.txt \
+              rs/libmoq/native-libs/windows.txt \
+              rs/moq-video/src/frame/nv12_resize.ptx
+            do
+              test -f "${overlayPkgs.libmoq.src}/$asset"
+            done
+            touch "$out"
+          '';
+        };
       }
     );
 }
