@@ -3,12 +3,18 @@ use std::{
 	future::Future,
 	marker::PhantomData,
 	pin::Pin,
-	// std, not `crate::sync`: loom's Arc has no `downgrade`. See `sync.rs`.
+	// std, not `crate::sync`: loom's Arc has no `downgrade`, and `Waker::from` takes
+	// std's. See `sync.rs`.
 	sync::{Arc, OnceLock, Weak},
-	task::{Context, Poll, Waker},
+	task::{Context, Poll, Wake, Waker},
 };
 
 use smallvec::SmallVec;
+
+use crate::{
+	lock::{Lock, WeakLock},
+	sync::Mutex,
+};
 
 /// Number of slots stored inline before spilling to the heap.
 const INLINE_WAITERS: usize = 32;
@@ -240,6 +246,247 @@ impl fmt::Debug for Park {
 	}
 }
 
+/// A [`WaiterList`] that is shared, and that a [`Waker`] can wake.
+///
+/// A plain [`WaiterList`] is a field, woken by whoever owns the state around it. That is
+/// enough until the thing being waited on is a *foreign* future, which takes a `Waker`
+/// and keeps exactly one. Hand it a caller's waker and the most recent caller owns the
+/// wakeup for everybody: when that one walks away the notification goes nowhere, while
+/// the others sit parked with live registrations. Poll such a future with
+/// [`waker`](Self::waker) instead. It outlives every caller, and waking it fans out to
+/// the whole list.
+///
+/// Two shapes, depending on where the list should live:
+///
+/// - [`new`](Fan::new) owns one, for a caller whose state is behind its own lock.
+/// - [`project`](Self::project) reaches into a list already inside a [`Lock`], so there
+///   is one lock and one list rather than two. Prefer it when the state is a `Lock`.
+///
+/// Role-less and cloneable like [`Queue`](crate::Queue): every handle can wake or hand
+/// out the waker.
+pub struct Fan<T = WaiterList> {
+	inner: Arc<FanInner<T>>,
+}
+
+/// Where the list a [`Fan`] wakes actually lives.
+enum Target<T> {
+	/// The fan owns it.
+	Owned(Lock<T>),
+
+	/// It belongs to state someone else owns. Weak on purpose: that state routinely
+	/// holds the fan's waker — the future being polled with it usually lives there —
+	/// and a strong handle would make that a cycle.
+	Projected(WeakLock<T>),
+}
+
+impl<T> Target<T> {
+	fn upgrade(&self) -> Option<Lock<T>> {
+		match self {
+			Self::Owned(lock) => Some(lock.clone()),
+			Self::Projected(weak) => weak.upgrade(),
+		}
+	}
+}
+
+struct FanInner<T> {
+	target: Target<T>,
+
+	/// Reaches the list inside `T`. Identity when the fan owns a bare [`WaiterList`].
+	project: fn(&mut T) -> &mut WaiterList,
+
+	/// Deferral state, under a lock of its own. It cannot ride along inside the list's
+	/// state, because a projected fan does not own that state's layout.
+	defer: Mutex<Defer>,
+}
+
+#[derive(Default)]
+struct Defer {
+	/// How many [`Hold`]s are outstanding. While this is non-zero a wake is recorded
+	/// rather than delivered.
+	held: usize,
+
+	/// A wake arrived while held, and is still owed to the list.
+	owed: bool,
+}
+
+impl<T> FanInner<T> {
+	fn notify(&self) {
+		{
+			let mut defer = self.defer.lock().expect("mutex poisoned");
+			if defer.held > 0 {
+				defer.owed = true;
+				return;
+			}
+		}
+
+		// Gone already: whatever was parked went with it.
+		let Some(lock) = self.target.upgrade() else {
+			return;
+		};
+
+		let mut waiters = {
+			let mut state = lock.lock();
+			(self.project)(&mut state).take()
+		};
+
+		// Outside both locks: a waker may resume its task inline, and a resumed waiter's
+		// first move is to take the lock its list lives under.
+		waiters.wake();
+	}
+}
+
+impl<T: Send + 'static> Wake for FanInner<T> {
+	fn wake(self: Arc<Self>) {
+		self.notify();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.notify();
+	}
+}
+
+impl Fan<WaiterList> {
+	/// Create a fan that owns its list.
+	///
+	/// For a caller whose own state is not a [`Lock`]. When it is, prefer
+	/// [`project`](Self::project): it wakes a list already in there, instead of adding a
+	/// second list behind a second lock.
+	pub fn new() -> Self {
+		Self::build(Target::Owned(Lock::new(WaiterList::new())), |list| list)
+	}
+}
+
+impl<T: Send + 'static> Fan<T> {
+	/// A fan over a [`WaiterList`] that lives inside `state`.
+	///
+	/// One lock and one list: parking stays a plain `&mut` call on that list wherever
+	/// the state is already locked, and this supplies only what a `WaiterList` cannot —
+	/// a [`Waker`] of its own, and [`hold`](Self::hold).
+	///
+	/// The reference is weak, so `state` may hold this fan (or its waker) without
+	/// leaking itself. Once `state` is dropped, waking is a no-op.
+	pub fn project(state: &Lock<T>, project: fn(&mut T) -> &mut WaiterList) -> Self {
+		Self::build(Target::Projected(state.downgrade()), project)
+	}
+
+	fn build(target: Target<T>, project: fn(&mut T) -> &mut WaiterList) -> Self {
+		Self {
+			inner: Arc::new(FanInner {
+				target,
+				project,
+				defer: Mutex::new(Defer::default()),
+			}),
+		}
+	}
+
+	/// Park a waiter until the next wake.
+	///
+	/// The registration is weak and owned by the waiter, exactly as in [`WaiterList`]: a
+	/// caller that gives up releases its slot by dropping.
+	///
+	/// This takes the lock the list lives under, so a *projected* fan cannot use it from
+	/// inside that lock — park on the list directly there, which is the point of
+	/// [`project`](Self::project).
+	pub fn register(&self, waiter: &Waiter) {
+		if let Some(lock) = self.inner.target.upgrade() {
+			let mut state = lock.lock();
+			waiter.register((self.inner.project)(&mut state));
+		}
+	}
+
+	/// Wake every parked waiter, draining the list.
+	///
+	/// Records the wake instead while a [`hold`](Self::hold) is outstanding. Takes the
+	/// list's lock, so the same caveat as [`register`](Self::register) applies.
+	pub fn wake(&self) {
+		self.inner.notify();
+	}
+
+	/// A [`Waker`] that wakes every parked waiter.
+	///
+	/// Cache it rather than building one per poll: a foreign future compares the waker it
+	/// was given against the new one with `will_wake` to decide whether to re-register,
+	/// and a fresh handle each time defeats that.
+	pub fn waker(&self) -> Waker {
+		Waker::from(self.inner.clone())
+	}
+
+	/// Hold back wakes until the returned guard drops.
+	///
+	/// For polling a foreign future with [`waker`](Self::waker) while holding a lock that
+	/// the parked waiters will take when they resume. Such a future can wake its waker
+	/// *inline* — `FuturesUnordered`, for one, notifies its parent from a child's `wake` —
+	/// and delivering that would resume a waiter straight into the lock the waker fired
+	/// under.
+	///
+	/// **Drop the guard once that lock is released, not before**: the deferred wake is
+	/// delivered where the guard drops, so dropping it early puts the hazard back. Nested
+	/// holds are fine, and only the last one out delivers.
+	#[must_use = "wakes are held back only while the guard is alive"]
+	pub fn hold(&self) -> Hold<T> {
+		self.inner.defer.lock().expect("mutex poisoned").held += 1;
+
+		Hold { fan: self.clone() }
+	}
+}
+
+impl Default for Fan<WaiterList> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<T> Clone for Fan<T> {
+	fn clone(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+		}
+	}
+}
+
+impl<T> fmt::Debug for Fan<T> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let defer = self.inner.defer.lock().expect("mutex poisoned");
+		f.debug_struct("Fan")
+			.field("held", &defer.held)
+			.field("owed", &defer.owed)
+			.finish_non_exhaustive()
+	}
+}
+
+/// Defers wakes on a [`Fan`] until dropped. Created by [`Fan::hold`].
+pub struct Hold<T = WaiterList> {
+	fan: Fan<T>,
+}
+
+impl<T> Drop for Hold<T> {
+	fn drop(&mut self) {
+		let owed = {
+			let mut defer = self.fan.inner.defer.lock().expect("mutex poisoned");
+			defer.held -= 1;
+
+			// Still held by someone else: the wake stays owed, and the last one out
+			// delivers it.
+			match defer.held {
+				0 => std::mem::take(&mut defer.owed),
+				_ => false,
+			}
+		};
+
+		if owed {
+			// `notify`, not `wake`: `Drop` may not ask for bounds the struct does not
+			// carry, and the notify path needs none.
+			self.fan.inner.notify();
+		}
+	}
+}
+
+impl<T> fmt::Debug for Hold<T> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Hold").finish_non_exhaustive()
+	}
+}
+
 /// Future that drives a poll function, managing waiter lifetime across polls.
 struct WaiterFn<F, R> {
 	poll: F,
@@ -280,6 +527,132 @@ where
 #[cfg(all(test, not(loom)))]
 mod tests {
 	use super::*;
+
+	/// A waker that records whether it fired.
+	#[derive(Default)]
+	struct Flag(std::sync::atomic::AtomicBool);
+
+	impl Flag {
+		fn woken(&self) -> bool {
+			self.0.load(std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	impl Wake for Flag {
+		fn wake(self: Arc<Self>) {
+			self.wake_by_ref();
+		}
+
+		fn wake_by_ref(self: &Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	fn flagged(fan: &Fan) -> (Arc<Flag>, Waiter) {
+		let flag = Arc::new(Flag::default());
+		let waiter = Waiter::new(Waker::from(flag.clone()));
+		fan.register(&waiter);
+
+		// The waiter goes back to the caller: the registration is weak, and dies with it.
+		(flag, waiter)
+	}
+
+	#[test]
+	fn the_waker_fans_out_to_everyone_parked() {
+		let fan = Fan::new();
+		let (first, _first_waiter) = flagged(&fan);
+		let (second, _second_waiter) = flagged(&fan);
+
+		fan.waker().wake();
+
+		assert!(first.woken() && second.woken(), "one wake must reach every waiter");
+	}
+
+	#[test]
+	fn a_departed_waiter_releases_its_slot() {
+		let fan = Fan::new();
+		let (gone, waiter) = flagged(&fan);
+		drop(waiter);
+
+		let (live, _live_waiter) = flagged(&fan);
+		fan.wake();
+
+		assert!(live.woken());
+		assert!(!gone.woken(), "a dropped waiter should have no registration left");
+	}
+
+	/// Waking while holding the fan's own lock deadlocks the moment a waker resumes its
+	/// task inline, because a resumed waiter registers again.
+	#[test]
+	fn waking_does_not_hold_the_lock() {
+		struct Reentrant(Fan);
+
+		impl Wake for Reentrant {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.0.register(&Waiter::noop());
+			}
+		}
+
+		let fan = Fan::new();
+		let waiter = Waiter::new(Waker::from(Arc::new(Reentrant(fan.clone()))));
+		fan.register(&waiter);
+
+		// On a deadlock this thread never finishes, so the test cannot hang.
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn({
+			let fan = fan.clone();
+			move || {
+				fan.wake();
+				let _ = tx.send(());
+			}
+		});
+
+		rx.recv_timeout(std::time::Duration::from_secs(5))
+			.expect("wake reached a waker while holding the lock, and the wake re-entered it");
+	}
+
+	#[test]
+	fn a_held_wake_lands_when_the_hold_drops() {
+		let fan = Fan::new();
+		let (flag, _waiter) = flagged(&fan);
+
+		let hold = fan.hold();
+		fan.wake();
+		assert!(!flag.woken(), "the wake was delivered while the fan was held");
+
+		drop(hold);
+		assert!(flag.woken(), "the held wake never arrived");
+	}
+
+	#[test]
+	fn only_the_last_hold_out_delivers() {
+		let fan = Fan::new();
+		let (flag, _waiter) = flagged(&fan);
+
+		let outer = fan.hold();
+		let inner = fan.hold();
+		fan.wake();
+
+		drop(inner);
+		assert!(!flag.woken(), "a hold is still outstanding");
+
+		drop(outer);
+		assert!(flag.woken());
+	}
+
+	#[test]
+	fn a_quiet_hold_wakes_nobody() {
+		let fan = Fan::new();
+		let (flag, _waiter) = flagged(&fan);
+
+		drop(fan.hold());
+
+		assert!(!flag.woken(), "nothing woke, so nothing was owed");
+	}
 
 	#[test]
 	fn poll_future_bridges_a_std_future() {
@@ -447,5 +820,71 @@ mod tests {
 		let mut fut = std::pin::pin!(crate::wait(|_| Poll::Ready(NotUnpin(std::marker::PhantomPinned))));
 		let mut cx = Context::from_waker(Waker::noop());
 		assert!(fut.as_mut().poll(&mut cx).is_ready());
+	}
+
+	/// The point of projecting: one lock, one list. Parking happens on the list inside
+	/// the state, and the fan's waker still reaches it.
+	#[test]
+	fn a_projected_fan_wakes_the_list_inside_the_state() {
+		#[derive(Default)]
+		struct State {
+			waiters: WaiterList,
+			other: WaiterList,
+		}
+
+		let state = Lock::new(State::default());
+		let fan = Fan::project(&state, |s| &mut s.waiters);
+
+		let flag = Arc::new(Flag::default());
+		let waiter = Waiter::new(Waker::from(flag.clone()));
+
+		// Parked directly on the list, as a caller already holding the lock would.
+		waiter.register(&mut state.lock().waiters);
+
+		let bystander = Arc::new(Flag::default());
+		let bystander_waiter = Waiter::new(Waker::from(bystander.clone()));
+		bystander_waiter.register(&mut state.lock().other);
+
+		fan.waker().wake();
+
+		assert!(flag.woken(), "the projected list was not woken");
+		assert!(!bystander.woken(), "only the projected list should be woken");
+	}
+
+	/// A projected fan is weak, so the state it points at can hold the fan (or its
+	/// waker) without leaking. Waking after that state is gone does nothing.
+	#[test]
+	fn a_projected_fan_outlives_its_state_harmlessly() {
+		let state = Lock::new(WaiterList::new());
+		let fan = Fan::project(&state, |list| list);
+
+		let flag = Arc::new(Flag::default());
+		let waiter = Waiter::new(Waker::from(flag.clone()));
+		waiter.register(&mut state.lock());
+
+		drop(state);
+
+		// No panic, and nothing to wake: the list went with the state.
+		fan.wake();
+		fan.waker().wake();
+		assert!(!flag.woken());
+	}
+
+	/// Deferral is the same either way round.
+	#[test]
+	fn a_projected_fan_defers_a_held_wake() {
+		let state = Lock::new(WaiterList::new());
+		let fan = Fan::project(&state, |list| list);
+
+		let flag = Arc::new(Flag::default());
+		let waiter = Waiter::new(Waker::from(flag.clone()));
+		waiter.register(&mut state.lock());
+
+		let hold = fan.hold();
+		fan.wake();
+		assert!(!flag.woken(), "the wake was delivered while the fan was held");
+
+		drop(hold);
+		assert!(flag.woken(), "the held wake never arrived");
 	}
 }

@@ -10,23 +10,37 @@ use std::{
 use crate::sync::{Mutex, MutexGuard};
 
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
+///
+/// Every kio channel keeps its state in one of these, with its [`WaiterList`]s inside,
+/// so a state change and the wake it owes are decided under a single lock. [`Fan`] can
+/// hand out a [`Waker`](std::task::Waker) for one of those lists — see
+/// [`Fan::project`](crate::Fan::project).
+///
+/// Poisoning is not part of the contract: a panic while the lock is held poisons it, and
+/// every method here panics in turn rather than handing back a `Result`.
+///
+/// [`WaiterList`]: crate::WaiterList
+/// [`Fan`]: crate::Fan
 pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
 
 impl<T> Lock<T> {
+	/// Wrap a value.
 	pub fn new(value: T) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(value)),
 		}
 	}
 
+	/// Lock the state, blocking until it is free. Panics if the lock was poisoned.
 	pub fn lock(&self) -> LockGuard<'_, T> {
 		LockGuard {
 			inner: self.inner.lock().expect("mutex poisoned"),
 		}
 	}
 
+	/// Whether both handles point at the same state.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}

@@ -17,9 +17,16 @@
 
 use std::task::Poll;
 
-use loom::{future::block_on, thread};
+use loom::{
+	future::block_on,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	thread,
+};
 
-use crate::{Closed, Producer, Queue, Ref, Shared};
+use crate::{Closed, Fan, Producer, Queue, Ref, Shared, wait};
 
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
@@ -227,5 +234,42 @@ fn queue_close_wakes_a_parked_pop() {
 
 		assert_eq!(block_on(queue.pop()), Err(Closed), "the close was lost");
 		close.join().unwrap();
+	});
+}
+
+/// `Fan` holds wakes back while a guard is out and delivers them when the last
+/// one drops. A wake racing that window must still reach the parked waiter, whichever
+/// side of the hold it lands on.
+#[test]
+fn a_held_wake_is_never_lost() {
+	loom::model(|| {
+		let fan = Fan::new();
+		let ready = Arc::new(AtomicBool::new(false));
+
+		let waker = {
+			let fan = fan.clone();
+			let ready = ready.clone();
+
+			thread::spawn(move || {
+				let hold = fan.hold();
+				ready.store(true, Ordering::SeqCst);
+				fan.wake();
+				// The deferred wake is delivered here.
+				drop(hold);
+			})
+		};
+
+		// Register before reading `ready`: the other order has a window where the store
+		// and the wake both land between the read and the registration.
+		block_on(wait(|waiter| {
+			fan.register(waiter);
+
+			match ready.load(Ordering::SeqCst) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		}));
+
+		waker.join().unwrap();
 	});
 }
