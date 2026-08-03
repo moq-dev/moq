@@ -19,7 +19,6 @@ author:
 normative:
   qmux: I-D.ietf-quic-qmux
   RFC6455:
-  RFC9000:
 
 informative:
   RFC8446:
