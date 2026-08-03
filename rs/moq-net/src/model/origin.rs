@@ -1629,6 +1629,21 @@ struct AttachContext<'a> {
 /// [`route_order`]: an offline source ranks below every announced route, so it
 /// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
 /// cutting its subscribers for content nobody has advertised.
+/// Whether two sources carry the same content and may therefore splice.
+///
+/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
+/// identity, or that does not speak the hops extension at all, contributes as a
+/// first hop. Two such sources are not interchangeable even though their first
+/// hops compare equal, so splicing them would cut one publisher's subscribers
+/// over to an unrelated publisher's content. Every other id compares normally,
+/// including `None` for a locally produced broadcast with no hops.
+fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
+	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
+		return false;
+	}
+	a == b
+}
+
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -1646,7 +1661,7 @@ fn attach_source(
 		if let Ok(mut s) = existing.state.write()
 			&& !s.closed
 		{
-			if s.publisher == publisher {
+			if same_publisher(s.publisher, publisher) {
 				let id = s.next_route;
 				s.next_route += 1;
 				s.routes.push(FrontRoute {
@@ -4696,6 +4711,72 @@ mod tests {
 	/// the new source, never tear it down (#2473, e2e finding 2). Redundant
 	/// publishers sharing an origin id MUST produce the same tracks, so the
 	/// splice resumes seamlessly at the group boundary.
+	/// Two publishers that never declared an identity both arrive with a first
+	/// hop of UNKNOWN. They are unrelated content, so the second MUST replace the
+	/// first rather than joining it as an interchangeable standby: splicing them
+	/// would cut one publisher's subscribers over to the other's stream.
+	#[tokio::test]
+	async fn test_unknown_publishers_do_not_splice() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let unknown_a = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+		let unknown_b = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+
+		let source_a = origin
+			.create_broadcast("test", announce().with_hops(unknown_a))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_some("test");
+
+		// Same first hop by value, but it identifies nothing, so this is a
+		// replacement: the path is unannounced and re-announced rather than
+		// silently gaining a standby.
+		let source_b = origin
+			.create_broadcast("test", announce().with_hops(unknown_b))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_none("test");
+		announced.assert_next_some("test");
+
+		drop(source_a);
+		drop(source_b);
+	}
+
+	/// The same two sources under a real shared publisher id do splice, which is
+	/// what keeps the rule above about UNKNOWN rather than about hop chains.
+	#[tokio::test]
+	async fn test_known_publishers_still_splice() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let publisher = Origin::new(1).unwrap();
+		let hops_a = OriginList::try_from(vec![publisher]).unwrap();
+		let hops_b = OriginList::try_from(vec![publisher, Origin::new(3).unwrap()]).unwrap();
+
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_some("test");
+
+		// Shares the publisher, so it joins silently as a standby: no churn.
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_wait();
+
+		drop(source_a);
+		drop(source_b);
+	}
+
 	#[tokio::test]
 	async fn test_standby_join_splices_live_subscriber() {
 		tokio::time::pause();

@@ -58,12 +58,14 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Origin,
 	// The origin stamped into the hop chain of broadcasts from versions that
-	// don't carry real hop ids on the wire (Lite01/02/03). It gives each
-	// upstream session a stable identity in the hop list so two sessions
-	// publishing the same path resolve as distinct routes instead of colliding
-	// on an empty/placeholder chain. Random per connection unless the caller
-	// assigned the peer an identity (`peer_origin`), which then also makes the
-	// route recognizable across sessions.
+	// don't carry real hop ids on the wire (Lite01/02/03), and into the
+	// placeholder entries Lite03 sends in place of real ids.
+	//
+	// This is the peer's assigned identity (`peer_origin`) when the caller gave
+	// it one, which also makes the route recognizable across sessions. Otherwise
+	// it is `Origin::UNKNOWN` (0), the reserved "no identity" value: a random id
+	// would look like an identity the peer never agreed to and cannot exclude
+	// for loop detection.
 	session_origin: crate::Origin,
 	// The identity assigned to the peer by `Client::with_peer_origin`, standing
 	// in wherever the peer declines to declare one (an AnnounceOk reporting
@@ -100,7 +102,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: config.peer_origin.unwrap_or_else(crate::Origin::random),
+			session_origin: config.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
 			peer_origin: config.peer_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
