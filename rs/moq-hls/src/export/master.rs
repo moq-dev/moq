@@ -6,10 +6,23 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+
 use super::Kind;
 
 const VERSION: u32 = 9;
 const AUDIO_GROUP: &str = "aud";
+
+/// RFC 3986 unreserved characters, which are safe in one URL path segment.
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+
+fn rendition_uri(kind: Kind, name: &str, suffix: &str) -> String {
+	format!(
+		"{}/{}/media.m3u8{suffix}",
+		kind.as_str(),
+		utf8_percent_encode(name, PATH_SEGMENT)
+	)
+}
 
 /// A video rendition entry for the master playlist.
 pub struct VideoVariant {
@@ -86,7 +99,7 @@ fn render_video(out: &mut String, variant: &VideoVariant, audio: Option<&AudioGr
 		let _ = write!(line, ",AUDIO=\"{}\"", group.id);
 	}
 	let _ = writeln!(out, "{line}");
-	let _ = writeln!(out, "{}/{}/media.m3u8{suffix}", Kind::Video.as_str(), variant.name);
+	let _ = writeln!(out, "{}", rendition_uri(Kind::Video, &variant.name, suffix));
 }
 
 /// Render the multivariant playlist. The first rendition in each audio codec group is default.
@@ -107,11 +120,10 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant], query: Opti
 			let default = if index == 0 { "YES" } else { "NO" };
 			let _ = writeln!(
 				out,
-				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}/{}/media.m3u8{suffix}\"",
+				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}\"",
 				group.id,
 				variant.name,
-				Kind::Audio.as_str(),
-				variant.name
+				rendition_uri(Kind::Audio, &variant.name, &suffix)
 			);
 		}
 	}
@@ -134,7 +146,7 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant], query: Opti
 				"#EXT-X-STREAM-INF:BANDWIDTH={},CODECS=\"{}\"",
 				variant.bandwidth, variant.codec
 			);
-			let _ = writeln!(out, "{}/{}/media.m3u8{suffix}", Kind::Audio.as_str(), variant.name);
+			let _ = writeln!(out, "{}", rendition_uri(Kind::Audio, &variant.name, &suffix));
 		}
 	}
 
@@ -222,5 +234,26 @@ mod tests {
 		let out = render_master(&[], &audio, None);
 		assert!(out.contains("#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"opus\"\n"));
 		assert!(out.contains("\naudio/audio/media.m3u8\n"));
+	}
+
+	#[test]
+	fn rendition_names_are_percent_encoded_in_uris() {
+		let video = vec![VideoVariant {
+			name: "cam#1/main?alt".into(),
+			bandwidth: 2_500_000,
+			width: None,
+			height: None,
+			codec: "avc1.42c01f".into(),
+		}];
+		let audio = vec![AudioVariant {
+			name: "audio #1".into(),
+			bandwidth: 128_000,
+			codec: "opus".into(),
+		}];
+
+		let out = render_master(&video, &audio, Some("jwt=abc.def"));
+
+		assert!(out.contains("\nvideo/cam%231%2Fmain%3Falt/media.m3u8?jwt=abc.def\n"));
+		assert!(out.contains("URI=\"audio/audio%20%231/media.m3u8?jwt=abc.def\""));
 	}
 }

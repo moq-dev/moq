@@ -4488,6 +4488,7 @@ dependencies = [
  "m3u8-rs",
  "moq-mux",
  "moq-net",
+ "percent-encoding",
  "reqwest",
  "thiserror 2.0.19",
  "tokio",

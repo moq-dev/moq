@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, RawQuery, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{RawQuery, State};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bytes::Bytes;
+use percent_encoding::percent_decode_str;
 
 use super::Server;
 use crate::export::{Kind, Rendition};
@@ -21,16 +22,96 @@ const MP4: &str = "video/mp4";
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn router(server: Server) -> Router {
-	Router::new()
-		.route("/{broadcast}/master.m3u8", get(master))
-		.route("/{broadcast}/{kind}/{rendition}/media.m3u8", get(media))
-		.route("/{broadcast}/{kind}/{rendition}/init.mp4", get(init))
-		.route("/{broadcast}/{kind}/{rendition}/seg/{file}", get(segment))
-		.with_state(server)
+	Router::new().route("/{*path}", get(request)).with_state(server)
 }
 
-async fn master(State(server): State<Server>, Path(broadcast): Path<String>, RawQuery(query): RawQuery) -> Response {
-	let Some(broadcaster) = server.broadcaster(&broadcast).await else {
+enum Route {
+	Master {
+		broadcast: String,
+	},
+	Media {
+		broadcast: String,
+		kind: String,
+		rendition: String,
+	},
+	Init {
+		broadcast: String,
+		kind: String,
+		rendition: String,
+	},
+	Segment {
+		broadcast: String,
+		kind: String,
+		rendition: String,
+		file: String,
+	},
+}
+
+fn parse_route(path: &str) -> Option<Route> {
+	let parts = path
+		.strip_prefix('/')?
+		.split('/')
+		.map(|part| {
+			percent_decode_str(part)
+				.decode_utf8()
+				.ok()
+				.map(|part| part.into_owned())
+		})
+		.collect::<Option<Vec<_>>>()?;
+
+	match parts.as_slice() {
+		[broadcast @ .., file] if !broadcast.is_empty() && file == "master.m3u8" => Some(Route::Master {
+			broadcast: broadcast.join("/"),
+		}),
+		[broadcast @ .., kind, rendition, file] if !broadcast.is_empty() && file == "media.m3u8" => {
+			Some(Route::Media {
+				broadcast: broadcast.join("/"),
+				kind: kind.clone(),
+				rendition: rendition.clone(),
+			})
+		}
+		[broadcast @ .., kind, rendition, file] if !broadcast.is_empty() && file == "init.mp4" => Some(Route::Init {
+			broadcast: broadcast.join("/"),
+			kind: kind.clone(),
+			rendition: rendition.clone(),
+		}),
+		[broadcast @ .., kind, rendition, directory, file] if !broadcast.is_empty() && directory == "seg" => {
+			Some(Route::Segment {
+				broadcast: broadcast.join("/"),
+				kind: kind.clone(),
+				rendition: rendition.clone(),
+				file: file.clone(),
+			})
+		}
+		_ => None,
+	}
+}
+
+async fn request(State(server): State<Server>, uri: Uri, RawQuery(query): RawQuery) -> Response {
+	match parse_route(uri.path()) {
+		Some(Route::Master { broadcast }) => master(&server, &broadcast, query.as_deref()).await,
+		Some(Route::Media {
+			broadcast,
+			kind,
+			rendition,
+		}) => media(&server, &broadcast, &kind, &rendition, query.as_deref()).await,
+		Some(Route::Init {
+			broadcast,
+			kind,
+			rendition,
+		}) => init(&server, &broadcast, &kind, &rendition).await,
+		Some(Route::Segment {
+			broadcast,
+			kind,
+			rendition,
+			file,
+		}) => segment(&server, &broadcast, &kind, &rendition, &file).await,
+		None => not_found(),
+	}
+}
+
+async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Response {
+	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
 	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
@@ -39,15 +120,11 @@ async fn master(State(server): State<Server>, Path(broadcast): Path<String>, Raw
 	}
 	// Propagate whatever query reached the master (e.g. a credential a wrapping
 	// middleware required) down to the child media-playlist URLs.
-	m3u8(broadcaster.master_playlist(query.as_deref()))
+	m3u8(broadcaster.master_playlist(query))
 }
 
-async fn media(
-	State(server): State<Server>,
-	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
-	RawQuery(query): RawQuery,
-) -> Response {
-	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
+async fn media(server: &Server, broadcast: &str, kind: &str, rendition: &str, query: Option<&str>) -> Response {
+	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
 
@@ -64,17 +141,14 @@ async fn media(
 		Err(err) => return server_error(err),
 	}
 
-	match rendition.media_playlist(query.as_deref()) {
+	match rendition.media_playlist(query) {
 		Some(playlist) => m3u8(playlist),
 		None => not_found(),
 	}
 }
 
-async fn init(
-	State(server): State<Server>,
-	Path((broadcast, kind, rendition)): Path<(String, String, String)>,
-) -> Response {
-	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
+async fn init(server: &Server, broadcast: &str, kind: &str, rendition: &str) -> Response {
+	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
 	match rendition.init().await {
@@ -84,14 +158,11 @@ async fn init(
 	}
 }
 
-async fn segment(
-	State(server): State<Server>,
-	Path((broadcast, kind, rendition, file)): Path<(String, String, String, String)>,
-) -> Response {
+async fn segment(server: &Server, broadcast: &str, kind: &str, rendition: &str, file: &str) -> Response {
 	let Some(sequence) = file.strip_suffix(".m4s").and_then(|s| s.parse::<u64>().ok()) else {
 		return not_found();
 	};
-	let Some(rendition) = rendition_for(&server, &broadcast, &kind, &rendition).await else {
+	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
 	match rendition.segment(sequence).await {
@@ -139,4 +210,43 @@ fn not_found() -> Response {
 fn server_error(err: crate::Error) -> Response {
 	tracing::warn!(%err, "hls request failed");
 	(StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parses_multisegment_broadcast_and_encoded_rendition() {
+		let Some(Route::Media {
+			broadcast,
+			kind,
+			rendition,
+		}) = parse_route("/project/live/video/cam%231%2Fmain%3Falt/media.m3u8")
+		else {
+			panic!("media route should parse");
+		};
+
+		assert_eq!(broadcast, "project/live");
+		assert_eq!(kind, "video");
+		assert_eq!(rendition, "cam#1/main?alt");
+	}
+
+	#[test]
+	fn parses_all_resource_routes() {
+		assert!(matches!(
+			parse_route("/project/live/master.m3u8"),
+			Some(Route::Master { .. })
+		));
+		assert!(matches!(
+			parse_route("/project/live/video/main/init.mp4"),
+			Some(Route::Init { .. })
+		));
+		assert!(matches!(
+			parse_route("/project/live/video/main/seg/42.m4s"),
+			Some(Route::Segment { .. })
+		));
+		assert!(parse_route("/master.m3u8").is_none());
+		assert!(parse_route("/project/live/video/main/unknown").is_none());
+	}
 }

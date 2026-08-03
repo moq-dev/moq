@@ -14,11 +14,11 @@
 //!
 //! Every request is served. To gate access, wrap [`Server::router`] in your own
 //! [`axum`] middleware. It runs before routing, so a rejected request never reaches
-//! the origin, but it also sees the raw request URI rather than the path parameters
-//! axum decodes for the handlers. The broadcast is the first segment, still
-//! percent-encoded: `/li%76e/master.m3u8` serves the broadcast `live`. Decode a
-//! segment before matching it against a policy, or a name can be encoded past the
-//! check.
+//! the origin, but it also sees the raw request URI rather than the path segments
+//! the server decodes. A broadcast occupies every segment before the HLS resource
+//! suffix, still percent-encoded: `/project/li%76e/master.m3u8` serves the broadcast
+//! `project/live`. Decode each segment before matching it against a policy, or a
+//! name can be encoded past the check.
 //!
 //! ```no_run
 //! use axum::http::StatusCode;
@@ -194,6 +194,32 @@ mod tests {
 		// Pin the 404 to our handler: an unmatched route would also 404, but without
 		// the no-store that not_found() sets, so a broken URI can't fake this pass.
 		assert_eq!(allowed.headers()[header::CACHE_CONTROL], "no-store");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn router_matches_multisegment_broadcast_when_nested() {
+		use axum::body::Body;
+		use axum::extract::Request;
+		use axum::http::{StatusCode, header};
+		use tower::ServiceExt;
+
+		let origin = moq_net::Origin::random().produce();
+		let server = Server::new(origin.consume(), Config::default());
+		let app = Router::new().nest("/hls", server.router());
+
+		let response = app
+			.oneshot(
+				Request::builder()
+					.uri("/hls/project/live/master.m3u8")
+					.body(Body::empty())
+					.unwrap(),
+			)
+			.await
+			.unwrap();
+
+		assert_eq!(response.status(), StatusCode::NOT_FOUND);
+		// The handler adds no-store. Axum's unmatched-route 404 does not.
+		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 	}
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
