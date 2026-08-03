@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/moq-dev/moq/compare/kio-v0.5.2...kio-v0.5.3) - 2026-08-03
+
+### Added
+
+- *(kio)* add WaiterCell and Queue ([#2560](https://github.com/moq-dev/moq/pull/2560))
+
+### Other
+
+- *(kio)* rename WaiterCell to Park ([#2583](https://github.com/moq-dev/moq/pull/2583))
+
 ## [0.5.2](https://github.com/moq-dev/moq/compare/kio-v0.5.1...kio-v0.5.2) - 2026-07-29
 
 ### Other

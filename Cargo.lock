@@ -892,9 +892,9 @@ dependencies = [
 
 [[package]]
 name = "bytesize"
-version = "2.4.2"
+version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d7c8918969267b2932ffd5655509bbbea0833823058c378876953217f5fc50e"
+checksum = "7354288c522e7e980fafd2075d63d1285794c3a6a16cdd492f189ea406e5f18b"
 
 [[package]]
 name = "bytestring"
@@ -1138,9 +1138,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "301b56658598e48f3648647ac6fc887be7e7108eddfa4e9b63fcf3ec58c0cadf"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -1148,9 +1148,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "94a65403d1a1bd28f7dc68eb8506e8874808ee5eecb59298de588e2e1407a078"
 dependencies = [
  "anstream",
  "anstyle",
@@ -3203,9 +3203,9 @@ dependencies = [
 
 [[package]]
 name = "http-cache"
-version = "1.0.0-alpha.6"
+version = "1.0.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d01e0b5d3afe17eadd68dad863adc0715b7ccfa887effbb9ea4de3c7c78c6c44"
+checksum = "e5578f9c6c2ad8403802d209d1ffe8a2a15d3f89bfaabca9deaa977947dba241"
 dependencies = [
  "bytes",
  "futures",
@@ -3224,9 +3224,9 @@ dependencies = [
 
 [[package]]
 name = "http-cache-reqwest"
-version = "1.0.0-alpha.6"
+version = "1.0.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff1fa00fd5b0d38c26d5f24f1cf513e286a988b57880c2bf357304669268fa3"
+checksum = "8b8eff2dd41dcc485744bd8ce476cf0fe2df289ba8b49c1750b7c887ef7a07b5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3610,9 +3610,9 @@ dependencies = [
 
 [[package]]
 name = "ipnet"
-version = "2.12.0"
+version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 dependencies = [
  "serde",
 ]
@@ -4010,7 +4010,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kio"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "loom",
  "smallvec",
@@ -4087,7 +4087,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4381,7 +4381,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4430,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "hang",
@@ -4477,7 +4477,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4534,7 +4534,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -4565,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.5"
+version = "0.19.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4616,7 +4616,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bytes",
  "criterion",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.14.5"
+version = "0.14.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4764,7 +4764,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4783,7 +4783,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.40"
+version = "0.5.41"
 dependencies = [
  "anyhow",
  "clap",
@@ -4793,7 +4793,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4826,7 +4826,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.11"
+version = "0.0.12"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -8536,9 +8536,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.54"
+version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e1d5e639ff6bab73cb6885cc7e7b1de96c3f32c68ec55f3952614bec1092244"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
  "js-sys",

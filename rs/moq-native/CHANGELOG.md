@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.6](https://github.com/moq-dev/moq/compare/moq-native-v0.19.5...moq-native-v0.19.6) - 2026-08-03
+
+### Fixed
+
+- *(moq-native)* dial the resolver's first choice, not the first family match ([#2592](https://github.com/moq-dev/moq/pull/2592))
+- *(native)* send the request path and query in the SETUP on every URI-less transport ([#2572](https://github.com/moq-dev/moq/pull/2572))
+
+### Other
+
+- add Client::with_peer_origin for peers that declare no identity ([#2577](https://github.com/moq-dev/moq/pull/2577))
+
 ## [0.19.5](https://github.com/moq-dev/moq/compare/moq-native-v0.19.4...moq-native-v0.19.5) - 2026-07-31
 
 ### Added

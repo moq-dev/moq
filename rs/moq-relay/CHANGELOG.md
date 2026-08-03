@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.5...moq-relay-v0.14.6) - 2026-08-03
+
+### Fixed
+
+- unbreak the libmoq release, and moq-relay's fresh-resolve build ([#2597](https://github.com/moq-dev/moq/pull/2597))
+- *(native)* send the request path and query in the SETUP on every URI-less transport ([#2572](https://github.com/moq-dev/moq/pull/2572))
+
+### Other
+
+- *(deps)* bump the cargo group with 2 updates ([#2591](https://github.com/moq-dev/moq/pull/2591))
+
 ## [0.14.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.4...moq-relay-v0.14.5) - 2026-07-31
 
 ### Added
