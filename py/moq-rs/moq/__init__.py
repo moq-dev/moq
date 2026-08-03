@@ -30,6 +30,7 @@ from .publish import (
     TrackDynamic,
     TrackProducer,
     TrackRequest,
+    VideoProducer,
 )
 from .server import Request, Server, Transport
 from .session import Session
@@ -63,7 +64,13 @@ from .types import (
     Subscription,
     TrackInfo,
     Video,
+    VideoCodec,
+    VideoEncoderInput,
+    VideoEncoderKind,
+    VideoEncoderOutput,
+    VideoFrame,
     VideoHint,
+    VideoPixelFormat,
     VideoProperties,
 )
 
@@ -120,7 +127,14 @@ __all__ = [
     "TrackRequest",
     "Transport",
     "Video",
+    "VideoCodec",
+    "VideoEncoderInput",
+    "VideoEncoderKind",
+    "VideoEncoderOutput",
+    "VideoFrame",
     "VideoHint",
+    "VideoPixelFormat",
+    "VideoProducer",
     "VideoProperties",
     "connect",
     "is_auth",

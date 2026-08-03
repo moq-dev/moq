@@ -15,7 +15,27 @@ let package = Package(
     platforms: [.iOS(.v15), .macOS(.v12)],
     products: [.library(name: "MoqFFI", targets: ["MoqFFI"])],
     targets: [
-        .target(name: "MoqFFI", dependencies: ["MoqFFIBinary"], path: "Sources/MoqFFI"),
+        .target(
+            name: "MoqFFI",
+            dependencies: ["MoqFFIBinary"],
+            path: "Sources/MoqFFI",
+            linkerSettings: [
+                // A Rust staticlib does not carry the link options its dependencies
+                // declare, so an external linker has to name them. Mirrors
+                // rs/libmoq/native-libs/apple.txt, which solves the same problem for
+                // C consumers of libmoq. These cover moq-video / moq-audio: hardware
+                // H.264/H.265 encode and decode, plus capture. All macOS-only, since
+                // those backends are `cfg(target_os = "macos")`.
+                .linkedFramework("AVFoundation", .when(platforms: [.macOS])),
+                .linkedFramework("CoreGraphics", .when(platforms: [.macOS])),
+                .linkedFramework("CoreMedia", .when(platforms: [.macOS])),
+                .linkedFramework("CoreVideo", .when(platforms: [.macOS])),
+                .linkedFramework("ScreenCaptureKit", .when(platforms: [.macOS])),
+                .linkedFramework("VideoToolbox", .when(platforms: [.macOS])),
+                // openh264, the software H.264 fallback, is C++.
+                .linkedLibrary("c++"),
+            ]
+        ),
         .binaryTarget(
             name: "MoqFFIBinary",
             url: "REPLACE_URL",

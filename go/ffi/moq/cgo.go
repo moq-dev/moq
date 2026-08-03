@@ -12,11 +12,18 @@
 // build matrix.
 package moq
 
+// A Rust staticlib does not carry the link options its dependencies declare, so
+// every system library has to be named here. The same list, for the same reason,
+// lives in rs/libmoq/native-libs/ for C consumers of libmoq; keep the two in step
+// when moq-ffi gains a dependency. The moq-video / moq-audio entries cover
+// hardware H.264/H.265 encode and decode plus capture, and openh264 (the software
+// H.264 fallback) is C++.
+
 /*
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64 -lmoq_ffi -ldl -lm -lpthread
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux_arm64 -lmoq_ffi -ldl -lm -lpthread
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/darwin_amd64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/darwin_arm64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64 -lmoq_ffi -ldl -lm -lpthread -lstdc++
+#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux_arm64 -lmoq_ffi -ldl -lm -lpthread -lstdc++
+#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/darwin_amd64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework CoreGraphics -lc++
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/darwin_arm64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework CoreGraphics -lc++
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows_amd64 -lmoq_ffi -lws2_32 -luserenv -lbcrypt -lntdll
 */
 import "C"

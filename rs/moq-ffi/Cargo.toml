@@ -30,6 +30,9 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
+# Default features only: the Linux hardware codecs stay off so the wrappers'
+# cross-compiled targets (Android, iOS) don't pull a CUDA / libva graph.
+moq-video = { workspace = true }
 serde_json = "1"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }

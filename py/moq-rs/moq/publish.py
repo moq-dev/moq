@@ -21,6 +21,7 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqVideoProducer,
 )
 
 from .types import (
@@ -31,6 +32,9 @@ from .types import (
     Route,
     Subscription,
     TrackInfo,
+    VideoEncoderInput,
+    VideoEncoderOutput,
+    VideoFrame,
     VideoHint,
     VideoProperties,
 )
@@ -331,6 +335,48 @@ class AudioProducer:
         self._inner.finish()
 
 
+class VideoProducer:
+    """Publish raw pictures and let a native encoder compress them on the way out.
+
+    Built via :meth:`BroadcastProducer.publish_video`. Pixel format,
+    resolution, and framerate are fixed at construction; each
+    :meth:`write` call passes only pixels and a presentation timestamp.
+    """
+
+    def __init__(self, inner: MoqVideoProducer) -> None:
+        self._inner = inner
+
+    def write(self, frame: VideoFrame) -> None:
+        """Encode and publish one frame in the configured input format.
+
+        A hardware encoder pipelines, so a call that puts nothing on the wire
+        is normal rather than an error.
+        """
+        self._inner.write(frame)
+
+    def cut(self) -> None:
+        """Start a new group at the next written frame.
+
+        Optional: the encoder keyframes every ``gop`` frames on its own, and
+        each of those cuts a group, so a subscriber can always join without
+        this. Reach for it only to place the boundaries yourself.
+        """
+        self._inner.cut()
+
+    def set_bitrate(self, bitrate: int) -> None:
+        """Retune the live encoder, in bits per second.
+
+        Cheap enough to drive from a congestion controller: no keyframe is
+        forced. Raises if this backend cannot retune while running, which is
+        not fatal -- the encoder keeps its current rate.
+        """
+        self._inner.set_bitrate(bitrate)
+
+    def finish(self) -> None:
+        """Flush any frames the codec is holding and finalize the track."""
+        self._inner.finish()
+
+
 class BroadcastDynamic:
     """Async source of tracks requested by subscribers.
 
@@ -439,6 +485,19 @@ class BroadcastProducer:
     ) -> AudioProducer:
         """Publish a raw-audio track with an in-process Opus encoder."""
         return AudioProducer(self._inner.publish_audio(name, input, output))
+
+    def publish_video(
+        self,
+        input: VideoEncoderInput,
+        output: VideoEncoderOutput,
+    ) -> VideoProducer:
+        """Publish a raw-video track with an in-process H.264/H.265 encoder.
+
+        The track is named after the codec (``.avc3`` / ``.hev1``) and its
+        catalog rendition appears once the first keyframe has been encoded, so
+        subscribers discover it through the catalog rather than a name you pick.
+        """
+        return VideoProducer(self._inner.publish_video(input, output))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

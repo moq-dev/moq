@@ -19,6 +19,9 @@ pub enum MoqError {
 	Audio(#[from] moq_audio::Error),
 
 	#[error(transparent)]
+	Video(#[from] moq_video::Error),
+
+	#[error(transparent)]
 	Url(#[from] url::ParseError),
 
 	#[error(transparent)]
