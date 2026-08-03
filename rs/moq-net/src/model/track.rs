@@ -560,9 +560,7 @@ impl TrackState {
 	/// Drop every cached group and reset the eviction bookkeeping. Each group's
 	/// access sample lives in its own charge, released when the group itself dies.
 	fn clear_cache(&mut self) {
-		for (_, slot) in self.lookup.drain() {
-			slot.group.drop_cached();
-		}
+		self.lookup.clear();
 		self.arrival.clear();
 		self.evict.clear();
 		self.latest_group = None;
@@ -644,7 +642,7 @@ impl TrackState {
 		self.lookup.insert(
 			sequence,
 			Slot {
-				group: group.clone(),
+				group: group.clone_cached(),
 				stamp,
 			},
 		);

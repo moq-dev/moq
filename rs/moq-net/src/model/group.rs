@@ -222,26 +222,52 @@ pub struct Producer {
 	// [`Self::with_meter`]. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
 
-	// Shared by every clone: its `Drop` is the abrupt-teardown, running exactly once
-	// when the last of them goes.
-	alive: Arc<Alive>,
+	// Shared teardown state tagged with this handle's ownership role.
+	liveness: Liveness,
 }
 
-/// Ends the group when the last [`Producer`] clone drops, including the clone the
-/// parent track holds in its cache.
-///
-/// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
-/// a snapshot, and acting on it is exactly what can invalidate it. Holding a producer
-/// of its own also keeps the state writable until the teardown has run, whatever order
-/// the last owner's fields drop in.
+#[derive(Clone, Copy)]
+enum Role {
+	Publisher,
+	Cache,
+}
+
+/// Runs teardown with the role of whichever handle releases the final reference.
+struct Liveness {
+	alive: Option<Arc<Alive>>,
+	role: Role,
+}
+
+impl Liveness {
+	fn new(alive: Arc<Alive>, role: Role) -> Self {
+		Self {
+			alive: Some(alive),
+			role,
+		}
+	}
+
+	fn clone_as(&self, role: Role) -> Self {
+		Self::new(self.alive.as_ref().expect("a live handle owns its guard").clone(), role)
+	}
+}
+
+impl Drop for Liveness {
+	fn drop(&mut self) {
+		let alive = self.alive.take().expect("a live handle owns its guard");
+		if let Some(alive) = Arc::into_inner(alive) {
+			alive.teardown(self.role);
+		}
+	}
+}
+
+/// Shared state used when the final publisher or cache handle tears down the group.
 struct Alive {
 	info: Info,
 	state: kio::Producer<GroupState>,
-	warn_on_drop: bool,
 }
 
-impl Drop for Alive {
-	fn drop(&mut self) {
+impl Alive {
+	fn teardown(self, role: Role) {
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
@@ -252,7 +278,7 @@ impl Drop for Alive {
 				if state.fin.is_some() || state.abort.is_some() {
 					return;
 				}
-				if self.warn_on_drop {
+				if matches!(role, Role::Publisher) {
 					tracing::warn!(
 						sequence = self.info.sequence,
 						"group::Producer dropped without finish() or abort()"
@@ -264,7 +290,7 @@ impl Drop for Alive {
 				if state.fin.is_some() || state.abort.is_some() {
 					return;
 				}
-				if self.warn_on_drop {
+				if matches!(role, Role::Publisher) {
 					tracing::warn!(
 						sequence = self.info.sequence,
 						"group::Producer dropped without finish() or abort()"
@@ -300,7 +326,6 @@ impl Producer {
 		let alive = Arc::new(Alive {
 			info,
 			state: state.clone(),
-			warn_on_drop: true,
 		});
 		Self {
 			info,
@@ -308,7 +333,7 @@ impl Producer {
 			track,
 			cache,
 			stats: stats::Meter::default(),
-			alive,
+			liveness: Liveness::new(alive, Role::Publisher),
 		}
 	}
 
@@ -325,14 +350,20 @@ impl Producer {
 		self.info
 	}
 
-	/// Drop the cache's handle, suppressing its unfinished warning if it is final.
-	pub(crate) fn drop_cached(self) {
-		let Self { alive, .. } = self;
-		if let Some(mut alive) = Arc::into_inner(alive) {
-			// Only the final strong handle can enter here, so a concurrent publisher
-			// drop still owns and reports its own unfinished teardown.
-			alive.warn_on_drop = false;
+	fn clone_as(&self, role: Role) -> Self {
+		Self {
+			info: self.info,
+			state: self.state.clone(),
+			track: self.track.clone(),
+			cache: self.cache.clone(),
+			stats: self.stats.clone(),
+			liveness: self.liveness.clone_as(role),
 		}
+	}
+
+	/// Clone a handle owned by the parent track's cache.
+	pub(crate) fn clone_cached(&self) -> Self {
+		self.clone_as(Role::Cache)
 	}
 
 	/// The parent track's timescale.
@@ -549,14 +580,7 @@ impl Producer {
 
 impl Clone for Producer {
 	fn clone(&self) -> Self {
-		Self {
-			info: self.info,
-			state: self.state.clone(),
-			track: self.track.clone(),
-			cache: self.cache.clone(),
-			stats: self.stats.clone(),
-			alive: self.alive.clone(),
-		}
+		self.clone_as(Role::Publisher)
 	}
 }
 
