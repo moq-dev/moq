@@ -984,11 +984,11 @@ mod probe {
 		let stop = &AtomicBool::new(false);
 		std::thread::scope(|scope| -> Result<()> {
 			let decode_device = device.clone();
-			scope.spawn(move || {
+			let worker = scope.spawn(move || -> Result<()> {
 				// Its own COM/MF lifetime: the guard is per thread.
-				let _com = ComGuard::new().expect("decode thread COM");
+				let _com = ComGuard::new().context("decode thread COM")?;
 				let mut decoder = decoder;
-				let units = stream().expect("test stream");
+				let units = stream().context("decode thread test stream")?;
 				while !stop.load(Ordering::Relaxed) {
 					// A fresh session per pass, so the decoder keeps hitting the
 					// device rather than idling once the stream runs out.
@@ -996,19 +996,11 @@ mod probe {
 						if stop.load(Ordering::Relaxed) {
 							break;
 						}
-						if let Err(e) = decoder.decode(unit) {
-							eprintln!("[concurrent] decode thread stopped: {e}");
-							return;
-						}
+						decoder.decode(unit).context("concurrent decode")?;
 					}
-					match Decoder::open(&decode_device) {
-						Ok(next) => decoder = next,
-						Err(e) => {
-							eprintln!("[concurrent] could not reopen the decoder: {e}");
-							return;
-						}
-					}
+					decoder = Decoder::open(&decode_device).context("reopen concurrent decoder")?;
 				}
+				Ok(())
 			});
 
 			eprintln!("[concurrent] decode is running; building the scaler now");
@@ -1021,7 +1013,11 @@ mod probe {
 				Ok(())
 			})();
 			stop.store(true, Ordering::Relaxed);
-			result
+			let decode_result = worker
+				.join()
+				.map_err(|_| anyhow!("concurrent decode thread panicked"))?;
+			result?;
+			decode_result
 		})
 	}
 
