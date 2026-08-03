@@ -64,7 +64,12 @@ discord() {
 # a push/schedule trigger to a PR-only one, fails here until alert.yml matches.
 check_coverage() {
     local expected actual
-    expected=$(non_pr_workflow_names | sort -u)
+    # Not `non_pr_workflow_names | sort -u`: a failure inside a pipeline would
+    # be swallowed and read as "no workflows need watching", which is the
+    # silent pass this whole guard exists to prevent. Capture, propagate, then
+    # sort.
+    expected=$(non_pr_workflow_names) || return 2
+    expected=$(sort -u <<<"$expected")
     actual=$(watched_workflow_names | sort -u)
 
     if [[ "$expected" == "$actual" ]]; then
@@ -86,9 +91,9 @@ check_coverage() {
 # read, and check_coverage would pass while the workflow went unwatched. That
 # silent gap is the whole thing this script exists to prevent.
 #
-# Anything still unrecognized (a quoted `"on":`, say) is loud rather than empty:
-# it prints to stderr and yields no triggers, which check_coverage then reads as
-# non-PR, so the workflow is reported missing instead of quietly skipped.
+# Anything still unrecognized (a quoted `"on":`, say) is a hard error that
+# aborts check_coverage, rather than an empty result it could mistake for
+# "no non-PR triggers".
 workflow_triggers() {
     awk -v file="$1" '
         # on: [push, pull_request]
@@ -161,11 +166,34 @@ non_pr_workflow_names() {
         # alert.yml watches the others; watching itself would be a trigger loop.
         [[ "$(basename "$f")" =~ ^alert\.ya?ml$ ]] && continue
 
-        triggers=$(workflow_triggers "$f")
+        triggers=$(workflow_triggers "$f") || return 2
         if grep -qvx 'pull_request' <<<"$triggers"; then
-            sed -n 's/^name:[[:space:]]*//p' "$f" | head -1
+            workflow_name "$f" || return 2
         fi
     done
+}
+
+# The workflow's `name:`, which is what alert.yml references.
+#
+# GitHub treats `name:` as optional and falls back to the file path, which
+# workflow_run cannot reference cleanly. Every workflow here has one, so this
+# requires it: a nameless workflow would otherwise contribute nothing and slip
+# past check_coverage unwatched.
+workflow_name() {
+    local name
+    name=$(sed -n 's/^name:[[:space:]]*//p' "$1" | head -1)
+    name=${name%%#*}
+    name=${name%"${name##*[![:space:]]}"}
+    # Unquote so `name: "Foo"` matches a plain `- Foo` entry in alert.yml.
+    if [[ "$name" =~ ^\"(.*)\"$ ]] || [[ "$name" =~ ^\'(.*)\'$ ]]; then
+        name="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -z "$name" ]]; then
+        echo "alert.sh: $1 has no top-level name:, so alert.yml cannot reference it" >&2
+        return 2
+    fi
+    printf '%s\n' "$name"
 }
 
 # Names listed under alert.yml's `on.workflow_run.workflows:`.
