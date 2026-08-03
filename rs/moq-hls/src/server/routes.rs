@@ -47,6 +47,10 @@ enum Route {
 	},
 }
 
+fn broadcast_path(parts: &[String]) -> Option<String> {
+	(!parts.is_empty() && parts.iter().all(|part| !part.contains('/'))).then(|| parts.join("/"))
+}
+
 fn parse_route(path: &str) -> Option<Route> {
 	let parts = path
 		.strip_prefix('/')?
@@ -63,29 +67,25 @@ fn parse_route(path: &str) -> Option<Route> {
 	}
 
 	match parts.as_slice() {
-		[broadcast @ .., file] if !broadcast.is_empty() && file == "master.m3u8" => Some(Route::Master {
-			broadcast: broadcast.join("/"),
+		[broadcast @ .., file] if file == "master.m3u8" => Some(Route::Master {
+			broadcast: broadcast_path(broadcast)?,
 		}),
-		[broadcast @ .., kind, rendition, file] if !broadcast.is_empty() && file == "media.m3u8" => {
-			Some(Route::Media {
-				broadcast: broadcast.join("/"),
-				kind: kind.clone(),
-				rendition: rendition.clone(),
-			})
-		}
-		[broadcast @ .., kind, rendition, file] if !broadcast.is_empty() && file == "init.mp4" => Some(Route::Init {
-			broadcast: broadcast.join("/"),
+		[broadcast @ .., kind, rendition, file] if file == "media.m3u8" => Some(Route::Media {
+			broadcast: broadcast_path(broadcast)?,
 			kind: kind.clone(),
 			rendition: rendition.clone(),
 		}),
-		[broadcast @ .., kind, rendition, directory, file] if !broadcast.is_empty() && directory == "seg" => {
-			Some(Route::Segment {
-				broadcast: broadcast.join("/"),
-				kind: kind.clone(),
-				rendition: rendition.clone(),
-				file: file.clone(),
-			})
-		}
+		[broadcast @ .., kind, rendition, file] if file == "init.mp4" => Some(Route::Init {
+			broadcast: broadcast_path(broadcast)?,
+			kind: kind.clone(),
+			rendition: rendition.clone(),
+		}),
+		[broadcast @ .., kind, rendition, directory, file] if directory == "seg" => Some(Route::Segment {
+			broadcast: broadcast_path(broadcast)?,
+			kind: kind.clone(),
+			rendition: rendition.clone(),
+			file: file.clone(),
+		}),
 		_ => None,
 	}
 }
@@ -256,5 +256,11 @@ mod tests {
 	#[test]
 	fn rejects_empty_path_segments() {
 		assert!(parse_route("/project//live/master.m3u8").is_none());
+	}
+
+	#[test]
+	fn rejects_encoded_broadcast_separators() {
+		assert!(parse_route("/project/private%2F/master.m3u8").is_none());
+		assert!(parse_route("/project%2Fprivate/master.m3u8").is_none());
 	}
 }
