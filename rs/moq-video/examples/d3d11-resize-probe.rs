@@ -18,15 +18,15 @@
 //! | `live` | Decoder bound and decoding first, scaler built after. The reported failure. |
 //! | `concurrent` | Decode loop on one thread, scaler on another, one shared device. |
 //! | `crate` | Like `live`, but through the real `decode::Decoder`, to confirm the probe's decoder matches it. |
-//! | `ladder` | One decoder and four GPU-resize plus hardware-encode rungs on one device. The full `moq-transcode` shape. |
+//! | `ladder` | One live decoder and four GPU-resize plus hardware-encode rungs on one device. The full `moq-transcode` shape. |
 //!
 //! Run one mode per process: a wedge leaves the device unusable, so a second
 //! mode in the same process would measure the wreckage rather than itself.
 //!
-//! Every mode passes on an NVIDIA RTX 3070 Ti (driver 32.0.15.9186), including
-//! `ladder` at 200 blits against four live encode sessions, so the wedge needs
-//! hardware, a driver, or an ingredient this does not yet reproduce. Run it on a
-//! machine that does wedge and the log names the call.
+//! The modes through `crate` pass on an NVIDIA RTX 3070 Ti (driver
+//! 32.0.15.9186). The production-shaped live `ladder` overlap still needs a
+//! native Windows run. Run it on a machine that wedges and the log names the
+//! call.
 //!
 //! `bindflags` did turn up a constraint that holds everywhere: a video processor
 //! rejects an input view over a resource whose bind flags are
@@ -64,7 +64,7 @@ mod probe {
 	use std::mem::{ManuallyDrop, size_of};
 	use std::ptr;
 	use std::sync::atomic::{AtomicBool, Ordering};
-	use std::sync::{LazyLock, Mutex};
+	use std::sync::{Barrier, LazyLock, Mutex};
 	use std::time::{Duration, Instant};
 
 	use anyhow::{Context, Result, anyhow, bail};
@@ -1070,7 +1070,8 @@ mod probe {
 	/// of them wants the GPU's video engine.
 	fn mode_ladder(debug_layer: bool) -> Result<()> {
 		const RUNGS: usize = 4;
-		const PASSES: usize = 200;
+		const SCALE_PASSES: usize = 200;
+		const DECODE_PASSES: usize = 16;
 		const SIZES: [Size; RUNGS] = [
 			Size {
 				width: 256,
@@ -1104,17 +1105,26 @@ mod probe {
 		config.kind = moq_video::decode::Kind::Named("mediafoundation".into());
 		let mut decoder = moq_video::decode::Decoder::new(&catalog, &config).context("Media Foundation decoder")?;
 
+		let units = stream()?;
 		let mut frames = Vec::new();
-		for (index, unit) in stream()?.into_iter().enumerate() {
+		for (index, unit) in units.iter().enumerate() {
 			let timestamp = moq_net::Timestamp::from_micros(index as u64 * 33_333).unwrap();
-			frames.extend(decoder.decode(&unit.into(), timestamp, index == 0).context("decode")?);
+			frames.extend(
+				decoder
+					.decode(&unit.clone().into(), timestamp, index == 0)
+					.context("decode")?,
+			);
 		}
-		let Some(Surface::Texture(first)) = frames.first().map(|f| &f.surface) else {
+		let Some(first) = frames.into_iter().next() else {
+			bail!("the decoder did not produce a frame on this machine");
+		};
+		let Surface::Texture(texture) = &first.surface else {
 			bail!("the decoder did not produce a GPU texture on this machine");
 		};
-		let device = first.device().clone();
-		let source = first.texture().clone();
-		eprintln!("[ladder] decoded {} frames; starting the rungs", frames.len());
+		let device = texture.device().clone();
+		let source = texture.texture().clone();
+		let frames = [first];
+		eprintln!("[ladder] primed the decoder; starting live decode and the rungs");
 
 		let stop = &AtomicBool::new(false);
 		let frames = &frames;
@@ -1147,26 +1157,53 @@ mod probe {
 				}));
 			}
 
-			// Let the encoders bind the device and get busy before the scaler
-			// shows up, so the blit lands mid-session rather than before one.
-			std::thread::sleep(Duration::from_millis(500));
-			eprintln!("[ladder] rungs are encoding; building the scaler now");
-
-			let result = (|| -> Result<()> {
-				let scaler = Scaler::new(&device, SOURCE, TARGET)?;
-				for pass in 0..PASSES {
+			let start = &Barrier::new(2);
+			let scale_device = device.clone();
+			let scale_source = source.clone();
+			let scale_worker = scope.spawn(move || -> Result<()> {
+				let _com = ComGuard::new().context("ladder scaler COM")?;
+				start.wait();
+				eprintln!("[ladder] live decode is running; building the instrumented scaler now");
+				let scaler = Scaler::new(&scale_device, SOURCE, TARGET)?;
+				for pass in 0..SCALE_PASSES {
 					if pass % 25 == 0 {
-						eprintln!("[ladder] scale pass {pass}/{PASSES}");
+						eprintln!("[ladder] scale pass {pass}/{SCALE_PASSES}");
 					}
-					scaler.scale(&device, &source, SOURCE, TARGET)?;
+					scaler.scale(&scale_device, &scale_source, SOURCE, TARGET)?;
+				}
+				Ok(())
+			});
+
+			// Let the encoders bind the device and get busy, then release live
+			// decode and the instrumented scaler together.
+			std::thread::sleep(Duration::from_millis(500));
+			eprintln!("[ladder] rungs are encoding; starting live decode and scaler");
+			start.wait();
+			let decode_result = (|| -> Result<()> {
+				let mut timestamp_index = units.len() as u64;
+				for pass in 0..DECODE_PASSES {
+					if pass % 4 == 0 {
+						eprintln!("[ladder] decode pass {pass}/{DECODE_PASSES}");
+					}
+					for (index, unit) in units.iter().enumerate() {
+						let timestamp = moq_net::Timestamp::from_micros(timestamp_index * 33_333).unwrap();
+						decoder
+							.decode(&unit.clone().into(), timestamp, index == 0)
+							.context("live ladder decode")?;
+						timestamp_index += 1;
+					}
 				}
 				Ok(())
 			})();
 			stop.store(true, Ordering::Relaxed);
+			let scale_result = scale_worker
+				.join()
+				.map_err(|_| anyhow!("ladder scaler thread panicked"))?;
 			for worker in workers {
 				worker.join().map_err(|_| anyhow!("ladder rung thread panicked"))??;
 			}
-			result
+			decode_result?;
+			scale_result
 		})
 	}
 
