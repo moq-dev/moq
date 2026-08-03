@@ -49,8 +49,11 @@ discord() {
         }')
 
     # Fail the step on a non-2xx so a rotated/rejected webhook surfaces as a
-    # red run rather than silently dropping every future alert.
+    # red run rather than silently dropping every future alert. Bounded so a
+    # stalled endpoint fails in seconds instead of holding a runner until the
+    # job timeout.
     curl -sS --fail-with-body -X POST \
+        --connect-timeout 5 --max-time 15 \
         -H "Content-Type: application/json" \
         -d "$payload" \
         "$DISCORD_WEBHOOK"
