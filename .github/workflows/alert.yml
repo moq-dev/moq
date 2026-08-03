@@ -11,7 +11,7 @@ name: Alert
 # pull_request_target. The author already sees them as a check on the PR, and
 # that noise is what drives people to mute Actions notifications wholesale.
 #
-# Needs a DISCORD_ALERTS_WEBHOOK repo secret (Discord: Channel > Integrations >
+# Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
 
 on:
@@ -72,7 +72,7 @@ jobs:
 
       - name: Post to Discord
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_ALERTS_WEBHOOK }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           RUN_NAME: ${{ github.event.workflow_run.name }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
