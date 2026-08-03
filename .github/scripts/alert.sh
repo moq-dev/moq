@@ -2,18 +2,18 @@
 #
 # Discord alerting for workflow failures outside of pull requests.
 # Usage:
-#   alert.sh discord           — post the current workflow_run failure to Discord
-#   alert.sh check-coverage    — verify alert.yml watches every non-PR workflow
+#   alert.sh discord          Post the current workflow_run failure to Discord.
+#   alert.sh check-coverage   Verify alert.yml watches every non-PR workflow.
 #
 # Environment (discord):
-#   DISCORD_WEBHOOK   — required, the #alerts channel webhook URL
-#   RUN_NAME          — workflow name (github.event.workflow_run.name)
-#   RUN_URL           — run html_url
-#   RUN_CONCLUSION    — failure / timed_out
-#   RUN_EVENT         — what triggered the failed run (push, schedule, ...)
-#   RUN_REF           — head_branch: a branch name, or a tag for tag-triggered runs
-#   RUN_TITLE         — display_title (usually the commit subject)
-#   RUN_ACTOR         — triggering actor login
+#   DISCORD_WEBHOOK   Required. The #alerts channel webhook URL.
+#   RUN_NAME          Workflow name (github.event.workflow_run.name).
+#   RUN_URL           Run html_url.
+#   RUN_CONCLUSION    failure / timed_out.
+#   RUN_EVENT         What triggered the failed run (push, schedule, ...).
+#   RUN_REF           head_branch: a branch name, or a tag for tag-triggered runs.
+#   RUN_TITLE         display_title, usually the commit subject.
+#   RUN_ACTOR         Triggering actor login.
 
 set -euo pipefail
 
@@ -78,35 +78,102 @@ check_coverage() {
     return 1
 }
 
-# Names of workflows with at least one non-pull_request trigger. Reads the
-# top-level `on:` block, which ends at the next column-0 key.
+# Print one trigger name per line for a workflow file.
+#
+# GitHub accepts four serializations of `on:` (block map, block sequence, flow
+# sequence, bare scalar), so all four are handled here. A parser that understood
+# only one would report "no non-PR triggers" for a workflow it merely failed to
+# read, and check_coverage would pass while the workflow went unwatched. That
+# silent gap is the whole thing this script exists to prevent.
+#
+# Anything still unrecognized (a quoted `"on":`, say) is loud rather than empty:
+# it prints to stderr and yields no triggers, which check_coverage then reads as
+# non-PR, so the workflow is reported missing instead of quietly skipped.
+workflow_triggers() {
+    awk -v file="$1" '
+        # on: [push, pull_request]
+        /^on:[[:space:]]*\[/ {
+            line = $0
+            sub(/^on:[[:space:]]*\[/, "", line)
+            sub(/\].*$/, "", line)
+            n = split(line, items, ",")
+            for (i = 1; i <= n; i++) {
+                gsub(/[[:space:]"'"'"']/, "", items[i])
+                if (items[i] != "") print items[i]
+            }
+            seen = 1
+            next
+        }
+        # on: push
+        /^on:[[:space:]]*[A-Za-z_]/ {
+            line = $0
+            sub(/^on:[[:space:]]*/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            print line
+            seen = 1
+            next
+        }
+        # on:  (block map or block sequence on the following indented lines)
+        /^on:[[:space:]]*(#.*)?$/ { in_on = 1; seen = 1; next }
+
+        in_on && /^[^[:space:]#]/ { in_on = 0 }
+        !in_on { next }
+        # Blank lines and comments.
+        /^[[:space:]]*(#.*)?$/ { next }
+        # Block sequence item: "  - push"
+        /^  - [A-Za-z_]/ {
+            line = $0
+            sub(/^  - /, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            print line
+            next
+        }
+        # Block map key: "  push:"
+        /^  [A-Za-z_][A-Za-z_0-9]*:/ {
+            line = $1
+            sub(/:.*/, "", line)
+            print line
+            next
+        }
+        # Deeper indentation is a triggers own config (branches, tags, types).
+        /^    / { next }
+        {
+            printf "alert.sh: cannot parse the on: block of %s (line %d: %s)\n", file, NR, $0 >"/dev/stderr"
+            exit 2
+        }
+        END {
+            if (!seen) {
+                printf "alert.sh: no on: block found in %s\n", file >"/dev/stderr"
+                exit 2
+            }
+        }
+    ' "$1"
+}
+
+# Names of workflows carrying at least one non-pull_request trigger.
 non_pr_workflow_names() {
-    local f
+    local f triggers
     for f in "$WORKFLOWS_DIR"/*.yml; do
-        # alert.yml watches others; watching itself would be a trigger loop.
+        # alert.yml watches the others; watching itself would be a trigger loop.
         [[ "$(basename "$f")" == "alert.yml" ]] && continue
 
-        awk '
-            /^on:/                  { in_on = 1; next }
-            in_on && /^[a-zA-Z_]+:/ { in_on = 0 }
-            in_on && /^  [a-z_]+:/  {
-                key = $1
-                sub(":", "", key)
-                if (key != "pull_request") non_pr = 1
-            }
-            END { exit !non_pr }
-        ' "$f" || continue
-
-        sed -n 's/^name:[[:space:]]*//p' "$f" | head -1
+        triggers=$(workflow_triggers "$f")
+        if grep -qvx 'pull_request' <<<"$triggers"; then
+            sed -n 's/^name:[[:space:]]*//p' "$f" | head -1
+        fi
     done
 }
 
 # Names listed under alert.yml's `on.workflow_run.workflows:`.
 watched_workflow_names() {
     awk '
-        /^    workflows:/   { in_list = 1; next }
-        in_list && /^      - / { sub(/^      - /, ""); print; next }
-        in_list             { exit }
+        /^    workflows:/ { in_list = 1; next }
+        in_list && /^      - / {
+            sub(/^      - /, "")
+            print
+            next
+        }
+        in_list { exit }
     ' "$WORKFLOWS_DIR/alert.yml"
 }
 
