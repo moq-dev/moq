@@ -639,6 +639,48 @@ mod tests {
 		}
 	}
 
+	/// The multi-rung transcode path stays on hardware through decode, resize, and
+	/// encode: the Direct3D11 video processor scales the decoded texture on its own
+	/// device and the encoder MFT reads the result in place. The residency
+	/// assertion catches a CPU fallback even when the pixels and dimensions still
+	/// look right, which is what a ladder pays for once per rung.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_resized_texture_reencodes_in_place() {
+		let target = crate::Size::new(160, 120);
+		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
+			return;
+		};
+		let resized: Vec<_> = decoded.iter().map(|frame| frame.resize(target).unwrap()).collect();
+		for frame in &resized {
+			assert_eq!(frame.size(), target);
+			assert!(
+				matches!(frame.surface, Surface::Texture(_)),
+				"Direct3D11 resize downloaded to the CPU"
+			);
+		}
+
+		let encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Named("mediafoundation".into()),
+			..EncodeConfig::new(target.width, target.height, 30)
+		});
+		let Ok(mut encoder) = encoder else {
+			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
+			return;
+		};
+
+		let mut packets = 0;
+		for (i, out) in resized.iter().enumerate() {
+			if i == 0 {
+				encoder.keyframe();
+			}
+			packets += encoder.encode(out).unwrap().len();
+		}
+		packets += encoder.finish().unwrap().len();
+
+		assert!(packets > 0, "re-encoding resized textures produced no packets");
+	}
+
 	/// H.265 has no software encoder or decoder, so the HEVC round-trip rides the
 	/// Media Foundation hardware path on both ends: NVENC/QSV/AMF encode through an
 	/// HEVC encoder MFT, DXVA decode through an HEVC decoder MFT. Skips cleanly when

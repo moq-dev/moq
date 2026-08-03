@@ -131,13 +131,14 @@ rather than a blanket promise:
 | --- | --- | --- | --- |
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
 | Linux | `Cuda` (NVDEC) | yes, straight into NVENC | no, downloaded to I420 first |
-| Windows | `I420` (Media Foundation downloads its DXVA texture) | no | no |
+| Windows | `Texture` (Media Foundation / DXVA) | yes, straight into a hardware encoder MFT | no, downloaded to I420 first |
 
-So the transcode path is real on macOS and Linux: a decoded frame feeds the
-encoder without leaving the GPU, and `decode::Config::resize` scales it there too.
-Rendering is zero-copy on macOS only. The Vulkan and EGL importers that would
-extend it to Linux, and the Media Foundation decode-surface retention that would
-give Windows a GPU frame at all, are both tracked in
+So the transcode path is real everywhere: a decoded frame feeds the encoder
+without leaving the GPU, and `Frame::resize` scales it there too, on a
+`VTPixelTransferSession` (macOS), a CUDA kernel (Linux), or a Direct3D11 video
+processor (Windows). A driver that refuses the GPU scaler downloads and scales on
+the CPU instead, warning once. Rendering is zero-copy on macOS only; the Vulkan
+and EGL importers that would extend it to Linux are tracked in
 [#2481](https://github.com/moq-dev/moq/issues/2481).
 
 Matching on `Surface` stays portable because every variant has a universal
