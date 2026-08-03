@@ -560,7 +560,9 @@ impl TrackState {
 	/// Drop every cached group and reset the eviction bookkeeping. Each group's
 	/// access sample lives in its own charge, released when the group itself dies.
 	fn clear_cache(&mut self) {
-		self.lookup.clear();
+		for (_, slot) in self.lookup.drain() {
+			slot.group.drop_cached();
+		}
 		self.arrival.clear();
 		self.evict.clear();
 		self.latest_group = None;
@@ -3414,8 +3416,8 @@ mod test {
 
 	#[tokio::test]
 	async fn drop_after_abort_does_not_warn() {
-		// abort() closes the channel after recording `abort`. Drop must treat the
-		// read-only guard returned by write() as clean or it emits a false WARN.
+		// abort() records its terminal marker before closing the channel, so the
+		// read-only guard returned by write() represents a deliberate teardown.
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", None);
 			let keep = producer.clone();
@@ -3427,6 +3429,47 @@ mod test {
 			drop(keep);
 		});
 		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[test]
+	fn abort_with_cached_unfinished_group_does_not_warn() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let mut producer = track_producer("test", None);
+			producer.append_group().unwrap();
+			producer.abort(Error::Cancel).unwrap();
+		});
+		assert_eq!(warns, 0, "track abort must not blame its cache-owned group");
+	}
+
+	#[test]
+	fn abort_does_not_suppress_a_live_unfinished_group() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let mut producer = track_producer("test", None);
+			let group = producer.append_group().unwrap();
+			producer.abort(Error::Cancel).unwrap();
+			drop(group);
+		});
+		assert_eq!(warns, 1, "a surviving unfinished group producer must still warn");
+	}
+
+	#[test]
+	fn unfinished_track_drop_does_not_duplicate_the_group_warning() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let mut producer = track_producer("test", None);
+			producer.append_group().unwrap();
+			drop(producer);
+		});
+		assert_eq!(warns, 0, "the parent track warning identifies the abandoned producer");
+	}
+
+	#[test]
+	fn drop_after_unmarked_close_warns() {
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let producer = track_producer("test", None);
+			assert!(producer.state.close().is_ok());
+			drop(producer);
+		});
+		assert_eq!(warns, 1, "a closed track without a terminal marker must warn");
 	}
 
 	#[tokio::test]

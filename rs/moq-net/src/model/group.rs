@@ -237,6 +237,7 @@ pub struct Producer {
 struct Alive {
 	info: Info,
 	state: kio::Producer<GroupState>,
+	warn_on_drop: bool,
 }
 
 impl Drop for Alive {
@@ -251,20 +252,24 @@ impl Drop for Alive {
 				if state.fin.is_some() || state.abort.is_some() {
 					return;
 				}
-				tracing::warn!(
-					sequence = self.info.sequence,
-					"group::Producer dropped without finish() or abort()"
-				);
+				if self.warn_on_drop {
+					tracing::warn!(
+						sequence = self.info.sequence,
+						"group::Producer dropped without finish() or abort()"
+					);
+				}
 				state.release();
 			}
 			Err(state) => {
 				if state.fin.is_some() || state.abort.is_some() {
 					return;
 				}
-				tracing::warn!(
-					sequence = self.info.sequence,
-					"group::Producer dropped without finish() or abort()"
-				);
+				if self.warn_on_drop {
+					tracing::warn!(
+						sequence = self.info.sequence,
+						"group::Producer dropped without finish() or abort()"
+					);
+				}
 			}
 		}
 	}
@@ -295,6 +300,7 @@ impl Producer {
 		let alive = Arc::new(Alive {
 			info,
 			state: state.clone(),
+			warn_on_drop: true,
 		});
 		Self {
 			info,
@@ -317,6 +323,16 @@ impl Producer {
 	/// The group header.
 	pub(crate) fn info(&self) -> Info {
 		self.info
+	}
+
+	/// Drop the cache's handle, suppressing its unfinished warning if it is final.
+	pub(crate) fn drop_cached(self) {
+		let Self { alive, .. } = self;
+		if let Some(mut alive) = Arc::into_inner(alive) {
+			// Only the final strong handle can enter here, so a concurrent publisher
+			// drop still owns and reports its own unfinished teardown.
+			alive.warn_on_drop = false;
+		}
 	}
 
 	/// The parent track's timescale.
@@ -985,6 +1001,16 @@ mod test {
 			drop(keep);
 		});
 		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[test]
+	fn drop_after_unmarked_close_warns() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let producer = Info { sequence: 0 }.produce();
+			assert!(producer.state.close().is_ok());
+			drop(producer);
+		});
+		assert_eq!(warns, 1, "a closed group without a terminal marker must warn");
 	}
 
 	#[test]
