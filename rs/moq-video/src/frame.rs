@@ -1682,13 +1682,14 @@ pub mod d3d11 {
 			};
 			let texture = match result {
 				Ok(texture) => texture,
-				Err(err) => {
+				Err(ScaleError::Unsupported(err)) => {
 					*state = ScalerState::Unsupported {
 						_device: self.device.clone(),
 						reason: err.to_string(),
 					};
 					return Err(err);
 				}
+				Err(ScaleError::Transient(err)) => return Err(err),
 			};
 			drop(state);
 			drop(scaler);
@@ -1773,6 +1774,12 @@ pub mod d3d11 {
 		target: Size,
 	}
 
+	/// Whether a failed scale proves this key unsupported or can succeed later.
+	enum ScaleError {
+		Unsupported(Error),
+		Transient(Error),
+	}
+
 	impl Scaler {
 		fn new(device: &ID3D11Device, source: Size, target: Size) -> Result<Self, Error> {
 			let video = device
@@ -1845,10 +1852,11 @@ pub mod d3d11 {
 		}
 
 		/// Blit `source` into a new texture at the target size.
-		fn scale(&self, source: &ID3D11Texture2D) -> Result<ID3D11Texture2D, Error> {
+		fn scale(&self, source: &ID3D11Texture2D) -> Result<ID3D11Texture2D, ScaleError> {
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
 			unsafe { source.GetDesc(&mut desc) };
-			let output = alloc(&self.device, self.target.width, self.target.height, desc.Format)?;
+			let output = alloc(&self.device, self.target.width, self.target.height, desc.Format)
+				.map_err(ScaleError::Transient)?;
 
 			let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
 				FourCC: 0,
@@ -1864,9 +1872,10 @@ pub mod d3d11 {
 			unsafe {
 				self.video
 					.CreateVideoProcessorInputView(source, &self.enumerator, &input_desc, Some(&mut input))
-					.map_err(|e| err("CreateVideoProcessorInputView", e))?;
+					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorInputView", e)))?;
 			}
-			let input = input.ok_or_else(|| Error::Codec(anyhow::anyhow!("input view is null")))?;
+			let input =
+				input.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("input view is null"))))?;
 
 			let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
 				ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
@@ -1878,9 +1887,10 @@ pub mod d3d11 {
 			unsafe {
 				self.video
 					.CreateVideoProcessorOutputView(&output, &self.enumerator, &output_desc, Some(&mut view))
-					.map_err(|e| err("CreateVideoProcessorOutputView", e))?;
+					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorOutputView", e)))?;
 			}
-			let view = view.ok_or_else(|| Error::Codec(anyhow::anyhow!("output view is null")))?;
+			let view =
+				view.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("output view is null"))))?;
 
 			let streams = [D3D11_VIDEO_PROCESSOR_STREAM {
 				Enable: true.into(),
@@ -1902,7 +1912,7 @@ pub mod d3d11 {
 			drop(std::mem::ManuallyDrop::into_inner(unsafe {
 				ptr::read(&streams[0].pInputSurface)
 			}));
-			result.map_err(|e| err("VideoProcessorBlt", e))?;
+			result.map_err(|e| ScaleError::Transient(err("VideoProcessorBlt", e)))?;
 
 			Ok(output)
 		}
