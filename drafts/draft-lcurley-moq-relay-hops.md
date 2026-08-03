@@ -85,7 +85,7 @@ LINK_COST Setup Option {
 ~~~
 
 **Option Value**:
-The price this connection adds to every advertisement crossing it, in units chosen by the deployment (the same units as [ROUTE_COST](#route_cost-parameter)).
+The price this connection adds to every advertisement crossing it, in units chosen by the deployment (the same units as [ROUTE_COST](#routecost-parameter)).
 Both endpoints add it to the Route Cost of every advertisement they receive over the connection before forwarding or acting on it, so the link is charged the same from either direction.
 
 An absent option means the default cost of 1, under which the accumulated Route Cost equals the hop count and selection degenerates to shortest-path.
