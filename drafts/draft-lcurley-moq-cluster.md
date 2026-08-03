@@ -1,9 +1,9 @@
 ---
-title: "MoQ Relay Hops Extension"
-abbrev: "moq-relay-hops"
+title: "MoQ Cluster Extension"
+abbrev: "moq-cluster"
 category: info
 
-docname: draft-lcurley-moq-relay-hops-latest
+docname: draft-lcurley-moq-cluster-latest
 submissiontype: IETF  # also: "independent", "editorial", "IAB", or "IRTF"
 number:
 date:
@@ -23,7 +23,7 @@ informative:
 
 --- abstract
 
-This document defines a Relay Hops extension for MoQ Transport {{moqt}}.
+This document defines a clustering extension for MoQ Transport {{moqt}}, used to build a mesh of relays.
 Each namespace advertisement carries the ordered list of Hop IDs it has traversed, starting with the original publisher, plus the accumulated cost of that path.
 A receiver uses the list to detect routing loops and to identify which advertisements come from the same publisher, and the cost to choose between paths.
 Each endpoint declares its own Hop ID during setup, and the peer uses it to avoid advertising or serving a path that already passed through that endpoint.

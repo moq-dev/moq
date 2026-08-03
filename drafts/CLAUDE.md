@@ -14,7 +14,7 @@ table in the root `CLAUDE.md`).
 
 Current drafts include `draft-lcurley-moq-lite` (the simplified MoQ transport),
 `draft-lcurley-moq-hang` (the media layer), and extension drafts
-(`-moq-timestamp`, `-moq-relay-hops`, `-moq-probe`, ...). Run
+(`-moq-timestamp`, `-moq-cluster`, `-moq-probe`, ...). Run
 `just drafts` to list them.
 
 ## Build and publish
@@ -66,6 +66,12 @@ like a table that silently degrades into a paragraph.
 
 ## Conventions
 
+- **Brevity is very important.** Less text is generally better; these drafts
+  aim to be readable, not hyper-specific. State each rule once, in the section
+  that owns it, and cross-reference instead of restating. One short motivating
+  sentence is enough rationale; skip exhaustive edge-case enumeration, repeated
+  explanations of the same mechanism, and "in other words" restatements. When
+  editing, prefer deleting a sentence over adding one.
 - Draft sources are kramdown-rfc markdown; `remark` (the repo's CommonMark
   linter) skips them. A successful `kramdown-rfc` run also validates syntax.
 - The `docname` frontmatter field ends in `-latest`; `publish` rewrites it to
