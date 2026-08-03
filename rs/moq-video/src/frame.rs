@@ -1954,6 +1954,13 @@ pub mod d3d11 {
 		flags
 	}
 
+	/// Whether explicit GPU-resize tests can render to an NV12 destination.
+	#[cfg(test)]
+	pub(crate) fn supports_nv12_render_target(device: &ID3D11Device) -> bool {
+		let support = unsafe { device.CheckFormatSupport(DXGI_FORMAT_NV12) }.unwrap_or_default();
+		support & D3D11_FORMAT_SUPPORT_RENDER_TARGET.0 as u32 != 0
+	}
+
 	struct UnmapGuard<'a> {
 		context: &'a ID3D11DeviceContext,
 		resource: &'a ID3D11Texture2D,
@@ -2274,6 +2281,7 @@ mod tests {
 	/// A Direct3D11 texture stays on the GPU when the caller opts in.
 	#[cfg(target_os = "windows")]
 	#[test]
+	#[ignore = "explicit D3D11 GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_stays_on_the_gpu() {
 		let Ok(device) = super::d3d11::create_device() else {
 			eprintln!("skipping: no Direct3D11 hardware device");
@@ -2283,6 +2291,10 @@ mod tests {
 			eprintln!("skipping: driver will not allocate a usable NV12 texture");
 			return;
 		};
+		if !super::d3d11::supports_nv12_render_target(&device) {
+			eprintln!("skipping: driver cannot render to NV12");
+			return;
+		}
 
 		let config = crate::resize::Config {
 			acceleration: crate::resize::Acceleration::Gpu,
@@ -2320,6 +2332,7 @@ mod tests {
 	/// Runs on real hardware; skips without a Direct3D11 device.
 	#[cfg(target_os = "windows")]
 	#[test]
+	#[ignore = "explicit D3D11 GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_matches_cpu() {
 		let Ok(device) = super::d3d11::create_device() else {
 			eprintln!("skipping: no Direct3D11 hardware device");
@@ -2330,6 +2343,10 @@ mod tests {
 			eprintln!("skipping: driver will not allocate a usable NV12 texture");
 			return;
 		};
+		if !super::d3d11::supports_nv12_render_target(&device) {
+			eprintln!("skipping: driver cannot render to NV12");
+			return;
+		}
 
 		let gpu = texture.resize(160, 120).unwrap().download_i420().unwrap();
 		let cpu = source.resize(160, 120).unwrap();

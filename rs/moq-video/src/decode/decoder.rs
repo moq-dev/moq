@@ -646,6 +646,7 @@ mod tests {
 	/// look right, which is what a ladder pays for once per rung.
 	#[cfg(target_os = "windows")]
 	#[test]
+	#[ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn mediafoundation_resized_texture_reencodes_in_place() {
 		let target = crate::Size::new(160, 120);
 		let resize = crate::resize::Config {
@@ -655,6 +656,16 @@ mod tests {
 		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
 			return;
 		};
+		let Some(device) = decoded.iter().find_map(|frame| match &frame.surface {
+			Surface::Texture(texture) => Some(texture.device()),
+			_ => None,
+		}) else {
+			panic!("Media Foundation decode did not return a Direct3D11 texture");
+		};
+		if !crate::frame::d3d11::supports_nv12_render_target(device) {
+			eprintln!("skipping: driver cannot render to NV12");
+			return;
+		}
 		let resized: Vec<_> = decoded
 			.iter()
 			.map(|frame| frame.resize_with(target, &resize).unwrap())

@@ -358,6 +358,10 @@ mod tests {
 	/// The multi-rung live path on real hardware: one shared NVDEC session
 	/// decodes the source, the GPU box filter resizes per rung, and each rung's
 	/// NVENC session encodes the CUDA frame in place. Skips without a GPU.
+	#[cfg_attr(
+		target_os = "windows",
+		ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"
+	)]
 	#[tokio::test]
 	async fn live_multi_rung_hardware() {
 		if !hardware_available() {
@@ -436,6 +440,10 @@ mod tests {
 	/// decoder) into hardware encode (NVENC, consuming the CUDA frame in place).
 	/// Skips on machines without both; on a Linux + NVIDIA box this is the
 	/// zero-copy transcode path under the real broadcast plumbing.
+	#[cfg_attr(
+		target_os = "windows",
+		ignore = "explicit live-DXVA GPU probe; VideoProcessorBlt can hang on affected drivers"
+	)]
 	#[tokio::test]
 	async fn end_to_end_hardware() {
 		if !hardware_available() {

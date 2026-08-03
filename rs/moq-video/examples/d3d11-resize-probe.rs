@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 mod probe {
 	use std::ffi::c_void;
-	use std::mem::ManuallyDrop;
+	use std::mem::{ManuallyDrop, size_of};
 	use std::ptr;
 	use std::sync::Mutex;
 	use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,12 +75,13 @@ mod probe {
 		D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
 		D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MESSAGE, D3D11_SDK_VERSION,
 		D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-		D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-		D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
-		D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11InfoQueue, ID3D11Texture2D, ID3D11VideoContext,
-		ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+		D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+		D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+		D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device,
+		ID3D11DeviceContext, ID3D11InfoQueue, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+		ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
 		ID3D11VideoProcessorOutputView,
 	};
 	use moq_video::windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
@@ -145,7 +146,9 @@ mod probe {
 			if unsafe { queue.GetMessage(index, None, &mut len) }.is_err() || len == 0 {
 				continue;
 			}
-			let mut buffer = vec![0u8; len];
+			// The message contains pointers, so its backing allocation must carry
+			// pointer alignment rather than the byte vector's alignment of one.
+			let mut buffer = vec![0u64; len.div_ceil(size_of::<u64>())];
 			let message = buffer.as_mut_ptr().cast::<D3D11_MESSAGE>();
 			if unsafe { queue.GetMessage(index, Some(message), &mut len) }.is_err() {
 				continue;
@@ -306,6 +309,14 @@ mod probe {
 
 			step("VideoProcessorSetStreamFrameFormat", || unsafe {
 				video_context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+			});
+			step("VideoProcessorSetStreamAutoProcessingMode", || unsafe {
+				video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+			});
+			step("VideoProcessorSetColorSpace", || unsafe {
+				let space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
+				video_context.VideoProcessorSetStreamColorSpace(&processor, 0, &space);
+				video_context.VideoProcessorSetOutputColorSpace(&processor, &space);
 			});
 
 			Ok(Self {
