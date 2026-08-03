@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::Kind;
 
@@ -15,6 +15,8 @@ const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
 const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+/// Characters that cannot appear in an HLS quoted-string attribute.
+const QUOTED_STRING: &AsciiSet = &CONTROLS.add(b'"');
 
 fn rendition_uri(kind: Kind, name: &str, suffix: &str) -> String {
 	format!(
@@ -22,6 +24,10 @@ fn rendition_uri(kind: Kind, name: &str, suffix: &str) -> String {
 		kind.as_str(),
 		utf8_percent_encode(name, PATH_SEGMENT)
 	)
+}
+
+fn quoted_string(value: &str) -> String {
+	utf8_percent_encode(value, QUOTED_STRING).to_string()
 }
 
 /// A video rendition entry for the master playlist.
@@ -118,11 +124,12 @@ pub fn render_master(video: &[VideoVariant], audio: &[AudioVariant], query: Opti
 	for group in &audio_groups {
 		for (index, variant) in group.variants.iter().enumerate() {
 			let default = if index == 0 { "YES" } else { "NO" };
+			let name = quoted_string(&variant.name);
 			let _ = writeln!(
 				out,
 				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{}\",NAME=\"{}\",DEFAULT={default},AUTOSELECT=YES,URI=\"{}\"",
 				group.id,
-				variant.name,
+				name,
 				rendition_uri(Kind::Audio, &variant.name, &suffix)
 			);
 		}
@@ -255,5 +262,19 @@ mod tests {
 
 		assert!(out.contains("\nvideo/cam%231%2Fmain%3Falt/media.m3u8?jwt=abc.def\n"));
 		assert!(out.contains("URI=\"audio/audio%20%231/media.m3u8?jwt=abc.def\""));
+	}
+
+	#[test]
+	fn audio_names_cannot_inject_attributes_or_lines() {
+		let audio = vec![AudioVariant {
+			name: "audio\"\nINJECT\u{7f}\u{1f3b5}".into(),
+			bandwidth: 128_000,
+			codec: "opus".into(),
+		}];
+
+		let out = render_master(&[], &audio, None);
+
+		assert!(out.contains("NAME=\"audio%22%0AINJECT%7F%F0%9F%8E%B5\""));
+		assert!(!out.contains("\nINJECT"));
 	}
 }

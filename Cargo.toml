@@ -107,6 +107,7 @@ moq-transcode = { version = "0.0.5", path = "rs/moq-transcode", default-features
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"
 moq-video = { version = "0.0.11", path = "rs/moq-video", default-features = false }
+percent-encoding = "2"
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
