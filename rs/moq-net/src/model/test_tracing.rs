@@ -1,7 +1,7 @@
 //! Tracing helpers shared by model tests.
 
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -40,7 +40,7 @@ pub(crate) fn count_drop_warnings(expected_message: &str, f: impl FnOnce()) -> u
 
 	impl Subscriber for Count {
 		fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-			*metadata.level() <= Level::WARN
+			*metadata.level() == Level::WARN
 		}
 
 		fn new_span(&self, _span: &Attributes<'_>) -> Id {

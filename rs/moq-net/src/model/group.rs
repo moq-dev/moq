@@ -812,8 +812,8 @@ impl Fetch {
 #[cfg(test)]
 mod test {
 	use super::*;
-	use bytes::Bytes;
 	use crate::model::test_tracing::count_drop_warnings;
+	use bytes::Bytes;
 	use futures::FutureExt;
 
 	#[test]
