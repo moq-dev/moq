@@ -357,7 +357,7 @@ The publisher replies with a single TRACK_INFO message carrying the resolved epo
 The returned properties are fixed for the lifetime of that generation, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path, track name, and epoch, and reuse it across every SUBSCRIBE and FETCH of the same generation.
 An announcement that changes the broadcast's Epoch replaces the content (see [ANNOUNCE_UPDATE](#announce-update)); cached TRACK_INFO from another generation MUST NOT be used to parse its frames, since the timescale may differ.
 A subscriber without announcements (a path known out of band) gets the same protection by echoing a non-zero resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames.
-A resolved epoch of 0 pins nothing, so such a cache SHOULD NOT outlive the connection.
+A resolved epoch of 0 pins nothing and cannot key the cache: a subscriber following announcements MUST discard such a cache when the broadcast's advertisement is replaced (see [ANNOUNCE_UPDATE](#announce-update)), and one without announcements SHOULD NOT keep it beyond the connection.
 If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
 Because a subscriber MAY open the Track stream concurrently with a SUBSCRIBE or FETCH (see [Subscribe](#subscribe) and [Fetch](#fetch)) and cannot parse any buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
@@ -787,7 +787,8 @@ A value of 0 means unspecified: identity falls back to the first entry of the pa
 
 **Ended**:
 Whether the broadcast has ended (1) or is live (0).
-An ended broadcast is complete or static content, such as a recording: the publisher MUST reset a Subscribe Stream for it, and subscribers read its groups via FETCH instead.
+An ended broadcast is complete or static content, such as a recording: the publisher MUST reset a new Subscribe Stream for it, and subscribers read its groups via FETCH instead.
+A broadcast ending does not disturb subscriptions already in flight: they conclude normally with SUBSCRIBE_END.
 `Ended` describes the content; retracting the advertisement itself is ANNOUNCE_END, and an ended broadcast may stay advertised indefinitely.
 Ended broadcasts are only advertised on Announce Streams that requested them (see [ANNOUNCE_REQUEST](#announce-request)); on other streams, a broadcast that ends but remains available is retracted with ANNOUNCE_END.
 Values other than 0 and 1 are a protocol violation.
