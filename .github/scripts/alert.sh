@@ -70,7 +70,8 @@ check_coverage() {
     # sort.
     expected=$(non_pr_workflow_names) || return 2
     expected=$(sort -u <<<"$expected")
-    actual=$(watched_workflow_names | sort -u)
+    actual=$(watched_workflow_names) || return 2
+    actual=$(sort -u <<<"$actual")
 
     if [[ "$expected" == "$actual" ]]; then
         echo "alert.yml watches all $(wc -l <<<"$expected" | tr -d ' ') non-PR workflows"
@@ -83,130 +84,70 @@ check_coverage() {
     return 1
 }
 
-# Print one trigger name per line for a workflow file.
-#
-# GitHub accepts four serializations of `on:` (block map, block sequence, flow
-# sequence, bare scalar), so all four are handled here. A parser that understood
-# only one would report "no non-PR triggers" for a workflow it merely failed to
-# read, and check_coverage would pass while the workflow went unwatched. That
-# silent gap is the whole thing this script exists to prevent.
-#
-# Anything still unrecognized (a quoted `"on":`, say) is a hard error that
-# aborts check_coverage, rather than an empty result it could mistake for
-# "no non-PR triggers".
-workflow_triggers() {
-    awk -v file="$1" '
-        # on: [push, pull_request]
-        /^on:[[:space:]]*\[/ {
-            line = $0
-            sub(/^on:[[:space:]]*\[/, "", line)
-            sub(/\].*$/, "", line)
-            n = split(line, items, ",")
-            for (i = 1; i <= n; i++) {
-                gsub(/[[:space:]"'"'"']/, "", items[i])
-                if (items[i] != "") print items[i]
-            }
-            seen = 1
-            next
-        }
-        # on: push
-        /^on:[[:space:]]*[A-Za-z_]/ {
-            line = $0
-            sub(/^on:[[:space:]]*/, "", line)
-            sub(/[[:space:]]*#.*$/, "", line)
-            print line
-            seen = 1
-            next
-        }
-        # on:  (block map or block sequence on the following indented lines)
-        /^on:[[:space:]]*(#.*)?$/ { in_on = 1; seen = 1; next }
-
-        in_on && /^[^[:space:]#]/ { in_on = 0 }
-        !in_on { next }
-        # Blank lines and comments.
-        /^[[:space:]]*(#.*)?$/ { next }
-        # Block sequence item: "  - push"
-        /^  - [A-Za-z_]/ {
-            line = $0
-            sub(/^  - /, "", line)
-            sub(/[[:space:]]*#.*$/, "", line)
-            print line
-            next
-        }
-        # Block map key: "  push:"
-        /^  [A-Za-z_][A-Za-z_0-9]*:/ {
-            line = $1
-            sub(/:.*/, "", line)
-            print line
-            next
-        }
-        # Deeper indentation is a triggers own config (branches, tags, types).
-        /^    / { next }
-        {
-            printf "alert.sh: cannot parse the on: block of %s (line %d: %s)\n", file, NR, $0 >"/dev/stderr"
-            exit 2
-        }
-        END {
-            if (!seen) {
-                printf "alert.sh: no on: block found in %s\n", file >"/dev/stderr"
-                exit 2
-            }
-        }
-    ' "$1"
-}
-
 # Names of workflows carrying at least one non-pull_request trigger.
 #
-# GitHub runs both .yml and .yaml, so both are scanned. nullglob keeps the
-# unmatched extension from expanding to a literal path under `set -u`.
+# The YAML is parsed rather than pattern-matched. GitHub accepts `on:` as a
+# block map, block sequence, flow sequence or bare scalar, any of which may wrap
+# across lines, and it runs both .yml and .yaml. Every hand-rolled version of
+# this missed a shape and then reported success for a workflow it had not
+# actually read, which is the exact silent gap the guard exists to close. bun is
+# already a hard dependency (jsDeps in flake.nix, `bun install` in CI), so its
+# YAML parser costs nothing new.
+#
+# A workflow with no `name:` is an error, not a skip: GitHub falls back to the
+# file path, which alert.yml cannot reference, and skipping it would put the
+# workflow past this check unwatched.
 non_pr_workflow_names() {
-    local f triggers
+    local f files=()
     shopt -s nullglob
     for f in "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml; do
         # alert.yml watches the others; watching itself would be a trigger loop.
         [[ "$(basename "$f")" =~ ^alert\.ya?ml$ ]] && continue
-
-        triggers=$(workflow_triggers "$f") || return 2
-        if grep -qvx 'pull_request' <<<"$triggers"; then
-            workflow_name "$f" || return 2
-        fi
+        files+=("$f")
     done
+
+    printf "%s\n" "${files[@]}" | bun -e '
+const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
+const names = [];
+for (const file of files) {
+    const doc = Bun.YAML.parse(await Bun.file(file).text());
+    if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+        console.error("alert.sh: " + file + " is not a YAML mapping");
+        process.exit(2);
+    }
+    const on = doc.on;
+    let triggers;
+    if (typeof on === "string") triggers = [on];
+    else if (Array.isArray(on)) triggers = on;
+    else if (on !== null && typeof on === "object") triggers = Object.keys(on);
+    else {
+        console.error("alert.sh: cannot read the on: value of " + file);
+        process.exit(2);
+    }
+    if (!triggers.some((t) => t !== "pull_request")) continue;
+
+    const name = doc.name;
+    if (typeof name !== "string" || name.trim() === "") {
+        console.error("alert.sh: " + file + " has no top-level name:, so alert.yml cannot reference it");
+        process.exit(2);
+    }
+    names.push(name.trim());
 }
-
-# The workflow's `name:`, which is what alert.yml references.
-#
-# GitHub treats `name:` as optional and falls back to the file path, which
-# workflow_run cannot reference cleanly. Every workflow here has one, so this
-# requires it: a nameless workflow would otherwise contribute nothing and slip
-# past check_coverage unwatched.
-workflow_name() {
-    local name
-    name=$(sed -n 's/^name:[[:space:]]*//p' "$1" | head -1)
-    name=${name%%#*}
-    name=${name%"${name##*[![:space:]]}"}
-    # Unquote so `name: "Foo"` matches a plain `- Foo` entry in alert.yml.
-    if [[ "$name" =~ ^\"(.*)\"$ ]] || [[ "$name" =~ ^\'(.*)\'$ ]]; then
-        name="${BASH_REMATCH[1]}"
-    fi
-
-    if [[ -z "$name" ]]; then
-        echo "alert.sh: $1 has no top-level name:, so alert.yml cannot reference it" >&2
-        return 2
-    fi
-    printf '%s\n' "$name"
+if (names.length) console.log(names.join("\n"));
+'
 }
 
 # Names listed under alert.yml's `on.workflow_run.workflows:`.
 watched_workflow_names() {
-    awk '
-        /^    workflows:/ { in_list = 1; next }
-        in_list && /^      - / {
-            sub(/^      - /, "")
-            print
-            next
-        }
-        in_list { exit }
-    ' "$WORKFLOWS_DIR/alert.yml"
+    ALERT_YML="$WORKFLOWS_DIR/alert.yml" bun -e '
+const doc = Bun.YAML.parse(await Bun.file(Bun.env.ALERT_YML).text());
+const list = doc?.on?.workflow_run?.workflows;
+if (!Array.isArray(list)) {
+    console.error("alert.sh: alert.yml has no on.workflow_run.workflows list");
+    process.exit(2);
+}
+if (list.length) console.log(list.join("\n"));
+'
 }
 
 case "${1:-}" in
