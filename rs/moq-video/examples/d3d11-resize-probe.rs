@@ -18,7 +18,7 @@
 //! | `live` | Decoder bound and decoding first, scaler built after. The reported failure. |
 //! | `concurrent` | Decode loop on one thread, scaler on another, one shared device. |
 //! | `crate` | Like `live`, but through the real `decode::Decoder`, to confirm the probe's decoder matches it. |
-//! | `ladder` | One decoder, four hardware encoders, and a scaler on one device. The full `moq-transcode` shape. |
+//! | `ladder` | One decoder and four GPU-resize plus hardware-encode rungs on one device. The full `moq-transcode` shape. |
 //!
 //! Run one mode per process: a wedge leaves the device unusable, so a second
 //! mode in the same process would measure the wreckage rather than itself.
@@ -39,7 +39,8 @@
 //! The probe prints its PID on startup and a watchdog line every two seconds
 //! naming the call in flight, so a wedge is one `procdump -ma <pid>` away from
 //! a stack. Pass `--debug-layer` to add `D3D11_CREATE_DEVICE_DEBUG`, which
-//! often names the problem before the wedge does.
+//! often names the problem before the wedge does. The `crate` and `ladder`
+//! modes reject this flag because the production decoder owns device creation.
 //!
 //! The decode session here is a deliberately minimal reimplementation of
 //! `decode::backend::mediafoundation`. The question is which ordering of device
@@ -1027,7 +1028,9 @@ mod probe {
 	/// The same ordering as `live`, but the pictures come from the crate's own
 	/// decoder, so the probe's minimal MFT can be checked against the real one.
 	fn mode_crate(debug_layer: bool) -> Result<()> {
-		let _ = debug_layer;
+		if debug_layer {
+			bail!("crate mode cannot enable the debug layer because the decoder owns its Direct3D device");
+		}
 		eprintln!("[crate] decode via moq_video::decode::Decoder, then scale its device");
 
 		let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
@@ -1059,9 +1062,9 @@ mod probe {
 		report(&device, &scaled, &gradient(0))
 	}
 
-	/// The full `moq-transcode` shape: one DXVA decoder, `RUNGS` hardware encoder
-	/// MFTs, and a scaler, all on the single device the decoded textures belong
-	/// to, all on separate threads.
+	/// The full `moq-transcode` shape: one DXVA decoder plus `RUNGS` GPU-resize and
+	/// hardware-encode paths on the decoded textures' device, all on separate
+	/// threads.
 	///
 	/// The encoders are the ingredient the other modes lack. `encode::Encoder`
 	/// binds the device of the texture it is handed, so a ladder puts one decode
@@ -1070,8 +1073,25 @@ mod probe {
 	fn mode_ladder(debug_layer: bool) -> Result<()> {
 		const RUNGS: usize = 4;
 		const PASSES: usize = 200;
-		let _ = debug_layer;
-		eprintln!("[ladder] one decoder + {RUNGS} hardware encoders + a scaler on one device");
+		const SIZES: [Size; RUNGS] = [
+			Size {
+				width: 256,
+				height: 192,
+			},
+			Size {
+				width: 224,
+				height: 168,
+			},
+			Size {
+				width: 192,
+				height: 144,
+			},
+			TARGET,
+		];
+		if debug_layer {
+			bail!("ladder mode cannot enable the debug layer because the decoder owns its Direct3D device");
+		}
+		eprintln!("[ladder] one decoder + {RUNGS} GPU-resize and hardware-encode rungs on one device");
 
 		let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -1101,13 +1121,13 @@ mod probe {
 		let stop = &AtomicBool::new(false);
 		let frames = &frames;
 		std::thread::scope(|scope| -> Result<()> {
-			for rung in 0..RUNGS {
+			for (rung, target) in SIZES.into_iter().enumerate() {
 				scope.spawn(move || {
 					let _com = match ComGuard::new() {
 						Ok(com) => com,
 						Err(e) => return eprintln!("[ladder] rung {rung} has no COM: {e}"),
 					};
-					let mut config = moq_video::encode::Config::new(SOURCE.width, SOURCE.height, 30);
+					let mut config = moq_video::encode::Config::new(target.width, target.height, 30);
 					config.kind = moq_video::encode::Kind::Named("mediafoundation".into());
 					let mut encoder = match moq_video::encode::Encoder::new(&config) {
 						Ok(encoder) => encoder,
@@ -1118,7 +1138,14 @@ mod probe {
 							if stop.load(Ordering::Relaxed) {
 								return;
 							}
-							if let Err(e) = encoder.encode(frame) {
+							let resized = match frame.resize(target) {
+								Ok(resized) => resized,
+								Err(e) => return eprintln!("[ladder] rung {rung} stopped resizing: {e}"),
+							};
+							if !matches!(&resized.surface, Surface::Texture(_)) {
+								return eprintln!("[ladder] rung {rung} resize left the GPU");
+							}
+							if let Err(e) = encoder.encode(&resized) {
 								return eprintln!("[ladder] rung {rung} stopped encoding: {e}");
 							}
 						}
