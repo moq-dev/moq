@@ -15,11 +15,9 @@ pub struct Config {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Acceleration {
-	/// Use the stable platform default.
+	/// Use the platform default.
 	///
-	/// CUDA and macOS pixel buffers stay on the GPU. Direct3D11 textures use the
-	/// CPU because some drivers can block indefinitely when a cold video
-	/// processor first runs on a device with a live DXVA decoder.
+	/// GPU-backed surfaces stay on the GPU on every supported platform.
 	#[default]
 	Auto,
 	/// Always download GPU surfaces and scale on the CPU.

@@ -131,14 +131,12 @@ rather than a blanket promise:
 | --- | --- | --- | --- |
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
 | Linux | `Cuda` (NVDEC) | yes, straight into NVENC | no, downloaded to I420 first |
-| Windows | `Texture` (Media Foundation / DXVA) | yes without resize; GPU resize is opt-in | no, downloaded to I420 first |
+| Windows | `Texture` (Media Foundation / DXVA) | yes, through the Direct3D11 video processor | no, downloaded to I420 first |
 
-On macOS and Linux, `Frame::resize` stays on the GPU through a
-`VTPixelTransferSession` or CUDA kernel. Windows defaults to downloading and
-scaling on the CPU because some drivers can block indefinitely when a cold
-Direct3D11 video processor runs beside a live DXVA decoder. Call
-`Frame::resize_with` with `resize::Acceleration::Gpu` to opt into the GPU path;
-a driver that rejects it returns to CPU scaling and warns once. Rendering is
+`Frame::resize` stays on the GPU through a `VTPixelTransferSession`, CUDA kernel,
+or Direct3D11 video processor. Call `Frame::resize_with` with
+`resize::Acceleration::Cpu` to force a download and CPU resize. A driver that
+rejects GPU resizing returns to CPU scaling and warns once. Rendering is
 zero-copy on macOS only; the Vulkan and EGL importers that would extend it are
 tracked in [#2481](https://github.com/moq-dev/moq/issues/2481).
 

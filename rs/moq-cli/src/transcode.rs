@@ -36,7 +36,8 @@ pub struct Args {
 	#[arg(long, default_value = "auto")]
 	pub decoder: String,
 
-	/// Frame resize acceleration: `auto`, `cpu`, or `gpu`.
+	/// Frame resize acceleration: `auto` (GPU-backed frames stay resident), `cpu`,
+	/// or `gpu`.
 	#[arg(long, default_value = "auto", value_parser = parse_resize_acceleration)]
 	pub resize_acceleration: moq_video::resize::Acceleration,
 }

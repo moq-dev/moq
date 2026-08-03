@@ -24,9 +24,9 @@ the H.264 software fallback. H.264, H.265, and 8-bit 4:2:0 AV1 source renditions
 are eligible when a matching decoder is available. On an NVIDIA GPU the pipeline
 is fully GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 CUDA frame in place, with no CPU copies. macOS also resizes on the GPU. Windows
-defaults to CPU resize because some drivers can wedge in the Direct3D11 video
-processor; set `Config::resize.acceleration` to `resize::Acceleration::Gpu` to
-opt in.
+uses the Direct3D11 video processor by default; set
+`Config::resize.acceleration` to `resize::Acceleration::Cpu` to force a download
+and CPU resize.
 
 ## Library
 

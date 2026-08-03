@@ -56,8 +56,7 @@ pub struct Config {
 	/// need a hardware decoder).
 	pub decoder: moq_video::decode::Kind,
 
-	/// Frame resize behavior. Automatic mode keeps Direct3D11 resizing on the CPU
-	/// because some Windows drivers can wedge beside a live DXVA decoder.
+	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
 	pub resize: moq_video::resize::Config,
 }
 
