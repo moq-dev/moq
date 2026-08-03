@@ -55,7 +55,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, peer_origin, version, tasks);
 
 				let dispatch_session = adapter.clone();
-				let mut sub_ns = subscriber.clone();
+				let sub_ns = subscriber.clone();
 				let sub_ns_adapter = adapter.clone();
 
 				// Every half only ends the session on error (err_only parks on clean
@@ -69,19 +69,32 @@ pub fn start<S: web_transport_trait::Session>(
 					version
 				)));
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
+				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
+				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let stream = match version {
-						Version::Draft16 => {
-							let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-							Stream {
-								writer: crate::coding::Writer::new(send, version),
-								reader: crate::coding::Reader::new(recv, version),
+					let mut prefixes = futures::stream::FuturesUnordered::new();
+					for prefix in sub_ns.subscribe_prefixes() {
+						let mut sub_ns = sub_ns.clone();
+						let sub_ns_adapter = sub_ns_adapter.clone();
+						prefixes.push(async move {
+							let stream = match version {
+								Version::Draft16 => {
+									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+									Stream {
+										writer: crate::coding::Writer::new(send, version),
+										reader: crate::coding::Reader::new(recv, version),
+									}
+								}
+								_ => Stream::open(&sub_ns_adapter, version).await?,
+							};
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 							}
-						}
-						_ => Stream::open(&sub_ns_adapter, version).await?,
-					};
-					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+							Ok::<(), Error>(())
+						});
+					}
+					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+						result?;
 					}
 					Ok(())
 				}));
@@ -128,7 +141,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let subscriber = Subscriber::new(session.clone(), subscribe, control, peer_origin, version, tasks);
 
 				let sub_ns_session = session.clone();
-				let mut sub_ns = subscriber.clone();
+				let sub_ns = subscriber.clone();
 
 				// When the peer's SETUP was pre-read (a gated server accept), monitor
 				// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
@@ -153,10 +166,22 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
 				let mut goaway = std::pin::pin!(err_only(goaway));
 				let mut setup = std::pin::pin!(setup);
+				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let stream = Stream::open(&sub_ns_session, version).await?;
-					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+					let mut prefixes = futures::stream::FuturesUnordered::new();
+					for prefix in sub_ns.subscribe_prefixes() {
+						let mut sub_ns = sub_ns.clone();
+						let sub_ns_session = sub_ns_session.clone();
+						prefixes.push(async move {
+							let stream = Stream::open(&sub_ns_session, version).await?;
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+							}
+							Ok::<(), Error>(())
+						});
+					}
+					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+						result?;
 					}
 					Ok(())
 				}));

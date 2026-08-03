@@ -154,14 +154,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Some(track)
 	}
 
-	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
+	/// The prefixes to issue SUBSCRIBE_NAMESPACE for: this handle's permitted scope,
+	/// relative to its root, exactly as `lite::Subscriber` uses.
+	///
+	/// NOT the root. The root says where a remote broadcast MOUNTS locally; the scope
+	/// says what we may ask for. They coincide only when the peer shares our namespace,
+	/// and conflating them broke both halves for a rooted subscriber: we asked the peer
+	/// for a prefix it had never heard of (nothing matched), and re-joined that same
+	/// root onto the reply so anything that did match landed at `<root>/<root>/...`.
+	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
+		self.origin.allowed().map(|p| p.to_owned()).collect()
+	}
+
+	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
-	/// (virtual for v14/v15, real bidi for v16+).
+	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
 	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
+		prefix: PathOwned,
 	) -> Result<(), Error> {
-		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
@@ -225,6 +237,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut data = stream.reader.read_exact(size as usize).await?;
 
 			match type_id {
+				// The suffix is relative to the prefix we subscribed, which is itself
+				// relative to our root -- so the join is too, which is what everything
+				// below wants (`create_broadcast` joins the root itself).
 				ietf::Namespace::ID => {
 					let msg = ietf::Namespace::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
