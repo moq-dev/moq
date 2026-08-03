@@ -325,7 +325,8 @@ A subscriber opens Subscribe Streams to request a Track.
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
 When a start group can be resolved, the publisher replies with a SUBSCRIBE_OK message (confirming the subscription and resolving its start group), followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
 When the accepted track has already ended with no matching groups there is no start group to resolve, so the publisher sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A rejection is a stream reset: if the publisher cannot serve the subscription — the track does not exist, the broadcast has ended (see `Ended` in [ANNOUNCE_START](#announce-start)), the requested `Epoch` is not the one being served, or it otherwise refuses — it MUST reset the stream rather than leave it pending, and SHOULD do so promptly (within roughly a round trip) so the subscriber is not left waiting.
+A rejection is a stream reset.
+If the publisher cannot serve the subscription (no such track, an ended broadcast, an `Epoch` that is not the one being served, or any other refusal), it MUST reset the stream rather than leave it pending, and SHOULD do so promptly (within roughly a round trip) so the subscriber is not left waiting.
 A subscription the publisher accepts but has no groups for yet is not a rejection: for a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start. A subscriber therefore distinguishes "pending" from "refused" by the stream reset, not by a timeout.
 The Subscribe Stream does not carry the track's publisher properties — those are immutable and fetched once via a [Track Stream](#track-stream) (see [TRACK_INFO](#track-info)).
 The subscriber MUST have the track's TRACK_INFO before it can fully interpret the FRAME messages that arrive on Group Streams, since the timescale is needed to interpret each timestamp; it MAY open the Track and Subscribe streams concurrently and buffer frames until TRACK_INFO arrives.
@@ -355,7 +356,8 @@ The subscriber sends a TRACK message containing the broadcast path, track name, 
 The publisher replies with a single TRACK_INFO message carrying the resolved epoch and then FINs the stream, or resets the stream on error (e.g. the track does not exist, or a non-zero epoch does not match).
 The returned properties are fixed for the lifetime of that generation, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path, track name, and epoch, and reuse it across every SUBSCRIBE and FETCH of the same generation.
 An announcement that changes the broadcast's Epoch replaces the content (see [ANNOUNCE_UPDATE](#announce-update)); cached TRACK_INFO from another generation MUST NOT be used to parse its frames, since the timescale may differ.
-A subscriber without announcements (a path known out of band) gets the same protection by echoing the resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames.
+A subscriber without announcements (a path known out of band) gets the same protection by echoing a non-zero resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames.
+A resolved epoch of 0 pins nothing, so such a cache SHOULD NOT outlive the connection.
 If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
 Because a subscriber MAY open the Track stream concurrently with a SUBSCRIBE or FETCH (see [Subscribe](#subscribe) and [Fetch](#fetch)) and cannot parse any buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
@@ -778,8 +780,8 @@ This is combined with the broadcast path prefix to form the full broadcast path.
 
 **Epoch**:
 The generation of content at this path, chosen by the original publisher and forwarded unchanged by relays.
-Each new generation MUST use a non-zero Epoch greater than the last.
-Wall-clock milliseconds are a convenient source, but clocks roll back and skew, so a publisher SHOULD take the maximum of its clock and one more than the highest Epoch it can observe at the path (e.g. the incumbent advertisement).
+Each new generation MUST use a non-zero Epoch greater than the last, minted with enough entropy that independent publishers cannot collide by accident: equal Epochs declare interchangeable content, so equality must only happen by deliberate opt-in.
+Wall-clock milliseconds with random low-order bits appended is a good source; clocks roll back and skew, so a publisher SHOULD also exceed the highest Epoch it can observe at the path (e.g. the incumbent advertisement).
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 means unspecified: identity falls back to the first entry of the path (see below), e.g. when bridging from an endpoint that does not assign Epochs.
 

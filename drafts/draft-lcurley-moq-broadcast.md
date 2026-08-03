@@ -78,8 +78,8 @@ EPOCH Parameter {
 
 **Epoch**:
 The generation of content at this namespace, chosen by the original publisher and forwarded unchanged by relays.
-Each new generation MUST use a non-zero Epoch greater than the last.
-Wall-clock milliseconds are a convenient source, but clocks roll back and skew, so a publisher SHOULD take the maximum of its clock and one more than the highest Epoch it can observe at the namespace.
+Each new generation MUST use a non-zero Epoch greater than the last, minted with enough entropy that independent publishers cannot collide by accident: equal Epochs declare interchangeable content, so equality must only happen by deliberate opt-in.
+Wall-clock milliseconds with random low-order bits appended is a good source; clocks roll back and skew, so a publisher SHOULD also exceed the highest Epoch it can observe at the namespace.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 is equivalent to omitting the parameter.
 
