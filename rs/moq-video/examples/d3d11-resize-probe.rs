@@ -879,15 +879,13 @@ mod probe {
 			.surface
 			.into_i420()
 			.context("cpu resize download")?;
-		// Packed I420, so the luma plane is the leading width * height bytes.
-		let luma = (TARGET.width * TARGET.height) as usize;
 		eprintln!(
 			"    scaled {}x{} -> {}x{}, luma MAE vs the CPU resize: {}",
 			SOURCE.width,
 			SOURCE.height,
 			TARGET.width,
 			TARGET.height,
-			mae(got.y(), &expected[..luma])
+			mae(got.y(), expected.y())
 		);
 		Ok(())
 	}
