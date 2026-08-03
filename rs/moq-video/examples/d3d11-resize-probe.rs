@@ -1121,36 +1121,32 @@ mod probe {
 		let stop = &AtomicBool::new(false);
 		let frames = &frames;
 		std::thread::scope(|scope| -> Result<()> {
+			let mut workers = Vec::with_capacity(RUNGS);
 			for (rung, target) in SIZES.into_iter().enumerate() {
-				scope.spawn(move || {
-					let _com = match ComGuard::new() {
-						Ok(com) => com,
-						Err(e) => return eprintln!("[ladder] rung {rung} has no COM: {e}"),
-					};
+				workers.push(scope.spawn(move || -> Result<()> {
+					let _com = ComGuard::new().with_context(|| format!("ladder rung {rung} COM"))?;
 					let mut config = moq_video::encode::Config::new(target.width, target.height, 30);
 					config.kind = moq_video::encode::Kind::Named("mediafoundation".into());
-					let mut encoder = match moq_video::encode::Encoder::new(&config) {
-						Ok(encoder) => encoder,
-						Err(e) => return eprintln!("[ladder] rung {rung} has no hardware encoder: {e}"),
-					};
+					let mut encoder = moq_video::encode::Encoder::new(&config)
+						.with_context(|| format!("ladder rung {rung} hardware encoder"))?;
 					while !stop.load(Ordering::Relaxed) {
 						for frame in frames {
 							if stop.load(Ordering::Relaxed) {
-								return;
+								return Ok(());
 							}
-							let resized = match frame.resize(target) {
-								Ok(resized) => resized,
-								Err(e) => return eprintln!("[ladder] rung {rung} stopped resizing: {e}"),
-							};
+							let resized = frame
+								.resize(target)
+								.with_context(|| format!("ladder rung {rung} resize"))?;
 							if !matches!(&resized.surface, Surface::Texture(_)) {
-								return eprintln!("[ladder] rung {rung} resize left the GPU");
+								bail!("ladder rung {rung} resize left the GPU");
 							}
-							if let Err(e) = encoder.encode(&resized) {
-								return eprintln!("[ladder] rung {rung} stopped encoding: {e}");
-							}
+							encoder
+								.encode(&resized)
+								.with_context(|| format!("ladder rung {rung} encode"))?;
 						}
 					}
-				});
+					Ok(())
+				}));
 			}
 
 			// Let the encoders bind the device and get busy before the scaler
@@ -1169,6 +1165,9 @@ mod probe {
 				Ok(())
 			})();
 			stop.store(true, Ordering::Relaxed);
+			for worker in workers {
+				worker.join().map_err(|_| anyhow!("ladder rung thread panicked"))??;
+			}
 			result
 		})
 	}
