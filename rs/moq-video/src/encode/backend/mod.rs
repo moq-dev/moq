@@ -44,7 +44,20 @@ pub(crate) trait Backend: Send {
 	/// request, arriving via [`Encoder::keyframe`](super::Encoder::keyframe).
 	fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<Encoded>, Error>;
 
-	/// Flush the encoder, returning any buffered access units.
+	/// Return every access unit the codec is still holding, leaving the encoder
+	/// usable for the frames that follow.
+	///
+	/// The caller reaches for this at a boundary the output has to respect, which
+	/// on a live track is a group: a codec that pipelines would otherwise carry the
+	/// last frames of one group into the next, ahead of its keyframe, where a
+	/// consumer joining there cannot decode them.
+	///
+	/// No default, even though most backends have nothing to hold: a pipelined one
+	/// that inherited an empty implementation would drop frames at every boundary
+	/// and look like it worked.
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error>;
+
+	/// Flush the encoder for the last time, returning any buffered access units.
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error>;
 
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
@@ -136,4 +149,83 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 	}
 
 	Err(Error::NoEncoder(tried.join(", ")))
+}
+
+#[cfg(test)]
+pub(crate) mod test_util {
+	use h264_reader::nal::sps::SeqParameterSet;
+	use h264_reader::nal::{Nal, RefNal, UnitType};
+
+	/// A stream's VUI color description, as the raw code points ISO/IEC 23091-2
+	/// assigns them plus the range flag.
+	///
+	/// Deliberately not mapped onto [`Color`](crate::Color): the mapping is lossy
+	/// (several code points share a matrix, and BT.709 and SMPTE 170M define the
+	/// same transfer curve under different numbers), so a test that compared
+	/// `Color`s could not see a backend drift on the fields `Color` folds away.
+	#[derive(Debug, PartialEq, Eq)]
+	pub(crate) struct Described {
+		pub primaries: u8,
+		pub transfer: u8,
+		pub matrix: u8,
+		pub full_range: bool,
+	}
+
+	/// The description we emit for BT.601 and BT.709 limited range, shared by the
+	/// backend tests so a backend drifting from the others fails rather than
+	/// quietly encoding its own dialect.
+	///
+	/// BT.601 goes out as SMPTE 170M primaries and matrix (code point 6) with the
+	/// BT.709 transfer curve (1). The two curves are defined identically, and
+	/// CoreVideo's SMPTE 170M transfer constant is deprecated while Media
+	/// Foundation has none at all, so 1 is the only value all four backends can
+	/// actually emit.
+	pub(crate) const BT601_DESCRIBED: Described = Described {
+		primaries: 6,
+		transfer: 1,
+		matrix: 6,
+		full_range: false,
+	};
+
+	pub(crate) const BT709_DESCRIBED: Described = Described {
+		primaries: 1,
+		transfer: 1,
+		matrix: 1,
+		full_range: false,
+	};
+
+	/// The color description an H.264 Annex-B stream carries in its SPS, or `None`
+	/// if it carries none and a decoder would have to guess.
+	///
+	/// Reads the bitstream rather than the encoder's config, so a backend that
+	/// quietly drops the VUI (or a driver that ignores it) fails the test instead
+	/// of passing on our own bookkeeping.
+	pub(crate) fn declared_color(annexb: &[u8]) -> Option<Described> {
+		// Every 4-byte start code contains a 3-byte one at offset 1, so scanning
+		// for the short form finds both.
+		let starts: Vec<usize> = (0..annexb.len().saturating_sub(2))
+			.filter(|&i| annexb[i..i + 3] == [0, 0, 1])
+			.map(|i| i + 3)
+			.collect();
+
+		let sps = starts.iter().enumerate().find_map(|(n, &start)| {
+			// Bound the NAL at the next start code: a trailing slice would
+			// leave the SPS parser reading into the following NAL.
+			let end = starts.get(n + 1).map_or(annexb.len(), |&next| next - 3);
+			let nal = RefNal::new(&annexb[start..end], &[], true);
+			match nal.header().ok()?.nal_unit_type() {
+				UnitType::SeqParameterSet => SeqParameterSet::from_bits(nal.rbsp_bits()).ok(),
+				_ => None,
+			}
+		})?;
+
+		let signal = sps.vui_parameters.as_ref()?.video_signal_type.as_ref()?;
+		let description = signal.colour_description.as_ref()?;
+		Some(Described {
+			primaries: description.colour_primaries,
+			transfer: description.transfer_characteristics,
+			matrix: description.matrix_coefficients,
+			full_range: signal.video_full_range_flag,
+		})
+	}
 }

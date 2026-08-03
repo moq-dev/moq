@@ -125,6 +125,9 @@ fn client_version(version: Option<moq_net::Version>) -> moq_native::Client {
 	config.tls.disable_verify = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
 	config.websocket.delay = None;
+	// Every relay in this file listens on IPv4 loopback, so bind the same family
+	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
+	config.bind = "127.0.0.1:0".parse().expect("parse bind");
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
@@ -379,13 +382,20 @@ async fn two_publish_only_clients_coexist() {
 	web_handle.abort();
 }
 
-/// Run the relay's accept loop over a stream-only server (no QUIC), the same path
+/// Run the relay's accept loop over the given server config, the same path
 /// `main.rs` uses. Authenticates through the shared [`Auth`], here with fully
-/// public access (`--auth-public ""`) so no-JWT stream clients get the root.
-async fn spawn_stream_relay(config: moq_native::ServerConfig, auth_config: AuthConfig) -> tokio::task::JoinHandle<()> {
+/// public access (`--auth-public ""`) so no-JWT clients get the root.
+///
+/// Returns the QUIC socket the server bound, when it has one, so a caller that
+/// asked for an ephemeral port can dial it.
+async fn spawn_accept_relay(
+	config: moq_native::ServerConfig,
+	auth_config: AuthConfig,
+) -> (Option<std::net::SocketAddr>, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut server = config.init().expect("server init");
+	let addr = server.local_addr().ok();
 
 	let auth = auth_config
 		.init(&moq_native::tls::Client::default())
@@ -394,7 +404,7 @@ async fn spawn_stream_relay(config: moq_native::ServerConfig, auth_config: AuthC
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
 
-	tokio::spawn(async move {
+	let handle = tokio::spawn(async move {
 		let mut id = 0;
 		while let Some(request) = server.accept().await {
 			let conn = Connection {
@@ -408,7 +418,9 @@ async fn spawn_stream_relay(config: moq_native::ServerConfig, auth_config: AuthC
 				let _ = conn.run().await;
 			});
 		}
-	})
+	});
+
+	(addr, handle)
 }
 
 /// Stand up the relay listening only on a plain-TCP qmux `--server-bind` on a
@@ -430,7 +442,7 @@ async fn spawn_internal_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 
-	let handle = spawn_stream_relay(config, auth_config).await;
+	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -540,7 +552,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 	let mut auth_config = AuthConfig::default();
 	auth_config.public = Some(public);
 
-	let handle = spawn_stream_relay(config, auth_config).await;
+	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
 	// Wait for the socket file to appear.
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -740,6 +752,46 @@ async fn internal_unix_path_reaches_server() {
 	handle.abort();
 }
 
+/// Stand up the relay listening only on a QUIC `--server-bind` on an ephemeral
+/// loopback port, with fully public auth (no-JWT => whole root). Returns the bound
+/// address and an abort handle.
+async fn spawn_quic_relay() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+	let mut config = moq_native::ServerConfig::default();
+	config.bind = Some("127.0.0.1:0".to_string());
+	config.tls.generate = vec!["localhost".into()];
+
+	#[allow(deprecated)]
+	let public = PublicConfig::Simple(vec![String::new()]);
+	let mut auth_config = AuthConfig::default();
+	auth_config.public = Some(public);
+
+	let (addr, handle) = spawn_accept_relay(config, auth_config).await;
+	(addr.expect("relay bound no QUIC socket"), handle)
+}
+
+/// Raw QUIC has no request URI either, so `moqt://host:port/<path>` only reaches the
+/// relay if the client puts it in the SETUP. Same assertion as TCP: the relay scopes
+/// the publisher's grant to that root, across every version whose SETUP carries a path.
+#[tokio::test]
+async fn raw_quic_path_reaches_server() {
+	let (addr, handle) = spawn_quic_relay().await;
+
+	// Dialing an IP literal sends no SNI, so the SETUP is the only thing the server
+	// has to go on.
+	let pub_url: url::Url = format!("moqt://{addr}/room").parse().expect("parse url");
+	let sub_url: url::Url = format!("moqt://{addr}").parse().expect("parse url");
+
+	for version in path_versions() {
+		let announced = path_round_trip(version, pub_url.clone(), sub_url.clone(), "test").await;
+		assert_eq!(
+			announced, "room/test",
+			"the SETUP path should scope the publisher's grant ({version})"
+		);
+	}
+
+	handle.abort();
+}
+
 /// `/health` is a liveness probe that always returns `200 ok`.
 #[tokio::test]
 async fn health_endpoint_reports_ok() {
@@ -774,7 +826,7 @@ async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let mut auth_config = AuthConfig::default();
 	auth_config.public_subscribe = Some(public_subscribe);
 
-	let handle = spawn_stream_relay(config, auth_config).await;
+	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {
@@ -860,7 +912,7 @@ async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
 	let mut auth_config = AuthConfig::default();
 	auth_config.public_publish = Some(public_publish);
 
-	let handle = spawn_stream_relay(config, auth_config).await;
+	let (_, handle) = spawn_accept_relay(config, auth_config).await;
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(5);
 	loop {

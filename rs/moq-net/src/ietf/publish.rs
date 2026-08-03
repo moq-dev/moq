@@ -107,7 +107,7 @@ The namespace or track is not of interest to the endpoint.
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Path, Timescale,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
 		FilterType, GroupOrder, Location, Parameters, RequestId,
@@ -173,6 +173,11 @@ pub struct Publish<'a> {
 	pub group_order: GroupOrder,
 	pub largest_location: Option<Location>,
 	pub forward: bool,
+
+	/// The track's Timescale, sent as a Track Property (draft-17+).
+	///
+	/// `None` declares no timeline, so the subscriber times objects by arrival.
+	pub timescale: Option<Timescale>,
 	// pub parameters: Parameters,
 }
 
@@ -208,6 +213,11 @@ impl Message for Publish<'_> {
 					0x10 => self.forward,
 					0x22 => self.group_order,
 				);
+
+				// Track Properties are the final field, so nothing may follow.
+				if let Some(timescale) = self.timescale {
+					super::properties::encode(w, timescale, version)?;
+				}
 			}
 		}
 
@@ -243,6 +253,7 @@ impl Message for Publish<'_> {
 					group_order,
 					largest_location,
 					forward,
+					timescale: None,
 				})
 			}
 			_ => {
@@ -251,7 +262,7 @@ impl Message for Publish<'_> {
 					0x10 => forward: Option<bool>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				super::properties::skip(r, version)?;
+				let timescale = super::properties::decode(r, version)?;
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let forward = forward.unwrap_or(true);
@@ -264,6 +275,7 @@ impl Message for Publish<'_> {
 					group_order,
 					largest_location,
 					forward,
+					timescale,
 				})
 			}
 		}
@@ -432,6 +444,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -455,6 +468,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -514,6 +528,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -573,6 +588,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			largest_location: Some(Location { group: 10, object: 5 }),
 			forward: true,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -598,6 +614,7 @@ mod tests {
 			group_order: GroupOrder::Descending,
 			largest_location: None,
 			forward: true,
+			timescale: None,
 		};
 
 		let v17 = encode_message(&msg, Version::Draft17);

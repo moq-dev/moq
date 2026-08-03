@@ -1,5 +1,5 @@
 //! Wire encoding for the Low Overhead Container (LOC) defined in
-//! [draft-ietf-moq-loc](https://www.ietf.org/archive/id/draft-ietf-moq-loc-00.html).
+//! [draft-ietf-moq-loc-04](https://www.ietf.org/archive/id/draft-ietf-moq-loc-04.html).
 //!
 //! A LOC frame is laid out as:
 //!
@@ -9,14 +9,15 @@
 //! [codec_bitstream: remaining bytes]
 //! ```
 //!
-//! Each KVP starts with a delta-encoded type id. Even types carry a single
-//! varint value, odd types carry length-prefixed bytes. Recognized types:
+//! Each KVP starts with a delta-encoded type id, so properties are serialized in
+//! ascending type order. Even types carry a single varint value, odd types carry
+//! length-prefixed bytes. Recognized types:
 //!
 //! | ID   | Name        | Decoded into       |
 //! |------|-------------|--------------------|
-//! | 0x06 | Timestamp   | [`Frame::timestamp`] (required) |
 //! | 0x08 | Timescale   | [`Frame::timescale`] (optional, per-frame override) |
 //! | 0x0d | Video Config | Skipped. The hang catalog's `description` is authoritative. |
+//! | 0x10 | Timestamp   | [`Frame::timestamp`] (required) |
 //!
 //! Any other property is silently skipped on decode and never emitted on
 //! encode. Public properties are not handled here. They belong in the MoQ
@@ -28,8 +29,17 @@ use bytes::{Buf, Bytes, BytesMut};
 use moq_net::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 
 /// Property IDs recognized by this implementation.
-const PROP_TIMESTAMP: u64 = 0x06;
 const PROP_TIMESCALE: u64 = 0x08;
+const PROP_TIMESTAMP: u64 = 0x10;
+
+/// The Timestamp id from draft-03, accepted on decode so frames from an older
+/// peer (including our own releases) still carry a timestamp.
+///
+/// Only the value from draft-03's IANA table is honored. Draft-03's body text
+/// disagreed with its own table and said 0x0A, which draft-04 assigns to Secure
+/// Objects private properties, so decoding 0x0A as a timestamp would misread
+/// somebody else's property.
+const PROP_TIMESTAMP_DRAFT03: u64 = 0x06;
 
 /// A decoded LOC frame.
 #[derive(Clone, Debug)]
@@ -51,7 +61,7 @@ pub struct Frame {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The frame's property block did not contain a 0x06 (Timestamp) entry.
+	/// The frame's property block did not contain a 0x10 (Timestamp) entry.
 	#[error("loc frame missing required timestamp property")]
 	MissingTimestamp,
 
@@ -121,7 +131,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 		if abs % 2 == 0 {
 			let value: u64 = VarInt::decode_quic(&mut props)?.into();
 			match abs {
-				PROP_TIMESTAMP => timestamp = Some(value),
+				PROP_TIMESTAMP | PROP_TIMESTAMP_DRAFT03 => timestamp = Some(value),
 				PROP_TIMESCALE => {
 					if value == 0 {
 						return Err(Error::MalformedProperties);
@@ -151,7 +161,7 @@ pub fn decode(mut buf: Bytes) -> Result<Frame, Error> {
 	})
 }
 
-/// Encode a LOC frame with a single 0x06 Timestamp property.
+/// Encode a LOC frame with a single 0x10 Timestamp property.
 ///
 /// Per-frame 0x08 timescale is never emitted. The encoder relies on the
 /// catalog timescale to interpret `timestamp`.
@@ -190,12 +200,12 @@ mod tests {
 
 	#[test]
 	fn decode_per_frame_timescale() {
-		// Manually craft: properties = [delta=0x06 timestamp=96000, delta=0x02 (abs=0x08) timescale=48000]
+		// Manually craft: properties = [delta=0x08 timescale=48000, delta=0x08 (abs=0x10) timestamp=96000]
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP);
-		write_varint(&mut props, 96_000);
-		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP); // delta = 2
+		write_varint(&mut props, PROP_TIMESCALE);
 		write_varint(&mut props, 48_000);
+		write_varint(&mut props, PROP_TIMESTAMP - PROP_TIMESCALE); // delta = 8
+		write_varint(&mut props, 96_000);
 
 		let mut frame = BytesMut::new();
 		write_varint(&mut frame, props.len() as u64);
@@ -210,13 +220,13 @@ mod tests {
 
 	#[test]
 	fn decode_skips_video_config() {
-		// properties = [delta=0x06 timestamp=10, delta=0x07 (abs=0x0d, video config) bytes=[1,2,3]]
+		// properties = [delta=0x0d (video config) bytes=[1,2,3], delta=0x03 (abs=0x10) timestamp=10]
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP);
-		write_varint(&mut props, 10);
-		write_varint(&mut props, 0x0d - PROP_TIMESTAMP); // delta = 7 -> abs 0x0d (Video Config)
+		write_varint(&mut props, 0x0d);
 		write_varint(&mut props, 3); // length
 		props.extend_from_slice(&[0x01, 0x02, 0x03]);
+		write_varint(&mut props, PROP_TIMESTAMP - 0x0d); // delta = 3
+		write_varint(&mut props, 10);
 
 		let mut frame = BytesMut::new();
 		write_varint(&mut frame, props.len() as u64);
@@ -257,10 +267,10 @@ mod tests {
 	fn decode_rejects_zero_timescale() {
 		// Per-frame 0x08 timescale of 0 is invalid (would divide by zero).
 		let mut props = BytesMut::new();
-		write_varint(&mut props, PROP_TIMESTAMP);
-		write_varint(&mut props, 10);
-		write_varint(&mut props, PROP_TIMESCALE - PROP_TIMESTAMP);
+		write_varint(&mut props, PROP_TIMESCALE);
 		write_varint(&mut props, 0);
+		write_varint(&mut props, PROP_TIMESTAMP - PROP_TIMESCALE);
+		write_varint(&mut props, 10);
 
 		let mut frame = BytesMut::new();
 		write_varint(&mut frame, props.len() as u64);
@@ -274,8 +284,33 @@ mod tests {
 	fn decode_overflowing_properties_length_errors() {
 		let mut frame = BytesMut::new();
 		write_varint(&mut frame, 100); // claims 100 bytes of properties
-		frame.extend_from_slice(&[0x06]); // only 1 byte follows
+		frame.extend_from_slice(&[0x10]); // only 1 byte follows
 
 		assert!(matches!(decode(frame.freeze()), Err(Error::MalformedProperties)));
+	}
+
+	#[test]
+	fn decode_accepts_draft03_timestamp() {
+		// A draft-03 peer wrote the Timestamp at 0x06 instead of 0x10.
+		let mut props = BytesMut::new();
+		write_varint(&mut props, PROP_TIMESTAMP_DRAFT03);
+		write_varint(&mut props, 4242);
+
+		let mut frame = BytesMut::new();
+		write_varint(&mut frame, props.len() as u64);
+		frame.extend_from_slice(&props);
+		frame.extend_from_slice(b"payload");
+
+		let decoded = decode(frame.freeze()).unwrap();
+		assert_eq!(decoded.timestamp, 4242);
+		assert_eq!(decoded.payload, Bytes::from_static(b"payload"));
+	}
+
+	#[test]
+	fn encode_uses_draft04_timestamp() {
+		// The encoder emits 0x10, never the draft-03 id: the compat is decode-only.
+		let encoded = encode(7, b"x").unwrap();
+		let props_len = encoded[0] as usize;
+		assert_eq!(encoded[1..=props_len][0], PROP_TIMESTAMP as u8);
 	}
 }

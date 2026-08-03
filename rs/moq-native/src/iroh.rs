@@ -273,11 +273,24 @@ pub(crate) async fn accept(
 	}
 }
 
+/// Which transport binding an `iroh://` dial negotiated.
+///
+/// Unlike the other schemes, this isn't known until the ALPN is chosen, and it decides
+/// where the request target travels: H3 puts it in the CONNECT URL, raw QUIC has nowhere
+/// to put it but the SETUP.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Binding {
+	/// Raw QUIC over an iroh connection, carrying no request URI.
+	Raw,
+	/// WebTransport over HTTP/3, carrying the request URI in its CONNECT.
+	H3,
+}
+
 pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
-) -> Result<web_transport_iroh::Session> {
+) -> Result<(web_transport_iroh::Session, Binding)> {
 	let host = url.host().ok_or(Error::MissingHost)?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().map_err(Error::InvalidEndpointId)?;
 
@@ -311,11 +324,14 @@ pub(crate) async fn connect(
 				request = request.with_protocol(alpn.to_string());
 			}
 
-			web_transport_iroh::Session::connect_h3(conn, request).await?
+			(
+				web_transport_iroh::Session::connect_h3(conn, request).await?,
+				Binding::H3,
+			)
 		}
 		alpn if moq_net::ALPNS.contains(&alpn) => {
 			let conn = connecting.await?;
-			web_transport_iroh::Session::raw(conn)
+			(web_transport_iroh::Session::raw(conn), Binding::Raw)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};

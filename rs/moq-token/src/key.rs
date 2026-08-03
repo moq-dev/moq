@@ -361,9 +361,12 @@ impl Key {
 	}
 
 	/// Write the key to a file as base64url-encoded JSON.
+	///
+	/// A key carrying private material is written owner-only (mode `0600` on Unix), including when
+	/// it overwrites a file that was more permissive.
 	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
 		let encoded = self.to_str()?;
-		std::fs::write(path, encoded)?;
+		crate::fs::write(path.as_ref(), &encoded, self.is_private())?;
 		Ok(())
 	}
 
@@ -413,10 +416,12 @@ impl Key {
 		})
 	}
 
-	/// Whether the key carries the private material signing actually needs.
+	/// Whether the key carries private material: the half signing needs, and the half that must
+	/// not leak to another user on disk.
 	///
-	/// `key_ops` says what a key is *permitted* to do, which a public JWK can still advertise.
-	pub(crate) fn has_signing_material(&self) -> bool {
+	/// `key_ops` says what a key is *permitted* to do, which a public JWK can still advertise, so
+	/// this asks about the material rather than the declared operations.
+	pub(crate) fn is_private(&self) -> bool {
 		match &self.material {
 			KeyMaterial::OCT { .. } => true,
 			KeyMaterial::EC { d, .. } => d.is_some(),
@@ -1789,5 +1794,58 @@ mod tests {
 
 		// Clean up
 		std::fs::remove_file(temp_path).ok();
+	}
+
+	#[cfg(unix)]
+	mod permissions {
+		use super::*;
+		use std::os::unix::fs::PermissionsExt;
+
+		fn temp_path(name: &str) -> std::path::PathBuf {
+			let unique = SystemTime::now()
+				.duration_since(SystemTime::UNIX_EPOCH)
+				.unwrap()
+				.as_nanos();
+			std::env::temp_dir().join(format!("test_perms_{name}_{unique}.jwk"))
+		}
+
+		fn mode(path: &std::path::Path) -> u32 {
+			std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+		}
+
+		#[test]
+		fn private_key_is_owner_only() {
+			let path = temp_path("private");
+			create_test_key().to_file(&path).unwrap();
+			assert_eq!(mode(&path), 0o600);
+			std::fs::remove_file(&path).ok();
+		}
+
+		#[test]
+		fn private_key_tightens_existing_file() {
+			let path = temp_path("existing");
+			std::fs::write(&path, "stale").unwrap();
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+			create_test_key().to_file(&path).unwrap();
+			assert_eq!(mode(&path), 0o600);
+
+			// The old contents are gone, not just hidden behind the new mode.
+			let contents = std::fs::read_to_string(&path).unwrap();
+			assert!(!contents.contains("stale"));
+			std::fs::remove_file(&path).ok();
+		}
+
+		#[test]
+		fn public_key_keeps_default_permissions() {
+			let path = temp_path("public");
+			std::fs::write(&path, "").unwrap();
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+			let public = Key::generate(Algorithm::ES256, None).unwrap().to_public().unwrap();
+			public.to_file(&path).unwrap();
+			assert_eq!(mode(&path), 0o644);
+			std::fs::remove_file(&path).ok();
+		}
 	}
 }

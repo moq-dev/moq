@@ -61,6 +61,7 @@ function deviceField(
 	parent.run((effect) => {
 		const devices = effect.get(device.out.available) ?? [];
 		const selected = effect.get(device.out.requested);
+		const fallback = devices.find((d) => d.deviceId === effect.get(device.out.default));
 		dropdown.replaceChildren();
 
 		if (devices.length === 0) {
@@ -70,14 +71,19 @@ function deviceField(
 		}
 
 		dropdown.disabled = false;
+
+		// An empty value means no preference, letting the browser and OS route the capture.
+		const label = fallback?.label ? `Default (${fallback.label})` : "Default";
+		dropdown.appendChild(DOM.create("option", { value: "" }, label));
+
 		for (const d of devices) {
 			const option = DOM.create("option", { value: d.deviceId }, d.label || "Unknown device");
 			dropdown.appendChild(option);
 		}
-		if (selected) dropdown.value = selected;
+		dropdown.value = selected ?? "";
 	});
 
-	parent.event(dropdown, "change", () => device.preferred.set(dropdown.value));
+	parent.event(dropdown, "change", () => device.preferred.set(dropdown.value || undefined));
 	return field;
 }
 
@@ -103,6 +109,8 @@ export function sourceTab(parent: Effect, publish: MoqPublish): HTMLElement {
 		for (const f of fields) section.appendChild(f);
 		DOM.render(effect, devices, section);
 	});
+
+	container.appendChild(devices);
 
 	// File selection only applies to the file source.
 	const filePicker = DOM.create("div");

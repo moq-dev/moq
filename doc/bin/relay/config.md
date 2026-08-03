@@ -105,6 +105,21 @@ listen = "0.0.0.0:4443"
 
 See [HTTP Endpoints](/bin/relay/http) for available endpoints.
 
+### \[internal]
+
+Plain HTTP listener for unauthenticated operational endpoints. It is disabled
+unless `listen` is configured. Bind it only to loopback or a trusted private
+network.
+
+```toml
+[internal]
+listen = "127.0.0.1:9101"
+```
+
+It serves `/health`, Prometheus traffic counters at `/metrics`, and the local
+cluster topology view at `/nodes`. See [HTTP Endpoints](/bin/relay/http) for the
+response formats.
+
 ### \[web.https]
 
 HTTPS/WSS server for TCP fallback.

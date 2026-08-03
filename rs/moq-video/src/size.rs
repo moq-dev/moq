@@ -30,13 +30,21 @@ impl Size {
 	/// needs even, non-zero dimensions. Checking here keeps the rule in one place
 	/// instead of re-deriving it at each boundary.
 	pub(crate) fn validate(&self, what: &str) -> Result<(), Error> {
+		self.validate_nonzero(what)?;
+		if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
+			return Err(Error::Codec(anyhow::anyhow!("{what} {self}: dimensions must be even")));
+		}
+		Ok(())
+	}
+
+	/// The half of [`Size::validate`] that is not about chroma, for the surfaces
+	/// that hold RGB and so tolerate odd dimensions (a render target sized to a
+	/// window).
+	pub(crate) fn validate_nonzero(&self, what: &str) -> Result<(), Error> {
 		if self.width == 0 || self.height == 0 {
 			return Err(Error::Codec(anyhow::anyhow!(
 				"{what} {self}: dimensions must be non-zero"
 			)));
-		}
-		if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
-			return Err(Error::Codec(anyhow::anyhow!("{what} {self}: dimensions must be even")));
 		}
 		Ok(())
 	}

@@ -64,11 +64,15 @@ pub fn start<S: web_transport_trait::Session>(
 	// Traffic stats are attributed through these origin handles: tag them with
 	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
 	subscribe: Option<origin::Producer>,
+	// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	// declare one itself. See `Client::with_peer_origin`.
+	peer_origin: Option<Origin>,
 	// The version of the protocol to use.
 	version: Version,
 	// The capabilities (and optional request path) we advertise in our SETUP message.
 	// Only sent on versions with a Setup Stream (lite-05+); ignored otherwise.
-	our_setup: Setup,
+	// Its `origin` is filled in here from the attached origin handles.
+	mut our_setup: Setup,
 	// The peer's SETUP, when it was already read before `start` (e.g. a server that
 	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
@@ -97,6 +101,20 @@ pub fn start<S: web_transport_trait::Session>(
 	} else {
 		None
 	};
+
+	// Declare our origin (hop) id in SETUP so the peer can serve our
+	// subscriptions from a route that does not flow through us. Taken from the
+	// caller's real handles before the empty-half defaulting below, since those
+	// placeholders carry throwaway ids that never appear in a hop chain. The
+	// publish identity is what we stamp onto forwarded announcements, so it
+	// wins when both halves are wired (they share it in practice).
+	if our_setup.origin.is_none() {
+		our_setup.origin = publish
+			.as_deref()
+			.or(subscribe.as_deref())
+			.copied()
+			.filter(|origin| origin.id() != 0);
+	}
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
 	// and GROUP streams are accepted regardless of which halves the caller wired.
@@ -141,6 +159,8 @@ pub fn start<S: web_transport_trait::Session>(
 		session: session.clone(),
 		origin: publish,
 		version,
+		peer_setup: peer_setup.clone(),
+		peer_origin,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		session: session.clone(),
@@ -148,6 +168,7 @@ pub fn start<S: web_transport_trait::Session>(
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
+		peer_origin,
 		// The dialing side prices the link in its own SETUP, so that is also where the
 		// subscriber reads our price from. A server never sets one, leaving the
 		// subscriber to take the price out of the client's SETUP instead.

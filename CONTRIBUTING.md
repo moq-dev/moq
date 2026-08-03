@@ -4,15 +4,16 @@ How a change lands in this repo: branch targeting, commits, PR descriptions, rev
 
 ## Branch Targeting
 
-Two long-lived branches. The split is about **semver breakage, not size or novelty**: `dev` is only for changes that break an existing published contract. Everything else (bug fixes, new behavior, new/additive APIs, docs, refactors) goes to `main`, however large.
+Two long-lived branches. The split is about **semver breakage of a published API, not size or novelty**: `dev` is only for changes that break the API contract consumers compile against. Everything else (bug fixes, new behavior, new/additive APIs, docs, refactors, wire-protocol work) goes to `main`, however large.
 
-- **`main`**: the default. Bug fixes, new behavior, new/additive APIs, docs, and refactors that preserve the existing public/wire contract. A change that only *adds* is additive and lands here even when it is big: a new `pub` item, a new option, or a parser accepting a broader set of inputs it previously rejected. Changing what a component does with input it *already* takes (e.g. recognizing a media pattern it used to mishandle) is a fix, not a break, so it also lands here.
-- **`dev`**: reserved for changes that violate semver by breaking an existing contract. Target it only for:
-  - Wire-protocol changes (anything under `rs/moq-net`, including `moq-lite` / `moq-transport` framing or draft bumps).
-  - Breaking changes to public APIs in `rs/moq-ffi`, `rs/libmoq`, `rs/moq-net`, `rs/hang`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`. This means a renamed, removed, or signature-changed `pub` item, not a newly *added* one (adding is additive, so it goes to `main`).
-  - Catalog/container format changes in `rs/hang` or `js/hang` that alter existing on-the-wire framing or fields.
+- **`main`**: the default. Bug fixes, new behavior, new/additive APIs, docs, and refactors that preserve the existing public API. A change that only *adds* is additive and lands here even when it is big: a new `pub` item, a new option, or a parser accepting a broader set of inputs it previously rejected. Changing what a component does with input it *already* takes (e.g. recognizing a media pattern it used to mishandle) is a fix, not a break, so it also lands here.
 
-`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if a change turns out to break an existing contract. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
+  Wire-protocol and format work lands here too, including `moq-lite` / `moq-transport` framing, a new draft version, a field added to or removed from an in-progress one, and catalog/container format changes in `rs/hang` or `js/hang`. Versions are negotiated per session, so a peer keeps speaking whatever version it already supports; the change reaches it only once both ends offer the new one. Ship it behind a version gate (see the Version matching section of [`rs/CLAUDE.md`](rs/CLAUDE.md)) and update the matching draft under `drafts/` in the same PR.
+- **`dev`**: reserved for changes that violate semver by breaking a published API. That means a renamed, removed, or signature-changed `pub` (Rust) or exported (TS) item in `rs/moq-net`, `rs/hang`, `rs/moq-ffi`, `rs/libmoq`, `js/net`, `js/hang`, or any of the language wrappers under `swift/`, `kt/`, `go/`, `py/`. A newly *added* item is additive and goes to `main`.
+
+  A wire change usually needs no API break to land, since the version gate is internal. If yours does, that break is what sends the PR to `dev`, not the wire change itself.
+
+`dev` periodically merges into `main` (or vice versa) when the batch is ready to ship. When in doubt, target `main`; reviewers will redirect to `dev` if a change turns out to break a published API. CI (`pull_request:` workflows) runs on PRs against either branch, so no extra setup is needed when you switch the base.
 
 ## Commit Messages
 

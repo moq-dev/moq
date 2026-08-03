@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import type { Timescale } from "../time.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
@@ -131,9 +132,25 @@ export class SubscribeOk {
 	requestId: bigint | undefined;
 	trackAlias: bigint;
 
-	constructor({ requestId, trackAlias }: { requestId?: bigint; trackAlias: bigint }) {
+	/**
+	 * The track's Timescale, sent as a Track Property (draft-17+).
+	 *
+	 * `undefined` declares no timeline, so the subscriber times objects by arrival.
+	 */
+	timescale: Timescale | undefined;
+
+	constructor({
+		requestId,
+		trackAlias,
+		timescale,
+	}: {
+		requestId?: bigint;
+		trackAlias: bigint;
+		timescale?: Timescale;
+	}) {
 		this.requestId = requestId;
 		this.trackAlias = trackAlias;
+		this.timescale = timescale;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -153,6 +170,11 @@ export class SubscribeOk {
 			const params = new Parameters();
 			params.groupOrder = GROUP_ORDER;
 			await params.encode(w, version);
+
+			// Track Properties are the final field, so nothing may follow.
+			if (this.timescale !== undefined) {
+				await Properties.encode(w, this.timescale, version);
+			}
 		}
 	}
 
@@ -170,6 +192,7 @@ export class SubscribeOk {
 				? await r.u62()
 				: undefined;
 		const trackAlias = await r.u62();
+		let timescale: Timescale | undefined;
 
 		if (version === Version.DRAFT_14) {
 			const expires = await r.u62();
@@ -190,10 +213,10 @@ export class SubscribeOk {
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+)
 			await Parameters.decode(r, version);
-			await Properties.skip(r, version);
+			timescale = await Properties.decode(r, version);
 		}
 
-		return new SubscribeOk({ requestId, trackAlias });
+		return new SubscribeOk({ requestId, trackAlias, timescale });
 	}
 }
 

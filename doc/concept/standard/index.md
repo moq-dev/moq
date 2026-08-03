@@ -41,6 +41,8 @@ moq-lite is forwards compatible with moq-transport, so it works with any moq-tra
 On the media side, there are the [MSF](/concept/standard/msf) (catalog) and [LOC](/concept/standard/loc) (container) drafts.
 They are too early/unstable to be useful, so we're using a custom [hang](/concept/layer/hang) media format instead.
 
+Our own specifications are written as Internet-Drafts and rendered under [Drafts](/draft/).
+
 - [Website](https://moq.dev)
 - [GitHub](https://github.com/moq-dev/moq)
 - [Documentation](https://doc.moq.dev)

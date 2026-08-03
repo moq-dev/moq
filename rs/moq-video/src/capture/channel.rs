@@ -94,6 +94,7 @@ mod tests {
 			width: id,
 			height: 2,
 			data: Vec::new(),
+			color: None,
 		})
 	}
 

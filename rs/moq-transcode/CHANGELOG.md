@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.4...moq-transcode-v0.0.5) - 2026-07-29
+
+### Added
+
+- *(moq-video)* render decoded frames on the GPU, and carry color spaces end to end ([#2552](https://github.com/moq-dev/moq/pull/2552))
+
 ## [0.0.4](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.3...moq-transcode-v0.0.4) - 2026-07-25
 
 ### Other

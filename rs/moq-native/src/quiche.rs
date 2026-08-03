@@ -264,10 +264,11 @@ impl QuicheClient {
 
 		let socket = crate::bind::udp(self.bind)?;
 		let local = socket.local_addr()?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 		let addrs = tokio::net::lookup_host((host.as_str(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let remote = crate::util::pick_addr(addrs, local).ok_or(Error::NoDnsEntries)?;
+		let remote = crate::util::pick_addr(addrs, local, dual_stack).ok_or(Error::NoDnsEntries)?;
 
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)

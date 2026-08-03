@@ -72,12 +72,20 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init()?;
 
-	// `devices` only talks to the local hardware, so answer it before binding any
-	// transport.
-	#[cfg(feature = "capture")]
-	if matches!(cli.command, Command::Devices) {
-		cli.moq.reject("devices")?;
-		return devices::run().await;
+	// The local verbs never touch the network, so answer them before binding any
+	// transport. Each arm returns, so the move out of `cli.command` can't reach the
+	// code below.
+	match cli.command {
+		Command::Token(token) => {
+			cli.moq.reject("token")?;
+			return token.run();
+		}
+		#[cfg(feature = "capture")]
+		Command::Devices => {
+			cli.moq.reject("devices")?;
+			return devices::run().await;
+		}
+		_ => {}
 	}
 
 	cli.moq.validate()?;
@@ -98,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
 			Command::Export(export) => run_export(cli.moq, export, net).await,
 			#[cfg(feature = "transcode")]
 			Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
+			Command::Token(_) => unreachable!("handled above, before the transport is bound"),
 			#[cfg(feature = "capture")]
 			Command::Devices => unreachable!("handled above, before the transport is bound"),
 		}
@@ -111,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Route one source INTO the shared Origin, exposing it to the MoQ network.
 async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();
@@ -225,7 +234,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 
 /// Route the shared Origin OUT to one sink, filling it from the MoQ network.
 async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()> {
-	let origin = moq_net::Origin::random().produce();
+	let origin = moq.origin()?;
 	// The broadcast defaults to "": MoQ names each broadcast by the connection
 	// path plus any explicit `--broadcast`, so an unset name is the root broadcast.
 	let name = moq.broadcast.clone().unwrap_or_default();

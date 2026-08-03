@@ -56,6 +56,46 @@ Media muxers and demuxers for importing existing formats into MoQ.
 
 [Learn more](/lib/rs/crate/moq-mux)
 
+## Native Media
+
+What a browser gets from WebCodecs and `getUserMedia`, for native applications:
+devices, hardware codecs, and the playback path back out. No ffmpeg, no
+GStreamer.
+
+### moq-video
+
+[![crates.io](https://img.shields.io/crates/v/moq-video)](https://crates.io/crates/moq-video)
+[![docs.rs](https://docs.rs/moq-video/badge.svg)](https://docs.rs/moq-video)
+
+Camera, display, and window capture, hardware H.264/H.265 encode and decode, and
+GPU rendering of decoded frames.
+
+**Features:**
+
+- VideoToolbox, Media Foundation, NVENC/NVDEC, VAAPI, with openh264 as the H.264 software fallback
+- Decoded frames stay on the GPU where the platform allows, so transcoding skips the round trip
+- `wgpu` renderer handing back a texture you present, importing the decoder's surface zero-copy on macOS
+- Linux hardware libraries `dlopen`'d, so a build links and starts without a GPU
+
+[Learn more](/lib/rs/crate/moq-video)
+
+### moq-audio
+
+[![crates.io](https://img.shields.io/crates/v/moq-audio)](https://crates.io/crates/moq-audio)
+[![docs.rs](https://docs.rs/moq-audio/badge.svg)](https://docs.rs/moq-audio)
+
+Microphone and macOS system-audio capture, Opus and PCM codecs, speaker playback,
+and acoustic echo cancellation.
+
+**Features:**
+
+- CoreAudio / WASAPI / ALSA devices via cpal
+- One output device mixing every track in a call
+- Echo cancellation so a laptop without a headset doesn't send itself back
+- Rust codecs and DSP: no C toolchain, no CMake, no codec to install (ALSA headers are the one Linux build dependency)
+
+[Learn more](/lib/rs/crate/moq-audio)
+
 ## Authentication
 
 ### moq-token
@@ -135,7 +175,8 @@ ffmpeg -i input.mp4 -f mpegts - | \
 
 ### moq-token CLI
 
-Command-line tool for JWT token management (binary name: `moq-token`).
+Command-line tool for JWT token management (binary name: `moq-token`). The same
+commands are built into moq-cli as `moq token ...`.
 
 **Installation:**
 
@@ -266,6 +307,8 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 - [moq-net API](https://docs.rs/moq-net)
 - [hang API](https://docs.rs/hang)
 - [moq-mux API](https://docs.rs/moq-mux)
+- [moq-video API](https://docs.rs/moq-video)
+- [moq-audio API](https://docs.rs/moq-audio)
 - [moq-token API](https://docs.rs/moq-token)
 - [moq-native API](https://docs.rs/moq-native)
 - [libmoq API](https://docs.rs/libmoq)
@@ -275,5 +318,6 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 - Explore [moq-net](/lib/rs/crate/moq-net) - Networking layer
 - Explore [hang](/lib/rs/crate/hang) - Media library
 - Explore [moq-mux](/lib/rs/crate/moq-mux) - Media import
+- Explore [moq-video](/lib/rs/crate/moq-video) and [moq-audio](/lib/rs/crate/moq-audio) - Native capture, codecs, and playback
 - Deploy [moq-relay](/bin/relay/) - Relay server
 - View [code examples](https://github.com/moq-dev/moq/tree/main/rs)

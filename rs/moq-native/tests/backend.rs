@@ -20,6 +20,10 @@ struct ConnectTest<'a> {
 	client_bind: Option<&'a str>,
 	/// Authority the client dials: a DNS name (sends SNI) or a bare IP (no SNI).
 	authority: &'a str,
+	/// Appended to the dial URL, e.g. `/room?jwt=abc`.
+	path: &'a str,
+	/// The request path the server must observe, when the test cares.
+	expect_path: Option<&'a str>,
 	backend: moq_native::QuicBackend,
 	/// Capture qlog traces from both ends into this directory.
 	qlog: Option<&'a std::path::Path>,
@@ -37,6 +41,36 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		bind: "[::]:0",
 		client_bind: None,
 		authority: "localhost",
+		path: "",
+		expect_path: None,
+		backend,
+		qlog: None,
+	})
+	.await;
+}
+
+/// Dial a URL with a path and a query and assert the server sees both.
+///
+/// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
+/// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
+/// server reports the same thing through [`moq_native::Request::path`].
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
+async fn path_test(scheme: &str, backend: moq_native::QuicBackend) {
+	// A relay reads `?jwt=` off this, so dropping the query silently unauthenticates.
+	let expect_path = match scheme {
+		"moqt" | "moql" => Some("/room?jwt=abc"),
+		// WebTransport splits the two: the path is the request target, the query stays
+		// on the URL.
+		_ => Some("/room"),
+	};
+
+	connect_test(ConnectTest {
+		scheme,
+		bind: "[::]:0",
+		client_bind: None,
+		authority: "localhost",
+		path: "/room?jwt=abc",
+		expect_path,
 		backend,
 		qlog: None,
 	})
@@ -54,6 +88,8 @@ async fn no_sni_test(scheme: &str, backend: moq_native::QuicBackend) {
 		bind: "127.0.0.1:0",
 		client_bind: None,
 		authority: "127.0.0.1",
+		path: "",
+		expect_path: None,
 		backend,
 		qlog: None,
 	})
@@ -69,6 +105,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 		bind,
 		client_bind,
 		authority,
+		path,
+		expect_path,
 		backend,
 		qlog,
 	} = config;
@@ -108,15 +146,19 @@ async fn connect_test(config: ConnectTest<'_>) {
 	client_config.bind = client_bind.unwrap_or(bind).parse().expect("invalid bind address");
 
 	let client = client_config.init().expect("failed to init client");
-	let url: url::Url = format!("{scheme}://{authority}:{}", addr.port()).parse().unwrap();
+	let url: url::Url = format!("{scheme}://{authority}:{}{path}", addr.port()).parse().unwrap();
 
 	// ── run server and client concurrently ──────────────────────────
+	let expect_path = expect_path.map(str::to_string);
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		// The client wired only a subscriber, so its advertised role reaches the server
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
 		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
+		if let Some(expect_path) = expect_path {
+			assert_eq!(request.path(), expect_path);
+		}
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -329,6 +371,28 @@ async fn quinn_raw_quic_no_sni() {
 #[cfg(feature = "quinn")]
 #[tracing_test::traced_test]
 #[tokio::test]
+async fn quinn_raw_quic_path() {
+	path_test("moqt", moq_native::QuicBackend::Quinn).await;
+}
+
+/// `moql://` derives its SETUP path exactly like `moqt://`; only the scheme differs.
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_raw_quic_moql_path() {
+	path_test("moql", moq_native::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn quinn_webtransport_path() {
+	path_test("https", moq_native::QuicBackend::Quinn).await;
+}
+
+#[cfg(feature = "quinn")]
+#[tracing_test::traced_test]
+#[tokio::test]
 async fn quinn_mtls() {
 	mtls_test("https", moq_native::QuicBackend::Quinn, false).await;
 }
@@ -352,12 +416,21 @@ async fn quiche_raw_quic() {
 #[cfg(feature = "quiche")]
 #[tracing_test::traced_test]
 #[tokio::test]
+async fn quiche_raw_quic_path() {
+	path_test("moqt", moq_native::QuicBackend::Quiche).await;
+}
+
+#[cfg(feature = "quiche")]
+#[tracing_test::traced_test]
+#[tokio::test]
 async fn quiche_dual_stack_ipv4() {
 	connect_test(ConnectTest {
 		scheme: "moqt",
 		bind: "[::]:0",
 		client_bind: Some("0.0.0.0:0"),
 		authority: "127.0.0.1",
+		path: "",
+		expect_path: None,
 		backend: moq_native::QuicBackend::Quiche,
 		qlog: None,
 	})
@@ -454,7 +527,7 @@ async fn iroh_connect() {
 		.with_iroh(client_endpoint)
 		.with_iroh_addrs(server_addrs);
 
-	let url: url::Url = format!("iroh://{server_endpoint_id}").parse().unwrap();
+	let url: url::Url = format!("iroh://{server_endpoint_id}/room?jwt=abc").parse().unwrap();
 
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
@@ -463,6 +536,11 @@ async fn iroh_connect() {
 		// over every transport, now that the SETUP is read before the caller authorizes
 		// rather than deferred to `ok()`.
 		assert_eq!(request.role(), Some(moq_native::moq_net::Role::Subscriber));
+		// iroh offers the moq ALPNs ahead of H3, so this lands on raw QUIC: no request
+		// URL, leaving the SETUP as the only place for the request target.
+		assert_eq!(request.transport(), moq_native::Transport::Iroh);
+		assert_eq!(request.url(), None);
+		assert_eq!(request.path(), "/room?jwt=abc");
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
@@ -534,6 +612,13 @@ async fn noq_raw_quic_no_sni() {
 #[cfg(feature = "noq")]
 #[tracing_test::traced_test]
 #[tokio::test]
+async fn noq_raw_quic_path() {
+	path_test("moqt", moq_native::QuicBackend::Noq).await;
+}
+
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
 async fn noq_webtransport() {
 	backend_test("https", moq_native::QuicBackend::Noq).await;
 }
@@ -562,6 +647,8 @@ async fn qlog_test(scheme: &str, backend: moq_native::QuicBackend) -> Vec<std::p
 		bind: "[::]:0",
 		client_bind: None,
 		authority: "localhost",
+		path: "",
+		expect_path: None,
 		backend,
 		qlog: Some(dir.path()),
 	})

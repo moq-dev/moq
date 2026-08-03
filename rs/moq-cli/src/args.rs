@@ -8,9 +8,10 @@
 //! - `import` routes media INTO MoQ from one source; `export` routes it OUT to
 //!   one sink. The verb fixes the data direction (and thus, for the
 //!   bidirectional gateways, whether `--connect`/`--listen` push or pull).
-//! - `devices` touches no network at all, so it's the one verb that takes no MoQ
-//!   side. That's why the requirement is enforced per-verb ([`MoqSide::validate`])
-//!   rather than by clap: an `ArgGroup` can't be conditional on the subcommand.
+//! - `devices` and `token` touch no network at all, so they're the verbs that take
+//!   no MoQ side. That's why the requirement is enforced per-verb
+//!   ([`MoqSide::validate`]) rather than by clap: an `ArgGroup` can't be
+//!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
 //!   `rtmp`, `srt`, `rtc`). Exactly one per invocation, so "which endpoint" is
@@ -19,6 +20,7 @@
 use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use hang::moq_net;
 
 use crate::publish::PublishFormat;
 use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
@@ -43,8 +45,9 @@ pub struct Cli {
 /// The MoQ attachment. At least one of `--client-connect` / `--server-bind`;
 /// both may be given at once.
 ///
-/// The group is not `required`, because `devices` runs without a MoQ side. Every
-/// verb that does need one calls [`validate`](Self::validate).
+/// The group is not `required`, because the local verbs (`token`, `devices`) run
+/// without a MoQ side. Every verb that does need one calls
+/// [`validate`](Self::validate).
 #[derive(Args, Clone)]
 #[command(group = ArgGroup::new("moq").multiple(true).args(["client-connect", "server-bind"]))]
 pub struct MoqSide {
@@ -54,6 +57,17 @@ pub struct MoqSide {
 	/// which bridge one named broadcast.
 	#[arg(long, alias = "name", help_heading = "MoQ")]
 	pub broadcast: Option<String>,
+
+	/// Fix this process's origin id instead of minting a fresh random one.
+	///
+	/// The origin id is the first hop of every announcement this process
+	/// publishes, and relays treat it as the broadcast's content identity:
+	/// redundant publishers of the same broadcast share an id so relays fail
+	/// over between them at a group boundary. Leave unset outside a redundant
+	/// (1+1) chain; the default fresh id per run is what makes a restarted
+	/// publisher look like new content instead of silently splicing.
+	#[arg(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
+	pub origin: Option<u64>,
 
 	/// MoQ client config (`--client-connect`, `--client-bind`, `--client-tls-*`, ...).
 	#[command(flatten)]
@@ -70,6 +84,17 @@ pub struct MoqSide {
 }
 
 impl MoqSide {
+	/// Mint the origin all broadcasts route through: the pinned `--origin` id
+	/// when set, otherwise fresh and random.
+	pub fn origin(&self) -> anyhow::Result<moq_net::origin::Producer> {
+		use anyhow::Context;
+		Ok(match self.origin {
+			Some(id) => moq_net::Origin::new(id).with_context(|| format!("invalid --origin {id}"))?,
+			None => moq_net::Origin::random(),
+		}
+		.produce())
+	}
+
 	/// Reject a verb that needs the MoQ network but was given no way to reach it.
 	/// Stands in for the clap `required` the `moq` group can't carry, since
 	/// `devices` is exempt.
@@ -82,13 +107,23 @@ impl MoqSide {
 	}
 
 	/// Reject the MoQ flags on a verb that never touches the network, rather than
-	/// silently ignoring them. Only `devices` qualifies, hence the gate.
-	#[cfg(feature = "capture")]
+	/// silently ignoring them. `--broadcast` counts: a local verb has no content, and
+	/// next to `token generate` it reads like it scopes the key, which `--root` does.
+	///
+	/// `--origin` is left out on purpose. It reads `MOQ_ORIGIN`, so rejecting it would
+	/// fail `moq token` in any shell that exports the variable for a publisher, and an
+	/// ambient env value is not the deliberate request this is meant to catch.
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
-		anyhow::ensure!(
-			self.client.connect.is_none() && self.server.bind.is_none(),
-			"`{command}` runs locally and takes no MoQ side; drop --client-connect / --server-bind"
-		);
+		let ignored = [
+			("--client-connect", self.client.connect.is_some()),
+			("--server-bind", self.server.bind.is_some()),
+			("--broadcast", self.broadcast.is_some()),
+		];
+
+		if let Some((flag, _)) = ignored.into_iter().find(|(_, given)| *given) {
+			anyhow::bail!("`{command}` runs locally and takes no MoQ side; drop {flag}");
+		}
+
 		Ok(())
 	}
 }
@@ -107,6 +142,8 @@ pub enum Command {
 	/// only encoded while watched (just-in-time).
 	#[cfg(feature = "transcode")]
 	Transcode(crate::transcode::Args),
+	/// Generate, sign, and verify the JWT tokens a relay authenticates with.
+	Token(moq_token_cli::Args),
 	/// List the capture devices `import capture` can name.
 	#[cfg(feature = "capture")]
 	Devices,
@@ -243,4 +280,38 @@ pub struct Fragmented {
 	/// Cap the output fragment/cluster duration (e.g. `2s`). Default: one GOP.
 	#[arg(long, value_parser = humantime::parse_duration)]
 	pub fragment_duration: Option<Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use clap::CommandFactory;
+
+	// Catches the conflicts clap only panics on at runtime: a duplicate long, a
+	// dangling `conflicts_with`, a flattened arg colliding with an existing one.
+	// The token verb flattens a whole command tree from another crate, so this is
+	// the only thing standing between a rename there and a broken `moq`.
+	#[test]
+	fn valid() {
+		Cli::command().debug_assert();
+	}
+
+	#[test]
+	fn token_verb() {
+		let cli = Cli::try_parse_from(["moq", "token", "generate", "--algorithm", "ES256"]).unwrap();
+		assert!(matches!(cli.command, Command::Token(_)));
+		// Local verb: it needs no MoQ side, so what every other verb demands...
+		assert!(cli.moq.validate().is_err());
+		assert!(cli.moq.reject("token").is_ok());
+
+		// ...these it refuses, rather than accepting the flag and ignoring it.
+		for flag in [
+			["--client-connect", "https://relay.example.com"],
+			["--broadcast", "room"],
+		] {
+			let cli = Cli::try_parse_from(["moq", flag[0], flag[1], "token", "generate"]).unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains(flag[0]), "{err}");
+		}
+	}
 }

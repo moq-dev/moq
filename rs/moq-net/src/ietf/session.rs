@@ -21,6 +21,10 @@ pub fn start<S: web_transport_trait::Session>(
 	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
+	// The origin (hop) id assigned to the peer. moq-transport carries no hop ids,
+	// so this is the only way a peer gets a stable identity here. See
+	// `Client::with_peer_origin`.
+	peer_origin: Option<Origin>,
 	version: Version,
 	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
 	// transports). A server passes `None`.
@@ -46,9 +50,9 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
+				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), peer_origin, version);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version, tasks);
+				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, peer_origin, version, tasks);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -119,9 +123,9 @@ pub fn start<S: web_transport_trait::Session>(
 				};
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
+				let publisher = Publisher::new(session.clone(), publish, control.clone(), peer_origin, version);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, version, tasks);
+				let subscriber = Subscriber::new(session.clone(), subscribe, control, peer_origin, version, tasks);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

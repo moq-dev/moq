@@ -259,27 +259,27 @@ fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &OriginList)
 pub struct AnnounceRequest<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
-	// If non-zero, the publisher SHOULD skip announces whose hop IDs contain this value.
+	// Lite04/05 only: if non-zero, the publisher SHOULD skip announces whose hop IDs
+	// contain this value. Not on the wire elsewhere, so the value set here is ignored
+	// when encoding for another version and decodes as zero; lite-06 carries the
+	// identity session-wide in the SETUP Origin parameter instead.
 	pub exclude_hop: u64,
 }
 
 impl Message for AnnounceRequest<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		let exclude_hop = match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => 0,
-			_ => u64::decode(r, version)?,
+		let exclude_hop = match version.has_exclude_hop() {
+			true => u64::decode(r, version)?,
+			false => 0,
 		};
 		Ok(Self { prefix, exclude_hop })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
-		match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
-			_ => {
-				self.exclude_hop.encode(w, version)?;
-			}
+		if version.has_exclude_hop() {
+			self.exclude_hop.encode(w, version)?;
 		}
 
 		Ok(())
@@ -600,6 +600,50 @@ mod tests {
 			.encode(&mut buf, Version::Lite06Wip)
 			.unwrap();
 		assert_eq!(buf.len(), 3);
+	}
+
+	fn request_round_trip(msg: &AnnounceRequest, version: Version) -> AnnounceRequest<'static> {
+		let mut buf = bytes::BytesMut::new();
+		msg.encode(&mut buf, version).unwrap();
+		let mut slice = &buf[..];
+		let got = AnnounceRequest::decode(&mut slice, version).unwrap();
+		assert!(slice.is_empty(), "trailing bytes after decode");
+		AnnounceRequest {
+			prefix: got.prefix.to_owned(),
+			exclude_hop: got.exclude_hop,
+		}
+	}
+
+	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
+	// announces before they hit the wire.
+	#[test]
+	fn announce_request_carries_exclude_hop_on_lite05() {
+		let msg = AnnounceRequest {
+			prefix: Path::new("room/"),
+			exclude_hop: 42,
+		};
+		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
+	}
+
+	// Lite06 dropped the field: the receiver's reflected-announce check catches the same
+	// loops, so a value set locally is simply not sent and decodes as zero.
+	#[test]
+	fn announce_request_drops_exclude_hop_on_lite06() {
+		let msg = AnnounceRequest {
+			prefix: Path::new("room/"),
+			exclude_hop: 42,
+		};
+		assert_eq!(request_round_trip(&msg, Version::Lite06Wip).exclude_hop, 0);
+
+		// And it costs nothing on the wire: the body is just the prefix.
+		let mut with = bytes::BytesMut::new();
+		msg.encode(&mut with, Version::Lite05).unwrap();
+		let mut without = bytes::BytesMut::new();
+		msg.encode(&mut without, Version::Lite06Wip).unwrap();
+		assert!(
+			without.len() < with.len(),
+			"lite06 must not encode the exclude_hop varint"
+		);
 	}
 
 	#[test]

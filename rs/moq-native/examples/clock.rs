@@ -8,22 +8,17 @@
 //! Run with:
 //!
 //! ```text
-//! cargo run -p moq-native --example clock -- --url https://relay.example.com/anon --broadcast clock publish
-//! cargo run -p moq-native --example clock -- --url https://relay.example.com/anon --broadcast clock subscribe
+//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock publish
+//! cargo run -p moq-native --example clock -- --client-connect https://relay.example.com/anon --broadcast clock subscribe
 //! ```
 
 use anyhow::Context;
 use chrono::prelude::*;
 use clap::Parser;
 use moq_net::*;
-use url::Url;
 
 #[derive(Parser, Clone)]
 struct Config {
-	/// Connect to the given URL starting with https://
-	#[arg(long)]
-	url: Url,
-
 	/// The name of the broadcast to publish or subscribe to.
 	#[arg(long)]
 	broadcast: String,
@@ -56,9 +51,10 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 
+	let url = config.client.connect.clone().context("--client-connect is required")?;
 	let client = config.client.init()?;
 
-	tracing::info!(url = ?config.url, "connecting to server");
+	tracing::info!(%url, "connecting to server");
 
 	let track = config.track;
 
@@ -72,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
-			let reconnect = client.with_publisher(&origin).reconnect(config.url);
+			let reconnect = client.with_publisher(&origin).reconnect(url);
 
 			// Keep the result out of the `select!` arm (a `?` there would return
 			// before the close below runs), so the broadcast is always closed.
@@ -87,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 			result
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_subscriber(origin.clone()).reconnect(config.url);
+			let reconnect = client.with_subscriber(origin.clone()).reconnect(url);
 
 			// IETF MoQ + the current origin::Consumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces

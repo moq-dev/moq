@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.9.4"
+version = "0.9.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -68,6 +68,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
 moq-srt = { workspace = true }
+moq-token-cli = { workspace = true }
 moq-transcode = { workspace = true, optional = true }
 moq-video = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

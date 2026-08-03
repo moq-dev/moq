@@ -187,11 +187,17 @@ mod tests {
 	use crate::frame::I420;
 	use crate::{Frame, Surface};
 
+	/// The `index`th frame of a flat `size` stream at 30fps, every pixel at RGB
+	/// `level`.
+	fn flat_frame(index: u64, level: u8, size: crate::Size) -> Frame {
+		let rgba = vec![level; size.pixels() as usize * 4];
+		let surface = Surface::rgba(&rgba, size).unwrap();
+		Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap())
+	}
+
 	/// The `index`th frame of a mid-gray 320x240 stream, at 30fps.
 	fn gray_frame(index: u64) -> Frame {
-		let rgba = vec![0x80u8; 320 * 240 * 4];
-		let surface = Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
-		Frame::new(surface, Timestamp::from_micros(index * 33_333).unwrap())
+		flat_frame(index, 0x80, gray_size())
 	}
 
 	/// Assert a decoded picture is the expected size and looks like the gray frame
@@ -259,19 +265,24 @@ mod tests {
 		}
 	}
 
-	/// An openh264 (software H.264) encoder for the gray test stream.
-	fn h264_software_encoder() -> Encoder {
+	/// An openh264 (software H.264) encoder for a `size` test stream at 30fps.
+	fn h264_software_encoder(size: crate::Size) -> Encoder {
 		Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(320, 240, 30)
+			..EncodeConfig::new(size.width, size.height, 30)
 		})
 		.expect("openh264 encoder")
+	}
+
+	/// The size the gray test stream is encoded at.
+	fn gray_size() -> crate::Size {
+		crate::Size::new(320, 240)
 	}
 
 	#[test]
 	fn openh264_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
-		round_trip(h264_software_encoder(), decoder, "openh264");
+		round_trip(h264_software_encoder(gray_size()), decoder, "openh264");
 	}
 
 	#[test]
@@ -303,14 +314,14 @@ mod tests {
 	fn videotoolbox_round_trip() {
 		let decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
 			.expect("videotoolbox decoder");
-		round_trip(h264_software_encoder(), decoder, "videotoolbox");
+		round_trip(h264_software_encoder(gray_size()), decoder, "videotoolbox");
 	}
 
 	/// Encode `count` gray frames and decode them, returning the decoded pictures.
 	/// The shared setup for the residency and re-encode tests below.
 	#[cfg(target_os = "macos")]
 	fn decode_gray(count: u64) -> Vec<Frame> {
-		let mut encoder = h264_software_encoder();
+		let mut encoder = h264_software_encoder(gray_size());
 		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Named("videotoolbox".into())))
 			.expect("videotoolbox decoder");
 
@@ -417,7 +428,215 @@ mod tests {
 			eprintln!("skipping: no Media Foundation H.264 hardware decoder available");
 			return;
 		};
-		round_trip(h264_software_encoder(), decoder, "mediafoundation");
+		round_trip(h264_software_encoder(gray_size()), decoder, "mediafoundation");
+	}
+
+	/// A distinct RGB level per frame index, so a caller holding several decoded
+	/// pictures at once can tell them apart. Spaced far enough apart that lossy
+	/// coding can't blur two of them together, which caps how long a stream this
+	/// builds.
+	#[cfg(target_os = "windows")]
+	fn level(index: u64) -> u8 {
+		u8::try_from(0x20 + index * 0x10).expect("test stream is short enough to keep its levels distinct")
+	}
+
+	/// The limited-range BT.601 luma a flat [`level`] frame decodes to.
+	#[cfg(target_os = "windows")]
+	fn expected_luma(level: u8) -> u32 {
+		16 + (219 * level as u32) / 255
+	}
+
+	/// Decode `count` frames of a `size` [`level`] stream through the Media
+	/// Foundation hardware decoder, holding every picture rather than consuming it
+	/// as it arrives. `None` when this machine has no hardware decoder.
+	#[cfg(target_os = "windows")]
+	fn decode_levels(count: u64, size: crate::Size) -> Option<(Vec<Frame>, Box<dyn backend::Backend>)> {
+		let mut encoder = h264_software_encoder(size);
+		let decoder = backend::open(
+			Codec::H264,
+			&decode_config(super::Kind::Named("mediafoundation".into())),
+		);
+		let Ok(mut decoder) = decoder else {
+			eprintln!("skipping: no Media Foundation H.264 hardware decoder available");
+			return None;
+		};
+
+		let mut decoded = Vec::new();
+		for i in 0..count {
+			let keyframe = i == 0;
+			if keyframe {
+				encoder.keyframe();
+			}
+			for encoded in encoder.encode(&flat_frame(i, level(i), size)).unwrap() {
+				decoded.extend(decoder.decode(encoded.payload, encoded.timestamp, keyframe).unwrap());
+			}
+		}
+
+		assert!(!decoded.is_empty(), "decoder produced no frames");
+		// The decoder goes back to the caller rather than being dropped here: its
+		// `ComGuard` tears Media Foundation down for the whole thread, and a test
+		// that keeps working with the frames afterwards would be doing so in a
+		// process no application resembles.
+		Some((decoded, decoder))
+	}
+
+	/// Every plane of a decoded flat frame: its average luma, and its average U and
+	/// V, which stay neutral because the source is gray. Chroma is the half that
+	/// catches a bad plane split, since the UV plane sits after the *texture's* luma
+	/// rows rather than the frame's.
+	#[cfg(target_os = "windows")]
+	fn plane_averages(frame: &Frame) -> (u32, u32, u32) {
+		let i420 = frame.surface.to_i420().unwrap();
+		let average = |plane: &[u8]| plane.iter().map(|&b| b as u32).sum::<u32>() / plane.len() as u32;
+		(average(i420.y()), average(i420.u()), average(i420.v()))
+	}
+
+	/// A decoded frame comes back as a GPU texture rather than downloaded pixels,
+	/// which is what leaves a render or re-encode path free of a CPU round trip.
+	/// `round_trip` above only checks the pixels, so it passes either way: this is
+	/// the test that pins the frame's residency.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_decode_stays_gpu_resident() {
+		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
+			return;
+		};
+		for out in &decoded {
+			assert!(
+				matches!(out.surface, Surface::Texture(_)),
+				"Media Foundation decode downloaded to the CPU instead of keeping its picture on the GPU"
+			);
+		}
+	}
+
+	/// Held frames keep their own pixels. The decoder decodes into a short array of
+	/// picture buffers and recycles a slice as soon as its sample is released, so
+	/// handing that slice out as the frame would let later pictures overwrite
+	/// frames a consumer is still holding: the decoder's texture has to be copied
+	/// into one of ours on the way out.
+	///
+	/// A distinct level per frame is what makes that visible; a fixed test picture
+	/// looks identical either way.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_held_frames_keep_their_pixels() {
+		// More frames than the decoder's pool has slices (8 on the hardware this
+		// was written against, one per picture), so it has to recycle the slices
+		// the earliest frames came out of.
+		let Some((decoded, _decoder)) = decode_levels(12, gray_size()) else {
+			return;
+		};
+
+		for (i, out) in decoded.iter().enumerate() {
+			let (luma, _, _) = plane_averages(out);
+			let want = expected_luma(level(i as u64));
+			// Half the gap between adjacent levels, so a frame showing a neighbour's
+			// picture fails rather than squeaking through.
+			assert!(
+				luma.abs_diff(want) <= 6,
+				"frame {i} decoded to luma {luma}, expected about {want}: the decoder recycled its picture buffer"
+			);
+		}
+	}
+
+	/// A height that isn't a whole number of macroblocks is coded padded (180 rows
+	/// become 192), and the frame has to be the picture rather than the padding.
+	///
+	/// Chroma is the assertion that bites: the interleaved UV plane starts after
+	/// the *texture's* luma rows, so reading a padded texture as if it were the
+	/// frame lands in the last luma rows and colors the picture with them.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_decode_crops_coded_padding() {
+		let size = crate::Size::new(320, 180);
+		let Some((decoded, _decoder)) = decode_levels(3, size) else {
+			return;
+		};
+
+		for (i, out) in decoded.iter().enumerate() {
+			assert_eq!(out.size(), size, "frame {i} came back at the coded size");
+			let (luma, u, v) = plane_averages(out);
+			assert!(
+				luma.abs_diff(expected_luma(level(i as u64))) <= 6,
+				"frame {i} luma {luma} is not its own picture"
+			);
+			// Gray in, so both chroma planes stay neutral.
+			assert!(
+				u.abs_diff(128) <= 4 && v.abs_diff(128) <= 4,
+				"frame {i} chroma ({u}, {v}) is not neutral: the plane split read into the padding"
+			);
+		}
+	}
+
+	/// The transcode path stays on hardware from decode through re-encode: the
+	/// hardware encoder MFT takes the decoded texture on the same Direct3D11
+	/// device, no download and no upload. The residency assertion catches a CPU
+	/// fallback even when the pixels and dimensions still look right.
+	///
+	/// Decoding what comes back is the other half, and the one that pins the blit:
+	/// the encoder reads the texture on its own timeline, so a copy that never
+	/// landed still produces packets, just of the wrong picture.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn mediafoundation_decoded_texture_reencodes_in_place() {
+		let size = gray_size();
+		let Some((decoded, _decoder)) = decode_levels(3, size) else {
+			return;
+		};
+		for out in &decoded {
+			assert!(
+				matches!(out.surface, Surface::Texture(_)),
+				"Media Foundation decode downloaded to the CPU"
+			);
+		}
+
+		let encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Named("mediafoundation".into()),
+			..EncodeConfig::new(size.width, size.height, 30)
+		});
+		let Ok(mut encoder) = encoder else {
+			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
+			return;
+		};
+
+		let mut reencoded = Vec::new();
+		for (i, out) in decoded.iter().enumerate() {
+			if i == 0 {
+				encoder.keyframe();
+			}
+			reencoded.extend(encoder.encode(out).unwrap());
+		}
+		reencoded.extend(encoder.finish().unwrap());
+		assert!(
+			!reencoded.is_empty(),
+			"re-encoding decoded textures produced no packets"
+		);
+
+		// Back to pixels through the software decoder, so this leans on nothing the
+		// hardware path just did.
+		let mut decoder = backend::open(Codec::H264, &decode_config(super::Kind::Software)).expect("openh264 decoder");
+		let mut out = Vec::new();
+		for (i, encoded) in reencoded.iter().enumerate() {
+			out.extend(
+				decoder
+					.decode(encoded.payload.clone(), encoded.timestamp, i == 0)
+					.unwrap(),
+			);
+		}
+
+		// Every frame, not merely some: a hardware encoder holding its tail back is
+		// what this file's flush exists to stop, and a per-frame check alone cannot
+		// see a stream that came back one short.
+		assert_eq!(out.len(), decoded.len(), "the re-encoded stream lost frames");
+		for (i, frame) in out.iter().enumerate() {
+			assert_eq!(frame.size(), size, "re-encoded frame {i} changed size");
+			let (luma, _, _) = plane_averages(frame);
+			let want = expected_luma(level(i as u64));
+			assert!(
+				luma.abs_diff(want) <= 6,
+				"re-encoded frame {i} came back as luma {luma}, expected about {want}"
+			);
+		}
 	}
 
 	/// H.265 has no software encoder or decoder, so the HEVC round-trip rides the

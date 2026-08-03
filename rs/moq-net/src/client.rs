@@ -15,6 +15,7 @@ pub struct Client {
 	versions: Versions,
 	setup_path: Option<String>,
 	cost: Option<u64>,
+	peer_origin: Option<crate::Origin>,
 }
 
 impl Client {
@@ -67,6 +68,8 @@ impl Client {
 	///
 	/// Only for transports that carry no request URI of their own (native QUIC, qmux
 	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
+	/// Append `?` and the URI query when there is one: that is how a credential in the
+	/// query (`?jwt=`) reaches the server.
 	/// Bindings that already carry a URI (WebTransport, qmux over WebSocket) convey
 	/// the path there and MUST NOT send this; a server is entitled to treat it as a
 	/// protocol violation. An empty path is equivalent to omitting it. Ignored by
@@ -92,6 +95,29 @@ impl Client {
 		self
 	}
 
+	/// Assign an origin (hop) id to the peer, used whenever the peer doesn't declare
+	/// one itself.
+	///
+	/// Some relays never declare their identity: every moq-transport version (the
+	/// protocol carries no hop ids), and moq-lite peers without the hops extension.
+	/// Broadcasts received from such a peer are normally attributed to a random
+	/// per-connection origin, so they can't be recognized across sessions. This knob
+	/// pins that identity instead, exactly as if the peer had declared it:
+	///
+	/// - broadcasts received from the peer carry `origin` in their hop chains, so
+	///   every session dialing the same relay (with the same id) resolves to one
+	///   route and loop checks can recognize it;
+	/// - broadcasts whose hop chain already contains `origin` are neither announced
+	///   nor served back to the peer, preventing an echo through a relay that does
+	///   no loop detection of its own.
+	///
+	/// An identity the peer does declare (moq-lite with the hops extension) wins
+	/// over this one.
+	pub fn with_peer_origin(mut self, origin: crate::Origin) -> Self {
+		self.peer_origin = Some(origin);
+		self
+	}
+
 	/// Perform the MoQ handshake, returning the [`Session`] and the [`Driver`] that
 	/// runs its protocol work. The driver must be polled (spawned or awaited) for
 	/// the session to make progress.
@@ -110,6 +136,15 @@ impl Client {
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
 
+		// An assigned peer identity means subscriptions from the peer resolve to a
+		// source whose hop chain excludes it, the same split-horizon rule applied
+		// when a peer declares its own id. Announce filtering is per-protocol and
+		// handled inside each publisher.
+		let publish = match self.peer_origin {
+			Some(peer) => publish.map(|origin| origin.excluding(peer)),
+			None => publish,
+		};
+
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
@@ -127,6 +162,7 @@ impl Client {
 					true,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					ietf::Version::Draft19,
 					self.setup_path.clone(),
 					None,
@@ -150,6 +186,7 @@ impl Client {
 					true,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					ietf::Version::Draft18,
 					self.setup_path.clone(),
 					None,
@@ -173,6 +210,7 @@ impl Client {
 					true,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					ietf::Version::Draft17,
 					self.setup_path.clone(),
 					None,
@@ -218,6 +256,8 @@ impl Client {
 					path: self.setup_path.clone(),
 					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 					cost: self.cost,
+					// Filled by `lite::start` from the attached origin handles.
+					origin: None,
 				};
 
 				let start = lite::start(
@@ -225,6 +265,7 @@ impl Client {
 					None,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					version,
 					our_setup,
 					None,
@@ -248,6 +289,7 @@ impl Client {
 					None,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					lite::Version::Lite04,
 					lite::Setup::default(),
 					None,
@@ -275,6 +317,7 @@ impl Client {
 					None,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					lite::Version::Lite03,
 					lite::Setup::default(),
 					None,
@@ -335,6 +378,7 @@ impl Client {
 					Some(stream),
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
@@ -360,6 +404,7 @@ impl Client {
 					true,
 					publish.clone(),
 					subscribe.clone(),
+					self.peer_origin,
 					v,
 					None,
 					None,

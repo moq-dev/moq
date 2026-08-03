@@ -37,6 +37,9 @@ The client supports several URL schemes:
 - `moqt://` — Raw QUIC with the MoQ IETF ALPN (no WebTransport overhead)
 - `moql://` — Raw QUIC with the moq-lite ALPN
 
+The URL path and query mean the same thing on every scheme.
+Raw QUIC has no request URI to put them in, so the client sends them in the MoQ SETUP instead; the server sees the same request path either way.
+
 ### Transport Racing
 
 `client.connect()` automatically races QUIC and WebSocket connections.

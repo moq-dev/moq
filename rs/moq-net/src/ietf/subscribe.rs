@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path,
+	Path, Timescale,
 	coding::*,
 	ietf::{GroupOrder, Location, Parameters, RequestId},
 };
@@ -163,6 +163,11 @@ impl Message for Subscribe<'_> {
 pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
+
+	/// The track's Timescale, sent as a Track Property (draft-17+).
+	///
+	/// `None` declares no timeline, so the subscriber times objects by arrival.
+	pub timescale: Option<Timescale>,
 }
 
 impl Message for SubscribeOk {
@@ -189,6 +194,11 @@ impl Message for SubscribeOk {
 				encode_params!(w, version,
 					0x22 => GroupOrder::Descending,
 				);
+
+				// Track Properties are the final field, so nothing may follow.
+				if let Some(timescale) = self.timescale {
+					super::properties::encode(w, timescale, version)?;
+				}
 			}
 		}
 
@@ -202,6 +212,7 @@ impl Message for SubscribeOk {
 			None
 		};
 		let track_alias = u64::decode(r, version)?;
+		let mut timescale = None;
 
 		match version {
 			Version::Draft14 => {
@@ -223,13 +234,14 @@ impl Message for SubscribeOk {
 				decode_params!(r, version,
 					0x22 => _group_order: Option<GroupOrder>,
 				);
-				super::properties::skip(r, version)?;
+				timescale = super::properties::decode(r, version)?;
 			}
 		}
 
 		Ok(Self {
 			request_id,
 			track_alias,
+			timescale,
 		})
 	}
 }
@@ -491,6 +503,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -504,6 +517,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -642,6 +656,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -696,6 +711,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			timescale: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

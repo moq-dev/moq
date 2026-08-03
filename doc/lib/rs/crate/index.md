@@ -15,4 +15,6 @@ Rust crates providing the MoQ protocol implementation and related tooling.
 | [hang](./hang) | Media encoding/streaming (catalog, container) |
 | [web-transport](./web-transport) | WebTransport protocol support |
 | [moq-mux](./moq-mux) | Media muxers/demuxers (fMP4, CMAF, MPEG-TS, FLV) |
+| [moq-video](./moq-video) | Native video capture, codecs, and GPU rendering |
+| [moq-audio](./moq-audio) | Native audio capture, codecs, playback, and echo cancellation |
 | [libmoq](./libmoq) | C FFI bindings |

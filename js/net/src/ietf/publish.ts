@@ -121,7 +121,7 @@ export class Publish {
 		}
 		// v15+: parameters followed by Track Properties (draft-17+)
 		const params = await Parameters.decode(r, version);
-		await Properties.skip(r, version);
+		await Properties.decode(r, version);
 		const groupOrder = params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;

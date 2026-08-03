@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-	Error, Path, PathOwned, broadcast,
+	Error, Path, PathOwned, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
@@ -60,6 +60,11 @@ struct State {
 struct TrackState {
 	producer: track::Producer,
 	alias: Option<u64>,
+
+	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
+	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: the
+	// publisher opted out of timestamps, so frames are stamped on arrival instead.
+	timescale: Option<Timescale>,
 }
 
 struct BroadcastState {
@@ -78,11 +83,13 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// A random per-connection origin stamped into the hop chain of every
-	// broadcast. moq-transport never carries hop ids on the wire, so each
-	// upstream session needs a stable, unique identity in the hop list for two
-	// sessions publishing the same path to resolve as distinct routes instead
-	// of colliding on an empty chain.
+	// The origin stamped into the hop chain of every broadcast. moq-transport
+	// never carries hop ids on the wire, so each upstream session needs a stable
+	// identity in the hop list for two sessions publishing the same path to
+	// resolve as distinct routes instead of colliding on an empty chain. Random
+	// per connection unless the caller assigned the peer an identity
+	// (`Client::with_peer_origin`), which then also makes the route recognizable
+	// across sessions dialing the same relay.
 	session_origin: crate::Origin,
 	state: Lock<State>,
 	tasks: Tasks,
@@ -108,12 +115,19 @@ async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, al
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: origin::Producer, control: Control, version: Version, tasks: Tasks) -> Self {
+	pub fn new(
+		session: S,
+		origin: origin::Producer,
+		control: Control,
+		peer_origin: Option<crate::Origin>,
+		version: Version,
+		tasks: Tasks,
+	) -> Self {
 		Self {
 			session,
 			origin,
 			control,
-			session_origin: crate::Origin::random(),
+			session_origin: peer_origin.unwrap_or_else(crate::Origin::random),
 			state: Default::default(),
 			tasks,
 			version,
@@ -599,6 +613,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(TrackState {
 					producer: track.clone(),
 					alias: Some(msg.track_alias),
+					timescale: msg.timescale,
 				});
 			}
 			Entry::Occupied(_) => {
@@ -699,6 +714,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				TrackState {
 					producer: track.clone(),
 					alias: None,
+					timescale: None,
 				},
 			);
 		}
@@ -718,7 +734,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Read the response and register the alias mapping
 		match self.read_subscribe_response(&mut stream).await {
-			Ok(Some(alias)) => {
+			Ok(Some((alias, timescale))) => {
+				if let Some(timescale) = timescale {
+					let mut state = self.state.lock();
+					if let Some(track) = state.subscribes.get_mut(&request_id) {
+						track.timescale = Some(timescale);
+					}
+				}
+
 				if let Err(err) = self.register_alias(request_id, alias) {
 					self.session.close(err.to_code(), err.to_string().as_ref());
 					self.remove_subscribe(request_id);
@@ -806,7 +829,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<u64>, Error> {
+	async fn read_subscribe_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+	) -> Result<Option<(u64, Option<Timescale>)>, Error> {
 		// Read type_id + size + body from the stream
 		let type_id: u64 = stream.reader.decode().await?;
 		let size: u16 = stream.reader.decode().await?;
@@ -816,7 +842,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			ietf::SubscribeOk::ID => {
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Some(msg.track_alias))
+				Ok(Some((msg.track_alias, msg.timescale)))
 			}
 			ietf::SubscribeError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeError::decode_msg(&mut data, self.version)?;
@@ -847,7 +873,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::warn!(track_alias = %group.track_alias, "unknown track alias");
 		})?;
 
-		let (mut producer, track) = {
+		let (mut producer, track, timescale) = {
 			let mut state = self.state.lock();
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
@@ -857,11 +883,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// Stats (groups/frames/bytes) are counted in the model as the group is
 			// written, through the tagged `track::Producer`.
 			let producer = track.producer.create_group(group_info)?;
-			(producer, track.producer.clone())
+			(producer, track.producer.clone(), track.timescale)
 		};
 
 		let res = {
-			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone()));
+			let mut serve = std::pin::pin!(self.run_group(group, stream, producer.clone(), timescale));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -895,6 +921,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: group::Producer,
+		timescale: Option<Timescale>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -903,13 +930,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 
 			// Per-object extension headers may carry the frame's presentation timestamp
-			// (Timestamp/Timescale Object Properties). Absent it, stamp the local receive time.
-			let timestamp = if group.flags.has_extensions {
-				let size: usize = stream.decode().await?;
-				let mut ext = stream.read_exact(size).await?;
-				ietf::decode_object_time(&mut ext, self.version)?
-			} else {
-				None
+			// (the Timestamp Object Property), in the units the track declared. A track
+			// that declared no timescale opted out, so its objects are stamped on arrival
+			// even if one carries a Timestamp we could not interpret.
+			let timestamp = match (group.flags.has_extensions, timescale) {
+				(true, Some(timescale)) => {
+					let size: usize = stream.decode().await?;
+					let mut ext = stream.read_exact(size).await?;
+					ietf::decode_object_time(&mut ext, timescale, self.version)?
+				}
+				(true, None) => {
+					let size: usize = stream.decode().await?;
+					stream.read_exact(size).await?;
+					None
+				}
+				(false, _) => None,
 			};
 
 			let size: u64 = stream.decode().await?;
@@ -994,5 +1029,38 @@ mod tests {
 		remove_track_alias(&aliases, 7, RequestId(13));
 
 		assert_eq!(aliases.read().get(&7), Some(&RequestId(11)));
+	}
+
+	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
+	/// attributed to a random per-connection origin. An identity assigned via
+	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
+	/// resolve to one recognizable route.
+	#[tokio::test]
+	async fn assigned_peer_origin_attributes_announces() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let assigned = crate::Origin::new(777).unwrap();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			Some(assigned),
+			Version::Draft14,
+			tasks,
+		);
+
+		let _producer = subscriber
+			.start_announce(crate::Path::new("room/host").to_owned())
+			.unwrap();
+
+		// Broadcast visibility is deferred until the executor ticks.
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		assert_eq!(hops, vec![assigned]);
 	}
 }

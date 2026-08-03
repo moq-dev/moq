@@ -5,9 +5,16 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.39"
+version = "0.5.40"
 edition = "2024"
 rust-version.workspace = true
+
+# The command surface is also a library so `moq-cli` can nest it under `moq token`
+# instead of duplicating it. Keeping it here rather than in `moq-token` keeps clap
+# and anyhow out of that library's public API.
+[lib]
+name = "moq_token_cli"
+path = "src/lib.rs"
 
 # The package is `moq-token-cli`, but the binary it ships is `moq-token`.
 [[bin]]
@@ -18,3 +25,6 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 moq-token = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

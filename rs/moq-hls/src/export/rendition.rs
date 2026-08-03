@@ -271,7 +271,7 @@ impl Rendition {
 	///
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
 	/// resolved by fetching the newest complete segment's group first.
-	pub(crate) async fn init(&self) -> Result<Option<Bytes>> {
+	pub async fn init(&self) -> Result<Option<Bytes>> {
 		let mut cache = self.init.lock().await;
 		if let Some(bytes) = cache.as_ref() {
 			return Ok(Some(bytes.clone()));

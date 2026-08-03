@@ -24,16 +24,20 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::{
 	CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVGOPSize,
 	CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
-	IMFMediaEvent, IMFMediaEventGenerator, IMFSample, IMFTransform, METransformHaveOutput, METransformNeedInput,
-	MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT,
-	MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-	MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager,
-	MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-	MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN,
-	MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-	MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-	MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-	eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
+	IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, METransformDrainComplete,
+	METransformHaveOutput, METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT,
+	MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_EVENT_FLAG_NONE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+	MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+	MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
+	MF_TRANSFORM_ASYNC_UNLOCK, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+	MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_0_255, MFNominalRange_16_235,
+	MFSampleExtension_Discontinuity, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+	MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+	MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+	MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+	MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoPrimaries_SMPTE170M,
+	MFVideoTransFunc_709, MFVideoTransferMatrix_BT601, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
+	eAVEncH264VProfile_High, eAVEncH265VProfile_Main_420_8,
 };
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
@@ -42,7 +46,7 @@ use super::super::encoder::{Codec, Config};
 use super::{Backend, Encoded};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
-use crate::{Error, Frame};
+use crate::{Color, Error, Frame};
 
 pub(crate) const NAME: &str = "mediafoundation";
 
@@ -62,6 +66,9 @@ pub(crate) struct MediaFoundation {
 	framerate: u32,
 	bitrate: u32,
 	gop: u32,
+	/// The color space of the input frames, stamped onto both media types so the
+	/// encoder writes it into the bitstream's VUI.
+	color: Color,
 	/// Lazily configured on the first frame, since the Direct3D11 device to bind
 	/// (for zero-copy texture input) comes from the frame itself.
 	started: bool,
@@ -72,6 +79,12 @@ pub(crate) struct MediaFoundation {
 	output_size: u32,
 	/// True once the MFT has asked for input and we haven't fed it since.
 	needs_input: bool,
+	/// True once the MFT has reported its drain complete, so a drain knows the
+	/// tail is out rather than still coming.
+	drained: bool,
+	/// Set while the next sample is the first of a restarted stream, so it can be
+	/// marked as such.
+	discontinuity: bool,
 	sample_index: i64,
 	/// Frames handed to the MFT that haven't come back out, oldest first: the
 	/// sample time we gave the codec paired with the frame's real timestamp. This
@@ -132,10 +145,13 @@ impl MediaFoundation {
 			framerate: config.framerate,
 			bitrate: clamp_u32(config.resolved_bitrate()),
 			gop: config.gop,
+			color: config.resolved_color(),
 			started: false,
 			provides_samples: false,
 			output_size: 0,
 			needs_input: false,
+			drained: false,
+			discontinuity: false,
 			sample_index: 0,
 			pending: VecDeque::new(),
 			last_timestamp: None,
@@ -211,6 +227,39 @@ impl MediaFoundation {
 		Ok(())
 	}
 
+	/// Stamp the color space onto a media type. Media Foundation takes these as a
+	/// request rather than a guarantee, so a driver may still emit an untagged
+	/// stream; the conversion picks the matrix an untagged stream implies, which
+	/// is what keeps that case correct.
+	fn set_color(&self, media: &IMFMediaType) -> Result<(), Error> {
+		let (primaries, matrix) = match self.color {
+			Color::Bt601Limited | Color::Bt601Full => (MFVideoPrimaries_SMPTE170M, MFVideoTransferMatrix_BT601),
+			Color::Bt709Limited | Color::Bt709Full => (MFVideoPrimaries_BT709, MFVideoTransferMatrix_BT709),
+		};
+		// BT.601 and BT.709 share a transfer curve; only primaries and matrix differ.
+		let transfer = MFVideoTransFunc_709;
+		let range = match self.color.limited() {
+			true => MFNominalRange_16_235,
+			false => MFNominalRange_0_255,
+		};
+
+		unsafe {
+			media
+				.SetUINT32(&MF_MT_VIDEO_PRIMARIES, primaries.0 as u32)
+				.map_err(|e| mf_err("color primaries", e))?;
+			media
+				.SetUINT32(&MF_MT_TRANSFER_FUNCTION, transfer.0 as u32)
+				.map_err(|e| mf_err("transfer function", e))?;
+			media
+				.SetUINT32(&MF_MT_YUV_MATRIX, matrix.0 as u32)
+				.map_err(|e| mf_err("yuv matrix", e))?;
+			media
+				.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, range.0 as u32)
+				.map_err(|e| mf_err("nominal range", e))?;
+		}
+		Ok(())
+	}
+
 	fn set_output_type(&self) -> Result<(), Error> {
 		let format = OutputFormat::for_codec(self.codec);
 		let media = unsafe { MFCreateMediaType().map_err(|e| mf_err("create output type", e))? };
@@ -236,6 +285,7 @@ impl MediaFoundation {
 			media
 				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
 				.map_err(|e| mf_err("output frame rate", e))?;
+			self.set_color(&media)?;
 			self.transform
 				.SetOutputType(0, &media, 0)
 				.map_err(|e| mf_err("SetOutputType", e))?;
@@ -261,6 +311,7 @@ impl MediaFoundation {
 			media
 				.SetUINT64(&MF_MT_FRAME_RATE, pack_2x32(self.framerate, 1))
 				.map_err(|e| mf_err("input frame rate", e))?;
+			self.set_color(&media)?;
 			self.transform
 				.SetInputType(0, &media, 0)
 				.map_err(|e| mf_err("SetInputType", e))?;
@@ -273,9 +324,8 @@ impl MediaFoundation {
 	fn build_sample(&self, frame: &Surface) -> Result<IMFSample, Error> {
 		let buffer = match frame {
 			Surface::Texture(texture) => unsafe {
-				let buffer =
-					MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, texture.subresource, false)
-						.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
+				let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &texture.texture, 0, false)
+					.map_err(|e| mf_err("MFCreateDXGISurfaceBuffer", e))?;
 				let length = buffer
 					.cast::<windows::Win32::Media::MediaFoundation::IMF2DBuffer>()
 					.map_err(|e| mf_err("DXGI buffer is not 2D", e))?
@@ -386,6 +436,7 @@ impl MediaFoundation {
 		// `GetType` returns the raw `MF_EVENT_TYPE` value as a u32.
 		const NEED_INPUT: u32 = METransformNeedInput.0 as u32;
 		const HAVE_OUTPUT: u32 = METransformHaveOutput.0 as u32;
+		const DRAIN_COMPLETE: u32 = METransformDrainComplete.0 as u32;
 		match unsafe { event.GetType().map_err(|e| mf_err("event GetType", e))? } {
 			NEED_INPUT => self.needs_input = true,
 			HAVE_OUTPUT => {
@@ -393,6 +444,7 @@ impl MediaFoundation {
 					out.push(packet);
 				}
 			}
+			DRAIN_COMPLETE => self.drained = true,
 			_ => {}
 		}
 		Ok(())
@@ -444,6 +496,47 @@ impl MediaFoundation {
 			sample_to_bytes(&sample)?,
 			self.take_timestamp(sample_time),
 		)))
+	}
+
+	/// End the stream and wait the MFT's tail out, returning everything it was
+	/// still holding.
+	///
+	/// The blocking wait is the point. A hardware encoder holds a frame or two, and
+	/// the events carrying them are posted *after* the drain command, so sweeping
+	/// whatever happens to be queued already truncates the stream: that is one
+	/// access unit lost per group, and on a live track the frame does not vanish
+	/// but reappears ahead of the next group's keyframe.
+	///
+	/// An async MFT owes a `METransformDrainComplete` for every drain, and a failed
+	/// event surfaces through [`handle_event`](Self::handle_event) as an error
+	/// rather than a silence, so the wait terminates either way. Both messages that
+	/// set that up are checked for the same reason: the wait is only bounded by an
+	/// MFT that accepted the drain, so failing to reach that state has to be an
+	/// error here rather than a block later.
+	fn drain(&mut self) -> Result<Vec<Encoded>, Error> {
+		let mut out = Vec::new();
+		if !self.started {
+			return Ok(out);
+		}
+
+		// Cleared here rather than after the wait: a drain we exited early once
+		// leaves its completion queued, and reading that later would let the next
+		// drain believe it was already done.
+		self.drained = false;
+		unsafe {
+			self.transform
+				.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
+				.map_err(|e| mf_err("end of stream", e))?;
+			self.transform
+				.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
+				.map_err(|e| mf_err("drain", e))?;
+		}
+		while !self.drained {
+			let event =
+				unsafe { self.events.GetEvent(MF_EVENT_FLAG_NONE) }.map_err(|e| mf_err("GetEvent (drain)", e))?;
+			self.handle_event(&event, &mut out)?;
+		}
+		Ok(out)
 	}
 
 	/// The timestamp of the frame this output belongs to, found by the sample time
@@ -499,11 +592,21 @@ impl Backend for MediaFoundation {
 		}
 
 		let sample = self.build_sample(&frame.surface)?;
+		if self.discontinuity {
+			// The first picture of a restarted stream is not temporally continuous
+			// with the one before the drain, and only this says so: the encoder would
+			// otherwise be free to predict across the seam.
+			unsafe { sample.SetUINT32(&MFSampleExtension_Discontinuity, 1) }
+				.map_err(|e| mf_err("mark discontinuity", e))?;
+		}
 		unsafe {
 			self.transform
 				.ProcessInput(0, &sample, 0)
 				.map_err(|e| mf_err("ProcessInput", e))?;
 		}
+		// Cleared only once the sample is in: a rejected one never carried the mark
+		// anywhere, so the next attempt still owns it.
+		self.discontinuity = false;
 		self.needs_input = false;
 		// Record the pairing before advancing the index, so this is the sample time
 		// `build_sample` just stamped the sample with.
@@ -515,19 +618,24 @@ impl Backend for MediaFoundation {
 		Ok(out)
 	}
 
-	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
-		if !self.started {
-			return Ok(Vec::new());
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		let out = self.drain()?;
+		if self.started {
+			// A drain leaves the MFT stopped: it stops asking for input until a new
+			// stream starts.
+			unsafe {
+				self.transform
+					.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+					.map_err(|e| mf_err("start of stream", e))?;
+			}
+			self.needs_input = false;
+			self.discontinuity = true;
 		}
-		unsafe {
-			let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-			let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-		}
-		// Low-latency CBR buffers almost nothing, so a non-blocking sweep of the
-		// queued events flushes the tail without risking a hang.
-		let mut out = Vec::new();
-		self.drain_ready(&mut out)?;
 		Ok(out)
+	}
+
+	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.drain()
 	}
 
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
@@ -583,10 +691,10 @@ fn enumerate_encoder(subtype: GUID) -> Result<IMFTransform, Error> {
 	let mut transform: Option<IMFTransform> = None;
 	for slot in entries.iter_mut() {
 		let Some(activate) = slot.take() else { continue };
-		if transform.is_none() {
-			if let Ok(mft) = unsafe { activate.ActivateObject::<IMFTransform>() } {
-				transform = Some(mft);
-			}
+		if transform.is_none()
+			&& let Ok(mft) = unsafe { activate.ActivateObject::<IMFTransform>() }
+		{
+			transform = Some(mft);
 		}
 	}
 	unsafe {

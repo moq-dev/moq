@@ -76,7 +76,10 @@ rust-version = "1.91"
 flate2 = "1.1"
 hang = { version = "0.20", path = "rs/hang" }
 kio = { version = "0.5", path = "rs/kio" }
-moq-audio = { version = "0.0.14", path = "rs/moq-audio" }
+# Permutation testing for the kio primitives (and everything built on them).
+# Only compiled under `--cfg loom`; see `just rs loom`.
+loom = { version = "0.7.2", features = ["futures"] }
+moq-audio = { version = "0.0.15", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
 moq-hls = { version = "0.4.3", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.3.2", path = "rs/moq-json" }
@@ -94,15 +97,17 @@ moq-rtmp = { version = "0.2.2", path = "rs/moq-rtmp" }
 moq-srt = { version = "0.2.3", path = "rs/moq-srt" }
 moq-stats = { version = "0.1.3", path = "rs/moq-stats" }
 moq-token = { version = "0.7", path = "rs/moq-token" }
+moq-token-cli = { version = "0.5", path = "rs/moq-token-cli" }
 # default-features off (the hardware codecs) on moq-transcode and moq-video so
 # each consumer opts in: binaries (libmoq, moq-boy, moq-cli) enable them, but a
 # self-compiler can leave them off to drop the CUDA / libva deps. Both crates
 # still default them on when depended on directly.
-moq-transcode = { version = "0.0.4", path = "rs/moq-transcode", default-features = false }
+moq-transcode = { version = "0.0.5", path = "rs/moq-transcode", default-features = false }
 # Standalone crate (moq-dev/vaapi); vendored from cros-libva + cros-codecs.
 # dlopen's libva at runtime (no libva-dev at build, no NEEDED libva in the binary).
 moq-vaapi = "0.0.3"
-moq-video = { version = "0.0.10", path = "rs/moq-video", default-features = false }
+moq-video = { version = "0.0.11", path = "rs/moq-video", default-features = false }
+percent-encoding = "2"
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
@@ -119,6 +124,22 @@ web-transport-trait = "0.3.4"
 
 [profile.dev]
 panic = "abort"
+
+# Optimize the bignum crates even in dev/test builds. RSA keygen is bignum
+# arithmetic in a loop, and unoptimized it is orders of magnitude slower: the
+# moq-token key tests spend ~16s generating 2048-bit keys, versus well under a
+# second here. These are dependencies we never step through in a debugger, so
+# optimizing them costs nothing an unoptimized build was buying us, and the
+# tests keep exercising production key sizes rather than being weakened to
+# stay fast. `profile.test` inherits these overrides.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

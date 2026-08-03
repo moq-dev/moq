@@ -4,6 +4,7 @@ import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
+import type { Timescale } from "../time.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -153,6 +154,10 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.trackName, { priority: msg.subscriberPriority });
 
 		try {
+			// Declaring the timescale is what opts the track into timestamps; every object
+			// Timestamp below is in these units.
+			const timescale = (await track.info()).timescale;
+
 			// Send SUBSCRIBE_OK
 			await stream.writer.u53(SubscribeOk.id);
 			const ok = new SubscribeOk({
@@ -161,6 +166,7 @@ export class Publisher {
 						? msg.requestId
 						: undefined,
 				trackAlias: msg.requestId,
+				timescale,
 			});
 			await ok.encode(stream.writer, version);
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
@@ -170,7 +176,7 @@ export class Publisher {
 				for (;;) {
 					const group = await track.recvGroup();
 					if (!group) return;
-					void this.#runGroup(msg.requestId, group);
+					void this.#runGroup(msg.requestId, group, timescale);
 				}
 			})();
 
@@ -206,7 +212,7 @@ export class Publisher {
 	/**
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
-	async #runGroup(requestId: bigint, group: group.Consumer) {
+	async #runGroup(requestId: bigint, group: group.Consumer, timescale: Timescale) {
 		try {
 			const stream = await Writer.open(this.#quic, this.#session.version);
 
@@ -232,7 +238,7 @@ export class Publisher {
 					if (!frame) break;
 
 					const obj = new Frame({ payload: frame.payload, timestamp: frame.timestamp });
-					await obj.encode(stream, header.flags, this.#session.version);
+					await obj.encode(stream, header.flags, timescale, this.#session.version);
 				}
 
 				stream.close();

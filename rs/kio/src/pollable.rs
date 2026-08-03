@@ -5,7 +5,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use crate::Waiter;
+use crate::{Park, Waiter};
 
 /// A pollable computation backed by kio channels.
 ///
@@ -14,8 +14,8 @@ use crate::Waiter;
 ///
 /// This exists because a kio [`Waiter`] holds the strong `Arc<Waker>` while the
 /// channel's [`crate::WaiterList`] keeps only a `Weak`. A bare [`Future`] would have
-/// to stash the strong `Waiter` in a field and replace it every poll (or lose its
-/// wakeup); [`Pending`] does that once so each implementor doesn't have to.
+/// to park the strong `Waiter` in a field for as long as it stays pending (or lose
+/// its wakeup); [`Pending`] does that once so each implementor doesn't have to.
 pub trait Pollable: Unpin {
 	/// The value the computation resolves to.
 	type Output;
@@ -29,7 +29,7 @@ pub trait Pollable: Unpin {
 	fn poll(&self, waiter: &Waiter) -> Poll<Self::Output>;
 }
 
-/// Adapts a [`Pollable`] into a [`Future`], retaining the strong [`Waiter`] between
+/// Adapts a [`Pollable`] into a [`Future`], parking the strong [`Waiter`] between
 /// polls so its weak registration stays live.
 ///
 /// Derefs to the inner value, so any inherent methods you define on it are
@@ -37,15 +37,17 @@ pub trait Pollable: Unpin {
 /// `update`).
 pub struct Pending<P> {
 	inner: P,
-	// Retain the previous waiter so its Weak registration survives until the next
-	// poll replaces it (see [`crate::WaiterList`]).
-	waiter: Option<Waiter>,
+	// Retains a parked waiter across polls so its weak registrations survive; see [`Park`].
+	park: Park,
 }
 
 impl<P> Pending<P> {
 	/// Wrap a [`Pollable`] so it can be `.await`ed.
 	pub fn new(inner: P) -> Self {
-		Self { inner, waiter: None }
+		Self {
+			inner,
+			park: Park::default(),
+		}
 	}
 
 	/// Consume the wrapper, returning the inner value.
@@ -72,16 +74,14 @@ impl<P: Pollable> Future for Pending<P> {
 	type Output = P::Output;
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<P::Output> {
-		// Replacing drops the previous waiter, killing its Weak ref in the list so
-		// the inner poll's register call can recycle the slot (see `WaiterList`).
 		// `Pending<P>` is `Unpin` (P is, via the trait bound), so this deref is sound.
 		let this = &mut *self;
-		this.waiter = Some(Waiter::new(cx.waker().clone()));
-		Pollable::poll(&this.inner, this.waiter.as_ref().unwrap())
+		let waiter = this.park.hold(cx);
+		Pollable::poll(&this.inner, waiter)
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod test {
 	use super::*;
 	use crate::Producer;

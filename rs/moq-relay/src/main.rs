@@ -66,9 +66,9 @@ async fn main() -> anyhow::Result<()> {
 	let cluster = cluster.with_stats(stats.registry().clone());
 
 	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-	// /metrics + /health, separate from the customer-facing web server. No-op
+	// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 	// when unconfigured.
-	let internal = Internal::new(config.internal, cluster.stats.clone());
+	let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
 
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
@@ -98,17 +98,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
-	let mut conn_id = 0;
-
 	while let Some(request) = server.accept().await {
 		let conn = Connection {
-			id: conn_id,
+			// Shared with outbound cluster dials so one id space covers every session.
+			id: cluster.next_connection_id(),
 			request,
 			cluster: cluster.clone(),
 			auth: auth.clone(),
 		};
 
-		conn_id += 1;
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {
 				tracing::warn!(%err, "connection closed");

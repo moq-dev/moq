@@ -86,6 +86,8 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
     `--tls-cert` + `--tls-key`).
 
   Both may be given at once (dial a relay *and* accept incoming sessions).
+  `--origin <id>` pins the process's origin id (default: fresh and random per
+  run); see [Redundant Publishers](#redundant-publishers-11).
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`
@@ -96,6 +98,11 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
 
 Run `moq import --help` / `moq export --help` to see the endpoints, and
 `moq import rtmp --help` for a specific one.
+
+Two verbs sit outside this grammar because they never touch the network:
+[`moq token`](#authentication) manages relay JWTs, and `moq devices` lists the
+capture devices in a build with the `capture` feature enabled. Both take no MoQ
+side and reject one if given.
 
 ## Basic Usage
 
@@ -110,6 +117,39 @@ Remux a file to MPEG-TS and pipe it in (`-c copy` avoids re-encoding):
 ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
+
+### Redundant Publishers (1+1)
+
+Relays key a broadcast's content identity on the publisher's origin id (the
+first hop of its announcements). Two publishers of the same broadcast that
+share an id are treated as interchangeable sources: relays hold both routes
+and fail over between them at a group boundary, so killing one leaves viewers
+running off the other.
+
+Sharing an id is a promise: the publishers MUST produce the same broadcast,
+meaning the same track names carrying the same content, with group sequences
+aligned on the same boundaries. Relays may switch between same-id sources
+whenever routing prefers another (not only on failure), splicing at the next
+group boundary, so encoders that drift (for example segment-numbered tracks
+from processes started at different times) tear down subscribers on the
+switch. Independent publishers with different tracks or timelines MUST use
+different origin ids; the newcomer then takes the broadcast over instead of
+joining. Run the same command from two aligned encoders, pinning the same id
+on both:
+
+```bash
+moq --origin 42 --client-connect https://relay-a.example.com/anon --broadcast event.hang import ts
+moq --origin 42 --client-connect https://relay-b.example.com/anon --broadcast event.hang import ts
+```
+
+Leave `--origin` unset everywhere else. The default fresh id per run is what
+makes a restarted encoder look like new content (ending subscriptions and
+invalidating caches) instead of silently splicing mid-stream. A publisher with
+a *different* id takes the broadcast over the moment it announces, ending the
+incumbent rather than waiting behind it, so a reconnect is live again without
+waiting for the relay's transport to time out the connection it replaced. The
+last publisher to announce a path owns it, so use authorization to decide who
+may publish where.
 
 ### Capture a Webcam
 
@@ -502,7 +542,26 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect "https://relay.example.com/?jwt=<token>" --broadcast my-stream.hang import ts
 ```
 
-See [Authentication](/bin/relay/auth) for token generation.
+`moq token` mints those tokens, so a relay operator needs no extra tool:
+
+```bash
+# Generate a signing key. Only private.jwk has to stay secret; the relay
+# verifies with public.jwk.
+moq token generate --algorithm ES256 --out private.jwk --public public.jwk
+
+# Sign a token letting the bearer publish `rooms/123/alice` and watch the room.
+# Add `--expires <unix-timestamp>` to bound how long it stays valid.
+moq token sign --key private.jwk \
+    --root "rooms/123" \
+    --publish "alice" \
+    --subscribe "" > alice.jwt
+
+# Inspect a token's claims.
+moq token verify --key public.jwk --in alice.jwt
+```
+
+See [Authentication](/bin/relay/auth) for the key formats, scoping rules, and
+relay configuration.
 
 ## Test Videos
 

@@ -243,7 +243,9 @@ impl Message for FetchOk {
 				decode_params!(buf, version,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				super::properties::skip(buf, version)?;
+				// FETCH_OK may declare a timescale; we don't surface it yet, and a fetched
+				// object without an interpretable timestamp is stamped on arrival.
+				let _ = super::properties::decode(buf, version)?;
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 

@@ -5,7 +5,7 @@ import { error, reason } from "../error.ts";
 import * as netGroup from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
-import { Timestamp } from "../time.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { withTimeout } from "../util/timeout.ts";
 import type { Session } from "./adapter.ts";
@@ -50,6 +50,11 @@ export class Subscriber {
 
 	// Publisher-chosen aliases used by incoming group streams.
 	#aliases = new TrackAliases<track.Producer>();
+
+	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
+	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so the publisher
+	// opted out of timestamps and its frames are stamped on arrival instead.
+	#timescales = new Map<bigint, Timescale>();
 
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
@@ -317,6 +322,7 @@ export class Subscriber {
 			);
 		} finally {
 			this.#aliases.delete(trackAlias, producer);
+			this.#timescales.delete(trackAlias);
 		}
 	}
 
@@ -365,6 +371,9 @@ export class Subscriber {
 		const ok = await SubscribeOk.decode(state.stream.reader, version);
 		try {
 			this.#aliases.set(ok.trackAlias, producer);
+			if (ok.timescale !== undefined) {
+				this.#timescales.set(ok.trackAlias, ok.timescale);
+			}
 		} catch (err) {
 			this.#session.close();
 			throw err;
@@ -504,7 +513,12 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
-				const frame = await Frame.decode(stream, group.flags, this.#session.version);
+				const frame = await Frame.decode(
+					stream,
+					group.flags,
+					this.#timescales.get(group.trackAlias),
+					this.#session.version,
+				);
 				if (frame.payload === undefined) break;
 
 				producer.writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });

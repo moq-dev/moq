@@ -69,6 +69,12 @@ impl Backend for Vaapi {
 		})
 	}
 
+	fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		// The encoder submits and reads back synchronously per frame, so nothing
+		// is ever buffered.
+		Ok(Vec::new())
+	}
+
 	fn finish(&mut self) -> Result<Vec<Encoded>, Error> {
 		// The encoder submits and reads back synchronously per frame, so nothing
 		// is buffered at shutdown.

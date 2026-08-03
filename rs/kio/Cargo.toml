@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -23,5 +23,14 @@ smallvec = "1.15"
 tokio = { workspace = true, features = ["time"], optional = true }
 web-async = { workspace = true, optional = true }
 
+# Loom swaps in its own Arc/Mutex/atomics so it can permute every interleaving.
+# It's a normal (not dev) dependency because `sync.rs` re-exports it from the
+# library itself, but `cfg(loom)` is never set outside `just rs loom`.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

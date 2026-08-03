@@ -6,11 +6,17 @@
 	"scripts": {
 		"dev": "vitepress dev --open",
 		"build": "vitepress build",
+		"check": "tsc --noEmit && bun test ./.vitepress && vitepress build",
+		"test": "bun test ./.vitepress",
 		"preview": "vitepress preview",
 		"deploy": "vitepress build && wrangler deploy"
 	},
 	"devDependencies": {
+		"@types/bun": "^1.3.14",
+		"@types/node": "^26.1.1",
+		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
-		"wrangler": "^4.110.0"
+		"wrangler": "^4.114.0",
+		"yaml": "^2.9.0"
 	}
 }

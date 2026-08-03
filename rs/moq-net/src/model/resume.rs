@@ -233,6 +233,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Whether any segment is spliced in, and so whether there is anything for
+	/// [`Self::release`] to drop.
+	///
+	/// A segment outlives the route that produced it: the source can leave, or its
+	/// copy can die, while the segment stays spliced so readers keep what it already
+	/// delivered. That makes this, not the caller's own handle on the serving route,
+	/// the condition for arming an idle release.
+	pub(crate) fn is_spliced(&self) -> bool {
+		!self.state.read().segments.is_empty()
+	}
+
 	/// Mark the logical track as complete: no further switches. Subscribers see a
 	/// clean end once the final segment's track finishes.
 	pub fn finish(&mut self) -> Result<()> {
@@ -258,6 +269,12 @@ impl Producer {
 		state.abort = Some(err);
 		state.epoch += 1;
 		Ok(())
+	}
+
+	/// Whether the logical track ended in an error, as opposed to still being
+	/// servable or cleanly [`finish`](Self::finish)ed.
+	pub(crate) fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
 	}
 
 	/// Create a read handle for the logical track.
