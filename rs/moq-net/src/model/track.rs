@@ -1464,8 +1464,8 @@ impl Drop for Alive {
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
 		//
-		// `abort()`/`finish()` close the channel, so `write()` returns `Err(Ref)`.
-		// Check Ok and Err: Ok is unreachable after a deliberate close.
+		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
+		// leaves it open with `final_sequence` set, so inspect both outcomes.
 		match self.state.write() {
 			Ok(mut state) => {
 				if state.final_sequence.is_some() || state.abort.is_some() {
@@ -3414,8 +3414,8 @@ mod test {
 
 	#[tokio::test]
 	async fn drop_after_abort_does_not_warn() {
-		// abort() closes the channel after recording `abort`. Drop must treat that as
-		// clean via read(); without the abort check this emits a false WARN.
+		// abort() closes the channel after recording `abort`. Drop must treat the
+		// read-only guard returned by write() as clean or it emits a false WARN.
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", None);
 			let keep = producer.clone();
