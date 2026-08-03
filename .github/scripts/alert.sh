@@ -88,11 +88,11 @@ check_coverage() {
 #
 # The YAML is parsed rather than pattern-matched. GitHub accepts `on:` as a
 # block map, block sequence, flow sequence or bare scalar, any of which may wrap
-# across lines, and it runs both .yml and .yaml. Every hand-rolled version of
-# this missed a shape and then reported success for a workflow it had not
-# actually read, which is the exact silent gap the guard exists to close. bun is
-# already a hard dependency (jsDeps in flake.nix, `bun install` in CI), so its
-# YAML parser costs nothing new.
+# across lines, and it runs both .yml and .yaml. A matcher covering only some of
+# those shapes reports "no non-PR triggers" for a workflow it did not actually
+# read, which is the silent gap this guard exists to close. bun is already a
+# hard dependency (jsDeps in flake.nix, `bun install` in CI), so its YAML parser
+# costs nothing new.
 #
 # A workflow with no `name:` is an error, not a skip: GitHub falls back to the
 # file path, which alert.yml cannot reference, and skipping it would put the

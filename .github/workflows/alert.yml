@@ -5,9 +5,7 @@ name: Alert
 #
 # Why this exists: GitHub only notifies the user who *triggered* a run, and the
 # runs that matter most here are triggered by moq-bot (release tags) or by cron,
-# so nobody is notified when a release breaks. That is how libmoq shipped no
-# release for six weeks: every tag build failed, and the tags kept accumulating
-# with no artifact behind them.
+# so without this nobody is notified when a release breaks.
 #
 # PR failures are deliberately excluded. The author already sees them on the PR,
 # and that noise is what drives people to mute Actions notifications wholesale.
