@@ -56,17 +56,22 @@ impl Frame {
 	}
 
 	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
-	/// preserving the timestamp. Every GPU surface scales on the GPU and stays
-	/// there, so resize -> [`encode`](crate::encode::Encoder::encode) never
-	/// touches the CPU; only a CPU frame scales on the CPU. When one output size
+	/// preserving the timestamp. CUDA and macOS pixel-buffer surfaces scale on
+	/// the GPU and stay there. Direct3D11 textures use the CPU unless explicitly
+	/// enabled through [`resize_with`](Self::resize_with). When one output size
 	/// is enough, prefer decoding straight to it
 	/// ([`decode::Config::resize`](crate::decode::Config)), which is free on
 	/// decoders with a hardware scaler; this method is for fanning one decoded
 	/// stream out to several sizes.
 	pub fn resize(&self, size: Size) -> Result<Frame, Error> {
+		self.resize_with(size, &crate::resize::Config::default())
+	}
+
+	/// A copy of this frame scaled with explicit platform options.
+	pub fn resize_with(&self, size: Size, config: &crate::resize::Config) -> Result<Frame, Error> {
 		Ok(Frame {
 			timestamp: self.timestamp,
-			surface: self.surface.resize(size)?,
+			surface: self.surface.resize_with(size, config)?,
 		})
 	}
 }
@@ -158,19 +163,30 @@ impl Surface {
 		)?))
 	}
 
-	/// A copy scaled to `size`, staying on the GPU for every GPU surface: CUDA,
-	/// macOS pixel buffers, and Direct3D11 textures. The pixel half of
-	/// [`Frame::resize`], which is what you usually want since it carries the
-	/// timestamp across too.
+	/// A copy scaled to `size`. CUDA and macOS pixel-buffer surfaces stay on the
+	/// GPU. Direct3D11 textures use the CPU unless explicitly enabled through
+	/// [`resize_with`](Self::resize_with). The pixel half of [`Frame::resize`],
+	/// which is what you usually want since it carries the timestamp across too.
 	///
 	/// A GPU scaler that a driver refuses falls back to downloading and scaling
 	/// on the CPU, warning once, rather than failing the frame.
 	pub fn resize(&self, size: Size) -> Result<Surface, Error> {
+		self.resize_with(size, &crate::resize::Config::default())
+	}
+
+	/// A copy scaled with explicit platform options.
+	pub fn resize_with(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
+		// Counts as a use on builds where every GPU arm is compiled out.
+		let _ = config;
 		size.validate("resize to")?;
 		let Size { width, height } = size;
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(width, height)?),
+			#[cfg(target_os = "macos")]
+			Surface::PixelBuffer(pixels) if config.acceleration == crate::resize::Acceleration::Cpu => {
+				Surface::I420(pixels.download_i420()?.resize(width, height)?)
+			}
 			#[cfg(target_os = "macos")]
 			Surface::PixelBuffer(pixels) => match pixels.resize(width, height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
@@ -183,6 +199,10 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Surface::Cuda(cuda) if config.acceleration == crate::resize::Acceleration::Cpu => {
+				Surface::I420(cuda.download_i420()?.resize(width, height)?)
+			}
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(cuda) => match cuda.resize(width, height) {
 				Ok(scaled) => Surface::Cuda(scaled),
 				// E.g. the driver rejected the vendored PTX: degrade to a CPU
@@ -193,6 +213,10 @@ impl Surface {
 					Surface::I420(cuda.download_i420()?.resize(width, height)?)
 				}
 			},
+			#[cfg(target_os = "windows")]
+			Surface::Texture(texture) if config.acceleration != crate::resize::Acceleration::Gpu => {
+				Surface::I420(texture.download_i420()?.resize(width, height)?)
+			}
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) => match texture.resize(width, height) {
 				Ok(scaled) => Surface::Texture(scaled),
@@ -1605,7 +1629,8 @@ pub mod d3d11 {
 		}
 
 		/// Scale to `width` x `height` on the GPU, staying on this texture's device.
-		/// The Windows half of [`Frame::resize`](crate::Frame::resize).
+		/// The Windows path opted into by
+		/// [`Frame::resize_with`](crate::Frame::resize_with).
 		///
 		/// Errors rather than falling back, so the caller decides. Two things a
 		/// driver can refuse: rendering to NV12 at all (no output view, so no
@@ -2176,6 +2201,20 @@ mod tests {
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
+	/// Explicit CPU acceleration downloads a macOS pixel buffer before scaling.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn pixel_buffer_resize_can_force_the_cpu() {
+		let config = crate::resize::Config {
+			acceleration: crate::resize::Acceleration::Cpu,
+			..Default::default()
+		};
+		let source = Surface::PixelBuffer(nv12_surface(&gradient_i420(320, 240)));
+		let scaled = source.resize_with(Size::new(160, 120), &config).unwrap();
+
+		assert!(matches!(scaled, Surface::I420(_)), "CPU resize stayed on the GPU");
+	}
+
 	/// Upload a packed I420 test picture as NV12, including CoreVideo row
 	/// padding, so the transfer test starts from the decoder's surface format.
 	#[cfg(target_os = "macos")]
@@ -2232,9 +2271,7 @@ mod tests {
 		super::macos::PixelBuffer::new(buffer, frame.width, frame.height)
 	}
 
-	/// A decoded Windows frame scales without leaving the GPU. The regression
-	/// test for the fix: before it, a ladder fanning one frame out to several
-	/// sizes downloaded it once per rung, and this arm came back `I420`.
+	/// A Direct3D11 texture stays on the GPU when the caller opts in.
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn d3d11_resize_stays_on_the_gpu() {
@@ -2247,12 +2284,35 @@ mod tests {
 			return;
 		};
 
-		let scaled = Surface::Texture(texture).resize(crate::Size::new(160, 120)).unwrap();
+		let config = crate::resize::Config {
+			acceleration: crate::resize::Acceleration::Gpu,
+			..Default::default()
+		};
+		let scaled = Surface::Texture(texture)
+			.resize_with(crate::Size::new(160, 120), &config)
+			.unwrap();
 		assert!(
 			matches!(scaled, Surface::Texture(_)),
 			"Direct3D11 resize downloaded to the CPU"
 		);
 		assert_eq!((scaled.width(), scaled.height()), (160, 120));
+	}
+
+	/// Direct3D11 resize defaults to the CPU until the live-DXVA wedge is fixed.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn d3d11_resize_defaults_to_the_cpu() {
+		let Ok(device) = super::d3d11::create_device() else {
+			eprintln!("skipping: no Direct3D11 hardware device");
+			return;
+		};
+		let Ok(texture) = super::d3d11::upload_i420(&device, &gradient_i420(320, 240)) else {
+			eprintln!("skipping: driver will not allocate a usable NV12 texture");
+			return;
+		};
+
+		let scaled = Surface::Texture(texture).resize(crate::Size::new(160, 120)).unwrap();
+		assert!(matches!(scaled, Surface::I420(_)), "Direct3D11 resize was not opt-in");
 	}
 
 	/// GPU (video processor) and CPU (bilinear convolution) resizes agree on a

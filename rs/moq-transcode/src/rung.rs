@@ -48,6 +48,8 @@ pub(crate) struct Rung {
 	pub encoder: moq_video::encode::Kind,
 	/// Which decoder implementation to use.
 	pub decoder: moq_video::decode::Kind,
+	/// How to resize decoded frames.
+	pub resize: moq_video::resize::Config,
 }
 
 impl Rung {
@@ -186,15 +188,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					let Some(output) = &mut current else { continue };
 
 					// The feed decodes at the source's native size; size this rung's copy
-					// here. A GPU frame resizes on the GPU and feeds the encoder without
-					// touching the CPU. The resize carries the source's color space
-					// across, which is why the encoder is opened from the scaled frame
-					// rather than from this rung's size.
+					// here. Supported GPU paths feed the encoder without touching the
+					// CPU. The resize carries the source's color space across, which is
+					// why the encoder is opened from the scaled frame rather than from
+					// this rung's size.
 					let resized;
 					let frame: &moq_video::Frame = match frame.size() == rung.info.size {
 						true => &frame,
 						false => {
-							resized = frame.resize(rung.info.size)?;
+							resized = frame.resize_with(rung.info.size, &rung.resize)?;
 							&resized
 						}
 					};
@@ -394,7 +396,7 @@ fn write(output: &mut moq_net::group::Producer, encoded: Vec<moq_video::encode::
 /// (`decode::Config::resize`). A decoder with a hardware scaler (NVDEC) does,
 /// and its GPU frames feed the encoder in place: the NVDEC -> NVENC path never
 /// touches the CPU. Frames that come back at any other size (software decode,
-/// or a hardware decoder without a scaler) get `Frame::resize` instead.
+/// or a hardware decoder without a scaler) get `Frame::resize_with` instead.
 struct Pipeline {
 	decoder: moq_video::decode::Decoder,
 	/// Opened from the first decoded frame, whose color space it has to declare.
@@ -448,7 +450,7 @@ impl Pipeline {
 			let raw: &moq_video::Frame = match raw.size() == self.size {
 				true => &raw,
 				false => {
-					resized = raw.resize(self.size)?;
+					resized = raw.resize_with(self.size, &self.rung.resize)?;
 					&resized
 				}
 			};

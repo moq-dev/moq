@@ -318,6 +318,10 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang     tra
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
 ```
 
+Windows defaults to CPU resizing because some drivers can wedge when a cold
+Direct3D11 video processor runs beside a live DXVA decoder. Pass
+`--resize-acceleration gpu` to opt into GPU resizing after validating the driver.
+
 On an NVIDIA GPU the pipeline is fully GPU-resident: one shared NVDEC session
 decodes the source for all active rungs, a CUDA kernel resizes each rung's copy,
 and NVENC encodes it in place, with no CPU copies. Without a GPU it falls back

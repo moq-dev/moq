@@ -35,6 +35,10 @@ pub struct Args {
 	/// backend name like `nvdec`.
 	#[arg(long, default_value = "auto")]
 	pub decoder: String,
+
+	/// Frame resize acceleration: `auto`, `cpu`, or `gpu`.
+	#[arg(long, default_value = "auto", value_parser = parse_resize_acceleration)]
+	pub resize_acceleration: moq_video::resize::Acceleration,
 }
 
 /// Parse a `height:bitrate` rung, e.g. `720:2500000`.
@@ -47,6 +51,16 @@ fn parse_rung(arg: &str) -> Result<moq_transcode::Rung, String> {
 		.parse()
 		.map_err(|e| format!("invalid bitrate `{bitrate}`: {e}"))?;
 	Ok(moq_transcode::Rung::new(height, bitrate))
+}
+
+/// Parse a frame resize acceleration preference.
+fn parse_resize_acceleration(arg: &str) -> Result<moq_video::resize::Acceleration, String> {
+	match arg {
+		"auto" => Ok(moq_video::resize::Acceleration::Auto),
+		"cpu" => Ok(moq_video::resize::Acceleration::Cpu),
+		"gpu" => Ok(moq_video::resize::Acceleration::Gpu),
+		_ => Err(format!("expected auto, cpu, or gpu, got `{arg}`")),
+	}
 }
 
 /// Run the transcoder: subscribe to the source through the relay, publish the
@@ -104,6 +118,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		"software" => moq_video::decode::Kind::Software,
 		name => moq_video::decode::Kind::Named(name.to_string()),
 	};
+	config.resize.acceleration = args.resize_acceleration;
 	// Reference the source renditions relatively when the output nests under
 	// the source (`a/b` -> `a/b/transcode.hang` is `..`, one `..` per level);
 	// otherwise the derivative catalog advertises only the rungs.

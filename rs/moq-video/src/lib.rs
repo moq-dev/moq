@@ -68,6 +68,7 @@ pub mod decode;
 pub mod encode;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod resize;
 
 mod color;
 mod error;

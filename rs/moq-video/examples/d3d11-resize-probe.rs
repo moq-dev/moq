@@ -1,11 +1,10 @@
 //! Instrumented probe for the Direct3D11 GPU-resize wedge (Windows only).
 //!
-//! `Surface::resize` downloads a `Surface::Texture` and scales it on the CPU,
-//! once per rung, because a `VideoProcessorBlt` scaler wedged on the device a
-//! DXVA decoder was running on. This binary is the harness for finding out
-//! which call blocks and under which ordering: it runs one scaler under several
-//! orderings and logs every Direct3D call around it, so the last line before a
-//! wedge names the call that blocked.
+//! Direct3D11 GPU resizing is opt-in because a `VideoProcessorBlt` scaler wedged
+//! on the device a DXVA decoder was running on. This binary is the harness for
+//! finding out which call blocks and under which ordering: it runs one scaler
+//! under several orderings and logs every Direct3D call around it, so the last
+//! line before a wedge names the call that blocked.
 //!
 //! ```text
 //! cargo run -p moq-video --example d3d11-resize-probe -- live

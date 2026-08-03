@@ -109,6 +109,7 @@ pub async fn run(
 							config: source_config.clone(),
 							encoder: config.encoder.clone(),
 							decoder: config.decoder.clone(),
+							resize: config.resize,
 							info: info.clone(),
 						};
 						tasks.spawn(rung::serve(rung, request));
@@ -316,6 +317,7 @@ mod tests {
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
+			..Default::default()
 		};
 
 		let output = moq_net::broadcast::Info::default().produce();
@@ -368,12 +370,14 @@ mod tests {
 		// 180p and 120p: NVENC rejects tiny frames (80x60 is below its minimum
 		// encode resolution), so the hardware ladder stays a bit larger than the
 		// software test's.
-		let config = Config {
+		let mut config = Config {
 			rungs: vec![Rung::new(180, 200_000), Rung::new(120, 100_000)],
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
+			..Default::default()
 		};
+		config.resize.acceleration = moq_video::resize::Acceleration::Gpu;
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let consumer = output.consume();
@@ -440,12 +444,14 @@ mod tests {
 		}
 
 		let source = source_broadcast(2, 5);
-		let config = Config {
+		let mut config = Config {
 			rungs: vec![Rung::new(120, 100_000)],
 			encoder: moq_video::encode::Kind::Hardware,
 			decoder: moq_video::decode::Kind::Hardware,
 			source: None,
+			..Default::default()
 		};
+		config.resize.acceleration = moq_video::resize::Acceleration::Gpu;
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let consumer = output.consume();
@@ -482,6 +488,7 @@ mod tests {
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: Some(moq_net::PathRelativeOwned::from("..".to_string())),
+			..Default::default()
 		};
 
 		let output = moq_net::broadcast::Info::default().produce();
@@ -579,6 +586,7 @@ mod tests {
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			source: None,
+			..Default::default()
 		};
 
 		let output = moq_net::broadcast::Info::default().produce();

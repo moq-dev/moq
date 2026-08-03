@@ -648,10 +648,17 @@ mod tests {
 	#[test]
 	fn mediafoundation_resized_texture_reencodes_in_place() {
 		let target = crate::Size::new(160, 120);
+		let resize = crate::resize::Config {
+			acceleration: crate::resize::Acceleration::Gpu,
+			..Default::default()
+		};
 		let Some((decoded, _decoder)) = decode_levels(3, gray_size()) else {
 			return;
 		};
-		let resized: Vec<_> = decoded.iter().map(|frame| frame.resize(target).unwrap()).collect();
+		let resized: Vec<_> = decoded
+			.iter()
+			.map(|frame| frame.resize_with(target, &resize).unwrap())
+			.collect();
 		for frame in &resized {
 			assert_eq!(frame.size(), target);
 			assert!(
