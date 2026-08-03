@@ -66,6 +66,10 @@ like a table that silently degrades into a paragraph.
 
 ## Conventions
 
+- **Brevity.** Less text is better: state each rule once, normatively, where it
+  belongs, and cross-reference instead of restating. Cut consequences a reader
+  can derive, edge cases the general rule already decides, and motivation
+  beyond a sentence. When editing, prefer deleting a sentence over qualifying it.
 - Draft sources are kramdown-rfc markdown; `remark` (the repo's CommonMark
   linter) skips them. A successful `kramdown-rfc` run also validates syntax.
 - The `docname` frontmatter field ends in `-latest`; `publish` rewrites it to
