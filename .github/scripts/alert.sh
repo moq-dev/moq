@@ -151,11 +151,15 @@ workflow_triggers() {
 }
 
 # Names of workflows carrying at least one non-pull_request trigger.
+#
+# GitHub runs both .yml and .yaml, so both are scanned. nullglob keeps the
+# unmatched extension from expanding to a literal path under `set -u`.
 non_pr_workflow_names() {
     local f triggers
-    for f in "$WORKFLOWS_DIR"/*.yml; do
+    shopt -s nullglob
+    for f in "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml; do
         # alert.yml watches the others; watching itself would be a trigger loop.
-        [[ "$(basename "$f")" == "alert.yml" ]] && continue
+        [[ "$(basename "$f")" =~ ^alert\.ya?ml$ ]] && continue
 
         triggers=$(workflow_triggers "$f")
         if grep -qvx 'pull_request' <<<"$triggers"; then
