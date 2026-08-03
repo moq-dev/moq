@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 use super::Kind;
 
@@ -15,8 +15,6 @@ const AUDIO_GROUP: &str = "aud";
 
 /// RFC 3986 unreserved characters, which are safe in one URL path segment.
 const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
-/// Characters that cannot appear in an HLS quoted-string attribute.
-const QUOTED_STRING: &AsciiSet = &CONTROLS.add(b'"');
 
 fn rendition_uri(kind: Kind, name: &str, suffix: &str) -> String {
 	format!(
@@ -27,7 +25,15 @@ fn rendition_uri(kind: Kind, name: &str, suffix: &str) -> String {
 }
 
 fn quoted_string(value: &str) -> String {
-	utf8_percent_encode(value, QUOTED_STRING).to_string()
+	let mut quoted = String::with_capacity(value.len());
+	for character in value.chars() {
+		if character == '"' || character.is_ascii_control() {
+			let _ = write!(quoted, "%{:02X}", character as u32);
+		} else {
+			quoted.push(character);
+		}
+	}
+	quoted
 }
 
 /// A video rendition entry for the master playlist.
@@ -265,16 +271,16 @@ mod tests {
 	}
 
 	#[test]
-	fn audio_names_cannot_inject_attributes_or_lines() {
+	fn audio_names_preserve_unicode_without_injection() {
 		let audio = vec![AudioVariant {
-			name: "audio\"\nINJECT\u{7f}\u{1f3b5}".into(),
+			name: "音声\"\nINJECT\u{7f}\u{1f3b5}".into(),
 			bandwidth: 128_000,
 			codec: "opus".into(),
 		}];
 
 		let out = render_master(&[], &audio, None);
 
-		assert!(out.contains("NAME=\"audio%22%0AINJECT%7F%F0%9F%8E%B5\""));
+		assert!(out.contains("NAME=\"音声%22%0AINJECT%7F🎵\""));
 		assert!(!out.contains("\nINJECT"));
 	}
 }
