@@ -743,6 +743,28 @@ mod cache_tests {
 		assert_eq!(cache.values.len(), 1);
 		drop(second);
 	}
+
+	#[test]
+	fn caches_failure_markers() {
+		let mut attempts = 0;
+		let mut cache = Cache::new(1);
+		let failed = cache
+			.get_or_insert_with(1, || {
+				attempts += 1;
+				Ok::<_, ()>(Err::<(), _>("unsupported"))
+			})
+			.unwrap();
+		drop(failed);
+		let failed = cache
+			.get_or_insert_with(1, || {
+				attempts += 1;
+				Ok::<_, ()>(Ok::<_, &str>(()))
+			})
+			.unwrap();
+
+		assert_eq!(attempts, 1);
+		assert!(failed.lock().unwrap().is_err());
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -1626,7 +1648,7 @@ pub mod d3d11 {
 		}
 
 		/// Scale to `width` x `height` on the GPU, staying on this texture's device.
-		/// The Windows path opted into by
+		/// The Windows GPU path used by
 		/// [`Frame::resize_with`](crate::Frame::resize_with).
 		///
 		/// Errors rather than falling back, so the caller decides. Two things a
@@ -1637,19 +1659,38 @@ pub mod d3d11 {
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let source = Size::new(self.width, self.height);
 			let target = Size::new(width, height);
+			let key = ScalerKey::new(&self.device, source, target);
 
 			let scaler = {
 				let mut scalers = SCALERS
 					.lock()
 					.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
-				scalers.get_or_insert_with(ScalerKey::new(&self.device, source, target), || {
-					Scaler::new(&self.device, source, target)
-				})?
+				scalers
+					.get_or_insert_with(key, || {
+						Ok::<_, std::convert::Infallible>(ScalerState::discover(&self.device, source, target))
+					})
+					.expect("scaler discovery is infallible")
 			};
-			let texture = scaler
+			let mut state = scaler
 				.lock()
-				.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?
-				.scale(&self.texture)?;
+				.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
+			let result = match &*state {
+				ScalerState::Ready(scaler) => scaler.scale(&self.texture),
+				ScalerState::Unsupported { reason, .. } => {
+					return Err(Error::Codec(anyhow::anyhow!("GPU resize is unsupported: {reason}")));
+				}
+			};
+			let texture = match result {
+				Ok(texture) => texture,
+				Err(err) => {
+					*state = ScalerState::Unsupported {
+						_device: self.device.clone(),
+						reason: err.to_string(),
+					};
+					return Err(err);
+				}
+			};
+			drop(state);
 			drop(scaler);
 			if let Ok(mut scalers) = SCALERS.lock() {
 				scalers.prune();
@@ -1672,15 +1713,37 @@ pub mod d3d11 {
 	/// and `ID3D11VideoContext` is not safe to drive from two threads at once, so
 	/// each device and scale gets one serialized processor that its ladder rungs
 	/// share.
-	static SCALERS: LazyLock<Mutex<Cache<ScalerKey, Scaler>>> =
+	static SCALERS: LazyLock<Mutex<Cache<ScalerKey, ScalerState>>> =
 		LazyLock::new(|| Mutex::new(Cache::new(SCALER_CACHE_CAPACITY)));
+
+	/// A usable scaler, or a remembered capability failure for this exact key.
+	enum ScalerState {
+		Ready(Scaler),
+		Unsupported {
+			/// Keeps the pointer in the cache key unique while this marker exists.
+			_device: ID3D11Device,
+			reason: String,
+		},
+	}
+
+	impl ScalerState {
+		fn discover(device: &ID3D11Device, source: Size, target: Size) -> Self {
+			match Scaler::new(device, source, target) {
+				Ok(scaler) => Self::Ready(scaler),
+				Err(err) => Self::Unsupported {
+					_device: device.clone(),
+					reason: err.to_string(),
+				},
+			}
+		}
+	}
 
 	/// Which device and which scale a cached processor is for.
 	///
 	/// The device is keyed by pointer because `ID3D11Device` is not hashable. That
-	/// is sound only because the cached [`Scaler`] holds a reference to the same
-	/// device: the address cannot be freed and handed to a different device while
-	/// an entry keyed on it is alive.
+	/// is sound only because every cached [`ScalerState`] holds a reference to the
+	/// same device: the address cannot be freed and handed to a different device
+	/// while an entry keyed on it is alive.
 	#[derive(Clone, PartialEq, Eq, Hash)]
 	struct ScalerKey {
 		device: usize,
