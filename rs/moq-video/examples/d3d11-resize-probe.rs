@@ -63,8 +63,8 @@ mod probe {
 	use std::ffi::c_void;
 	use std::mem::{ManuallyDrop, size_of};
 	use std::ptr;
-	use std::sync::Mutex;
 	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::{LazyLock, Mutex};
 	use std::time::{Duration, Instant};
 
 	use anyhow::{Context, Result, anyhow, bail};
@@ -114,9 +114,10 @@ mod probe {
 
 	// ---------------------------------------------------------------- tracing
 
-	/// The Direct3D or Media Foundation call currently in flight, and when it
-	/// started. The watchdog reads it; a wedge leaves the culprit here.
-	static IN_FLIGHT: Mutex<Option<(&'static str, Instant)>> = Mutex::new(None);
+	/// The Direct3D or Media Foundation calls currently in flight, keyed by
+	/// thread. The watchdog reads them; a wedge leaves every culprit here.
+	static IN_FLIGHT: LazyLock<Mutex<std::collections::HashMap<std::thread::ThreadId, (&'static str, Instant)>>> =
+		LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 	/// The debug layer's message queue, when `--debug-layer` is on. Drained after
 	/// every step, so a complaint is attributed to the call that provoked it.
@@ -126,10 +127,11 @@ mod probe {
 	/// with no matching `<--` is the call that blocked.
 	fn step<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
 		eprintln!("--> {name}");
-		*IN_FLIGHT.lock().unwrap() = Some((name, Instant::now()));
+		let thread = std::thread::current().id();
+		IN_FLIGHT.lock().unwrap().insert(thread, (name, Instant::now()));
 		let started = Instant::now();
 		let out = f();
-		*IN_FLIGHT.lock().unwrap() = None;
+		IN_FLIGHT.lock().unwrap().remove(&thread);
 		eprintln!("<-- {name} ({:.1?})", started.elapsed());
 		drain_info_queue();
 		out
@@ -174,8 +176,8 @@ mod probe {
 		std::thread::spawn(|| {
 			loop {
 				std::thread::sleep(Duration::from_secs(2));
-				if let Some((name, since)) = *IN_FLIGHT.lock().unwrap() {
-					eprintln!("[watchdog] blocked {:.0?} in {name}", since.elapsed());
+				for (thread, (name, since)) in IN_FLIGHT.lock().unwrap().iter() {
+					eprintln!("[watchdog] thread {thread:?} blocked {:.0?} in {name}", since.elapsed());
 				}
 			}
 		});
