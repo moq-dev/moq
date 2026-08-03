@@ -47,15 +47,6 @@ impl Waiter {
 		Self::new(Waker::noop().clone())
 	}
 
-	/// Create a waiter for the task behind a [`Context`]: the bridge from a
-	/// `Future::poll` into kio's waiter-based poll functions.
-	///
-	/// The result lives only as long as the poll that made it, so park it in a
-	/// [`Park`] to keep its registrations alive until the next one.
-	pub fn from_context(cx: &Context<'_>) -> Self {
-		Self::new(cx.waker().clone())
-	}
-
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
@@ -231,7 +222,7 @@ impl Park {
 		if !reuse {
 			// The outgoing waiter drops here, killing its registrations so the lists
 			// can reclaim those slots.
-			self.0 = Some(Waiter::from_context(cx));
+			self.0 = Some(Waiter::new(cx.waker().clone()));
 		}
 		self.0.as_ref().unwrap()
 	}
@@ -402,7 +393,7 @@ mod tests {
 		let cx = Context::from_waker(&waker);
 		let mut list = WaiterList::new();
 
-		let waiter = Waiter::from_context(&cx);
+		let waiter = Waiter::new(cx.waker().clone());
 		waiter.register(&mut list);
 		let mut park = Park::new(waiter);
 		assert_eq!(list.entries[0].strong_count(), 1, "a constructed park must hold");
@@ -435,7 +426,7 @@ mod tests {
 		let cx = Context::from_waker(&waker);
 		let mut list = WaiterList::new();
 
-		let waiter = Waiter::from_context(&cx);
+		let waiter = Waiter::new(cx.waker().clone());
 		let clone = waiter.clone();
 		assert!(Arc::ptr_eq(waiter.shared(), clone.shared()));
 
