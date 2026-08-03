@@ -44,8 +44,8 @@ Hang is built on top of moq-lite [moql] and uses much of the same terminology.
 A quick recap:
 
 - **Broadcast**: A collection of Tracks from a single publisher.
-- **Track**: An series of Groups, each of which can be delivered and decoded *out-of-order*.
-- **Group**: An series of Frames, each of which must be delivered and decoded *in-order*.
+- **Track**: A series of Groups, each of which can be delivered and decoded *out-of-order*.
+- **Group**: A series of Frames, each of which must be delivered and decoded *in-order*.
 - **Frame**: A sized payload of bytes representing a single moment in time.
 
 Hang introduces additional terminology:
@@ -82,7 +82,7 @@ ANNOUNCE suffix=alice.hang active=true
 ANNOUNCE suffix=bob.hang   active=true
 ~~~
 
-If a publisher no longer wants to participant, or is disconnected somehow, their presence will be unannounced.
+If a participant leaves or is disconnected, their broadcast is unannounced.
 Publishers and subscribers SHOULD terminate any subscriptions once a participant is unannounced.
 
 ~~~
@@ -248,8 +248,7 @@ A decoder config field carrying raw bytes, notably `description` (an `AllowShare
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
 A consumer MUST accept either case.
 
-Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
-Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
+Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}); the two alphabets overlap, so the encoding cannot be detected and must be specified.
 
 ## Common Rendition Fields {#common}
 Audio and video renditions share the following fields, extending the WebCodecs decoder config:
@@ -308,7 +307,7 @@ The `kind` field selects the framing; a consumer MUST ignore a rendition whose `
 Every container shares the same group rules:
 
 Each moq-lite group MUST start with a keyframe.
-If codec does not support delta frames (ex. audio), then a group MAY consist of multiple keyframes.
+If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
 ## legacy

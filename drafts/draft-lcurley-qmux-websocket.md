@@ -41,31 +41,22 @@ This document uses the terms QMux Record, QMux Frame, and transport parameter as
 
 # Introduction
 QMux [qmux] lets an application written against the QUIC stream and datagram API run over an ordered, reliable byte-stream transport.
-It defines a binding over TCP and over TLS, but it does not define a binding over WebSocket; the WebSocket binding is out of scope for the QUIC working group charter.
+It defines a binding over TCP and over TLS, but a WebSocket binding is out of scope for the QUIC working group charter.
 
-A WebSocket binding is nevertheless useful.
-WebSocket [RFC6455] is available in essentially every deployment environment, including:
+A WebSocket binding is nevertheless useful: WebSocket [RFC6455] is available where UDP is blocked, in web browsers that lack WebTransport, and behind HTTP load balancers that cannot route raw TCP or QUIC.
 
-- Networks where UDP (and therefore QUIC) is blocked by a firewall or middlebox.
-- Web browsers, which expose a WebSocket API but do not universally expose a WebTransport or raw-socket API.
-- HTTP load balancers and proxies that can route and terminate WebSocket but not raw TCP or QUIC.
-
-This document specifies how to carry QMux over WebSocket.
-It defines the message framing, the subprotocol negotiation used in place of TLS ALPN, how the QMux version is selected, keep-alive behavior, and the handling of datagrams.
-All other QMux semantics — in-order STREAM frame delivery, stream identifiers, flow control, transport parameters, and connection close — apply unchanged from [qmux].
+This document specifies how to carry QMux over WebSocket: the message framing, the subprotocol negotiation used in place of TLS ALPN, keep-alive behavior, and datagrams.
+All other QMux semantics (in-order STREAM frame delivery, stream identifiers, flow control, transport parameters, and connection close) apply unchanged from [qmux].
 
 This binding is application agnostic: any QUIC application that can run over QMux can run over QMux over WebSocket.
-Media over QUIC Transport [moqt] is one such application and is the motivating use case, but nothing in this document is specific to it.
+Media over QUIC Transport [moqt] is the motivating use case, but nothing in this document is specific to it.
 
 
 # WebSocket Binding Overview
-A QMux-over-WebSocket connection is an ordinary WebSocket connection [RFC6455] whose binary messages carry QMux frames.
+A QMux-over-WebSocket connection is an ordinary WebSocket connection [RFC6455] whose binary messages carry QMux frames, taking the place of the underlying byte-stream transport in [qmux].
 
 Both the QMux Record layer and the WebSocket message layer provide self-delimiting messages over a reliable, ordered byte stream.
 The two layers are therefore collapsed: instead of prefixing each Record with its `Size`, the binding relies on the WebSocket message boundary to delimit it.
-
-The WebSocket connection takes the place of the underlying byte-stream transport in [qmux].
-Once the WebSocket handshake completes, each endpoint sends and receives QMux frames inside WebSocket binary messages as defined below.
 
 
 # Establishing a Connection
@@ -79,27 +70,14 @@ How the underlying connection is authenticated and authorized is out of scope fo
 
 # Subprotocol Negotiation
 QMux over TCP/TLS uses TLS ALPN [RFC8446] to agree on the application protocol.
-The QMux wire-format version is *not* negotiated separately: it is determined by the negotiated application protocol, as described in {{versions}}.
-WebSocket has no ALPN exchange, so this binding uses the WebSocket subprotocol negotiation of [RFC6455] Section 1.9 — the `Sec-WebSocket-Protocol` header — in its place, carrying the same application protocol identifier.
+WebSocket has no ALPN exchange, so this binding uses the WebSocket subprotocol negotiation of [RFC6455] Section 1.9 (the `Sec-WebSocket-Protocol` header) in its place, carrying the same application protocol identifier.
 
-## Subprotocol Identifier
-The subprotocol identifier is exactly the application protocol identifier that the application would use as its ALPN over native QUIC; for example `moq-transport-18`.
-The application protocol identifier also determines the QMux wire-format version — for example `moq-transport-18` indicates that `qmux-01` is to be used — so there is no separate QMux version negotiation (see {{versions}}).
+The subprotocol identifier is exactly the identifier the application would use as its ALPN over native QUIC, for example `moq-transport-18`.
+It also determines the QMux wire-format version, so there is no separate QMux version negotiation (see {{versions}}).
 
-## Client Behavior
-A client offers one or more application protocol identifiers in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference.
-A client that supports multiple application protocols, or multiple versions of one, offers one identifier per protocol version it is willing to use (for example `moq-transport-18` and `moq-transport-17`).
-
+A client offers one or more identifiers in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference, one per protocol version it is willing to use.
+A server selects at most one, in its own order of preference, and echoes it in the response header; if it supports none of the offered identifiers, it MUST fail the handshake.
 A client MUST treat the absence of a `Sec-WebSocket-Protocol` response header, or a response value it did not offer, as a failed handshake per [RFC6455].
-
-## Server Behavior
-A server selects at most one of the client's offered identifiers and echoes it in the `Sec-WebSocket-Protocol` response header.
-A server MUST NOT select an identifier the client did not offer.
-
-A server SHOULD select identifiers in its own order of preference (for example, preferring a newer application protocol version), independent of the client's ordering.
-If the server supports none of the offered identifiers, it MUST fail the handshake.
-
-The selected identifier determines both the application protocol and, via {{versions}}, the QMux wire-format version for the connection.
 
 
 # Record Framing {#framing}
@@ -135,27 +113,19 @@ The first QMux frame sent by each endpoint MUST be the `QX_TRANSPORT_PARAMETERS`
 
 
 # QMux Version {#versions}
-This binding builds on QMux as defined in [qmux] (draft-ietf-quic-qmux-01), which introduced the QMux Record layer that this binding relies on (see {{framing}}).
-
-The QMux version is not signaled on the wire and is not carried in the subprotocol identifier.
-As with QMux over TLS, it is implied by the negotiated application protocol: each application protocol that runs over QMux specifies which QMux version each of its ALPN identifiers uses.
-For example, Media over QUIC Transport [moqt] identifier `moq-transport-18` uses [qmux].
-
-An application protocol used with this binding MUST select a QMux version that provides the Record layer, i.e. [qmux] or later.
+The QMux version is not signaled on the wire.
+As with QMux over TLS, it is implied by the negotiated application protocol: each application protocol that runs over QMux specifies which QMux version each of its identifiers uses.
+An application protocol used with this binding MUST select a QMux version that provides the Record layer (see {{framing}}), i.e. [qmux] or later.
 
 
 # Keep-Alive and Idle Timeout {#keepalive}
-QUIC and QMux detect a dead peer with an idle timeout.
-A WebSocket connection has no built-in idle timeout: if the peer's host crashes or its network drops without a TCP FIN, the local socket can remain "open" until OS-level TCP keep-alive eventually probes, which may take hours.
+A WebSocket connection has no built-in idle timeout: if the peer's host crashes without a TCP FIN, the local socket can remain "open" for hours.
 
-To detect a dead peer in a timely manner, an endpoint SHOULD send WebSocket Ping frames [RFC6455] periodically and SHOULD close the connection if no WebSocket frame of any kind is received from the peer within a timeout.
-The timeout SHOULD be a small multiple of the ping interval to tolerate transient delays.
-Reasonable defaults are a 5-second ping interval and a 30-second timeout, matching common QUIC idle-timeout configurations, but the values are a local policy decision.
+To detect a dead peer, an endpoint SHOULD send WebSocket Ping frames [RFC6455] periodically and SHOULD close the connection if no WebSocket frame of any kind is received within a timeout, a small multiple of the ping interval.
+Reasonable defaults are a 5-second ping interval and a 30-second timeout, but the values are a local policy decision.
+Receipt of any WebSocket frame from the peer (binary, Ping, or Pong) resets the idle timer.
 
-Receipt of any WebSocket frame from the peer — binary, Ping, or Pong — resets the idle timer.
-An endpoint replies to a Ping with a Pong per [RFC6455]; this is handled by the WebSocket layer and is independent of QMux frames.
-
-This keep-alive operates at the WebSocket layer and is separate from the QMux `max_idle_timeout` transport parameter and the `QX_PING` frame defined in [qmux], either of which an endpoint MAY also use.
+This keep-alive operates at the WebSocket layer and is separate from the QMux `max_idle_timeout` transport parameter and `QX_PING` frame, either of which an endpoint MAY also use.
 
 
 # Datagrams {#datagrams}
