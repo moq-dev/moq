@@ -58,6 +58,9 @@ fn parse_route(path: &str) -> Option<Route> {
 				.map(|part| part.into_owned())
 		})
 		.collect::<Option<Vec<_>>>()?;
+	if parts.iter().any(String::is_empty) {
+		return None;
+	}
 
 	match parts.as_slice() {
 		[broadcast @ .., file] if !broadcast.is_empty() && file == "master.m3u8" => Some(Route::Master {
@@ -248,5 +251,10 @@ mod tests {
 		));
 		assert!(parse_route("/master.m3u8").is_none());
 		assert!(parse_route("/project/live/video/main/unknown").is_none());
+	}
+
+	#[test]
+	fn rejects_empty_path_segments() {
+		assert!(parse_route("/project//live/master.m3u8").is_none());
 	}
 }
