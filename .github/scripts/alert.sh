@@ -57,8 +57,9 @@ discord() {
 }
 
 # Every workflow that can run outside a pull request must be watched by
-# alert.yml, and PR-only workflows must not be (each entry costs a skipped
-# Alert run per trigger, and `Check` alone fires on every push to every PR).
+# alert.yml, and pull-request-only workflows must not be (each entry costs a
+# skipped Alert run per trigger, and `Check` alone fires on every push to every
+# PR).
 #
 # This is the guard against the list going stale: adding a workflow, or adding
 # a push/schedule trigger to a PR-only one, fails here until alert.yml matches.
@@ -108,6 +109,9 @@ non_pr_workflow_names() {
 
     printf "%s\n" "${files[@]}" | bun -e '
 const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
+// Both report their failure as a check on the PR itself, so alert.yml skips
+// them at runtime and a workflow triggered only by these needs no entry.
+const PR_EVENTS = new Set(["pull_request", "pull_request_target"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());
@@ -124,7 +128,7 @@ for (const file of files) {
         console.error("alert.sh: cannot read the on: value of " + file);
         process.exit(2);
     }
-    if (!triggers.some((t) => t !== "pull_request")) continue;
+    if (!triggers.some((t) => !PR_EVENTS.has(t))) continue;
 
     const name = doc.name;
     if (typeof name !== "string" || name.trim() === "") {
