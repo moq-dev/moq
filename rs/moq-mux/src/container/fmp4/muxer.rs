@@ -276,10 +276,11 @@ impl Muxer {
 			let info = self.info(sequence.wrapping_add(i as u32));
 			let data = super::encode_fragment_at(info, base, std::slice::from_ref(frame))?;
 
+			// Advance by the number the trun actually claims, not the untruncated one: they are
+			// the same value only because both go through the same checked narrowing.
 			if let Some(duration) = frame.duration {
-				dts = dts
-					.checked_add(duration.as_scale(self.timescale) as u64)
-					.ok_or(Error::PtsOverflow)?;
+				let ticks = super::trun_duration(duration, self.timescale)?;
+				dts = dts.checked_add(u64::from(ticks)).ok_or(Error::PtsOverflow)?;
 			}
 
 			out.push(Fragment {
@@ -475,6 +476,47 @@ mod tests {
 			.map(|f| super::super::timeline(&f.data).0)
 			.collect();
 		assert_eq!(tfdts, vec![0, 1_500, 3_000, 4_500]);
+	}
+
+	// `fragments` advances tfdt by each sample's duration, which the trun stores in 32 bits. A
+	// silent narrowing left fragment N claiming a wrapped duration while fragment N+1 started at
+	// the untruncated time, so the run stopped tiling. u32::MAX is an accepted timescale, which
+	// puts a one-second sample right at the edge of the field.
+	#[test]
+	fn fragments_reject_a_duration_too_large_for_trun() {
+		let scale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let muxer = video_muxer().with_timescale(scale).unwrap();
+
+		let two_seconds = 2 * u64::from(u32::MAX);
+		let frames: Vec<Frame> = (0..2)
+			.map(|i| Frame {
+				timestamp: Timestamp::from_scale(i * two_seconds, scale.as_u64()).unwrap(),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: i == 0,
+				duration: Some(Timestamp::from_scale(two_seconds, scale.as_u64()).unwrap()),
+			})
+			.collect();
+
+		let err = muxer.fragments(0, &frames).unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::SampleDurationTooLarge(t)) if t == two_seconds),
+			"got {err:?}"
+		);
+
+		// One second exactly is u32::MAX ticks at this scale, so it still encodes and tiles.
+		let one_second = u64::from(u32::MAX);
+		let frames: Vec<Frame> = (0..2)
+			.map(|i| Frame {
+				timestamp: Timestamp::from_scale(i * one_second, scale.as_u64()).unwrap(),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: i == 0,
+				duration: Some(Timestamp::from_scale(one_second, scale.as_u64()).unwrap()),
+			})
+			.collect();
+
+		let out = muxer.fragments(0, &frames).unwrap();
+		let tfdts: Vec<_> = out.iter().map(|f| super::super::timeline(&f.data).0).collect();
+		assert_eq!(tfdts, vec![0, one_second], "each tfdt is where the last trun ended");
 	}
 
 	// The segment metadata an LL-HLS packager reads back off each part.
