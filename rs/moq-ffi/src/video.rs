@@ -143,8 +143,14 @@ fn finalize(
 }
 
 /// An encoder paired with the track publishing its output.
+///
+/// The encoder is a [`Sink`](moq_video::encode::Sink) rather than a bare
+/// `Encoder` because this object is shared across threads: uniffi hands it to
+/// whichever thread the caller writes from, and an `Encoder` built on one thread
+/// and dropped on another unbalances the per-thread COM apartment the Windows
+/// backend opens. The sink owns the thread instead, so every caller is welcome.
 struct VideoProducer {
-	encoder: moq_video::encode::Encoder,
+	encoder: moq_video::encode::Sink,
 	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	format: MoqVideoPixelFormat,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
@@ -166,7 +172,7 @@ impl VideoProducer {
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
-		let encoded = self.encoder.encode(&frame)?;
+		let encoded = self.encoder.blocking_encode(frame)?;
 		self.producer.publish(&encoded)?;
 		Ok(())
 	}
@@ -177,7 +183,7 @@ impl VideoProducer {
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
-		let drained = encoder.finish().and_then(|encoded| producer.publish(&encoded));
+		let drained = encoder.blocking_finish().and_then(|encoded| producer.publish(&encoded));
 		finalize(producer, drained)
 	}
 }
@@ -242,7 +248,7 @@ impl MoqVideoProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(producer.encoder.set_bitrate(bitrate)?)
+		Ok(producer.encoder.blocking_set_bitrate(bitrate)?)
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.
@@ -280,7 +286,7 @@ impl MoqBroadcastProducer {
 
 		// Open the encoder first: a config this machine can't encode should fail
 		// without leaving a track advertised that will never carry frames.
-		let encoder = moq_video::encode::Encoder::new(&config)?;
+		let encoder = moq_video::encode::Sink::blocking_open(&config)?;
 		let producer = self.with_state(|state| {
 			Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),

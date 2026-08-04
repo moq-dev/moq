@@ -4857,6 +4857,7 @@ dependencies = [
  "openh264",
  "openh264-sys2",
  "pipewire",
+ "pollster",
  "thiserror 2.0.19",
  "tokio",
  "tracing",

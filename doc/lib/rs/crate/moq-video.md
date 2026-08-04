@@ -101,6 +101,16 @@ Keyframes are the encoder's business: it inserts them per `encode::Config::gop`,
 and `Encoder::keyframe` is there for the rarer case where you need one at a
 specific frame.
 
+`encode::Sink` is the same encoder with a thread of its own. Reach for it when the
+codec outlives a single thread's stack: an object shared between threads, a handle
+behind an FFI boundary, or a task that migrates between executor workers. Hardware
+codecs are not all thread-agnostic (a Media Foundation MFT's COM apartment is
+per-thread, so building it on one thread and dropping it on another corrupts COM
+state), and the sink confines the whole encoder lifetime to one thread so callers
+do not have to. Each call comes in an `async` flavor for a task and a `blocking_`
+one for a plain thread. A plain `Encoder` you build, drive, and drop inside one
+function needs none of this.
+
 ## Subscribing
 
 `decode::Consumer` is the mirror. It reads the rendition's catalog entry to pick a

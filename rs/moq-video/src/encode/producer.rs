@@ -15,9 +15,9 @@ use crate::capture;
 use crate::{Error, Frame};
 
 use super::Encoded;
+use super::Sink;
 use super::encoder::{self, Codec};
 use super::rate::{Control, Policy};
-use super::sink::Sink;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
@@ -407,8 +407,11 @@ async fn capture_loop<E: CatalogExt>(
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
 			let frame = Frame::new(surface, Timestamp::from_micros(clock.micros())?);
-			let encoded = encoder.encode(frame, force_keyframe).await?;
-			force_keyframe = false;
+			if force_keyframe {
+				encoder.keyframe();
+				force_keyframe = false;
+			}
+			let encoded = encoder.encode(frame).await?;
 			// Once the encoder emits a frame the importer has parsed the SPS and
 			// the catalog rendition exists, so demand gating can take over.
 			catalog_ready |= !encoded.is_empty();

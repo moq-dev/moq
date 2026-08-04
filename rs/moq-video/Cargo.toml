@@ -76,6 +76,11 @@ openh264 = "0.9.3"
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.6", default-features = false }
+# The `encode::Sink` blocking calls, for a caller with no executor to yield to
+# (an FFI boundary). Parks the thread on the encode thread's reply; tokio's own
+# blocking helpers panic when the caller happens to be a runtime worker, which an
+# FFI callback can be.
+pollster = "1.0"
 thiserror = "2"
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"

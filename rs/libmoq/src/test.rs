@@ -1614,6 +1614,65 @@ fn video_raw_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Regression: a producer handle is just an integer, so a C caller may drive it
+/// from any thread. `ffi::enter` serializes those calls but runs each on the
+/// calling thread, so holding a bare `Encoder` was unsound on Windows, where the
+/// codec's COM apartment is per-thread: it was opened on the publishing thread
+/// and closed on whichever thread called finish. The confinement itself is
+/// asserted in moq-video (`encode::sink`); this pins that the C surface supports
+/// the usage, including the drain on finish.
+#[test]
+fn video_raw_publish_from_many_threads() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-threads-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		// An explicit ceiling so the retunes below stay under the rate the encoder
+		// opened at, which openh264 requires.
+		bitrate: 1_000_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// A fresh caller thread per frame, never the one that published.
+	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
+	for i in 0..8u64 {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			if i == 0 {
+				assert_eq!(moq_publish_video_raw_cut(producer), 0);
+			}
+			let frame = moq_video_encoder_frame {
+				timestamp_us: i * 33_333,
+				data: rgba.as_ptr(),
+				data_size: rgba.len(),
+			};
+			assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+			assert_eq!(moq_publish_video_raw_bitrate(producer, 900_000 - i), 0);
+		})
+		.join()
+		.unwrap();
+	}
+
+	// ...and finished, so the encoder is drained and dropped, from yet another.
+	std::thread::spawn(move || assert_eq!(moq_publish_video_raw_finish(producer), 0))
+		.join()
+		.unwrap();
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it.
 #[test]

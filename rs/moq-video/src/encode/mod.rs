@@ -8,6 +8,9 @@
 //! - [`Encoder`] encodes raw [`Frame`](crate::Frame)s you supply into
 //!   [`Encoded`] access units, and [`Producer`] publishes those (bring your own
 //!   frames). Build both for the same [`Codec`].
+//! - [`Sink`] is an [`Encoder`] that owns the thread it runs on, for an encoder
+//!   outliving a single thread's stack (a shared object, an FFI handle, a task
+//!   that migrates between workers).
 //! - [`Producer`] alone publishes frames you already encoded.
 //!
 //! [`Options`] / [`Kind`] / [`Config`] configure them. The decode/consume
@@ -28,3 +31,4 @@ pub mod rate;
 pub use encoded::Encoded;
 pub use encoder::{Codec, Config, Encoder, Kind};
 pub use producer::{Options, Producer, publish_capture};
+pub use sink::Sink;
