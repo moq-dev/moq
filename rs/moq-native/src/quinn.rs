@@ -228,12 +228,12 @@ pub enum Error {
 	/// whichever address happened to be unroutable or to blackhole until its
 	/// timeout. A host with a single address reports that error directly instead.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
-	AllAttemptsFailed(Vec<crate::AddressFailure<Error>>),
+	Failover(Vec<crate::failover::Failure<Error>>),
 }
 
 impl crate::failover::Aggregate for Error {
-	fn aggregate(failures: Vec<crate::AddressFailure<Self>>) -> Self {
-		Self::AllAttemptsFailed(failures)
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
 	}
 }
 
@@ -406,7 +406,7 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::Client(err) => classify_client_error(err),
-			Self::AllAttemptsFailed(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
 	}

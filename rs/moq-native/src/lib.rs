@@ -18,7 +18,7 @@ mod connect;
 mod crypto;
 mod error;
 #[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
-mod failover;
+pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
 mod log;
@@ -45,8 +45,6 @@ pub mod websocket;
 pub use client::{Client, ClientConfig};
 pub use connect::ConnectError;
 pub use error::{Error, Result};
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
-pub use failover::AddressFailure;
 pub use log::Log;
 pub use reconnect::{Backoff, ConnectionStatsReader, Reconnect, Status};
 pub use server::{Request, Server, ServerConfig, Transport};

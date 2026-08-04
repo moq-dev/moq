@@ -1,10 +1,14 @@
 //! Happy Eyeballs (RFC 8305) address failover for client dials.
 //!
 //! DNS often returns both IPv6 and IPv4 addresses, and either family can be
-//! silently broken (an unrouted AAAA, a blocked v4 path). Instead of dialing a
-//! single address and waiting out the handshake timeout, [`race`] staggers
-//! attempts across the resolved addresses, alternating families per
-//! [`interleave`], and hands back the first connection to complete.
+//! silently broken (an unrouted AAAA, a blocked v4 path). Rather than dial one
+//! address and wait out the handshake timeout, a dial staggers attempts across
+//! every resolved address, alternating families, and takes the first connection
+//! to complete. The stagger is [`crate::ClientConfig::failover_delay`].
+//!
+//! Nothing here needs calling: every client dial goes through it. The one type
+//! a consumer sees is [`Failure`], which the backend `Error` types carry when
+//! the race loses every attempt.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -21,10 +25,11 @@ pub(crate) const DEFAULT_DELAY: Duration = Duration::from_millis(250);
 
 /// One failed connection attempt, naming the address it dialed.
 ///
-/// Produced by the Happy Eyeballs address race and surfaced in the per-backend
-/// `AllAttemptsFailed` errors, which carry one of these per attempt.
+/// Carried by each backend's `Error::Failover` variant, one per attempt, when
+/// the address race loses all of them. A dial that had only one address to try
+/// reports that error directly instead, so this never stands alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddressFailure<E> {
+pub struct Failure<E> {
 	/// The address that was dialed.
 	pub addr: SocketAddr,
 
@@ -32,13 +37,13 @@ pub struct AddressFailure<E> {
 	pub error: E,
 }
 
-impl<E: fmt::Display> fmt::Display for AddressFailure<E> {
+impl<E: fmt::Display> fmt::Display for Failure<E> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}: {}", self.addr, self.error)
 	}
 }
 
-impl<E: std::error::Error + 'static> std::error::Error for AddressFailure<E> {
+impl<E: std::error::Error + 'static> std::error::Error for Failure<E> {
 	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
 		Some(&self.error)
 	}
@@ -47,14 +52,13 @@ impl<E: std::error::Error + 'static> std::error::Error for AddressFailure<E> {
 /// An error type that can fold several failed attempts into one value, so
 /// [`race`] can report an address race that lost every attempt.
 ///
-/// Implemented by each backend's error enum over its own `AllAttemptsFailed`
-/// variant.
+/// Implemented by each backend's error enum over its own `Failover` variant.
 pub(crate) trait Aggregate: Sized {
 	/// Fold two or more failed attempts into a single error.
 	///
 	/// Never called with fewer than two: a lone attempt is no race, so [`race`]
 	/// hands that error back untouched rather than burying it in an aggregate.
-	fn aggregate(failures: Vec<AddressFailure<Self>>) -> Self;
+	fn aggregate(failures: Vec<Failure<Self>>) -> Self;
 }
 
 /// Order resolved addresses for racing: keep the resolver's order within each
@@ -160,7 +164,7 @@ fn normalize_family(addr: SocketAddr, local: SocketAddr) -> SocketAddr {
 }
 
 /// Render each failed attempt as `addr: error`, joined by `; `.
-pub(crate) fn describe<E: fmt::Display>(failures: &[AddressFailure<E>]) -> String {
+pub(crate) fn describe<E: fmt::Display>(failures: &[Failure<E>]) -> String {
 	failures.iter().map(|f| f.to_string()).collect::<Vec<_>>().join("; ")
 }
 
@@ -190,7 +194,7 @@ where
 {
 	let mut remaining = candidates.into_iter();
 	let mut attempts = FuturesUnordered::new();
-	let mut failures: Vec<(usize, AddressFailure<E>)> = Vec::new();
+	let mut failures: Vec<(usize, Failure<E>)> = Vec::new();
 
 	let mut next_index = 0;
 	let mut start = |addr: SocketAddr, attempts: &mut FuturesUnordered<_>| {
@@ -223,7 +227,7 @@ where
 						// interesting when the whole race fails. Then it comes back in
 						// the returned error, which the caller logs.
 						tracing::debug!(%addr, index, %err, "connection attempt failed");
-						failures.push((index, AddressFailure { addr, error: err }));
+						failures.push((index, Failure { addr, error: err }));
 						// A failure starts the next candidate immediately (RFC 8305
 						// section 5) rather than waiting out the stagger delay.
 						if let Some(addr) = remaining.next() {
@@ -250,7 +254,7 @@ where
 
 /// Fold the failed attempts into one error, leaving a lone attempt's error
 /// exactly as the backend produced it.
-fn collapse<E: Aggregate>(mut failures: Vec<AddressFailure<E>>) -> E {
+fn collapse<E: Aggregate>(mut failures: Vec<Failure<E>>) -> E {
 	match failures.len() {
 		1 => failures.pop().expect("checked len").error,
 		_ => E::aggregate(failures),
@@ -268,11 +272,11 @@ mod tests {
 	}
 
 	/// Stands in for a backend error enum: one variant per dial failure, one that
-	/// aggregates them the way `AllAttemptsFailed` does.
+	/// aggregates them the way a backend's `Failover` variant does.
 	#[derive(Debug, PartialEq, Eq)]
 	enum TestError {
 		Dial(&'static str),
-		All(Vec<AddressFailure<TestError>>),
+		All(Vec<Failure<TestError>>),
 	}
 
 	impl fmt::Display for TestError {
@@ -285,13 +289,13 @@ mod tests {
 	}
 
 	impl Aggregate for TestError {
-		fn aggregate(failures: Vec<AddressFailure<Self>>) -> Self {
+		fn aggregate(failures: Vec<Failure<Self>>) -> Self {
 			Self::All(failures)
 		}
 	}
 
-	fn failed(addr: &str, err: &'static str) -> AddressFailure<TestError> {
-		AddressFailure {
+	fn failed(addr: &str, err: &'static str) -> Failure<TestError> {
+		Failure {
 			addr: v4(addr),
 			error: TestError::Dial(err),
 		}
