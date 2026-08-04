@@ -2014,10 +2014,12 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 						// the pollable (which is `Sync`) is held across the await.
 						let query = track.info().into_inner();
 						let skip = |id: u64| dead.contains(&id);
+						// The route-change edge is checked BEFORE the query result:
+						// a rejection is only authoritative while the source is
+						// still the dispatched route, and the two can resolve in
+						// the same wake. Taking a stale rejection here would turn
+						// a seamless handover into a terminal abort.
 						let info = kio::wait(|waiter| {
-							if let Poll::Ready(result) = query.poll(waiter) {
-								return Poll::Ready(Some(result));
-							}
 							match state.poll(waiter, |s| {
 								if s.closed || s.serve_route(skip) != Some(id) {
 									Poll::Ready(())
@@ -2025,9 +2027,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 									Poll::Pending
 								}
 							}) {
-								Poll::Ready(_) => Poll::Ready(None),
-								Poll::Pending => Poll::Pending,
+								Poll::Ready(_) => return Poll::Ready(None),
+								Poll::Pending => {}
 							}
+							query.poll(waiter).map(Some)
 						})
 						.await;
 						match info {
@@ -3739,6 +3742,51 @@ mod tests {
 		// One refusal is the verdict; the source is never re-asked.
 		assert!(matches!(subscribing.await, Err(Error::NotFound)));
 		dynamic.assert_no_request();
+	}
+
+	/// A rejection is only authoritative while its source is still the
+	/// dispatched route. Here a better route takes over while the original
+	/// source's info request is pending, and the stale source rejects at the
+	/// same moment: the handover must win, not the stale rejection.
+	#[tokio::test]
+	async fn test_stale_rejection_does_not_abort_a_handover() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		// The only route: dispatch parks on its pending info request.
+		let source_remote = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_remote = source_remote.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let request_remote = dynamic_remote.requested_track().await.unwrap();
+
+		// A better route attaches (taking dispatch) while the old source's
+		// request is still pending; the old source rejects in the same window.
+		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_local = source_local.dynamic();
+		request_remote.reject(Error::NotFound);
+		settle().await;
+
+		// The subscription rides the handover onto the new route.
+		let mut producer_local = accept_track(&mut dynamic_local, "video").await;
+		settle().await;
+		let mut sub = subscribing
+			.await
+			.expect("the handover must win over the stale rejection");
+		producer_local.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+		sub.assert_not_closed();
 	}
 
 	/// A better source attaching mid-subscription takes the track over at an
