@@ -53,8 +53,8 @@ pub(crate) struct Rung {
 }
 
 impl Rung {
-	fn pipeline(&self) -> Result<Pipeline, Error> {
-		Pipeline::new(self)
+	async fn pipeline(&self) -> Result<Pipeline, Error> {
+		Pipeline::new(self).await
 	}
 
 	fn container(&self) -> Result<moq_mux::catalog::hang::Container, Error> {
@@ -312,7 +312,7 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
 	// so the encoder starts clean at the group's keyframe.
-	let (pipeline, container) = match rung.pipeline().and_then(|p| rung.container().map(|c| (p, c))) {
+	let (pipeline, container) = match rung.pipeline().await.and_then(|p| rung.container().map(|c| (p, c))) {
 		Ok(built) => built,
 		Err(err) => {
 			request.reject(moq_net::Error::Cancel);
@@ -371,7 +371,7 @@ async fn transcode_group_inner(
 			let keyframe = frame.keyframe || first;
 			first = false;
 
-			write(output, pipeline.process(&frame.payload, timestamp, keyframe).await?)?;
+			write(output, pipeline.process(frame.payload, timestamp, keyframe).await?)?;
 		}
 	}
 
@@ -401,7 +401,7 @@ fn write(output: &mut moq_net::group::Producer, encoded: Vec<moq_video::encode::
 /// -> NVENC path never touches the CPU. Frames that come back at any other size
 /// get `Frame::resize_with` instead.
 struct Pipeline {
-	decoder: moq_video::decode::Decoder,
+	decoder: moq_video::decode::Sink,
 	/// Opened from the first decoded frame, whose color space it has to declare.
 	/// `None` until one arrives; a keyframe requested before then waits in
 	/// `pending_keyframe`.
@@ -412,11 +412,13 @@ struct Pipeline {
 }
 
 impl Pipeline {
-	fn new(rung: &Rung) -> Result<Self, Error> {
+	async fn new(rung: &Rung) -> Result<Self, Error> {
 		let mut decode = moq_video::decode::Config::new();
 		decode.kind = rung.decoder.clone();
 		decode.resize = decoder_resize(rung.info.size, rung.resize.acceleration);
-		let decoder = moq_video::decode::Decoder::new(&rung.config, &decode)?;
+		// A `Sink` for the same reason as the encoder above: a fetch task holds this
+		// pipeline across `Container::read`, so the codec must own its thread.
+		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
 
 		Ok(Self {
 			decoder,
@@ -431,7 +433,7 @@ impl Pipeline {
 	/// carrying the presentation time of the picture it came from.
 	async fn process(
 		&mut self,
-		payload: &Bytes,
+		payload: Bytes,
 		timestamp: moq_net::Timestamp,
 		keyframe: bool,
 	) -> Result<Vec<moq_video::encode::Encoded>, Error> {
@@ -446,7 +448,7 @@ impl Pipeline {
 		}
 
 		let mut encoded = Vec::new();
-		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
+		for raw in self.decoder.decode(payload, timestamp, keyframe).await? {
 			// Already at the rung size (the decoder scaled): feed the frame through
 			// as-is, keeping a GPU frame on the GPU.
 			let raw = match raw.size() == self.size {

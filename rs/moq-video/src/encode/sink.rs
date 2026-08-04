@@ -134,12 +134,12 @@ impl Sink {
 #[cfg(not(target_os = "macos"))]
 mod threaded {
 	use std::sync::Arc;
-	use std::thread::JoinHandle;
 
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::Encoded;
 	use super::super::encoder::{Config, Encoder};
+	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
 	/// Work for the encode thread. Every variant goes down the same channel so a
@@ -177,168 +177,86 @@ mod threaded {
 		},
 	}
 
-	/// An [`Encoder`] running on its own thread. See the module docs.
-	pub struct Inner {
-		/// `Option` so `Drop` can drop the sender (signalling the thread to exit)
-		/// before joining.
-		tx: Option<mpsc::UnboundedSender<Request>>,
-		handle: Option<JoinHandle<()>>,
-		name: String,
-		/// Set between queueing a request and taking its reply, so a cancelled
-		/// call is caught rather than silently skipped. See [`Inner::request`].
-		abandoned: bool,
-	}
+	/// Build an encoder for `config` and serve requests until the channel closes.
+	/// Runs entirely on the encode thread; see [`crate::worker`].
+	fn run(config: Config, ready: Ready, mut requests: mpsc::UnboundedReceiver<Request>) {
+		let mut encoder = match Encoder::new(&config) {
+			Ok(encoder) => encoder,
+			Err(err) => return ready.err(err),
+		};
+		// If the awaiting `open` was cancelled, give up before encoding.
+		if !ready.ok(encoder.name()) {
+			return;
+		}
 
-	impl Inner {
-		pub async fn open(config: &Config) -> Result<Self, Error> {
-			let (req_tx, mut req_rx) = mpsc::unbounded_channel::<Request>();
-			let (ready_tx, ready_rx) = oneshot::channel::<Result<String, Error>>();
-			let config = config.clone();
-
-			let handle = std::thread::Builder::new()
-				.name("moq-video-encode".into())
-				.spawn(move || {
-					let mut encoder = match Encoder::new(&config) {
-						Ok(encoder) => encoder,
-						Err(err) => {
-							let _ = ready_tx.send(Err(err));
-							return;
-						}
-					};
-					// If the awaiting `open` was cancelled, give up before encoding.
-					if ready_tx.send(Ok(encoder.name().to_string())).is_err() {
-						return;
-					}
-
-					// Serve each request in arrival order. The encoder and its COM /
-					// MFT handles are created, used, and dropped only on this thread.
-					// `finish` consumes the encoder, so it breaks out and drains below
-					// rather than serving another request.
-					let mut draining = None;
-					while let Some(req) = req_rx.blocking_recv() {
-						match req {
-							Request::Encode { frame, resp } => {
-								let _ = resp.send(encoder.encode(&frame));
-							}
-							Request::Keyframe => encoder.keyframe(),
-							Request::SetBitrate { bitrate, resp } => {
-								let _ = resp.send(encoder.set_bitrate(bitrate));
-							}
-							Request::Flush { resp } => {
-								let _ = resp.send(encoder.flush());
-							}
-							Request::Finish { resp } => {
-								draining = Some(resp);
-								break;
-							}
-						}
-					}
-					// The drain runs here, on this thread, and consumes the encoder;
-					// otherwise `encoder` drops here. Either way the COM apartment it
-					// opened closes on the thread that opened it.
-					if let Some(resp) = draining {
-						let _ = resp.send(encoder.finish());
-					}
-				})
-				.map_err(|err| Error::Codec(anyhow::anyhow!("failed to spawn the encode thread: {err}")))?;
-
-			match ready_rx.await {
-				Ok(Ok(name)) => Ok(Self {
-					tx: Some(req_tx),
-					handle: Some(handle),
-					name,
-					abandoned: false,
-				}),
-				Ok(Err(err)) => Err(err),
-				Err(_) => {
-					let _ = handle.join();
-					Err(Error::Codec(anyhow::anyhow!("encode thread exited before opening")))
+		// Serve each request in arrival order. The encoder and its COM / MFT
+		// handles are created, used, and dropped only on this thread. `finish`
+		// consumes the encoder, so it breaks out and drains below rather than
+		// serving another request.
+		let mut draining = None;
+		while let Some(req) = requests.blocking_recv() {
+			match req {
+				Request::Encode { frame, resp } => {
+					let _ = resp.send(encoder.encode(&frame));
+				}
+				Request::Keyframe => encoder.keyframe(),
+				Request::SetBitrate { bitrate, resp } => {
+					let _ = resp.send(encoder.set_bitrate(bitrate));
+				}
+				Request::Flush { resp } => {
+					let _ = resp.send(encoder.flush());
+				}
+				Request::Finish { resp } => {
+					draining = Some(resp);
+					break;
 				}
 			}
 		}
+		// The drain runs here, on this thread, and consumes the encoder; otherwise
+		// `encoder` drops here. Either way the COM apartment it opened closes on
+		// the thread that opened it.
+		if let Some(resp) = draining {
+			let _ = resp.send(encoder.finish());
+		}
+	}
+
+	/// An [`Encoder`] running on its own thread. See the module docs.
+	pub struct Inner(Worker<Request>);
+
+	impl Inner {
+		pub async fn open(config: &Config) -> Result<Self, Error> {
+			let config = config.clone();
+			let worker = Worker::open("moq-video-encode", move |ready, requests| run(config, ready, requests)).await?;
+			Ok(Self(worker))
+		}
 
 		pub fn name(&self) -> &str {
-			&self.name
+			self.0.name()
 		}
 
 		pub fn keyframe(&mut self) {
 			// Nothing to report: a dead encode thread surfaces on the next encode,
 			// which is where the caller is already handling one.
-			let _ = self.send(Request::Keyframe);
+			let _ = self.0.send(Request::Keyframe);
 		}
 
 		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
-			self.request(|resp| Request::Encode { frame, resp }).await
+			self.0.request(|resp| Request::Encode { frame, resp }).await
 		}
 
 		pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
-			self.request(|resp| Request::SetBitrate { bitrate, resp }).await
+			self.0.request(|resp| Request::SetBitrate { bitrate, resp }).await
 		}
 
 		pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
-			self.request(|resp| Request::Flush { resp }).await
+			self.0.request(|resp| Request::Flush { resp }).await
 		}
 
 		pub async fn finish(mut self) -> Result<Vec<Encoded>, Error> {
 			// `self` drops on the way out, which drops the sender and joins the
 			// thread that just drained and released the encoder.
-			self.request(|resp| Request::Finish { resp }).await
+			self.0.request(|resp| Request::Finish { resp }).await
 		}
-
-		/// Queue a request, mapping a dead encode thread onto an error.
-		fn send(&self, req: Request) -> Result<(), Error> {
-			self.tx.as_ref().ok_or_else(gone)?.send(req).map_err(|_| gone())
-		}
-
-		/// Send a request built around a fresh oneshot and await its reply,
-		/// mapping a dead encode thread onto an error either way.
-		///
-		/// The flag is what makes a cancelled call safe. Dropping this future
-		/// after the send leaves the request queued: the thread still runs it and
-		/// still advances the codec, but its reply lands in a dropped receiver.
-		/// Letting the next call proceed would publish a stream quietly missing
-		/// whatever that request produced, so the sink refuses instead.
-		async fn request<T>(
-			&mut self,
-			build: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Request,
-		) -> Result<T, Error> {
-			if self.abandoned {
-				return Err(abandoned());
-			}
-			let (resp_tx, resp_rx) = oneshot::channel();
-			self.send(build(resp_tx))?;
-
-			self.abandoned = true;
-			let reply = resp_rx.await;
-			// Only reached if this future was polled to completion; a cancelled one
-			// never gets here and leaves the flag set.
-			self.abandoned = false;
-
-			reply.map_err(|_| gone())?
-		}
-	}
-
-	impl Drop for Inner {
-		fn drop(&mut self) {
-			// Drop the sender so the thread's `blocking_recv` returns `None` and it
-			// exits, dropping the encoder on its own thread; then join so teardown
-			// (COM uninit) completes before we return. A wedged encode blocking the
-			// thread would stall this join, the same tradeoff as the capture pump.
-			self.tx.take();
-			if let Some(handle) = self.handle.take() {
-				let _ = handle.join();
-			}
-		}
-	}
-
-	fn gone() -> Error {
-		Error::Codec(anyhow::anyhow!("encode thread stopped unexpectedly"))
-	}
-
-	fn abandoned() -> Error {
-		Error::Codec(anyhow::anyhow!(
-			"a cancelled encode left the codec ahead of this stream; drop the sink"
-		))
 	}
 }
 

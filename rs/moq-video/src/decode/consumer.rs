@@ -4,7 +4,8 @@ use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
 
-use super::decoder::{Config, Decoder};
+use super::decoder::Config;
+use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
 
@@ -13,7 +14,11 @@ use crate::Frame;
 /// The codec/backend are fixed at construction; [`read`](Self::read) returns
 /// plain [`Frame`]s. The direct mirror of `moq_audio::decode::Consumer`.
 pub struct Consumer {
-	decoder: Decoder,
+	/// A [`Sink`] rather than a bare `Decoder`: the read loop below is held
+	/// across `.await` by every caller (libmoq's spawned task, moq-transcode),
+	/// so the codec would otherwise migrate between executor workers and
+	/// unbalance the per-thread COM apartment the Windows backend opens.
+	decoder: Sink,
 	track: moq_mux::container::Consumer<moq_mux::container::legacy::Wire>,
 	/// Frames a single access unit decoded to but `read` hasn't returned yet.
 	/// One AU yields one frame in the low-delay path, but a backend may hand back
@@ -30,7 +35,7 @@ impl Consumer {
 		name: impl Into<String>,
 		config: Config,
 	) -> Result<Self, Error> {
-		let decoder = Decoder::new(catalog, &config)?;
+		let decoder = Sink::open(catalog, &config).await?;
 
 		let name = name.into();
 		let track = broadcast
@@ -67,7 +72,8 @@ impl Consumer {
 
 			self.pending.extend(
 				self.decoder
-					.decode(&mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)?,
+					.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
+					.await?,
 			);
 		}
 	}
