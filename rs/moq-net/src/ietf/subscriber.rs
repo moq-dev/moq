@@ -50,11 +50,8 @@ struct State {
 	// Track aliases chosen by the remote publisher.
 	aliases: TrackAliases,
 
-	// Each broadcast created by either a PUBLISH or PUBLISH_NAMESPACE message.
+	// Each broadcast created by a PUBLISH_NAMESPACE message.
 	broadcasts: HashMap<PathOwned, BroadcastState>,
-
-	// Each PUBLISH message that is implicitly causing a PUBLISH_NAMESPACE message.
-	publishes: HashMap<RequestId, PathOwned>,
 }
 
 struct TrackState {
@@ -73,7 +70,7 @@ struct BroadcastState {
 	// the origin unannounces once the last source detaches.
 	producer: crate::model::broadcast::SourceGuard,
 
-	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
+	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 }
 
@@ -341,50 +338,31 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	/// Handle an incoming PUBLISH on its bidi stream.
+	/// Reject an incoming PUBLISH.
+	///
+	/// PUBLISH offers a single track, so honoring it means routing per
+	/// (namespace, track). Our model routes per namespace: a source attaches at a
+	/// path and serves every track under it, resolved on demand via SUBSCRIBE.
+	/// Accepting a PUBLISH would mean inventing a namespace-level source out of a
+	/// track-level offer, and that fiction then contradicts any real
+	/// PUBLISH_NAMESPACE for the same path.
+	///
+	/// Declining the request rather than failing the session, since a peer using
+	/// a feature we don't implement is not a protocol violation.
 	async fn run_publish_stream(
 		&mut self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::Publish<'_>,
 	) -> Result<(), Error> {
-		let request_id = msg.request_id;
+		tracing::debug!(broadcast = %msg.track_namespace, track = %msg.track_name, "rejecting publish");
 
-		if let Err(err) = self.start_publish(&msg) {
-			if matches!(err, Error::Duplicate) {
-				self.session.close(err.to_code(), err.to_string().as_ref());
-				return Err(err);
-			}
-			self.write_publish_error(&mut stream, request_id, 400, &err.to_string())
-				.await?;
-			return Ok(());
-		}
+		self.write_publish_error(&mut stream, msg.request_id, 400, "PUBLISH is not supported")
+			.await?;
+		// Finish rather than awaiting the peer's close: the rejection is the whole
+		// exchange, and dropping `stream` on return tears down the rest.
+		let _ = stream.writer.finish();
 
-		let res = self.write_publish_ok(&mut stream, &msg).await;
-
-		if res.is_ok() {
-			// PUBLISH is the peer feeding us a broadcast, so count this session as
-			// an active upstream feed for the lifetime of the publish. The guard
-			// drops (releasing `broadcasts_closed`) when the stream closes below.
-			// Wait for PublishDone or stream close
-			let _ = stream.reader.closed().await;
-		}
-
-		// Clean up (always runs after start_publish succeeds)
-		let mut state = self.state.lock();
-		if let Some(mut track) = state.subscribes.remove(&request_id) {
-			let _ = track.producer.finish();
-			if let Some(alias) = track.alias {
-				remove_track_alias(&state.aliases, alias, request_id);
-			}
-		}
-		if let Some(path) = state.publishes.remove(&request_id) {
-			drop(state);
-			// Count the unannounce only when the publish was OK'd and its stream then
-			// closed (a real end); a failed write_publish_ok is a local rollback.
-			let _ = self.stop_announce(path, res.is_ok());
-		}
-
-		res
+		Ok(())
 	}
 
 	/// Send OK on the bidi stream.
@@ -454,38 +432,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						retry_interval: 0,
 					})
 					.await?;
-			}
-		}
-		Ok(())
-	}
-
-	async fn write_publish_ok(&self, stream: &mut Stream<S, Version>, msg: &ietf::Publish<'_>) -> Result<(), Error> {
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.encode(&ietf::PublishOk::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishOk {
-						request_id: Some(msg.request_id),
-						forward: true,
-						subscriber_priority: 0,
-						group_order: GroupOrder::Descending,
-						filter_type: FilterType::LargestObject,
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestOk {
-						request_id: Some(msg.request_id),
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.encode(&ietf::RequestOk::ID).await?;
-				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
 		}
 		Ok(())
@@ -605,49 +551,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),
 		};
-
-		Ok(())
-	}
-
-	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
-		let request_id = msg.request_id;
-		let namespace = msg.track_namespace.to_owned();
-
-		// Announce the broadcast first so the track is born from it (inheriting the
-		// broadcast's Arc<broadcast::Info>). Undo the announce on any error path below.
-		let mut broadcast = self.start_announce(namespace.clone())?;
-		let track = match broadcast.create_track(msg.track_name.to_string(), None) {
-			Ok(track) => track,
-			Err(err) => {
-				let _ = self.stop_announce(namespace, false);
-				return Err(err);
-			}
-		};
-
-		let mut state = self.state.lock();
-		match state.subscribes.entry(request_id) {
-			Entry::Vacant(entry) => {
-				entry.insert(TrackState {
-					producer: track.clone(),
-					alias: Some(msg.track_alias),
-					timescale: msg.timescale,
-				});
-			}
-			Entry::Occupied(_) => {
-				drop(state);
-				let _ = self.stop_announce(namespace, false);
-				return Err(Error::Duplicate);
-			}
-		};
-
-		if let Err(err) = insert_track_alias(&state.aliases, msg.track_alias, request_id) {
-			state.subscribes.remove(&request_id);
-			drop(state);
-			let _ = self.stop_announce(namespace, false);
-			return Err(err);
-		}
-		state.publishes.insert(request_id, namespace);
-		drop(state);
 
 		Ok(())
 	}
@@ -1194,5 +1097,54 @@ mod tests {
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
 		assert_eq!(hops, vec![assigned]);
+	}
+
+	/// PUBLISH offers one track, but a source attaches per namespace and serves
+	/// every track under it, resolved on demand via SUBSCRIBE. Rather than invent
+	/// a namespace-level source from a track-level offer, decline the request and
+	/// leave the session running.
+	#[tokio::test]
+	async fn publish_is_rejected_without_announcing() {
+		// An open gate, so the rejection actually reaches the wire.
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			Version::Draft19,
+			tasks,
+		);
+
+		let stream = Stream::open(&session, Version::Draft19).await.unwrap();
+		let msg = ietf::Publish {
+			request_id: RequestId(1),
+			track_namespace: crate::Path::new("room/host"),
+			track_name: "video".into(),
+			track_alias: 7,
+			group_order: GroupOrder::Ascending,
+			largest_location: None,
+			forward: true,
+			timescale: None,
+		};
+
+		// Errors are surfaced to the peer on the stream, not raised as a session error.
+		subscriber.run_publish_stream(stream, msg).await.unwrap();
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"a rejected PUBLISH must not announce a broadcast"
+		);
+		assert_eq!(
+			occurrences(&session.log, b"PUBLISH is not supported"),
+			1,
+			"the decline reaches the peer"
+		);
 	}
 }

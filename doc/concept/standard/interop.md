@@ -42,7 +42,12 @@ If it plays, you interop. That's the whole test.
 
 - **`SUBSCRIBE_NAMESPACE` is required.** The subscriber discovers broadcasts by
   sending `SUBSCRIBE_NAMESPACE` and waiting for a matching announce, so your
-  relay must support it. The publisher announces with `PUBLISH_NAMESPACE`.
+  relay must support it. The publisher announces with `PUBLISH_NAMESPACE`, and
+  only in response to a `SUBSCRIBE_NAMESPACE` covering the namespace.
+- **`PUBLISH` is declined.** Content is routed per namespace and tracks are
+  resolved on demand via `SUBSCRIBE`, so a single-track `PUBLISH` offer is
+  answered with a request error. Announce with `PUBLISH_NAMESPACE` and serve
+  the resulting `SUBSCRIBE`s instead.
 - **Self-signed or expired cert?** Add `--client-tls-disable-verify`.
 - **Subscriber sees nothing?** If your relay doesn't replay existing
   announcements, start the subscriber before the publisher.
