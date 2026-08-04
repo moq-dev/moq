@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
 	extract::{Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
-	http::{HeaderMap, StatusCode, Uri, header::HOST},
+	http::{HeaderMap, HeaderValue, StatusCode, Uri, header::HOST},
 	response::Response,
 };
 use moq_net::origin;
@@ -29,11 +29,7 @@ pub(crate) async fn serve_ws(
 		return Ok(landing_response());
 	};
 
-	// Advertise the full qmux × moq-net subprotocol matrix, with bare qmux
-	// fallbacks last. axum picks the first entry that the client also offered,
-	// so a modern client lands on `qmux-00.moq-lite-04`; old clients still
-	// match `webtransport` or `qmux-00.moql` and negotiate via SETUP.
-	let ws = ws.protocols(supported_subprotocols());
+	let ws = negotiate_subprotocol(ws)?;
 
 	let host = uri
 		.authority()
@@ -123,6 +119,56 @@ where
 	// Hold the session so it doesn't close early; the driver serves it in place.
 	let (_session, driver) = server.accept(ws).await?;
 	driver.await.map_err(Into::into)
+}
+
+/// Pick a subprotocol for the upgrade, or fail the handshake outright.
+///
+/// We advertise the full qmux × moq-net subprotocol matrix, with bare qmux
+/// fallbacks last. axum picks the first entry that the client also offered, so
+/// a modern client lands on `qmux-01.moq-lite-05`; old clients still match
+/// `webtransport` or `qmux-00.moql` and negotiate via SETUP.
+///
+/// When the client offered subprotocols and none of them are ours, the
+/// qmux-over-WebSocket draft requires us to fail the handshake rather than
+/// upgrade with no selection: the client MUST treat a missing
+/// `Sec-WebSocket-Protocol` response header as a failure anyway, so upgrading
+/// only wastes a connection that has already agreed on nothing.
+///
+/// A client that offers no subprotocol at all is left alone. That's the legacy
+/// route, predating this binding, which upgrades and negotiates the moq version
+/// over moq-lite SETUP instead.
+fn negotiate_subprotocol(ws: WebSocketUpgrade) -> Result<WebSocketUpgrade, StatusCode> {
+	let supported = supported_subprotocols();
+
+	if !subprotocols_acceptable(ws.requested_protocols().map(HeaderValue::as_bytes), &supported) {
+		tracing::debug!("rejecting WebSocket upgrade: no supported subprotocol offered");
+		return Err(StatusCode::BAD_REQUEST);
+	}
+
+	Ok(ws.protocols(supported))
+}
+
+/// Whether the offered subprotocols leave us something to select.
+///
+/// True when the client offered one we support, or offered none at all. Empty
+/// entries are ignored so a blank header reads as "offered nothing" instead of
+/// as an identifier we don't know.
+fn subprotocols_acceptable<'a>(requested: impl IntoIterator<Item = &'a [u8]>, supported: &[String]) -> bool {
+	let mut offered = false;
+
+	for protocol in requested {
+		let protocol = protocol.trim_ascii();
+		if protocol.is_empty() {
+			continue;
+		}
+		offered = true;
+
+		if supported.iter().any(|s| s.as_bytes() == protocol) {
+			return true;
+		}
+	}
+
+	!offered
 }
 
 /// QMux wire-format versions that can ride under a `{prefix}.{alpn}` pair.
@@ -379,6 +425,103 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn subprotocols_acceptable_requires_a_match_when_any_are_offered() {
+		let supported = supported_subprotocols();
+		let known = supported.first().expect("no supported subprotocols").clone();
+
+		// Offering nothing is the legacy route: upgrade and negotiate via SETUP.
+		assert!(subprotocols_acceptable([], &supported));
+		// A blank header carries no identifier, so it reads the same way.
+		assert!(subprotocols_acceptable([b"" as &[u8], b"  "], &supported));
+
+		// Something we know, alone or among identifiers we don't.
+		assert!(subprotocols_acceptable([known.as_bytes()], &supported));
+		assert!(subprotocols_acceptable(
+			[b"bogus-99" as &[u8], known.as_bytes()],
+			&supported
+		));
+
+		// Nothing we know: the draft says fail the handshake.
+		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8]], &supported));
+		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8], b"soap"], &supported));
+
+		// Near misses must not sneak through a prefix or substring match.
+		assert!(!subprotocols_acceptable(
+			[format!("{known}-next").as_bytes()],
+			&supported
+		));
+	}
+
+	/// Send a raw WebSocket handshake and return its HTTP status line.
+	///
+	/// `protocols` is the `Sec-WebSocket-Protocol` request header, omitted when
+	/// `None`. Hand-rolled because a qmux client always appends the bare
+	/// fallbacks we support, so it can't express "offers only what we reject".
+	async fn handshake_status(addr: std::net::SocketAddr, protocols: Option<&str>) -> String {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let mut request = format!(
+			"GET / HTTP/1.1\r\n\
+			 Host: {addr}\r\n\
+			 Upgrade: websocket\r\n\
+			 Connection: Upgrade\r\n\
+			 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+			 Sec-WebSocket-Version: 13\r\n"
+		);
+		if let Some(protocols) = protocols {
+			request.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
+		}
+		request.push_str("\r\n");
+
+		let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+		stream.write_all(request.as_bytes()).await.expect("write request");
+
+		// The status line is in the first read; we never read the body.
+		let mut buf = [0u8; 1024];
+		let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+			.await
+			.expect("server did not respond")
+			.expect("read response");
+
+		String::from_utf8_lossy(&buf[..n])
+			.lines()
+			.next()
+			.expect("empty response")
+			.to_owned()
+	}
+
+	/// A client offering only subprotocols we don't support must fail the
+	/// handshake, per draft-lcurley-qmux-websocket. Upgrading anyway leaves the
+	/// connection with no negotiated ALPN, which the client is required to treat
+	/// as a failure regardless.
+	#[tokio::test]
+	async fn axum_ws_rejects_unsupported_subprotocols() {
+		let (addr, _rx) = spawn_test_server().await;
+
+		let status = handshake_status(addr, Some("bogus-99, soap")).await;
+		assert!(
+			status.starts_with("HTTP/1.1 400"),
+			"unsupported subprotocols must fail the handshake, got {status:?}",
+		);
+
+		// A supported identifier still upgrades.
+		let supported = supported_subprotocols();
+		let known = supported.first().expect("no supported subprotocols");
+		let status = handshake_status(addr, Some(&format!("bogus-99, {known}"))).await;
+		assert!(
+			status.starts_with("HTTP/1.1 101"),
+			"a supported subprotocol must upgrade, got {status:?}",
+		);
+
+		// No header at all is the legacy route: upgrade, negotiate via SETUP.
+		let status = handshake_status(addr, None).await;
+		assert!(
+			status.starts_with("HTTP/1.1 101"),
+			"offering no subprotocol must still upgrade, got {status:?}",
+		);
+	}
+
 	/// What a single accepted WebSocket connection negotiated, as seen by the server.
 	#[derive(Debug)]
 	struct Observed {
@@ -398,8 +541,8 @@ mod tests {
 		let route = any(move |ws: WebSocketUpgrade| {
 			let tx = tx.clone();
 			async move {
-				let ws = ws.protocols(supported_subprotocols());
-				ws.on_upgrade(move |socket| async move {
+				let ws = negotiate_subprotocol(ws)?;
+				Ok::<_, StatusCode>(ws.on_upgrade(move |socket| async move {
 					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
 					let socket = WebSocketAdapter::new(socket);
 
@@ -416,7 +559,7 @@ mod tests {
 					// Hold the session open so the client stays alive long enough
 					// to observe the negotiated subprotocol.
 					let _ = session.closed().await;
-				})
+				}))
 			}
 		});
 
