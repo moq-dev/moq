@@ -158,13 +158,10 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(
-		TIMEOUT,
-		client().with_publisher(&pub_origin).connect(url.clone()).established(),
-	)
-	.await
-	.expect("publisher connect timeout")
-	.expect("publisher connect failed");
+	let pub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
+		.await
+		.expect("publisher connect timeout")
+		.expect("publisher connect failed");
 	assert_eq!(
 		pub_session.version(),
 		expected_version,
@@ -175,7 +172,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -269,10 +266,7 @@ async fn relay_websocket_root_path_upgrades() {
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client()
-			.with_publisher(pub_origin.consume())
-			.connect(url.clone())
-			.established(),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -281,7 +275,7 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed (root-path WS upgrade)");
@@ -349,20 +343,14 @@ async fn two_publish_only_clients_coexist() {
 
 	let sess_a = tokio::time::timeout(
 		TIMEOUT,
-		client()
-			.with_publisher(pub_a.consume())
-			.connect(url.clone())
-			.established(),
+		connect_once(client().with_publisher(pub_a.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher a connect timeout")
 	.expect("publisher a connect failed");
 	let sess_b = tokio::time::timeout(
 		TIMEOUT,
-		client()
-			.with_publisher(pub_b.consume())
-			.connect(url.clone())
-			.established(),
+		connect_once(client().with_publisher(pub_b.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher b connect timeout")
@@ -371,7 +359,7 @@ async fn two_publish_only_clients_coexist() {
 	// ── one subscriber should see broadcasts from both publish-only clients ──
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -500,10 +488,7 @@ async fn internal_tcp_round_trip() {
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client()
-			.with_publisher(pub_origin.consume())
-			.connect(url.clone())
-			.established(),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -517,7 +502,7 @@ async fn internal_tcp_round_trip() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -615,10 +600,7 @@ async fn internal_unix_round_trip() {
 
 	let pub_session = tokio::time::timeout(
 		TIMEOUT,
-		client()
-			.with_publisher(pub_origin.consume())
-			.connect(url.clone())
-			.established(),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -632,7 +614,7 @@ async fn internal_unix_round_trip() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -704,7 +686,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	group.finish().expect("finish group");
 
 	let pub_client = client_version(Some(version)).with_publisher(pub_origin.consume());
-	let pub_session = tokio::time::timeout(TIMEOUT, pub_client.connect(pub_url).established())
+	let pub_session = tokio::time::timeout(TIMEOUT, connect_once(pub_client, pub_url))
 		.await
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
@@ -712,7 +694,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
-	let sub_session = tokio::time::timeout(TIMEOUT, sub_client.connect(sub_url).established())
+	let sub_session = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -885,7 +867,7 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	// scoped subscriber, by contrast, would stay open indefinitely.
 	match tokio::time::timeout(
 		TIMEOUT,
-		client().with_publisher(pub_origin.consume()).connect(url).established(),
+		connect_once(client().with_publisher(pub_origin.consume()), url),
 	)
 	.await
 	{
@@ -910,7 +892,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
 	let sub_origin = Origin::random().produce();
-	let session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established())
+	let session = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -969,7 +951,7 @@ async fn publish_only_public_rejects_subscriber_role() {
 
 	// Like the publisher case, `connect()` may resolve optimistically; either it fails
 	// outright, or the session the relay hands back closes shortly after.
-	match tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url).established()).await {
+	match tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url)).await {
 		Ok(Ok(session)) => {
 			tokio::time::timeout(TIMEOUT, session.closed())
 				.await
@@ -980,4 +962,14 @@ async fn publish_only_public_rejects_subscriber_role() {
 	}
 
 	handle.abort();
+}
+
+/// Dial once and hand back the session.
+///
+/// These tests want a single transport, so reconnecting is off: the connection is
+/// released as soon as the session is up, and with nothing left to redial the
+/// session outlives it.
+async fn connect_once(client: moq_native::Client, url: url::Url) -> moq_native::Result<moq_net::Session> {
+	let connection = client.with_reconnect(false).connect(url).established().await?;
+	connection.session().ok_or(moq_native::Error::ConnectFailed)
 }

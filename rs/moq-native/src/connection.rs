@@ -501,25 +501,31 @@ impl Connection {
 	/// `Ready(Ok(session))` while a session is live (during a GOAWAY handover this is the
 	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
 	/// otherwise.
-	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::Session>> {
+	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		match ready!(self.state.poll(waiter, |state| match (state.status, &state.session) {
-			(Some(Status::Connected | Status::Migrating), Some(session)) => Poll::Ready(session.clone()),
+			(Some(Status::Connected | Status::Migrating), Some(_)) => Poll::Ready(()),
 			_ => Poll::Pending,
 		})) {
-			Ok(session) => Poll::Ready(Ok(session)),
+			Ok(()) => Poll::Ready(Ok(())),
 			Err(state) => Poll::Ready(Err(terminal(&state))),
 		}
 	}
 
-	/// Wait until a session is established, returning it.
+	/// Wait until a session is established, handing the connection back.
 	///
 	/// Returns as soon as a session is live, so the first call waits out the initial dial
 	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
 	/// mode). Useful when a caller wants dial errors up front rather than through
-	/// [`closed`](Self::closed). The loop lives in the handle, not the returned session:
-	/// drop the [`Connection`] and nothing redials.
-	pub async fn established(&self) -> crate::Result<moq_net::Session> {
-		kio::wait(|waiter| self.poll_established(waiter)).await
+	/// [`closed`](Self::closed); reach for [`session`](Self::session) afterwards if you
+	/// need the transport itself.
+	///
+	/// It consumes and returns the connection so the reconnecting chain,
+	/// `client.connect(url).established().await?`, keeps it: the loop lives in this
+	/// handle, so a version that handed back only the session would leave the caller
+	/// holding a live transport that silently never redials.
+	pub async fn established(self) -> crate::Result<Self> {
+		kio::wait(|waiter| self.poll_established(waiter)).await?;
+		Ok(self)
 	}
 
 	/// Poll for the next connection status change since this handle last reported one.

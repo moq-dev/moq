@@ -25,11 +25,9 @@ let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
 
 // A background task dials and redials with backoff if the session drops.
-// Drop the handle to disconnect.
-let connection = client.connect(url);
-
-// Optionally wait for the first session (surfacing dial errors up front).
-let session = connection.established().await?;
+// `established` waits for the first session and hands the connection back;
+// hold it to keep reconnecting, drop it to disconnect.
+let connection = client.connect(url).established().await?;
 ```
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
@@ -62,7 +60,7 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect(url).established().await?;
+let connection = client.connect(url).established().await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
@@ -71,13 +69,16 @@ See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
 
-The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) you publish broadcasts into:
+Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) into the client before connecting and publish your broadcasts into that. The origin outlives any single session, so a reconnect resumes where it left off; reaching for the session's own [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) instead ties your broadcasts to one transport.
 
 ```rust
-let session = client.connect(url).established().await?;
+// Publish into an origin wired before connecting: it outlives any one session,
+// so the broadcast survives a reconnect. Hold the connection to keep redialing.
+let origin = moq_net::Origin::new().produce();
+let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
-let mut broadcast = session.publisher().create_broadcast("", route)?;
+let mut broadcast = origin.create_broadcast("", route)?;
 // ... add catalog and tracks to the broadcast ...
 ```
 
@@ -87,11 +88,14 @@ See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 
 The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
-The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html) for receiving announcements:
+Subscribing works the same way round: wire an origin in before connecting and read announcements from its [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html), so they keep arriving across a reconnect.
 
 ```rust
-let session = client.connect(url).established().await?;
-let mut announced = session.consumer().announced();
+// Consume into an origin wired before connecting, so announcements keep flowing
+// across a reconnect. Hold the connection to keep redialing.
+let origin = moq_net::Origin::new().produce();
+let mut announced = origin.consume().announced();
+let _connection = client.with_subscriber(origin).connect(url);
 
 // Wait for broadcasts to be announced.
 while let Some((path, broadcast)) = announced.next().await {
