@@ -61,12 +61,19 @@ pub enum Error {
 	#[error("no addresses resolved")]
 	NoAddresses,
 
-	/// Every resolved address failed to connect, paired with its own error in
-	/// dial order. All of them are kept: picking one to report would bury a
-	/// rejected certificate or a refused port behind whichever address happened
-	/// to be unroutable or to blackhole until its timeout.
-	#[error("all {} addresses failed: {}", .0.len(), crate::failover::describe(.0))]
-	AllAddresses(Vec<(std::net::SocketAddr, Error)>),
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a refused port behind whichever address happened to be
+	/// unroutable or to blackhole until its timeout. A host with a single address
+	/// reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	AllAttemptsFailed(Vec<crate::AddressFailure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::AddressFailure<Self>>) -> Self {
+		Self::AllAttemptsFailed(failures)
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -113,7 +120,6 @@ async fn connect_addrs(
 		}
 	})
 	.await
-	.map_err(Error::AllAddresses)
 }
 
 /// Listens for incoming plain-TCP qmux connections on a TCP port.

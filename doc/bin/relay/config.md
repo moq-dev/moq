@@ -210,8 +210,9 @@ tls.disable_verify = true
 
 # Delay before also dialing the next resolved address (Happy Eyeballs).
 # When DNS returns both IPv6 and IPv4, attempts alternate between the families,
-# each starting this long after the previous one, and the first connection to
-# complete wins. "0s" dials every address at once. Defaults to 250ms.
+# each starting this long after the previous one (or immediately, if that one
+# fails outright), and the first connection to complete wins. "0s" dials every
+# address at once. Defaults to 250ms, RFC 8305's Connection Attempt Delay.
 # failover_delay = "250ms"
 ```
 
