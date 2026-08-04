@@ -71,6 +71,7 @@ function announceHarness(version: Version, origin = 1n) {
 
 const PUBLISHER_A = OriginSchema.parse(7n);
 const PUBLISHER_B = OriginSchema.parse(8n);
+const PUBLISHER_C = OriginSchema.parse(9n);
 const PEER = OriginSchema.parse(2n);
 
 test("a restart from the same publisher is a route change, not a republish", async () => {
@@ -97,6 +98,17 @@ test("a restart from the same publisher is a route change, not a republish", asy
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, Version.DRAFT_06));
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
 	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// A third publisher takes over. The replacement above has to leave its own publisher on
+	// record, or this one reads as a first announcement and skips the end.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: true });
+
+	// And the new owner's own reroute is still transparent.
+	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_C] }, Version.DRAFT_06));
+	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
+	expect(await announced.next()).toEqual({ path: Path.from("room"), active: false });
 
 	announced.close();
 	subscriber.close();

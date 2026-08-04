@@ -288,14 +288,11 @@ export class Subscriber {
 					// The first hop identifies the original publisher; an empty chain means the
 					// peer itself originated it. See `restart_announce` in the Rust subscriber.
 					const publisher = hops?.[0] ?? responderOrigin;
-					const restart = advertised.has(suffix);
-					const previous = advertised.get(suffix);
-					advertised.set(suffix, publisher);
 
 					// A second advertisement for a path we already carry is a restart: either an
 					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
-					if (restart) {
-						if (previous === publisher) {
+					if (advertised.has(suffix)) {
+						if (advertised.get(suffix) === publisher) {
 							// Same publisher, new route. In-flight subscriptions resume across it,
 							// so there is nothing for a consumer to react to.
 							console.debug(`announced: broadcast=${path} rerouted`);
@@ -306,6 +303,11 @@ export class Subscriber {
 						// subscriptions must not carry over. Surface a real end before the start.
 						retract();
 					}
+
+					// After `retract()`, which clears the entry: the path is advertised again, by
+					// whoever just took it over. Recording it before would leave nothing behind, so
+					// the *next* takeover would read as a first announcement and skip its own end.
+					advertised.set(suffix, publisher);
 				} else {
 					retract();
 					continue;
