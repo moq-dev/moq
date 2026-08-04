@@ -26,8 +26,11 @@ impl Client {
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
 			.with_reconnect(false)
-			.connect(url);
-		let session = connection.established().await.map_err(map_connect_error)?;
+			.connect(url)
+			.established()
+			.await
+			.map_err(map_connect_error)?;
+		let session = connection.session().ok_or(MoqError::Closed)?;
 
 		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 	}

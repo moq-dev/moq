@@ -169,7 +169,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -327,7 +327,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 		Ok::<_, anyhow::Error>(has_cert)
 	});
 
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out");
 
@@ -551,7 +551,7 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -712,4 +712,14 @@ async fn noq_qlog() {
 async fn quiche_qlog() {
 	let traces = qlog_test("https", moq_native::QuicBackend::Quiche).await;
 	assert!(!traces.is_empty(), "expected at least one trace");
+}
+
+/// Dial once and hand back the session.
+///
+/// These tests want a single transport, so reconnecting is off: the connection is
+/// released as soon as the session is up, and with nothing left to redial the
+/// session outlives it.
+async fn connect_once(client: moq_native::Client, url: url::Url) -> moq_native::Result<moq_net::Session> {
+	let connection = client.with_reconnect(false).connect(url).established().await?;
+	connection.session().ok_or(moq_native::Error::ConnectFailed)
 }

@@ -290,8 +290,11 @@ async fn run_session(
 	// One-shot: the catalog subscription below dies with the session anyway, so a
 	// background redial could not resurrect this run. A drop surfaces as the
 	// catalog closing and the loop below winding down.
-	let connection = client.with_reconnect(false).connect(settings.url.clone());
-	let _session = connection.established().await?;
+	let _connection = client
+		.with_reconnect(false)
+		.connect(settings.url.clone())
+		.established()
+		.await?;
 
 	// Wait for the broadcast to be announced. Synchronous lookup would race the gossip of
 	// announcements that happens after the session is established.

@@ -101,11 +101,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	client_config.tls.disable_verify = Some(true);
 	let client = client_config.init().expect("client init");
 	let client_session = within("client connects", async {
-		client
-			.with_reconnect(false)
-			.connect(format!("tcp://127.0.0.1:{port}/").parse().expect("parse url"))
-			.established()
-			.await
+		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
 	.await
 	.expect("connect");
@@ -395,11 +391,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mid_a_client = client_config.init().expect("mid-a client init");
 	let mid_a_upstream = within(
 		"MID-A connects to TOP",
-		mid_a_client
-			.with_subscriber(mid_a_origin.clone())
-			.with_reconnect(false)
-			.connect(top_url.parse().expect("parse top url"))
-			.established(),
+		connect_once(
+			mid_a_client.with_subscriber(mid_a_origin.clone()),
+			top_url.parse().expect("parse top url"),
+		),
 	)
 	.await
 	.expect("mid-a upstream connect");
@@ -426,11 +421,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let sub_client = sub_client_config.init().expect("subscriber client init");
 	let sub_session = within(
 		"subscriber connects to BOTTOM",
-		sub_client
-			.with_subscriber(sub_origin.clone())
-			.with_reconnect(false)
-			.connect(format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url"))
-			.established(),
+		connect_once(
+			sub_client.with_subscriber(sub_origin.clone()),
+			format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url"),
+		),
 	)
 	.await
 	.expect("subscriber connect");
@@ -670,4 +664,14 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	);
 
 	cluster_run.abort();
+}
+
+/// Dial once and hand back the session.
+///
+/// These tests want a single transport, so reconnecting is off: the connection is
+/// released as soon as the session is up, and with nothing left to redial the
+/// session outlives it.
+async fn connect_once(client: moq_native::Client, url: url::Url) -> moq_native::Result<moq_net::Session> {
+	let connection = client.with_reconnect(false).connect(url).established().await?;
+	connection.session().ok_or(moq_native::Error::ConnectFailed)
 }
