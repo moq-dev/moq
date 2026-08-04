@@ -440,3 +440,58 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(
 		Err(Error::UnexpectedMessage)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
+		let writes = log.writes.lock().unwrap();
+		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// A subscriber issues one SUBSCRIBE_NAMESPACE per PERMITTED PREFIX, and asks for
+	/// those prefixes rather than the root it mounts replies under. Driven through
+	/// `start` so the per-prefix fan-out is exercised, not just one stream in
+	/// isolation: a loop that opened a single stream would still satisfy a test that
+	/// called `run_subscribe_namespace` itself.
+	#[tokio::test]
+	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let scoped = origin
+			.with_root("rootns")
+			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
+			.expect("scope the origin to two prefixes");
+
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let driver = start(
+			session,
+			None,
+			None,
+			true,
+			None,
+			Some(scoped),
+			None,
+			Version::Draft18,
+			None,
+			None,
+		)
+		.expect("start the session");
+		let _driver = tokio::spawn(driver);
+
+		// Both requests are written before either peer response, which never comes.
+		for _ in 0..100 {
+			if occurrences(&log, b"cam") > 0 && occurrences(&log, b"mic") > 0 {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+		}
+
+		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
+		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
+		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+}
