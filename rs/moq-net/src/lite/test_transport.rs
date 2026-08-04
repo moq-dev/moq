@@ -241,11 +241,16 @@ impl web_transport_trait::RecvStream for ScriptedRecv {
 /// Records what we send while replaying a scripted peer response on every stream.
 ///
 /// The script is shared across streams, so a test that only opens one gets exactly
-/// what it wrote; drive one stream at a time.
+/// what it wrote; drive one stream at a time. [`Self::per_stream`] hands each
+/// opened stream its own script instead, for flows holding several requests open
+/// at once.
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
 	script: Arc<Mutex<Vec<u8>>>,
+	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
+	/// across every stream.
+	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
 }
 
 impl ScriptedSession {
@@ -253,6 +258,17 @@ impl ScriptedSession {
 		Self {
 			log: Log::default(),
 			script: Arc::new(Mutex::new(script)),
+			queue: None,
+		}
+	}
+
+	/// Each `open_bi` replays the next script in order. An exhausted queue (or an
+	/// empty entry) reads as a peer that never speaks.
+	pub fn per_stream(scripts: Vec<Vec<u8>>) -> Self {
+		Self {
+			log: Log::default(),
+			script: Arc::new(Mutex::new(Vec::new())),
+			queue: Some(Arc::new(Mutex::new(scripts.into_iter().collect()))),
 		}
 	}
 }
@@ -272,12 +288,11 @@ impl web_transport_trait::Session for ScriptedSession {
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Ok((
-			SinkSend::new(self.log.clone()),
-			ScriptedRecv {
-				script: self.script.clone(),
-			},
-		))
+		let script = match &self.queue {
+			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
+			None => self.script.clone(),
+		};
+		Ok((SinkSend::new(self.log.clone()), ScriptedRecv { script }))
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {

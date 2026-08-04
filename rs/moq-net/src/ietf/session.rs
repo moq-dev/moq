@@ -68,7 +68,6 @@ pub fn start<S: web_transport_trait::Session>(
 					subscriber.clone(),
 					version
 				)));
-				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
 				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
 				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
@@ -108,9 +107,6 @@ pub fn start<S: web_transport_trait::Session>(
 						return Poll::Ready(Err(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
-						return Poll::Ready(Err(err));
-					}
-					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
 					if task_set.poll(waiter).is_ready() {
@@ -163,7 +159,6 @@ pub fn start<S: web_transport_trait::Session>(
 					subscriber.clone(),
 					version
 				)));
-				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
 				let mut goaway = std::pin::pin!(err_only(goaway));
 				let mut setup = std::pin::pin!(setup);
 				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
@@ -192,9 +187,6 @@ pub fn start<S: web_transport_trait::Session>(
 						return Poll::Ready(Err::<(), Error>(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
-						return Poll::Ready(Err(err));
-					}
-					if let Poll::Ready(err) = waiter.poll_future(publisher_run.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
 					if let Poll::Ready(err) = waiter.poll_future(goaway.as_mut()) {
@@ -493,5 +485,43 @@ mod tests {
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
 		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// A namespace is only advertised in response to a SUBSCRIBE_NAMESPACE. A peer
+	/// that never subscribes hears nothing, no matter what we announce locally.
+	#[tokio::test]
+	async fn announces_wait_for_a_subscribe_namespace() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let _cam = origin
+			.create_broadcast("solo-cam", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+
+		// An open gate: an unsolicited PUBLISH_NAMESPACE would reach the wire.
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let driver = start(
+			session,
+			None,
+			None,
+			true,
+			Some(origin.consume()),
+			None,
+			None,
+			Version::Draft18,
+			None,
+			None,
+		)
+		.expect("start the session");
+		let _driver = tokio::spawn(driver);
+
+		// Give an unsolicited announce every chance to land before asserting silence.
+		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		assert_eq!(
+			occurrences(&log, b"solo-cam"),
+			0,
+			"PUBLISH_NAMESPACE must wait for a SUBSCRIBE_NAMESPACE"
+		);
 	}
 }
