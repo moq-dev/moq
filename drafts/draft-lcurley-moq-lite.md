@@ -356,7 +356,8 @@ The subscriber sends a TRACK message containing the broadcast path, track name, 
 The publisher replies with a single TRACK_INFO message carrying the resolved epoch and then FINs the stream, or resets the stream on error (e.g. the track does not exist, or a non-zero epoch does not match).
 The returned properties are fixed for the lifetime of that generation, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path, track name, and epoch, and reuse it across every SUBSCRIBE and FETCH of the same generation.
 An announcement that changes the broadcast's Epoch replaces the content (see [ANNOUNCE_UPDATE](#announce-update)); cached TRACK_INFO from another generation MUST NOT be used to parse its frames, since the timescale may differ.
-A subscriber without announcements (a path known out of band) gets the same protection by echoing a non-zero resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames.
+A subscriber without announcements (a path known out of band) gets the same protection by waiting for TRACK_INFO and echoing its non-zero resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames.
+Opening those streams concurrently with Epoch 0 forfeits this: the streams can resolve on opposite sides of a replacement, so the single-round-trip open is only safe when the epoch is already known (from an advertisement or a prior TRACK_INFO).
 A resolved epoch of 0 pins nothing and cannot key the cache: a subscriber following announcements MUST discard such a cache when the broadcast's advertisement is replaced (see [ANNOUNCE_UPDATE](#announce-update)), and one without announcements SHOULD NOT keep it beyond the connection.
 If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
@@ -781,8 +782,7 @@ This is combined with the broadcast path prefix to form the full broadcast path.
 **Epoch**:
 The generation of content at this path, chosen by the original publisher and forwarded unchanged by relays.
 Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the path (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare interchangeable content.
-RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random; the timestamp preserves ordering across restarts without persisted state, and the random bits make an accidental collision within the same millisecond improbable.
-Clocks roll back and skew, so a publisher that observes a higher incumbent Epoch MUST exceed it instead of trusting its clock.
+RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 means unspecified: identity falls back to the first entry of the path (see below), e.g. when bridging from an endpoint that does not assign Epochs.
 

@@ -66,7 +66,7 @@ A relay forwarding into such a session strips EPOCH, and downstream receivers tr
 
 # EPOCH Parameter
 The EPOCH parameter carries the generation of the broadcast.
-It is a parameter (see {{moqt}} Section 2.5) carried in a namespace advertisement (PUBLISH_NAMESPACE, {{moqt}} Section 10.15, or an extended NAMESPACE, {{relay-hops}}), and in SUBSCRIBE and FETCH to pin the request (see [Pinning Subscriptions and Fetches](#pinning-subscriptions-and-fetches)).
+It is a parameter (see {{moqt}} Section 2.5) carried in a namespace advertisement (PUBLISH_NAMESPACE, {{moqt}} Section 10.15, or an extended NAMESPACE, {{relay-hops}}), and in SUBSCRIBE, FETCH, and PUBLISH to pin the request (see [Pinning Subscriptions, Fetches, and Publishes](#pinning-subscriptions-fetches-and-publishes)).
 
 ~~~
 EPOCH Parameter {
@@ -79,8 +79,7 @@ EPOCH Parameter {
 **Epoch**:
 The generation of content at this namespace, chosen by the original publisher and forwarded unchanged by relays.
 Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the namespace (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare interchangeable content.
-RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random; the timestamp preserves ordering across restarts without persisted state, and the random bits make an accidental collision within the same millisecond improbable.
-Clocks roll back and skew, so a publisher that observes a higher incumbent Epoch MUST exceed it instead of trusting its clock.
+RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 is equivalent to omitting the parameter.
 
@@ -98,11 +97,13 @@ When combined with {{relay-hops}}, Epoch comparison happens first; its path-leng
 An advertisement without EPOCH carries no generation: the publisher predates this extension, or the parameter was stripped crossing a non-supporting session.
 Unspecified advertisements are never interchangeable with specified ones; among themselves, the identity rules otherwise in effect apply ({{relay-hops}} origin identity, or plain {{moqt}} semantics).
 
-## Pinning Subscriptions and Fetches
+## Pinning Subscriptions, Fetches, and Publishes
 On a session that negotiated this extension, a subscriber MAY include EPOCH in SUBSCRIBE or FETCH; the request then targets exactly that generation, and the publisher MUST reject it rather than serve a different one.
 A publisher that retains an older generation (e.g. a recording) MAY serve a FETCH pinned to it even after a newer generation replaced the namespace.
 A request without EPOCH targets whatever generation the publisher currently serves, matching {{moqt}}'s default behavior.
 Echoing the Epoch of the advertisement acted on closes the race where a request crosses a replacement in flight.
+
+The same race exists in the push direction: a publisher SHOULD include EPOCH in PUBLISH, and a receiver MUST reject a PUBLISH whose Epoch differs from the generation it currently holds for the namespace, so a stale push cannot attach its tracks to a replacement.
 
 
 # Security Considerations
@@ -129,9 +130,9 @@ This document requests a registration in the "MOQT Setup Options" registry ({{mo
 
 This document requests a registration in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
 
-| Value   | Name  | Carried In                                    | Reference     |
-|:--------|:------|:----------------------------------------------|:--------------|
-| 0x40B5B | EPOCH | PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, FETCH | This Document |
+| Value   | Name  | Carried In                                             | Reference     |
+|:--------|:------|:-------------------------------------------------------|:--------------|
+| 0x40B5B | EPOCH | PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, FETCH, PUBLISH | This Document |
 
 
 --- back
