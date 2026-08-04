@@ -83,16 +83,13 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// The origin stamped into the hop chain of every broadcast from this session.
-	// moq-transport carries no hop ids on the wire, so a peer only has an identity
-	// if the caller assigned it one (`Client::with_peer_origin`), which also makes
-	// the route recognizable across sessions dialing the same relay.
-	//
-	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
-	// Inventing a random id here would look like a real identity without being
-	// one: the peer never learns it, so it cannot exclude it for loop detection,
-	// and two unrelated publishers would each get an id that made their content
-	// look distinct rather than merely unknown.
+	// The origin stamped into the hop chain of every broadcast. moq-transport
+	// never carries hop ids on the wire, so each upstream session needs a stable
+	// identity in the hop list for two sessions publishing the same path to
+	// resolve as distinct routes instead of colliding on an empty chain. Random
+	// per connection unless the caller assigned the peer an identity
+	// (`Client::with_peer_origin`), which then also makes the route recognizable
+	// across sessions dialing the same relay.
 	session_origin: crate::Origin,
 	state: Lock<State>,
 	tasks: Tasks,
@@ -130,7 +127,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			session,
 			origin,
 			control,
-			session_origin: peer_origin.unwrap_or(crate::Origin::UNKNOWN),
+			session_origin: peer_origin.unwrap_or_else(crate::Origin::random),
 			state: Default::default(),
 			tasks,
 			version,
@@ -1087,10 +1084,37 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
-	/// A suffix the peer returns is relative to the prefix we asked for, and mounts
-	/// under our root exactly once.
+	/// The peer's REQUEST_OK followed by one NAMESPACE, framed exactly as
+	/// `run_subscribe_namespace` reads it -- built with the crate's own writer so the
+	/// framing can't drift from the encoder under test.
+	async fn namespace_response(version: Version, suffix: &str) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::Namespace::ID).await.unwrap();
+		writer
+			.encode(&ietf::Namespace {
+				suffix: crate::Path::new(suffix),
+			})
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// A NAMESPACE suffix is relative to the prefix we subscribed, and mounts under
+	/// our root exactly once.
+	///
+	/// Driven through the real response stream rather than by recomputing the join
+	/// here: a test that did its own `prefix.join(suffix)` would still pass if the
+	/// NAMESPACE arm went back to joining the root.
 	#[tokio::test]
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
+		const VERSION: Version = Version::Draft18;
+
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scoped = origin
@@ -1098,22 +1122,24 @@ mod tests {
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
 			.expect("scope the origin");
 
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
 		let (tasks, _task_set) = crate::util::TaskSet::new();
-		let mut subscriber = Subscriber::new(
-			session,
-			scoped,
-			Control::new(None, false),
-			None,
-			Version::Draft16,
-			tasks,
-		);
+		let mut subscriber = Subscriber::new(session.clone(), scoped, Control::new(None, false), None, VERSION, tasks);
 
-		// What the NAMESPACE arm does with a suffix, using the prefix we subscribed.
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
-		let path = prefix.join(crate::Path::new("x.hang"));
-		subscriber.start_announce(path).unwrap();
-		settle().await;
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		// Parks on the read after the scripted NAMESPACE is consumed.
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		for _ in 0..100 {
+			// The result is deliberately ignored: a regressed mount lands out of scope
+			// and errors here, which the assertions below name far better than a poll
+			// would.
+			let _ = futures::poll!(run.as_mut());
+			if consumer.get_broadcast("rootns/cam/x.hang").is_some() {
+				break;
+			}
+			settle().await;
+		}
 
 		assert!(
 			consumer.get_broadcast("rootns/cam/x.hang").is_some(),

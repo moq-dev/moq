@@ -199,3 +199,114 @@ impl web_transport_trait::Stats for SinkStats {
 		None
 	}
 }
+
+/// A peer that replays a canned byte script and then goes quiet, so a test can drive
+/// a response arm end to end instead of duplicating its decoding.
+///
+/// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
+/// EOF would exit, and a test usually wants to assert against the loop still running.
+pub struct ScriptedRecv {
+	script: Arc<Mutex<Vec<u8>>>,
+}
+
+impl web_transport_trait::RecvStream for ScriptedRecv {
+	type Error = SinkError;
+
+	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+		let take = {
+			let mut script = self.script.lock().unwrap();
+			if script.is_empty() {
+				0
+			} else {
+				let take = dst.len().min(script.len());
+				dst[..take].copy_from_slice(&script[..take]);
+				script.drain(..take);
+				take
+			}
+		};
+
+		match take {
+			0 => std::future::pending().await,
+			take => Ok(Some(take)),
+		}
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	async fn closed(&mut self) -> Result<(), Self::Error> {
+		std::future::pending().await
+	}
+}
+
+/// Records what we send while replaying a scripted peer response on every stream.
+///
+/// The script is shared across streams, so a test that only opens one gets exactly
+/// what it wrote; drive one stream at a time.
+#[derive(Clone)]
+pub struct ScriptedSession {
+	pub log: Log,
+	script: Arc<Mutex<Vec<u8>>>,
+}
+
+impl ScriptedSession {
+	pub fn new(script: Vec<u8>) -> Self {
+		Self {
+			log: Log::default(),
+			script: Arc::new(Mutex::new(script)),
+		}
+	}
+}
+
+impl web_transport_trait::Session for ScriptedSession {
+	type SendStream = SinkSend;
+	type RecvStream = ScriptedRecv;
+	type Error = SinkError;
+
+	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+		std::future::pending().await
+	}
+
+	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		std::future::pending().await
+	}
+
+	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
+		Ok((
+			SinkSend::new(self.log.clone()),
+			ScriptedRecv {
+				script: self.script.clone(),
+			},
+		))
+	}
+
+	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+		Ok(SinkSend::new(self.log.clone()))
+	}
+
+	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
+	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
+		std::future::pending().await
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		0
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		None
+	}
+
+	fn close(&self, _code: u32, _reason: &str) {}
+
+	async fn closed(&self) -> Self::Error {
+		std::future::pending().await
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		SinkStats
+	}
+}
