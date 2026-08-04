@@ -107,6 +107,22 @@ pub struct moq_video_encoder_output {
 	pub encoder_len: usize,
 }
 
+/// One raw frame handed to [`moq_publish_video_raw_frame`].
+///
+/// Pixel format and resolution are fixed by [`moq_video_encoder_input`] at
+/// publish time, so a frame carries neither: `data` is exactly one picture in
+/// that layout, borrowed for the duration of the call (the encoder copies before
+/// returning). The decode side has its own [`moq_video_frame`], which does carry
+/// dimensions, since there they are what the stream turned out to be.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_encoder_frame {
+	/// Presentation timestamp, in microseconds.
+	pub timestamp_us: u64,
+	pub data: *const u8,
+	pub data_size: usize,
+}
+
 /// Decode-side configuration the caller passes to [`moq_consume_video_raw`].
 ///
 /// Output is always tightly-packed I420 (see [`moq_video_frame`]); there is no
@@ -122,18 +138,16 @@ pub struct moq_video_decoder_output {
 	pub latency_max_ms: u64,
 }
 
-/// One raw video frame: pixels plus a presentation timestamp.
+/// One decoded video frame from [`moq_consume_video_raw`]: packed I420 plus a
+/// presentation timestamp.
 ///
-/// Coming out of [`moq_consume_video_raw`], `data` is packed I420: the Y plane
-/// (`width * height`), then U, then V (`width/2 * height/2` each), no row
-/// padding, BT.601 limited range. It's owned by the consume slab and stays valid
-/// until the same id is released with [`moq_consume_video_raw_frame_free`].
+/// `data` is the Y plane (`width * height`), then U, then V (`width/2 *
+/// height/2` each), no row padding, BT.601 limited range, with `width` and
+/// `height` even. It's owned by the consume slab and stays valid until the same
+/// id is released with [`moq_consume_video_raw_frame_free`].
 ///
-/// Going into [`moq_publish_video_raw_frame`], `data` is in the pixel format
-/// declared by [`moq_video_encoder_input`] and is borrowed for the duration of
-/// the call; the encoder copies before returning.
-///
-/// `width` and `height` are even either way.
+/// The publish side has its own [`moq_video_encoder_frame`], which carries no
+/// dimensions because the encoder already fixed them.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_frame {
@@ -162,17 +176,9 @@ struct VideoEncoder {
 	encoder: moq_video::encode::Encoder,
 	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	format: moq_video_pixel_format,
-}
-
-/// A raw frame borrowed from the C caller: still bytes, since the pixel format
-/// that turns them into a surface lives with the encoder rather than the frame.
-pub struct RawFrame<'a> {
-	/// Presentation timestamp, in microseconds.
-	pub timestamp_us: u64,
-	/// The frame's own resolution, checked against the encoder's.
-	pub size: moq_video::Size,
-	/// The pixels, in the producer's configured format.
-	pub data: &'a [u8],
+	/// The encoded resolution, from the publish config. Frames carry only pixels,
+	/// so this is what says how to read them.
+	size: moq_video::Size,
 }
 
 /// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
@@ -231,22 +237,24 @@ impl Video {
 			encoder,
 			producer,
 			format,
+			size: config.size(),
 		})
 	}
 
-	pub fn publish_frame(&mut self, id: Id, frame: RawFrame<'_>) -> Result<(), Error> {
+	pub fn publish_frame(&mut self, id: Id, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
 		let entry = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
 
+		// A buffer that isn't one picture at the configured size is rejected here,
+		// by the surface constructors, rather than reinterpreted.
+		let size = entry.size;
 		let surface = match entry.format {
-			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => moq_video::Surface::I420(moq_video::I420::new(
-				frame.size.width,
-				frame.size.height,
-				frame.data.to_vec(),
-			)?),
-			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(frame.data, frame.size)?,
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
+				moq_video::Surface::I420(moq_video::I420::new(size.width, size.height, data.to_vec())?)
+			}
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(data, size)?,
 		};
 
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
 		let encoded = entry.encoder.encode(&frame)?;
@@ -465,28 +473,23 @@ pub unsafe extern "C" fn moq_publish_video_raw(
 
 /// Encode and publish one raw frame.
 ///
-/// `frame->data` is borrowed for the duration of the call and must be in the
-/// pixel format and at the resolution declared by [`moq_video_encoder_input`].
+/// `frame->data` is borrowed for the duration of the call and must be exactly one
+/// picture in the pixel format and at the resolution declared by
+/// [`moq_video_encoder_input`].
 /// A backend that pipelines publishes an earlier frame's output here, so a call
 /// that emits nothing is normal rather than an error.
 ///
 /// # Safety
-/// - `frame` must point to a valid [`moq_video_frame`].
+/// - `frame` must point to a valid [`moq_video_encoder_frame`].
 /// - `frame->data` must point to `frame->data_size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *const moq_video_frame) -> i32 {
+pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *const moq_video_encoder_frame) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		let raw = RawFrame {
-			timestamp_us: frame.timestamp_us,
-			size: moq_video::Size::new(frame.width, frame.height),
-			data,
-		};
-
-		State::lock().video.publish_frame(producer, raw)
+		State::lock().video.publish_frame(producer, frame.timestamp_us, data)
 	})
 }
 

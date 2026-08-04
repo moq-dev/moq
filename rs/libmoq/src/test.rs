@@ -1550,10 +1550,8 @@ fn video_raw_publish_consume() {
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
-		let frame = moq_video_frame {
+		let frame = moq_video_encoder_frame {
 			timestamp_us: index * 33_333,
-			width: 320,
-			height: 240,
 			data: rgba.as_ptr(),
 			data_size: rgba.len(),
 		};
@@ -1616,8 +1614,8 @@ fn video_raw_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A raw video producer rejects a frame whose resolution isn't the one it was
-/// opened at, rather than encoding a corner of it.
+/// A raw video producer rejects a buffer that isn't one picture at the
+/// configured resolution, rather than reinterpreting it.
 #[test]
 fn video_raw_publish_rejects_frame_size_mismatch() {
 	let origin = id(moq_origin_create());
@@ -1639,11 +1637,11 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 	};
 	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
 
+	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
+	// of its own, so this is caught as a wrong-sized picture.
 	let rgba = gray_rgba(640, 480);
-	let frame = moq_video_frame {
+	let frame = moq_video_encoder_frame {
 		timestamp_us: 0,
-		width: 640,
-		height: 480,
 		data: rgba.as_ptr(),
 		data_size: rgba.len(),
 	};

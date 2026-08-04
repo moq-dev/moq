@@ -256,7 +256,7 @@ try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
 try video.finish()
 ```
 
-`kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named("videotoolbox")` pin the choice. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+`kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
 
 The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 

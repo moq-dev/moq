@@ -149,7 +149,7 @@ if (moq_consume_video_properties(catalog, &snapshot) < 0) {
 
 The `moq_publish_media_*` and `moq_consume_video` / `moq_consume_audio` calls carry already-encoded frames, for a caller that brings its own codec. The `_raw` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.
 
-`moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_frame` carries only pixels and a timestamp:
+`moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
 
 ```c
 struct moq_video_encoder_input input = {
@@ -168,17 +168,15 @@ if (video < 0) {
     fprintf(stderr, "publish video failed: %s\n", moq_error());
 }
 
-struct moq_video_frame frame = {
+struct moq_video_encoder_frame frame = {
     .timestamp_us = pts_us,
-    .width = 1280,
-    .height = 720,
     .data = rgba,
     .data_size = 1280 * 720 * 4,
 };
 moq_publish_video_raw_frame(video, &frame);
 ```
 
-Every zero in the output config means "pick a default": `bitrate` derives one from the resolution and framerate, `gop` uses roughly two seconds. `data` is borrowed only for the call, and each frame must match the configured resolution. A hardware encoder pipelines, so a call that puts nothing on the wire is normal rather than an error.
+Every zero in the output config means "pick a default": `bitrate` derives one from the resolution and framerate, `gop` uses roughly two seconds. `data` is borrowed only for the call, and must be exactly one picture at the configured resolution: the frame carries no dimensions of its own, so a wrong-sized buffer is rejected rather than reinterpreted. (The decode side's `moq_video_frame` does carry dimensions, since there they are whatever the stream turned out to be.) A hardware encoder pipelines, so a call that puts nothing on the wire is normal rather than an error.
 
 The track is named after the codec (`.avc3` / `.hev1`), and its catalog rendition appears once the first keyframe has been encoded, which is where the resolution and codec string come from. So a subscriber discovers the track through the catalog rather than a name you chose.
 
