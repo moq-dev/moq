@@ -164,6 +164,7 @@ export class Subscriber {
 							console.debug(`announced: broadcast=${path} active=false`);
 
 							this.#announced.delete(path);
+							this.#consumes.evict(path);
 							for (const consumer of this.#announcedConsumers) {
 								const suffix = Path.stripPrefix(consumer.prefix, path);
 								if (suffix === null) continue;
@@ -454,6 +455,9 @@ export class Subscriber {
 			console.debug(`runPublishNamespace: stream.reader.closed resolved for ${path}`);
 		} finally {
 			this.#announced.delete(path);
+			// The path is gone, so stop sharing its broadcast: a holder outliving the publisher
+			// would otherwise hand the dead generation to whoever consumes the path next.
+			this.#consumes.evict(path);
 			console.debug(`announced: broadcast=${path} active=false`);
 
 			for (const consumer of this.#announcedConsumers) {

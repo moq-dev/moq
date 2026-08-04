@@ -262,6 +262,16 @@ export class Subscriber {
 
 				const path = Path.join(prefix, suffix);
 
+				// Retract the path: forget the advertisement, drop the shared consume entry so a
+				// later announce subscribes fresh rather than cloning the dead generation's tracks,
+				// and tell the consumer.
+				const retract = () => {
+					advertised.delete(suffix);
+					this.#consumes.evict(path);
+					console.debug(`announced: broadcast=${path} active=false`);
+					announced.append({ path: suffix, active: false });
+				};
+
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
@@ -269,10 +279,7 @@ export class Subscriber {
 					if (full.includes(this.origin)) {
 						// A reflected restart means the peer's remaining route loops back through
 						// us, so the advertisement is gone even though the message says active.
-						if (advertised.delete(suffix)) {
-							console.debug(`announced: broadcast=${path} active=false`);
-							announced.append({ path: suffix, active: false });
-						}
+						if (advertised.has(suffix)) retract();
 						continue;
 					}
 				}
@@ -297,15 +304,15 @@ export class Subscriber {
 
 						// A different publisher took the path, so cached track info and existing
 						// subscriptions must not carry over. Surface a real end before the start.
-						console.debug(`announced: broadcast=${path} active=false`);
-						announced.append({ path: suffix, active: false });
+						retract();
 					}
 				} else {
-					advertised.delete(suffix);
+					retract();
+					continue;
 				}
 
-				console.debug(`announced: broadcast=${path} active=${active}`);
-				announced.append({ path: suffix, active });
+				console.debug(`announced: broadcast=${path} active=true`);
+				announced.append({ path: suffix, active: true });
 			}
 
 			announced.close();

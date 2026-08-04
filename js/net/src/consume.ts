@@ -40,4 +40,18 @@ export class BroadcastCache {
 
 		return consumer;
 	}
+
+	/**
+	 * Stop sharing the broadcast cached for `path`, so the next request subscribes fresh.
+	 *
+	 * Call when the path's advertisement goes away. A handle only leaves the cache on its own
+	 * once *every* holder has closed it, so one holder outliving the publisher (a second
+	 * watcher, or a caller consuming the path directly) would otherwise keep the dead
+	 * generation's cached tracks alive and hand them to whoever consumes the path next.
+	 * Existing handles are left alone: they belong to their holders, and the wire resets
+	 * whatever they still have open.
+	 */
+	evict(path: Path.Valid): void {
+		this.#cache.delete(path);
+	}
 }

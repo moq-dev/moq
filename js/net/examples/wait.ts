@@ -34,10 +34,15 @@ async function main() {
 		});
 	});
 
-	// Run until interrupted, then release the handle and the connection.
-	await connection.closed;
-	effect.close();
-	broadcast.close();
+	// Run until interrupted. `closed` rejects if the reconnect loop gives up, so release
+	// everything on the way out either way.
+	try {
+		await connection.closed;
+	} finally {
+		effect.close();
+		broadcast.close();
+		connection.close();
+	}
 }
 
 main().catch(console.error);

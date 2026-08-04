@@ -209,6 +209,12 @@ export class Broadcast {
 				const blind = conn.consume(path);
 				effect.cleanup(() => blind.close());
 				effect.set(this.#active, blind, undefined);
+
+				// Nothing will announce it back, but `active` still promises a *live* broadcast,
+				// so stop advertising this one once the wire resets it.
+				void blind.closed.then(() => {
+					if (this.#active.peek() === blind) this.#active.set(undefined);
+				});
 				return;
 			}
 
@@ -217,9 +223,12 @@ export class Broadcast {
 
 			let current: broadcast.Consumer | undefined;
 			const offline = () => {
+				const mine = current;
 				current?.close();
 				current = undefined;
-				this.#active.set(undefined);
+				// Only clear what this run put there. A spawn task that resumes after its run was
+				// torn down would otherwise wipe the consumer a newer run already installed.
+				if (this.#active.peek() === mine) this.#active.set(undefined);
 			};
 			effect.cleanup(offline);
 

@@ -177,6 +177,12 @@ export class Connection implements Established {
 		return this.#subscriber.consume(path);
 	}
 
+	/**
+	 * Watches a broadcast, live only while it is announced.
+	 *
+	 * @param path - The path of the broadcast to watch
+	 * @returns A reactive handle to the broadcast
+	 */
 	announcedBroadcast(path: Path.Valid): announce.Broadcast {
 		return announce.watchBroadcast(this, path);
 	}

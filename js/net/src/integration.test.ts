@@ -974,3 +974,51 @@ test("integration: announcedBroadcast consumes blind without discovery", async (
 	client.close();
 	server.close();
 });
+
+test("integration: a republish is not served from the previous generation's cache", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const serve = async (broadcast: BroadcastProducer, payload: string) => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			req.accept().writeString(payload);
+		}
+	};
+
+	const first = new BroadcastProducer();
+	const servingFirst = serve(first, "old");
+	server.publish(Path.from("shared"), first);
+
+	const watched = client.announcedBroadcast(Path.from("shared"));
+	const active = await waitFor(watched.active, (b) => b !== undefined);
+	if (!active) throw new Error("expected an active broadcast");
+	expect(await active.subscribe("video").readString()).toBe("old");
+
+	// A second holder of the same path, which is what makes the cache reachable: consumed
+	// broadcasts are reference-counted, so the handle closing its own copy below does not
+	// release the shared one.
+	const bystander = client.consume(Path.from("shared"));
+
+	first.close();
+	await servingFirst;
+	await waitFor(watched.active, (b) => b === undefined);
+
+	// The republish must subscribe fresh. Cloning the cached entry would resolve the previous
+	// generation's tracks, which the wire has already reset.
+	const second = new BroadcastProducer();
+	const servingSecond = serve(second, "new");
+	server.publish(Path.from("shared"), second);
+
+	const republished = await waitFor(watched.active, (b) => b !== undefined);
+	if (!republished) throw new Error("expected a republished broadcast");
+	expect(await republished.subscribe("video").readString()).toBe("new");
+
+	bystander.close();
+	watched.close();
+	second.close();
+	await servingSecond;
+	client.close();
+	server.close();
+});
