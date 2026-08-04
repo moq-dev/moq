@@ -821,6 +821,21 @@ pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
 	panic!("no moof");
 }
 
+/// The sample durations a fragment's `trun` claims, which is what a player advances its own
+/// clock by. Distinct from the durations that went in: a missing one is inferred or defaulted.
+#[cfg(test)]
+pub(crate) fn trun_durations(fragment: &Bytes) -> Vec<Option<u32>> {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(fragment.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			return moof.traf[0].trun[0].entries.iter().map(|e| e.duration).collect();
+		}
+	}
+	panic!("no moof");
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

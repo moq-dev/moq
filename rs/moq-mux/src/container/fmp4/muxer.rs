@@ -10,7 +10,8 @@ use crate::container::Frame;
 use crate::container::source::{VideoTransform, build_video_transform};
 
 use super::export::{
-	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
+	Fragment, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, fragment_seconds,
+	infer_missing_durations,
 };
 use super::{Error, synthesize_audio_trak, synthesize_video_trak};
 
@@ -39,6 +40,8 @@ enum Kind {
 /// 2. [`init`](Self::init) builds the rendition's init segment (ftyp+moov).
 /// 3. [`fragment`](Self::fragment) encodes frames as one moof+mdat whose `tfdt` carries their
 ///    real presentation time, so a fragment built from a mid-stream group stands alone.
+///    [`fragments`](Self::fragments) cuts the same run into one fragment per frame, for a
+///    consumer that addresses individual frames (LL-HLS Partial Segments).
 ///
 /// For inline-parameter-set codecs (catalog `description` absent), [`init`](Self::init) returns
 /// `None` until a group has been [`read`](Self::read) to resolve the config from a keyframe.
@@ -215,22 +218,74 @@ impl Muxer {
 	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
 	/// across the boundary.
 	///
-	/// A caller that owns a continuous decode timeline across calls, typically one emitting a
-	/// fragment per frame, wants [`fragment_at`](Self::fragment_at) instead.
+	/// A caller emitting one fragment per frame wants [`fragments`](Self::fragments), which cuts
+	/// a whole run at once, or [`fragment_at`](Self::fragment_at) if it authors the timeline.
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
 		let Some(base_dts) = frames.first().map(|f| f.timestamp) else {
 			return Ok(Bytes::new());
 		};
-		self.fragment_at(sequence, base_dts, frames)
+		let frames = self.resolve_durations(frames);
+		Ok(super::encode_fragment_at(self.info(sequence), base_dts, &frames)?)
+	}
+
+	/// Encode each frame as its own moof+mdat, timed as one continuous run.
+	///
+	/// This is [`fragment`](Self::fragment)'s timing with a cut between every sample, for a
+	/// consumer whose smallest addressable unit is one frame (an LL-HLS origin cutting Partial
+	/// Segments at stored-object boundaries). Durations are resolved across the whole slice
+	/// *before* cutting, so each frame is timed by its real successor and each fragment's `tfdt`
+	/// advances by exactly what the previous `trun` claimed. Calling `fragment` once per frame
+	/// instead re-anchors every fragment, collapsing `cts` to zero and timing every sample by the
+	/// catalog cadence.
+	///
+	/// Reordering survives: `tfdt` walks decode order while each `cts` carries `PTS - DTS`.
+	/// Fragment `i` is numbered `sequence + i`. Returns an empty `Vec` when `frames` is empty.
+	///
+	/// The run's last frame has no successor to be timed by, so it takes the catalog cadence like
+	/// any trailing sample. Set [`Frame::duration`] to pin it.
+	pub fn fragments(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Vec<Fragment>> {
+		let frames = self.resolve_durations(frames);
+		let Some(first) = frames.first() else {
+			return Ok(Vec::new());
+		};
+
+		// Walk the timeline in the track's own ticks: `encode_fragment_at` rescales the anchor
+		// the same way, so an accumulated tick count and the durations in the trun can't drift
+		// apart the way re-deriving from each frame's PTS would.
+		let mut dts = first.timestamp.as_scale(self.timescale) as u64;
+		let mut out = Vec::with_capacity(frames.len());
+
+		for (i, frame) in frames.iter().enumerate() {
+			let base = moq_net::Timestamp::from_scale(dts, self.timescale.as_u64()).map_err(Error::from)?;
+			// The moof sequence number is informative only, so wrapping past u32 is harmless.
+			let info = self.info(sequence.wrapping_add(i as u32));
+			let data = super::encode_fragment_at(info, base, std::slice::from_ref(frame))?;
+
+			if let Some(duration) = frame.duration {
+				dts = dts
+					.checked_add(duration.as_scale(self.timescale) as u64)
+					.ok_or(Error::PtsOverflow)?;
+			}
+
+			out.push(Fragment {
+				data,
+				init: false,
+				// Audio has no keyframes, so every audio fragment can start a segment.
+				independent: !self.is_video() || frame.keyframe,
+				duration: fragment_seconds(std::slice::from_ref(frame), self.default_frame),
+			});
+		}
+
+		Ok(out)
 	}
 
 	/// Encode frames as one moof+mdat fragment whose decode timeline starts at `base_dts`.
 	///
 	/// [`fragment`](Self::fragment) anchors each fragment at `frames[0].timestamp`, which keeps
-	/// it self-contained but re-anchors on every call. A caller emitting one fragment per frame
-	/// owns the decode timeline itself: pass the DTS it authored and the composition offsets
-	/// (`PTS - DTS`) come out correct, so reordered frames keep their presentation order and
-	/// `tfdt` stays monotonic across fragments.
+	/// it self-contained but re-anchors on every call. A caller that authors its own decode
+	/// timeline passes the DTS it computed, and the composition offsets (`PTS - DTS`) come out
+	/// correct, so reordered frames keep their presentation order and `tfdt` stays monotonic
+	/// across fragments.
 	///
 	/// `base_dts` must be monotonically non-decreasing across a track's fragments. Returns an
 	/// empty `Bytes` when `frames` is empty.
@@ -239,16 +294,34 @@ impl Muxer {
 	/// following frame, and a fragment's last frame has none to look at, so it falls back to the
 	/// catalog cadence: a one-frame fragment whose real cadence differs writes a `trun` duration
 	/// that doesn't reach the next fragment's `base_dts`.
+	///
+	/// Prefer [`fragments`](Self::fragments) when the whole run is available: it owns the
+	/// timeline, so there is no contract to keep.
 	pub fn fragment_at(&self, sequence: u32, base_dts: moq_net::Timestamp, frames: &[Frame]) -> crate::Result<Bytes> {
-		let mut frames = frames.to_vec();
-		apply_codec_durations(&mut frames, self.opus);
-		let frames = infer_missing_durations(frames, None, self.default_frame);
-		let info = super::FragmentInfo {
+		let frames = self.resolve_durations(frames);
+		Ok(super::encode_fragment_at(self.info(sequence), base_dts, &frames)?)
+	}
+
+	/// Whether this muxer serves a video rendition.
+	fn is_video(&self) -> bool {
+		matches!(self.kind, Kind::Video(_))
+	}
+
+	/// The per-fragment metadata every encode call shares.
+	fn info(&self, sequence_number: u32) -> super::FragmentInfo {
+		super::FragmentInfo {
 			track_id: TRACK_ID,
 			timescale: self.timescale,
-			sequence_number: sequence,
-		};
-		Ok(super::encode_fragment_at(info, base_dts, &frames)?)
+			sequence_number,
+		}
+	}
+
+	/// Fill in the durations the frames don't carry: the codec's own where it states one, then
+	/// the gap to the following frame, then the catalog cadence for a trailing sample.
+	fn resolve_durations(&self, frames: &[Frame]) -> Vec<Frame> {
+		let mut frames = frames.to_vec();
+		apply_codec_durations(&mut frames, self.opus);
+		infer_missing_durations(frames, None, self.default_frame)
 	}
 }
 
@@ -319,6 +392,125 @@ mod tests {
 			keyframe,
 			duration: Some(Timestamp::from_scale(1_000, 30_000).unwrap()),
 		}
+	}
+
+	// A duration-less frame at a real 1500-tick cadence, i.e. VFR or Legacy/LOC input.
+	fn untimed_frame(pts: u64, keyframe: bool) -> Frame {
+		Frame {
+			timestamp: Timestamp::from_scale(pts, 30_000).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: None,
+		}
+	}
+
+	// The reason `fragments` exists rather than a loop over `fragment`. Cutting per call leaves
+	// each fragment a one-element slice with no successor, so every sample falls back to the
+	// catalog cadence (999 ticks: 1/30s taken to nanoseconds and truncated back to 30 kHz) while
+	// the frames really arrive 1500 apart. Resolving first and cutting after times each frame by
+	// its real successor, so the fragments tile the timeline instead of running 33% short.
+	#[test]
+	fn fragments_time_each_frame_by_its_real_successor() {
+		let muxer = video_muxer();
+		let input: Vec<Frame> = (0..4).map(|i| untimed_frame(i * 1_500, i == 0)).collect();
+
+		let cut_per_call: Vec<_> = input
+			.iter()
+			.enumerate()
+			.map(|(i, frame)| {
+				let fragment = muxer.fragment(i as u32, std::slice::from_ref(frame)).unwrap();
+				super::super::trun_durations(&fragment)
+			})
+			.collect();
+		assert_eq!(
+			cut_per_call,
+			vec![vec![Some(999)]; 4],
+			"no successor in a one-element slice, so every sample takes the catalog cadence"
+		);
+
+		let resolved_first = muxer.fragments(0, &input).unwrap();
+		let durations: Vec<_> = resolved_first
+			.iter()
+			.map(|f| super::super::trun_durations(&f.data))
+			.collect();
+		assert_eq!(
+			durations,
+			vec![vec![Some(1_500)], vec![Some(1_500)], vec![Some(1_500)], vec![Some(999)]],
+			"real successor gaps, and only the trailing sample has none to read"
+		);
+
+		// Each tfdt is where the previous trun said the run had reached.
+		let tfdts: Vec<_> = resolved_first
+			.iter()
+			.map(|f| super::super::timeline(&f.data).0)
+			.collect();
+		assert_eq!(tfdts, vec![0, 1_500, 3_000, 4_500]);
+	}
+
+	// The segment metadata an LL-HLS packager reads back off each part.
+	#[test]
+	fn fragments_carry_segment_metadata() {
+		let muxer = video_muxer();
+		let input = [tick_frame(0, true), tick_frame(1_000, false)];
+		let fragments = muxer.fragments(7, &input).unwrap();
+
+		assert_eq!(fragments.len(), 2);
+		assert!(!fragments[0].init && !fragments[1].init);
+		assert!(fragments[0].independent, "opens on a keyframe");
+		assert!(!fragments[1].independent, "mid-GOP, so it can't start a segment");
+		for fragment in &fragments {
+			assert!((fragment.duration - 1.0 / 30.0).abs() < 1e-6, "one 30 fps frame");
+		}
+
+		assert!(muxer.fragments(0, &[]).unwrap().is_empty());
+	}
+
+	// Audio has no keyframes, so every audio part can start a segment.
+	#[tokio::test]
+	async fn audio_fragments_are_all_independent() {
+		use hang::catalog::AudioCodec;
+
+		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		let muxer = Muxer::audio(&config).unwrap();
+		let packet = Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]);
+		let frames: Vec<Frame> = (0..3)
+			.map(|i| Frame {
+				payload: packet.clone(),
+				keyframe: false,
+				..frame(i * 20_000, false)
+			})
+			.collect();
+
+		let fragments = muxer.fragments(0, &frames).unwrap();
+		assert_eq!(fragments.len(), 3);
+		assert!(fragments.iter().all(|f| f.independent));
+	}
+
+	// `fragments` is the same encoder as a correct hand-rolled loop, so a caller already doing
+	// the accumulation gets byte-identical output and can migrate without a diff.
+	#[test]
+	fn fragments_match_an_authored_timeline() {
+		let muxer = video_muxer();
+		let input = [tick_frame(0, true), tick_frame(3_000, false), tick_frame(1_000, false)];
+
+		let mut base_dts = Timestamp::from_scale(0, 30_000).unwrap();
+		let mut authored = Vec::new();
+		for (sequence, frame) in input.iter().enumerate() {
+			authored.push(
+				muxer
+					.fragment_at(sequence as u32, base_dts, std::slice::from_ref(frame))
+					.unwrap(),
+			);
+			base_dts = base_dts.checked_add(frame.duration.unwrap()).unwrap();
+		}
+
+		let cut: Vec<_> = muxer
+			.fragments(0, &input)
+			.unwrap()
+			.into_iter()
+			.map(|f| f.data)
+			.collect();
+		assert_eq!(cut, authored);
 	}
 
 	// A per-frame caller owns the decode timeline, so a reordered (I, P, B) run keeps its
