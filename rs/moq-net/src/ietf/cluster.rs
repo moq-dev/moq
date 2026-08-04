@@ -229,8 +229,16 @@ pub(crate) struct PeerSetup(kio::Shared<Option<Peer>>);
 impl PeerSetup {
 	/// Record what the peer declared. A SETUP carrying neither option records the
 	/// default (not negotiated), which is what unblocks a waiter.
+	///
+	/// First write wins. The announce loops read this once and hold it for their
+	/// lifetime while subscription serving re-reads it, so letting a later SETUP
+	/// overwrite the identity would advertise under one exclusion and serve under
+	/// another, which is how a routing loop gets back in.
 	pub fn set(&self, peer: Peer) {
-		*self.0.lock() = Some(peer);
+		let mut slot = self.0.lock();
+		if slot.is_none() {
+			*slot = Some(peer);
+		}
 	}
 
 	/// Await the peer's SETUP.
@@ -494,6 +502,26 @@ mod tests {
 			assert_eq!(peer.origin, Some(self_origin));
 			assert_eq!(peer.cost, cost);
 		}
+	}
+
+	/// The announce loops read the peer's declaration once and hold it, while
+	/// subscription serving re-reads it. A second SETUP overwriting the identity would
+	/// split those two apart, so the first write is the one that counts.
+	#[tokio::test]
+	async fn peer_setup_first_write_wins() {
+		let slot = PeerSetup::default();
+		slot.set(Peer {
+			origin: Some(origin(42)),
+			cost: Some(3),
+		});
+		slot.set(Peer {
+			origin: Some(origin(99)),
+			cost: Some(0),
+		});
+
+		let peer = slot.get().await;
+		assert_eq!(peer.origin, Some(origin(42)));
+		assert_eq!(peer.cost, Some(3));
 	}
 
 	#[test]

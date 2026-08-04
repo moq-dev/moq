@@ -33,6 +33,24 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 	}
 }
 
+/// Whether an error means the peer broke the protocol, as opposed to a stream or
+/// transport failing on its own.
+///
+/// Only the former justifies taking the whole session down.
+fn is_protocol_violation(err: &Error) -> bool {
+	matches!(
+		err,
+		Error::Decode(_)
+			| Error::Encode(_)
+			| Error::BoundsExceeded(_)
+			| Error::WrongSize
+			| Error::TooManyParameters
+			| Error::ProtocolViolation
+			| Error::UnexpectedMessage
+			| Error::UnexpectedStream
+	)
+}
+
 fn remove_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) {
 	let Ok(mut aliases) = aliases.write() else {
 		return;
@@ -429,6 +447,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				tracing::debug!(message = ?msg, "received publish_namespace");
 				async move {
 					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer).await {
+						// An advertisement update is decoded here rather than in the
+						// dispatcher, so nothing else would surface a malformed one. The
+						// cluster draft requires closing the session on those; a stream
+						// the peer simply reset is not the peer's fault.
+						if is_protocol_violation(&err) {
+							this.session.close(err.to_code(), err.to_string().as_ref());
+						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
 				}

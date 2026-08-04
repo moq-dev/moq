@@ -86,6 +86,7 @@ pub fn start<S: web_transport_trait::Session>(
 		// (a gated server accept), and filled by the uni loop otherwise. A version that
 		// cannot negotiate the extension is settled immediately so nothing blocks on it.
 		let peer_setup = cluster::PeerSetup::default();
+		let setup_read = peer_cluster.is_some();
 		match peer_cluster {
 			Some(peer) => peer_setup.set(peer),
 			None if !cluster::supported(version) => peer_setup.set(cluster::Peer::default()),
@@ -130,7 +131,13 @@ pub fn start<S: web_transport_trait::Session>(
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
 				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
-				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), None, version)));
+				let mut unis = std::pin::pin!(err_only(run_unis(
+					adapter.clone(),
+					subscriber.clone(),
+					None,
+					false,
+					version
+				)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
 					publisher.clone(),
@@ -233,6 +240,7 @@ pub fn start<S: web_transport_trait::Session>(
 					session.clone(),
 					subscriber.clone(),
 					Some(peer_setup.clone()),
+					setup_read,
 					version
 				)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
@@ -410,11 +418,15 @@ async fn run_unis<S: web_transport_trait::Session>(
 	// Where to record the peer's MoQ Cluster options once its SETUP arrives. `None`
 	// for draft-14..16, whose SETUP rides the control stream instead.
 	peer_setup: Option<cluster::PeerSetup>,
+	// Whether the peer's SETUP was already consumed before this loop started.
+	setup_read: bool,
 	version: Version,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
-	let mut seen_setup = false;
+	// A gated server accept already read the peer's one SETUP off its own uni stream,
+	// so anything arriving here is a second one.
+	let mut seen_setup = setup_read;
 
 	loop {
 		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
