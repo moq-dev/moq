@@ -205,3 +205,21 @@ test("an uncommitted first frame is re-encoded", () => {
 
 	expect(commit(encoder, { a: 1 })?.keyframe).toBe(true);
 });
+
+// The baseline is what the next delta is diffed against, so handing out the live object lets a
+// caller mutate it and make a real change look unchanged, silently starving consumers.
+test("the value getter does not expose the live baseline", () => {
+	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	commit(encoder, { a: 1 });
+
+	const leaked = encoder.value as { a: number };
+	leaked.a = 2;
+
+	// The change is still a change, because the mutation never touched the encoder's copy.
+	expect(commit(encoder, { a: 2 })).toBeDefined();
+});
+
+test("a value JSON cannot represent is rejected", () => {
+	const encoder = new Encoder<unknown>({});
+	expect(() => encoder.update(undefined)).toThrow("not representable as JSON");
+});

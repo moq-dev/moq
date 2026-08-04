@@ -88,7 +88,14 @@ export class Encoder<T> {
 			throw new Error("compression desynchronized: a record was encoded but never written");
 		}
 
-		const bytes = new TextEncoder().encode(JSON.stringify(value));
+		const text = JSON.stringify(value);
+		if (text === undefined) {
+			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol, which
+			// would otherwise frame as empty bytes and fail on the consumer instead of here.
+			throw new Error("record is not representable as JSON");
+		}
+
+		const bytes = new TextEncoder().encode(text);
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
 		this.#pending = true;

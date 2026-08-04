@@ -9,9 +9,11 @@ use crate::Result;
 
 /// Consumes an ordered log of JSON records from a track, yielding every record in order.
 ///
-/// A [`Decoder`] that owns its track. The log rides a single group, so this reads that group's
-/// frames in order; one record per frame. When something else already owns the track, use the
-/// [`Decoder`] directly.
+/// A [`Decoder`] that owns its track: it reads one record per frame, in order, and starts the
+/// decoder on a cold window at each group boundary. A [`Producer`](super::Producer) writes the whole
+/// log into one group, but a publisher that rolls its own (the way an
+/// [`Encoder`](super::Encoder) desync is cleared) is read here too. When something else already owns
+/// the track, use the [`Decoder`] directly.
 pub struct Consumer<T> {
 	track: moq_net::track::Subscriber,
 	group: Option<moq_net::group::Consumer>,
@@ -58,8 +60,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 			match group.poll_read_frame(waiter)? {
 				Poll::Ready(Some(frame)) => return Poll::Ready(Ok(Some(self.decoder.decode(&frame.payload)?))),
 				Poll::Ready(None) => {
-					// The group is finished; the log rides just this one, so the next poll for a
-					// group ends the stream.
+					// This group is exhausted. Clear it and poll for a later one, which starts its own
+					// window; the stream ends only when the track does.
 					self.group = None;
 				}
 				Poll::Pending => return Poll::Pending,

@@ -50,7 +50,15 @@ export class Producer<T> {
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
-			group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+			try {
+				group.writeFrame({ payload: encoded.payload, timestamp: Time.Timestamp.now() });
+			} catch (err) {
+				// The group carries no frames, so close it rather than leaving it open on the track. A
+				// rejected frame doesn't close the track, and a consumer that already advanced into this
+				// group would otherwise block until some later update opened a newer one.
+				group.close();
+				throw err;
+			}
 
 			if (this.#deltas) {
 				// Keep the group open so future deltas can be appended.

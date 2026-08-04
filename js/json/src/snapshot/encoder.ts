@@ -131,9 +131,14 @@ export class Encoder<T> {
 		this.#compress = config.compression ?? false;
 	}
 
-	/** The last encoded value, or `undefined` before the first snapshot. */
+	/**
+	 * A copy of the last encoded value, or `undefined` before the first snapshot.
+	 *
+	 * Copied rather than shared: the baseline is what the next delta is diffed against, so a caller
+	 * mutating it in place would make a later change look unchanged and never reach consumers.
+	 */
 	get value(): T | undefined {
-		return this.#last as T | undefined;
+		return this.#last === undefined ? undefined : (structuredClone(this.#last) as T);
 	}
 
 	/**
@@ -170,20 +175,31 @@ export class Encoder<T> {
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
 		// (dropping `undefined` fields, matching what lands on the wire).
 		const text = JSON.stringify(valid);
+		if (text === undefined) {
+			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol. Reject it
+			// here rather than letting it reach the wire as an unparseable frame.
+			throw new Error("value is not representable as JSON");
+		}
+
 		const json = JSON.parse(text);
 		if (this.#last !== undefined && deepEqual(this.#last, json)) return undefined;
 
 		const delta = this.#delta(json);
-		this.#last = json;
 
+		// Compress only after the diff, and advance the baseline only once the payload exists: framing
+		// can throw, and a baseline ahead of the wire would make the next delta unreadable. Matches the
+		// Rust encoder, which completes every fallible step before mutating state.
 		if (delta) {
 			const payload = this.#frame(delta);
+			this.#last = json;
 			this.#deltaBytes += payload.length;
 			this.#groupFrames += 1;
 			return this.#pend({ payload, keyframe: false });
 		}
 
-		return this.#pend({ payload: this.#snapshot(new TextEncoder().encode(text)), keyframe: true });
+		const payload = this.#snapshot(new TextEncoder().encode(text));
+		this.#last = json;
+		return this.#pend({ payload, keyframe: true });
 	}
 
 	// Hand a frame to the caller, marking it unacknowledged until they commit.

@@ -88,3 +88,11 @@ test("an uncommitted plaintext record does not stop the encoder", () => {
 	expect(decoder.decode(record.payload)).toEqual({ n: 1 });
 	record.commit();
 });
+
+// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol. Framing that
+// would write empty bytes and fail on the consumer rather than here.
+test("a record JSON cannot represent is rejected", () => {
+	const encoder = new Encoder<unknown>({});
+	expect(() => encoder.encode(undefined)).toThrow("not representable as JSON");
+	expect(() => encoder.encode(() => {})).toThrow("not representable as JSON");
+});
