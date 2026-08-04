@@ -139,6 +139,11 @@ pub enum Error {
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
+
+	/// `mdhd.timescale` is a 32-bit field, so a larger scale would reach the init segment
+	/// truncated while the fragments kept the full value, putting them on different timelines.
+	#[error("timescale {0} does not fit the 32-bit mdhd field")]
+	TimescaleTooLarge(u64),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -484,7 +489,13 @@ pub(crate) fn synthesize_video_trak(
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
-	Ok(build_video_trak(track_id, timescale, sample_entry, width, height))
+	Ok(build_video_trak(
+		track_id,
+		mdhd_timescale(timescale)?,
+		sample_entry,
+		width,
+		height,
+	))
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
@@ -594,7 +605,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 
-	Ok(build_audio_trak(track_id, timescale, sample_entry))
+	Ok(build_audio_trak(track_id, mdhd_timescale(timescale)?, sample_entry))
 }
 
 /// All-ones: the ISO/IEC 14496-12 spelling of "duration not known up front", which is always
@@ -604,7 +615,7 @@ const UNKNOWN_DURATION: u64 = u64::MAX;
 
 fn build_video_trak(
 	track_id: u32,
-	timescale: u64,
+	timescale: u32,
 	sample_entry: mp4_atom::Codec,
 	width: u16,
 	height: u16,
@@ -623,7 +634,7 @@ fn build_video_trak(
 	}
 }
 
-fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
+fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
 	mp4_atom::Trak {
 		tkhd: mp4_atom::Tkhd {
 			track_id,
@@ -675,10 +686,19 @@ pub(crate) fn encode_init(
 	Ok(Bytes::from(buf))
 }
 
-fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
+/// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.
+///
+/// `moq_net::Timescale` permits the whole QUIC varint range, so a caller-supplied scale can be
+/// wider than the field. Truncating would put the init segment and the fragments on different
+/// timelines, silently, so refuse instead.
+fn mdhd_timescale(timescale: u64) -> Result<u32> {
+	u32::try_from(timescale).map_err(|_| Error::TimescaleTooLarge(timescale))
+}
+
+fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
 	mp4_atom::Mdia {
 		mdhd: mp4_atom::Mdhd {
-			timescale: timescale as u32,
+			timescale,
 			..Default::default()
 		},
 		hdlr: mp4_atom::Hdlr {

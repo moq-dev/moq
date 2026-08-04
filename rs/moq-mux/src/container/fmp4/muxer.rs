@@ -310,4 +310,18 @@ mod tests {
 		let first = decoded[0].duration.unwrap().as_micros();
 		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
 	}
+
+	// mdhd.timescale is a 32-bit field, but the video timescale is `framerate * 1000`, so an
+	// absurd catalog framerate overflows it. Truncating would leave the init and the fragments
+	// on different timelines with no error.
+	#[test]
+	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
+		let err = Muxer::video(&config).unwrap().init().unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TimescaleTooLarge(_))),
+			"got {err:?}"
+		);
+	}
 }
