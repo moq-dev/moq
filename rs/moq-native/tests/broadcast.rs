@@ -2742,13 +2742,12 @@ async fn connect_once(
 
 /// A zero initial backoff must still give up on a peer that closes on sight.
 ///
-/// The value paces the retries and sets the bar for calling a session healthy, so
-/// at zero every session cleared the bar, which reset the give-up window, and the
-/// delay stayed zero through the multiplier. The loop redialed as fast as the
-/// runtime allowed and never stopped.
+/// `initial` is both the first delay and the bar a session must clear to count as
+/// healthy, so at zero every session looked healthy, which reset the give-up
+/// window on every pass. The loop then redialed forever, timeout or not.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn zero_backoff_still_gives_up_on_a_flapping_peer() {
+async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let (mut server, addr) = test_server();
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
@@ -2771,7 +2770,7 @@ async fn zero_backoff_still_gives_up_on_a_flapping_peer() {
 	let connection = client.connect(url);
 	tokio::time::timeout(TIMEOUT, connection.closed())
 		.await
-		.expect("the loop spun instead of exhausting its retry window")
+		.expect("the loop reset its give-up window instead of exhausting it")
 		.expect_err("a flapping peer must exhaust the retry window");
 
 	server_handle.abort();
