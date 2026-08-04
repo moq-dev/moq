@@ -271,9 +271,9 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-Advertisements whose reconstructed paths share the same first entry carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary, e.g. when the serving route ends.
+Advertisements whose reconstructed paths share the same non-zero first entry carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary, e.g. when the serving route ends.
 Cooperating redundant publishers MAY share a Hop ID to opt into this.
-If the first entries differ, they are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD treat the later as replacing the earlier.
+If the first entries differ, or either is 0 (no identity, so nothing is proven shared), they are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD treat the later as replacing the earlier.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -607,7 +607,7 @@ The Origin Parameter declares the sender's Hop ID: the identity it stamps onto a
 The Parameter Value is a variable-length integer; a value of 0 carries no identity and is equivalent to omitting the parameter.
 
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
-Either endpoint MAY send it; an endpoint that never forwards announcements (a leaf) has no identity worth excluding and SHOULD omit it.
+Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
 
 
@@ -644,7 +644,7 @@ ANNOUNCE_OK Message {
 The publisher's own Hop ID.
 This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
-A publisher that assigns a Hop ID MUST choose a non-zero value.
+A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices): a broadcast whose path starts with 0 loses restart continuity and failover, since 0 proves nothing shared (see [Routing](#routing) and [ANNOUNCE_RESTART](#announce-restart)).
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 **Active Count**:
@@ -731,9 +731,10 @@ The Hop ID list MAY differ from the original (e.g. after a relay failover or ups
 
 The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)), and it determines what the restart means:
 
-- The first entry is unchanged: the same publisher's broadcast is reachable over a different route.
+- The first entry is unchanged and non-zero: the same publisher's broadcast is reachable over a different route.
   The broadcast's content and track properties are continuous, so cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions on the new route at a group boundary instead of resubscribing.
-- The first entry changed: a different publisher replaced the broadcast at this path.
+- The first entry changed, or is 0: a different publisher may have replaced the broadcast at this path.
+  0 identifies nothing, so continuity can never be proven for it.
   The subscriber MUST treat it as a new broadcast: cached TRACK_INFO MUST be discarded, and existing subscriptions do not carry over (the group sequences and track set of the new broadcast are unrelated to the old one).
 
 The first entry only identifies the publisher, not a particular broadcast instance: a publisher that restarts its own broadcast (same path, new content) is indistinguishable from a route change.
@@ -1082,6 +1083,7 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Excluded the reserved Hop ID 0 from publisher identity everywhere it implies continuity: advertisements whose first entry is 0 are never interchangeable, and an ANNOUNCE_RESTART whose first entry is 0 replaces the broadcast rather than continuing it. Publishers SHOULD assign themselves a Hop ID (a random per-session value suffices) to keep restart continuity and failover.
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.

@@ -105,7 +105,7 @@ Because any number of endpoints can be 0, it identifies nothing, which constrain
 - **Filtering**: a peer that declared 0 excludes nothing, so the sender applies no filter to that session.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
-Declaring 0 therefore trades loop detection and failover for anonymity.
+Declaring 0 therefore trades loop detection, failover, and update continuity ({{updating}}) for anonymity.
 
 
 # Namespace Advertisements {#namespace}
@@ -179,7 +179,7 @@ Two relays that independently begin carrying the same namespace would each see t
 Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose HOP_PATH has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the namespace and each Hop ID, so exactly one side moves.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
-## Updating an Advertisement
+## Updating an Advertisement {#updating}
 An endpoint updates an advertisement by re-sending it with new parameters **on the stream that already carries it**: the original PUBLISH_NAMESPACE request stream, or the SUBSCRIBE_NAMESPACE response stream the NAMESPACE arrived on.
 A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
@@ -187,7 +187,7 @@ In {{moqt}} an advertisement lives for the lifetime of its stream, so an update 
 An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
 
 Replacement is atomic, so a receiver MUST NOT tear down subscriptions or drop cached state merely because an update arrived.
-What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed, a different publisher has taken over and they do not carry over.
+What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged and non-zero, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed or 0 ({{zero}}), a different publisher may have taken over and they do not carry over.
 
 The expected case is a ROUTE_COST-only change, which is how a relay signals that it started or stopped carrying the namespace.
 
