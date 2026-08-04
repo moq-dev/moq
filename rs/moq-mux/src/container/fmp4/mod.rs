@@ -325,12 +325,11 @@ pub(crate) fn encode(
 	Ok(())
 }
 
-/// Encode a single-traf moof+mdat fragment from a sequence of frames.
+/// Encode a single-traf moof+mdat fragment anchored at its own first frame.
 ///
-/// Performs the two-pass encoding required by ISO/IEC 14496-12: encode once
-/// to learn the moof size, then again with `trun.data_offset` pointing past
-/// the moof and mdat header. The DTS of the first frame is computed at the
-/// caller-supplied `timescale`.
+/// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
+/// without reference to whatever came before it. A caller that owns a continuous decode
+/// timeline across calls wants [`encode_fragment_at`] instead.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(
@@ -339,17 +338,42 @@ pub(crate) fn encode_fragment(
 	sequence_number: u32,
 	frames: &[Frame],
 ) -> Result<Bytes> {
+	let Some(base_dts) = frames.first().map(|f| f.timestamp) else {
+		return Ok(Bytes::new());
+	};
+	encode_fragment_at(track_id, timescale, sequence_number, base_dts, frames)
+}
+
+/// Encode a single-traf moof+mdat fragment whose decode timeline starts at `base_dts`.
+///
+/// Performs the two-pass encoding required by ISO/IEC 14496-12: encode once
+/// to learn the moof size, then again with `trun.data_offset` pointing past
+/// the moof and mdat header. `base_dts` is re-expressed at the caller-supplied
+/// `timescale`.
+///
+/// Frames arrive in decode order carrying presentation timestamps. DTS is authored by
+/// accumulating sample durations from `base_dts`, and each sample stores `PTS - DTS` as its
+/// signed composition offset, so a reordered frame keeps its presentation time even when the
+/// fragment holds a single sample.
+///
+/// Returns an empty `Bytes` when `frames` is empty.
+pub(crate) fn encode_fragment_at(
+	track_id: u32,
+	timescale: moq_net::Timescale,
+	sequence_number: u32,
+	base_dts: Timestamp,
+	frames: &[Frame],
+) -> Result<Bytes> {
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
 		return Ok(Bytes::new());
 	}
 
-	// Re-express the first frame's timestamp at the target track's scale. When the
-	// importer preserved the source scale (the common passthrough case), this is a
-	// no-op; otherwise it's a single rescale rather than the legacy `micros * scale
-	// / 1_000_000` round-trip.
-	let base_dts = frames[0].timestamp.as_scale(timescale) as u64;
+	// Re-express the anchor at the target track's scale. When the importer preserved the
+	// source scale (the common passthrough case), this is a no-op; otherwise it's a single
+	// rescale rather than the legacy `micros * scale / 1_000_000` round-trip.
+	let base_dts = base_dts.as_scale(timescale) as u64;
 	let mut dts = base_dts;
 
 	let entries: Vec<_> = frames
@@ -773,6 +797,102 @@ mod tests {
 			assert_eq!(actual.timestamp, expected.timestamp);
 			assert_eq!(actual.duration, expected.duration);
 			assert_eq!(actual.payload, expected.payload);
+		}
+	}
+
+	// The (tfdt, per-sample cts) a fragment actually carries, which is what a player reads.
+	fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				let traf = &moof.traf[0];
+				let cts = traf.trun[0].entries.iter().map(|e| e.cts.unwrap_or_default()).collect();
+				return (traf.tfdt.as_ref().unwrap().base_media_decode_time, cts);
+			}
+		}
+		panic!("no moof");
+	}
+
+	#[test]
+	fn encode_fragment_at_matches_encode_fragment_for_a_self_anchored_call() {
+		let timescale = moq_net::Timescale::new(1_000_000).unwrap();
+		let input = vec![
+			Frame {
+				timestamp: ts(5_000),
+				payload: Bytes::from_static(&[0x00]),
+				keyframe: true,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(71_000),
+				payload: Bytes::from_static(&[0x01]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+		];
+
+		let self_anchored = encode_fragment(1, timescale, 3, &input).unwrap();
+		let explicit = encode_fragment_at(1, timescale, 3, input[0].timestamp, &input).unwrap();
+		assert_eq!(self_anchored, explicit);
+	}
+
+	#[test]
+	fn encode_fragment_at_empty_frames_is_empty_bytes() {
+		let timescale = moq_net::Timescale::new(1_000_000).unwrap();
+		assert!(encode_fragment_at(1, timescale, 0, ts(1_000), &[]).unwrap().is_empty());
+	}
+
+	// One fragment per frame, the shape a fetch-on-demand origin storing one object per encoded
+	// frame produces. Anchoring each fragment at its own frame would collapse every cts to zero
+	// and let tfdt follow the reordered PTS; a caller-authored base keeps both right.
+	#[test]
+	fn per_frame_fragments_round_trip_reordered_pts() {
+		let timescale = moq_net::Timescale::new(1_000_000).unwrap();
+		let input = [
+			Frame {
+				timestamp: ts(0),
+				payload: Bytes::from_static(&[0x00]),
+				keyframe: true,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(99_000),
+				payload: Bytes::from_static(&[0x01]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+			Frame {
+				timestamp: ts(33_000),
+				payload: Bytes::from_static(&[0x02]),
+				keyframe: false,
+				duration: Some(ts(33_000)),
+			},
+		];
+
+		// The caller owns the decode timeline: one frame duration per fragment.
+		let mut base_dts = ts(0);
+		let mut fragments = Vec::new();
+		for (sequence, frame) in input.iter().enumerate() {
+			let fragment =
+				encode_fragment_at(1, timescale, sequence as u32, base_dts, std::slice::from_ref(frame)).unwrap();
+			base_dts = base_dts.checked_add(frame.duration.unwrap()).unwrap();
+			fragments.push(fragment);
+		}
+
+		let timelines: Vec<_> = fragments.iter().map(timeline).collect();
+		assert_eq!(
+			timelines,
+			vec![(0, vec![0]), (33_000, vec![66_000]), (66_000, vec![-33_000])],
+			"tfdt is the authored DTS and cts carries the reorder"
+		);
+
+		for (fragment, expected) in fragments.into_iter().zip(&input) {
+			let decoded = decode(fragment, timescale).unwrap();
+			assert_eq!(decoded.len(), 1);
+			assert_eq!(decoded[0].timestamp, expected.timestamp, "pts = dts + cts");
+			assert_eq!(decoded[0].payload, expected.payload);
 		}
 	}
 

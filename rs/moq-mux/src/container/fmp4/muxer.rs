@@ -212,12 +212,34 @@ impl Muxer {
 	/// `frames` may span several groups, and a sample is never timed by one in the next group
 	/// even so: consecutive sequence numbers say nothing about whether the publisher paused
 	/// across the boundary.
+	///
+	/// A caller that owns a continuous decode timeline across calls, typically one emitting a
+	/// fragment per frame, wants [`fragment_at`](Self::fragment_at) instead.
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
+		let Some(base_dts) = frames.first().map(|f| f.timestamp) else {
+			return Ok(Bytes::new());
+		};
+		self.fragment_at(sequence, base_dts, frames)
+	}
+
+	/// Encode frames as one moof+mdat fragment whose decode timeline starts at `base_dts`.
+	///
+	/// [`fragment`](Self::fragment) anchors each fragment at `frames[0].timestamp`, which keeps
+	/// it self-contained but re-anchors on every call. A caller emitting one fragment per frame
+	/// owns the decode timeline itself: pass the DTS it authored and the composition offsets
+	/// (`PTS - DTS`) come out correct, so reordered frames keep their presentation order and
+	/// `tfdt` stays monotonic across fragments.
+	///
+	/// `base_dts` must be monotonically non-decreasing across a track's fragments. Returns an
+	/// empty `Bytes` when `frames` is empty.
+	pub fn fragment_at(&self, sequence: u32, base_dts: moq_net::Timestamp, frames: &[Frame]) -> crate::Result<Bytes> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
 		let frames = infer_missing_durations(frames, None, self.default_frame);
 		let timescale = moq_net::Timescale::new(self.timescale).map_err(Error::from)?;
-		Ok(super::encode_fragment(TRACK_ID, timescale, sequence, &frames)?)
+		Ok(super::encode_fragment_at(
+			TRACK_ID, timescale, sequence, base_dts, &frames,
+		)?)
 	}
 }
 
@@ -252,10 +274,7 @@ mod tests {
 
 		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 
-		// VP8 needs no description, so the init builds without reading any media.
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.framerate = Some(30.0);
-		let mut muxer = Muxer::video(&config).unwrap();
+		let mut muxer = video_muxer();
 
 		let init = muxer.init().unwrap().expect("init buildable for an out-of-band codec");
 		assert_eq!(&init[4..8], b"ftyp");
@@ -274,6 +293,67 @@ mod tests {
 		assert_eq!(decoded[0].timestamp.as_micros(), 10_000_000);
 		assert!(decoded[0].keyframe);
 		assert_eq!(decoded[1].timestamp.as_micros(), 10_033_000);
+	}
+
+	// A 30 fps Legacy VP8 rendition: no description needed, so the muxer builds without media.
+	fn video_muxer() -> Muxer {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		Muxer::video(&config).unwrap()
+	}
+
+	// One frame at the muxer's own 30_000 timescale, so a frame period is exactly 1000 ticks.
+	fn tick_frame(pts: u64, keyframe: bool) -> Frame {
+		Frame {
+			timestamp: Timestamp::from_scale(pts, 30_000).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe,
+			duration: Some(Timestamp::from_scale(1_000, 30_000).unwrap()),
+		}
+	}
+
+	// A per-frame caller owns the decode timeline, so a reordered (I, P, B) run keeps its
+	// presentation order: tfdt follows the authored DTS while each cts carries the reorder.
+	#[test]
+	fn fragment_at_anchors_the_decode_timeline() {
+		let muxer = video_muxer();
+		let timescale = moq_net::Timescale::new(30_000).unwrap();
+		let input = [tick_frame(0, true), tick_frame(3_000, false), tick_frame(1_000, false)];
+
+		let mut base_dts = Timestamp::from_scale(0, 30_000).unwrap();
+		for (sequence, frame) in input.iter().enumerate() {
+			let fragment = muxer
+				.fragment_at(sequence as u32, base_dts, std::slice::from_ref(frame))
+				.unwrap();
+
+			let decoded = super::super::decode(fragment, timescale).unwrap();
+			assert_eq!(decoded.len(), 1);
+			assert_eq!(decoded[0].timestamp, frame.timestamp, "pts survives the reorder");
+
+			base_dts = base_dts.checked_add(frame.duration.unwrap()).unwrap();
+		}
+
+		// The authored timeline advanced one frame period per fragment, unlike the PTS.
+		assert_eq!(base_dts, Timestamp::from_scale(3_000, 30_000).unwrap());
+	}
+
+	#[test]
+	fn fragment_delegates_to_fragment_at() {
+		let muxer = video_muxer();
+		let frames = [tick_frame(0, true), tick_frame(1_000, false)];
+
+		for count in 1..=frames.len() {
+			let frames = &frames[..count];
+			assert_eq!(
+				muxer.fragment(7, frames).unwrap(),
+				muxer.fragment_at(7, frames[0].timestamp, frames).unwrap()
+			);
+		}
+	}
+
+	#[test]
+	fn fragment_with_no_frames_is_empty() {
+		assert!(video_muxer().fragment(0, &[]).unwrap().is_empty());
 	}
 
 	// The HLS origin accumulates every group of a (multi-group) audio segment into ONE fragment,
