@@ -305,7 +305,7 @@ export class Reload {
 	 * Close the handle when done; {@link Reload.close} only drops it to `undefined`.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
-		return Announce.watchBroadcast(this.established, path);
+		return new Announce.Broadcast({ connection: this.established, path });
 	}
 
 	/**

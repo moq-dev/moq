@@ -133,18 +133,20 @@ export class Consumer {
 // once per connection instead of once per watched path.
 const warnedNoDiscovery = new WeakSet<Established>();
 
-// Constructs a Broadcast without exposing a public constructor. The connection types are the
-// documented entry point, and they live in other modules, so this is re-exported as
-// {@link watchBroadcast} rather than assigned from within this one.
-let makeBroadcast: (connection: GetterInit<Established | undefined>, path: Path.Valid) => Broadcast;
-
 /**
- * Construct a {@link Broadcast}. Call `announcedBroadcast(path)` on a connection instead.
+ * What to watch, for {@link Broadcast}.
  *
- * @internal
+ * @public
  */
-export function watchBroadcast(connection: GetterInit<Established | undefined>, path: Path.Valid): Broadcast {
-	return makeBroadcast(connection, path);
+export interface BroadcastProps {
+	/**
+	 * The connection to watch on. Accepts a live {@link Established} session, or a reactive one
+	 * (a `Connection.Reload`'s `established`), which is how the handle survives reconnects.
+	 */
+	connection: GetterInit<Established | undefined>;
+
+	/** The broadcast path to watch. */
+	path: Path.Valid;
 }
 
 /**
@@ -184,13 +186,14 @@ export class Broadcast {
 	#active = new Signal<broadcast.Consumer | undefined>(undefined);
 	#signals = new Effect();
 
-	static {
-		makeBroadcast = (connection, path) => new Broadcast(connection, path);
-	}
-
-	// Accepts a live Established session or a reactive one (a Reload's `established`), which is
-	// how the handle survives reconnects.
-	private constructor(connection: GetterInit<Established | undefined>, path: Path.Valid) {
+	/**
+	 * Watch a path on a connection.
+	 *
+	 * Prefer `announcedBroadcast(path)` on the connection itself. Reach for this when the
+	 * session you want to follow isn't either connection type, e.g. your own
+	 * `Getter<Established | undefined>`.
+	 */
+	constructor({ connection, path }: BroadcastProps) {
 		this.path = path;
 		this.active = this.#active;
 
