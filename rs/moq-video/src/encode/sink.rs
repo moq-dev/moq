@@ -40,6 +40,19 @@ use threaded::Inner;
 /// so the executor keeps its worker while a slow hardware encoder works through
 /// a frame. A caller with no executor to yield to (an FFI boundary that must
 /// return a result synchronously) blocks on these futures itself.
+///
+/// # Cancellation
+///
+/// These futures are not cancel-safe, and the sink says so rather than letting
+/// it slide. The codec runs on its own thread, so a request that has been queued
+/// runs whether or not anyone is still waiting: dropping the future (racing it in
+/// a `select!`, giving it a timeout) leaves the codec a step ahead of the stream,
+/// holding output nobody received. Rather than let the next call carry on and
+/// publish a track quietly missing those frames, the sink refuses every call
+/// after a cancelled one. Drop it and open another.
+///
+/// Racing an encode against a shutdown signal is fine, since the sink is on its
+/// way out anyway. What does not work is cancelling one and carrying on.
 pub struct Sink(Inner);
 
 impl Sink {
@@ -158,6 +171,9 @@ mod threaded {
 		tx: Option<mpsc::UnboundedSender<Request>>,
 		handle: Option<JoinHandle<()>>,
 		name: String,
+		/// Set between queueing a request and taking its reply, so a cancelled
+		/// call is caught rather than silently skipped. See [`Inner::request`].
+		abandoned: bool,
 	}
 
 	impl Inner {
@@ -218,6 +234,7 @@ mod threaded {
 					tx: Some(req_tx),
 					handle: Some(handle),
 					name,
+					abandoned: false,
 				}),
 				Ok(Err(err)) => Err(err),
 				Err(_) => {
@@ -249,7 +266,7 @@ mod threaded {
 			self.request(|resp| Request::Flush { resp }).await
 		}
 
-		pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
+		pub async fn finish(mut self) -> Result<Vec<Encoded>, Error> {
 			// `self` drops on the way out, which drops the sender and joins the
 			// thread that just drained and released the encoder.
 			self.request(|resp| Request::Finish { resp }).await
@@ -262,13 +279,29 @@ mod threaded {
 
 		/// Send a request built around a fresh oneshot and await its reply,
 		/// mapping a dead encode thread onto an error either way.
+		///
+		/// The flag is what makes a cancelled call safe. Dropping this future
+		/// after the send leaves the request queued: the thread still runs it and
+		/// still advances the codec, but its reply lands in a dropped receiver.
+		/// Letting the next call proceed would publish a stream quietly missing
+		/// whatever that request produced, so the sink refuses instead.
 		async fn request<T>(
-			&self,
+			&mut self,
 			build: impl FnOnce(oneshot::Sender<Result<T, Error>>) -> Request,
 		) -> Result<T, Error> {
+			if self.abandoned {
+				return Err(abandoned());
+			}
 			let (resp_tx, resp_rx) = oneshot::channel();
 			self.send(build(resp_tx))?;
-			resp_rx.await.map_err(|_| gone())?
+
+			self.abandoned = true;
+			let reply = resp_rx.await;
+			// Only reached if this future was polled to completion; a cancelled one
+			// never gets here and leaves the flag set.
+			self.abandoned = false;
+
+			reply.map_err(|_| gone())?
 		}
 	}
 
@@ -287,6 +320,12 @@ mod threaded {
 
 	fn gone() -> Error {
 		Error::Codec(anyhow::anyhow!("encode thread stopped unexpectedly"))
+	}
+
+	fn abandoned() -> Error {
+		Error::Codec(anyhow::anyhow!(
+			"a cancelled encode left the codec ahead of this stream; drop the sink"
+		))
 	}
 }
 
@@ -362,6 +401,45 @@ mod tests {
 		config
 	}
 
+	/// Regression: a queued request runs on the encode thread whether or not the
+	/// caller is still waiting, so a cancelled `encode` leaves the codec a step
+	/// ahead of the stream with output nobody received. Carrying on would publish
+	/// a track quietly missing those frames, which is worse than an error: only
+	/// the publisher could ever tell, and only by decoding its own output.
+	#[test]
+	fn a_cancelled_call_poisons_the_sink() {
+		let _probe = probe::exclusive();
+
+		let mut sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
+
+		// Cancel an encode the moment it starts waiting, the shape a `select!` or a
+		// timeout produces. Holding the codec inside the call is what makes the
+		// cancel land mid-flight rather than race the encode thread for it.
+		let gate = probe::hold();
+		pollster::block_on(async {
+			let mut encode = Box::pin(sink.encode(gray(0)));
+			assert!(
+				futures::poll!(encode.as_mut()).is_pending(),
+				"the encode should still be waiting on the held codec"
+			);
+			// Dropped here, with the request queued and the reply still to come.
+		});
+		drop(gate);
+
+		// The codec really did run, so the stream is missing whatever came back.
+		let err = pollster::block_on(sink.encode(gray(1))).expect_err("the sink should refuse");
+		assert!(err.to_string().contains("cancelled"), "unexpected error: {err}");
+		// ...and it stays refused rather than recovering on the call after.
+		assert!(pollster::block_on(sink.flush()).is_err());
+
+		drop(sink);
+		let log = probe::take();
+		assert!(
+			log.iter().any(|(event, _)| *event == "encode"),
+			"the cancelled request should still have reached the codec: {log:?}"
+		);
+	}
+
 	/// Regression: the Windows backend opens a COM apartment on the thread that
 	/// builds the codec and closes it on the thread that drops it, so a codec
 	/// reachable from more than one thread has to own a thread of its own. Both
@@ -374,7 +452,7 @@ mod tests {
 	/// machine none of CI has.
 	#[test]
 	fn the_codec_stays_on_one_thread_however_it_is_driven() {
-		let _ = probe::take();
+		let _probe = probe::exclusive();
 
 		let sink = Arc::new(Mutex::new(Some(
 			pollster::block_on(Sink::open(&probe_config())).unwrap(),

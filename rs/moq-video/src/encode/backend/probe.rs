@@ -23,6 +23,29 @@ pub(crate) type Event = (&'static str, ThreadId);
 
 static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
+/// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
+/// each test its own process, but `cargo test` does not, and a shared log that
+/// only holds up under one runner is a trap for whoever adds the next test.
+static EXCLUSIVE: Mutex<()> = Mutex::new(());
+
+/// Take the probe for one test, clearing whatever a previous one left behind.
+pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+	let guard = EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
+	let _ = take();
+	guard
+}
+
+/// Held by [`hold`] to stall the codec inside [`Probe::encode`].
+static GATE: Mutex<()> = Mutex::new(());
+
+/// Stall the next encode until the returned guard drops.
+///
+/// Lets a test pin the codec mid-call, so a cancellation lands while the request
+/// is genuinely in flight rather than racing the encode thread for it.
+pub(crate) fn hold() -> std::sync::MutexGuard<'static, ()> {
+	GATE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
 fn record(what: &'static str) {
 	LOG.lock().unwrap().push((what, std::thread::current().id()));
 }
@@ -45,6 +68,8 @@ impl Probe {
 
 impl Backend for Probe {
 	fn encode(&mut self, frame: &Frame, _keyframe: bool) -> Result<Vec<Encoded>, Error> {
+		// Uncontended unless a test is holding the codec here on purpose.
+		drop(GATE.lock().unwrap_or_else(|err| err.into_inner()));
 		record("encode");
 		// The payload is the frame's timestamp, so a test can tell which frame a
 		// packet came from independently of what it's stamped with.
