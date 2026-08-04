@@ -21,6 +21,17 @@ func (s *Session) Closed(ctx context.Context) error {
 	return runErr(ctx, s.inner.Shutdown, s.inner.Closed)
 }
 
+// Status blocks until the next connection status change. A client session
+// reports StatusConnected first (the connect it was built from), then follows
+// the reconnect loop: StatusDisconnected while redialing, StatusMigrating
+// during a GOAWAY handover. It returns an error once the connection stops for
+// good. A server-accepted session's only transition is terminal, so Status
+// waits for the close and returns its reason. Cancelling ctx gives up waiting
+// and shuts the session down.
+func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
+	return runCancellable(ctx, s.inner.Shutdown, s.inner.Status)
+}
+
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
 	return s.inner.Stats()

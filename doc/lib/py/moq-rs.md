@@ -39,7 +39,16 @@ async with moq.Client("https://relay.example.com") as client:
     ...
 ```
 
-`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
+`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, reconnect=True, backoff=None, publish=None, subscribe=None)`. Use `tls_cert` and `tls_key` for mutual TLS. Without `publish` / `subscribe` an internal origin is created automatically. Pass an `OriginProducer` to share state across multiple clients.
+
+The session automatically reconnects with backoff when the transport drops (a relay restart, a laptop waking from sleep), and broadcasts consumed through it ride out the gap. Pass `reconnect=False` for a one-shot dial, or `backoff=moq.Backoff(initial_ms=500, multiplier=2, max_ms=10_000, timeout_ms=0)` to tune the pacing (`timeout_ms=0` retries forever). Observe the transitions with `Session.status()`:
+
+```python
+while True:
+    status = await client.session.status()  # CONNECTED / DISCONNECTED / MIGRATING
+```
+
+`Session.closed()` resolves only when the connection stops for good: it raises the terminal error when the retries are exhausted, and returns normally after a local shutdown.
 
 A server can reject the connection on auth grounds: `moq.Error.Unauthorized` (HTTP 401) or `moq.Error.Forbidden` (HTTP 403). These are terminal, so handle them separately from a transient transport failure rather than reconnecting. `moq.is_auth(err)` catches both:
 

@@ -18,11 +18,13 @@ class SmokeTest {
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
      * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
+     * One-shot mode, since the default reconnect would retry the dial with
+     * backoff instead of failing.
      */
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", tlsVerify = false)
+            Moq.connect("https://localhost:0/test", tlsVerify = false, reconnect = false)
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,

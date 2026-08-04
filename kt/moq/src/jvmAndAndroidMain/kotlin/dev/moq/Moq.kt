@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncedBroadcast
 import uniffi.moq.MoqAnnouncement
+import uniffi.moq.MoqBackoff
 import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqClient
 import uniffi.moq.MoqOriginOptions
@@ -78,6 +79,10 @@ class Moq internal constructor(
          * @param tlsCert path to a PEM certificate chain to present for mTLS.
          * @param tlsKey path to a PEM private key to present for mTLS.
          * @param bind local socket address to bind, e.g. "0.0.0.0:0".
+         * @param reconnect set false for a one-shot dial. By default the session redials
+         *   with backoff whenever the transport drops; watch [MoqSession.status] for the
+         *   transitions.
+         * @param backoff retry pacing for the automatic reconnect.
          * @param publish origin to announce broadcasts through; auto-created when null.
          * @param subscribe origin to discover broadcasts through; auto-created when null.
          *
@@ -94,6 +99,8 @@ class Moq internal constructor(
             tlsCert: String? = null,
             tlsKey: String? = null,
             bind: String? = null,
+            reconnect: Boolean? = null,
+            backoff: MoqBackoff? = null,
             publish: MoqOriginProducer? = null,
             subscribe: MoqOriginProducer? = null,
         ): Moq {
@@ -106,6 +113,8 @@ class Moq internal constructor(
                 if (tlsCert != null) client.setTlsCert(tlsCert)
                 if (tlsKey != null) client.setTlsKey(tlsKey)
                 if (bind != null) client.setBind(bind)
+                if (reconnect != null) client.setReconnect(reconnect)
+                if (backoff != null) client.setBackoff(backoff)
                 if (publish != null) client.setPublish(publish)
                 if (subscribe != null) client.setConsume(subscribe)
 

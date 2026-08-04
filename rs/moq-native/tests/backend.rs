@@ -169,7 +169,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -204,7 +204,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 
 	assert_eq!(&frame.payload[..], b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -328,7 +328,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 	});
 
 	// The mTLS cases assert on the connect result itself, so keep it a `Result`.
-	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let connection = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out");
 
@@ -338,9 +338,9 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 		.expect("server dropped identity result");
 	assert!(has_cert, "server did not observe the client certificate");
 	if !reject {
-		session.as_ref().expect("client connect failed");
+		connection.as_ref().expect("client connect failed");
 	}
-	drop(session);
+	drop(connection);
 
 	if reject {
 		server_handle.abort();
@@ -552,7 +552,7 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -587,7 +587,7 @@ async fn iroh_connect() {
 
 	assert_eq!(&frame.payload[..], b"hello");
 
-	drop(session);
+	drop(connection);
 	server_handle
 		.await
 		.expect("server task panicked")
@@ -715,20 +715,18 @@ async fn quiche_qlog() {
 	assert!(!traces.is_empty(), "expected at least one trace");
 }
 
-/// Dial once and hand back the client with its session.
+/// Dial once and hand back the client with its connection.
 ///
-/// These tests want a single transport, so reconnecting is off and the connection
-/// is released as soon as the session is up: there is nothing left to redial, and
-/// letting it go is what keeps `drop(session)` closing the transport, since a live
-/// connection holds a session clone of its own.
+/// These tests want a single transport, so reconnecting is off: there is nothing
+/// left to redial, and dropping the connection closes the transport because it
+/// holds the last session clone.
 ///
 /// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the session it just got.
+/// it), and the caller has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_native::Client,
 	url: url::Url,
-) -> moq_native::Result<(moq_native::Client, moq_net::Session)> {
+) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
-	let session = connection.session().ok_or(moq_native::Error::ConnectFailed)?;
-	Ok((client, session))
+	Ok((client, connection))
 }

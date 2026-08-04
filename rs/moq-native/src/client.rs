@@ -364,7 +364,7 @@ impl Client {
 	/// A background task dials, completes the MoQ handshake, and (by default)
 	/// redials with exponential backoff whenever the session drops. Wait for the
 	/// first session with [`Connection::established`] and for the loop to stop
-	/// with [`Connection::closed`]; drop the handle to stop it. Disable the
+	/// with [`Connection::closed`]; drop the last clone to stop it. Disable the
 	/// redialing with [`ClientConfig::reconnect`] / [`Self::with_reconnect`] for
 	/// a one-shot dial.
 	pub fn connect(&self, url: Url) -> Connection {

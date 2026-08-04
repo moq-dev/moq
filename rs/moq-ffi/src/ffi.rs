@@ -75,7 +75,10 @@ impl<T: Send + 'static> Task<T> {
 
 	/// Cancel all current and future [Self::run] calls, causing them to return [MoqError::Cancelled].
 	pub fn cancel(&self) {
-		let _ = self.cancel.send(true);
+		// send_replace, not send: `send` refuses to store the value while no
+		// receiver exists, so a cancel BEFORE the first `run` would silently
+		// no-op and the run would proceed.
+		self.cancel.send_replace(true);
 	}
 }
 

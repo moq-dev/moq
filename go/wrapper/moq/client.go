@@ -3,6 +3,7 @@ package moq
 import (
 	"context"
 	"sync"
+	"time"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
@@ -21,8 +22,30 @@ type clientConfig struct {
 	tlsCert            *string
 	tlsKey             *string
 	bind               *string
+	reconnect          *bool
+	backoff            *Backoff
 	publish            *OriginProducer
 	subscribe          *OriginProducer
+}
+
+// Backoff is the retry pacing for automatic reconnects: the delay starts at
+// Initial, multiplies by Multiplier after each failed attempt, and caps at Max.
+// After Timeout of consecutive failures the connection gives up for good; a
+// zero Timeout retries forever.
+type Backoff struct {
+	Initial    time.Duration
+	Multiplier uint32
+	Max        time.Duration
+	Timeout    time.Duration
+}
+
+func (b Backoff) ffi() ffi.MoqBackoff {
+	return ffi.MoqBackoff{
+		InitialMs:  uint64(b.Initial.Milliseconds()),
+		Multiplier: b.Multiplier,
+		MaxMs:      uint64(b.Max.Milliseconds()),
+		TimeoutMs:  uint64(b.Timeout.Milliseconds()),
+	}
 }
 
 // WithTLSVerify toggles TLS certificate verification. Verification is on by
@@ -71,6 +94,19 @@ func WithClientTLSKey(path string) ClientOption {
 // WithBind sets the local UDP socket bind address (default "[::]:0").
 func WithBind(addr string) ClientOption {
 	return func(c *clientConfig) { c.bind = &addr }
+}
+
+// WithReconnect toggles automatic reconnecting. It is on by default: the
+// session redials with backoff whenever the transport drops, and broadcasts
+// consumed through it ride out the gap. Pass false for a one-shot dial whose
+// transport close ends the session.
+func WithReconnect(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.reconnect = &enabled }
+}
+
+// WithBackoff sets retry pacing for the automatic reconnect.
+func WithBackoff(backoff Backoff) ClientOption {
+	return func(c *clientConfig) { c.backoff = &backoff }
 }
 
 // WithPublishOrigin sets the origin whose broadcasts are published to the
@@ -132,6 +168,12 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 			inner.Cancel()
 			return nil, err
 		}
+	}
+	if cfg.reconnect != nil {
+		inner.SetReconnect(*cfg.reconnect)
+	}
+	if cfg.backoff != nil {
+		inner.SetBackoff(cfg.backoff.ffi())
 	}
 	if cfg.publish != nil {
 		inner.SetPublish(&cfg.publish.inner)

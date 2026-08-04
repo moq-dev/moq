@@ -76,6 +76,15 @@ try {
 }
 ```
 
+### Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Pass `reconnect = false` to `Moq.connect` for a one-shot dial, or a
+`MoqBackoff` to tune the pacing. `moq.session.status()` reports each transition
+(`CONNECTED`, `DISCONNECTED`, `MIGRATING`), and `moq.session.closed()` resolves
+only once the connection stops for good.
+
 ## Subscribe
 
 ```kotlin

@@ -100,7 +100,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	let client = client_config.init().expect("client init");
-	let (_client_session_client, client_session) = within("client connects", async {
+	let (_client_connection_client, client_connection) = within("client connects", async {
 		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
 	.await
@@ -117,7 +117,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	within("drain_session returns", shutdown.drain_session(&server_session)).await;
 
 	// The peer observes the close rather than being left connected.
-	within("client observes the close", client_session.closed()).await;
+	let _ = within("client observes the close", client_connection.closed()).await;
 }
 
 #[test]
@@ -419,7 +419,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut sub_client_config = moq_native::ClientConfig::default();
 	sub_client_config.tls.disable_verify = Some(true);
 	let sub_client = sub_client_config.init().expect("subscriber client init");
-	let (_sub_session_client, sub_session) = within(
+	let (_sub_connection_client, sub_connection) = within(
 		"subscriber connects to BOTTOM",
 		connect_once(
 			sub_client.with_subscriber(sub_origin.clone()),
@@ -528,12 +528,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
-		sub_session.draining().peek().is_none(),
+		sub_connection.draining().expect("connected").peek().is_none(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 2s of silence is decisive).
-	let leaked = tokio::time::timeout(Duration::from_secs(2), sub_session.draining().recv()).await;
+	let leaked = tokio::time::timeout(
+		Duration::from_secs(2),
+		sub_connection.draining().expect("connected").recv(),
+	)
+	.await;
 	assert!(
 		leaked.is_err(),
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
@@ -666,22 +670,20 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	cluster_run.abort();
 }
 
-/// Dial once and hand back the client with its session.
+/// Dial once and hand back the client with its connection.
 ///
-/// These tests want a single transport, so reconnecting is off and the connection
-/// is released as soon as the session is up: there is nothing left to redial, and
-/// letting it go is what keeps `drop(session)` closing the transport, since a live
-/// connection holds a session clone of its own.
+/// These tests want a single transport, so reconnecting is off: there is nothing
+/// left to redial, and dropping the connection closes the transport because it
+/// holds the last session clone.
 ///
 /// The client comes back because it owns the transport endpoint (iroh's dies with
-/// it), and the caller has to outlive the session it just got.
+/// it), and the caller has to outlive the connection it just got.
 async fn connect_once(
 	client: moq_native::Client,
 	url: url::Url,
-) -> moq_native::Result<(moq_native::Client, moq_net::Session)> {
+) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
 	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
-	let session = connection.session().ok_or(moq_native::Error::ConnectFailed)?;
-	Ok((client, session))
+	Ok((client, connection))
 }
 
 #[test]

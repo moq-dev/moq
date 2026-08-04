@@ -14,34 +14,31 @@ struct Client {
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
+		let reconnect = self.config.reconnect.unwrap_or(true);
+		let linger = self.config.backoff.linger();
 		let client = self.config.clone().init().map_err(map_connect_error)?;
 
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
 		// always hand back a publisher/consumer.
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
-		// One-shot for now: the FFI session wraps a single moq_net::Session, so the
-		// connection loop's redial would have nothing to hand the new session to.
-		let connection = client
-			.with_publisher(&publish)
-			.with_subscriber(subscribe.clone())
-			.with_reconnect(false)
-			.connect(url)
-			.established()
-			.await
-			.map_err(map_connect_error)?;
-		// A peer that closes right after the handshake can clear the session between
-		// `established` returning and this read. The connection knows why it ended, so
-		// surface that rather than a bare "closed" that names no cause.
-		let session = match connection.session() {
-			Some(session) => session,
-			None => {
-				connection.closed().await.map_err(map_connect_error)?;
-				return Err(MoqError::Closed);
-			}
+		// Mirror moq_native::Client::consume: broadcasts fed by a reconnecting session
+		// linger across a drop for as long as the loop keeps retrying, so consumers ride
+		// out a relay restart instead of tearing down. The linger rides the clone handed
+		// to the session; the caller-facing handle keeps the origin's own window.
+		let ingest = match reconnect {
+			true => subscribe.clone().with_linger(linger),
+			false => subscribe.clone(),
 		};
 
-		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
+		let connection = client.with_publisher(&publish).with_subscriber(ingest).connect(url);
+
+		// Wait for the first session so auth errors surface here; later drops are the
+		// connection's to ride out. `MoqClient::cancel` unblocks a dial stuck retrying.
+		// `established` hands the connection back, which is what keeps it reconnecting.
+		let connection = connection.established().await.map_err(map_connect_error)?;
+
+		Ok(Arc::new(MoqSession::connected(connection, publish, subscribe)))
 	}
 }
 
@@ -102,6 +99,28 @@ mod tests {
 		assert_eq!(state.config.tls.cert, None);
 		assert_eq!(state.config.tls.key, None);
 	}
+}
+
+/// Retry pacing for the automatic reconnect (see [`MoqClient::set_backoff`]).
+///
+/// The delay starts at `initial_ms`, multiplies by `multiplier` after each failed
+/// attempt, and caps at `max_ms`. After `timeout_ms` of consecutive failures the
+/// connection gives up for good (0 retries forever); the window resets whenever a
+/// session stays up past `initial_ms`.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MoqBackoff {
+	/// Delay before the first reconnect attempt, in milliseconds.
+	#[uniffi(default = 1000)]
+	pub initial_ms: u64,
+	/// Multiplier applied to the delay after each failure.
+	#[uniffi(default = 2)]
+	pub multiplier: u32,
+	/// Maximum delay between reconnect attempts, in milliseconds.
+	#[uniffi(default = 30000)]
+	pub max_ms: u64,
+	/// Time spent retrying before giving up, in milliseconds. 0 retries forever.
+	#[uniffi(default = 300000)]
+	pub timeout_ms: u64,
 }
 
 #[derive(uniffi::Object)]
@@ -199,6 +218,30 @@ impl MoqClient {
 		Ok(())
 	}
 
+	/// Enable or disable automatic reconnecting. Enabled by default.
+	///
+	/// When enabled, the session returned by [`connect`](Self::connect) redials with
+	/// backoff whenever the transport drops, and broadcasts consumed through it survive
+	/// the gap. Disable for a one-shot dial: the transport's close then ends the session
+	/// (surfaced via [`MoqSession::closed`]).
+	pub fn set_reconnect(&self, enabled: bool) {
+		if let Some(mut state) = self.task.lock() {
+			state.config.reconnect = Some(enabled);
+		}
+	}
+
+	/// Configure retry pacing for the automatic reconnect (see [`MoqBackoff`]).
+	pub fn set_backoff(&self, backoff: MoqBackoff) {
+		if let Some(mut state) = self.task.lock() {
+			let mut out = moq_native::Backoff::default();
+			out.initial = Some(std::time::Duration::from_millis(backoff.initial_ms));
+			out.multiplier = Some(backoff.multiplier);
+			out.max = Some(std::time::Duration::from_millis(backoff.max_ms));
+			out.timeout = Some(std::time::Duration::from_millis(backoff.timeout_ms));
+			state.config.backoff = out;
+		}
+	}
+
 	/// Set the origin to publish local broadcasts to the remote.
 	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
 		if let Some(mut state) = self.task.lock() {
@@ -215,6 +258,12 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
+	/// The returned session automatically reconnects with backoff when the transport
+	/// drops (unless disabled via [`set_reconnect`](Self::set_reconnect)), and broadcasts
+	/// consumed through it ride out the gap. Watch [`MoqSession::status`] for the
+	/// connect/disconnect transitions and [`MoqSession::closed`] for the connection
+	/// giving up for good.
+	///
 	/// Both origin sides are always accessible via [`MoqSession::publisher`] and
 	/// [`MoqSession::consumer`], without the caller constructing a [`MoqOriginProducer`]
 	/// themselves. With neither [`set_publish`](Self::set_publish) nor
@@ -222,7 +271,7 @@ impl MoqClient {
 	/// announced on this session is also discoverable through it. Wiring either side opts out of
 	/// that and gives the other side its own fresh origin.
 	///
-	/// Can be cancelled by calling `cancel()`.
+	/// Can be cancelled by calling `cancel()`, including while the initial dial is retrying.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
 
@@ -279,30 +328,90 @@ impl From<moq_net::ConnectionStats> for MoqConnectionStats {
 	}
 }
 
+/// A connection lifecycle transition reported by [`MoqSession::status`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqConnectionStatus {
+	/// A session connected (the first connect, or a reconnect after a drop).
+	Connected,
+	/// The session dropped; a reconnect attempt follows.
+	Disconnected,
+	/// The peer sent a GOAWAY; the replacement is being dialed while the old
+	/// session keeps serving.
+	Migrating,
+}
+
+impl From<moq_native::Status> for MoqConnectionStatus {
+	fn from(status: moq_native::Status) -> Self {
+		match status {
+			moq_native::Status::Connected => Self::Connected,
+			moq_native::Status::Disconnected => Self::Disconnected,
+			// A future unknown status means the loop is between the known states;
+			// Migrating is the "still served, in flux" bucket.
+			_ => Self::Migrating,
+		}
+	}
+}
+
+/// What backs a [`MoqSession`]: a client connection (a loop that may redial) or
+/// a server-accepted session (one transport; the peer redialing yields a fresh
+/// `accept()`).
+#[derive(Clone)]
+enum Inner {
+	Connection(moq_native::Connection),
+	Session(moq_net::Session),
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	inner: Option<moq_net::Session>,
-	closed: Task<moq_net::Session>,
+	inner: Inner,
+	/// Serializes `closed()` calls onto the FFI runtime; holds its own `Inner` clone
+	/// so a parked `closed()` doesn't block the rest of the surface.
+	closed: Task<Inner>,
+	/// Serializes `status()` calls, which need `&mut` for per-handle change tracking.
+	status: Task<Inner>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
 }
 
 impl MoqSession {
-	pub(crate) fn new(
+	/// Wrap a client connection (see [`MoqClient::connect`]).
+	pub(crate) fn connected(
+		connection: moq_native::Connection,
+		publish: moq_net::origin::Producer,
+		subscribe: moq_net::origin::Producer,
+	) -> Self {
+		Self::build(Inner::Connection(connection), publish, subscribe)
+	}
+
+	/// Wrap a server-accepted session (see `MoqServer::accept`).
+	pub(crate) fn accepted(
 		session: moq_net::Session,
 		publish: moq_net::origin::Producer,
 		subscribe: moq_net::origin::Producer,
 	) -> Self {
+		Self::build(Inner::Session(session), publish, subscribe)
+	}
+
+	fn build(inner: Inner, publish: moq_net::origin::Producer, subscribe: moq_net::origin::Producer) -> Self {
 		// Eagerly wrap the wired origin sides so each publisher()/consumer()
 		// call hands back the same Arc. `publish` is published into; `subscribe`
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
 		Self {
-			inner: Some(session.clone()),
-			closed: Task::new(session),
+			inner: inner.clone(),
+			closed: Task::new(inner.clone()),
+			status: Task::new(inner),
 			publisher,
 			consumer,
+		}
+	}
+
+	/// Abort the live transport (if any) with `err` and stop any reconnect loop.
+	fn teardown(&self, err: moq_net::Error) {
+		match &self.inner {
+			Inner::Connection(connection) => connection.abort(err),
+			Inner::Session(session) => session.abort(err),
 		}
 	}
 }
@@ -312,33 +421,60 @@ impl Drop for MoqSession {
 		let _guard = crate::ffi::RUNTIME.enter();
 		// Close the transport while the runtime is entered. The backend spawns a
 		// lingering CLOSE task, which panics (aborting under panic=abort) if no reactor
-		// is in context. We can't leave this to the last `Session` clone's drop: that
-		// clone lives in the `closed` task and is released after this guard, off-runtime.
-		// Close-once dedup then makes that trailing drop a no-op.
-		if let Some(session) = self.inner.take() {
-			session.abort(moq_net::Error::Cancel);
-		}
+		// is in context. We can't leave this to the last `Session` clone's drop: clones
+		// live in the `closed`/`status` tasks and the connection state, released after
+		// this guard, off-runtime. Close-once dedup then makes those trailing drops no-ops.
+		self.teardown(moq_net::Error::Cancel);
 	}
 }
 
 #[uniffi::export]
 impl MoqSession {
-	/// Wait until the session is closed.
+	/// Wait until the session is over.
+	///
+	/// A client session resolves when its connection stops for good: `Err` with the
+	/// terminal error when it gave up (retries exhausted, or the session's close reason
+	/// with reconnecting disabled), `Ok` after a local [`shutdown`](Self::shutdown) /
+	/// [`cancel`](Self::cancel). Transient drops the reconnect loop rides out do not
+	/// resolve this; watch [`status`](Self::status) for those. A server-accepted
+	/// session resolves with the session's close reason.
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
 		self.closed
-			.run(|session| async move { Err(session.closed().await.into()) })
+			.run(|inner| async move {
+				match &*inner {
+					Inner::Connection(connection) => connection.closed().await.map_err(map_connect_error),
+					Inner::Session(session) => Err(session.closed().await.into()),
+				}
+			})
 			.await
 	}
 
-	/// Close the session with the given error code.
+	/// Wait for the next connection status change.
+	///
+	/// A client session reports `Connected` first (the connect it was built from), then
+	/// follows the reconnect loop: `Disconnected` while redialing, `Connected` again on
+	/// success, `Migrating` during a GOAWAY handover. It returns an error once the
+	/// connection stops for good (same terminal result as [`closed`](Self::closed)).
+	/// A server-accepted session is a single transport, so its only transition is
+	/// terminal: this waits for the close and returns its reason.
+	pub async fn status(&self) -> Result<MoqConnectionStatus, MoqError> {
+		self.status
+			.run(|mut inner| async move {
+				match &mut *inner {
+					Inner::Connection(connection) => Ok(connection.status().await.map_err(map_connect_error)?.into()),
+					Inner::Session(session) => Err(session.closed().await.into()),
+				}
+			})
+			.await
+	}
+
+	/// Close the session with the given error code, stopping any reconnect loop.
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
-		if let Some(inner) = &self.inner {
-			inner.abort(moq_net::Error::Remote(code));
-		}
-		// NOTE: we don't abort the closed Task because it will be aborted via above ^
-		// We'll get a slightly better error message instead of Cancelled.
+		self.teardown(moq_net::Error::Remote(code));
+		// NOTE: we don't abort the closed Task; the teardown above resolves it
+		// (with the close reason, or Ok once the connection loop stops).
 	}
 
 	/// Graceful shutdown. Equivalent to `cancel(0)`. Documents the
@@ -371,13 +507,15 @@ impl MoqSession {
 	/// byte/packet counters). Cheap to call; intended for periodic polling.
 	///
 	/// Individual fields are `None` when the transport backend doesn't report
-	/// them; see [`MoqConnectionStats`].
+	/// them, or (on a client session) while the connection is between sessions;
+	/// see [`MoqConnectionStats`].
 	pub fn stats(&self) -> MoqConnectionStats {
 		let _guard = crate::ffi::RUNTIME.enter();
-		self.inner
-			.as_ref()
-			.map(moq_net::Session::stats)
-			.unwrap_or_default()
-			.into()
+		match &self.inner {
+			Inner::Connection(connection) => connection.stats().stats(),
+			Inner::Session(session) => Some(session.stats()),
+		}
+		.unwrap_or_default()
+		.into()
 	}
 }

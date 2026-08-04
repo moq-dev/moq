@@ -379,9 +379,8 @@ impl Drop for Shared {
 		// Whoever still holds a consumer keeps the last state readable, so a
 		// [`ConnectionStatsReader`] outliving every [`Connection`] would otherwise
 		// keep the session clone parked here alive and the transport open with
-		// nothing left able to reach it. Releasing it here is not a close: a caller
-		// holding a session of their own keeps it, which is the whole point of
-		// [`Connection::session`].
+		// nothing left able to reach it. Releasing it drops the last clone, which
+		// is what closes the transport.
 		self.disconnected();
 	}
 }
@@ -413,21 +412,29 @@ impl ConnectionStatsReader {
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
 /// and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
-/// waits for the loop to stop. Dropping the handle aborts the background task.
-///
-/// `#[must_use]` because that last part is a footgun otherwise: `client.connect(url);`
-/// starts the dial and cancels it at the end of the statement. The old `async fn
-/// connect` was caught by the future's own `#[must_use]`; this restores the warning.
-#[must_use = "dropping the Connection aborts the dial; hold it for as long as you want the session"]
+/// waits for the loop to stop. Clones share the loop; it stops when the last
+/// clone drops (or on an explicit [`close`](Self::close)).
+#[derive(Clone)]
+#[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]
 pub struct Connection {
-	abort: tokio::task::AbortHandle,
+	task: std::sync::Arc<AbortOnDrop>,
 	state: kio::Consumer<State>,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: BandwidthConsumer,
 	/// The last status returned by [`status`](Self::status), for change detection.
+	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
+}
+
+/// Aborts the connection loop when the last [`Connection`] clone drops.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
 }
 
 impl Connection {
@@ -461,12 +468,33 @@ impl Connection {
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
 		Self {
-			abort: task.abort_handle(),
+			task: std::sync::Arc::new(AbortOnDrop(task.abort_handle())),
 			state,
 			send_bandwidth,
 			recv_bandwidth,
 			last_reported: None,
 		}
+	}
+
+	/// Stop the loop now, for every clone, closing the live session with `err`.
+	///
+	/// `err` is the code the peer sees. Locally this is still a deliberate stop, so
+	/// [`closed`](Self::closed) reports `Ok` rather than `err`.
+	pub fn abort(&self, err: moq_net::Error) {
+		// Carry the code to the peer before the loop's teardown gets there: dropping
+		// the last session clone closes with a bare `Cancel`, which would lose it.
+		if let Some(session) = self.state.read().session.clone() {
+			session.abort(err);
+		}
+		self.task.0.abort();
+	}
+
+	/// Stop the loop now, for every clone. [`abort`](Self::abort) with no error code.
+	///
+	/// Prefer just dropping the last clone; this is for teardown paths that can't
+	/// control which clone drops last.
+	pub fn close(&self) {
+		self.abort(moq_net::Error::Cancel);
 	}
 
 	async fn run(shared: &Shared, client: Client, url: Url) -> crate::Result<()> {
@@ -615,6 +643,13 @@ impl Connection {
 							// Handled above: a GOAWAY never reaches here.
 							Ended::Goaway(_) => None,
 						};
+						// NOTE: only UNAUTHORIZED is specified, and it is handled above. Any
+						// other MoQ-layer rejection (Request::close after the transport is
+						// accepted) lands here as an untyped transport close, so it cannot be
+						// told apart from a network blip and is retried until the give-up
+						// timeout. Classifying the rest needs the transport to surface the
+						// close code; until then, one-shot mode (`reconnect = false`) is how
+						// a caller observes those rejections directly.
 						match err {
 							Some(err) => {
 								tracing::warn!(%url, %err, "session severed immediately, retrying");
@@ -671,13 +706,12 @@ impl Connection {
 	/// Returns as soon as a session is live, so the first call waits out the initial dial
 	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
 	/// mode). Useful when a caller wants dial errors up front rather than through
-	/// [`closed`](Self::closed); reach for [`session`](Self::session) afterwards if you
-	/// need the transport itself.
+	/// [`closed`](Self::closed).
 	///
 	/// It consumes and returns the connection so the reconnecting chain,
 	/// `client.connect(url).established().await?`, keeps it: the loop lives in this
-	/// handle, so a version that handed back only the session would leave the caller
-	/// holding a live transport that silently never redials.
+	/// handle, so a version that handed back the underlying session instead would leave
+	/// the caller holding a live transport that silently never redials.
 	pub async fn established(self) -> crate::Result<Self> {
 		kio::wait(|waiter| self.poll_established(waiter)).await?;
 		Ok(self)
@@ -728,13 +762,18 @@ impl Connection {
 		self.state.read().version
 	}
 
-	/// The live [`moq_net::Session`], or `None` while between sessions.
+	/// Observe a GOAWAY from the peer, or `None` while between sessions.
 	///
-	/// An escape hatch for callers that need the raw session (during a GOAWAY handover
-	/// this is the old session, which is still serving). Sessions are refcounted, so a
-	/// clone held here keeps that transport open even after the loop moves on.
-	pub fn session(&self) -> Option<moq_net::Session> {
-		self.state.read().session.clone()
+	/// The reconnect loop reads the same GOAWAY to drive migration, reported as
+	/// [`Status::Migrating`], and a GOAWAY is a latch rather than a queue, so watching
+	/// it here doesn't take it from the loop. Reach for this when you need the message
+	/// itself: its redirect URI and deadline, or (in one-shot mode, where the loop
+	/// ignores GOAWAY entirely) the fact that one arrived at all.
+	///
+	/// Scoped to the current session, since that's what a GOAWAY is about; a redial
+	/// starts a fresh one.
+	pub fn draining(&self) -> Option<moq_net::goaway::Consumer> {
+		self.state.read().session.as_ref().map(moq_net::Session::draining)
 	}
 
 	/// A consumer for the live session's estimated send bitrate, mirroring
@@ -954,12 +993,6 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 				return;
 			}
 		}
-	}
-}
-
-impl Drop for Connection {
-	fn drop(&mut self) {
-		self.abort.abort();
 	}
 }
 
