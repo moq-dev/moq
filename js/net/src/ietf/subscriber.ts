@@ -202,6 +202,12 @@ export class Subscriber {
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`subscribe_namespace error: ${reason(e)}`);
+
+			// Abort the stream rather than letting the caller's `finally` close it cleanly.
+			// A rejected namespace subscription is a failure, and a consumer that can't tell
+			// it from "nothing is published under this prefix" waits forever on a broadcast
+			// that will never be announced. Matches the lite subscriber.
+			announced.close(e);
 		}
 	}
 

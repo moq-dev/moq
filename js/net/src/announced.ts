@@ -151,6 +151,11 @@ const warnedNoDiscovery = new WeakSet<Established>();
  * Falls back to consuming blind (and warns once) on a relay without
  * {@link Established.discovery}, where there is no announcement to wait for.
  *
+ * If discovery fails on a live session (the announcement stream is reset, or the relay
+ * refuses it) the handle goes offline and stays there: nothing reopens the stream on that
+ * connection. Build it from a `Connection.Reload` if you need it to recover, since a new
+ * connection starts a new stream.
+ *
  * Close it to release the announcement stream and the current broadcast.
  *
  * @public
@@ -225,8 +230,9 @@ export class Broadcast {
 						}
 					}
 				} catch (err) {
-					// The stream was reset, which means the session died under it.
-					console.debug("announcement stream reset", err);
+					// Discovery failed: the session died under the stream, or the relay refused
+					// to answer. Nothing reopens it on this connection, so say so out loud.
+					console.warn("broadcast discovery failed", err);
 				}
 
 				// The stream ended, or this run was torn down (its cleanup already ran). Either

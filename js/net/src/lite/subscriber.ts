@@ -206,6 +206,12 @@ export class Subscriber {
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
 
+			// The publisher behind each path we currently advertise, so a restart can tell a
+			// route change (same publisher, subscriptions resume) from a replacement (a new
+			// generation took the path, nothing carries over). At most one advertisement per
+			// path is current, so the path is the key.
+			const advertised = new Map<Path.Valid, Origin | undefined>();
+
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
@@ -254,16 +260,49 @@ export class Subscriber {
 					}
 				}
 
+				const path = Path.join(prefix, suffix);
+
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {
+						// A reflected restart means the peer's remaining route loops back through
+						// us, so the advertisement is gone even though the message says active.
+						if (advertised.delete(suffix)) {
+							console.debug(`announced: broadcast=${path} active=false`);
+							announced.append({ path: suffix, active: false });
+						}
 						continue;
 					}
 				}
 
-				const path = Path.join(prefix, suffix);
+				if (active) {
+					// The first hop identifies the original publisher; an empty chain means the
+					// peer itself originated it. See `restart_announce` in the Rust subscriber.
+					const publisher = hops?.[0] ?? responderOrigin;
+					const restart = advertised.has(suffix);
+					const previous = advertised.get(suffix);
+					advertised.set(suffix, publisher);
+
+					// A second advertisement for a path we already carry is a restart: either an
+					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+					if (restart) {
+						if (previous === publisher) {
+							// Same publisher, new route. In-flight subscriptions resume across it,
+							// so there is nothing for a consumer to react to.
+							console.debug(`announced: broadcast=${path} rerouted`);
+							continue;
+						}
+
+						// A different publisher took the path, so cached track info and existing
+						// subscriptions must not carry over. Surface a real end before the start.
+						console.debug(`announced: broadcast=${path} active=false`);
+						announced.append({ path: suffix, active: false });
+					}
+				} else {
+					advertised.delete(suffix);
+				}
 
 				console.debug(`announced: broadcast=${path} active=${active}`);
 				announced.append({ path: suffix, active });

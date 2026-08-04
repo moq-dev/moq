@@ -19,9 +19,9 @@ test("a same-name re-announce is a distinct update", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 
-	// A republish (a lite-06 RESTART, or an unannounce+announce that coalesces) arrives as a
-	// redundant active:true. The stream carries it as its own update, which is what lets a watcher
-	// notice the new instance even though membership never observably flipped.
+	// The stream is a log, not a set: it carries a redundant active:true as its own update rather
+	// than collapsing it. Deciding what a repeat means belongs to the session layer, which resolves
+	// a restart into either nothing (a route change) or an end + start (a new publisher).
 	producer.append({ path: p("a"), active: true });
 	producer.append({ path: p("a"), active: true });
 
