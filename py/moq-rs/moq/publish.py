@@ -367,8 +367,8 @@ class VideoProducer:
         """Retune the live encoder, in bits per second.
 
         Cheap enough to drive from a congestion controller: no keyframe is
-        forced. Raises if this backend cannot retune while running, which is
-        not fatal -- the encoder keeps its current rate.
+        forced. Raises if this backend cannot retune while running. That is
+        not fatal: the encoder keeps its current rate.
         """
         self._inner.set_bitrate(bitrate)
 

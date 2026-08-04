@@ -185,6 +185,25 @@ struct VideoFrame {
 	data: bytes::Bytes,
 }
 
+/// End a video track, given the result of draining its encoder into it.
+///
+/// A clean finish is a promise that the track holds everything the publisher
+/// produced, so a lost tail has to end the track as an abort instead. Finishing
+/// anyway would leave a truncated stream indistinguishable from a complete one,
+/// and only the local caller would ever learn otherwise.
+fn finalize(
+	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	drained: Result<(), moq_video::Error>,
+) -> Result<(), Error> {
+	match drained {
+		Ok(()) => Ok(producer.finish()?),
+		Err(err) => {
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err.into())
+		}
+	}
+}
+
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
 ///
 /// Same lifetime contract as the audio decoder: the task delivers one final
@@ -254,12 +273,10 @@ impl Video {
 		let VideoEncoder {
 			encoder, mut producer, ..
 		} = entry;
-		// Drain the codec before ending the track, so the last frames land in it
-		// rather than being dropped with the encoder.
-		let encoded = encoder.finish()?;
-		producer.publish(&encoded)?;
-		producer.finish()?;
-		Ok(())
+		// Drain the codec into the track before ending it, so the last frames land
+		// in it rather than being dropped with the encoder.
+		let drained = encoder.finish().and_then(|encoded| producer.publish(&encoded));
+		finalize(producer, drained)
 	}
 
 	pub fn consume(
@@ -496,6 +513,10 @@ pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
 /// roughly the next frame. No keyframe is forced, so this is cheap enough to
 /// drive from a congestion controller.
 ///
+/// The configured bitrate is a ceiling on some backends (openh264 rejects a raise
+/// above the rate it opened at), so set `bitrate` to the highest you will ask
+/// for and adapt downwards from there.
+///
 /// Returns a negative code if this backend cannot retune while running. That is
 /// not fatal: the encoder keeps running at its current rate, so stop adapting
 /// rather than stop publishing.
@@ -602,4 +623,53 @@ pub extern "C" fn moq_consume_video_raw_frame_free(id: u32) -> i32 {
 		let id = ffi::parse_id(id)?;
 		State::lock().video.frame_free(id)
 	})
+}
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A video track wired up without an encoder, plus a subscriber on it: enough
+	/// to pin what [`finalize`] shows the far end.
+	async fn track_under_test() -> (
+		moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+		moq_net::track::Subscriber,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog =
+			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())
+				.unwrap();
+		let consumer = broadcast.consume();
+		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264).unwrap();
+
+		let name = producer.demand().name().to_string();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		(producer, track)
+	}
+
+	/// A clean finish reaches the subscriber as the end of the track, which is what
+	/// makes the abort case below meaningful rather than vacuous.
+	#[tokio::test]
+	async fn a_successful_drain_ends_the_track_cleanly() {
+		let (producer, mut track) = track_under_test().await;
+		finalize(producer, Ok(())).unwrap();
+		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
+	}
+
+	/// Regression: a lost tail must reach the subscriber as an abort. Finishing the
+	/// track anyway would report a truncated stream as a complete one, and only the
+	/// publisher would ever know otherwise.
+	#[tokio::test]
+	async fn a_failed_drain_aborts_the_track() {
+		let (producer, mut track) = track_under_test().await;
+		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
+		finalize(producer, Err(err)).unwrap_err();
+
+		let Err(err) = track.recv_group().await else {
+			panic!("expected an abort, not a clean end");
+		};
+		assert!(
+			err.to_string().contains("the codec lost the tail"),
+			"the abort should carry the drain failure: {err}"
+		);
+	}
 }

@@ -105,16 +105,34 @@ pub struct MoqVideoEncoderOutput {
 
 /// One raw video frame: pixels plus a presentation timestamp.
 ///
-/// The pixel format and resolution are fixed by the producer config, so `data`
-/// is always in the [`MoqVideoEncoderInput`] layout.
+/// The pixel format and resolution are fixed by [`MoqVideoEncoderInput`] at
+/// publish time, so a frame carries neither. `data` is exactly one picture in
+/// that layout.
 #[derive(uniffi::Record)]
 pub struct MoqVideoFrame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
-	pub width: u32,
-	pub height: u32,
 	/// The pixels, in the configured layout.
 	pub data: Vec<u8>,
+}
+
+/// End a video track, given the result of draining its encoder into it.
+///
+/// A clean finish is a promise that the track holds everything the publisher
+/// produced, so a lost tail has to end the track as an abort instead. Finishing
+/// anyway would leave a truncated stream indistinguishable from a complete one,
+/// and only the local caller would ever learn otherwise.
+fn finalize(
+	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	drained: Result<(), moq_video::Error>,
+) -> Result<(), MoqError> {
+	match drained {
+		Ok(()) => Ok(producer.finish()?),
+		Err(err) => {
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err.into())
+		}
+	}
 }
 
 /// An encoder paired with the track publishing its output.
@@ -122,16 +140,20 @@ struct VideoProducer {
 	encoder: moq_video::encode::Encoder,
 	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	format: MoqVideoPixelFormat,
+	/// The encoded resolution, from the publish config. Frames carry only pixels,
+	/// so this is what says how to read them.
+	size: moq_video::Size,
 }
 
 impl VideoProducer {
 	fn write(&mut self, frame: MoqVideoFrame) -> Result<(), MoqError> {
-		let size = moq_video::Size::new(frame.width, frame.height);
+		// A buffer that isn't one picture at the configured size is rejected here,
+		// by the surface constructors, rather than reinterpreted.
 		let surface = match self.format {
 			MoqVideoPixelFormat::I420 => {
-				moq_video::Surface::I420(moq_video::I420::new(frame.width, frame.height, frame.data)?)
+				moq_video::Surface::I420(moq_video::I420::new(self.size.width, self.size.height, frame.data)?)
 			}
-			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, size)?,
+			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
 		};
 
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
@@ -146,11 +168,10 @@ impl VideoProducer {
 		let Self {
 			encoder, mut producer, ..
 		} = self;
-		// Drain the codec before ending the track, so the last frames land in it
-		// rather than being dropped with the encoder.
-		producer.publish(&encoder.finish()?)?;
-		producer.finish()?;
-		Ok(())
+		// Drain the codec into the track before ending it, so the last frames land
+		// in it rather than being dropped with the encoder.
+		let drained = encoder.finish().and_then(|encoded| producer.publish(&encoded));
+		finalize(producer, drained)
 	}
 }
 
@@ -201,6 +222,11 @@ impl MoqVideoProducer {
 	/// Retune the live encoder to `bitrate` bits per second, taking effect from
 	/// roughly the next frame. No keyframe is forced, so this is cheap enough to
 	/// drive from a congestion controller.
+	///
+	/// The configured bitrate is a ceiling on some backends (openh264 rejects a
+	/// raise above the rate it opened at), so set
+	/// [`bitrate`](MoqVideoEncoderOutput::bitrate) to the highest you will ask for
+	/// and adapt downwards from there.
 	///
 	/// Errors if this backend cannot retune while running. That is not fatal: the
 	/// encoder keeps running at its current rate, so stop adapting rather than
@@ -261,6 +287,7 @@ impl MoqBroadcastProducer {
 				encoder,
 				producer,
 				format: input.format,
+				size: config.size(),
 			})),
 		}))
 	}

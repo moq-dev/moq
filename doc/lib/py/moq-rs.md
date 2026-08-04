@@ -68,6 +68,32 @@ broadcast.finish()
 
 Supported codec formats include `opus`, `avc3`, `hev1`, `av01`, `vp09`, and others. See [`hang`](/lib/rs/crate/hang) for the full list.
 
+### Publishing raw media
+
+`publish_media` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publish_video` / `publish_audio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```python
+video = broadcast.publish_video(
+    moq.VideoEncoderInput(
+        format=moq.VideoPixelFormat.RGBA,
+        width=1280,
+        height=720,
+        framerate=30,
+    ),
+    moq.VideoEncoderOutput(
+        codec=moq.VideoCodec.H264,
+        kind=moq.VideoEncoderKind.AUTO(),
+    ),
+)
+
+video.write(moq.VideoFrame(timestamp_us=pts_us, data=rgba))
+video.finish()
+```
+
+`VideoEncoderKind.AUTO()` prefers a hardware encoder and falls back to software; `SOFTWARE()`, `HARDWARE()`, and `NAMED("nvenc")` pin the choice (each variant is a class, so call it). `set_bitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
+
 `publish_media` fills the catalog by parsing the codec bitstream. For a video format you can pass a `VideoHint` to supply fields the stream can't reveal (such as `bitrate`), or to publish the catalog before the first keyframe:
 
 ```python

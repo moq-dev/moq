@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.1"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.2"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -241,6 +241,24 @@ for try await request in dynamic {
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
+
+### Raw media
+
+`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```swift
+let video = try broadcast.publishVideo(
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
+    output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
+)
+
+try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
+try video.finish()
+```
+
+`kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named("videotoolbox")` pin the choice. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 ## Cancellation
 

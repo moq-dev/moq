@@ -133,6 +133,8 @@ typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
 /** The codec-side encoder configuration: codec, bitrate, keyframe interval, and backend preference. */
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
+/** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
+typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 /** Configures a lossy latest-value JSON track. */

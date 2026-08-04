@@ -31,8 +31,8 @@ public final class VideoProducer: Sendable {
     /// Retune the live encoder, in bits per second.
     ///
     /// Cheap enough to drive from a congestion controller: no keyframe is
-    /// forced. Throws if this backend cannot retune while running, which is not
-    /// fatal -- the encoder keeps its current rate.
+    /// forced. Throws if this backend cannot retune while running. That is not
+    /// fatal: the encoder keeps its current rate.
     public func setBitrate(_ bitrate: UInt64) throws {
         try ffi.setBitrate(bitrate: bitrate)
     }

@@ -945,8 +945,6 @@ async fn video_raw_publish_consume() {
 		video
 			.write(MoqVideoFrame {
 				timestamp_us: i * 33_333,
-				width: 320,
-				height: 240,
 				data: rgba.clone(),
 			})
 			.unwrap();
@@ -992,8 +990,6 @@ async fn video_raw_publish_consume() {
 		video
 			.write(MoqVideoFrame {
 				timestamp_us: i * 33_333,
-				width: 320,
-				height: 240,
 				data: rgba.clone(),
 			})
 			.unwrap();
@@ -1010,9 +1006,9 @@ async fn video_raw_publish_consume() {
 	broadcast.finish().unwrap();
 }
 
-/// A raw video producer rejects a frame whose resolution isn't the one it was
-/// opened at, rather than encoding a corner of it, and rejects any write after
-/// `finish`.
+/// A raw video producer rejects a buffer that isn't one picture at the
+/// configured resolution, rather than reinterpreting it, and rejects any write
+/// after `finish`.
 #[tokio::test]
 async fn video_raw_publish_rejects_bad_frames() {
 	use crate::video::*;
@@ -1048,12 +1044,12 @@ async fn video_raw_publish_rejects_bad_frames() {
 
 	let video = broadcast.publish_video(input(320, 240), output()).unwrap();
 
+	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
+	// of its own, so this is caught as a wrong-sized picture.
 	assert!(
 		video
 			.write(MoqVideoFrame {
 				timestamp_us: 0,
-				width: 640,
-				height: 480,
 				data: vec![0x80u8; 640 * 480 * 4],
 			})
 			.is_err()
@@ -1063,8 +1059,6 @@ async fn video_raw_publish_rejects_bad_frames() {
 	assert!(matches!(
 		video.write(MoqVideoFrame {
 			timestamp_us: 0,
-			width: 320,
-			height: 240,
 			data: vec![0x80u8; 320 * 240 * 4],
 		}),
 		Err(MoqError::Closed)

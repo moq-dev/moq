@@ -16,7 +16,7 @@ Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.1")
+    implementation("dev.moq:moq:0.4.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```
@@ -131,6 +131,34 @@ broadcast.setVideoProperties(
     )
 )
 ```
+
+### Raw media
+
+`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```kotlin
+val video = broadcast.publishVideo(
+    VideoEncoderInput(
+        format = VideoPixelFormat.RGBA,
+        width = 1280u,
+        height = 720u,
+        framerate = 30u,
+    ),
+    VideoEncoderOutput(
+        codec = VideoCodec.H264,
+        bitrate = null,
+        gop = null,
+        kind = autoEncoder,
+    ),
+)
+
+video.write(VideoFrame(timestampUs = ptsUs, data = rgba))
+video.finish()
+```
+
+`autoEncoder` prefers a hardware encoder and falls back to software; `softwareEncoder`, `hardwareEncoder`, and `namedEncoder("nvenc")` pin the choice. `setBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 ## Serve
 
