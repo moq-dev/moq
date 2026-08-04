@@ -32,7 +32,7 @@ mod producer;
 
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder};
-pub use encoder::{Encoder, ProducerConfig};
+pub use encoder::{Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
 
 #[cfg(test)]

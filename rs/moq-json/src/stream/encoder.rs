@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use serde::Serialize;
 
-use crate::Result;
+use crate::{Error, Result};
 
 /// Configuration for an [`Encoder`], and so for the [`Producer`](super::Producer) wrapping one.
 ///
@@ -30,6 +30,46 @@ impl ProducerConfig {
 	}
 }
 
+/// An encoded record the caller has not yet acknowledged writing.
+///
+/// Returned by [`Encoder::encode`]. Write the [`payload`](Self::payload), then
+/// [`commit`](Self::commit).
+///
+/// A frame that is never committed never reached the wire. With compression on that is
+/// unrecoverable within the group: the window is ahead of what the consumer holds, and a log has no
+/// keyframe to resynchronize on the way [`snapshot`](crate::snapshot) does. So the encoder refuses
+/// to encode anything further ([`Error::Desync`]) until the caller rolls a new group and calls
+/// [`Encoder::reset`]. Without compression each record stands alone, so a dropped one leaves a gap
+/// in the log but nothing undecodable, and encoding continues.
+#[must_use = "the record must be written and committed, or the encoder will refuse to continue"]
+pub struct Pending<'a, T> {
+	encoder: &'a mut Encoder<T>,
+	payload: Bytes,
+	committed: bool,
+}
+
+impl<T> Pending<'_, T> {
+	/// The frame payload to write.
+	pub fn payload(&self) -> &Bytes {
+		&self.payload
+	}
+
+	/// Acknowledge that the record reached the wire, keeping the encoder's window.
+	///
+	/// Only call this once the write has actually succeeded.
+	pub fn commit(mut self) {
+		self.committed = true;
+	}
+}
+
+impl<T> Drop for Pending<'_, T> {
+	fn drop(&mut self) {
+		if !self.committed {
+			self.encoder.desync();
+		}
+	}
+}
+
 /// Encodes JSON records into frame payloads, sharing one DEFLATE window across the log.
 ///
 /// The track-free core of [`Producer`](super::Producer). Unlike
@@ -43,6 +83,11 @@ pub struct Encoder<T> {
 	/// The DEFLATE encoder (one window for the whole log), `Some` while compressing.
 	flate: Option<moq_flate::Encoder>,
 	compression: bool,
+
+	/// Set when a compressed record was encoded but never written. The window is then ahead of the
+	/// consumer for the rest of the group, so encoding stops until the caller rolls a new one.
+	desynced: bool,
+
 	_marker: PhantomData<fn(T)>,
 }
 
@@ -52,23 +97,50 @@ impl<T> Encoder<T> {
 		Self {
 			flate: config.compression.then(moq_flate::Encoder::new),
 			compression: config.compression,
+			desynced: false,
 			_marker: PhantomData,
 		}
 	}
 
 	/// Start a cold DEFLATE window, for a caller that has just rolled a group.
+	///
+	/// This is also how a caller clears an [`Error::Desync`]: roll a new group so the consumer starts
+	/// its own cold window, then reset.
 	pub fn reset(&mut self) {
 		self.flate = self.compression.then(moq_flate::Encoder::new);
+		self.desynced = false;
+	}
+
+	/// Mark the window as ahead of the consumer, after a record that was never written.
+	///
+	/// Only meaningful while compressing: an uncompressed record carries no shared state, so losing
+	/// one leaves a gap in the log rather than an undecodable stream.
+	fn desync(&mut self) {
+		self.desynced = self.compression;
 	}
 }
 
 impl<T: Serialize> Encoder<T> {
 	/// Encode one record into the next frame payload.
-	pub fn encode(&mut self, value: &T) -> Result<Bytes> {
-		let payload = serde_json::to_vec(value)?;
-		Ok(match self.flate.as_mut() {
-			Some(flate) => flate.frame(&payload),
-			None => Bytes::from(payload),
+	///
+	/// The record comes back as a [`Pending`] the caller writes and then
+	/// [`commit`](Pending::commit)s. Errors with [`Error::Desync`] if a previous compressed record
+	/// was left uncommitted, since every frame after it would be undecodable.
+	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
+		if self.desynced {
+			return Err(Error::Desync);
+		}
+
+		let bytes = serde_json::to_vec(value)?;
+		let payload = match self.flate.as_mut() {
+			Some(flate) => flate.frame(&bytes),
+			None => Bytes::from(bytes),
+		};
+
+		Ok(Pending {
+			encoder: self,
+			payload,
+			committed: false,
 		})
 	}
 }

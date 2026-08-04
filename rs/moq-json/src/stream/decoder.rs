@@ -79,8 +79,10 @@ mod test {
 		values
 			.iter()
 			.map(|value| {
-				let payload = encoder.encode(value).unwrap();
-				decoder.decode(&payload).unwrap()
+				let record = encoder.encode(value).unwrap();
+				let decoded = decoder.decode(record.payload()).unwrap();
+				record.commit();
+				decoded
 			})
 			.collect()
 	}
@@ -101,7 +103,12 @@ mod test {
 	fn the_shared_window_shrinks_repetitive_records() {
 		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(true));
 		let sizes: Vec<usize> = (0..8)
-			.map(|n| encoder.encode(&json!({ "group": n, "pts": n * 2_000 })).unwrap().len())
+			.map(|n| {
+				let record = encoder.encode(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
+				let len = record.payload().len();
+				record.commit();
+				len
+			})
 			.collect();
 
 		let raw = serde_json::to_vec(&json!({ "group": 7, "pts": 14_000 })).unwrap().len();
@@ -120,14 +127,59 @@ mod test {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(true));
 
 		for n in 0..4 {
-			let payload = encoder.encode(&json!({ "n": n })).unwrap();
-			assert_eq!(decoder.decode(&payload).unwrap(), json!({ "n": n }));
+			let record = encoder.encode(&json!({ "n": n })).unwrap();
+			assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": n }));
+			record.commit();
 		}
 
 		encoder.reset();
 		decoder.reset();
 
-		let payload = encoder.encode(&json!({ "n": 99 })).unwrap();
-		assert_eq!(decoder.decode(&payload).unwrap(), json!({ "n": 99 }));
+		let record = encoder.encode(&json!({ "n": 99 })).unwrap();
+		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 99 }));
+		record.commit();
+	}
+}
+
+#[cfg(test)]
+mod desync_test {
+	use super::super::{Encoder, ProducerConfig};
+	use super::*;
+	use serde_json::{Value, json};
+
+	/// A compressed record that never reached the wire leaves the window ahead of the consumer, and a
+	/// log has no keyframe to resynchronize on. Continuing would emit frames nothing can decode, so
+	/// the encoder refuses until the caller rolls a new group and resets.
+	#[test]
+	fn an_uncommitted_compressed_record_stops_the_encoder() {
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_compression(true));
+		encoder.encode(&json!({ "n": 0 })).unwrap().commit();
+
+		// This one fails to write, so the caller never commits it.
+		drop(encoder.encode(&json!({ "n": 1 })).unwrap());
+
+		assert!(matches!(encoder.encode(&json!({ "n": 2 })), Err(crate::Error::Desync)));
+
+		// Rolling a new group gives the consumer a cold window too, so the reset clears it.
+		encoder.reset();
+		let record = encoder.encode(&json!({ "n": 2 })).unwrap();
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default().with_compression(true));
+		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 2 }));
+		record.commit();
+	}
+
+	/// Without compression a record carries no shared state, so a dropped one leaves a gap in the log
+	/// rather than an undecodable stream, and the encoder keeps going.
+	#[test]
+	fn an_uncommitted_plaintext_record_does_not_stop_the_encoder() {
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
+		drop(encoder.encode(&json!({ "n": 0 })).unwrap());
+
+		let record = encoder
+			.encode(&json!({ "n": 1 }))
+			.expect("plaintext records are independent");
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 1 }));
+		record.commit();
 	}
 }

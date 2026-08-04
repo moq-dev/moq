@@ -7,7 +7,12 @@ type Rec = { n: number };
 function roundtrip(compression: boolean, values: Rec[]): Rec[] {
 	const encoder = new Encoder<Rec>({ compression });
 	const decoder = new Decoder<Rec>({ compression });
-	return values.map((value) => decoder.decode(encoder.encode(value)));
+	return values.map((value) => {
+		const record = encoder.encode(value);
+		const decoded = decoder.decode(record.payload);
+		record.commit();
+		return decoded;
+	});
 }
 
 test("plaintext roundtrip in order", () => {
@@ -22,7 +27,11 @@ test("compressed roundtrip in order", () => {
 
 test("the shared window shrinks repetitive records", () => {
 	const encoder = new Encoder<{ group: number; pts: number }>({ compression: true });
-	const sizes = Array.from({ length: 8 }, (_, n) => encoder.encode({ group: n, pts: n * 2_000 }).length);
+	const sizes = Array.from({ length: 8 }, (_, n) => {
+		const record = encoder.encode({ group: n, pts: n * 2_000 });
+		record.commit();
+		return record.payload.length;
+	});
 
 	const raw = new TextEncoder().encode(JSON.stringify({ group: 7, pts: 14_000 })).length;
 	expect(sizes.at(-1)).toBeLessThan(raw / 2);
@@ -35,11 +44,47 @@ test("reset starts a cold window on both sides", () => {
 	const decoder = new Decoder<Rec>({ compression: true });
 
 	for (let n = 0; n < 4; n += 1) {
-		expect(decoder.decode(encoder.encode({ n }))).toEqual({ n });
+		const record = encoder.encode({ n });
+		expect(decoder.decode(record.payload)).toEqual({ n });
+		record.commit();
 	}
 
 	encoder.reset();
 	decoder.reset();
 
-	expect(decoder.decode(encoder.encode({ n: 99 }))).toEqual({ n: 99 });
+	const record = encoder.encode({ n: 99 });
+	expect(decoder.decode(record.payload)).toEqual({ n: 99 });
+	record.commit();
+});
+
+// A compressed record that never reached the wire leaves the window ahead of the consumer, and a log
+// has no keyframe to resynchronize on. Continuing would emit frames nothing can decode, so the
+// encoder refuses until the caller rolls a new group and resets.
+test("an uncommitted compressed record stops the encoder", () => {
+	const encoder = new Encoder<Rec>({ compression: true });
+	encoder.encode({ n: 0 }).commit();
+
+	// This one fails to write, so the caller never commits it.
+	encoder.encode({ n: 1 });
+
+	expect(() => encoder.encode({ n: 2 })).toThrow("compression desynchronized");
+
+	// Rolling a new group gives the consumer a cold window too, so the reset clears it.
+	encoder.reset();
+	const record = encoder.encode({ n: 2 });
+	const decoder = new Decoder<Rec>({ compression: true });
+	expect(decoder.decode(record.payload)).toEqual({ n: 2 });
+	record.commit();
+});
+
+// Without compression a record carries no shared state, so a dropped one leaves a gap in the log
+// rather than an undecodable stream, and the encoder keeps going.
+test("an uncommitted plaintext record does not stop the encoder", () => {
+	const encoder = new Encoder<Rec>({});
+	encoder.encode({ n: 0 });
+
+	const record = encoder.encode({ n: 1 });
+	const decoder = new Decoder<Rec>({});
+	expect(decoder.decode(record.payload)).toEqual({ n: 1 });
+	record.commit();
 });

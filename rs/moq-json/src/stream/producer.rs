@@ -32,7 +32,7 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
-		self.inner.lock().unwrap().track.subscribe(None)
+		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
 }
 
@@ -41,8 +41,10 @@ impl<T: Serialize> Producer<T> {
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
-				track,
-				group: None,
+				track: Track {
+					inner: track,
+					group: None,
+				},
 				encoder: Encoder::new(config),
 			})),
 			_marker: PhantomData,
@@ -61,28 +63,61 @@ impl<T: Serialize> Producer<T> {
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
+///
+/// The track and the encoder are separate fields so a [`Pending`](super::Pending) record (which
+/// borrows the encoder) and the write that consumes it (which borrows the track) don't contend for
+/// one `&mut self`.
 struct Inner<T> {
-	track: moq_net::track::Producer,
-	// The single group carrying the whole log, opened on the first append.
-	group: Option<moq_net::group::Producer>,
+	track: Track,
 	encoder: Encoder<T>,
 }
 
 impl<T: Serialize> Inner<T> {
 	fn append(&mut self, value: &T) -> Result<()> {
-		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so a
-		// failure here would leave the window carrying a record that never reached the wire and every
-		// later frame would decode against context the consumer doesn't have.
-		if self.group.is_none() {
-			self.group = Some(self.track.append_group()?);
-		}
+		// Split the borrow so `record` can hold the encoder while `track` is written through.
+		let Inner { track, encoder } = self;
 
-		let payload = self.encoder.encode(value)?;
+		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so
+		// failing here would desync the encoder over a group that was never even opened.
+		track.open()?;
+
+		// A failed write drops `record` uncommitted. The log rides a single group and has no keyframe
+		// to resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
+		// consumer cannot decode.
+		let record = encoder.encode(value)?;
+		track.write(record.payload())?;
+		record.commit();
+
+		Ok(())
+	}
+
+	fn finish(&mut self) -> Result<()> {
+		self.track.finish()
+	}
+}
+
+/// The track half of [`Inner`]: the single group carrying the whole log.
+struct Track {
+	inner: moq_net::track::Producer,
+	// Opened on the first append and never rolled.
+	group: Option<moq_net::group::Producer>,
+}
+
+impl Track {
+	/// Open the log's group if it isn't already.
+	fn open(&mut self) -> Result<()> {
+		if self.group.is_none() {
+			self.group = Some(self.inner.append_group()?);
+		}
+		Ok(())
+	}
+
+	/// Append one encoded record to the log's group.
+	fn write(&mut self, payload: &bytes::Bytes) -> Result<()> {
 		self.group
 			.as_mut()
 			.expect("a group is open")
-			.write_frame(moq_net::Timestamp::now(), payload)?;
-
+			.write_frame(moq_net::Timestamp::now(), payload.clone())?;
 		Ok(())
 	}
 
@@ -90,7 +125,7 @@ impl<T: Serialize> Inner<T> {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.track.finish()?;
+		self.inner.finish()?;
 		Ok(())
 	}
 }

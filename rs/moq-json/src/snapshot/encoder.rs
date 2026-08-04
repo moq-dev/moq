@@ -184,6 +184,12 @@ pub struct Encoder<T> {
 	/// Frames emitted into the current group, snapshot included.
 	group_frames: usize,
 
+	/// Whether the next frame has to be a full snapshot, because a frame was lost or the caller cut
+	/// the group. Kept separate from [`last`](Self::last) so a resync doesn't erase the value: that
+	/// field is also what [`Producer::lock`](super::Producer::lock) seeds an edit from, and dropping
+	/// it there would publish a document with every other field missing.
+	resync: bool,
+
 	_marker: PhantomData<fn(T)>,
 }
 
@@ -197,6 +203,7 @@ impl<T> Encoder<T> {
 			delta_bytes: 0,
 			snapshot_len: 0,
 			group_frames: 0,
+			resync: false,
 			_marker: PhantomData,
 		}
 	}
@@ -209,17 +216,20 @@ impl<T> Encoder<T> {
 		self.last.as_ref()
 	}
 
-	/// Forget the baseline, so the next [`update`](Self::update) emits a snapshot.
+	/// Force the next [`update`](Self::update) to emit a full snapshot, even for an unchanged value.
 	///
 	/// Call this whenever the caller closes the current group behind the encoder's back (a
 	/// `cut`, a `seek`, a discontinuity). Without it the next value may be encoded as a delta
 	/// against a DEFLATE window and a baseline that the new group doesn't carry.
+	///
+	/// [`value`](Self::value) survives: the snapshot republishes it in full anyway, and it is what a
+	/// caller editing in place starts from.
 	pub fn reset(&mut self) {
-		self.last = None;
 		self.flate = None;
 		self.delta_bytes = 0;
 		self.snapshot_len = 0;
 		self.group_frames = 0;
+		self.resync = true;
 	}
 }
 
@@ -242,8 +252,14 @@ impl<T: Serialize> Encoder<T> {
 	/// The state change is what [`Pending`] guards, so this stays private: every caller goes through
 	/// [`update`](Self::update) and has to say whether the frame reached the wire.
 	fn encode(&mut self, value: &T) -> Result<Option<Encoded>> {
-		// The first update (or the first after a `reset`) has no baseline to diff against, so it seeds
-		// the stream with a snapshot.
+		// A lost frame, or a group the caller cut, leaves the consumer's state unknown. Re-seed with a
+		// full snapshot even when the value is unchanged, since the frame that carried it may never
+		// have landed.
+		if self.resync {
+			return self.snapshot(value).map(Some);
+		}
+
+		// The first update has no baseline to diff against, so it seeds the stream with a snapshot.
 		let Some(last) = self.last.as_ref() else {
 			return self.snapshot(value).map(Some);
 		};
@@ -330,6 +346,7 @@ impl<T: Serialize> Encoder<T> {
 		self.group_frames = 1;
 		self.flate = flate;
 		self.last = Some(last);
+		self.resync = false;
 
 		Ok(Encoded {
 			payload,

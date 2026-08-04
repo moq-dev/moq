@@ -185,6 +185,10 @@ impl<T: Serialize> Inner<T> {
 	}
 
 	fn finish(&mut self) -> Result<()> {
+		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
+		// Any further update fails on the closed track, but it has to fail as an error rather than by
+		// writing a delta with no group to hold it.
+		self.encoder.reset();
 		self.track.finish()
 	}
 }

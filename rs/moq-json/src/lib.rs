@@ -44,6 +44,15 @@ pub enum Error {
 	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
 	#[error("delta before snapshot")]
 	MissingSnapshot,
+
+	/// A compressed [`stream`] frame was encoded but never written, so the shared DEFLATE window is
+	/// ahead of what the consumer holds and nothing later in this group can be decoded.
+	///
+	/// Unlike [`snapshot`], a stream has no keyframe to resynchronize on, so the encoder refuses to
+	/// continue rather than emit frames that cannot be read. Recover by rolling a new group and
+	/// calling [`stream::Encoder::reset`].
+	#[error("compression desynchronized: a frame was encoded but never written")]
+	Desync,
 }
 
 impl From<serde_json::Error> for Error {

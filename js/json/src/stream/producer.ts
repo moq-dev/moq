@@ -24,11 +24,16 @@ export class Producer<T> {
 
 	/** Append one record to the log. */
 	append(value: T): void {
-		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so a
-		// failure here would leave the window carrying a record that never reached the wire and every
-		// later frame would decode against context the consumer doesn't have.
+		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so
+		// failing here would desync the encoder over a group that was never even opened.
 		this.#group ??= this.#track.appendGroup();
-		this.#group.writeFrame({ payload: this.#encoder.encode(value), timestamp: Time.Timestamp.now() });
+
+		// A throw leaves the record uncommitted. The log rides a single group and has no keyframe to
+		// resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
+		// consumer cannot decode.
+		const record = this.#encoder.encode(value);
+		this.#group.writeFrame({ payload: record.payload, timestamp: Time.Timestamp.now() });
+		record.commit();
 	}
 
 	/** Finish the track, closing the group. */

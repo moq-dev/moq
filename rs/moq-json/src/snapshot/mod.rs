@@ -280,6 +280,54 @@ mod test {
 		assert!(matches!(guard.commit(), Err(crate::Error::Net(_))));
 	}
 
+	/// A rejected frame must not erase the last-published value: `lock` seeds its editing guard from
+	/// it, so losing it makes the next edit publish a document with every other field dropped.
+	#[test]
+	fn a_failed_publish_keeps_the_value_for_lock() {
+		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			#[serde(skip_serializing_if = "Option::is_none")]
+			video: Option<String>,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			scte35: Option<u32>,
+		}
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
+
+		producer.lock().video = Some("v1".to_string());
+
+		// The track is finished, so the next publish is rejected and the encoder resynchronizes.
+		producer.finish().unwrap();
+		let mut guard = producer.lock();
+		guard.scte35 = Some(42);
+		assert!(guard.commit().is_err());
+
+		// The editing baseline still carries what was actually published.
+		let guard = producer.lock();
+		assert_eq!(
+			guard.video,
+			Some("v1".to_string()),
+			"a rejected frame erased the baseline"
+		);
+	}
+
+	/// Finishing takes the open group with it, so the encoder must stop emitting deltas into a group
+	/// that no longer exists. A later update has to surface the closed track as an error rather than
+	/// writing a delta with nowhere to put it.
+	#[test]
+	fn update_after_finish_errors_instead_of_panicking() {
+		let (mut producer, _track) = producer(cfg(100));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.update(&json!({ "a": 2 })).unwrap(); // a delta, so a group is open
+		producer.finish().unwrap();
+
+		assert!(matches!(producer.update(&json!({ "a": 3 })), Err(crate::Error::Net(_))));
+	}
+
 	#[test]
 	fn commit_publishes_once() {
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
