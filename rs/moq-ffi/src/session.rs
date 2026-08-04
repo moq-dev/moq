@@ -50,6 +50,23 @@ fn map_connect_error(err: moq_native::Error) -> MoqError {
 	}
 }
 
+/// The terminal error of a connection that had already established a session.
+///
+/// Same auth rejections as [`map_connect_error`], but a session that ended carries
+/// a [`moq_net::Error`], and stringifying that into `Connect` would both lose the
+/// variant a caller can match on and claim the dial failed when it had succeeded.
+/// A server-accepted session reports its close the same way.
+fn map_closed_error(err: moq_native::Error) -> MoqError {
+	match err.connect_error() {
+		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
+		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
+		_ => match err {
+			moq_native::Error::MoqNet(err) => err.into(),
+			err => MoqError::Connect(format!("{err}")),
+		},
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -62,6 +79,32 @@ mod tests {
 		));
 		assert!(matches!(
 			map_connect_error(moq_native::ConnectError::Forbidden.into()),
+			MoqError::Forbidden
+		));
+	}
+
+	/// A session that ended must report the close, not a dial failure. Auth
+	/// rejections keep their dedicated variants, which is what `is_auth` reads in
+	/// every binding, but everything else keeps the `moq_net::Error` a caller can
+	/// match on instead of being flattened into a `Connect` string.
+	#[test]
+	fn maps_closed_errors_without_flattening_the_reason() {
+		assert!(matches!(
+			map_closed_error(moq_net::Error::Remote(7).into()),
+			MoqError::Protocol(moq_net::Error::Remote(7))
+		));
+		assert!(matches!(
+			map_closed_error(moq_net::Error::Cancel.into()),
+			MoqError::Protocol(moq_net::Error::Cancel)
+		));
+
+		// Auth still wins, so `is_auth` keeps working on a rejection delivered as a close.
+		assert!(matches!(
+			map_closed_error(moq_net::Error::Unauthorized.into()),
+			MoqError::Unauthorized
+		));
+		assert!(matches!(
+			map_closed_error(moq_native::ConnectError::Forbidden.into()),
 			MoqError::Forbidden
 		));
 	}
@@ -443,7 +486,7 @@ impl MoqSession {
 		self.closed
 			.run(|inner| async move {
 				match &*inner {
-					Inner::Connection(connection) => connection.closed().await.map_err(map_connect_error),
+					Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
 					Inner::Session(session) => Err(session.closed().await.into()),
 				}
 			})
@@ -462,7 +505,7 @@ impl MoqSession {
 		self.status
 			.run(|mut inner| async move {
 				match &mut *inner {
-					Inner::Connection(connection) => Ok(connection.status().await.map_err(map_connect_error)?.into()),
+					Inner::Connection(connection) => Ok(connection.status().await.map_err(map_closed_error)?.into()),
 					Inner::Session(session) => Err(session.closed().await.into()),
 				}
 			})
