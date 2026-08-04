@@ -125,6 +125,15 @@ export class Encoder<T> {
 	// Whether the frame from the last {@link update} is still unacknowledged. An uncommitted frame
 	// never reached the wire, so the next update resynchronizes before encoding anything new.
 	#pending = false;
+	// Bumped for each frame handed out, so a commit that arrives after the encoder has moved on can
+	// tell that it is acknowledging a frame that is no longer the outstanding one.
+	#generation = 0;
+
+	// Whether the next frame has to be a full snapshot, because a frame was lost or the caller closed
+	// the group. Kept separate from {@link #last} so a resync doesn't erase the value: that field is
+	// also what {@link Producer.mutate} seeds an edit from, and dropping it there would publish a
+	// document with every other field missing.
+	#resync = false;
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
@@ -142,18 +151,21 @@ export class Encoder<T> {
 	}
 
 	/**
-	 * Forget the baseline, so the next {@link update} emits a snapshot.
+	 * Force the next {@link update} to emit a full snapshot, even for an unchanged value.
 	 *
 	 * Call this whenever the caller closes the current group behind the encoder's back. Without it
 	 * the next value may be encoded as a delta against a DEFLATE window and a baseline that the new
 	 * group doesn't carry.
+	 *
+	 * {@link value} survives: the snapshot republishes it in full anyway, and it is what a caller
+	 * editing in place starts from.
 	 */
 	reset(): void {
-		this.#last = undefined;
 		this.#flate = undefined;
 		this.#deltaBytes = 0;
 		this.#snapshotLen = 0;
 		this.#groupFrames = 0;
+		this.#resync = true;
 		this.#pending = false;
 	}
 
@@ -182,7 +194,10 @@ export class Encoder<T> {
 		}
 
 		const json = JSON.parse(text);
-		if (this.#last !== undefined && deepEqual(this.#last, json)) return undefined;
+
+		// A resync has to emit even for an unchanged value: the frame that carried it may never have
+		// landed, so the consumer's state is unknown.
+		if (!this.#resync && this.#last !== undefined && deepEqual(this.#last, json)) return undefined;
 
 		const delta = this.#delta(json);
 
@@ -205,10 +220,15 @@ export class Encoder<T> {
 	// Hand a frame to the caller, marking it unacknowledged until they commit.
 	#pend(encoded: Encoded): Pending {
 		this.#pending = true;
+		const generation = ++this.#generation;
+
 		return {
 			...encoded,
 			commit: () => {
-				this.#pending = false;
+				// A caller that starts the next update before this frame settles has already made the
+				// encoder resynchronize around it. Acknowledging it now would clear the flag belonging to
+				// the newer frame, so a later loss of that one would go unnoticed.
+				if (this.#generation === generation) this.#pending = false;
 			},
 		};
 	}
@@ -224,6 +244,10 @@ export class Encoder<T> {
 	// merge-patch work. Since the gate excludes the frame about to be written, the delta that tips the
 	// group past `ratio * snapshot` still lands: a group overshoots the budget by at most one delta.
 	#delta(json: unknown): Uint8Array | undefined {
+		// A lost frame, or a group the caller closed, leaves the consumer's state unknown, so the next
+		// frame has to be a full snapshot.
+		if (this.#resync) return undefined;
+
 		const ratio = this.#deltaRatio;
 		if (ratio === 0) return undefined;
 		if (this.#last === undefined) return undefined;
@@ -247,6 +271,7 @@ export class Encoder<T> {
 		this.#snapshotLen = payload.length;
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
+		this.#resync = false;
 
 		return payload;
 	}

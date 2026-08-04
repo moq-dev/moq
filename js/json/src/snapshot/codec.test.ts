@@ -223,3 +223,31 @@ test("a value JSON cannot represent is rejected", () => {
 	const encoder = new Encoder<unknown>({});
 	expect(() => encoder.update(undefined)).toThrow("not representable as JSON");
 });
+
+// A caller that starts the next update before the previous frame settles makes the encoder
+// resynchronize around it. The stale commit landing afterwards must not clear the flag belonging to
+// the newer frame, or a later loss of that one goes unnoticed. (Rust cannot express this: its
+// `Pending` borrows the encoder, so a second `update` while one is outstanding does not compile.)
+test("a stale commit does not clear a newer pending frame", () => {
+	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const first = encoder.update({ a: 1 });
+
+	// The second update starts before the first frame settles, so the encoder resyncs around it.
+	expect(encoder.update({ a: 2 })?.keyframe).toBe(true);
+
+	// The first write finally completes, but it is no longer the outstanding frame.
+	first?.commit();
+
+	// The second frame was never committed either, so this must still resynchronize.
+	expect(encoder.update({ a: 3 })?.keyframe).toBe(true);
+});
+
+// The baseline is also what `Producer.mutate` seeds an edit from, so a resync must not erase it:
+// the next edit would otherwise publish a document with every other field missing.
+test("a resync keeps the value for mutate", () => {
+	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	commit(encoder, { video: "v1", scte35: 1 });
+
+	encoder.reset();
+	expect(encoder.value).toEqual({ video: "v1", scte35: 1 });
+});
