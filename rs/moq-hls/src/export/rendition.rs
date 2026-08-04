@@ -400,12 +400,11 @@ async fn read_group(
 /// True if a moq-net error means the group left (or hasn't reached) the relay cache: a 404, not
 /// a 500.
 ///
-/// Compares WIRE CODES rather than variants, because the same miss reaches us in two shapes. A
-/// group missing from the LOCAL cache answers with the named variant, but anything that crossed a
-/// session arrives as [`moq_net::Error::Remote`]: `from_transport` decodes only code 0 (back to
-/// `Cancel`) and leaves every other reset code raw. In a relay the publisher we FETCH from is
-/// always remote, so matching variants alone made the ordinary "that group aged out" answer a 500
-/// instead of a 404 -- for every segment past the cache's retention, on every request.
+/// Compares WIRE CODES rather than variants, because the same miss arrives in two shapes: a
+/// LOCAL cache answers with the named variant, while anything that crossed a session arrives as
+/// [`moq_net::Error::Remote`] carrying the raw code (`from_transport` decodes only code 0, back
+/// to `Cancel`). In a relay the publisher we FETCH from is always remote, so the remote shape is
+/// the common one and matching variants alone would classify it as a server error.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
 	let code = err.to_code();
 	code == moq_net::Error::NotFound.to_code()
@@ -474,11 +473,10 @@ mod tests {
 
 	#[test]
 	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
-		// REGRESSION: a relay always FETCHes from a REMOTE publisher, and moq-net decodes every
-		// wire reset code as `Error::Remote(code)` -- only code 0 maps back to a named variant
-		// (`Cancel`). Matching the named variants alone therefore missed every miss that actually
-		// happens in a relay, and the serve path turned "that group aged out" into a 500 rather
-		// than the 404 the caller documents. That is every segment past the cache's retention.
+		// A miss must classify the same whichever shape it arrives in. The remote shape is the
+		// one a relay actually sees: it always FETCHes from a remote publisher, and moq-net
+		// surfaces every wire reset code as `Error::Remote(code)` (only code 0 maps back to a
+		// named variant, `Cancel`).
 		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
 			assert!(is_cache_miss(&local), "{local:?} locally");
 			let remote = moq_net::Error::Remote(local.to_code());
