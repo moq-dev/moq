@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, Catalog, Container, VideoConfig};
-use mp4_atom::{DecodeMaybe, Encode};
+use mp4_atom::DecodeMaybe;
 
 use crate::Result;
 use crate::catalog::Stream;
@@ -473,34 +473,7 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		let ftyp = ftyp_data.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf)?;
-		moov.encode(&mut buf)?;
-		Ok(Bytes::from(buf))
+		Ok(crate::container::fmp4::encode_init(ftyp_data, traks, trexs)?)
 	}
 }
 

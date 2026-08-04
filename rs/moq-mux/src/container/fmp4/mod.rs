@@ -557,7 +557,15 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			let mut cursor = std::io::Cursor::new(description.as_ref());
 			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
 
-			let bitrate = config.bitrate.unwrap_or(0) as u32;
+			// Safari and AVFoundation reject an AAC track whose DecoderConfigDescriptor is all
+			// zeros: they endOfStream("decode") on the *init* append, which leaves the
+			// ManagedMediaSource ended and every later audio and video append failing. The
+			// catalog bitrate is optional and real publishers omit it, so fall back to the
+			// AAC-LC values ffmpeg and the iTunes encoders write.
+			let (max_bitrate, avg_bitrate) = match config.bitrate {
+				Some(bitrate) => (bitrate as u32, bitrate as u32),
+				None => (256_000, 128_000),
+			};
 			mp4_atom::Codec::from(mp4_atom::Mp4a {
 				audio,
 				esds: mp4_atom::Esds {
@@ -568,9 +576,10 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							object_type_indication: 0x40, // MPEG-4 AAC
 							stream_type: 0x05,            // audio
 							up_stream: 0,
-							buffer_size_db: Default::default(),
-							max_bitrate: bitrate,
-							avg_bitrate: bitrate,
+							// 24 KiB, the decoder buffer those same encoders declare.
+							buffer_size_db: mp4_atom::u24::from([0x00, 0x60, 0x00]),
+							max_bitrate,
+							avg_bitrate,
 							dec_specific,
 						},
 						sl_config: Default::default(),
@@ -615,6 +624,11 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 	Ok(build_audio_trak(track_id, timescale, sample_entry))
 }
 
+/// All-ones: the ISO/IEC 14496-12 spelling of "duration not known up front", which is always
+/// the case for the live fragmented streams synthesized here. Zero reads as an empty file to a
+/// strict parser, and VLC refuses to play one.
+const UNKNOWN_DURATION: u64 = u64::MAX;
+
 fn build_video_trak(
 	track_id: u32,
 	timescale: u64,
@@ -626,6 +640,7 @@ fn build_video_trak(
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			duration: UNKNOWN_DURATION,
 			width: mp4_atom::FixedPoint::from(width),
 			height: mp4_atom::FixedPoint::from(height),
 			..Default::default()
@@ -640,11 +655,51 @@ fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			duration: UNKNOWN_DURATION,
 			..Default::default()
 		},
 		mdia: build_mdia(timescale, b"soun", false, sample_entry),
 		..Default::default()
 	}
+}
+
+/// Assemble a fragmented init segment (ftyp + moov) around already-built traks.
+///
+/// `ftyp` is the one a passed-through CMAF init carried, if any; otherwise a plain `isom` one
+/// is synthesized. A `Cmaf` rendition's `tkhd` is left exactly as its publisher wrote it, but
+/// the `mvhd` is ours either way, so it declares the unknown duration a fragmented stream has.
+pub(crate) fn encode_init(
+	ftyp: Option<mp4_atom::Ftyp>,
+	traks: Vec<mp4_atom::Trak>,
+	trexs: Vec<mp4_atom::Trex>,
+) -> Result<Bytes> {
+	use mp4_atom::Encode;
+
+	let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
+		major_brand: b"isom".into(),
+		minor_version: 0x200,
+		compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
+	});
+	let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
+
+	let moov = mp4_atom::Moov {
+		mvhd: mp4_atom::Mvhd {
+			timescale,
+			duration: UNKNOWN_DURATION,
+			..Default::default()
+		},
+		trak: traks,
+		mvex: (!trexs.is_empty()).then(|| mp4_atom::Mvex {
+			trex: trexs,
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	let mut buf = Vec::new();
+	ftyp.encode(&mut buf)?;
+	moov.encode(&mut buf)?;
+	Ok(Bytes::from(buf))
 }
 
 fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
@@ -689,12 +744,80 @@ pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 	}
 }
 
+/// The decode timeline a fragment actually carries: its `tfdt` and each sample's composition
+/// offset. This is what a player reads, as opposed to the PTS [`decode`] reconstructs from it.
+#[cfg(test)]
+pub(crate) fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(fragment.as_ref());
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+		if let mp4_atom::Any::Moof(moof) = atom {
+			let traf = &moof.traf[0];
+			let cts = traf.trun[0].entries.iter().map(|e| e.cts.unwrap_or_default()).collect();
+			return (traf.tfdt.as_ref().unwrap().base_media_decode_time, cts);
+		}
+	}
+	panic!("no moof");
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
+	}
+
+	// An AAC-LC / 44.1 kHz / stereo AudioSpecificConfig, the catalog `description` shape.
+	fn aac_config(bitrate: Option<u64>) -> AudioConfig {
+		let mut config = AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 44_100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.bitrate = bitrate;
+		config
+	}
+
+	fn dec_config(trak: &mp4_atom::Trak) -> mp4_atom::esds::DecoderConfig {
+		match &trak.mdia.minf.stbl.stsd.codecs[0] {
+			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config,
+			other => panic!("expected mp4a, got {other:?}"),
+		}
+	}
+
+	// Safari and AVFoundation reject an all-zero DecoderConfigDescriptor on the *init* append,
+	// which ends the ManagedMediaSource and fails every append after it. The catalog bitrate is
+	// optional and real publishers omit it, so a synthesized esds must not lean on it.
+	#[test]
+	fn synthesized_aac_init_has_non_zero_bitrates() {
+		let inferred = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap());
+		assert_ne!(u32::from(inferred.buffer_size_db), 0);
+		assert_ne!(inferred.max_bitrate, 0);
+		assert_ne!(inferred.avg_bitrate, 0);
+
+		let stated = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(Some(96_000))).unwrap());
+		assert_eq!(stated.max_bitrate, 96_000, "the catalog's bitrate wins");
+		assert_eq!(stated.avg_bitrate, 96_000);
+	}
+
+	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a
+	// strict parser: VLC refuses to play one.
+	#[test]
+	fn synthesized_init_declares_unknown_duration() {
+		use mp4_atom::DecodeMaybe;
+
+		let trak = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		assert_eq!(trak.tkhd.duration, u64::MAX);
+
+		let init = encode_init(None, vec![trak], Vec::new()).unwrap();
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moov(moov) = atom {
+				assert_eq!(moov.mvhd.duration, u64::MAX);
+				assert_eq!(moov.trak[0].tkhd.duration, u64::MAX);
+				return;
+			}
+		}
+		panic!("no moov");
 	}
 
 	#[test]
@@ -801,21 +924,6 @@ mod tests {
 			assert_eq!(actual.duration, expected.duration);
 			assert_eq!(actual.payload, expected.payload);
 		}
-	}
-
-	// The (tfdt, per-sample cts) a fragment actually carries, which is what a player reads.
-	fn timeline(fragment: &Bytes) -> (u64, Vec<i32>) {
-		use mp4_atom::DecodeMaybe;
-
-		let mut cursor = std::io::Cursor::new(fragment.as_ref());
-		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
-			if let mp4_atom::Any::Moof(moof) = atom {
-				let traf = &moof.traf[0];
-				let cts = traf.trun[0].entries.iter().map(|e| e.cts.unwrap_or_default()).collect();
-				return (traf.tfdt.as_ref().unwrap().base_media_decode_time, cts);
-			}
-		}
-		panic!("no moof");
 	}
 
 	#[test]
