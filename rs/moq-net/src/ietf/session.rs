@@ -7,39 +7,91 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
 };
 
-use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
+use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster};
 
-// Handshake dispatcher: each argument is an independent session parameter, so
-// bundling them into a config struct would just add indirection.
-#[allow(clippy::too_many_arguments)]
+/// Everything one moq-transport session needs to start.
+pub struct Config<S: web_transport_trait::Session> {
+	pub session: S,
+
+	/// The bidi SETUP stream (draft-14 through draft-16 only). Draft-17+ passes `None`
+	/// and exchanges SETUP on uni streams instead.
+	pub setup: Option<Stream<S, Version>>,
+
+	pub request_id_max: Option<RequestId>,
+
+	/// Whether we dialed. Only the dialing side prices the link (see [`Self::cost`]).
+	pub client: bool,
+
+	/// Traffic stats are attributed through these origin handles: tag them with
+	/// `origin::{Consumer, Producer}::with_stats` before calling [`start`].
+	pub publish: Option<origin::Consumer>,
+	pub subscribe: Option<origin::Producer>,
+
+	/// The origin (hop) id to assign the peer when it declares none itself. See
+	/// `Client::with_peer_origin`; a peer that negotiates the MoQ Cluster extension
+	/// declares its own, which wins.
+	pub peer_origin: Option<Origin>,
+
+	/// What crossing this link costs, declared in our SETUP (see
+	/// [`cluster::RELAY_COST`]). Client-only: `None` on the accepting side, and on a
+	/// dialer that priced nothing.
+	pub cost: Option<u64>,
+
+	pub version: Version,
+
+	/// The request path we advertise in our SETUP (draft-17+ clients on URL-less
+	/// transports). A server passes `None`.
+	pub path: Option<String>,
+
+	/// The peer's SETUP stream, when it was already read before [`start`] (a draft-17+
+	/// server that gated on the client's path via [`accept_setup`]). It becomes the
+	/// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
+	pub peer_setup_stream: Option<Reader<S::RecvStream, crate::Version>>,
+
+	/// What that pre-read SETUP declared, so the session does not have to parse it
+	/// twice. `None` when [`Self::peer_setup_stream`] is.
+	pub peer_cluster: Option<cluster::Peer>,
+}
+
 pub fn start<S: web_transport_trait::Session>(
-	session: S,
-	setup: Option<Stream<S, Version>>,
-	request_id_max: Option<RequestId>,
-	client: bool,
-	// Traffic stats are attributed through these origin handles: tag them with
-	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
-	publish: Option<origin::Consumer>,
-	subscribe: Option<origin::Producer>,
-	// The origin (hop) id assigned to the peer. moq-transport carries no hop ids,
-	// so this is the only way a peer gets a stable identity here. See
-	// `Client::with_peer_origin`.
-	peer_origin: Option<Origin>,
-	version: Version,
-	// The request path we advertise in our SETUP (draft-17+ clients on URL-less
-	// transports). A server passes `None`.
-	path: Option<String>,
-	// The peer's SETUP stream, when it was already read before `start` (a draft-17+
-	// server that gated on the client's path via [`accept_setup`]). It becomes the
-	// GOAWAY channel; `None` lets the uni loop read the SETUP itself.
-	peer_setup: Option<Reader<S::RecvStream, crate::Version>>,
+	config: Config<S>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+	let Config {
+		session,
+		setup,
+		request_id_max,
+		client,
+		publish,
+		subscribe,
+		peer_origin,
+		cost,
+		version,
+		path,
+		peer_setup_stream,
+		peer_cluster,
+	} = config;
+
 	let driver = async move {
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
+
+		// Our own Hop ID: the identity of the origin we publish from, so every session
+		// out of this process stamps the same one and cross-session loop detection works.
+		let self_origin = *publish;
+
+		// The peer's cluster options. Seeded now when its SETUP was already read
+		// (a gated server accept), and filled by the uni loop otherwise. A version that
+		// cannot negotiate the extension is settled immediately so nothing blocks on it.
+		let peer_setup = cluster::PeerSetup::default();
+		match peer_cluster {
+			Some(peer) => peer_setup.set(peer),
+			None if !cluster::supported(version) => peer_setup.set(cluster::Peer::default()),
+			None => {}
+		}
+
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {
@@ -50,9 +102,26 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), peer_origin, version);
+				let publisher = Publisher::new(
+					adapter.clone(),
+					publish,
+					control.clone(),
+					peer_origin,
+					peer_setup.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, peer_origin, version, tasks);
+				let subscriber = Subscriber::new(
+					adapter.clone(),
+					subscribe,
+					control,
+					peer_origin,
+					peer_setup.clone(),
+					self_origin,
+					cost,
+					version,
+					tasks,
+				);
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -61,7 +130,7 @@ pub fn start<S: web_transport_trait::Session>(
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
 				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer)));
-				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), version)));
+				let mut unis = std::pin::pin!(err_only(run_unis(adapter.clone(), subscriber.clone(), None, version)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
 					publisher.clone(),
@@ -115,7 +184,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let setup = {
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version, path).await {
+						if let Err(err) = run_setup(session, version, path, self_origin, cost).await {
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -123,9 +192,26 @@ pub fn start<S: web_transport_trait::Session>(
 				};
 
 				let control = Control::new(None, client);
-				let publisher = Publisher::new(session.clone(), publish, control.clone(), peer_origin, version);
+				let publisher = Publisher::new(
+					session.clone(),
+					publish,
+					control.clone(),
+					peer_origin,
+					peer_setup.clone(),
+					version,
+				);
 				let (tasks, mut task_set) = TaskSet::new();
-				let subscriber = Subscriber::new(session.clone(), subscribe, control, peer_origin, version, tasks);
+				let subscriber = Subscriber::new(
+					session.clone(),
+					subscribe,
+					control,
+					peer_origin,
+					peer_setup.clone(),
+					self_origin,
+					cost,
+					version,
+					tasks,
+				);
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();
@@ -134,7 +220,7 @@ pub fn start<S: web_transport_trait::Session>(
 				// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
 				// arrives on the wire.
 				let goaway = async move {
-					match peer_setup {
+					match peer_setup_stream {
 						Some(reader) => run_goaway(reader.with_version(version), version).await,
 						None => std::future::pending().await,
 					}
@@ -143,7 +229,12 @@ pub fn start<S: web_transport_trait::Session>(
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); `setup` never resolves (it holds the stream open) and the
 				// task set draining is the one clean exit.
-				let mut unis = std::pin::pin!(err_only(run_unis(session.clone(), subscriber.clone(), version)));
+				let mut unis = std::pin::pin!(err_only(run_unis(
+					session.clone(),
+					subscriber.clone(),
+					Some(peer_setup.clone()),
+					version
+				)));
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					session.clone(),
 					publisher.clone(),
@@ -212,18 +303,29 @@ pub fn start<S: web_transport_trait::Session>(
 	Ok(driver)
 }
 
+/// What a peer's SETUP told us, beyond the stream it arrived on.
+pub struct PeerSetup<S: web_transport_trait::Session> {
+	/// The SETUP stream, which becomes the GOAWAY channel.
+	pub stream: Reader<S::RecvStream, crate::Version>,
+
+	/// The request path the peer advertised, for URL-less transports.
+	pub path: Option<String>,
+
+	/// The MoQ Cluster options it declared (see [`cluster`]).
+	pub cluster: cluster::Peer,
+}
+
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
-/// session, returning that stream (it becomes the GOAWAY channel) and the request
-/// path the peer advertised.
+/// session, returning that stream plus what it declared.
 ///
 /// Blocks on the peer's Setup Stream; any other uni stream racing ahead of it is
 /// `STOP_SENDING`-ed and skipped (group data needs a prior subscribe, so nothing
 /// legitimate precedes the SETUP at connect). Pass the returned reader to [`start`]
-/// as its `peer_setup` so GOAWAY monitoring continues without re-reading it.
+/// as its `peer_setup_stream` so GOAWAY monitoring continues without re-reading it.
 pub async fn accept_setup<S: web_transport_trait::Session>(
 	session: &S,
 	version: Version,
-) -> Result<(Reader<S::RecvStream, crate::Version>, Option<String>), Error> {
+) -> Result<PeerSetup<S>, Error> {
 	let outer_version = crate::Version::Ietf(version);
 
 	loop {
@@ -237,8 +339,9 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 		}
 
 		let setup: setup::Setup = reader.decode().await?;
-		let mut bytes = setup.parameters;
-		let path = match ietf::Parameters::decode(&mut bytes, version)?.get_bytes(ietf::ParameterBytes::Path) {
+		let mut bytes = setup.parameters.clone();
+		let params = ietf::Parameters::decode(&mut bytes, version)?;
+		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
 				std::str::from_utf8(bytes)
 					.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
@@ -246,19 +349,34 @@ pub async fn accept_setup<S: web_transport_trait::Session>(
 			),
 			None => None,
 		};
+		let cluster = cluster::peer_from_setup(&params, version)?;
 
-		return Ok((reader, path));
+		return Ok(PeerSetup {
+			stream: reader,
+			path,
+			cluster,
+		});
 	}
+}
+
+/// Parse the MoQ Cluster options out of a raw SETUP parameter block.
+fn decode_peer_cluster(parameters: bytes::Bytes, version: Version) -> Result<cluster::Peer, crate::DecodeError> {
+	let mut bytes = parameters;
+	let params = ietf::Parameters::decode(&mut bytes, version)?;
+	cluster::peer_from_setup(&params, version)
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
-/// server passes `None`.
+/// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
+/// declare our identity and (client-only) what this link costs to cross.
 async fn run_setup<S: web_transport_trait::Session>(
 	session: S,
 	version: Version,
 	path: Option<String>,
+	self_origin: Origin,
+	cost: Option<u64>,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -270,6 +388,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
+	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;
@@ -288,6 +407,9 @@ async fn run_setup<S: web_transport_trait::Session>(
 async fn run_unis<S: web_transport_trait::Session>(
 	session: S,
 	subscriber: Subscriber<S>,
+	// Where to record the peer's MoQ Cluster options once its SETUP arrives. `None`
+	// for draft-14..16, whose SETUP rides the control stream instead.
+	peer_setup: Option<cluster::PeerSetup>,
 	version: Version,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
@@ -299,14 +421,28 @@ async fn run_unis<S: web_transport_trait::Session>(
 		let kind: u64 = tasks.drive(reader.decode_peek()).await?;
 
 		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
-		// We accept it in the background without blocking, since there are no
-		// extensions that require waiting on the SETUP before proceeding.
+		// We accept it in the background without blocking; the one thing that does
+		// need it (the MoQ Cluster negotiation) waits on `peer_setup` instead, so a
+		// slow SETUP delays announcements rather than the whole session.
 		if kind == setup::SETUP_V17 {
+			let peer_setup = peer_setup.clone();
 			tasks.push(async move {
-				// Decode and discard the unified SETUP message.
-				if let Err(err) = reader.decode::<setup::Setup>().await {
-					tracing::warn!(%err, "setup decode error");
-					return;
+				let msg = match reader.decode::<setup::Setup>().await {
+					Ok(msg) => msg,
+					Err(err) => {
+						tracing::warn!(%err, "setup decode error");
+						return;
+					}
+				};
+
+				if let Some(peer_setup) = peer_setup {
+					// A SETUP we can't parse still settles the negotiation as "off",
+					// so the publisher isn't left waiting on a peer that already spoke.
+					let peer = decode_peer_cluster(msg.parameters, version).unwrap_or_else(|err| {
+						tracing::warn!(%err, "setup parameter decode error");
+						cluster::Peer::default()
+					});
+					peer_setup.set(peer);
 				}
 
 				// Monitor for GOAWAY after setup completes.
@@ -358,6 +494,12 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 	mut subscriber: Subscriber<S>,
 	version: Version,
 ) -> Result<(), Error> {
+	// PUBLISH_NAMESPACE decodes differently once the MoQ Cluster extension is
+	// negotiated, so the whole dispatch loop waits for the peer's SETUP first. The peer
+	// must send it before anything else, and `run_unis` reads it independently, so this
+	// costs a handshake round rather than blocking.
+	let peer = subscriber.peer().await;
+
 	let mut tasks = TaskSet::owned();
 	loop {
 		let mut stream = tasks.drive(Stream::accept(&session, version)).await?;
@@ -384,7 +526,7 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				tasks.push(subscriber.handle_stream(id, data, stream)?);
+				tasks.push(subscriber.handle_stream(id, data, stream, peer)?);
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");

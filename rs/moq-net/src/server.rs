@@ -2,7 +2,7 @@ use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
 	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, Version, Versions,
-	coding::{Decode, Encode, Reader, Stream},
+	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
 
@@ -238,11 +238,13 @@ impl Server {
 		session: S,
 		version: ietf::Version,
 	) -> Result<Request<S>, Error> {
-		let (peer_setup, path) = ietf::accept_setup(&session, version).await?;
+		let peer_setup = ietf::accept_setup(&session, version).await?;
 		Ok(Request {
-			path,
+			path: peer_setup.path.clone(),
 			role: None,
-			origin: None,
+			// A moq-transport peer only has an identity if it negotiated the MoQ
+			// Cluster extension and declared a non-zero Hop ID.
+			origin: peer_setup.cluster.origin.filter(|o| *o != crate::Origin::UNKNOWN),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				handshake: Handshake::IetfModern {
@@ -285,7 +287,7 @@ enum Handshake<S: web_transport_trait::Session> {
 	IetfModern {
 		session: S,
 		version: ietf::Version,
-		peer_setup: Reader<S::RecvStream, Version>,
+		peer_setup: ietf::PeerSetup<S>,
 	},
 	/// moq-lite 03/04: no Setup Stream.
 	LiteBare { session: S, version: lite::Version },
@@ -332,8 +334,9 @@ impl<S: web_transport_trait::Session> Request<S> {
 
 	/// The origin identity declared by the peer, when the negotiated protocol carries one.
 	///
-	/// A moq-lite-05+ endpoint declares this when it attaches a publish or
-	/// subscribe origin. Older versions and endpoints without one return `None`.
+	/// A moq-lite-05+ endpoint declares this when it attaches a publish or subscribe
+	/// origin; a `moqt-17`+ endpoint declares it via the MoQ Cluster extension. Older
+	/// versions and endpoints without one return `None`.
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
@@ -384,18 +387,21 @@ impl<S: web_transport_trait::Session> Request<S> {
 			} => {
 				// The client's SETUP was read in `accept_request`; hand the stream back
 				// for GOAWAY. A server never advertises a path, hence `None`.
-				let protocol = ietf::start(
-					session.clone(),
-					None,
-					None,
-					false,
+				let protocol = ietf::start(ietf::Config {
+					session: session.clone(),
+					setup: None,
+					request_id_max: None,
+					client: false,
 					publish,
 					subscribe,
-					None,
+					peer_origin: None,
+					// Only the dialing side prices a link.
+					cost: None,
 					version,
-					None,
-					Some(peer_setup),
-				)?;
+					path: None,
+					peer_setup_stream: Some(peer_setup.stream),
+					peer_cluster: Some(peer_setup.cluster),
+				})?;
 				tracing::debug!(?version, "connected");
 				return Ok(Session::new(session, version.into(), None, protocol));
 			}
@@ -493,18 +499,20 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let protocol = ietf::start(
-					session.clone(),
-					Some(stream),
+				let protocol = ietf::start(ietf::Config {
+					session: session.clone(),
+					setup: Some(stream),
 					request_id_max,
-					false,
+					client: false,
 					publish,
 					subscribe,
-					None,
-					v,
-					None,
-					None,
-				)?;
+					peer_origin: None,
+					cost: None,
+					version: v,
+					path: None,
+					peer_setup_stream: None,
+					peer_cluster: None,
+				})?;
 				(None, protocol)
 			}
 		};

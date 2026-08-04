@@ -7,6 +7,7 @@
 #[macro_use]
 mod parameters;
 mod adapter;
+pub mod cluster;
 mod control;
 mod fetch;
 mod goaway;

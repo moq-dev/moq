@@ -9,6 +9,8 @@ Relays can be joined together to proxy announcements and subscriptions between e
 
 A broadcast carries a small hop list as it travels. Each relay it passes through adds itself to the list, which is how loops are caught and how the network picks the shortest path when there's more than one. When two paths are the same length, every relay breaks the tie the same way (a hash of the broadcast name and hop list), so the whole cluster converges on one route instead of flapping between equals.
 
+Both wire protocols carry this. `moq-lite` has the hop list and route cost in its announcements natively; `moq-transport` gets them from the [MoQ Cluster extension](/draft/moq-cluster), negotiated per session on `moqt-17` and later. A peer that doesn't speak the extension still works, it just contributes no path or price of its own.
+
 ## Topology
 
 Each relay lists the peers it wants to dial in `cluster.connect`. That's it; the topology is whatever you draw with those links. Each peer is a full URL (e.g. `https://us-east.example.com/`); a bare host or `host:port` is deprecated but still accepted, and is wrapped in `https://.../` with a warning.
@@ -35,7 +37,7 @@ Pick the shape that matches your traffic. Linear chains are great for fanout; sm
 
 ## Link costs
 
-Hop counting treats every link the same, but links rarely cost the same: traffic between two relays in one datacenter is free, while a metered backbone bills per byte. On `moq-lite-06` (still work-in-progress and opt-in via `--version`), announcements carry a route cost so relays can route by price instead of distance.
+Hop counting treats every link the same, but links rarely cost the same: traffic between two relays in one datacenter is free, while a metered backbone bills per byte. Announcements carry a route cost so relays can route by price instead of distance, on `moq-lite-06` (still work-in-progress and opt-in via `--version`) and on `moqt-17` and later.
 
 Price a link by adding `?cost=N` to the peer URL:
 
@@ -70,7 +72,7 @@ A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits a
 
 ## Origin id
 
-Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
+Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. Each end declares it at session setup, so the other can avoid announcing (or serving) a path that already flows through it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
 
 Set `cluster.id` to pin a stable id across restarts:
 

@@ -12,20 +12,80 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::{Message, Version};
+use super::{Message, Version, cluster};
 
-/// A broadcast whose route table is watched for `advertisable` flips while the
-/// peer has an assigned identity (`Client::with_peer_origin`).
+/// A broadcast whose route table is watched for changes in what we advertise: the
+/// namespace becoming (un)advertisable, or its path or cost moving.
 struct Watched {
 	broadcast: crate::broadcast::Consumer,
+	/// Demand edges re-price the serving route without a route change (see
+	/// [`crate::broadcast::outgoing_cost`]), so the loop watches this too.
+	demand: crate::broadcast::Demand,
+	/// What the peer currently holds for this namespace, or [`Advert::None`] while it
+	/// is filtered. A selection that differs is worth a wire message; one that matches
+	/// is not.
+	sent: Advert,
+	/// When demand drained while a zero cost was advertised. Restoring the cold cost is
+	/// deferred by [`crate::broadcast::COST_LINGER`] past this, so viewer churn does not
+	/// flap routing across the mesh; demand returning in the window cancels it.
+	idle_at: Option<web_async::time::Instant>,
 	/// Set once the broadcast errors, so a dead entry stops being polled.
 	dead: bool,
 }
 
 impl Watched {
 	fn new(broadcast: crate::broadcast::Consumer) -> Self {
-		Self { broadcast, dead: false }
+		Self {
+			demand: broadcast.demand(),
+			broadcast,
+			sent: Advert::None,
+			idle_at: None,
+			dead: false,
+		}
 	}
+}
+
+/// What to advertise to this peer for one broadcast.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Advert {
+	/// Nothing: every route loops through the peer or us, or none is announced.
+	#[default]
+	None,
+	/// The namespace, with no routing information: the peer did not negotiate the MoQ
+	/// Cluster extension, so there is nowhere to put a path or a cost.
+	Plain,
+	/// The namespace, with the path it traversed and that path's accumulated cost.
+	Cluster(cluster::Advert),
+}
+
+impl Advert {
+	/// Whether the peer should hold this namespace at all.
+	fn wanted(&self) -> bool {
+		!matches!(self, Self::None)
+	}
+
+	/// The parameters to put on the wire, as the message structs carry them.
+	fn params(&self) -> Option<cluster::Advert> {
+		match self {
+			Self::Cluster(advert) => Some(advert.clone()),
+			_ => None,
+		}
+	}
+
+	/// Whether this advertisement carries a zero cost, which is what the serving-route
+	/// discount produces and what the linger is watching to restore.
+	fn discounted(&self) -> bool {
+		matches!(self, Self::Cluster(advert) if advert.cost == 0)
+	}
+}
+
+/// What a watched broadcast reported.
+enum Watch {
+	/// Its route table or demand moved; re-run the selection.
+	Changed(crate::PathOwned),
+	/// Demand just drained while a discounted cost was advertised. The cold cost is
+	/// restored once the linger expires, not now, so viewer churn does not flap routing.
+	Idle(crate::PathOwned),
 }
 
 /// What woke an announce-forwarding loop.
@@ -34,8 +94,13 @@ enum NamespaceEvent {
 	Closed(Result<(), Error>),
 	/// An origin-level (un)announce, `None` once the announce stream ends.
 	Update(Option<crate::announce::Update>),
-	/// A watched broadcast's route table changed; re-decide `advertisable`.
+	/// A watched broadcast's route table or demand moved; re-run the selection.
 	Routes(crate::PathOwned),
+	/// A watched broadcast's demand drained; start its linger.
+	Idle(crate::PathOwned),
+	/// The linger sleep fired without an expired entry (it was canceled, or a later
+	/// deadline remains): restart the turn so the next deadline arms a fresh sleep.
+	Linger,
 }
 
 #[derive(Clone)]
@@ -44,11 +109,16 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
 	control: Control,
-	// The identity assigned to the peer by `Client::with_peer_origin`.
-	// moq-transport has no exclude-hop on the wire, so this is the only signal
-	// for filtering announces that would echo the peer's own broadcasts back at
-	// it; the data plane is covered by the exclusion the client set on `origin`.
+	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
+	// origin we consume so it matches the local relay identity across every session,
+	// which is what makes cross-session loop detection work.
+	self_origin: crate::Origin,
+	// The identity assigned to the peer by `Client::with_peer_origin`, used when the
+	// peer declares none itself. A peer that negotiates the MoQ Cluster extension
+	// declares its own, which wins.
 	peer_origin: Option<crate::Origin>,
+	// What the peer declared in its SETUP, filled when that stream is read.
+	peer_setup: cluster::PeerSetup,
 	version: Version,
 }
 
@@ -58,50 +128,158 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		peer_origin: Option<crate::Origin>,
+		peer_setup: cluster::PeerSetup,
 		version: Version,
 	) -> Self {
 		Self {
 			session,
+			self_origin: *origin,
 			origin,
 			control,
 			peer_origin,
+			peer_setup,
 			version,
 		}
 	}
 
-	/// Whether an announced broadcast should be advertised to this peer: it needs
-	/// at least one advertisable route that doesn't flow through the identity the
-	/// peer was assigned. A same-path source can splice in or detach without an
-	/// origin-level (un)announce, silently flipping this, so the announce loops
-	/// watch every announced broadcast's route table (see [`Watched`]) and
-	/// advertise or withdraw the namespace when eligibility changes.
-	fn advertisable(&self, broadcast: &crate::broadcast::Consumer) -> bool {
-		let Some(peer) = self.peer_origin else {
-			return true;
-		};
-		broadcast
-			.routes()
-			.iter()
-			.any(|route| route.announce && !route.hops.contains(&peer))
+	/// What the peer declared in its SETUP, or the default (extension off) on a version
+	/// that cannot negotiate it.
+	///
+	/// Blocks until the peer's SETUP arrives, because the extension changes the NAMESPACE
+	/// encoding: nothing can be advertised until we know whether the peer speaks it.
+	async fn peer(&self) -> cluster::Peer {
+		match cluster::supported(self.version) {
+			true => self.peer_setup.get().await,
+			false => cluster::Peer::default(),
+		}
 	}
 
-	/// Poll every watched broadcast for a route-table change, reporting the first
-	/// changed path. Only populated when the peer has an assigned identity;
-	/// without one `advertisable` is constant and there is nothing to watch.
-	fn poll_watched(watched: &mut HashMap<crate::PathOwned, Watched>, waiter: &kio::Waiter) -> Poll<crate::PathOwned> {
+	/// The origin to serve this peer's subscriptions from: sources whose hop chain flows
+	/// through the peer are excluded, so a subscription is never handed data that already
+	/// flowed through the subscriber.
+	///
+	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
+	/// keeps advertised paths truthful and prevents subscription cycles of any length.
+	async fn serving_origin(&self) -> origin::Consumer {
+		let peer = self.peer().await;
+		match self.exclude(&peer) {
+			crate::Origin::UNKNOWN => self.origin.clone(),
+			exclude => self.origin.clone().excluding(exclude),
+		}
+	}
+
+	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
+	///
+	/// A peer that negotiated the extension declares its own; otherwise fall back to
+	/// one the caller assigned out of band (`Client::with_peer_origin`), since
+	/// moq-transport itself carries no identity.
+	fn exclude(&self, peer: &cluster::Peer) -> crate::Origin {
+		match peer.negotiated() {
+			true => peer.exclude(),
+			false => self.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
+		}
+	}
+
+	/// Pick what to advertise to this peer for one broadcast.
+	///
+	/// A same-path source can splice in or detach without an origin-level (un)announce,
+	/// and demand can re-price the serving route in place, so the announce loops watch
+	/// every announced broadcast (see [`Watched`]) and re-run this when either moves.
+	fn select(&self, watch: &Watched, peer: &cluster::Peer) -> Advert {
+		let routes = watch.broadcast.routes();
+		let exclude = self.exclude(peer);
+
+		for (route, serving) in crate::broadcast::advertisable_routes(&routes, self.self_origin, exclude) {
+			if !peer.negotiated() {
+				return Advert::Plain;
+			}
+
+			let cost = crate::broadcast::outgoing_cost(&watch.demand, route, serving);
+			// Our own Hop ID is always the last entry, so the peer reconstructs the full
+			// path. A chain with no room left is a loop in all but name; try the next route.
+			match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
+				Ok(advert) => return Advert::Cluster(advert),
+				Err(_) => continue,
+			}
+		}
+
+		Advert::None
+	}
+
+	/// Poll every watched broadcast for a change in what it should advertise, reporting
+	/// the first changed path.
+	///
+	/// Two things move it: the route table (a failover, a standby attaching, a
+	/// re-price) and demand on the serving route (which switches the discount on and
+	/// off). `fired` is the linger deadline's verdict for this turn.
+	fn poll_watched(
+		watched: &mut HashMap<crate::PathOwned, Watched>,
+		fired: Option<web_async::time::Instant>,
+		waiter: &kio::Waiter,
+	) -> Poll<Watch> {
 		for (path, watch) in watched.iter_mut() {
 			if watch.dead {
 				continue;
 			}
 			match watch.broadcast.poll_routes_changed(waiter) {
-				Poll::Ready(Ok(())) => return Poll::Ready(path.clone()),
+				Poll::Ready(Ok(())) => return Poll::Ready(Watch::Changed(path.clone())),
 				// A dying broadcast has no further route changes; the origin's
 				// unannounce is what removes the entry.
-				Poll::Ready(Err(_)) => watch.dead = true,
+				Poll::Ready(Err(_)) => {
+					watch.dead = true;
+					continue;
+				}
 				Poll::Pending => {}
+			}
+
+			// Only a cost-carrying advertisement re-prices on demand; a plain one has
+			// nowhere to put the discount, so watching demand would fire forever.
+			if !matches!(watch.sent, Advert::Cluster(_)) {
+				continue;
+			}
+
+			if !watch.sent.discounted() {
+				// Not discounted: demand arriving is what applies the discount.
+				if let Poll::Ready(Ok(())) = watch.demand.poll_used(waiter) {
+					return Poll::Ready(Watch::Changed(path.clone()));
+				}
+				continue;
+			}
+
+			match watch.idle_at {
+				// Demand coming back within the linger cancels the restore; fall through
+				// to re-arm the unused watch.
+				Some(_) if watch.demand.is_used() => watch.idle_at = None,
+				// The linger expired: restore the cold cost.
+				Some(at) if fired.is_some_and(|now| now >= at + crate::broadcast::COST_LINGER) => {
+					watch.idle_at = None;
+					return Poll::Ready(Watch::Changed(path.clone()));
+				}
+				// Still lingering: the sleep owns the wakeup, and `poll_used` re-arms
+				// the cancel check above.
+				Some(_) => {
+					let _ = watch.demand.poll_used(waiter);
+					continue;
+				}
+				None => {}
+			}
+
+			// Demand just drained. Start the linger rather than re-pricing now, and end
+			// the turn so the caller arms a deadline for it.
+			if let Poll::Ready(Ok(())) = watch.demand.poll_unused(waiter) {
+				return Poll::Ready(Watch::Idle(path.clone()));
 			}
 		}
 		Poll::Pending
+	}
+
+	/// The earliest deferred cost-restore across every watched broadcast.
+	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<web_async::time::Instant> {
+		watched
+			.values()
+			.filter_map(|watch| watch.idle_at)
+			.min()
+			.map(|at| at + crate::broadcast::COST_LINGER)
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
@@ -203,7 +381,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `origin::Dynamic` handler if one is registered.
-		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
+		let broadcast = match self
+			.serving_origin()
+			.await
+			.request_broadcast(&msg.track_namespace)
+			.await
+		{
 			Ok(broadcast) => broadcast,
 			Err(_) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
@@ -589,9 +772,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut announced = self.origin.announced();
 		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
 
+		// The extension changes what a PUBLISH_NAMESPACE carries, so nothing can be
+		// advertised until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+		let mut linger = kio::time::Deadline::new();
+
 		loop {
-			// Wait for the next (un)announce or watched route change, bailing once
-			// the session dies.
+			linger.set(Self::linger_deadline(&watched));
+
+			// Wait for the next (un)announce, watched route change, or cost restore,
+			// bailing once the session dies.
 			let event = {
 				let mut closed = std::pin::pin!(self.session.closed());
 				kio::wait(|waiter| {
@@ -601,28 +791,33 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					if let Poll::Ready(update) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(update));
 					}
-					Self::poll_watched(&mut watched, waiter).map(NamespaceEvent::Routes)
+					// Stamped per poll rather than kept: the turn always ends in a
+					// `Ready` below once it fires, so it never has to survive.
+					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+					match Self::poll_watched(&mut watched, fired, waiter) {
+						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
+						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
+						Poll::Pending => {}
+					}
+					match fired.is_some() {
+						true => Poll::Ready(NamespaceEvent::Linger),
+						false => Poll::Pending,
+					}
 				})
 				.await
 			};
 
 			match event {
 				NamespaceEvent::Closed(res) => return res,
+				NamespaceEvent::Linger => continue,
 				NamespaceEvent::Update(None) => break,
 				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
 					let suffix = path.to_owned();
 					match broadcast {
 						Some(broadcast) => {
-							let advertisable = self.advertisable(&broadcast);
-							if self.peer_origin.is_some() {
-								watched.insert(suffix.clone(), Watched::new(broadcast));
-							}
-							// A broadcast with no route avoiding the peer would only echo
-							// its own content back; skip it. The watch re-decides when its
-							// route table changes.
-							if advertisable {
-								self.announce_namespace(suffix, &mut namespace_streams).await?;
-							}
+							watched.insert(suffix.clone(), Watched::new(broadcast));
+							self.sync_publish_namespace(&suffix, &peer, &mut watched, &mut namespace_streams)
+								.await?;
 						}
 						None => {
 							watched.remove(&suffix);
@@ -633,12 +828,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				}
 				NamespaceEvent::Routes(suffix) => {
-					let Some(watch) = watched.get(&suffix) else { continue };
-					let advertisable = self.advertisable(&watch.broadcast);
-					if advertisable && !namespace_streams.contains_key(&suffix) {
-						self.announce_namespace(suffix, &mut namespace_streams).await?;
-					} else if !advertisable && namespace_streams.contains_key(&suffix) {
-						self.unannounce_namespace(&suffix, &mut namespace_streams).await;
+					self.sync_publish_namespace(&suffix, &peer, &mut watched, &mut namespace_streams)
+						.await?;
+				}
+				NamespaceEvent::Idle(suffix) => {
+					if let Some(watch) = watched.get_mut(&suffix) {
+						watch.idle_at = Some(web_async::time::Instant::now());
 					}
 				}
 			}
@@ -653,10 +848,119 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// Bring the peer's view of one namespace in line with the current selection.
+	///
+	/// A namespace that became advertisable opens its stream, one that stopped tears it
+	/// down, and one whose path or cost moved is updated by re-sending PUBLISH_NAMESPACE
+	/// **on the stream that already carries it**: opening a second stream would leave
+	/// two claiming one namespace and let the superseded one retract its replacement.
+	async fn sync_publish_namespace(
+		&self,
+		suffix: &crate::PathOwned,
+		peer: &cluster::Peer,
+		watched: &mut HashMap<crate::PathOwned, Watched>,
+		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
+	) -> Result<(), Error> {
+		let Some(watch) = watched.get(suffix) else {
+			return Ok(());
+		};
+		let advert = self.select(watch, peer);
+		if advert == watch.sent {
+			return Ok(());
+		}
+
+		match (advert.wanted(), namespace_streams.get_mut(suffix)) {
+			(false, _) => self.unannounce_namespace(suffix, namespace_streams).await,
+			(true, Some((request_id, stream))) => {
+				tracing::debug!(broadcast = %self.origin.absolute(suffix), "announce update");
+				let request_id = *request_id;
+				stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishNamespace {
+						request_id,
+						track_namespace: suffix.as_path(),
+						cluster: advert.params(),
+					})
+					.await?;
+			}
+			(true, None) => {
+				self.announce_namespace(suffix.clone(), advert.params(), namespace_streams)
+					.await?
+			}
+		}
+
+		// The peer can reject a fresh PUBLISH_NAMESPACE, which leaves no stream behind.
+		// Record what it actually holds, so a later route change retries instead of
+		// believing the namespace is already advertised.
+		let sent = match namespace_streams.contains_key(suffix) {
+			true => advert,
+			false => Advert::None,
+		};
+		if let Some(watch) = watched.get_mut(suffix) {
+			watch.sent = sent;
+		}
+		Ok(())
+	}
+
+	/// Bring the peer's view of one namespace in line with the current selection, on the
+	/// SUBSCRIBE_NAMESPACE response stream.
+	///
+	/// A namespace whose path or cost moved is updated by re-sending NAMESPACE on the
+	/// same stream; the receiver treats the repeat as a replacement rather than a
+	/// duplicate. One that stopped being advertisable gets a NAMESPACE_DONE, which
+	/// carries no cluster state of its own.
+	async fn sync_namespace<W: SendStream>(
+		&self,
+		suffix: &crate::PathOwned,
+		peer: &cluster::Peer,
+		watched: &mut HashMap<crate::PathOwned, Watched>,
+		writer: &mut Writer<W, Version>,
+	) -> Result<(), Error> {
+		let Some(watch) = watched.get(suffix) else {
+			return Ok(());
+		};
+		let advert = self.select(watch, peer);
+		if advert == watch.sent {
+			return Ok(());
+		}
+
+		let absolute = self.origin.absolute(suffix).to_owned();
+		match (advert.wanted(), watch.sent.wanted()) {
+			(true, _) => {
+				tracing::debug!(broadcast = %absolute, "namespace");
+				writer.encode(&ietf::Namespace::ID).await?;
+				writer
+					.encode(&ietf::Namespace {
+						suffix: suffix.as_path(),
+						cluster: advert.params(),
+					})
+					.await?;
+			}
+			(false, true) => {
+				tracing::debug!(broadcast = %absolute, "namespace_done");
+				writer.encode(&ietf::NamespaceDone::ID).await?;
+				writer
+					.encode(&ietf::NamespaceDone {
+						suffix: suffix.as_path(),
+					})
+					.await?;
+			}
+			// Never advertised and still not advertisable: nothing to say.
+			(false, false) => {}
+		}
+
+		if let Some(watch) = watched.get_mut(suffix) {
+			watch.sent = advert;
+		}
+		Ok(())
+	}
+
 	/// Open a bidi stream and send a PublishNamespace, recording the stream for later teardown.
 	async fn announce_namespace(
 		&self,
 		suffix: crate::PathOwned,
+		cluster: Option<cluster::Advert>,
 		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
 	) -> Result<(), Error> {
 		let absolute = self.origin.absolute(&suffix).to_owned();
@@ -671,6 +975,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.encode(&ietf::PublishNamespace {
 				request_id,
 				track_namespace: suffix.as_path(),
+				cluster,
 			})
 			.await?;
 
@@ -782,12 +1087,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
 			_ => {
 				let mut announced = origin.announced();
-
-				// Namespaces actually sent to the peer, so a filtered announce (no
-				// route avoiding the peer's assigned identity) never gets a dangling
-				// NamespaceDone.
-				let mut sent: std::collections::HashSet<crate::PathOwned> = std::collections::HashSet::new();
 				let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+
+				// The extension changes the NAMESPACE encoding, so nothing can be sent
+				// until the peer's SETUP says whether it speaks it.
+				let peer = self.peer().await;
+				let mut linger = kio::time::Deadline::new();
 
 				// Send initial NAMESPACE messages for currently active namespaces.
 				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
@@ -796,23 +1101,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							.strip_prefix(&prefix)
 							.expect("origin returned invalid path")
 							.to_owned();
-						let advertisable = self.advertisable(&broadcast);
-						if self.peer_origin.is_some() {
-							watched.insert(suffix.clone(), Watched::new(broadcast));
-						}
-						if !advertisable {
-							continue;
-						}
-						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
-						sent.insert(suffix.clone());
-						stream.writer.encode(&ietf::Namespace::ID).await?;
-						stream.writer.encode(&ietf::Namespace { suffix }).await?;
+						watched.insert(suffix.clone(), Watched::new(broadcast));
+						self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
+							.await?;
 					}
 				}
 
-				// Stream updates (origin (un)announces plus watched route changes),
-				// bailing if the peer closes its side first.
+				// Stream updates (origin (un)announces plus watched route and demand
+				// changes), bailing if the peer closes its side first.
 				loop {
+					linger.set(Self::linger_deadline(&watched));
+
 					let event = {
 						let mut closed = std::pin::pin!(stream.reader.closed());
 						kio::wait(|waiter| {
@@ -822,13 +1121,23 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							if let Poll::Ready(update) = announced.poll_next(waiter) {
 								return Poll::Ready(NamespaceEvent::Update(update));
 							}
-							Self::poll_watched(&mut watched, waiter).map(NamespaceEvent::Routes)
+							let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+							match Self::poll_watched(&mut watched, fired, waiter) {
+								Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
+								Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
+								Poll::Pending => {}
+							}
+							match fired.is_some() {
+								true => Poll::Ready(NamespaceEvent::Linger),
+								false => Poll::Pending,
+							}
 						})
 						.await
 					};
 
 					match event {
 						NamespaceEvent::Closed(res) => return res,
+						NamespaceEvent::Linger => continue,
 						NamespaceEvent::Update(None) => {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
@@ -838,29 +1147,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								.strip_prefix(&prefix)
 								.expect("origin returned invalid path")
 								.to_owned();
-							let absolute = origin.absolute(&path).to_owned();
 
 							match broadcast {
 								Some(broadcast) => {
-									let advertisable = self.advertisable(&broadcast);
-									if self.peer_origin.is_some() {
-										watched.insert(suffix.clone(), Watched::new(broadcast));
-									}
-									// Filtered now, but the watch re-decides when the
-									// route table changes.
-									if !advertisable {
-										continue;
-									}
-									tracing::debug!(broadcast = %absolute, "namespace");
-									sent.insert(suffix.clone());
-									stream.writer.encode(&ietf::Namespace::ID).await?;
-									stream.writer.encode(&ietf::Namespace { suffix }).await?;
+									watched.insert(suffix.clone(), Watched::new(broadcast));
+									self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
+										.await?;
 								}
 								None => {
-									watched.remove(&suffix);
 									// Only close out namespaces the peer actually saw.
-									if sent.remove(&suffix) {
-										tracing::debug!(broadcast = %absolute, "namespace_done");
+									let sent = watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
+									if sent {
+										tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
 										stream.writer.encode(&ietf::NamespaceDone::ID).await?;
 										stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
 									}
@@ -868,17 +1166,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							}
 						}
 						NamespaceEvent::Routes(suffix) => {
-							let Some(watch) = watched.get(&suffix) else { continue };
-							let advertisable = self.advertisable(&watch.broadcast);
-							if advertisable && !sent.contains(&suffix) {
-								tracing::debug!(broadcast = %suffix, "namespace");
-								sent.insert(suffix.clone());
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							} else if !advertisable && sent.remove(&suffix) {
-								tracing::debug!(broadcast = %suffix, "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
+								.await?;
+						}
+						NamespaceEvent::Idle(suffix) => {
+							if let Some(watch) = watched.get_mut(&suffix) {
+								watch.idle_at = Some(web_async::time::Instant::now());
 							}
 						}
 					}
@@ -920,6 +1213,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
+			cluster::PeerSetup::default(),
 			Version::Draft16,
 		);
 
@@ -946,11 +1240,13 @@ mod tests {
 		// Broadcast visibility is deferred until the executor ticks.
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
+		let peer = cluster::Peer::default();
+
 		let echoed = consumer.get_broadcast("from/peer").unwrap();
-		assert!(!publisher.advertisable(&echoed));
+		assert!(!publisher.select(&Watched::new(echoed), &peer).wanted());
 
 		let local = consumer.get_broadcast("from/us").unwrap();
-		assert!(publisher.advertisable(&local));
+		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -971,6 +1267,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
+			cluster::PeerSetup::default(),
 			Version::Draft16,
 		);
 
