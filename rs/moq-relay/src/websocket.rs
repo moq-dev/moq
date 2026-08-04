@@ -134,9 +134,8 @@ where
 /// `Sec-WebSocket-Protocol` response header as a failure anyway, so upgrading
 /// only wastes a connection that has already agreed on nothing.
 ///
-/// A client that offers no subprotocol at all is left alone. That's the legacy
-/// route, predating this binding, which upgrades and negotiates the moq version
-/// over moq-lite SETUP instead.
+/// A client that offers no subprotocol at all is left alone: it upgrades and
+/// negotiates the moq version over moq-lite SETUP instead.
 fn negotiate_subprotocol(ws: WebSocketUpgrade) -> Result<WebSocketUpgrade, StatusCode> {
 	let supported = supported_subprotocols();
 
@@ -459,7 +458,7 @@ mod tests {
 	/// `None`. Hand-rolled because a qmux client always appends the bare
 	/// fallbacks we support, so it can't express "offers only what we reject".
 	async fn handshake_status(addr: std::net::SocketAddr, protocols: Option<&str>) -> String {
-		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 		let mut request = format!(
 			"GET / HTTP/1.1\r\n\
@@ -477,18 +476,17 @@ mod tests {
 		let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
 		stream.write_all(request.as_bytes()).await.expect("write request");
 
-		// The status line is in the first read; we never read the body.
-		let mut buf = [0u8; 1024];
-		let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+		// Read through the newline rather than taking whatever one read returns:
+		// TCP is free to split the status line across segments. We never read
+		// past it, so the headers and body stay in the socket.
+		let mut stream = BufReader::new(stream);
+		let mut status = Vec::new();
+		tokio::time::timeout(Duration::from_secs(5), stream.read_until(b'\n', &mut status))
 			.await
 			.expect("server did not respond")
 			.expect("read response");
 
-		String::from_utf8_lossy(&buf[..n])
-			.lines()
-			.next()
-			.expect("empty response")
-			.to_owned()
+		String::from_utf8_lossy(&status).trim_end().to_owned()
 	}
 
 	/// A client offering only subprotocols we don't support must fail the
