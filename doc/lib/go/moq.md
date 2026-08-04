@@ -71,10 +71,14 @@ client, err := moq.Dial(ctx, "https://relay.example.com",
         Initial:    500 * time.Millisecond,
         Multiplier: 2,
         Max:        10 * time.Second,
-        Timeout:    0, // retry forever
+        Timeout:    moq.RetryForever,
     }),
 )
 ```
+
+Every `Backoff` field is optional and its zero value means the default (1s / 2 /
+30s / 5m), so `moq.Backoff{Max: 5 * time.Second}` changes only the ceiling.
+`moq.RetryForever` as `Timeout` is how you ask for unlimited retries.
 
 `Session.Status` reports each transition (`StatusConnected`, `StatusDisconnected`,
 `StatusMigrating`), and `Session.Closed` returns only once the connection stops
