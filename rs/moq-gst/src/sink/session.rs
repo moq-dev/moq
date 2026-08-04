@@ -142,7 +142,7 @@ impl Session {
 		// from a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let mut config = moq_native::ClientConfig::default();
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
-		config.backoff.timeout = std::time::Duration::ZERO;
+		config.backoff.timeout = Some(std::time::Duration::ZERO);
 		let client = config.init()?.with_publisher(origin.consume());
 		let reconnect = client.connect(settings.url.clone());
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.

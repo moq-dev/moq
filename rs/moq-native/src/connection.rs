@@ -9,76 +9,91 @@ use url::Url;
 use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
-#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+///
+/// Every field is optional so a value set in TOML survives the CLI re-parse that
+/// follows it; read them through the accessors, which supply the defaults.
+#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Backoff {
-	/// Initial delay before first reconnect attempt.
+	/// Initial delay before first reconnect attempt. Defaults to 1s.
 	///
 	/// Doubles as the bar a session must stay up to count as healthy, so it is
 	/// floored at 50ms: at zero every session would look healthy and the retry
 	/// pacing would collapse.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-initial",
 		long,
-		default_value = "1s",
 		env = "MOQ_BACKOFF_INITIAL",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub initial: Duration,
+	pub initial: Option<Duration>,
 
-	/// Multiplier applied to delay after each failure.
-	#[arg(id = "backoff-multiplier", long, default_value_t = 2, env = "MOQ_BACKOFF_MULTIPLIER")]
-	pub multiplier: u32,
+	/// Multiplier applied to delay after each failure. Defaults to 2.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "backoff-multiplier", long, env = "MOQ_BACKOFF_MULTIPLIER")]
+	pub multiplier: Option<u32>,
 
-	/// Maximum delay between reconnect attempts.
+	/// Maximum delay between reconnect attempts. Defaults to 30s.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-max",
 		long,
-		default_value = "30s",
 		env = "MOQ_BACKOFF_MAX",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub max: Duration,
+	pub max: Option<Duration>,
 
-	/// Maximum time to spend retrying before giving up.
+	/// Maximum time to spend retrying before giving up. Defaults to 5m.
+	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
 	/// unlimited retries.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-timeout",
 		long,
-		default_value = "5m",
 		env = "MOQ_BACKOFF_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub timeout: Duration,
-}
-
-impl Default for Backoff {
-	fn default() -> Self {
-		Self {
-			initial: Duration::from_secs(1),
-			multiplier: 2,
-			max: Duration::from_secs(30),
-			timeout: Duration::from_secs(300),
-		}
-	}
+	pub timeout: Option<Duration>,
 }
 
 impl Backoff {
+	/// The configured initial delay, or the default.
+	pub fn initial(&self) -> Duration {
+		self.initial.unwrap_or(DEFAULT_INITIAL)
+	}
+
+	/// The configured multiplier, or the default.
+	pub fn multiplier(&self) -> u32 {
+		self.multiplier.unwrap_or(DEFAULT_MULTIPLIER)
+	}
+
+	/// The configured delay ceiling, or the default.
+	pub fn max(&self) -> Duration {
+		self.max.unwrap_or(DEFAULT_MAX)
+	}
+
+	/// The configured give-up window, or the default. Zero retries forever.
+	pub fn timeout(&self) -> Duration {
+		self.timeout.unwrap_or(DEFAULT_TIMEOUT)
+	}
+
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
 	/// [`timeout`](Self::timeout), so when the loop does give up its error surfaces
 	/// before the broadcasts tear down. A zero timeout retries forever, so the
 	/// broadcasts linger forever too.
 	pub fn linger(&self) -> Duration {
-		match self.timeout.is_zero() {
+		let timeout = self.timeout();
+		match timeout.is_zero() {
 			true => Duration::MAX,
-			false => self.timeout.saturating_add(Duration::from_secs(1)),
+			false => timeout.saturating_add(Duration::from_secs(1)),
 		}
 	}
 }
@@ -217,6 +232,12 @@ pub struct GoawayConfig {
 	pub handover: Option<Duration>,
 }
 
+/// Defaults for the [`Backoff`] knobs, applied by its accessors when a field is unset.
+const DEFAULT_INITIAL: Duration = Duration::from_secs(1);
+const DEFAULT_MULTIPLIER: u32 = 2;
+const DEFAULT_MAX: Duration = Duration::from_secs(30);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Floor for the retry delay, which also sets the bar for calling a session
 /// healthy. Small enough to stay out of the way of a fast config, large enough
 /// that a session closed on sight never clears it.
@@ -242,11 +263,11 @@ struct Pacing {
 
 impl Pacing {
 	fn new(backoff: &Backoff) -> Self {
-		let initial = backoff.initial.max(MIN_BACKOFF);
+		let initial = backoff.initial().max(MIN_BACKOFF);
 		Self {
 			initial,
-			max: backoff.max.max(initial),
-			multiplier: backoff.multiplier.max(1),
+			max: backoff.max().max(initial),
+			multiplier: backoff.multiplier().max(1),
 		}
 	}
 
@@ -296,6 +317,70 @@ struct State {
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
 	session: Option<moq_net::Session>,
+}
+
+/// The producer side of everything a [`Connection`] handle can observe.
+///
+/// These three travel together through the loop, and every lifecycle transition
+/// touches more than one of them: leaving a session live in [`State`] while the
+/// bandwidth estimates reset (or the reverse) is how a handle ends up reporting a
+/// session that is already gone. Keeping them behind one value means a transition
+/// is one call rather than a block to remember.
+struct Shared {
+	state: kio::Producer<State>,
+	send_bw: BandwidthProducer,
+	recv_bw: BandwidthProducer,
+}
+
+impl Shared {
+	/// A session is live and serving.
+	fn connected(&self, session: &moq_net::Session) {
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Connected);
+			state.version = Some(session.version());
+			state.session = Some(session.clone());
+		}
+	}
+
+	/// The peer sent a GOAWAY: the session in [`State`] keeps serving while its
+	/// replacement is dialed, so only the status moves.
+	fn migrating(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Migrating);
+		}
+	}
+
+	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
+	/// and drops the estimates that belonged to it.
+	fn disconnected(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Disconnected);
+			state.version = None;
+			state.session = None;
+		}
+		let _ = self.send_bw.set(None);
+		let _ = self.recv_bw.set(None);
+	}
+
+	/// Record the error the loop gave up with, for [`Connection::closed`].
+	fn failed(&self, err: Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.error = Some(err);
+		}
+	}
+}
+
+impl Drop for Shared {
+	fn drop(&mut self) {
+		// The loop is over, including when its task was aborted out from under it.
+		// Whoever still holds a consumer keeps the last state readable, so a
+		// [`ConnectionStatsReader`] outliving every [`Connection`] would otherwise
+		// keep the session clone parked here alive and the transport open with
+		// nothing left able to reach it. Releasing it here is not a close: a caller
+		// holding a session of their own keeps it, which is the whole point of
+		// [`Connection::session`].
+		self.disconnected();
+	}
 }
 
 /// A cloneable read handle for the live connection stats of a [`Connection`].
@@ -351,16 +436,19 @@ impl Connection {
 
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
-			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url).await {
+			let shared = Shared {
+				state: producer,
+				send_bw,
+				recv_bw,
+			};
+			if let Err(err) = Self::run(&shared, client, url).await {
 				// In one-shot mode the session ending is the expected lifecycle, and
 				// its close reason arrives here; don't dress it up as a loop failure.
 				match reconnect {
 					true => tracing::error!(%err, "connection loop exited"),
 					false => tracing::info!(%err, "connection closed"),
 				}
-				if let Ok(mut state) = producer.write() {
-					state.error = Some(err);
-				}
+				shared.failed(err);
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
@@ -373,13 +461,7 @@ impl Connection {
 		}
 	}
 
-	async fn run(
-		state: &kio::Producer<State>,
-		send_bw: &BandwidthProducer,
-		recv_bw: &BandwidthProducer,
-		client: Client,
-		url: Url,
-	) -> crate::Result<()> {
+	async fn run(shared: &Shared, client: Client, url: Url) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.clone();
 		let pacing = Pacing::new(&backoff);
@@ -395,8 +477,8 @@ impl Connection {
 		let mut draining: Option<Draining> = None;
 
 		loop {
-			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
-				let timeout = backoff.timeout;
+			let timeout = backoff.timeout();
+			if !timeout.is_zero() && retry_start.elapsed() > timeout {
 				let msg = match last_error {
 					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
 					None => format!("reconnect timed out after {timeout:?}"),
@@ -409,11 +491,7 @@ impl Connection {
 			match client.dial(url.clone()).await {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
-					if let Ok(mut state) = state.write() {
-						state.status = Some(Status::Connected);
-						state.version = Some(session.version());
-						state.session = Some(session.clone());
-					}
+					shared.connected(&session);
 
 					let connected = tokio::time::Instant::now();
 					// Wait for the session to end, forwarding its bandwidth estimates into the
@@ -421,7 +499,7 @@ impl Connection {
 					// connection, and draining any predecessor left over from a migration.
 					// One-shot mode ignores GOAWAY: it cannot dial the replacement, and the
 					// peer force-closes at its own deadline anyway.
-					let ended = run_session(send_bw, recv_bw, &session, &mut draining, client.reconnect).await;
+					let ended = run_session(shared, &session, &mut draining, client.reconnect).await;
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
@@ -437,9 +515,7 @@ impl Connection {
 						// replacement at a group boundary. Tearing it down here instead
 						// would drop every group published until the replacement caught up.
 						tracing::info!(%url, "upstream GOAWAY; migrating");
-						if let Ok(mut state) = state.write() {
-							state.status = Some(Status::Migrating);
-						}
+						shared.migrating();
 						// Retire any predecessor first: overwriting would drop its deadline
 						// on the floor and leave it holding the connection open.
 						if let Some(mut old) = draining.take() {
@@ -463,19 +539,12 @@ impl Connection {
 						tracing::warn!(%url, ?delay, "peer redirected immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
-						sleep_draining(delay, &mut draining).await;
+						sleep_draining(delay, &mut draining, shared).await;
 						delay = pacing.next(delay);
 						continue;
 					}
 
-					if let Ok(mut state) = state.write() {
-						state.status = Some(Status::Disconnected);
-						state.version = None;
-						state.session = None;
-					}
-					// The estimates belonged to the now-closed session; reset until the next connect.
-					let _ = send_bw.set(None);
-					let _ = recv_bw.set(None);
+					shared.disconnected();
 
 					// One-shot mode: the session ending ends the connection. Its close
 					// reason is the terminal error, mirroring `moq_net::Session::closed`.
@@ -524,7 +593,12 @@ impl Connection {
 			}
 
 			tracing::warn!(%url, ?delay, "reconnecting after backoff");
-			tokio::time::sleep(delay).await;
+			// Drain-aware: a GOAWAY off a healthy session continues straight to the
+			// replacement dial, so a predecessor can still be draining when that dial
+			// fails and lands here. A plain sleep would stop enforcing its handover
+			// until some later dial succeeded, holding an upstream that asked to drain
+			// open for the whole retry window, or forever with `--backoff-timeout=0`.
+			sleep_draining(delay, &mut draining, shared).await;
 			delay = pacing.next(delay);
 		}
 	}
@@ -721,13 +795,18 @@ impl Draining {
 /// after a successful connect, so a replacement that takes several backoff rounds
 /// to reach would leave the old session holding its connection well past the
 /// handover window.
-async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
+async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
 	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
 	kio::wait(|waiter| {
 		if let Some(old) = draining.as_mut()
 			&& old.poll(waiter)
 		{
 			*draining = None;
+			// Nothing is serving now: the predecessor closed or overstayed its
+			// handover, and the replacement is still a dial away. Leaving the state
+			// on `Migrating` would keep handing callers a session that is already
+			// closed, with its stats and version, until the next connect overwrote it.
+			shared.disconnected();
 		}
 		waiter.poll_future(sleep.as_mut())
 	})
@@ -743,8 +822,7 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
 /// polled through the waiter's own waker. `migrate` is whether a GOAWAY ends this session's
 /// tenure ([`Ended::Goaway`]); when false the arm isn't polled and only a close returns.
 async fn run_session(
-	send_bw: &BandwidthProducer,
-	recv_bw: &BandwidthProducer,
+	shared: &Shared,
 	session: &moq_net::Session,
 	draining: &mut Option<Draining>,
 	migrate: bool,
@@ -756,8 +834,8 @@ async fn run_session(
 	tokio::pin!(closed);
 
 	kio::wait(|waiter| {
-		poll_forward(&mut send, send_bw, waiter);
-		poll_forward(&mut recv, recv_bw, waiter);
+		poll_forward(&mut send, &shared.send_bw, waiter);
+		poll_forward(&mut recv, &shared.recv_bw, waiter);
 
 		// Retire the predecessor once it closes or overstays its handover window.
 		if let Some(old) = draining.as_mut()
@@ -819,6 +897,45 @@ fn terminal(state: &State) -> Error {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The same clobber guard for [`Backoff`]. A bare field with a `default_value`
+	/// would be rewritten by the CLI re-parse that follows a TOML load, silently
+	/// resetting retry tuning that was only ever configured in the file.
+	#[test]
+	fn cli_does_not_clobber_toml_backoff() {
+		use clap::Parser;
+
+		#[derive(Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			backoff: Backoff,
+		}
+
+		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
+		let mut parsed = Wrapper::parse_from(["test"]);
+		parsed.backoff.initial = Some(Duration::from_secs(7));
+		parsed.backoff.multiplier = Some(5);
+		parsed.backoff.max = Some(Duration::from_secs(11));
+		parsed.backoff.timeout = Some(Duration::ZERO);
+		parsed.update_from(["test"]);
+
+		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(7)));
+		assert_eq!(parsed.backoff.multiplier, Some(5));
+		assert_eq!(parsed.backoff.max, Some(Duration::from_secs(11)));
+		assert_eq!(parsed.backoff.timeout, Some(Duration::ZERO), "0 means retry forever");
+
+		// Unset stays unset, so the accessors supply the documented defaults.
+		let parsed = Wrapper::parse_from(["test"]);
+		assert_eq!(parsed.backoff.initial, None);
+		assert_eq!(parsed.backoff.initial(), DEFAULT_INITIAL);
+		assert_eq!(parsed.backoff.multiplier(), DEFAULT_MULTIPLIER);
+		assert_eq!(parsed.backoff.max(), DEFAULT_MAX);
+		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
+
+		// And a flag still lands where the merge can see it.
+		let parsed = Wrapper::parse_from(["test", "--backoff-initial", "3s"]);
+		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(3)));
+	}
 
 	/// The clap+TOML clobber guard: both `GoawayConfig` fields are `Option<T>` with
 	/// no `default_value`, so a TOML-configured value survives the CLI re-parse
@@ -993,7 +1110,7 @@ mod tests {
 		// A zero initial would also make every session look healthy, resetting the
 		// give-up window forever.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO,
+			initial: Some(Duration::ZERO),
 			..Default::default()
 		});
 		assert_eq!(pacing.initial, MIN_BACKOFF);
@@ -1001,7 +1118,7 @@ mod tests {
 
 		// A cap below the floor would clamp the delay straight back down.
 		let pacing = Pacing::new(&Backoff {
-			max: Duration::ZERO,
+			max: Some(Duration::ZERO),
 			..Default::default()
 		});
 		assert_eq!(pacing.max, pacing.initial);
@@ -1009,16 +1126,16 @@ mod tests {
 
 		// A zero multiplier would shrink it to nothing on the second attempt.
 		let pacing = Pacing::new(&Backoff {
-			multiplier: 0,
+			multiplier: Some(0),
 			..Default::default()
 		});
 		assert_eq!(pacing.next(pacing.initial), pacing.initial);
 
 		// All at once: still paced.
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::ZERO,
-			max: Duration::ZERO,
-			multiplier: 0,
+			initial: Some(Duration::ZERO),
+			max: Some(Duration::ZERO),
+			multiplier: Some(0),
 			..Default::default()
 		});
 		let mut delay = pacing.initial;
@@ -1032,9 +1149,9 @@ mod tests {
 	#[test]
 	fn pacing_grows_to_the_cap() {
 		let pacing = Pacing::new(&Backoff {
-			initial: Duration::from_millis(100),
-			multiplier: 2,
-			max: Duration::from_millis(400),
+			initial: Some(Duration::from_millis(100)),
+			multiplier: Some(2),
+			max: Some(Duration::from_millis(400)),
 			..Default::default()
 		});
 
@@ -1047,10 +1164,10 @@ mod tests {
 	#[test]
 	fn test_backoff_default() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Duration::from_secs(1));
-		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Duration::from_secs(30));
-		assert_eq!(backoff.timeout, Duration::from_secs(300));
+		assert_eq!(backoff.initial(), Duration::from_secs(1));
+		assert_eq!(backoff.multiplier(), 2);
+		assert_eq!(backoff.max(), Duration::from_secs(30));
+		assert_eq!(backoff.timeout(), Duration::from_secs(300));
 	}
 
 	/// The linger outlives the give-up timeout (so the reconnect error surfaces
@@ -1058,10 +1175,10 @@ mod tests {
 	#[test]
 	fn test_backoff_linger() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.linger(), backoff.timeout + Duration::from_secs(1));
+		assert_eq!(backoff.linger(), backoff.timeout() + Duration::from_secs(1));
 
 		let unlimited = Backoff {
-			timeout: Duration::ZERO,
+			timeout: Some(Duration::ZERO),
 			..Backoff::default()
 		};
 		assert_eq!(unlimited.linger(), Duration::MAX);
