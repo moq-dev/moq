@@ -551,6 +551,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
 			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated())?;
+			// Junk inside the declared size would otherwise be applied silently, which
+			// is the one decode path that skipped the check the others make.
+			if !data.is_empty() {
+				return Err(Error::WrongSize);
+			}
 
 			// The stream is the advertisement, so an update on it must name the same one.
 			// Applying a mismatched update would retarget this path's routing with

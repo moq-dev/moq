@@ -72,15 +72,18 @@ pub fn start<S: web_transport_trait::Session>(
 	} = config;
 
 	let driver = async move {
+		// Our own Hop ID, taken from whichever origin the caller actually supplied so
+		// every session out of this process stamps the same one and cross-session loop
+		// detection works. Read BEFORE the placeholders below: their ids are random and
+		// identify nothing, so declaring one would compare incoming paths against an
+		// identity no other session shares.
+		let self_origin = self_origin(publish.as_ref(), subscribe.as_ref());
+
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
 		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Origin::random()).consume());
 		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Origin::random()));
-
-		// Our own Hop ID: the identity of the origin we publish from, so every session
-		// out of this process stamps the same one and cross-session loop detection works.
-		let self_origin = *publish;
 
 		// The peer's cluster options. Seeded now when its SETUP was already read
 		// (a gated server accept), and filled by the uni loop otherwise. A version that
@@ -338,6 +341,18 @@ pub struct PeerSetup<S: web_transport_trait::Session> {
 
 	/// The MoQ Cluster options it declared (see [`cluster`]).
 	pub cluster: cluster::Peer,
+}
+
+/// The Hop ID this session declares and detects loops against.
+///
+/// Both halves of a session share the process's origin identity, so either one names
+/// it; the publish half is just the usual one to be set. A session with neither half
+/// has no content to route, so a throwaway id is all it can offer.
+fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Origin {
+	publish
+		.map(|origin| **origin)
+		.or_else(|| subscribe.map(|origin| **origin))
+		.unwrap_or_else(Origin::random)
 }
 
 /// Server (draft-17+): read the peer's SETUP off its uni stream before starting the
@@ -696,5 +711,26 @@ mod tests {
 			0,
 			"PUBLISH_NAMESPACE must wait for a SUBSCRIBE_NAMESPACE"
 		);
+	}
+
+	/// The declared Hop ID must be the caller's own origin, whichever half carries it.
+	///
+	/// A subscribe-only session (an ingest that publishes nothing) still routes, so
+	/// declaring the placeholder's random id would compare incoming paths against an
+	/// identity no other session out of this process shares, and a route returning
+	/// here would never be recognized as a loop.
+	#[test]
+	fn the_hop_id_comes_from_whichever_origin_the_caller_set() {
+		let ours = crate::Origin::new(42).unwrap();
+
+		let publish = crate::origin::Info::new(ours).produce();
+		assert_eq!(self_origin(Some(&publish.consume()), None), ours, "the publish half");
+
+		let subscribe = crate::origin::Info::new(ours).produce();
+		assert_eq!(self_origin(None, Some(&subscribe)), ours, "the subscribe half alone");
+
+		// Neither half: nothing to route, so any id will do as long as it is ours.
+		let publish = crate::origin::Info::new(ours).produce();
+		assert_eq!(self_origin(Some(&publish.consume()), Some(&subscribe)), ours);
 	}
 }
