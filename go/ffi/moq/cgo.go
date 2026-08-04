@@ -18,6 +18,10 @@ package moq
 // when moq-ffi gains a dependency. The moq-video / moq-audio entries cover
 // hardware H.264/H.265 encode and decode plus capture, and openh264 (the software
 // H.264 fallback) is C++.
+//
+// ScreenCaptureKit sets a macOS 12.3 floor for darwin builds: it does not exist
+// before then, so a binary linking it fails to load on 12.0-12.2 even when it
+// never captures a screen. The Swift packages declare the same floor.
 
 /*
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64 -lmoq_ffi -ldl -lm -lpthread -lstdc++
