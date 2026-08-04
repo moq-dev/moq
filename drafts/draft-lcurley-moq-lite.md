@@ -1009,7 +1009,7 @@ Subscriber properties (see [SUBSCRIBE](#subscribe)) are the opposite: they fan *
 
 **Epoch**:
 The generation these properties belong to (see [ANNOUNCE_START](#announce-start)), or 0 when the publisher assigns none.
-Subscribers key their TRACK_INFO cache by it and MAY echo it in SUBSCRIBE and FETCH to pin the same generation.
+Subscribers key their TRACK_INFO cache by it, and a SUBSCRIBE or FETCH that will parse frames against a cached non-zero Epoch MUST send that Epoch: no data response identifies the generation actually served, so an unpinned request can silently cross a replacement.
 
 **Publisher Priority**:
 The publisher's priority for this Track, represented as a u8, used only to resolve ties between subscriptions of equal subscriber priority.
