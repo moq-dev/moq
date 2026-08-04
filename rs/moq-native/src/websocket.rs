@@ -246,7 +246,16 @@ impl Listener {
 		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
 		// doesn't restrict; qmux by default also accepts legacy clients that
 		// only offer a bare wire-format ALPN (today's moq-net clients still do).
-		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
+		//
+		// Keep-alive matches the dial side (5s ping / 30s deadline, parity with QUIC's
+		// idle timeout) and is on by default because the accept side is where its
+		// absence costs something: a peer whose host crashed sends no FIN, and a
+		// WebSocket has no idle timeout of its own, so the session -- and every
+		// broadcast announced through it -- would survive until the OS probes the
+		// socket hours later. `qmux::Server` defaults it OFF, so this must be explicit.
+		let server = qmux::Server::new()
+			.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
+			.with_keep_alive(qmux::KeepAlive::default());
 		Ok(Self { listener, server })
 	}
 

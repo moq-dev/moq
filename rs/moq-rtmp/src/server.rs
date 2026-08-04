@@ -66,7 +66,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_REQUESTS: usize = 128;
 
 /// Maximum gap between media packets from an accepted publisher.
-const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Note this bounds the PUBLISH direction only; a play session has no equivalent,
+/// which is why [`configure_socket`]'s keepalive is not optional.
+pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.
@@ -331,9 +334,16 @@ impl Server {
 /// Nagle off for latency, keepalive on so a dead peer is reaped rather than
 /// pinning a broadcast forever.
 ///
-/// Both are best-effort: a failure to set either is logged and ignored rather
+/// [`Server`] applies this to every socket it accepts. Call it yourself when you own
+/// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
+/// thing bounding a play session whose viewer vanished without a FIN while its
+/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// nothing reads or writes on a silent play socket, so it would otherwise live until
+/// the process restarted, holding its origin consumer open.
+///
+/// Both options are best-effort: a failure to set either is logged and ignored rather
 /// than dropping an otherwise healthy connection.
-pub(crate) fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
+pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 	// Nagle off: RTMP is latency-sensitive and we write whole packets.
 	if let Err(err) = stream.set_nodelay(true) {
 		tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");
