@@ -412,11 +412,16 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 		|| code == moq_net::Error::Evicted.to_code()
 }
 
-/// [`is_cache_miss`] through the moq-mux error layers a group read surfaces (plain transport, or
-/// wrapped in a CMAF decode error).
+/// [`is_cache_miss`] through every layer a group read wraps a transport error in.
+///
+/// A read goes through the track's container, and each one re-wraps differently: plain transport
+/// for a raw read, `Hang` for the legacy container (what the JS and native encoders publish), and
+/// `Cmaf` for fMP4. Miss one and that container's evictions surface as server errors while the
+/// others 404, so keep this exhaustive over the wrappings rather than the codecs.
 fn is_cache_miss_mux(err: &moq_mux::Error) -> bool {
 	match err {
 		moq_mux::Error::Moq(err) => is_cache_miss(err),
+		moq_mux::Error::Hang(hang::Error::Moq(err)) => is_cache_miss(err),
 		moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(err)) => is_cache_miss(err),
 		_ => false,
 	}
@@ -500,12 +505,22 @@ mod tests {
 
 	#[test]
 	fn a_cache_miss_is_recognised_through_the_mux_error_layers() {
-		// A group read surfaces the same miss wrapped one or two layers deep, and both wrappings
-		// have to keep resolving to 404.
+		// A group read wraps the same miss differently per container, and every wrapping has to
+		// resolve to 404. The `Hang` one is the shape a real relay produces most: it is what the
+		// legacy container (the JS and native encoders) surfaces, and an eviction there read as
+		// `mux: hang: moq error: remote error: code=13` -- a 500 -- until it was classified here.
 		let remote = moq_net::Error::Remote(moq_net::Error::NotFound.to_code());
 		assert!(is_cache_miss_mux(&moq_mux::Error::Moq(remote.clone())));
+		assert!(is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(
+			remote.clone()
+		))));
 		assert!(is_cache_miss_mux(&moq_mux::Error::Cmaf(
 			moq_mux::container::fmp4::Error::Moq(remote)
 		)));
+
+		// A genuine failure stays a failure through the same wrappings.
+		let denied = moq_net::Error::Unauthorized;
+		assert!(!is_cache_miss_mux(&moq_mux::Error::Moq(denied.clone())));
+		assert!(!is_cache_miss_mux(&moq_mux::Error::Hang(hang::Error::Moq(denied))));
 	}
 }
