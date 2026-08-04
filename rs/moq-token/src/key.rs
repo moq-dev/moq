@@ -424,8 +424,7 @@ impl Key {
 	pub(crate) fn is_private(&self) -> bool {
 		match &self.material {
 			KeyMaterial::OCT { .. } => true,
-			KeyMaterial::EC { d, .. } => d.is_some(),
-			KeyMaterial::OKP { d, .. } => d.is_some(),
+			KeyMaterial::EC { d, .. } | KeyMaterial::OKP { d, .. } => d.is_some(),
 			KeyMaterial::RSA { private, .. } => private.is_some(),
 		}
 	}

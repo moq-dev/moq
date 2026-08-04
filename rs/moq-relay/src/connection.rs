@@ -69,19 +69,19 @@ impl Connection {
 		};
 		if !authorized {
 			let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-			let wanted = role.map(|role| role.as_str()).unwrap_or("any");
+			let wanted = role.map_or("any", moq_net::Role::as_str);
 			anyhow::bail!("token does not grant {wanted} access to {}", token.root);
 		}
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, publish = %publish.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(%transport, ?role, tier = %token.tier, root = %token.root, subscribe = %subscribe.allowed().map(moq_net::Path::as_str).collect::<Vec<_>>().join(","), "subscriber accepted");
 			}
 			_ => unreachable!("authorized above guarantees at least one origin"),
 		}

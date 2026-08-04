@@ -188,7 +188,7 @@ impl Task {
 	/// Publishes stats broadcasts and writes a frame per drain. Runs until
 	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
 	async fn run(self, weak: Weak<Keepalive>) {
-		let node = self.node.as_ref().map(|p| p.as_str());
+		let node = self.node.as_ref().map(moq_net::Path::as_str);
 		let mut groups: HashMap<PathOwned, GroupPublisher> = HashMap::new();
 
 		if self.depth == 0 {

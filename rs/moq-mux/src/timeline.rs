@@ -82,7 +82,7 @@ impl Producer {
 		Ok(Self {
 			inner: moq_json::stream::Producer::new(net, config),
 			track,
-			timescale: Timescale::new(Timeline::default_timescale() as u64).expect("default timescale is nonzero"),
+			timescale: Timescale::new(u64::from(Timeline::default_timescale())).expect("default timescale is nonzero"),
 			granularity: DEFAULT_GRANULARITY,
 			wall: Arc::new(Mutex::new(None)),
 		})
@@ -116,9 +116,9 @@ impl Producer {
 			.duration_since(SystemTime::UNIX_EPOCH)
 			.unwrap_or_default()
 			.as_millis();
-		let scale = self.timescale.as_u64() as u128;
+		let scale = u128::from(self.timescale.as_u64());
 		let pts_units = pts.as_scale(self.timescale);
-		let moq_millis = unix_millis.saturating_sub(hang::catalog::MOQ_EPOCH_UNIX_MILLIS as u128);
+		let moq_millis = unix_millis.saturating_sub(u128::from(hang::catalog::MOQ_EPOCH_UNIX_MILLIS));
 		let moq_units = moq_millis * scale / 1000;
 		*self.wall.lock().unwrap() = Some(moq_units.saturating_sub(pts_units) as u64);
 	}
@@ -220,7 +220,7 @@ impl<E: RecordExt> Consumer<E> {
 
 		Ok(Self {
 			inner: moq_json::stream::Consumer::new(track, config),
-			timescale: Timescale::new(section.timescale as u64)
+			timescale: Timescale::new(u64::from(section.timescale))
 				.map_err(|_| crate::Error::InvalidTimescale(section.timescale))?,
 		})
 	}

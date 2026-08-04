@@ -182,11 +182,11 @@ impl Web {
 		// through to the landing page, and the client's WS fallback is silently
 		// dead.
 		#[cfg(feature = "websocket")]
-		let app = match self.config.ws {
-			true => app
-				.route("/", axum::routing::any(crate::websocket::serve_ws))
-				.route("/{*path}", axum::routing::any(crate::websocket::serve_ws)),
-			false => app,
+		let app = if self.config.ws {
+			app.route("/", axum::routing::any(crate::websocket::serve_ws))
+				.route("/{*path}", axum::routing::any(crate::websocket::serve_ws))
+		} else {
+			app
 		};
 
 		app.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
@@ -506,7 +506,11 @@ async fn serve_announced(
 		}
 	}
 
-	Ok(broadcasts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"))
+	Ok(broadcasts
+		.iter()
+		.map(ToString::to_string)
+		.collect::<Vec<_>>()
+		.join("\n"))
 }
 
 /// Serve the given group for a given track
@@ -517,7 +521,7 @@ async fn serve_fetch(
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
-	let mut path: Vec<&str> = path.split("/").collect();
+	let mut path: Vec<&str> = path.split('/').collect();
 	let track = path.pop().unwrap().to_string();
 
 	// We need at least a broadcast and a track.

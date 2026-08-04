@@ -12,9 +12,10 @@ const PRIVATE_MODE: u32 = 0o600;
 /// A public key keeps the default permissions, since it's meant to be handed around and often
 /// gets read by a relay running as a different user.
 pub(crate) fn write(path: &Path, contents: &str, private: bool) -> io::Result<()> {
-	match private {
-		true => write_private(path, contents),
-		false => std::fs::write(path, contents),
+	if private {
+		write_private(path, contents)
+	} else {
+		std::fs::write(path, contents)
 	}
 }
 
