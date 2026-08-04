@@ -140,8 +140,15 @@ pub enum Error {
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
 
+	/// A `Cmaf` rendition's init passes through from the catalog at its own scale, so
+	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
 	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
 	TimescaleOverride,
+
+	/// `mdhd.timescale` is a 32-bit field, so a larger scale would reach the init segment
+	/// truncated while the fragments kept the full value, putting them on different timelines.
+	#[error("timescale {0} does not fit the 32-bit mdhd field")]
+	TimescaleTooLarge(u64),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -315,7 +322,12 @@ pub(crate) fn encode(
 	}
 
 	let sequence_number = group.frame_count() as u32;
-	let bytes = encode_fragment(track_id, timescale, sequence_number, frames)?;
+	let info = FragmentInfo {
+		track_id,
+		timescale,
+		sequence_number,
+	};
+	let bytes = encode_fragment(info, frames)?;
 	// The fragment may carry several samples; the net frame's timestamp is the
 	// fragment's earliest presentation time so a relay can order it.
 	let mut writer = group.create_frame(moq_net::frame::Info {
@@ -328,6 +340,20 @@ pub(crate) fn encode(
 	Ok(())
 }
 
+/// Which track a fragment belongs to, and where it sits in that track.
+///
+/// Bundled rather than passed positionally because `track_id` and `sequence_number` are both
+/// `u32`, so a swapped pair would still compile.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FragmentInfo {
+	/// The `tfhd` track id, which must match the one the init segment declares.
+	pub track_id: u32,
+	/// The track's media timescale, which every timestamp is re-expressed at.
+	pub timescale: moq_net::Timescale,
+	/// The `mfhd` sequence number, informative only.
+	pub sequence_number: u32,
+}
+
 /// Encode a single-traf moof+mdat fragment anchored at its own first frame.
 ///
 /// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
@@ -335,24 +361,18 @@ pub(crate) fn encode(
 /// timeline across calls wants [`encode_fragment_at`] instead.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub(crate) fn encode_fragment(
-	track_id: u32,
-	timescale: moq_net::Timescale,
-	sequence_number: u32,
-	frames: &[Frame],
-) -> Result<Bytes> {
+pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<Bytes> {
 	let Some(base_dts) = frames.first().map(|f| f.timestamp) else {
 		return Ok(Bytes::new());
 	};
-	encode_fragment_at(track_id, timescale, sequence_number, base_dts, frames)
+	encode_fragment_at(info, base_dts, frames)
 }
 
 /// Encode a single-traf moof+mdat fragment whose decode timeline starts at `base_dts`.
 ///
 /// Performs the two-pass encoding required by ISO/IEC 14496-12: encode once
 /// to learn the moof size, then again with `trun.data_offset` pointing past
-/// the moof and mdat header. `base_dts` is re-expressed at the caller-supplied
-/// `timescale`.
+/// the moof and mdat header. `base_dts` is re-expressed at the track's timescale.
 ///
 /// Frames arrive in decode order carrying presentation timestamps. DTS is authored by
 /// accumulating sample durations from `base_dts`, and each sample stores `PTS - DTS` as its
@@ -360,13 +380,13 @@ pub(crate) fn encode_fragment(
 /// fragment holds a single sample.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
-pub(crate) fn encode_fragment_at(
-	track_id: u32,
-	timescale: moq_net::Timescale,
-	sequence_number: u32,
-	base_dts: Timestamp,
-	frames: &[Frame],
-) -> Result<Bytes> {
+pub(crate) fn encode_fragment_at(info: FragmentInfo, base_dts: Timestamp, frames: &[Frame]) -> Result<Bytes> {
+	let FragmentInfo {
+		track_id,
+		timescale,
+		sequence_number,
+	} = info;
+
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
@@ -511,7 +531,13 @@ pub(crate) fn synthesize_video_trak(
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
-	Ok(build_video_trak(track_id, timescale, sample_entry, width, height))
+	Ok(build_video_trak(
+		track_id,
+		mdhd_timescale(timescale)?,
+		sample_entry,
+		width,
+		height,
+	))
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
@@ -621,7 +647,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 
-	Ok(build_audio_trak(track_id, timescale, sample_entry))
+	Ok(build_audio_trak(track_id, mdhd_timescale(timescale)?, sample_entry))
 }
 
 /// All-ones: the ISO/IEC 14496-12 spelling of "duration not known up front", which is always
@@ -631,7 +657,7 @@ const UNKNOWN_DURATION: u64 = u64::MAX;
 
 fn build_video_trak(
 	track_id: u32,
-	timescale: u64,
+	timescale: u32,
 	sample_entry: mp4_atom::Codec,
 	width: u16,
 	height: u16,
@@ -650,7 +676,7 @@ fn build_video_trak(
 	}
 }
 
-fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
+fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
 	mp4_atom::Trak {
 		tkhd: mp4_atom::Tkhd {
 			track_id,
@@ -702,10 +728,19 @@ pub(crate) fn encode_init(
 	Ok(Bytes::from(buf))
 }
 
-fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
+/// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.
+///
+/// `moq_net::Timescale` permits the whole QUIC varint range, so a caller-supplied scale can be
+/// wider than the field. Truncating would put the init segment and the fragments on different
+/// timelines, silently, so refuse instead.
+fn mdhd_timescale(timescale: u64) -> Result<u32> {
+	u32::try_from(timescale).map_err(|_| Error::TimescaleTooLarge(timescale))
+}
+
+fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
 	mp4_atom::Mdia {
 		mdhd: mp4_atom::Mdhd {
-			timescale: timescale as u32,
+			timescale,
 			..Default::default()
 		},
 		hdlr: mp4_atom::Hdlr {
@@ -767,6 +802,14 @@ mod tests {
 
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
+	}
+
+	fn info(track_id: u32, timescale: moq_net::Timescale, sequence_number: u32) -> FragmentInfo {
+		FragmentInfo {
+			track_id,
+			timescale,
+			sequence_number,
+		}
 	}
 
 	// An AAC-LC / 44.1 kHz / stereo AudioSpecificConfig, the catalog `description` shape.
@@ -884,7 +927,7 @@ mod tests {
 			duration: Some(ts(33_333)),
 		}];
 
-		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);
@@ -915,7 +958,7 @@ mod tests {
 			},
 		];
 
-		let fragment = encode_fragment(1, timescale, 0, &input).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), input.len());
@@ -944,15 +987,19 @@ mod tests {
 			},
 		];
 
-		let self_anchored = encode_fragment(1, timescale, 3, &input).unwrap();
-		let explicit = encode_fragment_at(1, timescale, 3, input[0].timestamp, &input).unwrap();
+		let self_anchored = encode_fragment(info(1, timescale, 3), &input).unwrap();
+		let explicit = encode_fragment_at(info(1, timescale, 3), input[0].timestamp, &input).unwrap();
 		assert_eq!(self_anchored, explicit);
 	}
 
 	#[test]
 	fn encode_fragment_at_empty_frames_is_empty_bytes() {
 		let timescale = moq_net::Timescale::new(1_000_000).unwrap();
-		assert!(encode_fragment_at(1, timescale, 0, ts(1_000), &[]).unwrap().is_empty());
+		assert!(
+			encode_fragment_at(info(1, timescale, 0), ts(1_000), &[])
+				.unwrap()
+				.is_empty()
+		);
 	}
 
 	// One fragment per frame, the shape a fetch-on-demand origin storing one object per encoded
@@ -986,8 +1033,12 @@ mod tests {
 		let mut base_dts = ts(0);
 		let mut fragments = Vec::new();
 		for (sequence, frame) in input.iter().enumerate() {
-			let fragment =
-				encode_fragment_at(1, timescale, sequence as u32, base_dts, std::slice::from_ref(frame)).unwrap();
+			let fragment = encode_fragment_at(
+				info(1, timescale, sequence as u32),
+				base_dts,
+				std::slice::from_ref(frame),
+			)
+			.unwrap();
 			base_dts = base_dts.checked_add(frame.duration.unwrap()).unwrap();
 			fragments.push(fragment);
 		}
@@ -1019,7 +1070,7 @@ mod tests {
 			duration: None,
 		}];
 
-		let fragment = encode_fragment(1, timescale, 0, &frames).unwrap();
+		let fragment = encode_fragment(info(1, timescale, 0), &frames).unwrap();
 		let frames = decode(fragment, timescale).unwrap();
 
 		assert_eq!(frames.len(), 1);

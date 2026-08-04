@@ -556,12 +556,12 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
 	let timescale = moq_net::Timescale::new(track.timescale)?;
-	Ok(crate::container::fmp4::encode_fragment(
-		track.track_id,
+	let info = crate::container::fmp4::FragmentInfo {
+		track_id: track.track_id,
 		timescale,
-		seq,
-		&frames,
-	)?)
+		sequence_number: seq,
+	};
+	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.

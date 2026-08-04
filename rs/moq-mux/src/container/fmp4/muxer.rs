@@ -106,11 +106,14 @@ impl Muxer {
 	/// working in 90 kHz ticks.
 	///
 	/// Errors for a `Cmaf` rendition, whose init segment passes through from the catalog at its
-	/// own scale: overriding would leave the init and the fragments on different timelines.
+	/// own scale: overriding would leave the init and the fragments on different timelines. Also
+	/// errors above `u32::MAX`, which the init segment's `mdhd.timescale` field cannot hold.
 	pub fn with_timescale(mut self, timescale: moq_net::Timescale) -> crate::Result<Self> {
 		if matches!(self.catalog_container(), CatalogContainer::Cmaf { .. }) {
 			return Err(Error::TimescaleOverride.into());
 		}
+		// Reject here rather than at init(), so the failure lands on the call that is wrong.
+		super::mdhd_timescale(timescale.as_u64())?;
 		self.timescale = timescale;
 		Ok(self)
 	}
@@ -235,13 +238,12 @@ impl Muxer {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
 		let frames = infer_missing_durations(frames, None, self.default_frame);
-		Ok(super::encode_fragment_at(
-			TRACK_ID,
-			self.timescale,
-			sequence,
-			base_dts,
-			&frames,
-		)?)
+		let info = super::FragmentInfo {
+			track_id: TRACK_ID,
+			timescale: self.timescale,
+			sequence_number: sequence,
+		};
+		Ok(super::encode_fragment_at(info, base_dts, &frames)?)
 	}
 }
 
@@ -384,6 +386,37 @@ mod tests {
 		};
 		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+	}
+
+	// mdhd.timescale is 32 bits, but moq_net::Timescale spans the whole QUIC varint range. A
+	// wider scale used to truncate into the init while the fragments kept the full value,
+	// silently putting them on different timelines.
+	#[test]
+	fn with_timescale_rejects_a_scale_too_large_for_mdhd() {
+		let too_large = moq_net::Timescale::new(u64::from(u32::MAX) + 1).unwrap();
+		// Muxer isn't Debug, so match the Result rather than unwrap_err() it.
+		assert!(matches!(
+			video_muxer().with_timescale(too_large),
+			Err(crate::Error::Cmaf(Error::TimescaleTooLarge(_)))
+		));
+
+		// The largest scale the field can hold is still accepted.
+		let largest = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let muxer = video_muxer().with_timescale(largest).unwrap();
+		assert_eq!(muxer.timescale(), largest);
+	}
+
+	// The same truncation was reachable without with_timescale at all: the video timescale is
+	// `framerate * 1000`, so an absurd catalog framerate overflows the field on its own.
+	#[test]
+	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
+		let err = Muxer::video(&config).unwrap().init().unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TimescaleTooLarge(_))),
+			"got {err:?}"
+		);
 	}
 
 	// A Cmaf rendition's init passes through from the catalog at its own scale, so an override
