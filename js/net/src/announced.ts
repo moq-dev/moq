@@ -223,7 +223,10 @@ export class Broadcast {
 				// session; without discovery there is no stream, so watch the session itself.
 				// A consumed broadcast is a path-scoped handle, not a subscription, so its own
 				// `closed` says nothing about whether the path exists or the session is alive.
-				void conn.closed.then(() => {
+				// Raced against the run's teardown so a closed handle isn't retained until the
+				// session ends; the cleanup above has already cleared `active` in that case.
+				effect.spawn(async () => {
+					await Promise.race([effect.cancel, conn.closed]);
 					if (this.#active.peek() === blind) this.#active.set(undefined);
 				});
 				return;

@@ -209,7 +209,8 @@ export class Subscriber {
 			// The publisher behind each path we currently advertise, so a restart can tell a
 			// route change (same publisher, subscriptions resume) from a replacement (a new
 			// generation took the path, nothing carries over). At most one advertisement per
-			// path is current, so the path is the key.
+			// path is current, and every announce on this stream shares `prefix`, so the
+			// suffix is the key.
 			const advertised = new Map<Path.Valid, Origin | undefined>();
 
 			// Receive announce updates (for Draft03, this includes initial state)

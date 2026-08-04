@@ -1078,3 +1078,39 @@ test("integration: a blind handle goes offline when the session dies", async () 
 
 	watched.close();
 });
+
+// The handle and the consume-cache eviction are protocol-agnostic, but their implementations
+// are not: each subscriber resolves announcements its own way. These mirror the lite cases.
+test("integration: ietf blind handle picks up a publisher that arrives late", async () => {
+	const pair = createMockTransportPair("");
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url, { version: Ietf.Version.DRAFT_14 }),
+	]);
+
+	const watched = client.announcedBroadcast(Path.from("later"));
+	const blind = await waitFor(watched.active, (b) => b !== undefined);
+	if (!blind) throw new Error("expected a blind consumer");
+
+	// Rejects with 404 rather than resetting the whole handle.
+	await expect(blind.subscribe("video").readString()).rejects.toThrow();
+	expect(watched.active.peek()).toBe(blind);
+
+	const producer = new BroadcastProducer();
+	const serving = (async () => {
+		for (;;) {
+			const req = await producer.requested();
+			if (!req) break;
+			req.accept().writeString("ietf-late");
+		}
+	})();
+	server.publish(Path.from("later"), producer);
+
+	expect(await blind.subscribe("video").readString()).toBe("ietf-late");
+
+	watched.close();
+	producer.close();
+	await serving;
+	client.close();
+	server.close();
+});
