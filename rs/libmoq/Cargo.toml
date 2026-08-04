@@ -27,6 +27,9 @@ moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
 # Enable the NVENC / VAAPI / NVDEC hardware codecs (default-off at the workspace level).
 moq-video = { workspace = true, features = ["nvenc", "vaapi", "nvdec"] }
+# Blocking on `encode::Sink` from the synchronous C entry points; see
+# `video::block_on` for why not a tokio helper.
+pollster = "1.0"
 serde_json = "1"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }

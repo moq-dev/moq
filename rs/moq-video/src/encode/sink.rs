@@ -30,18 +30,16 @@ use threaded::Inner;
 /// An [`Encoder`](super::Encoder) confined to one thread, driven from anywhere.
 ///
 /// Same shape as [`Encoder`](super::Encoder), one method at a time, except that
-/// [`encode`](Self::encode) takes the frame by value (it may cross a thread) and
-/// each call comes in an `async` flavor and a `blocking_` one. Reach for this
-/// instead of an `Encoder` whenever the encoder outlives a single thread's
-/// stack: an object shared across threads, an FFI handle, a task that migrates
-/// between executor workers. An `Encoder` you build, drive, and drop inside one
-/// function needs none of it.
+/// the calls are `async` and [`encode`](Self::encode) takes the frame by value
+/// (it may cross a thread). Reach for this instead of an `Encoder` whenever the
+/// encoder outlives a single thread's stack: an object shared across threads, an
+/// FFI handle, a task that migrates between executor workers. An `Encoder` you
+/// build, drive, and drop inside one function needs none of it.
 ///
-/// The two flavors differ only in how the caller waits for the encode thread.
-/// Use `async` from a task, so the executor keeps its worker while the codec
-/// runs, and `blocking_` from a plain thread (an FFI boundary that has to return
-/// a result synchronously). The `blocking_` calls park the calling thread and
-/// need no runtime.
+/// Awaiting rather than blocking is the point: the codec runs on its own thread,
+/// so the executor keeps its worker while a slow hardware encoder works through
+/// a frame. A caller with no executor to yield to (an FFI boundary that must
+/// return a result synchronously) blocks on these futures itself.
 pub struct Sink(Inner);
 
 impl Sink {
@@ -50,11 +48,6 @@ impl Sink {
 	/// surfaces here rather than on the first frame.
 	pub async fn open(config: &Config) -> Result<Self, Error> {
 		Ok(Self(Inner::open(config).await?))
-	}
-
-	/// [`open`](Self::open) for a synchronous caller.
-	pub fn blocking_open(config: &Config) -> Result<Self, Error> {
-		pollster::block_on(Self::open(config))
 	}
 
 	/// The encoder name in use, e.g. `"mediafoundation"`.
@@ -67,8 +60,8 @@ impl Sink {
 	///
 	/// Queued behind the frames already in flight rather than applied to
 	/// whichever one the codec happens to be on, so it keys the next frame you
-	/// pass to [`encode`](Self::encode). Never blocks, so there is no `async`
-	/// flavor.
+	/// pass to [`encode`](Self::encode). Only queues the request, so unlike the
+	/// rest there is nothing to await.
 	pub fn keyframe(&mut self) {
 		self.0.keyframe();
 	}
@@ -82,21 +75,11 @@ impl Sink {
 		self.0.encode(frame).await
 	}
 
-	/// [`encode`](Self::encode) for a synchronous caller.
-	pub fn blocking_encode(&mut self, frame: Frame) -> Result<Vec<Encoded>, Error> {
-		pollster::block_on(self.encode(frame))
-	}
-
 	/// Retune the encoder, waiting for the backend's verdict. See
 	/// [`Encoder::set_bitrate`](super::Encoder::set_bitrate) for what a failure
 	/// means (not fatal: stop adapting, keep encoding).
 	pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		self.0.set_bitrate(bitrate).await
-	}
-
-	/// [`set_bitrate`](Self::set_bitrate) for a synchronous caller.
-	pub fn blocking_set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
-		pollster::block_on(self.set_bitrate(bitrate))
 	}
 
 	/// Drain the codec, returning every access unit it was still holding, and
@@ -108,11 +91,6 @@ impl Sink {
 	/// or its last pictures never reach a subscriber.
 	pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
 		self.0.finish().await
-	}
-
-	/// [`finish`](Self::finish) for a synchronous caller.
-	pub fn blocking_finish(self) -> Result<Vec<Encoded>, Error> {
-		pollster::block_on(self.finish())
 	}
 }
 
@@ -369,7 +347,9 @@ mod tests {
 	fn the_codec_stays_on_one_thread_however_it_is_driven() {
 		let _ = probe::take();
 
-		let sink = Arc::new(Mutex::new(Some(Sink::blocking_open(&probe_config()).unwrap())));
+		let sink = Arc::new(Mutex::new(Some(
+			pollster::block_on(Sink::open(&probe_config())).unwrap(),
+		)));
 
 		// Drive it the way an FFI handle gets driven: a fresh caller thread every
 		// time, none of them the thread that opened it.
@@ -380,8 +360,8 @@ mod tests {
 				let mut guard = sink.lock().unwrap();
 				let sink = guard.as_mut().unwrap();
 				sink.keyframe();
-				sink.blocking_encode(gray(index)).unwrap();
-				sink.blocking_set_bitrate(500_000 + index).unwrap();
+				pollster::block_on(sink.encode(gray(index))).unwrap();
+				pollster::block_on(sink.set_bitrate(500_000 + index)).unwrap();
 				std::thread::current().id()
 			});
 			callers.push(caller.join().unwrap());
@@ -390,7 +370,7 @@ mod tests {
 		// ...and finished, so dropped, from yet another.
 		let closer = std::thread::spawn(move || {
 			let sink = sink.lock().unwrap().take().unwrap();
-			let tail = sink.blocking_finish().unwrap();
+			let tail = pollster::block_on(sink.finish()).unwrap();
 			(std::thread::current().id(), tail)
 		});
 		let (closer, tail) = closer.join().unwrap();

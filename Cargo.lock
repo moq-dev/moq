@@ -4099,6 +4099,7 @@ dependencies = [
  "moq-native",
  "moq-net",
  "moq-video",
+ "pollster",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",

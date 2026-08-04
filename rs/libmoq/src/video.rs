@@ -169,6 +169,19 @@ pub struct Video {
 	frames: NonZeroSlab<VideoFrame>,
 }
 
+/// Wait out an encode-thread round trip from a C entry point.
+///
+/// The C ABI hands back a status code, so there is no executor to yield to and
+/// this is where [`Sink`](moq_video::encode::Sink)'s futures stop. Blocking is
+/// also what paces the caller: a raw frame is megabytes, so a publish free to run
+/// ahead of the codec would queue pictures without bound.
+///
+/// `pollster` rather than a tokio helper because those panic when the calling
+/// thread is driving a runtime, which the one dispatching a callback is.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+	pollster::block_on(future)
+}
+
 /// An encoder paired with the track publishing its output, plus the pixel format
 /// its caller feeds it (fixed at publish time, so a frame carries only pixels and
 /// a timestamp).
@@ -238,7 +251,7 @@ impl Video {
 	) -> Result<Id, Error> {
 		// Open the encoder first: a config this machine can't encode should fail
 		// without leaving a track advertised that will never carry frames.
-		let encoder = moq_video::encode::Sink::blocking_open(&config)?;
+		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config.codec)?;
 		self.producers.insert(VideoEncoder {
 			encoder,
@@ -264,7 +277,7 @@ impl Video {
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
-		let encoded = entry.encoder.blocking_encode(frame)?;
+		let encoded = block_on(entry.encoder.encode(frame))?;
 		entry.producer.publish(&encoded)?;
 		Ok(())
 	}
@@ -279,7 +292,7 @@ impl Video {
 
 	pub fn publish_bitrate(&mut self, id: Id, bitrate: u64) -> Result<(), Error> {
 		let entry = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
-		entry.encoder.blocking_set_bitrate(bitrate)?;
+		block_on(entry.encoder.set_bitrate(bitrate))?;
 		Ok(())
 	}
 
@@ -290,7 +303,7 @@ impl Video {
 		} = entry;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
-		let drained = encoder.blocking_finish().and_then(|encoded| producer.publish(&encoded));
+		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
 		finalize(producer, drained)
 	}
 
