@@ -133,10 +133,10 @@ impl<E: CatalogExt> Producer<E> {
 			// Audio hang frames carry microsecond timestamps; advertise that on the
 			// track so Lite05 subscribers know what scale to expect and the model
 			// layer accepts Frame::timestamp on append. `unique_track` does the same.
-			Some(name) => broadcast.create_track(name.clone(), hang::container::track_info())?,
+			Some(name) => broadcast.create_track(name.clone(), catalog.track_info())?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
-			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec))?,
+			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec), catalog.track_info())?,
 		};
 		let name = track.name().to_string();
 		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;

@@ -154,6 +154,18 @@ pub enum Command {
 /// import = one source -> MoQ.
 #[derive(Args, Clone)]
 pub struct Import {
+	/// How long relays keep a non-latest group of the published media tracks fetchable,
+	/// e.g. "30s" or "5s".
+	///
+	/// A RETENTION budget, not a delivery one: it never makes a subscriber play further behind
+	/// live, it caps how far back a FETCH can still reach (and how long a subscriber may ask to
+	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
+	/// advertise segments that are still fetchable; lower it when nothing reads history and the
+	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
+	/// which is retained unconditionally.
+	#[arg(long, value_parser = humantime::parse_duration, default_value = "30s")]
+	pub latency_max: std::time::Duration,
+
 	/// The single source feeding the Origin.
 	#[command(subcommand)]
 	pub source: ImportSource,

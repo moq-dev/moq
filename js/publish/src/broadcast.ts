@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { CatalogProducer } from "./catalog";
@@ -219,7 +220,10 @@ export class Broadcast {
 				continue;
 			}
 
-			const track = request.accept();
+			// Media, so declare the retention a FETCH-based consumer needs (the catalog above
+			// keeps the bare defaults: it is read at the live edge, which is always retained).
+			// Matches what a Rust publisher declares via `hang::container::track_info`.
+			const track = request.accept(Container.trackInfo());
 
 			// A second subscription for the same name supersedes the first: close the old producer.
 			signal.peek()?.close();

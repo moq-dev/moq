@@ -115,6 +115,10 @@ Each Subscription consists of a few properties:
 The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.
 
+It is declared per track, so a publisher raises it on the tracks that are read as history rather than followed at the live edge.
+hang media tracks ask for 30 seconds on that basis: a segmented egress (HLS/DASH) may only advertise segments a fetch can still reach, and a standard player starts several segments behind the live edge.
+This is a retention budget rather than a delivery one, so a longer window never makes a subscriber play further behind live.
+
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:
 

@@ -62,6 +62,10 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The per-rendition timeline producers, memoized by media-track name so the catalog
 	/// section and the media track's group recorder share one track. See [`media_producer`](Self::media_producer).
 	timelines: Arc<Mutex<BTreeMap<String, crate::timeline::Producer>>>,
+
+	/// Retention declared on the media tracks minted under this catalog. See
+	/// [`with_latency_max`](Self::with_latency_max).
+	latency_max: std::time::Duration,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -76,6 +80,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			clock: self.clock,
 			broadcast: self.broadcast.clone(),
 			timelines: self.timelines.clone(),
+			latency_max: self.latency_max,
 		}
 	}
 }
@@ -121,7 +126,41 @@ impl<E: CatalogExt> Producer<E> {
 			clock: crate::Clock::new(),
 			broadcast: broadcast.clone(),
 			timelines: Arc::new(Mutex::new(BTreeMap::new())),
+			latency_max: hang::container::LATENCY_MAX,
 		})
+	}
+
+	/// Declare how long the media tracks minted under this catalog keep a non-latest group
+	/// fetchable, overriding [`hang::container::LATENCY_MAX`].
+	///
+	/// The default suits a segmented egress (HLS/DASH), which may only advertise segments a
+	/// FETCH can still reach. Lower it when nothing reads history and the memory matters;
+	/// raise it for a deeper seek window. It is a RETENTION budget, not a delivery one, so it
+	/// never makes a subscriber play further behind live -- it caps what one may ask to wait
+	/// for, and a subscriber's own budget still defaults to zero.
+	///
+	/// Applies to the media tracks this catalog mints. The catalog and timeline tracks keep
+	/// moq-net's default: both are read at the live edge, which is retained unconditionally.
+	pub fn with_latency_max(mut self, latency_max: std::time::Duration) -> Self {
+		self.latency_max = latency_max;
+		self
+	}
+
+	/// The retention this catalog declares on its media tracks.
+	pub fn latency_max(&self) -> std::time::Duration {
+		self.latency_max
+	}
+
+	/// Track properties for a media track under this catalog, at the container's default
+	/// timescale. Carries [`latency_max`](Self::latency_max).
+	pub fn track_info(&self) -> moq_net::track::Info {
+		hang::container::track_info().with_latency_max(self.latency_max)
+	}
+
+	/// [`track_info`](Self::track_info) at an explicit timescale, for a container that keeps
+	/// the source's own (CMAF and Matroska both do).
+	pub fn track_info_at(&self, timescale: moq_net::Timescale) -> moq_net::track::Info {
+		hang::container::track_info_at(timescale).with_latency_max(self.latency_max)
 	}
 
 	/// Resolve a timestamp, synthesizing one from the broadcast's shared
@@ -475,6 +514,37 @@ mod test {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
+
+	#[test]
+	fn media_tracks_inherit_the_catalogs_declared_retention() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+
+		// The default is hang's media retention, sized so a segmented egress can serve a full
+		// playlist window rather than moq-net's live-edge default.
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		assert_eq!(catalog.track_info().latency_max, hang::container::LATENCY_MAX);
+		assert!(catalog.track_info().latency_max > moq_net::track::DEFAULT_LATENCY_MAX);
+
+		// An override reaches every media track this catalog mints, through either constructor,
+		// and does NOT disturb the timescale each one pins.
+		let catalog = catalog.with_latency_max(std::time::Duration::from_secs(3));
+		assert_eq!(catalog.latency_max(), std::time::Duration::from_secs(3));
+
+		let info = catalog.track_info();
+		assert_eq!(info.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(info.timescale, hang::container::TIMESCALE);
+
+		let at = catalog.track_info_at(moq_net::Timescale::MILLI);
+		assert_eq!(at.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
+
+		// And a reservation hands importers the same policy, since that is what the codec
+		// paths mint their tracks from.
+		assert_eq!(
+			catalog.reserve().track_info().latency_max,
+			std::time::Duration::from_secs(3)
+		);
+	}
 
 	#[test]
 	fn publishes_plain_and_compressed_tracks() {

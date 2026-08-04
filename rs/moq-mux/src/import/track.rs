@@ -173,7 +173,7 @@ impl<E: CatalogExt> Track<E> {
 		// Accept at the legacy microsecond timescale, matching the frame timestamps
 		// the container stamps. A codec-specific timescale (e.g. the opus sample
 		// rate) would be chosen here instead.
-		let track = request.accept(hang::container::track_info());
+		let track = request.accept(reserved.track_info());
 		let data = init.data.as_ref();
 		let kind = match init.format.as_str() {
 			"avc1" | "avcc" => {
@@ -476,7 +476,7 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// timescale would be chosen). A [`VideoHint`] carrying a codec publishes the catalog before the
 	/// first frame; any [`Init::data`] seeds the stream (as a call to [`initialize`](Self::initialize)).
 	pub fn new(request: moq_net::track::Request, reserved: crate::catalog::Reserved<E>, init: Init) -> Result<Self> {
-		let track = request.accept(hang::container::track_info());
+		let track = request.accept(reserved.track_info());
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format.as_str() {

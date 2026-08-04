@@ -172,7 +172,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		let broadcast = origin
 			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 			.context("failed to create broadcast")?;
-		local = Some(Publish::new(broadcast, &format)?);
+		local = Some(Publish::new(broadcast, &format, import.latency_max)?);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {

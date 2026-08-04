@@ -217,7 +217,11 @@ pub struct Publish {
 impl Publish {
 	/// Build a publisher decoding the given container format from stdin into
 	/// `broadcast` (typically created on the origin that announces it).
-	pub fn new(mut broadcast: moq_net::broadcast::Producer, format: &PublishFormat) -> anyhow::Result<Self> {
+	pub fn new(
+		mut broadcast: moq_net::broadcast::Producer,
+		format: &PublishFormat,
+		latency_max: std::time::Duration,
+	) -> anyhow::Result<Self> {
 		// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
 		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
@@ -226,7 +230,8 @@ impl Publish {
 			let catalog = moq_mux::catalog::Producer::with_catalog(
 				&mut broadcast,
 				moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
-			)?;
+			)?
+			.with_latency_max(latency_max);
 			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
@@ -234,10 +239,10 @@ impl Publish {
 			});
 		}
 
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?.with_latency_max(latency_max);
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3", catalog.track_info())?;
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
@@ -271,7 +276,7 @@ impl Publish {
 		args: &CaptureArgs,
 		bandwidth: Option<moq_net::bandwidth::Consumer>,
 	) -> anyhow::Result<Self> {
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?.with_latency_max(latency_max);
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));
@@ -577,7 +582,7 @@ mod tests {
 			.create_broadcast("cli", moq_net::broadcast::Route::new().with_announce(true))
 			.unwrap();
 		settle().await;
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts).unwrap();
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts, hang::container::LATENCY_MAX).unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream(decoder) = &mut publish.source else {
 			panic!("expected a stream source");

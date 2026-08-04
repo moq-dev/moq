@@ -236,7 +236,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let track = self.broadcast.create_track(
 				self.broadcast.unique_name(suffix),
-				hang::container::track_info_at(timescale),
+				self.catalog.track_info_at(timescale),
 			)?;
 
 			// Each track indexes its own group opens: audio and video group boundaries differ, so a
