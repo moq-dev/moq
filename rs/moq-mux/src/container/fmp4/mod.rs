@@ -789,11 +789,17 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
 /// integer duration), falling back to 90 kHz (the MPEG-TS convention).
 ///
+/// A framerate that doesn't scale to a whole tick takes the fallback too. Zero and negative land
+/// on 0 through `as u64`, which is not a timescale anything accepts, and infinity saturates to
+/// `u64::MAX`, which is past the varint range a `Timescale` holds.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	if let Some(fps) = config.framerate {
-		(fps * 1000.0) as u64
-	} else {
-		90000
+	let ticks = config
+		.framerate
+		.filter(|fps| fps.is_finite())
+		.map(|fps| (fps * 1000.0) as u64);
+	match ticks {
+		Some(ticks) if ticks > 0 => ticks,
+		_ => 90000,
 	}
 }
 
@@ -880,6 +886,20 @@ mod tests {
 			assert_eq!(config.max_bitrate, inferred.max_bitrate, "{unusable:?}");
 			assert_eq!(config.avg_bitrate, inferred.avg_bitrate, "{unusable:?}");
 		}
+	}
+
+	// `framerate * 1000` is 0 for a zero, negative or non-finite catalog framerate, and 0 is not
+	// a timescale: Timescale::new rejects it, so Muxer::video would fail to build at all.
+	#[test]
+	fn default_video_timescale_ignores_an_unusable_framerate() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		for unusable in [0.0, -30.0, f64::NAN, f64::INFINITY, 0.0005] {
+			config.framerate = Some(unusable);
+			assert_eq!(default_video_timescale(&config), 90_000, "{unusable}");
+		}
+
+		config.framerate = Some(30.0);
+		assert_eq!(default_video_timescale(&config), 30_000);
 	}
 
 	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a
