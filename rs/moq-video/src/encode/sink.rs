@@ -18,6 +18,8 @@
 //! doesn't block on an event loop, so a thread would only add a hop, and its
 //! zero-copy `CVPixelBuffer` surface is `!Send` and couldn't cross to one anyway.
 
+use std::sync::Arc;
+
 use super::Encoded;
 use super::encoder::Config;
 use crate::{Error, Frame};
@@ -81,11 +83,16 @@ impl Sink {
 
 	/// Encode one frame, waiting for its access units.
 	///
-	/// Takes the frame by value because it may be moved to the encode thread.
 	/// Otherwise [`Encoder::encode`](super::Encoder::encode): zero or more access
 	/// units, each stamped with the frame it came from.
-	pub async fn encode(&mut self, frame: Frame) -> Result<Vec<Encoded>, Error> {
-		self.0.encode(frame).await
+	///
+	/// Takes ownership, since the frame may be moved to the encode thread, but
+	/// takes it as anything that can become an [`Arc`] so a caller fanning one
+	/// frame out to several encoders (a transcode ladder) hands over a clone of
+	/// the handle rather than a copy of the pixels. Pass a [`Frame`] and it is
+	/// wrapped for you.
+	pub async fn encode(&mut self, frame: impl Into<Arc<Frame>>) -> Result<Vec<Encoded>, Error> {
+		self.0.encode(frame.into()).await
 	}
 
 	/// Retune the encoder, waiting for the backend's verdict. See
@@ -121,6 +128,7 @@ impl Sink {
 
 #[cfg(not(target_os = "macos"))]
 mod threaded {
+	use std::sync::Arc;
 	use std::thread::JoinHandle;
 
 	use tokio::sync::{mpsc, oneshot};
@@ -136,7 +144,7 @@ mod threaded {
 		/// A frame to encode, plus a oneshot to return the resulting access units
 		/// (or an error) in order.
 		Encode {
-			frame: Frame,
+			frame: Arc<Frame>,
 			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
 		},
 		/// Key the next frame. No reply: the encoder only records the request, so
@@ -254,7 +262,7 @@ mod threaded {
 			let _ = self.send(Request::Keyframe);
 		}
 
-		pub async fn encode(&mut self, frame: Frame) -> Result<Vec<Encoded>, Error> {
+		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
 			self.request(|resp| Request::Encode { frame, resp }).await
 		}
 
@@ -331,6 +339,8 @@ mod threaded {
 
 #[cfg(target_os = "macos")]
 mod inline {
+	use std::sync::Arc;
+
 	use super::super::Encoded;
 	use super::super::encoder::{Config, Encoder};
 	use crate::{Error, Frame};
@@ -353,7 +363,7 @@ mod inline {
 
 		/// Async only to match the threaded `Inner`; there's no thread to hand this
 		/// to, so it encodes inline. The same holds for the two below.
-		pub async fn encode(&mut self, frame: Frame) -> Result<Vec<Encoded>, Error> {
+		pub async fn encode(&mut self, frame: Arc<Frame>) -> Result<Vec<Encoded>, Error> {
 			self.0.encode(&frame)
 		}
 
