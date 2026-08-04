@@ -97,9 +97,6 @@ export class ControlStreamAdapter implements Session {
 	// requestId → namespace reverse lookup (for cleanup in #closeStream)
 	#namespacesByRequestId = new Map<bigint, string>();
 
-	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
-	#subscribeNamespaces = new Set<bigint>();
-
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
 	#incomingWaiters: ((stream: Stream | undefined) => void)[] = [];
@@ -360,7 +357,6 @@ export class ControlStreamAdapter implements Session {
 		if (!entry) return;
 		console.debug(`adapter: closing stream requestId=${requestId}`);
 		this.#streams.delete(requestId);
-		this.#subscribeNamespaces.delete(requestId);
 		const namespace = this.#namespacesByRequestId.get(requestId);
 		if (namespace !== undefined) {
 			this.#namespaces.delete(namespace);
@@ -432,11 +428,6 @@ export class ControlStreamAdapter implements Session {
 			}
 		}
 
-		// SubscribeNamespace (0x11): register for follow-up routing
-		if (typeId === 0x11) {
-			this.#subscribeNamespaces.add(requestId);
-		}
-
 		return { requestId };
 	}
 
@@ -504,13 +495,19 @@ export class ControlStreamAdapter implements Session {
 			return await r.u62();
 		};
 
-		const readNamespaceRequestId = async (): Promise<bigint> => {
+		// v14/v15 key PublishNamespaceDone/Cancel by namespace rather than request ID, so the
+		// stream they refer to has to be looked up. An unknown namespace means the stream is
+		// already gone (both peers can retract at once), which is not worth a session teardown.
+		const readNamespaceRoute = async (): Promise<{ route: Route; requestId: bigint }> => {
 			const r = new Reader(undefined, body, this.version);
 			const namespace = await Namespace.decode(r);
 			const requestId = this.#namespaces.get(namespace);
-			if (requestId === undefined) throw new Error(`unknown namespace: ${namespace}`);
+			if (requestId === undefined) {
+				console.warn(`adapter: no stream for namespace=${namespace} typeId=0x${typeId.toString(16)}`);
+				return { route: Route.Ignore, requestId: 0n };
+			}
 			this.#namespaces.delete(namespace);
-			return requestId;
+			return { route: Route.CloseStream, requestId };
 		};
 
 		switch (typeId) {
@@ -595,22 +592,16 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.ErrorResponse, requestId };
 			}
 			case 0x08: {
-				if (this.version === Version.DRAFT_14) {
-					// PublishNamespaceError
-					const requestId = await readRequestId();
-					return { route: Route.ErrorResponse, requestId };
-				}
-				// v15: Namespace entry (no requestId) — route to SubscribeNamespace stream
-				const subNs08 = this.#subscribeNamespaces.values().next().value;
-				if (subNs08 === undefined) throw new Error("unexpected message 0x08: no SubscribeNamespace stream");
-				return { route: Route.FollowUp, requestId: subNs08 };
+				// PublishNamespaceError (v14 only; folded into RequestError in v15+).
+				// NAMESPACE shares this ID from v16 on, but only on the SubscribeNamespace
+				// bidi stream, which never reaches the control stream.
+				if (this.version !== Version.DRAFT_14) throw new Error("unexpected PublishNamespaceError");
+				const requestId = await readRequestId();
+				return { route: Route.ErrorResponse, requestId };
 			}
-			case 0x0e: {
-				// v15: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
-				const subNs0e = this.#subscribeNamespaces.values().next().value;
-				if (subNs0e === undefined) throw new Error("unexpected message 0x0e: no SubscribeNamespace stream");
-				return { route: Route.FollowUp, requestId: subNs0e };
-			}
+			// 0x0e is v14's TRACK_STATUS_OK (RequestOk in v15+) and NAMESPACE_DONE on the v16+
+			// SubscribeNamespace bidi stream. Neither belongs on the control stream here: we
+			// never send TrackStatusRequest, so it falls through to the unknown-type error.
 			case 0x13: {
 				// SubscribeNamespaceError (v14 only)
 				if (this.version !== Version.DRAFT_14) throw new Error("unexpected SubscribeNamespaceError");
@@ -640,8 +631,7 @@ export class ControlStreamAdapter implements Session {
 					const requestId = await readRequestId();
 					return { route: Route.CloseStream, requestId };
 				}
-				const requestId = await readNamespaceRequestId();
-				return { route: Route.CloseStream, requestId };
+				return await readNamespaceRoute();
 			}
 			case 0x0c: {
 				// PublishNamespaceCancel: v16 uses requestId, v14/v15 uses namespace
@@ -649,8 +639,7 @@ export class ControlStreamAdapter implements Session {
 					const requestId = await readRequestId();
 					return { route: Route.CloseStream, requestId };
 				}
-				const requestId = await readNamespaceRequestId();
-				return { route: Route.CloseStream, requestId };
+				return await readNamespaceRoute();
 			}
 			case 0x14: {
 				// UnsubscribeNamespace (v14/v15 only)
@@ -706,7 +695,6 @@ export class ControlStreamAdapter implements Session {
 		// Clear namespace mappings
 		this.#namespaces.clear();
 		this.#namespacesByRequestId.clear();
-		this.#subscribeNamespaces.clear();
 
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();

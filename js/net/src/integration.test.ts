@@ -1114,3 +1114,88 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	client.close();
 	server.close();
 });
+
+// Drafts 14 and 15 retract an announcement with PUBLISH_NAMESPACE_DONE, which is keyed by
+// namespace rather than by request ID. Getting that lookup wrong used to kill the session, so
+// assert the retraction lands AND that the session survives to announce the next publisher.
+for (const version of [Ietf.Version.DRAFT_14, Ietf.Version.DRAFT_15] as const) {
+	const draft = version === Ietf.Version.DRAFT_14 ? "draft-14" : "draft-15";
+
+	test(`integration: ietf ${draft} unpublish retracts the announcement`, async () => {
+		const pair = createMockTransportPair("");
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { version }),
+		]);
+
+		const announced = client.announced();
+
+		const first = new BroadcastProducer();
+		server.publish(Path.from("shared"), first);
+		expect(await announced.next()).toEqual({ path: "shared" as Path.Valid, active: true });
+
+		first.close();
+		expect(await announced.next()).toEqual({ path: "shared" as Path.Valid, active: false });
+
+		// The session is still usable, so the next publisher on the same path is announced too.
+		const second = new BroadcastProducer();
+		server.publish(Path.from("shared"), second);
+		expect(await announced.next()).toEqual({ path: "shared" as Path.Valid, active: true });
+
+		second.close();
+		announced.close();
+		client.close();
+		server.close();
+	});
+
+	test(`integration: ietf ${draft} republish is not served from the previous generation's cache`, async () => {
+		const pair = createMockTransportPair("");
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { version }),
+		]);
+
+		const serve = async (broadcast: BroadcastProducer, payload: string) => {
+			for (;;) {
+				const req = await broadcast.requested();
+				if (!req) break;
+				req.accept().writeString(payload);
+			}
+		};
+
+		const first = new BroadcastProducer();
+		const servingFirst = serve(first, "old");
+		server.publish(Path.from("shared"), first);
+
+		const watched = client.announcedBroadcast(Path.from("shared"));
+		const active = await waitFor(watched.active, (b) => b !== undefined);
+		if (!active) throw new Error("expected an active broadcast");
+		expect(await active.subscribe("video").readString()).toBe("old");
+
+		// A second holder of the same path, which is what makes the cache reachable: consumed
+		// broadcasts are reference-counted, so the handle closing its own copy below does not
+		// release the shared one.
+		const bystander = client.consume(Path.from("shared"));
+
+		first.close();
+		await servingFirst;
+		await waitFor(watched.active, (b) => b === undefined);
+
+		// The republish must subscribe fresh. Cloning the cached entry would resolve the previous
+		// generation's tracks, which the wire has already reset.
+		const second = new BroadcastProducer();
+		const servingSecond = serve(second, "new");
+		server.publish(Path.from("shared"), second);
+
+		const republished = await waitFor(watched.active, (b) => b !== undefined);
+		if (!republished) throw new Error("expected a republished broadcast");
+		expect(await republished.subscribe("video").readString()).toBe("new");
+
+		bystander.close();
+		watched.close();
+		second.close();
+		await servingSecond;
+		client.close();
+		server.close();
+	});
+}

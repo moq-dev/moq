@@ -252,7 +252,7 @@ export class Publisher {
 
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
-	 * Sends RequestOk, then streams Namespace/NamespaceDone entries.
+	 * Sends RequestOk, then streams Namespace/NamespaceDone entries (draft-16+).
 	 *
 	 * @internal
 	 */
@@ -272,6 +272,18 @@ export class Publisher {
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 				});
 				await ok.encode(stream.writer, version);
+			}
+
+			// Drafts 14 and 15 have no NAMESPACE/NAMESPACE_DONE messages: a subscriber learns
+			// about matching namespaces from PUBLISH_NAMESPACE/PUBLISH_NAMESPACE_DONE, which
+			// #runPublish already sends. Their IDs are taken by other messages there
+			// (0x08 is PUBLISH_NAMESPACE_ERROR, 0x0e is TRACK_STATUS_OK), so sending entries
+			// anyway corrupts the peer's control stream. Just hold the stream open until it
+			// unsubscribes.
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+				await stream.reader.closed;
+				stream.close();
+				return;
 			}
 
 			const announced = new announce.Producer(prefix);
