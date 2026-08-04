@@ -109,6 +109,11 @@ export class Producer<T> {
 	finish(): void {
 		this.#group?.close();
 		this.#group = undefined;
+
+		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
+		// Any further update fails on the closed track, but it has to fail as a track error rather
+		// than as a delta with nowhere to put it.
+		this.#encoder.reset();
 		this.#track.close();
 	}
 }

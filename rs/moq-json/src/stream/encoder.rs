@@ -41,7 +41,7 @@ impl ProducerConfig {
 /// to encode anything further ([`Error::Desync`]) until the caller rolls a new group and calls
 /// [`Encoder::reset`]. Without compression each record stands alone, so a dropped one leaves a gap
 /// in the log but nothing undecodable, and encoding continues.
-#[must_use = "the record must be written and committed, or the encoder will refuse to continue"]
+#[must_use = "write and commit the record; an uncommitted compressed record stops the encoder"]
 pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
 	payload: Bytes,

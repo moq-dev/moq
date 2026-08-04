@@ -127,3 +127,19 @@ test("a stale commit does not clear a newer pending record", () => {
 
 	expect(() => encoder.encode({ n: 2 })).toThrow("compression desynchronized");
 });
+
+// A record committed after the encoder has been reset must not acknowledge whatever is outstanding
+// now: the newer record belongs to a different group and window.
+test("a commit from before a reset does not acknowledge a newer record", () => {
+	const encoder = new Encoder<Rec>({ compression: true });
+	const stale = encoder.encode({ n: 0 });
+
+	// The caller rolled a new group and reset, then encoded into it.
+	encoder.reset();
+	encoder.encode({ n: 1 });
+
+	// The old record's write finally settles, far too late to speak for the new one.
+	stale.commit();
+
+	expect(() => encoder.encode({ n: 2 })).toThrow("compression desynchronized");
+});

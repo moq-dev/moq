@@ -269,3 +269,19 @@ test("the decoder does not expose its live reconstruction", () => {
 	decoder.delta(delta?.payload as Uint8Array);
 	expect(decoder.decode()).toEqual({ a: 1, b: 2 });
 });
+
+// Finishing takes the open group with it, so the encoder must stop emitting deltas into a group that
+// no longer exists. A later update has to surface the closed track rather than a delta with nowhere
+// to put it. (Mirrors the Rust `update_after_finish_errors_instead_of_panicking`.)
+test("update after finish reports the closed track", async () => {
+	const { Track } = await import("@moq/net");
+	const { Producer } = await import("./producer.ts");
+
+	const track = new Track.Producer("test");
+	const producer = new Producer<Doc>({ track, deltaRatio: 100 });
+	producer.update({ a: 1 });
+	producer.update({ a: 2 }); // a delta, so a group is open
+	producer.finish();
+
+	expect(() => producer.update({ a: 3 })).toThrow("track is closed");
+});
