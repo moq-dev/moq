@@ -55,6 +55,11 @@ use threaded::Inner;
 ///
 /// Racing an encode against a shutdown signal is fine, since the sink is on its
 /// way out anyway. What does not work is cancelling one and carrying on.
+///
+/// macOS never refuses, because there is no thread to run ahead: the encoder
+/// runs inline, so a dropped future either had not started the call or had
+/// already finished it. Write to the contract above regardless, or the same code
+/// loses frames off macOS.
 pub struct Sink(Inner);
 
 impl Sink {
