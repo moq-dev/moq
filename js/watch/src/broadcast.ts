@@ -11,13 +11,15 @@ import { toHang } from "./msf";
 // announcement check logs at most once per connection.
 const warnedNoDiscovery = new WeakSet<Moq.Connection.Established>();
 
-// Whether to skip the announcement gate for this connection: without discovery, waiting on an
-// announcement would hang forever, so subscribe immediately and warn once per connection.
+// Whether to skip the announcement gate for a cross-broadcast reference: without discovery,
+// waiting on an announcement would hang forever, so subscribe immediately and warn once per
+// connection. The main broadcast doesn't need this; @moq/net's `announcedBroadcast` falls back
+// on its own.
 function skipDiscovery(conn: Moq.Connection.Established): boolean {
 	if (conn.discovery) return false;
 	if (!warnedNoDiscovery.has(conn)) {
 		warnedNoDiscovery.add(conn);
-		console.warn("relay does not support broadcast discovery; ignoring reload signal.");
+		console.warn("relay does not support broadcast discovery; subscribing to siblings blind.");
 	}
 	return true;
 }
@@ -155,10 +157,9 @@ export class Broadcast {
 		return active.has(path);
 	}
 
-	// Subscribe to the broadcast, re-consuming on every (re-)announce so a same-name republish (a new
-	// publisher, or a relay-failover RESTART) re-attaches to the new instance instead of clinging to
-	// the dead one. Driven off the announcement stream's updates rather than a membership flag, since
-	// a coalesced republish leaves the active set unchanged yet still emits a fresh update.
+	// Subscribe to the broadcast, waiting for its announcement so we never race a publisher that
+	// comes online after us. @moq/net drives the re-consume on a same-name republish and the blind
+	// fallback on a relay without discovery; mirror its handle into `active`.
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
@@ -168,44 +169,19 @@ export class Broadcast {
 
 		const name = effect.get(this.in.name);
 
-		// No announcement gate: subscribe immediately (reload off, or the relay lacks discovery).
-		if (!effect.get(this.in.reload) || skipDiscovery(conn)) {
+		// No announcement gate: subscribe immediately.
+		if (!effect.get(this.in.reload)) {
 			const broadcast = conn.consume(name);
 			effect.cleanup(() => broadcast.close());
 			effect.set(this.#out.active, broadcast, undefined);
 			return;
 		}
 
-		const announced = conn.announced(name);
+		const announced = conn.announcedBroadcast(name);
 		effect.cleanup(() => announced.close());
 
-		let current: Moq.Broadcast.Consumer | undefined;
-		effect.cleanup(() => {
-			current?.close();
-			current = undefined;
-			this.#out.active.set(undefined);
-		});
-
-		effect.spawn(async () => {
-			for (;;) {
-				const event = await Promise.race([effect.cancel, announced.next()]);
-				if (!event) break;
-
-				// Scoped to `name`, so the exact broadcast arrives with an empty suffix; ignore children.
-				if (event.path !== Path.empty()) continue;
-
-				if (event.active) {
-					// A live subscription survives a redundant (re-)announce; only replace a dead one.
-					if (current && current.closed.peek() === undefined) continue;
-					current?.close();
-					current = conn.consume(name);
-					this.#out.active.set(current);
-				} else {
-					current?.close();
-					current = undefined;
-					this.#out.active.set(undefined);
-				}
-			}
+		effect.run((nested) => {
+			nested.set(this.#out.active, nested.get(announced.active), undefined);
 		});
 	}
 

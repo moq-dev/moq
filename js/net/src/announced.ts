@@ -3,7 +3,9 @@
  *
  * @module
  */
-import { type GetPromise, Once, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
+import type * as broadcast from "./broadcast.js";
+import type { Established } from "./connection/established.js";
 import * as Path from "./path.js";
 
 /**
@@ -124,5 +126,118 @@ export class Consumer {
 	/** Closes the reader. Idempotent. */
 	close(abort?: Error) {
 		closeState(this.#state, abort);
+	}
+}
+
+// Connections already warned about missing broadcast discovery, so the fallback logs at most
+// once per connection instead of once per watched path.
+const warnedNoDiscovery = new WeakSet<Established>();
+
+/**
+ * A reactive handle to a single broadcast: {@link Broadcast.active} holds a live
+ * {@link broadcast.Consumer} while the path is announced and `undefined` while nobody
+ * publishes it.
+ *
+ * Use this instead of {@link Established.consume} whenever the broadcast may not exist yet.
+ * Subscribing to a path nobody publishes gets the stream reset, so a consumer that races the
+ * publisher stays silent forever unless it retries; this waits for the announcement instead.
+ *
+ * The handle re-consumes on every (re-)announce, so a same-name republish (a new publisher, or
+ * a relay-failover RESTART) re-attaches to the new instance rather than clinging to the dead
+ * one. Built from a reconnecting `Connection.Reload`, it also spans reconnects: the
+ * broadcast drops to `undefined` while disconnected and resolves again once the new connection
+ * announces it.
+ *
+ * Falls back to consuming blind (and warns once) on a relay without
+ * {@link Established.discovery}, where there is no announcement to wait for.
+ *
+ * Close it to release the announcement stream and the current broadcast.
+ *
+ * @public
+ */
+export class Broadcast {
+	/** The broadcast path this handle watches. */
+	readonly path: Path.Valid;
+
+	/** The live broadcast, or `undefined` while it is offline. */
+	readonly active: Getter<broadcast.Consumer | undefined>;
+
+	#active = new Signal<broadcast.Consumer | undefined>(undefined);
+	#signals = new Effect();
+
+	/**
+	 * Watch `path` on a connection. Accepts a live {@link Established} session or a reactive
+	 * one (a `Connection.Reload`'s `established`), which is how the handle survives reconnects.
+	 *
+	 * Obtain one from `announcedBroadcast(path)` on either connection type rather than
+	 * constructing it directly.
+	 */
+	constructor(connection: GetterInit<Established | undefined>, path: Path.Valid) {
+		this.path = path;
+		this.active = this.#active;
+
+		const source = getter(connection);
+		this.#signals.run((effect) => {
+			const conn = effect.get(source);
+			if (!conn) return;
+
+			// Without discovery no announcement ever arrives, so waiting would hang forever.
+			if (!conn.discovery) {
+				if (!warnedNoDiscovery.has(conn)) {
+					warnedNoDiscovery.add(conn);
+					console.warn("relay does not support broadcast discovery; consuming without waiting.");
+				}
+
+				const blind = conn.consume(path);
+				effect.cleanup(() => blind.close());
+				effect.set(this.#active, blind, undefined);
+				return;
+			}
+
+			const announced = conn.announced(path);
+			effect.cleanup(() => announced.close());
+
+			let current: broadcast.Consumer | undefined;
+			const offline = () => {
+				current?.close();
+				current = undefined;
+				this.#active.set(undefined);
+			};
+			effect.cleanup(offline);
+
+			effect.spawn(async () => {
+				try {
+					for (;;) {
+						const event = await Promise.race([effect.cancel, announced.next()]);
+						if (!event) break;
+
+						// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
+						if (event.path !== Path.empty()) continue;
+
+						if (event.active) {
+							// A live subscription survives a redundant (re-)announce; only replace a dead one.
+							if (current && current.closed.peek() === undefined) continue;
+							current?.close();
+							current = conn.consume(path);
+							this.#active.set(current);
+						} else {
+							offline();
+						}
+					}
+				} catch (err) {
+					// The stream was reset, which means the session died under it.
+					console.debug("announcement stream reset", err);
+				}
+
+				// The stream ended, or this run was torn down (its cleanup already ran). Either
+				// way there is nothing left announcing the path, so don't hold a dead broadcast.
+				offline();
+			});
+		});
+	}
+
+	/** Closes the handle and the broadcast it currently holds. Idempotent. */
+	close() {
+		this.#signals.close();
 	}
 }
