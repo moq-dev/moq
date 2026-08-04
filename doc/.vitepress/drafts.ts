@@ -64,6 +64,8 @@ interface Metadata {
 	docname: string;
 	normative: Record<string, string>;
 	informative: Record<string, string>;
+	/** Nested (hand-written) reference definitions: alias -> title/target. */
+	inline: Record<string, Reference>;
 }
 
 /** A citation target resolved to display text and (usually) a link. */
@@ -151,6 +153,7 @@ function split(source: string): { meta: Metadata; abstract: string[]; middle: st
 		docname: String(parsed.docname ?? ""),
 		normative: refs(parsed.normative),
 		informative: refs(parsed.informative),
+		inline: { ...inlineRefs(parsed.normative), ...inlineRefs(parsed.informative) },
 	};
 
 	return {
@@ -177,8 +180,27 @@ function refs(block: unknown): Record<string, string> {
 	return out;
 }
 
+/**
+ * Collect the nested reference definitions from a `normative:`/`informative:`
+ * block, keeping their `title` and `target` so the citation renders as a real
+ * link rather than falling back to the bare alias.
+ */
+function inlineRefs(block: unknown): Record<string, Reference> {
+	if (!block || typeof block !== "object") return {};
+	const out: Record<string, Reference> = {};
+	for (const [alias, def] of Object.entries(block as Record<string, unknown>)) {
+		if (!def || typeof def !== "object") continue;
+		const { title, target } = def as { title?: unknown; target?: unknown };
+		out[alias] = {
+			label: typeof title === "string" ? title : alias,
+			url: typeof target === "string" ? target : undefined,
+		};
+	}
+	return out;
+}
+
 /** Resolve a citation target to display text and a URL. */
-function resolve(target: string, routes: Map<string, string>): Reference {
+function resolve(target: string, routes: Map<string, string>, inline?: Record<string, Reference>): Reference {
 	const rfc = /^RFC\s?(\d+)$/i.exec(target);
 	if (rfc) {
 		return { label: `RFC ${rfc[1]}`, url: `https://www.rfc-editor.org/rfc/rfc${rfc[1]}` };
@@ -190,7 +212,7 @@ function resolve(target: string, routes: Map<string, string>): Reference {
 		return { label: docname, url: routes.get(docname) ?? datatracker(docname) };
 	}
 
-	return EXTERNAL[target] ?? { label: target };
+	return inline?.[target] ?? EXTERNAL[target] ?? { label: target };
 }
 
 /** Turn a resolved reference into a markdown link (or plain text if we have no URL). */
@@ -279,7 +301,7 @@ function citeSegment(
 		if (heading) return `[${heading}](#${name})`;
 
 		const alias = meta.normative[name] ?? meta.informative[name];
-		return link(resolve(alias ?? name, routes), suffix);
+		return link(resolve(alias ?? name, routes, meta.inline), suffix);
 	});
 
 	// `[ref]`, but not an image or an inline link. Only rewrite aliases the
@@ -289,7 +311,7 @@ function citeSegment(
 	return braces.replace(/(!?)\[([^\][]+)\](?![([])/g, (whole, bang: string, name: string) => {
 		if (bang) return whole;
 		const alias = meta.normative[name] ?? meta.informative[name];
-		return alias ? link(resolve(alias, routes)) : whole;
+		return alias ? link(resolve(alias, routes, meta.inline)) : whole;
 	});
 }
 
@@ -390,7 +412,7 @@ function references(meta: Metadata, routes: Map<string, string>): string[] {
 	const section = (heading: string, block: Record<string, string>): string[] => {
 		const entries = Object.values(block);
 		if (entries.length === 0) return [];
-		return ["", `## ${heading}`, "", ...entries.map((target) => `- ${link(resolve(target, routes))}`)];
+		return ["", `## ${heading}`, "", ...entries.map((target) => `- ${link(resolve(target, routes, meta.inline))}`)];
 	};
 
 	return [...section("Normative References", meta.normative), ...section("Informative References", meta.informative)];

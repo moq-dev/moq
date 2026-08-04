@@ -86,7 +86,7 @@ ci BASE="":
 
     # Validate the flake (eval + dev shell build) via `nix flake check`. This no
     # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
-    # to `just rs ci` (plain cargo) and `checks` is unwired (see flake.nix) -- so
+    # to `just rs ci` (plain cargo), leaving only lightweight Nix checks -- so
     # it's cheap. Gate it to Nix/Rust input changes anyway: a pure doc/JS PR
     # can't affect flake eval. Empty $files is a force-run, so run then.
     if [[ -z "$files" ]] || echo "$files" | grep -qE '(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'; then

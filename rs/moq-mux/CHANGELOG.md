@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.1...moq-mux-v0.9.2) - 2026-08-03
+
+### Fixed
+
+- *(loc)* adopt the draft-ietf-moq-loc-04 Timestamp code point, and align relay-hops with lite-06 ([#2581](https://github.com/moq-dev/moq/pull/2581))
+
+### Other
+
+- *(deps)* bump the cargo group with 2 updates ([#2591](https://github.com/moq-dev/moq/pull/2591))
+
 ## [0.9.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.0...moq-mux-v0.9.1) - 2026-07-27
 
 ### Added

@@ -56,17 +56,20 @@ impl Frame {
 	}
 
 	/// A copy of this frame scaled to `size` (both dimensions even and non-zero),
-	/// preserving the timestamp. CUDA and macOS `CVPixelBuffer` frames scale on
-	/// the GPU and stay there, so resize ->
-	/// [`encode`](crate::encode::Encoder::encode) never touches the CPU. Other
-	/// frames scale on the CPU. When one output size is enough, prefer decoding
-	/// straight to it ([`decode::Config::resize`](crate::decode::Config)), which
-	/// is free on decoders with a hardware scaler; this method is for fanning one
-	/// decoded stream out to several sizes.
+	/// preserving the timestamp. GPU-backed surfaces scale on the GPU and stay
+	/// there. When one output size is enough, prefer decoding straight to it
+	/// ([`decode::Config::resize`](crate::decode::Config)), which is free on
+	/// decoders with a hardware scaler; this method is for fanning one decoded
+	/// stream out to several sizes.
 	pub fn resize(&self, size: Size) -> Result<Frame, Error> {
+		self.resize_with(size, &crate::resize::Config::default())
+	}
+
+	/// A copy of this frame scaled with explicit platform options.
+	pub fn resize_with(&self, size: Size, config: &crate::resize::Config) -> Result<Frame, Error> {
 		Ok(Frame {
 			timestamp: self.timestamp,
-			surface: self.surface.resize(size)?,
+			surface: self.surface.resize_with(size, config)?,
 		})
 	}
 }
@@ -158,15 +161,29 @@ impl Surface {
 		)?))
 	}
 
-	/// A copy scaled to `size`, staying on the GPU for CUDA and macOS pixel-buffer
-	/// surfaces. The pixel half of [`Frame::resize`], which is what you usually
-	/// want since it carries the timestamp across too.
+	/// A copy scaled to `size`. GPU-backed surfaces stay on the GPU. The pixel
+	/// half of [`Frame::resize`],
+	/// which is what you usually want since it carries the timestamp across too.
+	///
+	/// A GPU scaler that a driver refuses falls back to downloading and scaling
+	/// on the CPU, warning once, rather than failing the frame.
 	pub fn resize(&self, size: Size) -> Result<Surface, Error> {
+		self.resize_with(size, &crate::resize::Config::default())
+	}
+
+	/// A copy scaled with explicit platform options.
+	pub fn resize_with(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
+		// Counts as a use on builds where every GPU arm is compiled out.
+		let _ = config;
 		size.validate("resize to")?;
 		let Size { width, height } = size;
 
 		Ok(match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(width, height)?),
+			#[cfg(target_os = "macos")]
+			Surface::PixelBuffer(pixels) if config.acceleration == crate::resize::Acceleration::Cpu => {
+				Surface::I420(pixels.download_i420()?.resize(width, height)?)
+			}
 			#[cfg(target_os = "macos")]
 			Surface::PixelBuffer(pixels) => match pixels.resize(width, height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
@@ -179,6 +196,10 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvdec"))]
+			Surface::Cuda(cuda) if config.acceleration == crate::resize::Acceleration::Cpu => {
+				Surface::I420(cuda.download_i420()?.resize(width, height)?)
+			}
+			#[cfg(all(target_os = "linux", feature = "nvdec"))]
 			Surface::Cuda(cuda) => match cuda.resize(width, height) {
 				Ok(scaled) => Surface::Cuda(scaled),
 				// E.g. the driver rejected the vendored PTX: degrade to a CPU
@@ -189,8 +210,22 @@ impl Surface {
 					Surface::I420(cuda.download_i420()?.resize(width, height)?)
 				}
 			},
-			// D3D11 textures have no GPU scaler wired up yet, so a ladder fanning one
-			// decoded frame out to several sizes downloads it once per rung.
+			#[cfg(target_os = "windows")]
+			Surface::Texture(texture) if config.acceleration == crate::resize::Acceleration::Cpu => {
+				Surface::I420(texture.download_i420()?.resize(width, height)?)
+			}
+			#[cfg(target_os = "windows")]
+			Surface::Texture(texture) => match texture.resize(width, height) {
+				Ok(scaled) => Surface::Texture(scaled),
+				// A driver that won't render to NV12 has no video-processor path
+				// at all: degrade to a CPU resize (download once) instead of
+				// killing the stream.
+				Err(err) => {
+					static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+					WARN_ONCE.call_once(|| tracing::warn!(%err, "GPU resize failed; falling back to the CPU"));
+					Surface::I420(texture.download_i420()?.resize(width, height)?)
+				}
+			},
 			#[allow(unreachable_patterns)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(width, height)?),
 		})
@@ -604,17 +639,144 @@ pub(crate) fn deinterleave_uv(uv: &[u8], u: &mut [u8], v: &mut [u8]) {
 	}
 }
 
+/// A bounded least-recently-used cache that never evicts a value in use.
+///
+/// Both GPU scalers want the same thing: the object that does the scaling is
+/// expensive to build, cheap to reuse, and not safe to drive from two threads at
+/// once, while a rendition ladder resizes on a thread per rung. So each key owns
+/// a serialized value, rungs share rather than contend, and a long-lived process
+/// does not retain every size it has ever seen.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct Cache<K, T> {
+	values: std::collections::HashMap<K, std::sync::Arc<std::sync::Mutex<T>>>,
+	order: std::collections::VecDeque<K>,
+	capacity: usize,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl<K: Clone + Eq + std::hash::Hash, T> Cache<K, T> {
+	fn new(capacity: usize) -> Self {
+		Self {
+			values: std::collections::HashMap::new(),
+			order: std::collections::VecDeque::new(),
+			capacity,
+		}
+	}
+
+	fn get_or_insert_with<E>(
+		&mut self,
+		key: K,
+		create: impl FnOnce() -> Result<T, E>,
+	) -> Result<std::sync::Arc<std::sync::Mutex<T>>, E> {
+		if let Some(value) = self.values.get(&key).cloned() {
+			self.touch(&key);
+			return Ok(value);
+		}
+
+		let value = std::sync::Arc::new(std::sync::Mutex::new(create()?));
+		self.values.insert(key.clone(), std::sync::Arc::clone(&value));
+		self.touch(&key);
+		self.prune();
+		Ok(value)
+	}
+
+	fn touch(&mut self, key: &K) {
+		self.order.retain(|entry| entry != key);
+		self.order.push_back(key.clone());
+	}
+
+	fn prune(&mut self) {
+		let mut remaining = self.order.len();
+		while self.values.len() > self.capacity && remaining > 0 {
+			let key = self.order.pop_front().expect("remaining entries");
+			let idle = self
+				.values
+				.get(&key)
+				.is_some_and(|value| std::sync::Arc::strong_count(value) == 1);
+			if idle {
+				self.values.remove(&key);
+			} else {
+				self.order.push_back(key);
+			}
+			remaining -= 1;
+		}
+	}
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod cache_tests {
+	use super::Cache;
+
+	#[test]
+	fn evicts_the_least_recently_used_idle_value() {
+		let mut cache = Cache::new(2);
+
+		let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
+		drop(first);
+		let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
+		drop(second);
+
+		let first = cache
+			.get_or_insert_with((1, 1), || Err::<(), _>("cached value was recreated"))
+			.unwrap();
+		drop(first);
+		let third = cache.get_or_insert_with((3, 3), || Ok::<_, ()>(())).unwrap();
+		drop(third);
+
+		assert!(cache.values.contains_key(&(1, 1)));
+		assert!(!cache.values.contains_key(&(2, 2)));
+		assert!(cache.values.contains_key(&(3, 3)));
+		assert_eq!(cache.values.len(), 2);
+	}
+
+	#[test]
+	fn defers_eviction_until_an_active_value_is_released() {
+		let mut cache = Cache::new(1);
+		let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
+		let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
+		assert_eq!(cache.values.len(), 2);
+
+		drop(first);
+		cache.prune();
+		assert!(!cache.values.contains_key(&(1, 1)));
+		assert!(cache.values.contains_key(&(2, 2)));
+		assert_eq!(cache.values.len(), 1);
+		drop(second);
+	}
+
+	#[test]
+	fn caches_failure_markers() {
+		let mut attempts = 0;
+		let mut cache = Cache::new(1);
+		let failed = cache
+			.get_or_insert_with(1, || {
+				attempts += 1;
+				Ok::<_, ()>(Err::<(), _>("unsupported"))
+			})
+			.unwrap();
+		drop(failed);
+		let failed = cache
+			.get_or_insert_with(1, || {
+				attempts += 1;
+				Ok::<_, ()>(Ok::<_, &str>(()))
+			})
+			.unwrap();
+
+		assert_eq!(attempts, 1);
+		assert!(failed.lock().unwrap().is_err());
+	}
+}
+
 #[cfg(target_os = "macos")]
 pub mod macos {
 	//! macOS CoreVideo surfaces: the [`PixelBuffer`] behind
 	//! `Surface::PixelBuffer`, GPU resize, and download/upload between it and CPU
 	//! I420.
 
-	use std::collections::{HashMap, VecDeque};
 	use std::ffi::c_void;
 	use std::ptr;
 	use std::ptr::NonNull;
-	use std::sync::{Arc, LazyLock, Mutex};
+	use std::sync::{LazyLock, Mutex};
 
 	use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFRetained, CFString};
 	use objc2_core_video::{
@@ -627,7 +789,7 @@ pub mod macos {
 	};
 	use objc2_video_toolbox::VTPixelTransferSession;
 
-	use super::I420;
+	use super::{Cache, I420};
 	use crate::{Color, Error};
 
 	/// Read-only lock flag (`kCVPixelBufferLock_ReadOnly`).
@@ -640,61 +802,8 @@ pub mod macos {
 	/// Transfer sessions and destination pools are reusable, but VideoToolbox does
 	/// not promise concurrent access to a session. Each cached output size gets
 	/// its own serialized scaler so independent ladder rungs do not contend.
-	type ScalerCache = Mutex<Cache<Scaler>>;
+	type ScalerCache = Mutex<Cache<(u32, u32), Scaler>>;
 	static SCALERS: LazyLock<ScalerCache> = LazyLock::new(|| Mutex::new(Cache::new(SCALER_CACHE_CAPACITY)));
-
-	/// A bounded least-recently-used cache that never evicts a value in use.
-	struct Cache<T> {
-		values: HashMap<(u32, u32), Arc<Mutex<T>>>,
-		order: VecDeque<(u32, u32)>,
-		capacity: usize,
-	}
-
-	impl<T> Cache<T> {
-		fn new(capacity: usize) -> Self {
-			Self {
-				values: HashMap::new(),
-				order: VecDeque::new(),
-				capacity,
-			}
-		}
-
-		fn get_or_insert_with<E>(
-			&mut self,
-			key: (u32, u32),
-			create: impl FnOnce() -> Result<T, E>,
-		) -> Result<Arc<Mutex<T>>, E> {
-			if let Some(value) = self.values.get(&key).cloned() {
-				self.touch(key);
-				return Ok(value);
-			}
-
-			let value = Arc::new(Mutex::new(create()?));
-			self.values.insert(key, Arc::clone(&value));
-			self.touch(key);
-			self.prune();
-			Ok(value)
-		}
-
-		fn touch(&mut self, key: (u32, u32)) {
-			self.order.retain(|entry| *entry != key);
-			self.order.push_back(key);
-		}
-
-		fn prune(&mut self) {
-			let mut remaining = self.order.len();
-			while self.values.len() > self.capacity && remaining > 0 {
-				let key = self.order.pop_front().expect("remaining entries");
-				let idle = self.values.get(&key).is_some_and(|value| Arc::strong_count(value) == 1);
-				if idle {
-					self.values.remove(&key);
-				} else {
-					self.order.push_back(key);
-				}
-				remaining -= 1;
-			}
-		}
-	}
 
 	/// A captured GPU surface. Cloning is a cheap retain (no pixel copy), which
 	/// is what keeps the capture -> encode path zero-copy.
@@ -1056,48 +1165,6 @@ pub mod macos {
 			}
 		}
 	}
-
-	#[cfg(test)]
-	mod cache_tests {
-		use super::Cache;
-
-		#[test]
-		fn evicts_the_least_recently_used_idle_value() {
-			let mut cache = Cache::new(2);
-
-			let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
-			drop(first);
-			let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
-			drop(second);
-
-			let first = cache
-				.get_or_insert_with((1, 1), || Err::<(), _>("cached value was recreated"))
-				.unwrap();
-			drop(first);
-			let third = cache.get_or_insert_with((3, 3), || Ok::<_, ()>(())).unwrap();
-			drop(third);
-
-			assert!(cache.values.contains_key(&(1, 1)));
-			assert!(!cache.values.contains_key(&(2, 2)));
-			assert!(cache.values.contains_key(&(3, 3)));
-			assert_eq!(cache.values.len(), 2);
-		}
-
-		#[test]
-		fn defers_eviction_until_an_active_value_is_released() {
-			let mut cache = Cache::new(1);
-			let first = cache.get_or_insert_with((1, 1), || Ok::<_, ()>(())).unwrap();
-			let second = cache.get_or_insert_with((2, 2), || Ok::<_, ()>(())).unwrap();
-			assert_eq!(cache.values.len(), 2);
-
-			drop(first);
-			cache.prune();
-			assert!(!cache.values.contains_key(&(1, 1)));
-			assert!(cache.values.contains_key(&(2, 2)));
-			assert_eq!(cache.values.len(), 1);
-			drop(second);
-		}
-	}
 }
 
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
@@ -1336,8 +1403,9 @@ pub mod d3d11 {
 
 	use std::ffi::c_void;
 	use std::ptr;
+	use std::sync::{LazyLock, Mutex};
 
-	use windows::Win32::Foundation::HMODULE;
+	use windows::Win32::Foundation::{HMODULE, RECT};
 	use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 	use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 	use windows::Win32::Graphics::Direct3D11::{
@@ -1345,15 +1413,23 @@ pub mod d3d11 {
 		D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
 		D3D11_FORMAT_SUPPORT, D3D11_FORMAT_SUPPORT_RENDER_TARGET, D3D11_FORMAT_SUPPORT_SHADER_SAMPLE,
 		D3D11_FORMAT_SUPPORT_VIDEO_ENCODER, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
-		D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
-		ID3D11DeviceContext, ID3D11Texture2D,
+		D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+		D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+		D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+		D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+		D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+		D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+		ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+		ID3D11VideoProcessorOutputView,
 	};
-	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+	#[cfg(test)]
+	use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
-	use super::I420;
-	use crate::Error;
+	use super::{Cache, I420};
+	use crate::{Error, Size};
 
 	fn err(ctx: &str, e: windows::core::Error) -> Error {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
@@ -1570,6 +1646,276 @@ pub mod d3d11 {
 				color: None,
 			})
 		}
+
+		/// Scale to `width` x `height` on the GPU, staying on this texture's device.
+		/// The Windows GPU path used by
+		/// [`Frame::resize_with`](crate::Frame::resize_with).
+		///
+		/// Errors rather than falling back, so the caller decides. Two things a
+		/// driver can refuse: rendering to NV12 at all (no output view, so no
+		/// scale), and an input view over a texture bound only for shader
+		/// sampling. [`bind_flags`] asks for render-target and video-encoder
+		/// support up front, so both come down to what the driver granted.
+		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
+			let source = Size::new(self.width, self.height);
+			let target = Size::new(width, height);
+			let key = ScalerKey::new(&self.device, source, target);
+
+			let scaler = {
+				let mut scalers = SCALERS
+					.lock()
+					.map_err(|_| Error::Codec(anyhow::anyhow!("video-processor cache lock poisoned")))?;
+				scalers
+					.get_or_insert_with(key, || {
+						Ok::<_, std::convert::Infallible>(ScalerState::discover(&self.device, source, target))
+					})
+					.expect("scaler discovery is infallible")
+			};
+			let mut state = scaler
+				.lock()
+				.map_err(|_| Error::Codec(anyhow::anyhow!("video processor lock poisoned")))?;
+			let result = match &*state {
+				ScalerState::Ready(scaler) => scaler.scale(&self.texture),
+				ScalerState::Unsupported { reason, .. } => {
+					return Err(Error::Codec(anyhow::anyhow!("GPU resize is unsupported: {reason}")));
+				}
+			};
+			let texture = match result {
+				Ok(texture) => texture,
+				Err(ScaleError::Unsupported(err)) => {
+					*state = ScalerState::Unsupported {
+						_device: self.device.clone(),
+						reason: err.to_string(),
+					};
+					return Err(err);
+				}
+				Err(ScaleError::Transient(err)) => return Err(err),
+			};
+			drop(state);
+			drop(scaler);
+			if let Ok(mut scalers) = SCALERS.lock() {
+				scalers.prune();
+			}
+
+			Ok(Self {
+				device: self.device.clone(),
+				texture,
+				width,
+				height,
+			})
+		}
+	}
+
+	/// Enough reusable video processors for a large rendition ladder without
+	/// retaining every device and scale a long-lived process has ever seen.
+	const SCALER_CACHE_CAPACITY: usize = 16;
+
+	/// Building a video processor costs orders of magnitude more than using one,
+	/// and `ID3D11VideoContext` is not safe to drive from two threads at once, so
+	/// each device and scale gets one serialized processor that its ladder rungs
+	/// share.
+	static SCALERS: LazyLock<Mutex<Cache<ScalerKey, ScalerState>>> =
+		LazyLock::new(|| Mutex::new(Cache::new(SCALER_CACHE_CAPACITY)));
+
+	/// A usable scaler, or a remembered capability failure for this exact key.
+	enum ScalerState {
+		Ready(Scaler),
+		Unsupported {
+			/// Keeps the pointer in the cache key unique while this marker exists.
+			_device: ID3D11Device,
+			reason: String,
+		},
+	}
+
+	impl ScalerState {
+		fn discover(device: &ID3D11Device, source: Size, target: Size) -> Self {
+			match Scaler::new(device, source, target) {
+				Ok(scaler) => Self::Ready(scaler),
+				Err(err) => Self::Unsupported {
+					_device: device.clone(),
+					reason: err.to_string(),
+				},
+			}
+		}
+	}
+
+	/// Which device and which scale a cached processor is for.
+	///
+	/// The device is keyed by pointer because `ID3D11Device` is not hashable. That
+	/// is sound only because every cached [`ScalerState`] holds a reference to the
+	/// same device: the address cannot be freed and handed to a different device
+	/// while an entry keyed on it is alive.
+	#[derive(Clone, PartialEq, Eq, Hash)]
+	struct ScalerKey {
+		device: usize,
+		source: Size,
+		target: Size,
+	}
+
+	impl ScalerKey {
+		fn new(device: &ID3D11Device, source: Size, target: Size) -> Self {
+			Self {
+				device: device.as_raw() as usize,
+				source,
+				target,
+			}
+		}
+	}
+
+	/// One Direct3D11 video processor, configured for a single source and target
+	/// size. The GPU scaler behind [`Texture::resize`].
+	struct Scaler {
+		/// Keeps the device keying this entry alive, so its address stays unique.
+		device: ID3D11Device,
+		video: ID3D11VideoDevice,
+		context: ID3D11VideoContext,
+		enumerator: ID3D11VideoProcessorEnumerator,
+		processor: ID3D11VideoProcessor,
+		target: Size,
+	}
+
+	/// Whether a failed scale proves this key unsupported or can succeed later.
+	enum ScaleError {
+		Unsupported(Error),
+		Transient(Error),
+	}
+
+	impl Scaler {
+		fn new(device: &ID3D11Device, source: Size, target: Size) -> Result<Self, Error> {
+			let video = device
+				.cast::<ID3D11VideoDevice>()
+				.map_err(|e| err("query ID3D11VideoDevice", e))?;
+			let immediate = unsafe { device.GetImmediateContext() }.map_err(|e| err("GetImmediateContext", e))?;
+			let context = immediate
+				.cast::<ID3D11VideoContext>()
+				.map_err(|e| err("query ID3D11VideoContext", e))?;
+
+			// The frame rates are what a processor uses to decide it should
+			// deinterlace or interpolate; matching them says neither.
+			let rate = DXGI_RATIONAL {
+				Numerator: 30,
+				Denominator: 1,
+			};
+			let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+				InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+				InputFrameRate: rate,
+				InputWidth: source.width,
+				InputHeight: source.height,
+				OutputFrameRate: rate,
+				OutputWidth: target.width,
+				OutputHeight: target.height,
+				Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+			};
+
+			let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&desc) }
+				.map_err(|e| err("CreateVideoProcessorEnumerator", e))?;
+			let processor =
+				unsafe { video.CreateVideoProcessor(&enumerator, 0) }.map_err(|e| err("CreateVideoProcessor", e))?;
+
+			let full = RECT {
+				left: 0,
+				top: 0,
+				right: source.width as i32,
+				bottom: source.height as i32,
+			};
+			let scaled = RECT {
+				left: 0,
+				top: 0,
+				right: target.width as i32,
+				bottom: target.height as i32,
+			};
+			unsafe {
+				context.VideoProcessorSetStreamFrameFormat(&processor, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+				// The whole picture into the whole destination: the scale itself.
+				context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&full));
+				context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&scaled));
+				// Drivers ship denoise and edge enhancement on by default here.
+				// This is a resize, not a filter chain, so a rung must not come out
+				// looking different from the frame it was scaled from.
+				context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+				// One space in, the same space out. Resampling moves samples
+				// around, it must not reinterpret them, and a processor left to
+				// its own devices will happily convert between ranges.
+				let space = D3D11_VIDEO_PROCESSOR_COLOR_SPACE::default();
+				context.VideoProcessorSetStreamColorSpace(&processor, 0, &space);
+				context.VideoProcessorSetOutputColorSpace(&processor, &space);
+			}
+
+			Ok(Self {
+				device: device.clone(),
+				video,
+				context,
+				enumerator,
+				processor,
+				target,
+			})
+		}
+
+		/// Blit `source` into a new texture at the target size.
+		fn scale(&self, source: &ID3D11Texture2D) -> Result<ID3D11Texture2D, ScaleError> {
+			let mut desc = D3D11_TEXTURE2D_DESC::default();
+			unsafe { source.GetDesc(&mut desc) };
+			let output = alloc(&self.device, self.target.width, self.target.height, desc.Format)
+				.map_err(ScaleError::Transient)?;
+
+			let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+				FourCC: 0,
+				ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+				Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+					Texture2D: D3D11_TEX2D_VPIV {
+						MipSlice: 0,
+						ArraySlice: 0,
+					},
+				},
+			};
+			let mut input: Option<ID3D11VideoProcessorInputView> = None;
+			unsafe {
+				self.video
+					.CreateVideoProcessorInputView(source, &self.enumerator, &input_desc, Some(&mut input))
+					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorInputView", e)))?;
+			}
+			let input =
+				input.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("input view is null"))))?;
+
+			let output_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+				ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+				Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+					Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+				},
+			};
+			let mut view: Option<ID3D11VideoProcessorOutputView> = None;
+			unsafe {
+				self.video
+					.CreateVideoProcessorOutputView(&output, &self.enumerator, &output_desc, Some(&mut view))
+					.map_err(|e| ScaleError::Unsupported(err("CreateVideoProcessorOutputView", e)))?;
+			}
+			let view =
+				view.ok_or_else(|| ScaleError::Unsupported(Error::Codec(anyhow::anyhow!("output view is null"))))?;
+
+			let streams = [D3D11_VIDEO_PROCESSOR_STREAM {
+				Enable: true.into(),
+				OutputIndex: 0,
+				InputFrameOrField: 0,
+				PastFrames: 0,
+				FutureFrames: 0,
+				ppPastSurfaces: ptr::null_mut(),
+				pInputSurface: std::mem::ManuallyDrop::new(Some(input)),
+				ppFutureSurfaces: ptr::null_mut(),
+				ppPastSurfacesRight: ptr::null_mut(),
+				pInputSurfaceRight: std::mem::ManuallyDrop::new(None),
+				ppFutureSurfacesRight: ptr::null_mut(),
+			}];
+			let result = unsafe { self.context.VideoProcessorBlt(&self.processor, &view, 0, &streams) };
+			// The stream struct holds the view in a `ManuallyDrop`, so releasing it
+			// is ours to do whether or not the blit succeeded.
+			// SAFETY: the field is live and read exactly once.
+			drop(std::mem::ManuallyDrop::into_inner(unsafe {
+				ptr::read(&streams[0].pInputSurface)
+			}));
+			result.map_err(|e| ScaleError::Transient(err("VideoProcessorBlt", e)))?;
+
+			Ok(output)
+		}
 	}
 
 	/// A plain single-slice texture on `device`, bound for whatever the driver
@@ -1595,6 +1941,42 @@ pub mod d3d11 {
 				.map_err(|e| err("CreateTexture2D", e))?;
 		}
 		texture.ok_or_else(|| Error::Codec(anyhow::anyhow!("CreateTexture2D returned null")))
+	}
+
+	/// Upload packed I420 as an NV12 texture on `device`, the inverse of
+	/// [`Texture::download_i420`]. Only the tests need it: every texture in a live
+	/// pipeline comes from a producer that already put it on the GPU.
+	#[cfg(test)]
+	pub(crate) fn upload_i420(device: &ID3D11Device, frame: &I420) -> Result<Texture, Error> {
+		let (width, height) = (frame.width, frame.height);
+		let texture = alloc(device, width, height, DXGI_FORMAT_NV12)?;
+
+		let (w, h) = (width as usize, height as usize);
+		let mut nv12 = vec![0u8; w * h * 3 / 2];
+		let (luma, chroma) = nv12.split_at_mut(w * h);
+		luma.copy_from_slice(frame.y());
+		super::interleave_uv(frame.u(), frame.v(), chroma);
+
+		let context = unsafe { device.GetImmediateContext() }.map_err(|e| err("GetImmediateContext", e))?;
+		// Tightly packed, so the row pitch is the width and the depth pitch is
+		// the whole buffer.
+		unsafe {
+			context.UpdateSubresource(
+				&texture,
+				0,
+				None,
+				nv12.as_ptr().cast::<c_void>(),
+				width,
+				nv12.len() as u32,
+			);
+		}
+
+		Ok(Texture {
+			device: device.clone(),
+			texture,
+			width,
+			height,
+		})
 	}
 
 	/// The Direct3D11 texture behind a Media Foundation sample, and which slice of
@@ -1640,6 +2022,13 @@ pub mod d3d11 {
 			flags |= D3D11_BIND_VIDEO_ENCODER.0 as u32;
 		}
 		flags
+	}
+
+	/// Whether explicit GPU-resize tests can render to an NV12 destination.
+	#[cfg(test)]
+	pub(crate) fn supports_nv12_render_target(device: &ID3D11Device) -> bool {
+		let support = unsafe { device.CheckFormatSupport(DXGI_FORMAT_NV12) }.unwrap_or_default();
+		support & D3D11_FORMAT_SUPPORT_RENDER_TARGET.0 as u32 != 0
 	}
 
 	struct UnmapGuard<'a> {
@@ -1889,6 +2278,20 @@ mod tests {
 		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
+	/// Explicit CPU acceleration downloads a macOS pixel buffer before scaling.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn pixel_buffer_resize_can_force_the_cpu() {
+		let config = crate::resize::Config {
+			acceleration: crate::resize::Acceleration::Cpu,
+			..Default::default()
+		};
+		let source = Surface::PixelBuffer(nv12_surface(&gradient_i420(320, 240)));
+		let scaled = source.resize_with(Size::new(160, 120), &config).unwrap();
+
+		assert!(matches!(scaled, Surface::I420(_)), "CPU resize stayed on the GPU");
+	}
+
 	/// Upload a packed I420 test picture as NV12, including CoreVideo row
 	/// padding, so the transfer test starts from the decoder's surface format.
 	#[cfg(target_os = "macos")]
@@ -1943,6 +2346,85 @@ mod tests {
 		unsafe { CVPixelBufferUnlockBaseAddress(&buffer, flags) };
 
 		super::macos::PixelBuffer::new(buffer, frame.width, frame.height)
+	}
+
+	/// A Direct3D11 texture stays on the GPU by default.
+	#[cfg(target_os = "windows")]
+	#[test]
+	#[ignore = "D3D11 GPU reproducer; VideoProcessorBlt can hang on affected drivers"]
+	fn d3d11_resize_defaults_to_the_gpu() {
+		let Ok(device) = super::d3d11::create_device() else {
+			eprintln!("skipping: no Direct3D11 hardware device");
+			return;
+		};
+		let Ok(texture) = super::d3d11::upload_i420(&device, &gradient_i420(320, 240)) else {
+			eprintln!("skipping: driver will not allocate a usable NV12 texture");
+			return;
+		};
+		if !super::d3d11::supports_nv12_render_target(&device) {
+			eprintln!("skipping: driver cannot render to NV12");
+			return;
+		}
+
+		let scaled = Surface::Texture(texture).resize(crate::Size::new(160, 120)).unwrap();
+		assert!(
+			matches!(scaled, Surface::Texture(_)),
+			"Direct3D11 resize downloaded to the CPU"
+		);
+		assert_eq!((scaled.width(), scaled.height()), (160, 120));
+	}
+
+	/// Direct3D11 resize can be forced onto the CPU.
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn d3d11_resize_can_force_the_cpu() {
+		let Ok(device) = super::d3d11::create_device() else {
+			eprintln!("skipping: no Direct3D11 hardware device");
+			return;
+		};
+		let Ok(texture) = super::d3d11::upload_i420(&device, &gradient_i420(320, 240)) else {
+			eprintln!("skipping: driver will not allocate a usable NV12 texture");
+			return;
+		};
+
+		let config = crate::resize::Config {
+			acceleration: crate::resize::Acceleration::Cpu,
+			..Default::default()
+		};
+		let scaled = Surface::Texture(texture)
+			.resize_with(crate::Size::new(160, 120), &config)
+			.unwrap();
+		assert!(matches!(scaled, Surface::I420(_)), "Direct3D11 resize ignored CPU mode");
+	}
+
+	/// GPU (video processor) and CPU (bilinear convolution) resizes agree on a
+	/// smooth gradient, so the scaler is scaling rather than merely not failing.
+	/// Runs on real hardware; skips without a Direct3D11 device.
+	#[cfg(target_os = "windows")]
+	#[test]
+	#[ignore = "explicit D3D11 GPU probe; VideoProcessorBlt can hang on affected drivers"]
+	fn d3d11_resize_matches_cpu() {
+		let Ok(device) = super::d3d11::create_device() else {
+			eprintln!("skipping: no Direct3D11 hardware device");
+			return;
+		};
+		let source = gradient_i420(320, 240);
+		let Ok(texture) = super::d3d11::upload_i420(&device, &source) else {
+			eprintln!("skipping: driver will not allocate a usable NV12 texture");
+			return;
+		};
+		if !super::d3d11::supports_nv12_render_target(&device) {
+			eprintln!("skipping: driver cannot render to NV12");
+			return;
+		}
+
+		let gpu = texture.resize(160, 120).unwrap().download_i420().unwrap();
+		let cpu = source.resize(160, 120).unwrap();
+
+		assert_eq!((gpu.width, gpu.height), (160, 120));
+		assert!(mae(gpu.y(), cpu.y()) < 4, "GPU and CPU luma disagree");
+		assert!(mae(gpu.u(), cpu.u()) < 4, "GPU and CPU u disagree");
+		assert!(mae(gpu.v(), cpu.v()) < 4, "GPU and CPU v disagree");
 	}
 
 	/// GPU (box filter) and CPU (bilinear convolution) resizes agree on a

@@ -244,16 +244,28 @@ impl Drop for Alive {
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
-		if let Ok(mut state) = modify(&self.state)
-			&& state.fin.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped mid-group. Deliberate ends go through finish()/abort().
-			tracing::warn!(
-				sequence = self.info.sequence,
-				"group::Producer dropped without finish() or abort()"
-			);
-			state.release();
+		//
+		// Check Ok and Err: Ok is unreachable after a deliberate close.
+		match self.state.write() {
+			Ok(mut state) => {
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+				state.release();
+			}
+			Err(state) => {
+				if state.fin.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					sequence = self.info.sequence,
+					"group::Producer dropped without finish() or abort()"
+				);
+			}
 		}
 	}
 }
@@ -800,6 +812,7 @@ impl Fetch {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	use futures::FutureExt;
 
@@ -956,6 +969,37 @@ mod test {
 
 		let result = consumer.next_frame().now_or_never().unwrap();
 		assert!(matches!(result, Err(crate::Error::Dropped)));
+	}
+
+	#[test]
+	fn drop_after_abort_does_not_warn() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let producer = Info { sequence: 0 }.produce();
+			let keep = producer.clone();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			writer.abort(crate::Error::Cancel).unwrap();
+			drop(keep);
+		});
+		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[test]
+	fn drop_unfinished_warns() {
+		let warns = count_drop_warnings("group::Producer dropped without finish", || {
+			let producer = Info { sequence: 0 }.produce();
+			let mut writer = producer.clone();
+			writer
+				.write_frame(Timestamp::ZERO, Bytes::from_static(b"data"))
+				.unwrap();
+			let _consumer = producer.consume();
+			drop(writer);
+			drop(producer);
+		});
+		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
 	}
 
 	#[test]

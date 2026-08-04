@@ -196,6 +196,10 @@ Client settings used when connecting to other relays (clustering).
 
 ```toml
 [client]
+# Maximum time for one outbound dial and MoQ handshake. Defaults to 30s.
+# Set to "0" to wait forever.
+timeout = "30s"
+
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
@@ -216,7 +220,11 @@ tls.disable_verify = true
 # failover_delay = "250ms"
 ```
 
-Also available as `--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`.
+The connect timeout is also available as `--client-connect-timeout` or
+`MOQ_CLIENT_CONNECT_TIMEOUT`, and the failover delay as
+`--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`. The two compose: the
+failover delay staggers the attempts within one dial, and the timeout bounds
+that dial as a whole.
 
 Pinning the source port (a non-zero port in `--client-bind`) disables address
 failover on the `quiche` backend, which binds a fresh socket per attempt and so

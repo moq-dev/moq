@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.5...moq-transcode-v0.0.6) - 2026-08-03
+
+### Fixed
+
+- *(moq-video)* keep Media Foundation decoded frames on the GPU, and stop losing frames at group boundaries ([#2584](https://github.com/moq-dev/moq/pull/2584))
+
 ## [0.0.5](https://github.com/moq-dev/moq/compare/moq-transcode-v0.0.4...moq-transcode-v0.0.5) - 2026-07-29
 
 ### Added

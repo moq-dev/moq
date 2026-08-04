@@ -318,6 +318,9 @@ moq --client-connect https://relay.example.com/anon --broadcast cam.hang     tra
 moq --client-connect https://relay.example.com/anon --broadcast cam.hang transcode --output ladder.hang
 ```
 
+Windows uses the Direct3D11 video processor by default. Pass
+`--resize-acceleration cpu` to force frames through CPU resizing.
+
 On an NVIDIA GPU the pipeline is fully GPU-resident: one shared NVDEC session
 decodes the source for all active rungs, a CUDA kernel resizes each rung's copy,
 and NVENC encodes it in place, with no CPU copies. Without a GPU it falls back

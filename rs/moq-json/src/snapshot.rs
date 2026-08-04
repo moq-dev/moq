@@ -318,7 +318,7 @@ impl Inner {
 	/// that tips the group past `ratio * snapshot` still lands: a group overshoots by at most one delta
 	/// before rolling.
 	fn delta_allowed(&self) -> bool {
-		let ratio = self.config.delta_ratio as u64;
+		let ratio = u64::from(self.config.delta_ratio);
 		ratio != 0
 			&& self.group.is_some()
 			&& self.group_frames < MAX_DELTA_FRAMES

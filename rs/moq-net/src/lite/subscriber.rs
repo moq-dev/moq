@@ -58,12 +58,14 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Origin,
 	// The origin stamped into the hop chain of broadcasts from versions that
-	// don't carry real hop ids on the wire (Lite01/02/03). It gives each
-	// upstream session a stable identity in the hop list so two sessions
-	// publishing the same path resolve as distinct routes instead of colliding
-	// on an empty/placeholder chain. Random per connection unless the caller
-	// assigned the peer an identity (`peer_origin`), which then also makes the
-	// route recognizable across sessions.
+	// don't carry real hop ids on the wire (Lite01/02/03), and into the
+	// placeholder entries Lite03 sends in place of real ids.
+	//
+	// This is the peer's assigned identity (`peer_origin`) when the caller gave
+	// it one, which also makes the route recognizable across sessions. Otherwise
+	// it is `Origin::UNKNOWN` (0), the reserved "no identity" value: a random id
+	// would look like an identity the peer never agreed to and cannot exclude
+	// for loop detection.
 	session_origin: crate::Origin,
 	// The identity assigned to the peer by `Client::with_peer_origin`, standing
 	// in wherever the peer declines to declare one (an AnnounceOk reporting
@@ -100,7 +102,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			origin: config.origin,
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: config.peer_origin.unwrap_or_else(crate::Origin::random),
+			session_origin: config.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
 			peer_origin: config.peer_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
@@ -576,12 +578,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Handle a RESTART (an explicit restart status, or a duplicate ANNOUNCE on lite-05).
 	///
 	/// The first hop of the chain identifies the original publisher. When it matches
-	/// the prior advertisement, the broadcast is the same content on a new path:
-	/// this session's route metadata updates in place, in-flight tracks keep
-	/// flowing, and the origin only hands over if the winner changed. Consumers
-	/// observe nothing. When the first hop differs, the original publisher was
-	/// replaced: the old route detaches gracefully and a fresh one attaches, so
-	/// downstream sees a real Ended + Active (a new broadcast, nothing resumes).
+	/// the prior advertisement and is a real identity, the broadcast is the same
+	/// content on a new path: this session's route metadata updates in place,
+	/// in-flight tracks keep flowing, and the origin only hands over if the winner
+	/// changed. Consumers observe nothing. When the first hop differs, or is
+	/// `Origin::UNKNOWN` (which identifies nothing, so two UNKNOWN advertisements
+	/// can be unrelated publishers), the old route detaches gracefully and a fresh
+	/// one attaches, so downstream sees a real Ended + Active (a new broadcast,
+	/// nothing resumes).
 	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
 	/// route is now gone), `Ok(true)` otherwise.
 	fn restart_announce(
@@ -620,11 +624,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		metadata.advertised = cost.0;
 
 		match routes.get_mut(&path) {
-			Some(entry) if entry.publisher != publisher => {
-				// A different original publisher: a brand-new broadcast replaced the
-				// old one at this path. Detach gracefully (downstream unannounces if
-				// this was the last source) and attach fresh below; cached TRACK_INFO
-				// and subscriptions must not carry over.
+			Some(entry) if entry.publisher != publisher || publisher == crate::Origin::UNKNOWN => {
+				// A different original publisher, or no identity at all (UNKNOWN
+				// never proves continuity): a brand-new broadcast may have replaced
+				// the old one at this path. Detach gracefully (downstream unannounces
+				// if this was the last source) and attach fresh below; cached
+				// TRACK_INFO and subscriptions must not carry over.
 				let entry = routes.remove(&path).expect("matched above");
 				entry.finish();
 			}
@@ -980,6 +985,132 @@ mod tests {
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
 		assert_eq!(hops, vec![assigned]);
+	}
+
+	/// A peer with no assigned identity is attributed the reserved origin 0
+	/// (UNKNOWN), not a random one: a random id would look like a real identity
+	/// the peer never agreed to and cannot exclude for loop detection.
+	#[tokio::test]
+	async fn absent_peer_origin_stamps_unknown() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+
+		let mut routes = HashMap::new();
+		subscriber
+			.start_announce(
+				Path::new("room/host").to_owned(),
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				None,
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		assert_eq!(hops, vec![crate::Origin::UNKNOWN]);
+	}
+
+	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
+		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let (tasks, task_set) = TaskSet::new();
+		// The task set must outlive the test; leak it so spawned run_source tasks stay alive.
+		std::mem::forget(task_set);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			session,
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			peer_origin: None,
+			cost: None,
+			tasks,
+		});
+		(subscriber, consumer)
+	}
+
+	/// An UNKNOWN (0) first hop identifies nothing, so a restart advertising
+	/// UNKNOWN again may be a different publisher entirely: the old broadcast must
+	/// be replaced, not updated in place. Regression: plain `==` on the publisher
+	/// id treated 0 == 0 as content-continuous and spliced unrelated broadcasts.
+	#[tokio::test]
+	async fn unknown_publisher_restart_replaces() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+
+		let mut routes = HashMap::new();
+		let path = Path::new("room/host").to_owned();
+		subscriber
+			.start_announce(
+				path.clone(),
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				Some(crate::Origin::UNKNOWN),
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		let before = consumer.get_broadcast("room/host").unwrap();
+
+		subscriber
+			.restart_announce(
+				path,
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				Some(crate::Origin::UNKNOWN),
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		assert!(before.is_closed(), "an UNKNOWN restart must replace the broadcast");
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"the fresh source re-attaches"
+		);
+	}
+
+	/// The counterpart: a real (non-zero) publisher id restarting is a route
+	/// change for the same content, so the broadcast survives in place.
+	#[tokio::test]
+	async fn known_publisher_restart_updates_in_place() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let publisher = crate::Origin::new(7).unwrap();
+
+		let mut routes = HashMap::new();
+		let path = Path::new("room/host").to_owned();
+		subscriber
+			.start_announce(
+				path.clone(),
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				Some(publisher),
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		let before = consumer.get_broadcast("room/host").unwrap();
+
+		subscriber
+			.restart_announce(
+				path,
+				crate::OriginList::new(),
+				RouteCost(5),
+				0,
+				Some(publisher),
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		assert!(
+			!before.is_closed(),
+			"a known publisher restart keeps the broadcast live"
+		);
 	}
 }
 

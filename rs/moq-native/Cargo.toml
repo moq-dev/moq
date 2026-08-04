@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.19.5"
+version = "0.19.6"
 edition = "2024"
 rust-version.workspace = true
 
@@ -96,7 +96,7 @@ bytes = "1"
 chrono = "0.4"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 tempfile = "3"
-# test-util adds tokio::time::pause/auto-advance for the failover racer tests.
+# test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 toml = "1.1"
 tracing-test = "0.2"

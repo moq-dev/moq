@@ -48,6 +48,8 @@ pub(crate) struct Rung {
 	pub encoder: moq_video::encode::Kind,
 	/// Which decoder implementation to use.
 	pub decoder: moq_video::decode::Kind,
+	/// How to resize decoded frames.
+	pub resize: moq_video::resize::Config,
 }
 
 impl Rung {
@@ -186,15 +188,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					let Some(output) = &mut current else { continue };
 
 					// The feed decodes at the source's native size; size this rung's copy
-					// here. A GPU frame resizes on the GPU and feeds the encoder without
-					// touching the CPU. The resize carries the source's color space
-					// across, which is why the encoder is opened from the scaled frame
-					// rather than from this rung's size.
+					// here. Supported GPU paths feed the encoder without touching the
+					// CPU. The resize carries the source's color space across, which is
+					// why the encoder is opened from the scaled frame rather than from
+					// this rung's size.
 					let resized;
 					let frame: &moq_video::Frame = match frame.size() == rung.info.size {
 						true => &frame,
 						false => {
-							resized = frame.resize(rung.info.size)?;
+							resized = frame.resize_with(rung.info.size, &rung.resize)?;
 							&resized
 						}
 					};
@@ -390,11 +392,11 @@ fn write(output: &mut moq_net::group::Producer, encoded: Vec<moq_video::encode::
 
 /// Decode -> resize -> encode for one fetched group of one rung.
 ///
-/// The decoder is asked to emit frames at the rung's resolution
-/// (`decode::Config::resize`). A decoder with a hardware scaler (NVDEC) does,
-/// and its GPU frames feed the encoder in place: the NVDEC -> NVENC path never
-/// touches the CPU. Frames that come back at any other size (software decode,
-/// or a hardware decoder without a scaler) get `Frame::resize` instead.
+/// Unless CPU scaling is forced, the decoder is asked to emit frames at the
+/// rung's resolution (`decode::Config::resize`). A decoder with a hardware
+/// scaler (NVDEC) does, and its GPU frames feed the encoder in place: the NVDEC
+/// -> NVENC path never touches the CPU. Frames that come back at any other size
+/// get `Frame::resize_with` instead.
 struct Pipeline {
 	decoder: moq_video::decode::Decoder,
 	/// Opened from the first decoded frame, whose color space it has to declare.
@@ -410,7 +412,7 @@ impl Pipeline {
 	fn new(rung: &Rung) -> Result<Self, Error> {
 		let mut decode = moq_video::decode::Config::new();
 		decode.kind = rung.decoder.clone();
-		decode.resize = Some(rung.info.size);
+		decode.resize = decoder_resize(rung.info.size, rung.resize.acceleration);
 		let decoder = moq_video::decode::Decoder::new(&rung.config, &decode)?;
 
 		Ok(Self {
@@ -448,7 +450,7 @@ impl Pipeline {
 			let raw: &moq_video::Frame = match raw.size() == self.size {
 				true => &raw,
 				false => {
-					resized = raw.resize(self.size)?;
+					resized = raw.resize_with(self.size, &self.rung.resize)?;
 					&resized
 				}
 			};
@@ -477,5 +479,27 @@ impl Pipeline {
 			Some(encoder) => encoder.finish().map_err(Into::into),
 			None => Ok(Vec::new()),
 		}
+	}
+}
+
+/// Let a hardware decoder scale only when the caller has not forced the CPU.
+fn decoder_resize(size: moq_video::Size, acceleration: moq_video::resize::Acceleration) -> Option<moq_video::Size> {
+	(acceleration != moq_video::resize::Acceleration::Cpu).then_some(size)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::decoder_resize;
+	use moq_video::resize::Acceleration;
+
+	/// A fetched NVDEC group reaches `Frame::resize_with` at native size when
+	/// CPU scaling is forced, rather than being resized in the decoder first.
+	#[test]
+	fn forced_cpu_skips_the_decoder_scaler() {
+		let size = moq_video::Size::new(160, 120);
+
+		assert_eq!(decoder_resize(size, Acceleration::Cpu), None);
+		assert_eq!(decoder_resize(size, Acceleration::Auto), Some(size));
+		assert_eq!(decoder_resize(size, Acceleration::Gpu), Some(size));
 	}
 }

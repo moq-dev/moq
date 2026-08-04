@@ -19,6 +19,9 @@ mod subscription;
 mod time;
 mod weak_cache;
 
+#[cfg(test)]
+pub(crate) mod test_tracing;
+
 pub(crate) use requests::Requests;
 pub(crate) use weak_cache::{WeakCache, WeakEntry};
 

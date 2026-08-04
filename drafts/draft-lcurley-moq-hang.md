@@ -18,8 +18,12 @@ author:
 
 normative:
   moql: I-D.lcurley-moq-lite
-  moqt: I-D.ietf-moq-transport
-  webcodecs: WebCodecs
+  webcodecs:
+    title: "WebCodecs"
+    target: https://www.w3.org/TR/webcodecs/
+    author:
+      - org: W3C
+    date: false
 
 informative:
 
@@ -40,8 +44,8 @@ Hang is built on top of moq-lite [moql] and uses much of the same terminology.
 A quick recap:
 
 - **Broadcast**: A collection of Tracks from a single publisher.
-- **Track**: An series of Groups, each of which can be delivered and decoded *out-of-order*.
-- **Group**: An series of Frames, each of which must be delivered and decoded *in-order*.
+- **Track**: A series of Groups, each of which can be delivered and decoded *out-of-order*.
+- **Group**: A series of Frames, each of which must be delivered and decoded *in-order*.
 - **Frame**: A sized payload of bytes representing a single moment in time.
 
 Hang introduces additional terminology:
@@ -78,7 +82,7 @@ ANNOUNCE suffix=alice.hang active=true
 ANNOUNCE suffix=bob.hang   active=true
 ~~~
 
-If a publisher no longer wants to participant, or is disconnected somehow, their presence will be unannounced.
+If a participant leaves or is disconnected, their broadcast is unannounced.
 Publishers and subscribers SHOULD terminate any subscriptions once a participant is unannounced.
 
 ~~~
@@ -87,7 +91,7 @@ ANNOUNCE suffix=alice.hang active=false
 
 # Catalog
 The catalog describes the available media tracks for a single participant.
-It's a JSON document that extends the the W3C WebCodecs specification.
+It's a JSON document that extends the W3C WebCodecs specification {{webcodecs}}.
 
 The catalog is published as a `catalog.json` track within the broadcast so it can be updated live as the participant's media tracks change.
 A participant MAY forgo publishing a catalog if it does not wish to publish any media tracks now and in the future.
@@ -102,9 +106,9 @@ The root of the catalog is a JSON document with the following schema:
 
 ~~~
 type Catalog = {
-	"audio": AudioSchema | undefined,
-	"video": VideoSchema | undefined,
-	// ... any custom fields ...
+  "audio": AudioSchema | undefined,
+  "video": VideoSchema | undefined,
+  // ... any custom fields ...
 }
 ~~~
 
@@ -122,13 +126,13 @@ A video track contains the necessary information to decode a video stream.
 
 ~~~
 type VideoSchema = {
-	"renditions": Map<TrackName, VideoDecoderConfig>,
-	"display": {
-		"width": number,
-		"height": number,
-	} | undefined,
-	"rotation": number | undefined,
-	"flip": boolean | undefined,
+  "renditions": Map<TrackName, VideoDecoderConfig>,
+  "display": {
+    "width": number,
+    "height": number,
+  } | undefined,
+  "rotation": number | undefined,
+  "flip": boolean | undefined,
 }
 ~~~
 
@@ -143,8 +147,8 @@ In addition to the WebCodecs fields, each rendition MAY carry the fields common 
 
 ~~~
 type VideoDecoderConfigExtensions = {
-	"displayAspectWidth": number | undefined,
-	"displayAspectHeight": number | undefined,
+  "displayAspectWidth": number | undefined,
+  "displayAspectHeight": number | undefined,
 }
 ~~~
 
@@ -156,32 +160,32 @@ For example:
 
 ~~~
 {
-	"renditions": {
-		"720p": {
-			"codec": "avc1.64001f",
-			"container": { "kind": "legacy" },
-			"codedWidth": 1280,
-			"codedHeight": 720,
-			"bitrate": 6000000,
-			"framerate": 30.0,
-			"jitter": 33
-		},
-		"480p": {
-			"codec": "avc1.64001e",
-			"container": { "kind": "legacy" },
-			"codedWidth": 848,
-			"codedHeight": 480,
-			"bitrate": 2000000,
-			"framerate": 30.0,
-			"jitter": 33
-		}
-	},
-	"display": {
-		"width": 1280,
-		"height": 720
-	},
-	"rotation": 0,
-	"flip": false,
+  "renditions": {
+    "720p": {
+      "codec": "avc1.64001f",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 6000000,
+      "framerate": 30.0,
+      "jitter": 33
+    },
+    "480p": {
+      "codec": "avc1.64001e",
+      "container": { "kind": "legacy" },
+      "codedWidth": 848,
+      "codedHeight": 480,
+      "bitrate": 2000000,
+      "framerate": 30.0,
+      "jitter": 33
+    }
+  },
+  "display": {
+    "width": 1280,
+    "height": 720
+  },
+  "rotation": 0,
+  "flip": false,
 }
 ~~~
 
@@ -191,7 +195,7 @@ An audio track contains the necessary information to decode an audio stream.
 
 ~~~
 type AudioSchema = {
-	"renditions": Map<TrackName, AudioDecoderConfig>,
+  "renditions": Map<TrackName, AudioDecoderConfig>,
 }
 ~~~
 
@@ -218,24 +222,24 @@ For example:
 
 ~~~
 {
-	"renditions": {
-		"stereo": {
-			"codec": "opus",
-			"container": { "kind": "legacy" },
-			"sampleRate": 48000,
-			"numberOfChannels": 2,
-			"bitrate": 128000,
-			"jitter": 20
-		},
-		"mono": {
-			"codec": "opus",
-			"container": { "kind": "legacy" },
-			"sampleRate": 48000,
-			"numberOfChannels": 1,
-			"bitrate": 64000,
-			"jitter": 20
-		}
-	},
+  "renditions": {
+    "stereo": {
+      "codec": "opus",
+      "container": { "kind": "legacy" },
+      "sampleRate": 48000,
+      "numberOfChannels": 2,
+      "bitrate": 128000,
+      "jitter": 20
+    },
+    "mono": {
+      "codec": "opus",
+      "container": { "kind": "legacy" },
+      "sampleRate": 48000,
+      "numberOfChannels": 1,
+      "bitrate": 64000,
+      "jitter": 20
+    }
+  },
 }
 ~~~
 
@@ -244,17 +248,16 @@ A decoder config field carrying raw bytes, notably `description` (an `AllowShare
 A publisher SHOULD emit lowercase hexadecimal characters and MUST NOT emit a `0x` prefix or any separators.
 A consumer MUST accept either case.
 
-Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}).
-Encoding a binary field as base64 is not reliably detectable: the alphabets overlap, so such a value is usually rejected but may instead decode to the wrong bytes.
+Note that this differs from the `cmaf` container's `init` field ({{container}}), which is base64 ({{!RFC4648, Section 4}}); the two alphabets overlap, so the encoding cannot be detected and must be specified.
 
 ## Common Rendition Fields {#common}
 Audio and video renditions share the following fields, extending the WebCodecs decoder config:
 
 ~~~
 type CommonExtensions = {
-	"broadcast": string | undefined,
-	"container": Container,
-	"jitter": number | undefined,
+  "broadcast": string | undefined,
+  "container": Container,
+  "jitter": number | undefined,
 }
 ~~~
 
@@ -295,16 +298,16 @@ A rendition declares its container via the `container` field of its catalog entr
 
 ~~~
 type Container =
-	{ "kind": "legacy" } |
-	{ "kind": "cmaf", "init": string } |
-	{ "kind": "loc" }
+  { "kind": "legacy" } |
+  { "kind": "cmaf", "init": string } |
+  { "kind": "loc" }
 ~~~
 
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
 Every container shares the same group rules:
 
 Each moq-lite group MUST start with a keyframe.
-If codec does not support delta frames (ex. audio), then a group MAY consist of multiple keyframes.
+If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
 Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
 
 ## legacy

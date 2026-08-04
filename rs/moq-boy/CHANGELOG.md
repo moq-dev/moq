@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.2...moq-boy-v0.4.3) - 2026-08-03
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.4.2](https://github.com/moq-dev/moq/compare/moq-boy-v0.4.1...moq-boy-v0.4.2) - 2026-07-29
 
 ### Fixed

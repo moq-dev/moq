@@ -83,13 +83,16 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// The origin stamped into the hop chain of every broadcast. moq-transport
-	// never carries hop ids on the wire, so each upstream session needs a stable
-	// identity in the hop list for two sessions publishing the same path to
-	// resolve as distinct routes instead of colliding on an empty chain. Random
-	// per connection unless the caller assigned the peer an identity
-	// (`Client::with_peer_origin`), which then also makes the route recognizable
-	// across sessions dialing the same relay.
+	// The origin stamped into the hop chain of every broadcast from this session.
+	// moq-transport carries no hop ids on the wire, so a peer only has an identity
+	// if the caller assigned it one (`Client::with_peer_origin`), which also makes
+	// the route recognizable across sessions dialing the same relay.
+	//
+	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
+	// Inventing a random id here would look like a real identity without being
+	// one: the peer never learns it, so it cannot exclude it for loop detection,
+	// and two unrelated publishers would each get an id that made their content
+	// look distinct rather than merely unknown.
 	session_origin: crate::Origin,
 	state: Lock<State>,
 	tasks: Tasks,
@@ -127,7 +130,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			session,
 			origin,
 			control,
-			session_origin: peer_origin.unwrap_or_else(crate::Origin::random),
+			session_origin: peer_origin.unwrap_or(crate::Origin::UNKNOWN),
 			state: Default::default(),
 			tasks,
 			version,

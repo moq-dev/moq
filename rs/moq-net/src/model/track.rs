@@ -1463,18 +1463,30 @@ impl Drop for Alive {
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		if let Ok(mut state) = self.state.write()
-			&& state.final_sequence.is_none()
-		{
-			// Dropped without finish() or abort(), so consumers will see
-			// Error::Dropped instead of a clean end. Deliberate ends go through
-			// finish()/abort().
-			tracing::warn!(
-				track = %self.name,
-				"track::Producer dropped without finish() or abort()"
-			);
-			state.clear_cache();
-			state.datagrams.clear();
+		//
+		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
+		// leaves it open with `final_sequence` set, so inspect both outcomes.
+		match self.state.write() {
+			Ok(mut state) => {
+				if state.final_sequence.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					track = %self.name,
+					"track::Producer dropped without finish() or abort()"
+				);
+				state.clear_cache();
+				state.datagrams.clear();
+			}
+			Err(state) => {
+				if state.final_sequence.is_some() || state.abort.is_some() {
+					return;
+				}
+				tracing::warn!(
+					track = %self.name,
+					"track::Producer dropped without finish() or abort()"
+				);
+			}
 		}
 	}
 }
@@ -2708,6 +2720,7 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::model::test_tracing::count_drop_warnings;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
 	/// normally born from a [`broadcast::Producer`].
@@ -3397,6 +3410,36 @@ mod test {
 
 		let result = consumer.recv_group().now_or_never().expect("should not block");
 		assert!(matches!(result, Err(Error::Dropped)));
+	}
+
+	#[tokio::test]
+	async fn drop_after_abort_does_not_warn() {
+		// abort() closes the channel after recording `abort`. Drop must treat the
+		// read-only guard returned by write() as clean or it emits a false WARN.
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let producer = track_producer("test", None);
+			let keep = producer.clone();
+			let mut writer = producer.clone();
+			let mut group = writer.append_group().unwrap();
+			group.finish().unwrap();
+			let _consumer = producer.subscribe(None);
+			writer.abort(Error::Cancel).unwrap();
+			drop(keep);
+		});
+		assert_eq!(warns, 0, "abort-then-drop must not emit unfinished-producer WARN");
+	}
+
+	#[tokio::test]
+	async fn drop_unfinished_warns() {
+		let warns = count_drop_warnings("track::Producer dropped without finish", || {
+			let producer = track_producer("test", None);
+			let mut writer = producer.clone();
+			writer.append_group().unwrap();
+			let _consumer = producer.subscribe(None);
+			drop(writer);
+			drop(producer);
+		});
+		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
 	}
 
 	#[tokio::test]

@@ -19,6 +19,14 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
+  qmuxws:
+    title: "QMux over WebSocket"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-qmux-websocket/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   RFC3986:
   RFC6455:
   RFC9002:
@@ -83,22 +91,15 @@ The moq-lite version identifier is `moq-lite-xx` where `xx` is the two-digit dra
 For bare QUIC, this is negotiated as an ALPN token during the QUIC handshake.
 For WebTransport over HTTP/3, the QUIC ALPN remains `h3` and the moq-lite version is advertised via the `WT-Available-Protocols` and `WT-Protocol` CONNECT headers.
 
-The bindings negotiated solely via ALPN (bare QUIC and Qmux over TCP/TLS) have no request URI, so a client conveys the request path it wishes to reach via the [Path Parameter](#path-parameter) in SETUP.
-The remaining bindings carry the path in their own handshake and do not use this parameter; see [Path Parameter](#path-parameter).
+When UDP is unavailable, moq-lite MAY also run over reliable byte-stream transports via Qmux [qmux]; see [Transports](#transports) for the specific bindings.
 
-When UDP is unavailable, moq-lite-05 MAY also run over reliable byte-stream transports via Qmux [qmux].
-Qmux provides a length-delimited polyfill for QUIC streams on top of TCP/TLS or WebSocket; see [Transports](#transports) for the specific bindings and ALPN negotiation.
-
-The session is active immediately after the QUIC/WebTransport connection is established.
+The session is active immediately after the connection is established.
 Both endpoints SHOULD begin sending and receiving streams right away to avoid an extra round-trip.
 
 Optional capabilities and extensions are negotiated via a SETUP message (see [SETUP](#setup)).
 Each endpoint MUST open a unidirectional Setup Stream at the start of the session, send a single SETUP message advertising what it supports, and immediately close the stream (FIN); an endpoint with no optional capabilities sends a SETUP with an empty parameter list.
-The two SETUP messages are independent; neither endpoint waits for the peer's SETUP before opening other streams.
-Because a SETUP is always sent, the buffering below is bounded: an endpoint knows the peer's full capability set has arrived once it receives that single SETUP.
-An endpoint SHOULD continue to send and process non-Setup streams until a negotiated extension would change the behavior or encoding of a stream, in which case it MUST buffer that stream until the peer's SETUP has been received.
-For example, if an extension adds a field to SUBSCRIBE_OK, the subscriber buffers SUBSCRIBE_OK until SETUP arrives so the new field can be parsed.
-
+Neither endpoint waits for the peer's SETUP before opening other streams.
+An endpoint MUST buffer a stream whose behavior or encoding depends on a negotiated extension until the peer's SETUP arrives; everything else proceeds immediately.
 As a fallback, an endpoint that opens an extension stream the peer does not support simply sees that stream reset (see [STREAM_TYPE](#stream_type)).
 A negotiated capability applies only to this hop; each session is negotiated independently and relays MUST NOT forward SETUP.
 
@@ -144,9 +145,7 @@ This ensures that all Frames within a Group arrive reliably and in order.
 In contrast, Groups may arrive out of order due to network congestion and prioritization.
 The application SHOULD process or buffer groups out of order to avoid blocking on flow control.
 
-A Group MAY also be transmitted as a single QUIC datagram (see [Datagrams](#datagrams)) when the entire group fits in one datagram and reliability is not required.
-A datagram-delivered group contains exactly one Frame and is not retransmitted on loss.
-The same subscription MAY receive groups via both streams and datagrams; the application MUST be prepared to deduplicate by group sequence.
+A small single-frame Group MAY instead be transmitted as a QUIC datagram when reliability is not required (see [Datagrams](#datagrams)).
 
 ## Frame
 A Frame is a payload of bytes within a Group.
@@ -154,75 +153,39 @@ A Frame is a payload of bytes within a Group.
 A frame is used to represent a chunk of data with an upfront size.
 The contents are opaque to the moq-lite layer.
 
-Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (units per second, part of the [TRACK_INFO](#track-info)).
-Every Track has a media timeline — the `Timescale` is always non-zero and every frame is timestamped.
-The timestamp is the source-of-truth for media time and is one of the two inputs to the moq-lite layer's [expiration](#expiration) decisions, alongside wall-clock arrival time.
+Each frame carries a presentation timestamp expressed in the parent Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
 See the Messages section for the specific encoding.
 
 ## Connection
-moq-lite runs on top of any transport that provides ordered, multiplexed, bidirectional streams.
-The primary transports are bare QUIC and WebTransport over HTTP/3.
-WebTransport is a layer on top of QUIC and HTTP/3, required for web support.
-The API is nearly identical to QUIC with the exception of stream IDs.
-
-When UDP is unavailable, moq-lite-05 also runs over Qmux [qmux], a length-delimited polyfill that maps QUIC streams onto a reliable byte-stream transport.
-See [Transports](#transports) for the supported bindings.
+moq-lite runs on top of any transport that provides ordered, multiplexed, bidirectional streams: bare QUIC, WebTransport over HTTP/3 (required for web support), or Qmux [qmux] when UDP is unavailable.
+See [Transports](#transports) for the bindings.
 
 How the underlying connection is authenticated is out-of-scope for this draft.
 
 ## Transports {#transports}
-moq-lite-05 defines four transport bindings.
+moq-lite defines four transport bindings.
 All four carry the same control and data streams defined elsewhere in this document; they differ only in how QUIC streams are multiplexed onto the underlying connection.
 
 |----|---------------------|------------------|----------------------|
 |    | Transport           | ALPN / Identifier | Record framing      |
 |---:|:--------------------|:------------------|:--------------------|
-| 1  | QUIC                | `moq-lite-05`     | Native QUIC streams |
-| 2  | WebTransport / H3   | `moq-lite-05` (CONNECT header) | Native WebTransport streams |
-| 3  | Qmux over TCP/TLS   | `moq-lite-05` (ALPN over TLS)  | Qmux Record [qmux]  |
-| 4  | Qmux over WebSocket | `moq-lite-05` (Sec-WebSocket-Protocol) | WebSocket message |
+| 1  | QUIC                | `moq-lite-xx`     | Native QUIC streams |
+| 2  | WebTransport / H3   | `moq-lite-xx` (CONNECT header) | Native WebTransport streams |
+| 3  | Qmux over TCP/TLS   | `moq-lite-xx` (ALPN over TLS)  | Qmux Record [qmux]  |
+| 4  | Qmux over WebSocket | `moq-lite-xx` (Sec-WebSocket-Protocol) | WebSocket message [qmuxws] |
 
 For bindings 1 and 2, moq-lite uses the underlying QUIC/WebTransport stream APIs directly.
-QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only.
-Bindings 3 and 4 are reliable byte-stream transports and have no datagram channel; a publisher MUST NOT emit datagrams on those bindings. Groups are still delivered normally via Group Streams; there is no conversion of a datagram into a stream.
+QUIC datagrams (see [Datagrams](#datagrams)) are supported by bindings 1 and 2 only; a publisher MUST NOT emit datagrams on bindings 3 and 4.
 
-### Qmux over TCP/TLS
-A client opens a TCP connection, performs a TLS handshake, and negotiates the ALPN token `moq-lite-05`.
-Each direction of the TLS byte stream then carries Qmux Records as defined in [qmux], which encapsulate QUIC STREAM frames.
-The Qmux Record's `Size` field length-delimits each record on the byte stream:
+For binding 3, a client opens a TCP connection, performs a TLS handshake, and negotiates the moq-lite version as the ALPN token.
+Each direction of the TLS byte stream then carries Qmux Records as defined in [qmux].
 
-~~~
-QMux Record {
-  Size (i),
-  Frames (..)
-}
-~~~
+For binding 4, a client opens a WebSocket connection [RFC6455] offering the moq-lite version as the subprotocol, per [qmuxws]: each WebSocket binary message carries one Qmux Record's `Frames` payload, with the message boundary replacing the Record `Size` field.
 
-All other moq-lite semantics (stream types, message encoding, flow control, etc.) are identical to native QUIC.
-
-### Qmux over WebSocket
-Qmux as published does not define a WebSocket binding due to IETF working-group charter scope.
-This section specifies how moq-lite-05 maps Qmux onto WebSocket [RFC6455]; the mapping is straightforward because both layers provide length-delimited messages over a reliable byte stream.
-
-A client opens a WebSocket connection with the `Sec-WebSocket-Protocol` header set to `moq-lite-05`.
-Each WebSocket binary message carries exactly one Qmux Record's `Frames` payload — that is, one or more QUIC frames concatenated.
-The WebSocket message length replaces the Qmux Record `Size` field: the WebSocket framing layer already self-delimits each record, so the `Size` varint MUST NOT be transmitted and MUST NOT be expected by the receiver.
-
-In other words, a Qmux-over-WebSocket record is:
-
-~~~
-WebSocket Binary Message {
-  Frames (..)
-}
-~~~
-
-Text messages MUST NOT be used and MUST be treated as a protocol violation.
-All other Qmux semantics (in-order STREAM frame delivery, stream IDs, etc.) apply unchanged.
-
-WebSocket ping/pong frames are handled by the WebSocket layer and are independent of moq-lite.
+All other moq-lite semantics (stream types, message encoding, flow control, etc.) are identical across bindings.
 
 ## Termination
 QUIC bidirectional streams have an independent send and receive direction.
@@ -268,79 +231,74 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 
 ### Announce
 A subscriber can open an Announce Stream to discover broadcasts matching a prefix.
+By default only live broadcasts are announced; the subscriber can opt into ended broadcasts too, e.g. to enumerate available recordings (see [ANNOUNCE_REQUEST](#announce-request)).
 
 The subscriber creates the stream with an ANNOUNCE_REQUEST message.
-The publisher replies with a single ANNOUNCE_OK message followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_RESTART messages for any matching broadcasts and any future changes.
-
-ANNOUNCE_OK carries metadata that applies to every announcement on this stream and is sent exactly once at the start of the response:
-
-- The publisher's own `Hop ID`, which is the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_RESTART Hop ID list. Hoisting it out of every announcement saves bytes since it is identical for every announcement on the session.
-- The number of ANNOUNCE_START messages (`Active Count`) the publisher will send immediately as the initial set. The subscriber MAY buffer until all `Active Count` initial announcements arrive before reporting them to the application, avoiding a trickle. Any announcements beyond `Active Count` are live updates and SHOULD be reported to the application as they arrive.
-
-Availability changes are carried by three message types:
+The publisher replies with a single ANNOUNCE_OK message followed by announcements for any matching broadcasts and any future changes:
 
 - ANNOUNCE_START: a matching broadcast is available.
 - ANNOUNCE_END: a previously started broadcast is no longer available.
-- ANNOUNCE_RESTART: a previously started broadcast was atomically replaced.
+- ANNOUNCE_UPDATE: a previously started advertisement was atomically replaced.
+
+ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
 
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per ANNOUNCE_START.
-The id never appears inside the ANNOUNCE_START message itself; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path, since the path can be arbitrarily long while the id is a compact ordinal.
+The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
+ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 
-Each broadcast starts unavailable.
-An ANNOUNCE_START makes the broadcast available; a subsequent ANNOUNCE_END makes it unavailable again and retires its Announce ID.
+Each broadcast has at most one current advertisement per stream.
+A second ANNOUNCE_START for an already-available path is a protocol violation; an ANNOUNCE_UPDATE atomically replaces the current advertisement (equivalent to ANNOUNCE_END+ANNOUNCE_START) while keeping its id live.
 
-A publisher SHOULD advertise, for each broadcast, the best path it knows whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)); when every known path contains it, the publisher SHOULD advertise nothing for that broadcast.
-A subscriber that declared no origin is subject to no exclusion and receives the best path outright; an unknown Hop ID of 0 in a path never matches anything.
-Selection is per stream: two subscribers can legitimately receive different paths for the same broadcast, and in particular a subscriber that the serving path flows through receives the best standby path instead of nothing, which is what lets it fail over to that standby if its own copy dies.
-The per-subscriber winner changing travels as an ANNOUNCE_RESTART; it swinging into or out of existence (the last qualifying path appearing or disappearing) travels as a fresh ANNOUNCE_START or an ANNOUNCE_END.
-If the best path changes (e.g. a relay failover or upstream restart), the publisher MAY send an ANNOUNCE_RESTART referencing the advertisement's Announce ID: the new announcement atomically replaces the prior one (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
-The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)); a restart that preserves it is an alternate route to the same broadcast, while one that changes it replaces the broadcast entirely (see [ANNOUNCE_RESTART](#announce-restart)).
-A publisher MUST NOT keep multiple current advertisements for the same broadcast on the same stream: each broadcast has at most one current advertisement at a time, and a second ANNOUNCE_START for an already-available path is a protocol violation (use ANNOUNCE_RESTART).
-A subscriber that sees the same broadcast advertised across multiple streams SHOULD route subscriptions to the advertisement with the lowest Route Cost after adding each arriving link's cost, breaking ties by the shortest total path length (see [ANNOUNCE_START](#announce-start)).
-Advertisements from peers that predate the Route Cost carry an effective cost of 0, so a mixed mesh degrades to shortest-path routing.
-Advertisements that tie on every advertised property SHOULD be broken toward the most recently received: they are indistinguishable to the rest of the mesh, and a publisher reconnecting over a new session is otherwise outranked by the session it replaced until the transport declares that one gone.
-
-Advertisements for the same broadcast path whose reconstructed paths share the same first entry carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary, e.g. when the serving route ends.
-Cooperating redundant publishers MAY share a Hop ID to opt into this.
-Advertisements whose first entries differ are distinct broadcasts colliding on one path: a relay MUST NOT splice between them, and SHOULD treat the later as a replacement for the earlier, ending the earlier advertisement before starting the later one.
-Serving the earlier until it ends on its own instead would hold the path for however long the transport takes to notice a publisher is gone, which is exactly the case a reconnecting publisher hits.
-
-When serving a subscription, a publisher MUST select the source by the same rule it uses for advertisements to that session: a path whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
-A subscriber that declared no origin is served from the publisher's preferred source as usual.
-If only excluded sources remain, the subscription is unroutable; serving it would hand the subscriber data that already flowed through itself.
-Advertisement and dispatch being one selection keeps advertised paths truthful, which is what makes the declared-origin filter sufficient to prevent subscription cycles of any length: any would-be cycle surfaces the subscriber's own Hop ID inside the candidate path, where the filter removes it.
-
-The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
+The subscriber MUST reset the stream if it receives an ANNOUNCE_END or ANNOUNCE_UPDATE referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a path that is already available, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all broadcasts are now unavailable.
 
 Path prefix matching and equality is done on a byte-by-byte basis.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
+#### Routing {#routing}
+Each advertisement carries an `Epoch` identifying the generation of content at the path, the path of Hop IDs it traversed, and an accumulated Route Cost (see [ANNOUNCE_START](#announce-start)), which relays use to build a loop-free mesh.
+
+A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
+This is the only loop defense moq-lite requires, and it catches loops of any length.
+A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
+
+A publisher SHOULD advertise, per stream, the best path for each broadcast whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)), and nothing when every known path contains it.
+Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
+The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+
+When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
+Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
+
+A subscriber that sees the same broadcast advertised across multiple streams MUST prefer the highest `Epoch` (any non-zero value outranks 0): a lower Epoch never displaces a higher one, regardless of cost or arrival order.
+Among interchangeable advertisements, the subscriber SHOULD route subscriptions to the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+
+Advertisements with the same non-zero `Epoch` carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a Group boundary.
+Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived from the event rather than from each process.
+Any other pair is two generations colliding on one path: a relay MUST NOT splice between them and MUST end the lower-Epoch advertisement rather than wait for it to end on its own, which would hold the path for however long the transport takes to notice a publisher is gone.
+Only when both Epochs are 0 does identity fall back to the first entry of the reconstructed path: a shared non-zero first entry is spliceable, while differing or zero first entries (0 proves nothing shared) are a replacement decided toward the most recently received.
+
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-When a start group can be resolved, the publisher replies with a SUBSCRIBE_OK message (confirming the subscription and resolving its start group), followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
-When the accepted track has already ended with no matching groups there is no start group to resolve, so the publisher sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A rejection is a stream reset: if the publisher cannot serve the subscription — the track does not exist, or it otherwise refuses — it MUST reset the stream rather than leave it pending, and SHOULD do so promptly (within roughly a round trip) so the subscriber is not left waiting.
-A subscription the publisher accepts but has no groups for yet is not a rejection: for a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start. A subscriber therefore distinguishes "pending" from "refused" by the stream reset, not by a timeout.
-The Subscribe Stream does not carry the track's publisher properties — those are immutable and fetched once via a [Track Stream](#track-stream) (see [TRACK_INFO](#track-info)).
-The subscriber MUST have the track's TRACK_INFO before it can fully interpret the FRAME messages that arrive on Group Streams, since the timescale is needed to interpret each timestamp; it MAY open the Track and Subscribe streams concurrently and buffer frames until TRACK_INFO arrives.
+The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by any number of SUBSCRIBE_END and SUBSCRIBE_DROP messages.
+For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
+A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, an `Epoch` that is not the one being served, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 
-The publisher sends SUBSCRIBE_OK once the absolute start group is resolved, and SUBSCRIBE_END once no further groups will be produced (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
-The publisher closes the stream (FIN) only once every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE_DROP message.
+The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
+The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
+
+The publisher closes the stream (FIN) only once every group from start to end has been accounted for, either via a Group Stream (completed or reset) or a SUBSCRIBE_DROP message.
 This MAY occur after SUBSCRIBE_END, since stragglers within the range can still be dropped.
-Unbounded subscriptions (no end group) stay open until the publisher sends SUBSCRIBE_END (and accounts for the remaining groups) to indicate the track has ended, or either endpoint resets.
-Either endpoint MAY reset/cancel the stream at any time.
+Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
 
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
-The subscriber sends a FETCH message containing the broadcast path, track name, priority, and group sequence.
-The publisher responds with FRAME messages directly on the same bidirectional stream — there is no response header.
-The Subscribe ID and Group Sequence for the returned FRAME messages are implicit, taken from the original FETCH request.
-As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames; because the properties are immutable, a single Track Stream lookup is reused across every FETCH of that track (group-by-group fetches do not re-fetch it).
+The subscriber sends a FETCH message containing the broadcast path, track name, epoch, priority, and group sequence.
+Unlike SUBSCRIBE, FETCH works on both live and ended broadcasts; it is the only way to read an ended one, and a non-zero epoch pins the fetch to a specific content generation (see [FETCH](#fetch)).
+The publisher responds with FRAME messages directly on the same bidirectional stream; there is no response header, and the group sequence is implicit from the request.
+As with a subscription, the subscriber MUST already have the track's [TRACK_INFO](#track-info) to parse the returned frames.
 The publisher FINs the stream after the last frame, or resets the stream on error.
 
 Fetch behaves like HTTP: a single request/response per stream.
@@ -348,17 +306,15 @@ Fetch behaves like HTTP: a single request/response per stream.
 ### Track {#track-stream}
 A subscriber opens a Track Stream (0x6) to learn a Track's immutable publisher properties without subscribing or fetching.
 
-The subscriber sends a TRACK message containing the broadcast path and track name.
-The publisher replies with a single TRACK_INFO message and then FINs the stream, or resets the stream on error (e.g. the track does not exist).
-The returned properties are fixed for the lifetime of the track, so the subscriber SHOULD cache TRACK_INFO and reuse it across every SUBSCRIBE and FETCH for that track rather than requesting it again.
-When the track was discovered via an announcement, the cached value is tied to the broadcast's original publisher, identified by the first entry of the advertisement's reconstructed path (see [ANNOUNCE_RESTART](#announce-restart)).
-A re-announce that preserves the first entry is a route change for the same broadcast, and the cached TRACK_INFO remains valid.
-If the first entry changed, the broadcast was replaced: the subscriber MUST discard the cached TRACK_INFO and MUST re-request it before parsing any further FRAME messages, since the timescale may have changed.
-If FRAME messages cannot be decoded against the cached TRACK_INFO (for example a malformed delta or payload after a missed re-announcement), the subscriber MUST reset the affected stream with a protocol violation and re-request TRACK_INFO.
-A subscriber that reached the track without an advertisement (e.g. a path known out of band) has no such invalidation signal; it MAY re-request TRACK_INFO whenever it needs to confirm freshness (for example on a new session). A stale cache only risks misparsing frames from a changed track, so the subscriber that cannot observe re-announcements SHOULD NOT cache TRACK_INFO beyond a single connection.
+The subscriber sends a TRACK message containing the broadcast path, track name, and epoch (0 for the current generation).
+The publisher replies with a single TRACK_INFO message carrying the resolved epoch and then FINs the stream, or resets the stream on error (e.g. the track does not exist, or a non-zero epoch does not match).
+The returned properties are fixed for the lifetime of that generation, so the subscriber SHOULD cache TRACK_INFO keyed by broadcast path, track name, and epoch, and reuse it across every SUBSCRIBE and FETCH of the same generation.
+An announcement that changes the broadcast's Epoch replaces the content (see [ANNOUNCE_UPDATE](#announce-update)); cached TRACK_INFO from another generation MUST NOT be used to parse its frames, since the timescale may differ.
+A subscriber without announcements (a path known out of band) gets the same protection by waiting for TRACK_INFO and echoing its non-zero resolved epoch in SUBSCRIBE and FETCH, so a concurrent replacement is a reset rather than misparsed frames; opening those streams concurrently with Epoch 0 forfeits this.
+A resolved epoch of 0 pins nothing and cannot key the cache: a subscriber following announcements MUST discard such a cache when the advertisement is replaced, and one without announcements SHOULD NOT keep it beyond the connection.
+If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
-Because a subscriber MAY open the Track stream concurrently with a SUBSCRIBE or FETCH (see [Subscribe](#subscribe) and [Fetch](#fetch)) and cannot parse any buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
-Otherwise the concurrent case — intended to keep a cold subscribe or fetch to a single round trip — would stall behind queued group frames that the subscriber cannot yet decode.
+Because a subscriber cannot parse buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
 
 ### Probe
 A subscriber opens a Probe Stream (0x4) to measure, and optionally increase, the available bitrate of the connection.
@@ -412,7 +368,7 @@ Rather than try to explain everything, here's an example:
 There are two people in a conference call, Ali and Bob.
 
 We subscribe to both of their audio tracks with subscriber priority 2 and video tracks with subscriber priority 1.
-Each publisher advertises a fixed publisher priority — here audio at 2 and video at 1 — used only to break ties.
+Each publisher advertises a fixed publisher priority (here audio at 2 and video at 1) used only to break ties.
 This results in equal priority for `Ali` and `Bob` while prioritizing audio.
 ```text
 ali/audio + bob/audio: subscriber_priority=2 publisher_priority=2
@@ -443,32 +399,21 @@ An application MUST support gaps and out-of-order delivery even when `ordered` i
 
 
 ## Expiration
-Expiration governs when an older group is dropped from a live subscription's Group Stream(s).
-It is primarily a delivery-time concern, governed by `Subscriber Max Latency`.
-Whether older groups remain available for FETCH or future subscriptions is governed by `Publisher Max Latency`, an upper bound on how long the publisher caches a non-latest group; beyond that the publisher MAY drop it.
+Expiration governs when an older group is dropped.
+The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds `Subscriber Max Latency` (see [SUBSCRIBE](#subscribe)); the subscriber MAY also locally drop such groups.
+Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
 
-It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization).
-However, a lower priority group will still consume RAM, bandwidth, and potentially flow control.
+It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-The publisher SHOULD reset Group Streams for non-latest groups whose age relative to the latest group exceeds the `Subscriber Max Latency` value in SUBSCRIBE/SUBSCRIBE_UPDATE.
-The subscriber MAY also locally drop such groups for its own resource accounting.
-Expiration only removes the group from the live subscription's stream; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Latency` (see [TRACK_INFO](#track-info)).
-
-Group age is computed relative to the latest group by sequence number.
 A group is never expired until at least the next group (by sequence number) has been received or queued.
-Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Latency` (`Subscriber Max Latency` for live delivery, `Publisher Max Latency` for the publisher's cache):
+Once a newer group exists, the group's age is measured two ways, and it is expired once **either** measure exceeds the relevant `Max Latency`:
 
-- **Timestamp age**: the difference between this group's first frame timestamp and the first frame timestamp of the latest group that has at least one frame (see [Frame](#frame)). This measure is consistent across relays and unaffected by buffering or jitter.
+- **Timestamp age**: the difference between this group's first frame timestamp and the first frame timestamp of the latest group that has at least one frame. This measure is consistent across relays and unaffected by buffering or jitter.
 - **Wall-clock age**: the difference between when this group's first byte arrived (subscriber) or was queued (publisher) and the same instant for the latest group.
 
-Equivalently, a group's effective lifetime is the *minimum* of the two — whichever clock declares it stale first wins. The two measures backstop each other:
-
-- A publisher cannot keep stale groups alive by reporting timestamps that look fresh; the wall-clock age expires them anyway.
-- A burst of groups delivered close together (e.g. catching up at the start of a subscription) does not reset their age; the timestamp age still expires the media-old ones even though they all just arrived.
-
-A group that contains zero frames has no timestamp, so only the wall-clock age applies.
-This avoids stalling expiration on tracks that intentionally emit empty groups as keep-alives or gap markers.
+The two backstop each other: a publisher cannot keep stale groups alive with fresh-looking timestamps, and a burst of groups arriving together does not reset their age.
+A group that contains zero frames has no timestamp, so only the wall-clock age applies; this avoids stalling expiration on empty groups sent as keep-alives or gap markers.
 
 An expired group SHOULD be reset at the QUIC level to avoid consuming flow control.
 
@@ -506,13 +451,9 @@ The subscriber MAY cache the error and potentially retry later.
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
-A publisher MAY transmit any Group as a single QUIC datagram in addition to (or instead of) opening a Group Stream.
-Datagrams are not cached: a publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
-A subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
-
-There is no separate subscription for datagram delivery; datagrams are routed to existing subscriptions via the Subscribe ID.
-The publisher decides which groups to send as datagrams based on application hints, group size, and network conditions.
-A subscriber that does not wish to receive datagrams can ignore them; well-behaved publishers SHOULD avoid sending datagrams when streams suffice.
+A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
+A datagram-delivered group is not cached or retransmitted; a publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
+There is no separate subscription for datagram delivery: datagrams are routed to existing subscriptions via the Subscribe ID, and a subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
 
 Each datagram body has the following encoding (note: there is no message length prefix; the QUIC datagram boundary delimits the payload):
 
@@ -531,18 +472,15 @@ A subscriber receiving a datagram with an unknown Subscribe ID MUST silently dro
 
 **Group Sequence**:
 The absolute sequence number of the group carried by this datagram.
-Each datagram represents a complete group containing exactly one frame.
 
 **Timestamp**:
-The absolute timestamp of the single frame in the group, expressed in the Track's negotiated `Timescale`.
-Any varint value (including 0) is a valid absolute timestamp.
+The absolute timestamp of the single frame in the group, expressed in the Track's `Timescale`.
+Any varint value (including 0) is valid.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
-The total datagram body (including all header fields above and the payload) MUST NOT exceed 1200 bytes.
-This limit ensures the datagram fits within the minimum QUIC path MTU without IP-layer fragmentation.
-A publisher MUST NOT send a datagram whose body exceeds this limit, and a receiver MUST silently drop any datagram that does.
-A group whose frame does not fit is simply not eligible for datagram delivery; it is delivered as a Group Stream like any other group, which is not a conversion of the datagram.
+The total datagram body MUST NOT exceed 1200 bytes, ensuring it fits within the minimum QUIC path MTU without IP-layer fragmentation; a publisher MUST NOT send a larger one and a receiver MUST silently drop it.
+A group whose frame does not fit is simply not eligible for datagram delivery.
 
 
 
@@ -627,8 +565,6 @@ The Parameter Value is a variable-length integer level, where each level include
 - `1` **Report**: The publisher can measure and periodically report its estimated bitrate.
 - `2` **Increase**: The publisher can additionally pad the connection (or send redundant data) to probe for bandwidth above its current sending rate, up to the subscriber's target.
 
-The levels are nested rather than independent: probing for more bandwidth is meaningless without measuring it, so Increase always includes Report. Reporting the current bitrate is far simpler to implement, so a publisher may support Report without Increase.
-
 A subscriber MUST consult the publisher's advertised level before relying on a Probe Stream:
 
 - At `None`, the subscriber SHOULD NOT open a Probe Stream; if it does, the publisher MUST reset it.
@@ -637,29 +573,19 @@ A subscriber MUST consult the publisher's advertised level before relying on a P
 
 ### Path Parameter {#path-parameter}
 The Path Parameter carries the request target the client wishes to reach, equivalent to the path and query components of a moq-lite URI.
-A server uses it to route the session to the correct origin, relay, or virtual host before any broadcasts are exchanged; its interpretation is otherwise application-defined and opaque to moq-lite.
-Unlike the capability-style Setup Parameters, it is per-hop setup metadata that rides along in SETUP because that is the first client-to-server message of the session.
+A server uses it to route the session before any broadcasts are exchanged; its interpretation is otherwise application-defined and opaque to moq-lite.
 
-The Parameter Value is a UTF-8 string holding the `path-abempty` component of the URI [RFC3986]; when the URI carries a query, the client MUST append `?` followed by the `query` component.
-A value whose path component is non-empty therefore begins with `/`.
-Carrying the query matters because a deployment commonly puts the session credential there, so a client that dropped it would arrive unauthenticated.
-The value MAY be empty, which is equivalent to omitting the parameter: both mean the client requests the server's default path.
-A client that wants the default therefore need not special-case the parameter, and a server MUST treat the two forms identically.
+The Parameter Value is a UTF-8 string holding the `path-abempty` component of the URI [RFC3986]; when the URI carries a query, the client MUST append `?` followed by the `query` component, since a deployment commonly puts the session credential there.
+The value MAY be empty, which is equivalent to omitting the parameter: both request the server's default path.
+A server that receives an invalid value MUST close the session with a PROTOCOL_VIOLATION, and one that does not recognize the requested path MUST close the session.
 
-This parameter exists for bindings that have no request URI of their own: the native QUIC binding (binding 1 in [Transports](#transports)) and the Qmux-over-TCP/TLS binding (binding 3), both of which negotiate only an ALPN token.
-The remaining bindings convey the path in their own handshake.
-
-- A client using a binding without a request URI (binding 1 or 3) SHOULD send one Path Parameter in its SETUP. Omitting it requests the server's default path.
-- The Path Parameter MUST NOT be sent on a binding that carries a request URI. The WebTransport (binding 2) and Qmux-over-WebSocket (binding 4) bindings convey the path in their handshake URI (the CONNECT request path and the WebSocket request URI, respectively). A server that receives a Path Parameter on either of these bindings MUST close the session with a PROTOCOL_VIOLATION.
-- A server MUST NOT send a Path Parameter. SETUP is bidirectional, but the path is meaningful only from client to server; a client that receives a Path Parameter MUST close the session with a PROTOCOL_VIOLATION.
-- A server that receives a Path that is not a valid URI path, optionally followed by `?` and a valid query, MUST close the session with a PROTOCOL_VIOLATION. A server that does not recognize or support the requested path MUST close the session.
-
-A relay MUST NOT forward the Path Parameter; like other per-hop setup metadata it applies only to this hop (see [Session](#session)).
+This parameter exists for the bindings that negotiate only an ALPN token and have no request URI of their own (bindings 1 and 3 in [Transports](#transports)); a client using one of them SHOULD send it.
+It MUST NOT be sent on a binding whose handshake carries a request URI (bindings 2 and 4), and only the client sends it; a receiver MUST close the session with a PROTOCOL_VIOLATION on either violation.
+A relay MUST NOT forward it; like other per-hop setup metadata it applies only to this hop.
 
 ### Role Parameter {#role-parameter}
-The Role Parameter advertises the direction the client intends to use the session for, letting a server reject a session whose authorization does not grant that direction during SETUP rather than accepting it and then silently carrying no data.
-
-A moq-lite session is bidirectional: either endpoint MAY publish and subscribe. A client's authorization (out of scope for this document; e.g. the credential carried in the [Path](#path-parameter)) may however grant only one direction. Without a hint, a server that authorizes, say, subscribe-only cannot tell whether a newly connected client meant to subscribe (and should be served) or to publish (and should be rejected), so it accepts the session and the client's data is silently dropped. The Role Parameter removes that ambiguity.
+The Role Parameter advertises the direction the client intends to use the session for.
+A moq-lite session is bidirectional, but a client's authorization (e.g. the credential in the [Path](#path-parameter)) may grant only one direction; the hint lets a server reject a mismatched session during SETUP instead of accepting it and silently carrying no data.
 
 The Parameter Value is a variable-length integer:
 
@@ -667,31 +593,27 @@ The Parameter Value is a variable-length integer:
 - `1` **Publisher**: The client intends to publish (and not subscribe).
 - `2` **Subscriber**: The client intends to subscribe (and not publish).
 
-A receiver that does not recognize the value MUST treat it as `Both`, so a newer client cannot break an older server; it simply loses the early rejection and falls back to authorizing per the client's actual actions.
+A receiver that does not recognize the value MUST treat it as `Both`, so a newer client cannot break an older server.
+The role is a hint that only ever narrows the session: a server MUST still enforce the client's authorization on every publish and subscribe, and MAY close a session whose advertised role requires a direction the authorization does not grant.
 
-The Role Parameter is a hint that only ever narrows the session: a server MUST still enforce the client's authorization on every publish and subscribe regardless of the advertised role, and MUST NOT grant a direction the authorization does not already allow. A server MAY close a session when the advertised role requires a direction the client's authorization does not grant: `Publisher` without publish authorization, or `Subscriber` without subscribe authorization.
-
-Like the [Path Parameter](#path-parameter), the Role Parameter is meaningful only from client to server. A server MUST NOT send a Role Parameter; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it; it applies only to this hop.
+Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection before forwarding or acting on it (see [ANNOUNCE_START](#announce-start)).
+The Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection (see [Routing](#routing)).
 
 The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
-An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path, matching the behavior of versions that predate the parameter.
-A deployment prices links to reflect its economics: 0 for a link within a datacenter (making a warm sibling effectively free to reach), larger values for metered or long-haul links.
-A value of 0 is meaningful and distinct from omitting the parameter.
+An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
+A value of 0 is meaningful and distinct from absent: it makes the link free, e.g. between two relays in the same datacenter.
 
-Only the client sends it: the price lives in the dialing side's configuration, and the server reads it from the client's SETUP so both ends charge the same link the same amount.
-A server MUST NOT send a Cost Parameter.
-Like the [Path Parameter](#path-parameter), it is per-hop setup metadata: a relay MUST NOT forward it.
+Only the client sends it, so both ends charge the same link the same amount; a server MUST NOT send it and a relay MUST NOT forward it.
 
 ### Origin Parameter {#origin-parameter}
-The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards. It replaces the per-stream `Exclude Hop` that ANNOUNCE_REQUEST carried in earlier versions.
+The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards.
 The Parameter Value is a variable-length integer; a value of 0 carries no identity and is equivalent to omitting the parameter.
 
-Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection for the peer's *subscriptions* can apply the same exclusion as its announcements (see [Announce](#announce)): a subscriber is never served data that flowed through itself, even when it never opens an Announce Stream.
-Either endpoint MAY send it; an endpoint that never forwards announcements (a leaf) has no identity worth excluding and SHOULD omit it.
-Like the [Path Parameter](#path-parameter), it is per-hop setup metadata: a relay MUST NOT forward it.
+Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
+Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
+A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -701,16 +623,19 @@ A subscriber sends an ANNOUNCE_REQUEST message to indicate it wants to receive a
 ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
+  Ended (i),
 }
 ~~~
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
 
-The publisher SHOULD skip announcements for broadcasts whose reconstructed path (including the publisher's own `Hop ID` from ANNOUNCE_OK) contains the origin the subscriber declared in its SETUP, when it declared one (see [Origin Parameter](#origin-parameter)).
-This is used by relays to avoid routing loops in a cluster; earlier versions carried the identity here as a per-stream `Exclude Hop` field.
+**Ended**:
+Whether ended broadcasts match this request (see `Ended` in [ANNOUNCE_START](#announce-start)).
+When 0, only live broadcasts are announced; when 1, ended broadcasts are announced too, e.g. to enumerate available recordings.
+Values other than 0 and 1 are a protocol violation.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_RESTART messages for any future updates.
+The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching and available broadcasts, followed by ANNOUNCE_START, ANNOUNCE_END, and ANNOUNCE_UPDATE messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -728,9 +653,9 @@ ANNOUNCE_OK Message {
 
 **Hop ID**:
 The publisher's own Hop ID.
-This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
+This is treated as the implicit trailing entry of every ANNOUNCE_START and ANNOUNCE_UPDATE Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
-A publisher that assigns a Hop ID MUST choose a non-zero value.
+A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices): the first entry of the path is the fallback content identity when `Epoch` is 0, and 0 proves nothing shared (see [Routing](#routing)).
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 **Active Count**:
@@ -742,19 +667,17 @@ A value of `0` is valid and means the publisher is offering no initial available
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise that a broadcast is available.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per ANNOUNCE_START.
-The id is not carried on the wire; both endpoints derive it from message order.
-ANNOUNCE_END and ANNOUNCE_RESTART later reference this id (see [ANNOUNCE_END](#announce-end) and [ANNOUNCE_RESTART](#announce-restart)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END and ANNOUNCE_UPDATE (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full path can be constructed by prepending the requested prefix.
-An ANNOUNCE_START for a path that is already available on this stream is a protocol violation (use ANNOUNCE_RESTART).
-Any announcement before ANNOUNCE_OK is a protocol violation.
 
 ~~~
 ANNOUNCE_START Message {
   Type (i) = 0x0
   Message Length (i)
   Broadcast Path Suffix (s),
+  Epoch (i),
+  Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
   Route Cost (i),
@@ -767,6 +690,21 @@ Set to 0x0 to indicate an ANNOUNCE_START message.
 **Broadcast Path Suffix**:
 This is combined with the broadcast path prefix to form the full broadcast path.
 
+**Epoch**:
+The generation of content at this path, chosen by the original publisher and forwarded unchanged by relays.
+Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the path (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare interchangeable content.
+RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
+A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
+A value of 0 means unspecified: identity falls back to the first entry of the path (see [Routing](#routing)), e.g. when bridging from an endpoint that does not assign Epochs.
+
+**Ended**:
+Whether the broadcast has ended (1) or is live (0).
+An ended broadcast is complete or static content, such as a recording: the publisher MUST reset a new Subscribe Stream for it, and subscribers read its groups via FETCH instead.
+A broadcast ending does not disturb subscriptions already in flight: they conclude normally with SUBSCRIBE_END.
+`Ended` describes the content; retracting the advertisement itself is ANNOUNCE_END, and an ended broadcast may stay advertised indefinitely.
+Ended broadcasts are only advertised on Announce Streams that requested them (see [ANNOUNCE_REQUEST](#announce-request)); on other streams, a broadcast that ends but remains available is retracted with ANNOUNCE_END.
+Values other than 0 and 1 are a protocol violation.
+
 **Hop Count**:
 The number of Hop ID entries that follow, NOT including the publisher's own `Hop ID` from ANNOUNCE_OK.
 A value of 0 means no Hop ID entries are present, indicating either that the announcement originated locally on the publisher (the publisher itself is the origin) or that the upstream peer does not support hop tracking.
@@ -774,32 +712,24 @@ A receiver MUST close the stream with a PROTOCOL_VIOLATION if the Hop Count does
 
 **Hop ID**:
 A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher.
-The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK as `Hop ID`.
-When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list (since that ID is no longer implicit downstream) and then send its own `Hop ID` in the ANNOUNCE_OK it sends to the downstream subscriber.
-The total path length is `Hop Count + 1` (including the implicit ANNOUNCE_OK `Hop ID`).
-The first entry of the reconstructed path (the first Hop ID, or the ANNOUNCE_OK `Hop ID` when the list is empty) identifies the original publisher of the broadcast; ANNOUNCE_RESTART uses it to distinguish a route change from a replacement (see [ANNOUNCE_RESTART](#announce-restart)).
-A Hop ID value of 0 means the hop is unknown: either it was never assigned (e.g. when bridging from an older protocol version) or a relay deliberately withholds it to obscure the underlying routing; the Hop Count still reflects the total number of entries including unknown hops.
-
-A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID.
-Such an announcement has looped back, so the receiver neither forwards it nor selects it as a route to the broadcast; forwarding would extend the loop, and subscribing through it would route the receiver back to itself.
-This is the only loop defense moq-lite requires, and it catches loops of any length.
-A publisher MAY additionally skip sending an announcement toward the peer it was learned from, but that is a bandwidth optimization rather than a correctness measure: the receiver discards the announcement either way.
-A relay that withholds its Hop ID (advertising 0) does not appear in the path under a distinguishable identity, so it cannot recognize an announcement that already passed through it; withholding the ID trades loop detection for privacy.
+The responding publisher's own Hop ID is NOT included in this list; it is carried once in ANNOUNCE_OK, so the total path length is `Hop Count + 1`.
+When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to this list, since that ID is no longer implicit downstream.
+The first entry of the reconstructed path identifies the original publisher of the broadcast; it is the fallback content identity when `Epoch` is 0 (see [Routing](#routing)).
+A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
-The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder that advertises every broadcast it could serve, at a cost reflecting the work of actually serving it).
+The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder).
 When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
 
-A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so the marginal cost of one more subscriber is only the links between them, which downstream receivers add themselves.
-This is what lets a cluster deduplicate: a subscriber that sees both a warm copy at cost 0 and the original at the full path cost pulls the copy that already exists.
-The discount applies only to an advertisement selecting the path the relay actually serves from; a standby path advertised to a subscriber whose declared origin filtered the serving path keeps its accumulated value, since serving that subscriber means opening a fresh ingest.
-When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_RESTART, optionally after a grace period so brief subscriber churn does not flap routing across the mesh.
+A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, which is what lets a cluster deduplicate onto a warm copy.
+The discount applies only to the path the relay actually serves from; a standby path keeps its accumulated value, since serving from it means opening a fresh ingest.
+When the relay stops carrying the broadcast it SHOULD restore the accumulated value via ANNOUNCE_UPDATE, optionally after a grace period so brief churn does not flap routing.
 
-Two relays that independently begin carrying the same broadcast will each see the other's zero-cost advertisement as cheaper than their own source, and switching simultaneously would leave the broadcast with no source at all.
-An actively-carrying relay SHOULD therefore apply a deterministic tie-break before re-parenting onto a strictly cheaper advertisement from another actively-carrying relay (one that advertised a Route Cost of 0 from a path of two or more hops; a single-hop path is the original publisher, which can never adopt a route to its own broadcast), such as comparing a stable hash of the broadcast path and each endpoint's Hop ID, so that exactly one side moves.
-Cheaper advertisements from anything else, e.g. a forwarding relay or a repriced upstream, carry no such hazard and SHOULD be adopted immediately.
-Hop-based loop detection (dropping any advertisement whose reconstructed path contains the receiver's own Hop ID) remains the authority on loop freedom; the tie-break only prevents the transient double-switch.
+Two relays that independently begin carrying the same broadcast would each see the other's 0 as cheaper than its own source, and both switching at once would leave the broadcast with no source.
+Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose path has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the broadcast path and each Hop ID, so exactly one side moves.
+Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and neither side SHOULD move.
+Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -823,26 +753,28 @@ Referencing an id that was never assigned, or one already retired, is a protocol
 Announce IDs are never reused within a stream; a broadcast that is announced again after an ANNOUNCE_END gets a fresh id from its next ANNOUNCE_START.
 
 
-## ANNOUNCE_RESTART {#announce-restart}
-A publisher sends an ANNOUNCE_RESTART message to atomically replace a previously started broadcast, referencing its Announce ID.
+## ANNOUNCE_UPDATE {#announce-update}
+A publisher sends an ANNOUNCE_UPDATE message to atomically replace a previously started advertisement, referencing its Announce ID.
 The advertisement is replaced in place (equivalent to ANNOUNCE_END+ANNOUNCE_START) and the id stays live.
 The Hop ID list MAY differ from the original (e.g. after a relay failover or upstream restart).
 
-The first entry of the reconstructed path identifies the original publisher (see [ANNOUNCE_START](#announce-start)), and it determines what the restart means:
+The `Epoch` determines what the update means (see [ANNOUNCE_START](#announce-start)):
 
-- The first entry is unchanged: the same publisher's broadcast is reachable over a different route.
-  The broadcast's content and track properties are continuous, so cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions on the new route at a group boundary instead of resubscribing.
-- The first entry changed: a different publisher replaced the broadcast at this path.
-  The subscriber MUST treat it as a new broadcast: cached TRACK_INFO MUST be discarded, and existing subscriptions do not carry over (the group sequences and track set of the new broadcast are unrelated to the old one).
-
-The first entry only identifies the publisher, not a particular broadcast instance: a publisher that restarts its own broadcast (same path, new content) is indistinguishable from a route change.
-A future extension may add an explicit epoch to announcements to make that case detectable.
+- Unchanged (non-zero): the same content over a different route, or a changed `Ended` flag or Route Cost.
+  Cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions at a group boundary.
+- Changed: a different generation occupies the path.
+  Cached TRACK_INFO MUST be discarded and existing subscriptions do not carry over.
+  A publisher SHOULD only move to a lower Epoch when the higher generation is gone entirely, e.g. a live broadcast vanished and only an older recording remains.
+- Both 0: the first entry of the reconstructed path decides instead, a preserved non-zero entry meaning a route change and a changed or zero entry a replacement (0 proves nothing shared).
+  The first entry only identifies the publisher, so a restart with new content is indistinguishable from a route change; assigning Epochs is what makes it detectable.
 
 ~~~
-ANNOUNCE_RESTART Message {
+ANNOUNCE_UPDATE Message {
   Type (i) = 0x2
   Message Length (i)
   Announce ID (i),
+  Epoch (i),
+  Ended (i),
   Hop Count (i),
   Hop ID (i) ...,
   Route Cost (i),
@@ -850,15 +782,16 @@ ANNOUNCE_RESTART Message {
 ~~~
 
 **Type**:
-Set to 0x2 to indicate an ANNOUNCE_RESTART message.
+Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 
 **Announce ID**:
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Hop Count**, **Hop ID**, and **Route Cost**:
+**Epoch**, **Ended**, **Hop Count**, **Hop ID**, and **Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start).
-A restart whose only change is the Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
+An update whose only change is the Route Cost is valid: it is how a relay advertises that it started or stopped actively carrying the broadcast.
+An update whose only change is the `Ended` flag is likewise valid: it is how a live broadcast ends into a recording without retiring its Announce ID.
 
 
 ## SUBSCRIBE
@@ -870,6 +803,7 @@ SUBSCRIBE Message {
   Subscribe ID (i)
   Broadcast Path (s)
   Track Name (s)
+  Epoch (i)
   Subscriber Priority (8)
   Subscriber Ordered (8)
   Subscriber Max Latency (i)
@@ -881,6 +815,10 @@ SUBSCRIBE Message {
 **Subscribe ID**:
 A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
+
+**Epoch**:
+The generation to subscribe to (see [ANNOUNCE_START](#announce-start)): 0 for the current one, or a non-zero value that MUST match the generation being served (the publisher resets the stream otherwise).
+Echoing the Epoch of the advertisement acted on closes the race where a SUBSCRIBE crosses a replacement in flight.
 
 **Subscriber Priority**:
 The priority of the subscription within the session, represented as a u8.
@@ -909,6 +847,8 @@ A non-zero value is the absolute group sequence + 1.
 The last group to deliver (inclusive).
 A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
+
+`Group Start` and `Group End` are offset by 1 only so 0 can mean "absent"; every other group field in this document is a plain absolute sequence.
 
 
 ## SUBSCRIBE_UPDATE
@@ -939,6 +879,7 @@ TRACK Message {
   Message Length (i)
   Broadcast Path (s)
   Track Name (s)
+  Epoch (i)
 }
 ~~~
 
@@ -948,6 +889,9 @@ The broadcast path of the track.
 **Track Name**:
 The name of the track.
 
+**Epoch**:
+The generation to resolve (see [ANNOUNCE_START](#announce-start)): 0 for the current one, or a non-zero value that MUST match a generation the publisher can serve (it resets the stream otherwise).
+
 ## TRACK_INFO {#track-info}
 TRACK_INFO is sent by the publisher in response to a TRACK message.
 It is the sole message on the Track Stream; the publisher FINs immediately afterward, or resets the stream on error (e.g. the track does not exist).
@@ -955,6 +899,7 @@ It is the sole message on the Track Stream; the publisher FINs immediately after
 ~~~
 TRACK_INFO Message {
   Message Length (i)
+  Epoch (i)
   Publisher Priority (8)
   Publisher Ordered (8)
   Publisher Max Latency (i)
@@ -963,9 +908,12 @@ TRACK_INFO Message {
 ~~~
 
 Every field is **fixed for the lifetime of the Track** and MUST NOT change; a change requires a new Track (a re-announcement of the broadcast).
-This immutability is what lets the properties live on their own stream — fetched once and cached — instead of being echoed on every SUBSCRIBE and FETCH response.
-It is also deliberate for relays: a relay serving one upstream subscription to many downstream subscribers would otherwise have to fan a single publisher-side change out to every downstream (and invalidate any cached groups) — publisher changes fan *out*.
-Subscriber properties (see [SUBSCRIBE](#subscribe)) are the opposite: they fan *in* at the relay, which already merges them, so they MAY change freely via SUBSCRIBE_UPDATE.
+This is what lets the properties live on their own stream, fetched once and cached, instead of being echoed on every SUBSCRIBE and FETCH response.
+Publisher properties fan *out* at a relay (one upstream subscription serving many downstreams), so a change would have to propagate everywhere; subscriber properties fan *in*, which the relay already merges, so they MAY change freely via SUBSCRIBE_UPDATE.
+
+**Epoch**:
+The generation these properties belong to (see [ANNOUNCE_START](#announce-start)), or 0 when the publisher assigns none.
+Subscribers key their TRACK_INFO cache by it, and a SUBSCRIBE or FETCH that will parse frames against a cached non-zero Epoch MUST send that Epoch: no data response identifies the generation actually served, so an unpinned request can silently cross a replacement.
 
 **Publisher Priority**:
 The publisher's priority for this Track, represented as a u8, used only to resolve ties between subscriptions of equal subscriber priority.
@@ -989,8 +937,7 @@ See the [Expiration](#expiration) section for more information.
 
 **Timescale**:
 The number of timestamp units per second for frame timestamps on this Track.
-It MUST be non-zero: every Track has a media timeline, so every FRAME carries a `Timestamp Delta` and every datagram body carries a `Timestamp` (see [FRAME](#frame) and [Datagrams](#datagrams)).
-A subscriber that receives a `Timescale` of 0 MUST reset the Subscribe or Fetch stream with a protocol violation.
+It MUST be non-zero; a subscriber that receives 0 MUST reset the stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
 ## SUBSCRIBE_OK {#subscribe-ok}
@@ -1012,10 +959,8 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
 **Group**:
 The absolute sequence number of the first group that will be delivered.
-This is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start` in SUBSCRIBE (see [SUBSCRIBE](#subscribe)); decode the requested `Group Start` before comparing.
-Once decoded, this MUST be greater than or equal to the requested start group.
-If it is strictly greater, the groups in between are unavailable and will not be delivered; SUBSCRIBE_OK thus also acts as an implicit drop of that leading range, and no separate SUBSCRIBE_DROP is required for it.
-A subscriber that requested the latest group (`Group Start` = 0) learns the resolved sequence here.
+It MUST be greater than or equal to the requested start group; any groups in between are unavailable and implicitly dropped, with no separate SUBSCRIBE_DROP required.
+A subscriber that requested the latest group learns the resolved sequence here.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1035,10 +980,6 @@ Set to 0x1 to indicate a SUBSCRIBE_END message.
 The exclusive end of the range: the absolute sequence number of the first group that will never be delivered.
 A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
-
-This field is encoded as a plain absolute sequence and is used as-is; it is **not** the `absolute + 1` form used by `Group Start`/`Group End` in SUBSCRIBE, which decode by subtracting 1.
-The two are easily confused, because a track whose highest delivered group is `N` sends `N + 1` here, the same number SUBSCRIBE would carry for an inclusive bound of `N`.
-They differ in why: SUBSCRIBE offsets by 1 only so that 0 can mean "absent", whereas this field has no absent case and 0 already means "no groups at all".
 
 SUBSCRIBE_END bounds the range but does not by itself end the stream: the publisher MAY still send SUBSCRIBE_DROP for groups below this sequence that it cannot deliver, and FINs the stream only once every group below this sequence has been accounted for.
 
@@ -1061,11 +1002,9 @@ Set to 0x2 to indicate a SUBSCRIBE_DROP message.
 
 **Group Start**:
 The first absolute group sequence in the dropped range.
-Despite the shared field name, this is a plain absolute sequence, **not** the `absolute + 1` form used by `Group Start` in SUBSCRIBE.
 
 **Group End**:
 The last absolute group sequence in the dropped range (inclusive).
-As with `Group Start` above, this is a plain absolute sequence, **not** the `absolute + 1` form used in SUBSCRIBE.
 
 **Error Code**:
 An application-specific error code.
@@ -1079,6 +1018,7 @@ FETCH Message {
   Message Length (i)
   Broadcast Path (s)
   Track Name (s)
+  Epoch (i)
   Subscriber Priority (8)
   Group Sequence (i)
 }
@@ -1090,6 +1030,10 @@ The broadcast path of the track to fetch from.
 **Track Name**:
 The name of the track to fetch from.
 
+**Epoch**:
+The generation to fetch from (see [ANNOUNCE_START](#announce-start)): 0 for the current one.
+A publisher that retains a non-current generation (e.g. a recording) MAY serve it, but MUST reset the stream rather than serve a group from a different generation than requested.
+
 **Subscriber Priority**:
 The priority of the fetch within the session, represented as a u8.
 See the [Prioritization](#prioritization) section for more information.
@@ -1097,10 +1041,8 @@ See the [Prioritization](#prioritization) section for more information.
 **Group Sequence**:
 The sequence number of the group to fetch.
 
-The publisher responds with FRAME messages directly on the same stream — there is no response header.
-The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence is implicit from the FETCH request.
-The publisher FINs the stream after the last frame, or resets on error.
-There is no FETCH_ERROR message — the publisher signals failure by resetting the stream.
+The publisher responds with FRAME messages directly on the same stream; there is no response header, and the group sequence is implicit from the FETCH request.
+The publisher FINs the stream after the last frame, or resets on error; there is no FETCH_ERROR message.
 
 ## PROBE
 PROBE is used to measure the available bitrate of the connection.
@@ -1180,7 +1122,7 @@ Encoded as a zigzag-mapped variable-length integer:
 - Encode: `unsigned = (signed << 1) ^ (signed >> 63)` (arithmetic right shift).
 - Decode: `signed = (unsigned >> 1) ^ -(unsigned & 1)`.
 
-Zigzag interleaves non-negative and negative values (`0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, ...`) so small magnitudes of either sign fit in a 1-byte varint and there is exactly one wire encoding for zero.
+Zigzag interleaves non-negative and negative values so small magnitudes of either sign fit in a 1-byte varint.
 The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
 
 **Payload**:
@@ -1191,21 +1133,23 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-06
+- Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
 - Allowed an empty SETUP `Path` parameter, equivalent to omitting it; both request the server's default path. Previously an empty value was a protocol violation, which made the two ways of asking for the default disagree.
 - Corrected SUBSCRIBE_END `Group` to an exclusive bound: the first sequence that will never be delivered, with 0 meaning no groups were produced. It was previously specified as the inclusive last group, which could not distinguish an empty track from one whose only group was 0.
-- Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_RESTART (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
+- Split ANNOUNCE_BROADCAST into three typed messages: ANNOUNCE_START (0x0), ANNOUNCE_END (0x1), and ANNOUNCE_UPDATE (0x2), each prefixed with a Type discriminator like the subscribe stream's responses.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
-- ANNOUNCE_END and ANNOUNCE_RESTART reference the Announce ID instead of repeating the broadcast path.
-- Replaced the duplicate-`active` restart idiom with ANNOUNCE_RESTART; a second ANNOUNCE_START for an already-available path is now a protocol violation.
-- Defined the first entry of the reconstructed path as the original publisher's identity: a restart that preserves it is a route change (TRACK_INFO stays valid, subscriptions may resume), one that changes it replaces the broadcast (TRACK_INFO discarded, nothing resumes).
-- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_RESTART: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
+- ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
+- Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
+- Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
+- Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
+- Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
+- Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_UPDATE: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
 - Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
-- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared first hop) publishers fail over across a mesh.
-- Defined same-path advertisements sharing a first entry as interchangeable content a relay may splice across at a Group boundary; differing first entries never splice, the later replacing the earlier.
+- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared Epoch) publishers fail over across a mesh.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
@@ -1328,10 +1272,10 @@ moq-lite inherits the transport security of the underlying connection: QUIC and 
 The `Increase` Probe level (see [Probe Parameter](#probe-parameter)) lets a subscriber ask the publisher to pad the connection up to a target bitrate. A publisher MUST NOT treat the target as authorization to send beyond what congestion control allows: padding is bounded by the congestion window, so probing cannot be used to amplify traffic toward the subscriber or a spoofed address. A publisher that only advertised `Report` MUST NOT pad above its current sending rate. Because all data flows on an established, congestion-controlled session to the connecting peer, moq-lite offers no off-path amplification vector.
 
 ## Session Redirection
-GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy — scheme, authority, and port — before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
+GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [ANNOUNCE_START](#announce-start)). The origin-based announcement filter (see [Origin Parameter](#origin-parameter)) exists for loop avoidance, not access control. Honoring it is normative for both advertisement and dispatch (see [Announce](#announce)), but a subscriber cannot verify that a publisher did, and a peer that ignores the filter is indistinguishable from one with a route the subscriber cannot see. It MUST NOT be relied upon to hide a broadcast from a peer that declared its origin.
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The origin-based announcement filter (see [Origin Parameter](#origin-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its origin.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches) or request large announce prefixes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control.

@@ -79,6 +79,18 @@ describe("citations resolve", () => {
 		expect(content(page as DraftPage)).not.toInclude("[qmux]:");
 		expect(html(page as DraftPage)).toInclude("draft-ietf-quic-qmux</a>: an endpoint");
 	});
+
+	test("a nested reference definition keeps its title and target", () => {
+		// hang defines `webcodecs` as a hand-written reference block rather than
+		// a bibxml name; the citation must render as a link labeled by its title,
+		// not as the bare alias.
+		const page = pages.find((p) => p.name === "draft-lcurley-moq-hang");
+		expect(page).toBeDefined();
+
+		const rendered = html(page as DraftPage);
+		expect(rendered).toInclude('href="https://www.w3.org/TR/webcodecs/"');
+		expect(content(page as DraftPage)).not.toMatch(/specification webcodecs\./);
+	});
 });
 
 describe("tables render as tables", () => {

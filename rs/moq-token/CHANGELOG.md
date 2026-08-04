@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/moq-dev/moq/compare/moq-token-v0.7.0...moq-token-v0.7.1) - 2026-08-03
+
+### Fixed
+
+- *(moq-token)* write private key files owner-only ([#2596](https://github.com/moq-dev/moq/pull/2596))
+
+### Other
+
+- *(deps)* bump the cargo group with 2 updates ([#2591](https://github.com/moq-dev/moq/pull/2591))
+
 ## [0.7.0](https://github.com/moq-dev/moq/compare/moq-token-v0.6.3...moq-token-v0.7.0) - 2026-07-22
 
 ### Added

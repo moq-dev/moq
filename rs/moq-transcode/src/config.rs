@@ -55,6 +55,9 @@ pub struct Config {
 	/// prefers hardware and falls back to openh264 (H.264 only; H.265 sources
 	/// need a hardware decoder).
 	pub decoder: moq_video::decode::Kind,
+
+	/// Frame resize behavior. Automatic mode keeps GPU-backed frames on the GPU.
+	pub resize: moq_video::resize::Config,
 }
 
 impl Default for Config {
@@ -72,6 +75,7 @@ impl Default for Config {
 			source: None,
 			encoder: moq_video::encode::Kind::default(),
 			decoder: moq_video::decode::Kind::default(),
+			resize: moq_video::resize::Config::default(),
 		}
 	}
 }

@@ -37,7 +37,7 @@ pub(crate) async fn serve_ws(
 
 	let host = uri
 		.authority()
-		.map(|authority| authority.as_str())
+		.map(axum::http::uri::Authority::as_str)
 		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
 	let mut params = request_auth_params(&state.auth, host, &uri)?;

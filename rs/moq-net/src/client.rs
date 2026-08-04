@@ -100,9 +100,10 @@ impl Client {
 	///
 	/// Some relays never declare their identity: every moq-transport version (the
 	/// protocol carries no hop ids), and moq-lite peers without the hops extension.
-	/// Broadcasts received from such a peer are normally attributed to a random
-	/// per-connection origin, so they can't be recognized across sessions. This knob
-	/// pins that identity instead, exactly as if the peer had declared it:
+	/// Broadcasts received from such a peer are normally attributed to the reserved
+	/// origin 0 ("unknown"), which identifies nothing: it never proves continuity,
+	/// so their advertisements neither splice nor survive a restart in place. This
+	/// knob pins a real identity instead, exactly as if the peer had declared it:
 	///
 	/// - broadcasts received from the peer carry `origin` in their hop chains, so
 	///   every session dialing the same relay (with the same id) resolves to one

@@ -131,14 +131,14 @@ rather than a blanket promise:
 | --- | --- | --- | --- |
 | macOS | `PixelBuffer` (VideoToolbox) | yes | yes, via `CVMetalTextureCache` |
 | Linux | `Cuda` (NVDEC) | yes, straight into NVENC | no, downloaded to I420 first |
-| Windows | `I420` (Media Foundation downloads its DXVA texture) | no | no |
+| Windows | `Texture` (Media Foundation / DXVA) | yes, through the Direct3D11 video processor | no, downloaded to I420 first |
 
-So the transcode path is real on macOS and Linux: a decoded frame feeds the
-encoder without leaving the GPU, and `decode::Config::resize` scales it there too.
-Rendering is zero-copy on macOS only. The Vulkan and EGL importers that would
-extend it to Linux, and the Media Foundation decode-surface retention that would
-give Windows a GPU frame at all, are both tracked in
-[#2481](https://github.com/moq-dev/moq/issues/2481).
+`Frame::resize` stays on the GPU through a `VTPixelTransferSession`, CUDA kernel,
+or Direct3D11 video processor. Call `Frame::resize_with` with
+`resize::Acceleration::Cpu` to force a download and CPU resize. A driver that
+rejects GPU resizing returns to CPU scaling and warns once. Rendering is
+zero-copy on macOS only; the Vulkan and EGL importers that would extend it are
+tracked in [#2481](https://github.com/moq-dev/moq/issues/2481).
 
 Matching on `Surface` stays portable because every variant has a universal
 fallback in `Surface::into_i420()`: take the fast path you recognize and let the

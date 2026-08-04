@@ -30,9 +30,25 @@ build name:
 all:
     @for f in draft-*.md; do just build "${f%.md}"; done
 
-# Validate that every draft still parses (kramdown-rfc markdown -> RFC XML).
+# Validate that every draft parses and that its generated XML passes validation.
+#
+# Both halves are needed. kramdown-rfc catches markdown and frontmatter errors,
+# but happily emits XML for a cross-reference that points at no such section;
+# xml2rfc is what rejects the dangling IDREF. Checking only the first half lets
+# a broken `[text](#anchor)` pass here and then fail at `publish` time, which is
+# the worst place to find it.
+#
+# --preptool stops after validation instead of rendering txt/html, and -N keeps
+# it off the network (kramdown-rfc already inlined the references), which is
+# what makes this a couple of seconds per draft rather than a minute.
 check:
-    @for f in draft-*.md; do echo "checking $f"; kramdown-rfc --v3 < "$f" > /dev/null; done
+    @for f in draft-*.md; do \
+        echo "checking $f"; \
+        kramdown-rfc --v3 < "$f" > "${f%.md}.xml" || exit 1; \
+        {{ xml2rfc }} --preptool -N "${f%.md}.xml" -o "${f%.md}.prepped.xml" \
+            || { rm -f "${f%.md}.prepped.xml"; exit 1; }; \
+        rm -f "${f%.md}.prepped.xml"; \
+    done
 
 # Remove generated files and the reference cache.
 clean:

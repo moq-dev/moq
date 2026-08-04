@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.5...moq-cli-v0.9.6) - 2026-08-03
+
+### Added
+
+- *(cli)* add a `token` subcommand to moq-cli ([#2593](https://github.com/moq-dev/moq/pull/2593))
+
 ## [0.9.5](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.4...moq-cli-v0.9.5) - 2026-07-29
 
 ### Added
