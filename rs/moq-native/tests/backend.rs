@@ -169,7 +169,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -327,6 +327,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 		Ok::<_, anyhow::Error>(has_cert)
 	});
 
+	// The mTLS cases assert on the connect result itself, so keep it a `Result`.
 	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out");
@@ -551,7 +552,7 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -714,12 +715,20 @@ async fn quiche_qlog() {
 	assert!(!traces.is_empty(), "expected at least one trace");
 }
 
-/// Dial once and hand back the session.
+/// Dial once and hand back the client with its session.
 ///
-/// These tests want a single transport, so reconnecting is off: the connection is
-/// released as soon as the session is up, and with nothing left to redial the
-/// session outlives it.
-async fn connect_once(client: moq_native::Client, url: url::Url) -> moq_native::Result<moq_net::Session> {
-	let connection = client.with_reconnect(false).connect(url).established().await?;
-	connection.session().ok_or(moq_native::Error::ConnectFailed)
+/// These tests want a single transport, so reconnecting is off and the connection
+/// is released as soon as the session is up: there is nothing left to redial, and
+/// letting it go is what keeps `drop(session)` closing the transport, since a live
+/// connection holds a session clone of its own.
+///
+/// The client comes back because it owns the transport endpoint (iroh's dies with
+/// it), and the caller has to outlive the session it just got.
+async fn connect_once(
+	client: moq_native::Client,
+	url: url::Url,
+) -> moq_native::Result<(moq_native::Client, moq_net::Session)> {
+	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
+	let session = connection.session().ok_or(moq_native::Error::ConnectFailed)?;
+	Ok((client, session))
 }

@@ -100,7 +100,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	let client = client_config.init().expect("client init");
-	let client_session = within("client connects", async {
+	let (_client_session_client, client_session) = within("client connects", async {
 		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
 	.await
@@ -389,7 +389,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let mid_a_client = client_config.init().expect("mid-a client init");
-	let mid_a_upstream = within(
+	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
 		connect_once(
 			mid_a_client.with_subscriber(mid_a_origin.clone()),
@@ -419,7 +419,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut sub_client_config = moq_native::ClientConfig::default();
 	sub_client_config.tls.disable_verify = Some(true);
 	let sub_client = sub_client_config.init().expect("subscriber client init");
-	let sub_session = within(
+	let (_sub_session_client, sub_session) = within(
 		"subscriber connects to BOTTOM",
 		connect_once(
 			sub_client.with_subscriber(sub_origin.clone()),
@@ -666,12 +666,20 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	cluster_run.abort();
 }
 
-/// Dial once and hand back the session.
+/// Dial once and hand back the client with its session.
 ///
-/// These tests want a single transport, so reconnecting is off: the connection is
-/// released as soon as the session is up, and with nothing left to redial the
-/// session outlives it.
-async fn connect_once(client: moq_native::Client, url: url::Url) -> moq_native::Result<moq_net::Session> {
-	let connection = client.with_reconnect(false).connect(url).established().await?;
-	connection.session().ok_or(moq_native::Error::ConnectFailed)
+/// These tests want a single transport, so reconnecting is off and the connection
+/// is released as soon as the session is up: there is nothing left to redial, and
+/// letting it go is what keeps `drop(session)` closing the transport, since a live
+/// connection holds a session clone of its own.
+///
+/// The client comes back because it owns the transport endpoint (iroh's dies with
+/// it), and the caller has to outlive the session it just got.
+async fn connect_once(
+	client: moq_native::Client,
+	url: url::Url,
+) -> moq_native::Result<(moq_native::Client, moq_net::Session)> {
+	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
+	let session = connection.session().ok_or(moq_native::Error::ConnectFailed)?;
+	Ok((client, session))
 }

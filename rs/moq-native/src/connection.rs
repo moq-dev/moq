@@ -14,6 +14,10 @@ use crate::{Client, Error};
 #[non_exhaustive]
 pub struct Backoff {
 	/// Initial delay before first reconnect attempt.
+	///
+	/// Doubles as the bar a session must stay up to count as healthy, so it is
+	/// floored at 50ms: at zero every session would look healthy and the retry
+	/// pacing would collapse.
 	#[arg(
 		id = "backoff-initial",
 		long,
@@ -213,6 +217,11 @@ pub struct GoawayConfig {
 	pub handover: Option<Duration>,
 }
 
+/// Floor for [`Backoff::initial`], which paces the retries and sets the bar for
+/// calling a session healthy. Small enough to stay out of the way of a fast
+/// config, large enough that a session closed on sight never clears it.
+const MIN_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Default handover window, and the ceiling a GOAWAY deadline is capped to when
 /// the config names none.
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
@@ -339,7 +348,14 @@ impl Connection {
 	) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.clone();
-		let mut delay = backoff.initial;
+		// This value does double duty: the first retry delay, and the bar a session
+		// has to clear to count as healthy. At zero both collapse. Every session would
+		// be healthy (`elapsed() >= 0`), which resets the give-up window; the delay
+		// would stay zero through the multiplier; and a peer that closes on sight
+		// would be redialed as fast as the runtime allows, forever. Floor it so both
+		// roles keep their meaning.
+		let initial = backoff.initial.max(MIN_BACKOFF);
+		let mut delay = initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<Error> = None;
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
@@ -380,7 +396,7 @@ impl Connection {
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
-					let healthy = connected.elapsed() >= backoff.initial;
+					let healthy = connected.elapsed() >= initial;
 
 					if let Ended::Goaway(msg) = &ended {
 						// A redirect is an assignment: keep dialing it from here on.
@@ -403,7 +419,7 @@ impl Connection {
 						draining = Some(Draining::new(session, goaway.handover(msg.timeout)));
 
 						if healthy {
-							delay = backoff.initial;
+							delay = initial;
 							retry_start = tokio::time::Instant::now();
 							last_error = None;
 							// No backoff sleep: a handover off a healthy session is not a failure.
@@ -457,7 +473,7 @@ impl Connection {
 					if healthy {
 						// Reset the backoff window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
-						delay = backoff.initial;
+						delay = initial;
 						retry_start = tokio::time::Instant::now();
 						last_error = None;
 					} else {
