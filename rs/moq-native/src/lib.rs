@@ -15,6 +15,7 @@
 pub mod bind;
 mod client;
 mod connect;
+mod connection;
 mod crypto;
 mod error;
 #[cfg(feature = "jemalloc")]
@@ -25,7 +26,6 @@ pub mod noq;
 pub mod quic;
 #[cfg(feature = "quinn")]
 pub mod quinn;
-mod reconnect;
 mod server;
 #[cfg(feature = "tcp")]
 pub mod tcp;
@@ -42,9 +42,9 @@ pub mod websocket;
 // new `pub` item in these modules doesn't silently join it.
 pub use client::{Client, ClientConfig};
 pub use connect::ConnectError;
+pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::Log;
-pub use reconnect::{Backoff, ConnectionStatsReader, GoawayConfig, Reconnect, Redirect, Status};
 pub use server::{Request, Server, ServerConfig, Transport};
 
 /// Spawn the session's protocol driver on the current tokio runtime, handing back

@@ -144,7 +144,7 @@ impl Session {
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
 		config.backoff.timeout = std::time::Duration::ZERO;
 		let client = config.init()?.with_publisher(origin.consume());
-		let reconnect = client.reconnect(settings.url.clone());
+		let reconnect = client.connect(settings.url.clone());
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
@@ -200,16 +200,16 @@ impl Drop for Session {
 /// Track the reconnect loop's observable state into the element's [`Status`] and fire GObject
 /// notifications until the loop stops.
 ///
-/// The reconnect loop owns the session; this task follows [`moq_native::Reconnect`] to mirror
+/// The reconnect loop owns the session; this task follows [`moq_native::Connection`] to mirror
 /// status/version into the `Status` the getters read, and watches the persistent bandwidth consumers
 /// only to `notify` the bitrate properties (the getters read the estimates directly). Each source is
 /// notified on its own change: a status edge notifies `status`/`connected`/`moq-version` together, a
 /// bitrate change notifies just that bitrate. The loop stops only on a terminal error (a non-retryable
 /// auth failure, or a bounded backoff's give-up), which the `Err` arm posts as a bus error.
-/// [`Session`]'s `Drop` aborts this task, which drops the `Reconnect` handle and quietly tears the loop
+/// [`Session`]'s `Drop` aborts this task, which drops the `Connection` handle and quietly tears the loop
 /// down.
 async fn forward(
-	mut reconnect: moq_native::Reconnect,
+	mut reconnect: moq_native::Connection,
 	origin: moq_net::origin::Producer,
 	status: Arc<Status>,
 	errored: Arc<AtomicBool>,

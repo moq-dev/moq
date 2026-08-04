@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track, None)?;
 			let clock = Publisher::new(track);
 
-			let reconnect = client.with_publisher(&origin).reconnect(url);
+			let reconnect = client.with_publisher(&origin).connect(url);
 
 			// Keep the result out of the `select!` arm (a `?` there would return
 			// before the close below runs), so the broadcast is always closed.
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
 			result
 		}
 		Command::Subscribe => {
-			let reconnect = client.with_subscriber(origin.clone()).reconnect(url);
+			let reconnect = client.with_subscriber(origin.clone()).connect(url);
 
 			// IETF MoQ + the current origin::Consumer API don't let us call
 			// `session.consume_broadcast(&path)` directly, so loop on announces

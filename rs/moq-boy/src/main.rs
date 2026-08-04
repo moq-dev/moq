@@ -232,7 +232,7 @@ async fn run(config: &Config) -> Result<()> {
 	let reconnect = client
 		.with_publisher(&publish_origin)
 		.with_subscriber(consume_origin)
-		.reconnect(url);
+		.connect(url);
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;

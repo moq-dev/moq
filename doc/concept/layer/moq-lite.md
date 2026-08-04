@@ -158,7 +158,7 @@ On the receiving side:
 
 A moq-transport client sends an empty URI: only a server can tell a peer where to reconnect. The URI is capped at 8,192 bytes on both wires, and a second GOAWAY on a session is a protocol violation that closes it.
 
-Native clients get step 3 for free from `moq_native::Client::reconnect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
+Native clients get step 3 for free from `moq_native::Client::connect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
 
 `moq-relay` uses this in both directions: on shutdown it drains its own downstream sessions (see [`--drain-timeout`](/bin/relay/config#drain-timeout)), and on a GOAWAY from a cluster peer the reconnect loop migrates transparently.
 

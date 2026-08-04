@@ -166,7 +166,7 @@ pub struct Options {
 	pub kind: encoder::Kind,
 	/// The connection's send-bandwidth estimate, from
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
-	/// `moq_native::Reconnect::send_bandwidth`, which survives reconnects).
+	/// `moq_native::Connection::send_bandwidth`, which survives reconnects).
 	///
 	/// Set it and the encoder tracks the estimate per the default
 	/// [`rate::Policy`](super::rate::Policy), so a closing uplink gets a softer

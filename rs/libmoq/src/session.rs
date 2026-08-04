@@ -42,7 +42,7 @@ impl Session {
 
 		// Build the reconnect loop up front so we can grab a stats reader for it
 		// before moving it into the spawned task.
-		let reconnect = client.reconnect(url);
+		let reconnect = client.connect(url);
 		let stats = reconnect.stats();
 
 		let closed = oneshot::channel();
@@ -95,7 +95,7 @@ impl Session {
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Reconnect) -> Result<(), Error> {
+	async fn report(callback: ffi::OnStatus, mut reconnect: moq_native::Connection) -> Result<(), Error> {
 		let mut connects: u64 = 0;
 		loop {
 			if let moq_native::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {

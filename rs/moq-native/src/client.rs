@@ -1,4 +1,4 @@
-use crate::{Backoff, Error, GoawayConfig, QuicBackend, Reconnect};
+use crate::{Backoff, Connection, Error, GoawayConfig, QuicBackend};
 #[cfg(feature = "websocket")]
 use std::future::Future;
 use std::net;
@@ -55,12 +55,29 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub tls: crate::tls::Client,
 
-	/// Retry pacing for [`Client::reconnect`] (`--client-backoff-*`).
+	/// Whether a [`Connection`] redials (with backoff) after its session drops.
+	///
+	/// Defaults to true. Set to false for a one-shot dial: the session's close
+	/// then surfaces through [`Connection::closed`] instead of triggering a
+	/// reconnect.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-reconnect",
+		long = "client-reconnect",
+		env = "MOQ_CLIENT_RECONNECT",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub reconnect: Option<bool>,
+
+	/// Retry pacing for [`Client::connect`] (`--client-backoff-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub backoff: Backoff,
 
-	/// How [`Client::reconnect`] reacts to a peer's GOAWAY (`--goaway-*`).
+	/// How [`Client::connect`] reacts to a peer's GOAWAY (`--goaway-*`).
 	#[command(flatten)]
 	#[serde(default)]
 	pub goaway: GoawayConfig,
@@ -98,6 +115,7 @@ impl Default for ClientConfig {
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
+			reconnect: None,
 			backoff: Backoff::default(),
 			goaway: GoawayConfig::default(),
 			#[cfg(feature = "websocket")]
@@ -119,8 +137,9 @@ pub struct Client {
 	versions: moq_net::Versions,
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
-	backoff: Backoff,
-	goaway: GoawayConfig,
+	pub(crate) reconnect: bool,
+	pub(crate) backoff: Backoff,
+	pub(crate) goaway: GoawayConfig,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
@@ -196,6 +215,7 @@ impl Client {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
+			reconnect: config.reconnect.unwrap_or(true),
 			backoff: config.backoff,
 			goaway: config.goaway,
 			#[cfg(feature = "websocket")]
@@ -266,39 +286,54 @@ impl Client {
 		self
 	}
 
-	/// Start a background reconnect loop that connects to the given URL,
-	/// waits for the session to close, then reconnects with exponential backoff.
+	/// Override whether this client redials after a session drop.
 	///
-	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
-	pub fn reconnect(&self, url: Url) -> Reconnect {
-		Reconnect::new(self.clone(), url, self.backoff.clone(), self.goaway.clone())
+	/// Defaults to [`ClientConfig::reconnect`], which defaults to true.
+	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
+		self.reconnect = reconnect;
+		self
 	}
 
-	/// Dial the configured [`ClientConfig::connect`] URL, publishing `origin` to it
-	/// and reconnecting with backoff until the returned handle is dropped.
+	/// Open a connection to the given URL.
+	///
+	/// A background task dials, completes the MoQ handshake, and (by default)
+	/// redials with exponential backoff whenever the session drops. Wait for the
+	/// first session with [`Connection::established`] and for the loop to stop
+	/// with [`Connection::closed`]; drop the handle to stop it. Disable the
+	/// redialing with [`ClientConfig::reconnect`] / [`Self::with_reconnect`] for
+	/// a one-shot dial.
+	pub fn connect(&self, url: Url) -> Connection {
+		Connection::new(self.clone(), url)
+	}
+
+	/// Connect to the configured [`ClientConfig::connect`] URL, publishing
+	/// `origin` to it.
 	///
 	/// Returns `None` when no `--client-connect` URL was configured, so a caller
 	/// that may run server-only doesn't have to branch on the URL itself.
-	pub fn publish(self, origin: moq_net::origin::Consumer) -> Option<Reconnect> {
+	pub fn publish(self, origin: moq_net::origin::Consumer) -> Option<Connection> {
 		let url = self.connect.clone()?;
-		Some(self.with_publisher(origin).reconnect(url))
+		Some(self.with_publisher(origin).connect(url))
 	}
 
-	/// Dial the configured [`ClientConfig::connect`] URL, consuming its broadcasts
-	/// into `origin` and reconnecting with backoff until the returned handle is
-	/// dropped.
+	/// Connect to the configured [`ClientConfig::connect`] URL, consuming its
+	/// broadcasts into `origin`.
 	///
 	/// Broadcasts fed by these sessions linger across a session drop for as long
 	/// as the reconnect loop keeps retrying ([`Backoff::linger`]): a relay restart
 	/// is a bounded gap the reconnect splices over, not a teardown. When the loop
-	/// gives up, its error surfaces (via [`Reconnect::closed`]) just before the
-	/// broadcasts abort.
+	/// gives up, its error surfaces (via [`Connection::closed`]) just before the
+	/// broadcasts abort. With reconnecting disabled there is no gap to splice, so
+	/// the broadcasts don't linger.
 	///
 	/// Returns `None` when no `--client-connect` URL was configured.
-	pub fn consume(self, origin: moq_net::origin::Producer) -> Option<Reconnect> {
+	pub fn consume(self, origin: moq_net::origin::Producer) -> Option<Connection> {
 		let url = self.connect.clone()?;
-		let origin = origin.with_linger(self.backoff.linger());
-		Some(self.with_subscriber(origin).reconnect(url))
+		let origin = match self.reconnect {
+			true => origin.with_linger(self.backoff.linger()),
+			false => origin,
+		};
+		Some(self.with_subscriber(origin).connect(url))
 	}
 
 	/// Dial the given URL and complete the MoQ handshake.
@@ -313,7 +348,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
+	pub(crate) async fn dial(&self, _url: Url) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, websocket, tcp, or uds feature",
 		))
@@ -334,7 +369,7 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
+	pub(crate) async fn dial(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
 		let pair = Box::pin(self.connect_inner(url)).await?;
@@ -860,6 +895,32 @@ mod tests {
 			config.connect.as_ref().unwrap().as_str(),
 			"https://relay.example.com/anon"
 		);
+	}
+
+	#[test]
+	fn test_toml_reconnect_survives_update_from() {
+		let toml = r#"
+			reconnect = false
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.reconnect, Some(false));
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-reconnect flag).
+		config.update_from(["test"]);
+		assert_eq!(config.reconnect, Some(false));
+	}
+
+	#[test]
+	fn test_cli_reconnect_flag() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.reconnect, None, "unset means the default (reconnect)");
+
+		let config = ClientConfig::parse_from(["test", "--client-reconnect"]);
+		assert_eq!(config.reconnect, Some(true));
+
+		let config = ClientConfig::parse_from(["test", "--client-reconnect=false"]);
+		assert_eq!(config.reconnect, Some(false));
 	}
 
 	#[test]
