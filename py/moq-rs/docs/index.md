@@ -61,6 +61,7 @@ asyncio.run(main())
    MediaProducer
    MediaStreamProducer
    AudioProducer
+   VideoProducer
    JsonSnapshotProducer
    JsonStreamProducer
 ```
@@ -122,6 +123,12 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    Video
    VideoHint
    VideoProperties
+   VideoFrame
+   VideoCodec
+   VideoPixelFormat
+   VideoEncoderInput
+   VideoEncoderOutput
+   VideoEncoderKind
    Dimensions
    Audio
    AudioFrame

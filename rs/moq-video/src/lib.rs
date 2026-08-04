@@ -74,6 +74,7 @@ mod color;
 mod error;
 pub mod frame;
 mod size;
+mod worker;
 
 #[cfg(target_os = "windows")]
 mod mf;

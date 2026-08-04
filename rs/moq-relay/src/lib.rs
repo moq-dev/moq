@@ -5,7 +5,10 @@
 //! or any other stream. Clustering, JWT authentication, WebSocket
 //! fallback, and an HTTP API are all included.
 //!
-//! See `main.rs` for a complete example of how these pieces fit together.
+//! [`Relay::load`] assembles every piece from a [`Config`]; [`Relay::run`] drives
+//! the stock loop, and embedders with their own workers or routes destructure a
+//! `Relay` instead of reproducing the sequence. `main.rs` is a thin wrapper over
+//! the two.
 
 mod auth;
 mod cache;
@@ -15,6 +18,7 @@ mod connection;
 mod http_client;
 mod internal;
 mod nodes;
+mod relay;
 mod stats;
 #[cfg(test)]
 mod test_env;
@@ -38,5 +42,6 @@ pub use cluster::*;
 pub use config::*;
 pub use connection::*;
 pub use internal::*;
+pub use relay::*;
 pub use stats::*;
 pub use web::*;

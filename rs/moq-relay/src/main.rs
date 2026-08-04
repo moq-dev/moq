@@ -1,6 +1,4 @@
-use moq_relay::*;
-
-use anyhow::Context;
+use moq_relay::{Config, Relay};
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -14,105 +12,7 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let mut config = Config::load()?;
-
-	config.client.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
-	config.server.quic.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
-
-	let mtls_enabled = !config.server.tls.root.is_empty();
-
-	#[allow(unused_mut)]
-	let mut server = config.server.init()?;
-	let client = config.client.clone().init()?;
-
-	// `None` for a stream-only server (no QUIC); any other error is real.
-	let addr = match server.local_addr() {
-		Ok(addr) => Some(addr),
-		Err(moq_native::Error::NoBackend(_)) => None,
-		Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
-	};
-
-	#[cfg(feature = "iroh")]
-	let (server, client) = match config.iroh.bind(&config.client.quic).await? {
-		Some(iroh) => (server.with_iroh(iroh.clone()), client.with_iroh(iroh)),
-		None => (server, client),
-	};
-
-	// Reject configs where neither JWT nor mTLS can authenticate anyone.
-	if config.auth.is_empty() {
-		anyhow::ensure!(
-			mtls_enabled,
-			"no auth-key, auth-key-dir, public path, or server tls.root configured; \
-			 nobody can authenticate"
-		);
-		tracing::warn!("no JWT/public auth configured; only mTLS peers will be accepted");
-	}
-
-	let auth = if config.auth.is_empty() {
-		// mTLS-only: no JWT/public source, but `--auth-mtls-tier` still applies.
-		Auth::default().with_mtls_tier(config.auth.mtls_tier.clone())
-	} else {
-		config.auth.init(&config.client.tls).await?
-	};
-
-	let cache = config.cache.init()?;
-	let cluster = Cluster::new(config.cluster)?
-		.with_cache(cache)
-		.with_client(client)
-		.with_client_tls(config.client.tls.build()?);
-	// Keep the producer alive for the whole run: its publish task stops when
-	// the last clone drops. The cluster only needs the counter registry.
-	let stats = config.stats.build(cluster.origin.clone());
-	let cluster = cluster.with_stats(stats.registry().clone());
-
-	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-	// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
-	// when unconfigured.
-	let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
-
-	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-	let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
-
-	match addr {
-		Some(addr) => tracing::info!(%addr, "listening"),
-		None => tracing::info!("listening (stream transports only)"),
-	}
-
-	#[cfg(unix)]
-	// Notify systemd that we're ready after all initialization is complete
-	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
-
-	#[cfg(feature = "jemalloc")]
-	let jemalloc = moq_native::jemalloc::run();
-	#[cfg(not(feature = "jemalloc"))]
-	let jemalloc = std::future::pending::<anyhow::Result<()>>();
-
-	tokio::select! {
-		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
-		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = internal.run() => return Err(err).context("internal server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
-		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
-		else => Ok(()),
-	}
-}
-
-async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
-	while let Some(request) = server.accept().await {
-		let conn = Connection {
-			// Shared with outbound cluster dials so one id space covers every session.
-			id: cluster.next_connection_id(),
-			request,
-			cluster: cluster.clone(),
-			auth: auth.clone(),
-		};
-
-		tokio::spawn(async move {
-			if let Err(err) = conn.run().await {
-				tracing::warn!(%err, "connection closed");
-			}
-		});
-	}
-
-	anyhow::bail!("stopped accepting connections")
+	// The whole startup sequence lives in `Relay::load` rather than here, so an
+	// embedder gets it by calling one function instead of copying this file.
+	Relay::load(Config::load()?).await?.run().await
 }

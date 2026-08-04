@@ -186,6 +186,36 @@ broadcast.Finish()
 
 If a producer is collected without `Finish()`, the underlying library logs a warning (`broadcast::Producer dropped without close()`) to help you spot the leak.
 
+## Raw media
+
+`PublishMedia` takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `PublishVideo` / `PublishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```go
+video, err := broadcast.PublishVideo(
+    moq.VideoEncoderInput{
+        Format:    moq.VideoPixelFormatRgba,
+        Width:     1280,
+        Height:    720,
+        Framerate: 30,
+    },
+    moq.VideoEncoderOutput{
+        Codec: moq.VideoCodecH264,
+        Kind:  moq.AutoEncoder(),
+    },
+)
+if err != nil {
+    // handle error
+}
+
+err = video.Write(moq.VideoFrame{TimestampUs: ptsUs, Data: rgba})
+// ...
+video.Finish()
+```
+
+`AutoEncoder()` prefers a hardware encoder and falls back to software; `SoftwareEncoder()`, `HardwareEncoder()`, and `NamedEncoder("videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `SetBitrate` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `Cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `Gop` frames on its own, and each of those cuts a group.
+
 ## Raw Track Controls
 
 Raw track subscribers can query the publisher's track properties and change their own delivery preferences without resubscribing:

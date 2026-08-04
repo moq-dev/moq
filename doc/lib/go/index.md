@@ -22,7 +22,7 @@ The raw UniFFI bindings (`MoqClient`, `MoqSession`, etc.) with blocking methods,
 **Supported platforms:**
 
 - `linux/amd64`, `linux/arm64`
-- `darwin/amd64`, `darwin/arm64`
+- `darwin/amd64`, `darwin/arm64` (macOS 12.3+)
 - `windows/amd64`
 
 [Learn more](/lib/go/moq-ffi)

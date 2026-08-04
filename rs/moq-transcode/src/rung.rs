@@ -53,8 +53,8 @@ pub(crate) struct Rung {
 }
 
 impl Rung {
-	fn pipeline(&self) -> Result<Pipeline, Error> {
-		Pipeline::new(self)
+	async fn pipeline(&self) -> Result<Pipeline, Error> {
+		Pipeline::new(self).await
 	}
 
 	fn container(&self) -> Result<moq_mux::catalog::hang::Container, Error> {
@@ -67,7 +67,14 @@ impl Rung {
 	/// decoded frame where the decoder knows. A rung below 576 lines fed by an HD
 	/// source carries the source's space, not the one its own size implies, so
 	/// leaving this to the encoder's size guess would label the rung wrongly.
-	fn encode(&self, color: Option<moq_video::Color>) -> Result<moq_video::encode::Encoder, Error> {
+	///
+	/// A [`Sink`](moq_video::encode::Sink) rather than a bare `Encoder`: both
+	/// callers hold it across `.await`, so on a multi-thread runtime the future
+	/// can migrate workers between opening the codec and dropping it. The Windows
+	/// backend's COM apartment is per-thread, so that would leak the opening
+	/// worker's initialization and uninitialize COM on one that never initialized
+	/// it. The sink owns a thread and stays on it.
+	async fn encode(&self, color: Option<moq_video::Color>) -> Result<moq_video::encode::Sink, Error> {
 		let mut config =
 			moq_video::encode::Config::new(self.info.size.width, self.info.size.height, self.info.framerate);
 		config.bitrate = Some(self.info.bitrate);
@@ -76,7 +83,7 @@ impl Rung {
 		// Keyframes are forced at every group boundary; the GOP is only a
 		// backstop against pathologically long source groups.
 		config.gop = self.info.framerate.saturating_mul(8).max(1);
-		Ok(moq_video::encode::Encoder::new(&config)?)
+		Ok(moq_video::encode::Sink::open(&config).await?)
 	}
 }
 
@@ -126,7 +133,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 		// Built from the first frame: the encoder writes that frame's color space
 		// into the bitstream, so it cannot open before one has arrived. A keyframe
 		// asked for at a group boundary waits here until it exists.
-		let mut encoder: Option<moq_video::encode::Encoder> = None;
+		let mut encoder: Option<moq_video::encode::Sink> = None;
 		let mut pending_keyframe = false;
 
 		// The output group currently being written, if the feed is mid-group.
@@ -151,7 +158,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					// group's tail would otherwise emit it into the new group, ahead of
 					// the keyframe requested just below.
 					if let Some(encoder) = &mut encoder {
-						encoder.flush()?;
+						encoder.flush().await?;
 					}
 					if let Some(output) = current.take() {
 						// A group boundary without an end: treat as incomplete.
@@ -192,32 +199,28 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<()
 					// CPU. The resize carries the source's color space across, which is
 					// why the encoder is opened from the scaled frame rather than from
 					// this rung's size.
-					let resized;
-					let frame: &moq_video::Frame = match frame.size() == rung.info.size {
-						true => &frame,
-						false => {
-							resized = frame.resize_with(rung.info.size, &rung.resize)?;
-							&resized
-						}
+					let frame: Arc<moq_video::Frame> = match frame.size() == rung.info.size {
+						true => frame,
+						false => Arc::new(frame.resize_with(rung.info.size, &rung.resize)?),
 					};
 					let encoder = match &mut encoder {
 						Some(encoder) => encoder,
 						None => {
-							let mut opened = rung.encode(frame.surface.color())?;
+							let mut opened = rung.encode(frame.surface.color()).await?;
 							if std::mem::take(&mut pending_keyframe) {
 								opened.keyframe();
 							}
 							encoder.insert(opened)
 						}
 					};
-					write(output, encoder.encode(frame)?)?;
+					write(output, encoder.encode(frame).await?)?;
 				}
 				Some(Item::End) => {
 					if let Some(mut output) = current.take() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
 						if let Some(encoder) = &mut encoder {
-							write(&mut output, encoder.flush()?)?;
+							write(&mut output, encoder.flush().await?)?;
 						}
 						output.finish()?;
 					}
@@ -309,7 +312,7 @@ async fn fetch(rung: Rung, request: moq_net::track::GroupRequest) -> Result<(), 
 
 	// A fresh pipeline per fetched group: groups are independently decodable,
 	// so the encoder starts clean at the group's keyframe.
-	let (pipeline, container) = match rung.pipeline().and_then(|p| rung.container().map(|c| (p, c))) {
+	let (pipeline, container) = match rung.pipeline().await.and_then(|p| rung.container().map(|c| (p, c))) {
 		Ok(built) => built,
 		Err(err) => {
 			request.reject(moq_net::Error::Cancel);
@@ -368,13 +371,13 @@ async fn transcode_group_inner(
 			let keyframe = frame.keyframe || first;
 			first = false;
 
-			write(output, pipeline.process(&frame.payload, timestamp, keyframe)?)?;
+			write(output, pipeline.process(frame.payload, timestamp, keyframe).await?)?;
 		}
 	}
 
 	// One-shot group: drain whatever the encoder still buffers. Each packet keeps
 	// the timestamp of the frame it was encoded from, so the tail stays in step.
-	write(output, pipeline.finish()?)?;
+	write(output, pipeline.finish().await?)?;
 	Ok(())
 }
 
@@ -398,22 +401,24 @@ fn write(output: &mut moq_net::group::Producer, encoded: Vec<moq_video::encode::
 /// -> NVENC path never touches the CPU. Frames that come back at any other size
 /// get `Frame::resize_with` instead.
 struct Pipeline {
-	decoder: moq_video::decode::Decoder,
+	decoder: moq_video::decode::Sink,
 	/// Opened from the first decoded frame, whose color space it has to declare.
 	/// `None` until one arrives; a keyframe requested before then waits in
 	/// `pending_keyframe`.
-	encoder: Option<moq_video::encode::Encoder>,
+	encoder: Option<moq_video::encode::Sink>,
 	pending_keyframe: bool,
 	rung: Rung,
 	size: moq_video::Size,
 }
 
 impl Pipeline {
-	fn new(rung: &Rung) -> Result<Self, Error> {
+	async fn new(rung: &Rung) -> Result<Self, Error> {
 		let mut decode = moq_video::decode::Config::new();
 		decode.kind = rung.decoder.clone();
 		decode.resize = decoder_resize(rung.info.size, rung.resize.acceleration);
-		let decoder = moq_video::decode::Decoder::new(&rung.config, &decode)?;
+		// A `Sink` for the same reason as the encoder above: a fetch task holds this
+		// pipeline across `Container::read`, so the codec must own its thread.
+		let decoder = moq_video::decode::Sink::open(&rung.config, &decode).await?;
 
 		Ok(Self {
 			decoder,
@@ -426,9 +431,9 @@ impl Pipeline {
 
 	/// Transcode one container payload into zero or more encoded frames, each
 	/// carrying the presentation time of the picture it came from.
-	fn process(
+	async fn process(
 		&mut self,
-		payload: &Bytes,
+		payload: Bytes,
 		timestamp: moq_net::Timestamp,
 		keyframe: bool,
 	) -> Result<Vec<moq_video::encode::Encoded>, Error> {
@@ -443,28 +448,22 @@ impl Pipeline {
 		}
 
 		let mut encoded = Vec::new();
-		for raw in self.decoder.decode(payload, timestamp, keyframe)? {
+		for raw in self.decoder.decode(payload, timestamp, keyframe).await? {
 			// Already at the rung size (the decoder scaled): feed the frame through
 			// as-is, keeping a GPU frame on the GPU.
-			let resized;
-			let raw: &moq_video::Frame = match raw.size() == self.size {
-				true => &raw,
-				false => {
-					resized = raw.resize_with(self.size, &self.rung.resize)?;
-					&resized
-				}
+			let raw = match raw.size() == self.size {
+				true => raw,
+				false => raw.resize_with(self.size, &self.rung.resize)?,
 			};
-			let encoder = match &mut self.encoder {
-				Some(encoder) => encoder,
-				None => {
-					let mut opened = self.rung.encode(raw.surface.color())?;
-					if std::mem::take(&mut self.pending_keyframe) {
-						opened.keyframe();
-					}
-					self.encoder.insert(opened)
+			if self.encoder.is_none() {
+				let mut opened = self.rung.encode(raw.surface.color()).await?;
+				if std::mem::take(&mut self.pending_keyframe) {
+					opened.keyframe();
 				}
-			};
-			encoded.extend(encoder.encode(raw)?);
+				self.encoder = Some(opened);
+			}
+			let encoder = self.encoder.as_mut().expect("just opened");
+			encoded.extend(encoder.encode(raw).await?);
 		}
 		Ok(encoded)
 	}
@@ -473,10 +472,10 @@ impl Pipeline {
 	///
 	/// Consumes the pipeline, since flushing the encoder consumes it: a one-shot
 	/// group's pipeline is done once drained.
-	fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+	async fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
 		// No encoder means no frame ever decoded, so there is nothing buffered.
 		match self.encoder {
-			Some(encoder) => encoder.finish().map_err(Into::into),
+			Some(encoder) => encoder.finish().await.map_err(Into::into),
 			None => Ok(Vec::new()),
 		}
 	}

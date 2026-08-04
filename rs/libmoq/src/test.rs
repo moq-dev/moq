@@ -1516,6 +1516,259 @@ fn video_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A mid-gray RGBA frame, encodable without a camera.
+fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
+	vec![0x80u8; width as usize * height as usize * 4]
+}
+
+/// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
+/// `moq_publish_video_raw` and read decoded I420 back out of
+/// `moq_consume_video_raw`, so the encode and decode halves meet on the wire.
+#[test]
+fn video_raw_publish_consume() {
+	let origin = id(moq_origin_create());
+	let path = b"video-raw-publish-test";
+	let broadcast = publish_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	// Software so the test is deterministic everywhere: `Auto` would reach for a
+	// hardware backend that CI runners don't have.
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	let rgba = gray_rgba(320, 240);
+	let publish = |index: u64| {
+		let frame = moq_video_encoder_frame {
+			timestamp_us: index * 33_333,
+			data: rgba.as_ptr(),
+			data_size: rgba.len(),
+		};
+		assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+	};
+
+	// The catalog rendition only exists once the importer has parsed the codec
+	// config out of an encoded keyframe, so publish before subscribing.
+	assert_eq!(moq_publish_video_raw_cut(producer), 0);
+	for i in 0..5u64 {
+		publish(i);
+	}
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+
+	let decoder = moq_video_decoder_output { latency_max_ms: 10_000 };
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe { moq_consume_video_raw(catalog_id, 0, &decoder, Some(channel_callback), frame_cb.ptr) });
+
+	// Keep feeding the encoder so the subscriber has frames to decode after it
+	// joins, whatever the group boundary it landed on.
+	for i in 5..20u64 {
+		publish(i);
+	}
+
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_video_frame {
+		timestamp_us: 0,
+		width: 0,
+		height: 0,
+		data: std::ptr::null(),
+		data_size: 0,
+	};
+	assert_eq!(unsafe { moq_consume_video_raw_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(frame.width, 320);
+	assert_eq!(frame.height, 240);
+	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
+
+	assert_eq!(moq_consume_video_raw_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_video_raw_close(consumer), 0);
+	loop {
+		let code = frame_cb.recv();
+		if code > 0 {
+			assert_eq!(moq_consume_video_raw_frame_free(id(code)), 0);
+		} else {
+			assert_eq!(code, 0, "raw video close delivers terminal 0");
+			break;
+		}
+	}
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Regression: a producer handle is just an integer, so a C caller may drive it
+/// from any thread. `ffi::enter` serializes those calls but runs each on the
+/// calling thread, so holding a bare `Encoder` was unsound on Windows, where the
+/// codec's COM apartment is per-thread: it was opened on the publishing thread
+/// and closed on whichever thread called finish. The confinement itself is
+/// asserted in moq-video (`encode::sink`); this pins that the C surface supports
+/// the usage, including the drain on finish.
+#[test]
+fn video_raw_publish_from_many_threads() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-threads-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		// An explicit ceiling so the retunes below stay under the rate the encoder
+		// opened at, which openh264 requires.
+		bitrate: 1_000_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// A fresh caller thread per frame, never the one that published.
+	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
+	for i in 0..8u64 {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			if i == 0 {
+				assert_eq!(moq_publish_video_raw_cut(producer), 0);
+			}
+			let frame = moq_video_encoder_frame {
+				timestamp_us: i * 33_333,
+				data: rgba.as_ptr(),
+				data_size: rgba.len(),
+			};
+			assert_eq!(unsafe { moq_publish_video_raw_frame(producer, &frame) }, 0);
+			assert_eq!(moq_publish_video_raw_bitrate(producer, 900_000 - i), 0);
+		})
+		.join()
+		.unwrap();
+	}
+
+	// ...and finished, so the encoder is drained and dropped, from yet another.
+	std::thread::spawn(move || assert_eq!(moq_publish_video_raw_finish(producer), 0))
+		.join()
+		.unwrap();
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A raw video producer rejects a buffer that isn't one picture at the
+/// configured resolution, rather than reinterpreting it.
+#[test]
+fn video_raw_publish_rejects_frame_size_mismatch() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-mismatch-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
+	// of its own, so this is caught as a wrong-sized picture.
+	let rgba = gray_rgba(640, 480);
+	let frame = moq_video_encoder_frame {
+		timestamp_us: 0,
+		data: rgba.as_ptr(),
+		data_size: rgba.len(),
+	};
+	assert!(unsafe { moq_publish_video_raw_frame(producer, &frame) } < 0);
+
+	assert_eq!(moq_publish_video_raw_finish(producer), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Bad discriminants and pointers are rejected at the boundary rather than
+/// reaching moq-video.
+#[test]
+fn video_raw_publish_rejects_invalid_config() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-invalid-test");
+
+	let valid_input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let valid_output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+
+	assert!(unsafe { moq_publish_video_raw(broadcast, std::ptr::null(), &valid_output) } < 0);
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, std::ptr::null()) } < 0);
+
+	let bad_format = moq_video_encoder_input {
+		format: 99,
+		..valid_input
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &bad_format, &valid_output) } < 0);
+
+	let zero_framerate = moq_video_encoder_input {
+		framerate: 0,
+		..valid_input
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &zero_framerate, &valid_output) } < 0);
+
+	let bad_codec = moq_video_encoder_output {
+		codec: 99,
+		..valid_output
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_codec) } < 0);
+
+	let bad_kind = moq_video_encoder_output {
+		kind: 99,
+		..valid_output
+	};
+	assert!(unsafe { moq_publish_video_raw(broadcast, &valid_input, &bad_kind) } < 0);
+
+	// Handles for a producer that was never created.
+	assert!(moq_publish_video_raw_cut(0) < 0);
+	assert!(moq_publish_video_raw_bitrate(0, 1_000_000) < 0);
+	assert!(moq_publish_video_raw_finish(0) < 0);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// End-to-end native decode: publish real H.264 (encoded by moq-video) and
 /// consume it through `moq_consume_video_raw`, asserting decoded I420 frames.
 #[test]

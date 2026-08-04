@@ -908,6 +908,244 @@ async fn video_publish_consume() {
 	broadcast.finish().unwrap();
 }
 
+/// The raw-video publish path: hand mid-gray RGBA to `publish_video` and check
+/// that the encoder's own output reaches a subscriber, described by a catalog
+/// rendition the importer built from the encoded keyframe.
+#[tokio::test]
+async fn video_raw_publish_consume() {
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let broadcast = origin.create_broadcast("video-raw-test".into()).unwrap();
+
+	let video = broadcast
+		.publish_video(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: None,
+				gop: None,
+				// Software so the test is deterministic everywhere: `Auto` would
+				// reach for a hardware backend that CI runners don't have.
+				kind: MoqVideoEncoderKind::Software,
+			},
+		)
+		.unwrap();
+
+	// The catalog rendition only exists once the importer has parsed the codec
+	// config out of an encoded keyframe, so write before subscribing.
+	video.cut().unwrap();
+	let rgba = vec![0x80u8; 320 * 240 * 4];
+	for i in 0..5u64 {
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let consumer = origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected announcement");
+
+	let broadcast_consumer = announcement.broadcast();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected catalog");
+
+	assert_eq!(catalog.video.len(), 1);
+	let (track_name, rendition) = catalog.video.iter().next().unwrap();
+	assert!(track_name.ends_with(".avc3"), "track name: {track_name}");
+	assert!(
+		rendition.codec.starts_with("avc3."),
+		"codec should be avc3, got {}",
+		rendition.codec
+	);
+	let coded = rendition.coded.as_ref().expect("coded dimensions should be set");
+	assert_eq!(coded.width, 320);
+	assert_eq!(coded.height, 240);
+	assert!(catalog.audio.is_empty());
+
+	let media_consumer = broadcast_consumer
+		.subscribe_media(track_name.clone(), rendition.container.clone(), None)
+		.await
+		.unwrap();
+
+	// Keep feeding the encoder so the subscriber has frames to read after it
+	// joins, whatever the group boundary it landed on.
+	for i in 5..20u64 {
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected frame");
+	assert!(!frame.payload.is_empty(), "frame should carry encoded video");
+
+	video.finish().unwrap();
+	broadcast.finish().unwrap();
+}
+
+/// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever
+/// thread the caller is on, and none of them need be the thread that published.
+/// Holding a bare `Encoder` made that unsound on Windows, where the codec's COM
+/// apartment is per-thread: it was opened on the publishing thread and closed on
+/// whichever thread dropped the object. The confinement itself is asserted in
+/// moq-video (`encode::sink`); this pins that the binding supports the usage
+/// end to end, including the drain on `finish`.
+#[tokio::test]
+async fn video_raw_publish_from_many_threads() {
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let broadcast = origin.create_broadcast("video-raw-threads".into()).unwrap();
+
+	let video = broadcast
+		.publish_video(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				// An explicit ceiling so the retunes below stay under the rate the
+				// encoder opened at, which openh264 requires.
+				bitrate: Some(1_000_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+		)
+		.unwrap();
+
+	// A fresh caller thread per frame, never the one that published.
+	let rgba = std::sync::Arc::new(vec![0x80u8; 320 * 240 * 4]);
+	for i in 0..8u64 {
+		let video = video.clone();
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			if i == 0 {
+				video.cut().unwrap();
+			}
+			video
+				.write(MoqVideoFrame {
+					timestamp_us: i * 33_333,
+					data: rgba.as_ref().clone(),
+				})
+				.unwrap();
+			video.set_bitrate(900_000 - i).unwrap();
+		})
+		.join()
+		.unwrap();
+	}
+
+	// The rendition only exists once the importer parsed the codec config out of
+	// an encoded keyframe, so this is what says the frames really were encoded.
+	// Checked before finishing, which withdraws it again.
+	let consumer = origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected announcement");
+	let catalog_consumer = announcement.broadcast().subscribe_catalog().await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected catalog");
+	assert_eq!(catalog.video.len(), 1);
+
+	// ...and finished, so the encoder is drained and dropped, from yet another.
+	let closer = video.clone();
+	std::thread::spawn(move || closer.finish()).join().unwrap().unwrap();
+
+	broadcast.finish().unwrap();
+}
+
+/// A raw video producer rejects a buffer that isn't one picture at the
+/// configured resolution, rather than reinterpreting it, and rejects any write
+/// after `finish`.
+#[tokio::test]
+async fn video_raw_publish_rejects_bad_frames() {
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let broadcast = origin.create_broadcast("video-raw-reject-test".into()).unwrap();
+
+	let input = |width, height| MoqVideoEncoderInput {
+		format: MoqVideoPixelFormat::Rgba,
+		width,
+		height,
+		framerate: 30,
+	};
+	let output = || MoqVideoEncoderOutput {
+		codec: MoqVideoCodec::H264,
+		bitrate: None,
+		gop: None,
+		kind: MoqVideoEncoderKind::Software,
+	};
+
+	// A zero framerate is rejected before any track is advertised.
+	assert!(
+		broadcast
+			.publish_video(
+				MoqVideoEncoderInput {
+					framerate: 0,
+					..input(320, 240)
+				},
+				output(),
+			)
+			.is_err()
+	);
+
+	let video = broadcast.publish_video(input(320, 240), output()).unwrap();
+
+	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
+	// of its own, so this is caught as a wrong-sized picture.
+	assert!(
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: 0,
+				data: vec![0x80u8; 640 * 480 * 4],
+			})
+			.is_err()
+	);
+
+	video.finish().unwrap();
+	assert!(matches!(
+		video.write(MoqVideoFrame {
+			timestamp_us: 0,
+			data: vec![0x80u8; 320 * 240 * 4],
+		}),
+		Err(MoqError::Closed)
+	));
+
+	broadcast.finish().unwrap();
+}
+
 #[tokio::test]
 async fn multiple_frames_ordering() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());

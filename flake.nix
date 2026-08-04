@@ -219,9 +219,11 @@
           ];
 
         # Developer workflow tooling not needed for builds: the GitHub CLI
-        # for opening/reviewing PRs from the dev shell.
+        # for opening/reviewing PRs, plus jq to read `cargo metadata` in
+        # `just rs check-changed`.
         devTools = with pkgs; [
           gh
+          jq
         ];
 
         # Linters / formatters required by `just ci`; `just check` and

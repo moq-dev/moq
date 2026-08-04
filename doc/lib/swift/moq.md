@@ -30,7 +30,7 @@ Add `Moq` to your target's dependencies:
 
 The raw `MoqFFI` bindings and the prebuilt XCFramework are pulled in transitively from [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi); you only depend on `moq-swift`.
 
-Supported platforms: iOS 15+, iPadOS 15+, macOS 12+. The XCFramework ships iOS device (arm64), iOS Simulator (arm64 + x86\_64), and macOS universal slices.
+Supported platforms: iOS 15+, iPadOS 15+, macOS 12.3+ (ScreenCaptureKit, which the video backend links, ships in 12.3). The XCFramework ships iOS device (arm64), iOS Simulator (arm64 + x86\_64), and macOS universal slices.
 
 ## Connect
 
@@ -241,6 +241,24 @@ for try await request in dynamic {
 ```
 
 The served broadcast is not announced. It only resolves consumers that call `requestBroadcast(path:)`. Each request arrives as a `BroadcastRequest`; call `accept(broadcast:)` to serve it, or `abort(errorCode:)` to fail the requester.
+
+### Raw media
+
+`publishMedia` above takes frames you already encoded. To hand over raw pixels or PCM instead and let the codec run inside the bindings, use `publishVideo` / `publishAudio`. Pixel format, resolution, and framerate are fixed at publish time, so each frame carries only its pixels and a timestamp:
+
+```swift
+let video = try broadcast.publishVideo(
+    input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
+    output: VideoEncoderOutput(codec: .h264, bitrate: nil, gop: nil, kind: .auto)
+)
+
+try video.write(VideoFrame(timestampUs: ptsUs, data: rgba))
+try video.finish()
+```
+
+`kind: .auto` prefers a hardware encoder and falls back to software; `.software`, `.hardware`, and `.named(name: "videotoolbox")` pin the choice. The bindings compile VideoToolbox (macOS), Media Foundation (Windows), and openh264 (software, everywhere); the Linux hardware codecs are a libmoq-only build option. `setBitrate(_:)` retunes the live encoder without forcing a keyframe, cheap enough to drive from a congestion controller.
+
+The track is named after the codec (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe is encoded, so subscribers discover it through the catalog rather than a name you pick. `cut()` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group.
 
 ## Cancellation
 

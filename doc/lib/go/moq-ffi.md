@@ -21,7 +21,7 @@ go get github.com/moq-dev/moq-go-ffi@latest
 import moqffi "github.com/moq-dev/moq-go-ffi/moq"
 ```
 
-The module bundles prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. cgo selects the right archive at link time via build tags; `CGO_ENABLED=1` is required (the default on Unix).
+The module bundles prebuilt `libmoq_ffi.a` for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`. The darwin archives need macOS 12.3+, since the video backend links ScreenCaptureKit. cgo selects the right archive at link time via build tags; `CGO_ENABLED=1` is required (the default on Unix).
 
 ## Local development
 

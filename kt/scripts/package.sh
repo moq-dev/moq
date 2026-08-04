@@ -82,26 +82,53 @@ mkdir -p "$KT_DIR/moq-ffi/src/jvmMain/resources"
 # Entries are "<cargo-target>:<...>" so the script stays portable to Bash 3.2
 # (default on macOS), which has no associative arrays.
 
-# --- Android JNI libs --- ("<cargo-target>:<android-abi>")
+# --- Android JNI libs --- ("<cargo-target>:<android-abi>:<ndk-sysroot-triple>")
+#
+# libmoq_ffi.so links the NDK C++ runtime, because moq-video's openh264 fallback
+# is C++ and cc-rs links Android C++ against libc++_shared by default. The AAR
+# has to carry that runtime: an app with no C++ of its own never packages it, and
+# would fail to load the binding with `libc++_shared.so not found`. The sysroot
+# triple differs from the cargo target for 32-bit ARM.
 ANDROID_ABIS=(
-    "aarch64-linux-android:arm64-v8a"
-    "armv7-linux-androideabi:armeabi-v7a"
-    "x86_64-linux-android:x86_64"
+    "aarch64-linux-android:arm64-v8a:aarch64-linux-android"
+    "armv7-linux-androideabi:armeabi-v7a:arm-linux-androideabi"
+    "x86_64-linux-android:x86_64:x86_64-linux-android"
 )
+
+# Resolved once, and only when there is an Android lib to stage, so a
+# desktop-only run needs no NDK. Assigned here rather than from a function: an
+# `exit` inside `$(...)` would only leave the subshell, and the script would
+# carry on and stage a lib whose C++ runtime is missing.
+NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+
 HAVE_ANDROID_LIBS=false
 for entry in "${ANDROID_ABIS[@]}"; do
-    target="${entry%%:*}"
-    abi="${entry##*:}"
+    IFS=':' read -r target abi sysroot_triple <<<"$entry"
     src="$LIB_DIR/$target/libmoq_ffi.so"
-    if [[ -f "$src" ]]; then
-        dest="$KT_DIR/moq-ffi/src/androidMain/jniLibs/$abi"
-        mkdir -p "$dest"
-        cp "$src" "$dest/"
-        echo "  android $abi <- $target"
-        HAVE_ANDROID_LIBS=true
-    else
+    if [[ ! -f "$src" ]]; then
         echo "  android $abi: skipped, $src missing"
+        continue
     fi
+
+    if [[ -z "$NDK_ROOT" ]]; then
+        echo "Error: staging Android libs needs ANDROID_NDK_HOME / ANDROID_NDK_ROOT;" >&2
+        echo "       libc++_shared.so must ship in the AAR or the binding won't load." >&2
+        exit 1
+    fi
+
+    # Glob the host tag (darwin-x86_64 / linux-x86_64) rather than guessing it.
+    cxx=$(echo "$NDK_ROOT"/toolchains/llvm/prebuilt/*/sysroot/usr/lib/"$sysroot_triple"/libc++_shared.so)
+    if [[ ! -f "$cxx" ]]; then
+        echo "Error: no libc++_shared.so for $sysroot_triple under $NDK_ROOT" >&2
+        exit 1
+    fi
+
+    dest="$KT_DIR/moq-ffi/src/androidMain/jniLibs/$abi"
+    mkdir -p "$dest"
+    cp "$src" "$dest/"
+    cp "$cxx" "$dest/"
+    echo "  android $abi <- $target (+ libc++_shared.so)"
+    HAVE_ANDROID_LIBS=true
 done
 
 # --- JVM desktop resources (JNA classpath layout) ---

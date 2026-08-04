@@ -58,7 +58,25 @@ from moq_ffi import (
     MoqVideo as Video,
 )
 from moq_ffi import (
+    MoqVideoCodec as VideoCodec,
+)
+from moq_ffi import (
+    MoqVideoEncoderInput as VideoEncoderInput,
+)
+from moq_ffi import (
+    MoqVideoEncoderKind as VideoEncoderKind,
+)
+from moq_ffi import (
+    MoqVideoEncoderOutput as VideoEncoderOutput,
+)
+from moq_ffi import (
+    MoqVideoFrame as VideoFrame,
+)
+from moq_ffi import (
     MoqVideoHint as VideoHint,
+)
+from moq_ffi import (
+    MoqVideoPixelFormat as VideoPixelFormat,
 )
 from moq_ffi import (
     MoqVideoProperties,
@@ -87,6 +105,12 @@ __all__ = [
     "Subscription",
     "TrackInfo",
     "Video",
+    "VideoCodec",
+    "VideoEncoderInput",
+    "VideoEncoderKind",
+    "VideoEncoderOutput",
+    "VideoFrame",
     "VideoHint",
+    "VideoPixelFormat",
     "VideoProperties",
 ]

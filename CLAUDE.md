@@ -10,14 +10,18 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 
 ```bash
 # Code quality and testing
-nix develop --command just check        # Run all tests and linting
-nix develop --command just fix          # Auto-fix linting issues
+nix develop --command just check        # Lint and compile what the branch changed
+nix develop --command just fix          # Auto-fix lint/formatting, same scope
+nix develop --command just check-all    # Same as check, over every package
+nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
-CI runs `just ci`, which layers a few checks on top of `just check` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
+`just check` and `just fix` both diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just fix-all` when you want the unscoped suite, or pass an explicit base (`just check origin/dev`). See [Workflow](#workflow) for how the base is resolved.
+
+CI runs `just ci`, which layers a few checks on top of `just check-all` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
 
 ## Architecture
 
@@ -179,10 +183,17 @@ PRs target `main` by default, however large the change: bug fixes, new behavior,
 
 When making changes to the codebase:
 
-1. Pick the base branch per [Branch Targeting](#branch-targeting) above. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
-2. Make your code changes
-3. Run `just fix` before committing to auto-format and fix linting issues
-4. Run `just check` to verify everything passes
-5. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-6. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
-7. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews
+1. Pick the base branch per [Branch Targeting](#branch-targeting) above: `dev` only for a semver break in a published API, `main` for everything else. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
+2. **Point the branch's upstream at that base**, which is where `just check` reads it from:
+
+   ```bash
+   git branch --set-upstream-to=origin/dev   # or origin/main
+   ```
+
+   Then push with `git push origin HEAD`, **not** `git push -u`: `-u` repoints the upstream at the branch's own remote copy, and `just check` then has nothing to diff against and silently falls back to `origin/main`. On a `dev`-based branch that fallback drags in every commit `dev` is ahead by, so the check is correct but much slower than it needs to be.
+3. Make your code changes
+4. Run `just fix` before committing to auto-format and fix linting issues
+5. Run `just check` to verify everything passes. Both only touch the crates the branch changed plus their dependents, so use `just fix-all` / `just check-all` when you have changed something the diff can't attribute to a package (build config, a lint rule, a shared toolchain pin)
+6. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
+7. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
+8. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews

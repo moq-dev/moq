@@ -4,19 +4,39 @@ use std::path::PathBuf;
 
 const LIB_NAME: &str = "moq";
 
+/// Enums the header must declare even though no signature mentions them.
+const ENUMS: &[&str] = &[
+	"moq_audio_format",
+	"moq_video_pixel_format",
+	"moq_video_codec",
+	"moq_video_encoder_kind",
+];
+
 fn main() {
 	let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
 	let version = env::var("CARGO_PKG_VERSION").unwrap();
 	let profile_dir = profile_dir();
 	let target_dir = profile_dir.parent().expect("profile dir has no parent");
 
+	// The `rerun-if-changed` below opts out of cargo's default "rerun when any
+	// file in the package changes", so the sources cbindgen reads have to be
+	// named explicitly or an edited signature leaves a stale header behind.
+	println!("cargo:rerun-if-changed=src");
+
 	// Generate C header into target/include/. The header is profile-independent,
 	// so a debug and release build in the same target tree can share it.
 	let include_dir = target_dir.join("include");
 	fs::create_dir_all(&include_dir).expect("Failed to create include directory");
 	let header = include_dir.join(format!("{}.h", LIB_NAME));
+	let mut config = cbindgen::Config::default();
+	// The codec enums cross the ABI as plain `uint32_t`, so that an unknown
+	// discriminant from C is an error rather than UB. That leaves no signature
+	// referencing them, and cbindgen emits only what a signature reaches, so name
+	// them here: without this a C caller has to hardcode the integers.
+	config.export.include = ENUMS.iter().map(|name| name.to_string()).collect();
 	cbindgen::Builder::new()
 		.with_crate(&crate_dir)
+		.with_config(config)
 		.with_language(cbindgen::Language::C)
 		.generate()
 		.expect("Unable to generate bindings")

@@ -104,7 +104,7 @@ import PackageDescription
 
 let package = Package(
     name: "Smoke",
-    platforms: [.iOS(.v15), .macOS(.v12)],
+    platforms: [.iOS(.v15), .macOS("12.3")],
     dependencies: [
         .package(path: "$PKG_LINK"),
     ],

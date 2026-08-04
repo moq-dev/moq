@@ -8,29 +8,30 @@
 
 use std::time::Instant;
 
+use moq_mux::catalog::hang::CatalogExt;
 use moq_net::Timestamp;
 
 use crate::capture;
 use crate::{Error, Frame};
 
 use super::Encoded;
+use super::Sink;
 use super::encoder::{self, Codec};
 use super::rate::{Control, Policy};
-use super::sink::Sink;
 
 /// Last-resort framerate when neither the caller nor the camera reports one.
 const DEFAULT_FRAMERATE: u32 = 30;
 
 /// Per-codec splitter + importer pair. Each codec frames its packets and resolves
 /// its catalog rendition differently, so the producer holds one of these.
-enum Codecs {
+enum Codecs<E: CatalogExt> {
 	H264 {
 		split: moq_mux::codec::h264::Split,
-		import: moq_mux::codec::h264::Import,
+		import: moq_mux::codec::h264::Import<E>,
 	},
 	H265 {
 		split: moq_mux::codec::h265::Split,
-		import: moq_mux::codec::h265::Import,
+		import: moq_mux::codec::h265::Import<E>,
 	},
 }
 
@@ -41,17 +42,20 @@ enum Codecs {
 /// registered) before the camera opens; this is what lets a subscriber
 /// trigger capture on demand. The `moq_mux::codec` importer for the codec
 /// handles catalog registration and framing.
-pub struct Producer {
-	codecs: Codecs,
+/// `E` is the catalog's application extension, defaulting to none. A host
+/// carrying its own catalog sections (the FFI bindings use `hang::Extra`)
+/// publishes into a catalog of the same shape.
+pub struct Producer<E: CatalogExt = ()> {
+	codecs: Codecs<E>,
 }
 
-impl Producer {
+impl<E: CatalogExt> Producer<E> {
 	/// Publish a track for `codec` into `broadcast`, registering its rendition
 	/// in `catalog`. The frames fed to [`publish`](Self::publish) must be in
 	/// that codec's framing (the matching [`Encoder`](super::Encoder) emits it).
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
 		codec: Codec,
 	) -> Result<Self, Error> {
 		let codecs = match codec {
@@ -197,9 +201,9 @@ impl std::fmt::Debug for Options {
 /// subscriber is watching; frames are stamped from `clock`, so passing the
 /// same [`Clock`](moq_mux::Clock) to a concurrent audio publish keeps the two
 /// tracks aligned.
-pub async fn publish_capture(
+pub async fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
-	catalog: moq_mux::catalog::Producer,
+	catalog: moq_mux::catalog::Producer<E>,
 	capture: capture::Config,
 	encode: Options,
 	clock: moq_mux::Clock,
@@ -322,8 +326,8 @@ fn log_track_ended(err: moq_net::Error) {
 /// encode thread. Both the capture and encode threads sit idle between frames,
 /// so their joins return promptly unless the underlying device or encoder is
 /// itself wedged.
-async fn capture_loop(
-	producer: &mut Producer,
+async fn capture_loop<E: CatalogExt>(
+	producer: &mut Producer<E>,
 	demand: &moq_net::track::Demand,
 	capture: &capture::Config,
 	encode: &Options,
@@ -403,8 +407,11 @@ async fn capture_loop(
 			// Stamp at capture, so a backend that buffers still publishes each
 			// access unit at the time the picture was grabbed.
 			let frame = Frame::new(surface, Timestamp::from_micros(clock.micros())?);
-			let encoded = encoder.encode(frame, force_keyframe).await?;
-			force_keyframe = false;
+			if force_keyframe {
+				encoder.keyframe();
+				force_keyframe = false;
+			}
+			let encoded = encoder.encode(frame).await?;
 			// Once the encoder emits a frame the importer has parsed the SPS and
 			// the catalog rendition exists, so demand gating can take over.
 			catalog_ready |= !encoded.is_empty();
