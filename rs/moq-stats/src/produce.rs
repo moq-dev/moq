@@ -4,8 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use std::task::Poll;
+
 use moq_net::stats::{Presence, Registry, Role, Tier, Traffic};
-use moq_net::{Path, PathOwned, broadcast, origin};
+use moq_net::{Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
 
@@ -99,6 +101,12 @@ impl Default for ProducerConfig {
 		Self::new()
 	}
 }
+
+/// Cap on consumer-requested (vs traffic-created) track pairs per group
+/// broadcast. Requests mint real tracks, so a connected subscriber probing
+/// arbitrary tier names must hit a bound. Sized far above any real tier set
+/// (a deployment has on the order of ten tiers, three track kinds each).
+const MAX_REQUESTED_TRACKS: usize = 64;
 
 /// Keeps the publish task alive: the task holds only a `Weak` to this, so it
 /// exits once the last [`Producer`] clone drops.
@@ -293,6 +301,15 @@ impl Task {
 				flush_dynamic(&mut publisher.broadcast, &mut publisher.session_tracks, &session_frames);
 			}
 
+			// Serve consumer requests for tracks no drain has created yet: a
+			// tier's tracks appear lazily on its first traffic, so a subscriber
+			// arriving first would otherwise be rejected and forced into a
+			// retry loop (fleet-wide, that rejection churn is a log and CPU
+			// storm). Held open with zeros instead; see `serve_requests`.
+			for publisher in groups.values_mut() {
+				publisher.serve_requests();
+			}
+
 			// Drop change-detection state for entries the report no longer
 			// carries (they were pruned on a previous drain).
 			let reported: HashSet<(&PathOwned, &Tier)> =
@@ -339,14 +356,34 @@ impl<T: Serialize> TrackPair<T> {
 	fn create(broadcast: &mut broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, None)?;
 		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?;
+		Ok(Self::from_tracks(plain_track, compressed_track))
+	}
 
+	/// Build a pair from consumer requests, creating whichever flavor was not
+	/// requested. `create_track` does not fulfill an already-queued request for
+	/// the same name, so the caller collects both flavors' requests first and
+	/// this serves each through its actual request where one exists.
+	fn adopt(broadcast: &mut broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
+		let PendingPair { plain, compressed } = pending;
+		let plain_track = match plain {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(name, None)?,
+		};
+		let compressed_track = match compressed {
+			Some(request) => request.accept(None),
+			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), None)?,
+		};
+		Ok(Self::from_tracks(plain_track, compressed_track))
+	}
+
+	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer) -> Self {
 		let plain_config = moq_json::snapshot::ProducerConfig::default().with_delta_ratio(0);
 		let compressed_config = moq_json::snapshot::ProducerConfig::default().with_compression(true);
 
-		Ok(Self {
+		Self {
 			plain: moq_json::snapshot::Producer::new(plain_track, plain_config),
 			compressed: moq_json::snapshot::Producer::new(compressed_track, compressed_config),
-		})
+		}
 	}
 
 	/// Publish `frame` on both flavors; moq-json skips unchanged values.
@@ -385,9 +422,34 @@ fn flush_dynamic<T: Serialize + Default>(
 	}
 }
 
+/// Both flavors' pending requests for one plain track name, collected before
+/// serving so each is answered through its own request.
+#[derive(Default)]
+struct PendingPair {
+	plain: Option<track::Request>,
+	compressed: Option<track::Request>,
+}
+
+impl PendingPair {
+	fn reject(self, err: moq_net::Error) {
+		if let Some(request) = self.plain {
+			request.reject(err.clone());
+		}
+		if let Some(request) = self.compressed {
+			request.reject(err);
+		}
+	}
+}
+
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
 	broadcast: broadcast::Producer,
+	/// Holds the broadcast's request queue open, so a subscriber asking for a
+	/// tier track no drain has created yet parks (served next tick) instead of
+	/// being rejected `NotFound` on the spot.
+	dynamic: broadcast::Dynamic,
+	/// Consumer-requested pairs created so far, bounding [`MAX_REQUESTED_TRACKS`].
+	requested: usize,
 	traffic_tracks: HashMap<String, TrackPair<TrafficFrame>>,
 	session_tracks: HashMap<String, TrackPair<SessionsFrame>>,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
@@ -434,14 +496,138 @@ impl GroupPublisher {
 			}
 		}
 
+		let dynamic = broadcast.dynamic();
+
 		Some(Self {
 			broadcast,
+			dynamic,
+			requested: 0,
 			traffic_tracks,
 			session_tracks,
 			local: HashMap::new(),
 			session_local: HashMap::new(),
 		})
 	}
+
+	/// Serve consumer requests for tracks no drain has created yet.
+	///
+	/// A tier's tracks are created lazily, on the tier's first recorded byte, so
+	/// a subscriber can legitimately ask before they exist (an idle protocol a
+	/// collector watches on every node). Rejecting such a request forces every
+	/// one of those subscribers into a resubscribe loop; instead any
+	/// stats-shaped name is accepted immediately and held open with a zero
+	/// frame, and the tier's real data rides the same tracks once it records
+	/// ([`flush_dynamic`] finds the pair already created). Names that do not
+	/// match the stats track shape are rejected as before.
+	fn serve_requests(&mut self) {
+		// Pop everything queued, grouping the two flavors of one plain name so
+		// the pair is built from the actual requests where present.
+		let noop = kio::Waiter::noop();
+		let mut traffic: HashMap<String, PendingPair> = HashMap::new();
+		let mut sessions: HashMap<String, PendingPair> = HashMap::new();
+		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
+			let Some(shape) = requested_track_shape(request.name()) else {
+				request.reject(moq_net::Error::NotFound);
+				continue;
+			};
+			let map = match shape.sessions {
+				true => &mut sessions,
+				false => &mut traffic,
+			};
+			let pending = map.entry(shape.plain).or_default();
+			match shape.compressed {
+				true => pending.compressed = Some(request),
+				false => pending.plain = Some(request),
+			}
+		}
+
+		for (plain, pending) in traffic {
+			Self::adopt_pair(
+				&mut self.broadcast,
+				&mut self.traffic_tracks,
+				&mut self.requested,
+				plain,
+				pending,
+			);
+		}
+		for (plain, pending) in sessions {
+			Self::adopt_pair(
+				&mut self.broadcast,
+				&mut self.session_tracks,
+				&mut self.requested,
+				plain,
+				pending,
+			);
+		}
+	}
+
+	/// Adopt one plain name's pending requests into a live [`TrackPair`],
+	/// publishing a zero frame so the subscription resolves immediately.
+	fn adopt_pair<T: Serialize + Default>(
+		broadcast: &mut broadcast::Producer,
+		tracks: &mut HashMap<String, TrackPair<T>>,
+		requested: &mut usize,
+		plain: String,
+		pending: PendingPair,
+	) {
+		// A pair created between the request queuing and this drain means the
+		// tracks already exist: this late request can only be rejected, and the
+		// requester's retry resolves against the live track. Also the cap.
+		if tracks.contains_key(&plain) || *requested >= MAX_REQUESTED_TRACKS {
+			pending.reject(moq_net::Error::NotFound);
+			return;
+		}
+		match TrackPair::adopt(broadcast, &plain, pending) {
+			Ok(mut pair) => {
+				// Hold the subscription open with zeros until the tier records.
+				pair.update(&plain, &T::default());
+				tracks.insert(plain, pair);
+				*requested += 1;
+			}
+			Err(err) => tracing::warn!(?err, name = %plain, "stats: failed to adopt requested track"),
+		}
+	}
+}
+
+/// The parsed shape of a consumer-requested stats track name.
+struct RequestedShape {
+	/// The plain (uncompressed) track name, the pair maps' key.
+	plain: String,
+	/// Whether the requested flavor was the [`COMPRESSED_SUFFIX`] one.
+	compressed: bool,
+	/// Sessions track vs traffic track, picking the frame type.
+	sessions: bool,
+}
+
+/// Classify a consumer-requested track name against the stats track shape
+/// `[<tier>/]{publisher|subscriber|sessions}.json[.z]`, or `None` for a name no
+/// tier could ever produce.
+fn requested_track_shape(name: &str) -> Option<RequestedShape> {
+	let (base, compressed) = match name.strip_suffix(COMPRESSED_SUFFIX) {
+		Some(base) => (base, true),
+		None => (name, false),
+	};
+	let (tier, kind) = match base.rsplit_once('/') {
+		Some((tier, kind)) => (Some(tier), kind),
+		None => (None, base),
+	};
+	let sessions = match kind {
+		"publisher.json" | "subscriber.json" => false,
+		"sessions.json" => true,
+		_ => return None,
+	};
+	// The tier label is an arbitrary path; require a clean one so a malformed
+	// name can't mint a track a real tier could never produce.
+	if let Some(tier) = tier
+		&& (tier.is_empty() || tier.starts_with('/') || tier.ends_with('/') || tier.contains("//"))
+	{
+		return None;
+	}
+	Some(RequestedShape {
+		plain: base.to_string(),
+		compressed,
+		sessions,
+	})
 }
 
 /// Change-detection state for one `(path, tier, side)` slot, owned by the
@@ -869,16 +1055,19 @@ mod tests {
 			assert!(broadcast.track(name).is_ok(), "{name} must exist");
 		}
 
-		// The regional tier never saw traffic, so its tracks were never created.
-		// The announced broadcast is an origin-owned splice, so `track()` always
-		// hands back a logical track; only the subscription reveals absence.
-		for name in ["region/sjc/publisher.json", "region/sjc/publisher.json.z"] {
-			let track = broadcast.track(name).expect("logical track");
-			assert!(
-				track.subscribe(None).await.is_err(),
-				"{name} must not exist for a tier with no traffic",
-			);
-		}
+		// The regional tier never saw traffic, so no drain created its tracks;
+		// a subscribe is held open and served zeros instead of being rejected
+		// (see `serve_requests`), and its slot still never surfaces in the
+		// frames above.
+		let subscribing = broadcast
+			.track("region/sjc/publisher.json")
+			.expect("logical track")
+			.subscribe(None);
+		drive_tick().await;
+		let mut sub = subscribing.await.expect("an idle tier's track is held open");
+		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
+		assert!(parsed.is_empty(), "an idle tier serves zeros, got {parsed:?}");
 	}
 
 	#[test]
@@ -912,5 +1101,121 @@ mod tests {
 		assert_eq!(group_key("acme/room/cam", 1), Path::new("acme").to_owned());
 		assert_eq!(group_key("acme/room/cam", 2), Path::new("acme/room").to_owned());
 		assert_eq!(group_key("acme/room", 3), Path::new("acme/room").to_owned());
+	}
+
+	#[test]
+	fn requested_track_shape_classifies() {
+		let shape = requested_track_shape("rtmp/publisher.json").expect("valid");
+		assert_eq!(shape.plain, "rtmp/publisher.json");
+		assert!(!shape.compressed);
+		assert!(!shape.sessions);
+
+		let shape = requested_track_shape("region/sjc/subscriber.json.z").expect("valid");
+		assert_eq!(shape.plain, "region/sjc/subscriber.json");
+		assert!(shape.compressed);
+		assert!(!shape.sessions);
+
+		let shape = requested_track_shape("sessions.json").expect("default tier");
+		assert_eq!(shape.plain, "sessions.json");
+		assert!(shape.sessions);
+
+		assert!(requested_track_shape("bogus.json").is_none());
+		assert!(requested_track_shape("xpublisher.json").is_none());
+		assert!(requested_track_shape("/publisher.json").is_none());
+		assert!(requested_track_shape("rtmp//publisher.json").is_none());
+		assert!(requested_track_shape("rtmp/publisher.json.z.z").is_none());
+	}
+
+	/// A subscribe for a tier that has never recorded resolves with a zero
+	/// frame instead of being rejected, and the tier's real data later rides
+	/// the SAME subscription (the retry storm this held open replaces).
+	#[tokio::test(start_paused = true)]
+	async fn idle_tier_track_resolves_with_zeros() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		// Some default-tier traffic so the group broadcast exists at all.
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		// Nothing has recorded on the rtmp tier: the track does not exist yet.
+		let subscribing = broadcast.track("rtmp/publisher.json").expect("track").subscribe(None);
+		drive_tick().await;
+		let mut sub = subscribing.await.expect("held open, not rejected");
+		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
+		assert!(parsed.is_empty(), "an idle tier serves zeros");
+
+		// The tier records: the same subscription carries the data.
+		let _rtmp = feed(producer.registry(), Tier::new("rtmp"), "foo/live", true, 1, 7).await;
+		drive_tick().await;
+		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
+		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 7);
+	}
+
+	/// The compressed flavor is adoptable too, and adopting either flavor
+	/// creates its sibling, so the pair stays in lockstep.
+	#[tokio::test(start_paused = true)]
+	async fn compressed_tier_request_creates_the_pair() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		let subscribing = broadcast.track("srt/subscriber.json.z").expect("track").subscribe(None);
+		drive_tick().await;
+		subscribing.await.expect("compressed flavor held open");
+
+		// The plain sibling was created alongside, so it resolves immediately.
+		subscribe(&broadcast, "srt/subscriber.json").await;
+	}
+
+	/// A sessions-shaped request is held open with zeros like the traffic ones.
+	#[tokio::test(start_paused = true)]
+	async fn idle_tier_sessions_track_resolves_with_zeros() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		let subscribing = broadcast.track("webrtc/sessions.json").expect("track").subscribe(None);
+		drive_tick().await;
+		let mut sub = subscribing.await.expect("held open, not rejected");
+		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let parsed: BTreeMap<String, Presence> = serde_json::from_slice(&frame.payload).expect("json");
+		assert!(parsed.is_empty());
+	}
+
+	/// A name no tier could produce is still rejected.
+	#[tokio::test(start_paused = true)]
+	async fn malformed_track_name_rejected() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		let subscribing = broadcast.track("bogus.json").expect("track").subscribe(None);
+		drive_tick().await;
+		assert!(subscribing.await.is_err(), "a non-stats name is rejected");
+	}
+
+	/// Consumer-requested pairs are bounded; a request past the cap is rejected.
+	#[tokio::test(start_paused = true)]
+	async fn requested_tracks_are_capped() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		for i in 0..MAX_REQUESTED_TRACKS {
+			let name = format!("t{i}/publisher.json");
+			let subscribing = broadcast.track(&name).expect("track").subscribe(None);
+			drive_tick().await;
+			subscribing.await.expect("within the cap");
+		}
+
+		let subscribing = broadcast.track("over/publisher.json").expect("track").subscribe(None);
+		drive_tick().await;
+		assert!(subscribing.await.is_err(), "past the cap is rejected");
 	}
 }
