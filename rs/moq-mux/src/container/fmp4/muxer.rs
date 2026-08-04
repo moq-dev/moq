@@ -1,7 +1,5 @@
 //! One-shot CMAF muxing for individually fetched groups.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
 
@@ -10,8 +8,8 @@ use crate::container::Frame;
 use crate::container::source::{VideoTransform, build_video_transform};
 
 use super::export::{
-	Fragment, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, fragment_seconds,
-	infer_missing_durations,
+	Fragment, apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, fallback_duration,
+	fragment_seconds, infer_missing_durations,
 };
 use super::{Error, synthesize_audio_trak, synthesize_video_trak};
 
@@ -25,6 +23,22 @@ const TRACK_ID: u32 = 1;
 enum Kind {
 	Video(VideoConfig),
 	Audio(AudioConfig),
+}
+
+/// The rendition's nominal frame period, exact at `timescale`.
+///
+/// A zero / NaN / infinite catalog framerate would divide the timescale into a non-finite tick
+/// count, so it takes the same 30 fps default the rest of the muxer does.
+fn default_frame(kind: &Kind, timescale: moq_net::Timescale) -> crate::Result<moq_net::Timestamp> {
+	let rate = match kind {
+		Kind::Video(config) => config
+			.framerate
+			.filter(|fps| fps.is_finite() && *fps > 0.0)
+			.unwrap_or(30.0),
+		// ~1024 samples per packet is the AAC frame; Opus states its own duration anyway.
+		Kind::Audio(config) => config.sample_rate.max(1) as f64 / 1024.0,
+	};
+	fallback_duration(timescale.as_u64(), rate)
 }
 
 /// Muxes one rendition's fetched groups into standalone CMAF, without a live subscription.
@@ -54,8 +68,8 @@ pub struct Muxer {
 	description: Option<Bytes>,
 	timescale: moq_net::Timescale,
 	/// Fallback duration for frames that carry none (Legacy / LOC sources), derived from the
-	/// catalog framerate / sample rate.
-	default_frame: Duration,
+	/// catalog framerate / sample rate and exact at [`Self::timescale`].
+	default_frame: moq_net::Timestamp,
 	/// True for Opus audio, whose packets state their own duration in the TOC byte.
 	opus: bool,
 }
@@ -64,33 +78,32 @@ impl Muxer {
 	/// A muxer for a video rendition described by `config`.
 	pub fn video(config: &VideoConfig) -> crate::Result<Self> {
 		let container = (&config.container).try_into()?;
-		let framerate = config
-			.framerate
-			.filter(|fps| fps.is_finite() && *fps > 0.0)
-			.unwrap_or(30.0);
+		let kind = Kind::Video(config.clone());
+		let timescale = moq_net::Timescale::new(catalog_timescale_video(config)?).map_err(Error::from)?;
 		Ok(Self {
 			container,
 			transform: build_video_transform(config),
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: moq_net::Timescale::new(catalog_timescale_video(config)?).map_err(Error::from)?,
-			default_frame: Duration::from_secs_f64(1.0 / framerate),
+			default_frame: default_frame(&kind, timescale)?,
+			timescale,
 			opus: false,
-			kind: Kind::Video(config.clone()),
+			kind,
 		})
 	}
 
 	/// A muxer for an audio rendition described by `config`.
 	pub fn audio(config: &AudioConfig) -> crate::Result<Self> {
 		let container = (&config.container).try_into()?;
+		let kind = Kind::Audio(config.clone());
+		let timescale = moq_net::Timescale::new(catalog_timescale_audio(config)?).map_err(Error::from)?;
 		Ok(Self {
 			container,
 			transform: None,
 			description: config.description.as_ref().filter(|b| !b.is_empty()).cloned(),
-			timescale: moq_net::Timescale::new(catalog_timescale_audio(config)?).map_err(Error::from)?,
-			// Fallback for a duration-less trailing sample (~1024 samples per frame).
-			default_frame: Duration::from_secs_f64(1024.0 / config.sample_rate.max(1) as f64),
+			default_frame: default_frame(&kind, timescale)?,
+			timescale,
 			opus: matches!(config.codec, hang::catalog::AudioCodec::Opus),
-			kind: Kind::Audio(config.clone()),
+			kind,
 		})
 	}
 
@@ -117,6 +130,8 @@ impl Muxer {
 		}
 		// Reject here rather than at init(), so the failure lands on the call that is wrong.
 		super::mdhd_timescale(timescale.as_u64())?;
+		// The fallback is a tick count at the muxer's scale, so moving the scale moves it too.
+		self.default_frame = default_frame(&self.kind, timescale)?;
 		self.timescale = timescale;
 		Ok(self)
 	}
@@ -416,9 +431,9 @@ mod tests {
 
 	// The reason `fragments` exists rather than a loop over `fragment`. Cutting per call leaves
 	// each fragment a one-element slice with no successor, so every sample falls back to the
-	// catalog cadence (999 ticks: 1/30s taken to nanoseconds and truncated back to 30 kHz) while
-	// the frames really arrive 1500 apart. Resolving first and cutting after times each frame by
-	// its real successor, so the fragments tile the timeline instead of running 33% short.
+	// catalog cadence (1000 ticks, one 30 fps frame) while the frames really arrive 1500 apart.
+	// Resolving first and cutting after times each frame by its real successor, so the fragments
+	// tile the timeline instead of running a third short.
 	#[test]
 	fn fragments_time_each_frame_by_its_real_successor() {
 		let muxer = video_muxer();
@@ -434,7 +449,7 @@ mod tests {
 			.collect();
 		assert_eq!(
 			cut_per_call,
-			vec![vec![Some(999)]; 4],
+			vec![vec![Some(1_000)]; 4],
 			"no successor in a one-element slice, so every sample takes the catalog cadence"
 		);
 
@@ -445,7 +460,12 @@ mod tests {
 			.collect();
 		assert_eq!(
 			durations,
-			vec![vec![Some(1_500)], vec![Some(1_500)], vec![Some(1_500)], vec![Some(999)]],
+			vec![
+				vec![Some(1_500)],
+				vec![Some(1_500)],
+				vec![Some(1_500)],
+				vec![Some(1_000)]
+			],
 			"real successor gaps, and only the trailing sample has none to read"
 		);
 
