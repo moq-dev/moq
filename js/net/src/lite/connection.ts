@@ -178,7 +178,7 @@ export class Connection implements Established {
 	}
 
 	announcedBroadcast(path: Path.Valid): announce.Broadcast {
-		return new announce.Broadcast(this, path);
+		return announce.watchBroadcast(this, path);
 	}
 
 	async #runSession() {

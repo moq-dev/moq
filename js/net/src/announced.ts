@@ -133,6 +133,20 @@ export class Consumer {
 // once per connection instead of once per watched path.
 const warnedNoDiscovery = new WeakSet<Established>();
 
+// Constructs a Broadcast without exposing a public constructor. The connection types are the
+// documented entry point, and they live in other modules, so this is re-exported as
+// {@link watchBroadcast} rather than assigned from within this one.
+let makeBroadcast: (connection: GetterInit<Established | undefined>, path: Path.Valid) => Broadcast;
+
+/**
+ * Construct a {@link Broadcast}. Call `announcedBroadcast(path)` on a connection instead.
+ *
+ * @internal
+ */
+export function watchBroadcast(connection: GetterInit<Established | undefined>, path: Path.Valid): Broadcast {
+	return makeBroadcast(connection, path);
+}
+
 /**
  * A reactive handle to a single broadcast: {@link Broadcast.active} holds a live
  * {@link broadcast.Consumer} while the path is announced and `undefined` while nobody
@@ -170,14 +184,13 @@ export class Broadcast {
 	#active = new Signal<broadcast.Consumer | undefined>(undefined);
 	#signals = new Effect();
 
-	/**
-	 * Watch `path` on a connection. Accepts a live {@link Established} session or a reactive
-	 * one (a `Connection.Reload`'s `established`), which is how the handle survives reconnects.
-	 *
-	 * Obtain one from `announcedBroadcast(path)` on either connection type rather than
-	 * constructing it directly.
-	 */
-	constructor(connection: GetterInit<Established | undefined>, path: Path.Valid) {
+	static {
+		makeBroadcast = (connection, path) => new Broadcast(connection, path);
+	}
+
+	// Accepts a live Established session or a reactive one (a Reload's `established`), which is
+	// how the handle survives reconnects.
+	private constructor(connection: GetterInit<Established | undefined>, path: Path.Valid) {
 		this.path = path;
 		this.active = this.#active;
 

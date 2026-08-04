@@ -181,7 +181,7 @@ export class Connection implements Established {
 	 * @returns A reactive handle to the broadcast
 	 */
 	announcedBroadcast(path: Path.Valid): announce.Broadcast {
-		return new announce.Broadcast(this, path);
+		return announce.watchBroadcast(this, path);
 	}
 
 	/**

@@ -1,5 +1,7 @@
 import * as Moq from "@moq/net";
-import { Effect } from "@moq/signals";
+
+// @moq/net re-exports the reactive primitives, so an app only needs the one dependency.
+const { Effect } = Moq.Signals;
 
 async function main() {
 	const url = new URL("https://cdn.moq.dev/anon");
