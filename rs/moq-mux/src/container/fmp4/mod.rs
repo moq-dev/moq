@@ -149,6 +149,12 @@ pub enum Error {
 	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
 	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
 	TimescaleOverride,
+
+	/// A sample duration is a 32-bit `trun` field. A longer one would encode truncated while the
+	/// decode timeline advanced by the full value, so the fragment would claim less time than the
+	/// next one starts at.
+	#[error("sample duration {0} does not fit the 32-bit trun field")]
+	SampleDurationTooLarge(u64),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -368,7 +374,7 @@ pub(crate) fn encode_fragment(
 			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
-			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
+			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
 			let pts = f.timestamp.as_scale(timescale) as i128;
 			let cts = pts - i128::from(dts);
 			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
@@ -718,6 +724,17 @@ fn mdhd_timescale(timescale: u64) -> Result<u32> {
 	u32::try_from(timescale).map_err(|_| Error::TimescaleTooLarge(timescale))
 }
 
+/// Narrow a sample duration to the 32-bit `trun` field, rejecting what would truncate.
+///
+/// The same number advances the decode time, both inside a fragment and across the run
+/// [`Muxer::fragments`] cuts, so a silent narrowing would leave the fragment claiming less time
+/// than the next `tfdt` starts at. `u32::MAX` is an accepted timescale, which puts a one-second
+/// sample right at the edge of the field.
+fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
+	let ticks = duration.as_scale(timescale);
+	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(u64::try_from(ticks).unwrap_or(u64::MAX)))
+}
+
 fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
 	mp4_atom::Mdia {
 		mdhd: mp4_atom::Mdhd {
@@ -993,6 +1010,47 @@ mod tests {
 			assert_eq!(actual.duration, expected.duration);
 			assert_eq!(actual.payload, expected.payload);
 		}
+	}
+
+	/// How long each sample in a fragment claims to last, as written into its `trun`.
+	fn trun_durations(fragment: &Bytes) -> Vec<Option<u32>> {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(fragment.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moof(moof) = atom {
+				return moof.traf[0].trun[0].entries.iter().map(|e| e.duration).collect();
+			}
+		}
+		panic!("no moof");
+	}
+
+	// A sample duration is a 32-bit trun field, but a Timestamp spans the whole varint range.
+	// Truncating would leave the fragment claiming less time than the next tfdt starts at.
+	#[test]
+	fn encode_fragment_rejects_a_duration_too_large_for_trun() {
+		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let over = u64::from(u32::MAX) + 1;
+		let frame = Frame {
+			timestamp: Timestamp::from_scale(0, timescale.as_u64()).unwrap(),
+			payload: Bytes::from_static(&[0x00]),
+			keyframe: true,
+			duration: Some(Timestamp::from_scale(over, timescale.as_u64()).unwrap()),
+		};
+
+		let err = encode_fragment(1, timescale, 0, std::slice::from_ref(&frame)).unwrap_err();
+		assert!(
+			matches!(err, Error::SampleDurationTooLarge(t) if t == over),
+			"got {err:?}"
+		);
+
+		// The largest the field can hold is still accepted.
+		let largest = Frame {
+			duration: Some(Timestamp::from_scale(u64::from(u32::MAX), timescale.as_u64()).unwrap()),
+			..frame
+		};
+		let fragment = encode_fragment(1, timescale, 0, &[largest]).unwrap();
+		assert_eq!(trun_durations(&fragment), vec![Some(u32::MAX)]);
 	}
 
 	#[test]
