@@ -4,6 +4,8 @@ use std::future::Future;
 use std::net;
 use url::Url;
 
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -35,7 +37,7 @@ pub struct ClientConfig {
 	pub backend: Option<QuicBackend>,
 
 	/// Maximum time for one [`Client::connect`], covering the dial and the MoQ
-	/// handshake. Set to 0 to wait forever.
+	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
 	///
 	/// This has to live above the transports rather than inside one: QUIC bounds its
 	/// own dial, but the WebSocket fallback and the handshake that follows either
@@ -46,12 +48,11 @@ pub struct ClientConfig {
 	#[arg(
 		id = "client-connect-timeout",
 		long = "client-connect-timeout",
-		default_value = "30s",
 		env = "MOQ_CLIENT_CONNECT_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
-	#[serde(with = "humantime_serde")]
-	pub timeout: std::time::Duration,
+	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+	pub timeout: Option<std::time::Duration>,
 
 	/// QUIC transport tuning (`--client-quic-*`): stream limits, GSO, timeouts.
 	#[command(flatten)]
@@ -101,6 +102,10 @@ impl ClientConfig {
 			moq_net::Versions::from(self.version.clone())
 		}
 	}
+
+	fn connect_timeout(&self) -> std::time::Duration {
+		self.timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT)
+	}
 }
 
 impl Default for ClientConfig {
@@ -109,7 +114,7 @@ impl Default for ClientConfig {
 			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
-			timeout: std::time::Duration::from_secs(30),
+			timeout: None,
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
@@ -207,11 +212,12 @@ impl Client {
 		};
 
 		let versions = config.versions();
+		let timeout = config.connect_timeout();
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
-			timeout: config.timeout,
+			timeout,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -960,7 +966,8 @@ mod tests {
 	#[test]
 	fn connect_timeout_defaults_to_thirty_seconds() {
 		let config = ClientConfig::parse_from(["test"]);
-		assert_eq!(config.timeout, std::time::Duration::from_secs(30));
+		assert_eq!(config.timeout, None);
+		assert_eq!(config.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
 	}
 
 	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
@@ -976,38 +983,37 @@ mod tests {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 		let addr = listener.local_addr().unwrap();
 
-		// Accept, then hold the connections open without ever writing a byte. Dropping
-		// them would surface as a clean EOF and let the fallback fail on its own.
-		tokio::spawn(async move {
-			let mut held = Vec::new();
-			while let Ok((stream, _)) = listener.accept().await {
-				held.push(stream);
-			}
-		});
-
-		let timeout = std::time::Duration::from_secs(1);
-		let client = ClientConfig {
-			timeout,
+		let timeout = DEFAULT_CONNECT_TIMEOUT;
+		let mut config = ClientConfig {
+			timeout: Some(timeout),
 			..Default::default()
-		}
-		.init()
-		.unwrap();
+		};
+		config.websocket.delay = Some(std::time::Duration::ZERO);
+		let client = config.init().unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket
 		// arm alone against the silent peer.
 		let url: Url = format!("https://127.0.0.1:{}/", addr.port()).parse().unwrap();
 
-		let started = std::time::Instant::now();
-		let err = match client.connect(url).await {
+		let mut attempt = Box::pin(client.connect(url));
+		let _silent = tokio::select! {
+			res = &mut attempt => match res {
+				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),
+				Ok(_) => panic!("connected to a peer that never spoke"),
+			},
+			res = listener.accept() => res.unwrap().0,
+		};
+
+		// Freeze only after TCP connected, then advance directly to the deadline. The
+		// accepted socket stays in scope and silent until the attempt returns.
+		tokio::time::pause();
+		tokio::time::advance(timeout).await;
+
+		let err = match attempt.await {
 			Err(err) => err,
 			Ok(_) => panic!("connected to a peer that never spoke"),
 		};
 
 		assert!(matches!(err, Error::ConnectTimeout(_)), "unexpected error: {err}");
-		assert!(
-			started.elapsed() < std::time::Duration::from_secs(15),
-			"connect outlived its own deadline by too much: {:?}",
-			started.elapsed()
-		);
 	}
 }
