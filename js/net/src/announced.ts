@@ -186,7 +186,14 @@ export class Broadcast {
 	/** The broadcast path this handle watches. */
 	readonly path: Path.Valid;
 
-	/** The live broadcast, or `undefined` while it is offline. */
+	/**
+	 * The live broadcast, or `undefined` while it is offline.
+	 *
+	 * Borrowed, not yours to close: this handle owns the consumer and swaps it when the path is
+	 * republished. Closing it leaves `active` pointing at a dead one, so reads fail until the
+	 * next announcement replaces it. Take a {@link broadcast.Consumer.clone} for a lifetime of
+	 * your own, or close this whole handle to release everything.
+	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
 	#active = new Signal<broadcast.Consumer | undefined>(undefined);
