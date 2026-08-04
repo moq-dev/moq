@@ -139,6 +139,9 @@ pub enum Error {
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
+
+	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
+	TimescaleOverride,
 }
 
 impl From<mp4_atom::Error> for Error {
