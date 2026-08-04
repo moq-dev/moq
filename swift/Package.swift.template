@@ -12,7 +12,7 @@ import PackageDescription
 
 let package = Package(
     name: "Moq",
-    platforms: [.iOS(.v15), .macOS(.v12)],
+    platforms: [.iOS(.v15), .macOS("12.3")],
     products: [.library(name: "Moq", targets: ["Moq"])],
     dependencies: [
         .package(url: "https://github.com/moq-dev/moq-swift-ffi", .upToNextMinor(from: "REPLACE_FFI_VERSION")),
