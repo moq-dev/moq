@@ -33,6 +33,9 @@ moq-net = { workspace = true }
 # Default features only: the Linux hardware codecs stay off so the wrappers'
 # cross-compiled targets (Android, iOS) don't pull a CUDA / libva graph.
 moq-video = { workspace = true }
+# Blocking on `encode::Sink` from the synchronous producer exports; see
+# `video::block_on` for why not a tokio helper.
+pollster = "1.0"
 serde_json = "1"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
@@ -44,4 +47,3 @@ url = "2"
 uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
-pollster = "1.0"

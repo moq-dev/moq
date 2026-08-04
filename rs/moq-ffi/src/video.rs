@@ -142,9 +142,29 @@ fn finalize(
 	}
 }
 
+/// Wait out an encode-thread round trip from a synchronous export.
+///
+/// The producer methods are sync, matching every other write path here
+/// ([`MoqAudioProducer::write`](crate::audio::MoqAudioProducer::write) and the
+/// json ones), so this is where [`Sink`](moq_video::encode::Sink)'s futures stop.
+/// Blocking is also what paces the caller: a raw frame is megabytes, so a `write`
+/// free to run ahead of the codec would queue pictures without bound.
+///
+/// `pollster` rather than a tokio helper because those panic when the calling
+/// thread is driving a runtime, which the one dispatching a uniffi callback is.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+	pollster::block_on(future)
+}
+
 /// An encoder paired with the track publishing its output.
+///
+/// The encoder is a [`Sink`](moq_video::encode::Sink) rather than a bare
+/// `Encoder` because this object is shared across threads: uniffi hands it to
+/// whichever thread the caller writes from, and an `Encoder` built on one thread
+/// and dropped on another unbalances the per-thread COM apartment the Windows
+/// backend opens. The sink owns the thread instead, so every caller is welcome.
 struct VideoProducer {
-	encoder: moq_video::encode::Encoder,
+	encoder: moq_video::encode::Sink,
 	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	format: MoqVideoPixelFormat,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
@@ -166,7 +186,7 @@ impl VideoProducer {
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
-		let encoded = self.encoder.encode(&frame)?;
+		let encoded = block_on(self.encoder.encode(frame))?;
 		self.producer.publish(&encoded)?;
 		Ok(())
 	}
@@ -177,7 +197,7 @@ impl VideoProducer {
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
-		let drained = encoder.finish().and_then(|encoded| producer.publish(&encoded));
+		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
 		finalize(producer, drained)
 	}
 }
@@ -242,7 +262,7 @@ impl MoqVideoProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		Ok(producer.encoder.set_bitrate(bitrate)?)
+		Ok(block_on(producer.encoder.set_bitrate(bitrate))?)
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.
@@ -280,7 +300,7 @@ impl MoqBroadcastProducer {
 
 		// Open the encoder first: a config this machine can't encode should fail
 		// without leaving a track advertised that will never carry frames.
-		let encoder = moq_video::encode::Encoder::new(&config)?;
+		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let producer = self.with_state(|state| {
 			Ok(moq_video::encode::Producer::new(
 				state.broadcast.clone(),
