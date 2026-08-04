@@ -399,11 +399,18 @@ async fn read_group(
 
 /// True if a moq-net error means the group left (or hasn't reached) the relay cache: a 404, not
 /// a 500.
+///
+/// Compares WIRE CODES rather than variants, because the same miss reaches us in two shapes. A
+/// group missing from the LOCAL cache answers with the named variant, but anything that crossed a
+/// session arrives as [`moq_net::Error::Remote`]: `from_transport` decodes only code 0 (back to
+/// `Cancel`) and leaves every other reset code raw. In a relay the publisher we FETCH from is
+/// always remote, so matching variants alone made the ordinary "that group aged out" answer a 500
+/// instead of a 404 -- for every segment past the cache's retention, on every request.
 fn is_cache_miss(err: &moq_net::Error) -> bool {
-	matches!(
-		err,
-		moq_net::Error::NotFound | moq_net::Error::Old | moq_net::Error::Evicted
-	)
+	let code = err.to_code();
+	code == moq_net::Error::NotFound.to_code()
+		|| code == moq_net::Error::Old.to_code()
+		|| code == moq_net::Error::Evicted.to_code()
 }
 
 /// [`is_cache_miss`] through the moq-mux error layers a group read surfaces (plain transport, or
@@ -459,4 +466,48 @@ async fn watch(
 		live.push(entry, window);
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_cache_miss_that_crossed_a_session_is_still_a_cache_miss() {
+		// REGRESSION: a relay always FETCHes from a REMOTE publisher, and moq-net decodes every
+		// wire reset code as `Error::Remote(code)` -- only code 0 maps back to a named variant
+		// (`Cancel`). Matching the named variants alone therefore missed every miss that actually
+		// happens in a relay, and the serve path turned "that group aged out" into a 500 rather
+		// than the 404 the caller documents. That is every segment past the cache's retention.
+		for local in [moq_net::Error::NotFound, moq_net::Error::Old, moq_net::Error::Evicted] {
+			assert!(is_cache_miss(&local), "{local:?} locally");
+			let remote = moq_net::Error::Remote(local.to_code());
+			assert!(is_cache_miss(&remote), "{local:?} over the wire ({remote:?})");
+		}
+	}
+
+	#[test]
+	fn a_real_failure_is_not_a_cache_miss() {
+		// The mapping must not swallow genuine errors into a 404, in either shape.
+		for err in [
+			moq_net::Error::Unauthorized,
+			moq_net::Error::ProtocolViolation,
+			moq_net::Error::Timeout,
+		] {
+			assert!(!is_cache_miss(&err), "{err:?} locally");
+			let remote = moq_net::Error::Remote(err.to_code());
+			assert!(!is_cache_miss(&remote), "{err:?} over the wire ({remote:?})");
+		}
+	}
+
+	#[test]
+	fn a_cache_miss_is_recognised_through_the_mux_error_layers() {
+		// A group read surfaces the same miss wrapped one or two layers deep, and both wrappings
+		// have to keep resolving to 404.
+		let remote = moq_net::Error::Remote(moq_net::Error::NotFound.to_code());
+		assert!(is_cache_miss_mux(&moq_mux::Error::Moq(remote.clone())));
+		assert!(is_cache_miss_mux(&moq_mux::Error::Cmaf(
+			moq_mux::container::fmp4::Error::Moq(remote)
+		)));
+	}
 }
