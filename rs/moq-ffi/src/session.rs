@@ -20,12 +20,14 @@ impl Client {
 		// always hand back a publisher/consumer.
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
-		let session = client
+		// One-shot for now: the FFI session wraps a single moq_net::Session, so the
+		// connection loop's redial would have nothing to hand the new session to.
+		let connection = client
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
-			.connect(url)
-			.await
-			.map_err(map_connect_error)?;
+			.with_reconnect(false)
+			.connect(url);
+		let session = connection.established().await.map_err(map_connect_error)?;
 
 		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 	}

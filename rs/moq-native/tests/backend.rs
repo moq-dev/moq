@@ -169,7 +169,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -327,7 +327,7 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 		Ok::<_, anyhow::Error>(has_cert)
 	});
 
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out");
 
@@ -551,7 +551,7 @@ async fn iroh_connect() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");

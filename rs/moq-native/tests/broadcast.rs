@@ -74,7 +74,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -183,7 +183,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -300,7 +300,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -424,7 +424,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -531,7 +531,7 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -619,7 +619,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -804,7 +804,7 @@ async fn broadcast_route_migration() {
 		let client = config.init().expect("init client");
 		let url: url::Url = format!("moqt://localhost:{port}").parse().unwrap();
 		async move {
-			tokio::time::timeout(TIMEOUT, client.with_subscriber(sub).connect(url))
+			tokio::time::timeout(TIMEOUT, client.with_subscriber(sub).connect(url).established())
 				.await
 				.expect("connect timeout")
 				.expect("connect failed")
@@ -914,7 +914,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	}
 	let client = client_config.init().expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -1049,7 +1049,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	}
 	let client = client_config.init().expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -1623,7 +1623,7 @@ async fn broadcast_websocket() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1736,7 +1736,7 @@ async fn broadcast_websocket_fallback() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1844,7 +1844,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1922,7 +1922,7 @@ async fn broadcast_race_quic_wins() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -1985,7 +1985,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -2120,7 +2120,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -2195,7 +2195,7 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 	let client = client_config.init().expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
-	let err = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let err = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out");
 	let err = expect_connect_err(err);
@@ -2232,7 +2232,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 	let client = client_config.init().expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
-	let reconnect = client.reconnect(url);
+	let reconnect = client.connect(url);
 	let err = tokio::time::timeout(TIMEOUT, reconnect.closed())
 		.await
 		.expect("reconnect close timed out")
@@ -2243,6 +2243,64 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+}
+
+/// With reconnecting disabled, the session ending ends the connection: its close
+/// reason surfaces through `closed()` and the loop never dials again.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn one_shot_connect_surfaces_the_session_close() {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	// Keep accepting so a buggy redial would show up as a second accept, and
+	// close each session as soon as it lands.
+	let accepts = Arc::new(AtomicUsize::new(0));
+	let server_accepts = accepts.clone();
+	let pub_origin = Origin::random().produce();
+	let server_handle = tokio::spawn(async move {
+		while let Some(request) = server.accept().await {
+			server_accepts.fetch_add(1, Ordering::SeqCst);
+			let session = request.with_publisher(&pub_origin).ok().await?;
+			session.abort(moq_net::Error::Cancel);
+		}
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.reconnect = Some(false);
+	// A tiny backoff so a buggy redial happens well within the sleep below.
+	client_config.backoff.initial = Duration::from_millis(10);
+	let client = client_config.init().expect("failed to init client");
+
+	let connection = client.connect(url);
+	let session = tokio::time::timeout(TIMEOUT, connection.established())
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	// The server aborts the session; one-shot mode turns that into the terminal error.
+	tokio::time::timeout(TIMEOUT, connection.closed())
+		.await
+		.expect("close timed out")
+		.expect_err("a severed session must surface as an error");
+	assert!(!connection.connected());
+	let _ = tokio::time::timeout(TIMEOUT, session.closed()).await;
+
+	// Give a buggy reconnect loop ample time to redial before counting accepts.
+	tokio::time::sleep(Duration::from_millis(200)).await;
+	assert_eq!(
+		accepts.load(Ordering::SeqCst),
+		1,
+		"one-shot mode must dial exactly once"
+	);
+
+	drop(connection);
+	server_handle.abort();
 }
 
 /// A peer that expresses announce-interest in a prefix the publisher can't serve (e.g. a
@@ -2293,7 +2351,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	});
 
 	let client = client.with_subscriber(consume);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -2406,10 +2464,13 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.scope(&["allowed".into()])
 		.expect("failed to scope publish origin");
 
-	let session = tokio::time::timeout(TIMEOUT, test_client().with_publisher(publish).connect(url))
-		.await
-		.expect("client connect timed out")
-		.expect("client connect failed");
+	let session = tokio::time::timeout(
+		TIMEOUT,
+		test_client().with_publisher(publish).connect(url).established(),
+	)
+	.await
+	.expect("client connect timed out")
+	.expect("client connect failed");
 
 	server_handle
 		.await
@@ -2514,7 +2575,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -2634,7 +2695,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 	});
 
 	let sub_origin = Origin::random().produce();
-	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");

@@ -23,10 +23,17 @@ Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.Cl
 ```rust
 let client = moq_native::ClientConfig::default().init()?;
 let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
-let session = client.connect(url).await?;
+
+// A background task dials and redials with backoff if the session drops.
+// Drop the handle to disconnect.
+let connection = client.connect(url);
+
+// Optionally wait for the first session (surfacing dial errors up front).
+let session = connection.established().await?;
 ```
 
 The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
+Set [`ClientConfig::reconnect`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html#structfield.reconnect) to `false` for a one-shot dial: the session's close then ends the connection instead of triggering a redial.
 
 ### URL Schemes
 
@@ -55,7 +62,7 @@ Pass JWT tokens via URL query parameters:
 let url = Url::parse(&format!(
     "https://relay.example.com/room/123?jwt={}", token
 ))?;
-let session = client.connect(url).await?;
+let session = client.connect(url).established().await?;
 ```
 
 See the [Authentication guide](/bin/relay/auth) for how to generate tokens.
@@ -67,7 +74,7 @@ The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/vi
 The connected [`Session`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html) exposes a [`publisher()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.publisher) [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Producer.html) you publish broadcasts into:
 
 ```rust
-let session = client.connect(url).await?;
+let session = client.connect(url).established().await?;
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
 let mut broadcast = session.publisher().create_broadcast("", route)?;
@@ -83,7 +90,7 @@ The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 The session also exposes a [`consumer()`](https://docs.rs/moq-net/latest/moq_net/struct.Session.html#method.consumer) [`origin::Consumer`](https://docs.rs/moq-net/latest/moq_net/origin/struct.Consumer.html) for receiving announcements:
 
 ```rust
-let session = client.connect(url).await?;
+let session = client.connect(url).established().await?;
 let mut announced = session.consumer().announced();
 
 // Wait for broadcasts to be announced.

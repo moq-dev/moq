@@ -90,7 +90,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.client(moq.client.clone())?
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
-		.reconnect(url);
+		.connect(url);
 
 	// Wait for the first session: the origin can't route a broadcast request
 	// until a connected session registers its handler.

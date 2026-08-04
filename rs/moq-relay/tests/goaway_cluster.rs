@@ -102,7 +102,9 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let client = client_config.init().expect("client init");
 	let client_session = within("client connects", async {
 		client
+			.with_reconnect(false)
 			.connect(format!("tcp://127.0.0.1:{port}/").parse().expect("parse url"))
+			.established()
 			.await
 	})
 	.await
@@ -395,7 +397,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"MID-A connects to TOP",
 		mid_a_client
 			.with_subscriber(mid_a_origin.clone())
-			.connect(top_url.parse().expect("parse top url")),
+			.with_reconnect(false)
+			.connect(top_url.parse().expect("parse top url"))
+			.established(),
 	)
 	.await
 	.expect("mid-a upstream connect");
@@ -424,7 +428,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"subscriber connects to BOTTOM",
 		sub_client
 			.with_subscriber(sub_origin.clone())
-			.connect(format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url")),
+			.with_reconnect(false)
+			.connect(format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url"))
+			.established(),
 	)
 	.await
 	.expect("subscriber connect");

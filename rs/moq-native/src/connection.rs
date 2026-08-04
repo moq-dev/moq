@@ -79,7 +79,7 @@ impl Backoff {
 	}
 }
 
-/// A connection lifecycle transition reported by [`Reconnect::status`].
+/// A connection lifecycle transition reported by [`Connection::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
@@ -255,9 +255,9 @@ struct State {
 	session: Option<moq_net::Session>,
 }
 
-/// A cloneable read handle for the live connection stats of a [`Reconnect`] loop.
+/// A cloneable read handle for the live connection stats of a [`Connection`].
 ///
-/// Obtained via [`Reconnect::stats`]. [`stats`](Self::stats) returns `None` while the loop is
+/// Obtained via [`Connection::stats`]. [`stats`](Self::stats) returns `None` while the loop is
 /// between connections (reconnecting), and `Some` snapshot while a session is established.
 #[derive(Clone)]
 pub struct ConnectionStatsReader {
@@ -271,16 +271,19 @@ impl ConnectionStatsReader {
 	}
 }
 
-/// Handle to a background reconnect loop.
+/// Handle to a connection maintained by a background task.
 ///
-/// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
-/// that transparently reconnects: [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
+/// The task connects, waits for the session to end, then (unless reconnecting is
+/// disabled, see [`ClientConfig::reconnect`](crate::ClientConfig::reconnect))
+/// redials with exponential backoff. The read surface mirrors [`moq_net::Session`]
+/// so a caller can treat it like a session that transparently reconnects:
+/// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
-/// The extra toggle a plain session doesn't have is the connection lifecycle: [`connected`](Self::connected)
-/// reads it synchronously and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
+/// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
+/// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
+/// and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
 /// waits for the loop to stop. Dropping the handle aborts the background task.
-pub struct Reconnect {
+pub struct Connection {
 	abort: tokio::task::AbortHandle,
 	state: kio::Consumer<State>,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
@@ -291,8 +294,8 @@ pub struct Reconnect {
 	last_reported: Option<Status>,
 }
 
-impl Reconnect {
-	pub(crate) fn new(client: Client, url: Url, backoff: Backoff, goaway: GoawayConfig) -> Self {
+impl Connection {
+	pub(crate) fn new(client: Client, url: Url) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 
@@ -304,8 +307,14 @@ impl Reconnect {
 		let recv_bandwidth = recv_bw.consume();
 
 		let task = tokio::spawn(async move {
-			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url, backoff, goaway).await {
-				tracing::error!(%err, "reconnect loop exited");
+			let reconnect = client.reconnect;
+			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url).await {
+				// In one-shot mode the session ending is the expected lifecycle, and
+				// its close reason arrives here; don't dress it up as a loop failure.
+				match reconnect {
+					true => tracing::error!(%err, "connection loop exited"),
+					false => tracing::info!(%err, "connection closed"),
+				}
 				if let Ok(mut state) = producer.write() {
 					state.error = Some(err);
 				}
@@ -327,15 +336,15 @@ impl Reconnect {
 		recv_bw: &BandwidthProducer,
 		client: Client,
 		url: Url,
-		backoff: Backoff,
-		goaway: GoawayConfig,
 	) -> crate::Result<()> {
+		let backoff = client.backoff.clone();
+		let goaway = client.goaway.clone();
 		let mut delay = backoff.initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<Error> = None;
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
 		// later drop redials wherever we were last sent. Scoped to this loop, so a
-		// fresh Reconnect starts from the configured URL again.
+		// fresh Connection starts from the configured URL again.
 		let mut url = url;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
@@ -352,7 +361,7 @@ impl Reconnect {
 
 			tracing::info!(%url, "connecting");
 
-			match client.connect(url.clone()).await {
+			match client.dial(url.clone()).await {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
 					if let Ok(mut state) = state.write() {
@@ -365,7 +374,9 @@ impl Reconnect {
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					let ended = run_session(send_bw, recv_bw, &session, &mut draining).await;
+					// One-shot mode ignores GOAWAY: it cannot dial the replacement, and the
+					// peer force-closes at its own deadline anyway.
+					let ended = run_session(send_bw, recv_bw, &session, &mut draining, client.reconnect).await;
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
@@ -421,15 +432,27 @@ impl Reconnect {
 					let _ = send_bw.set(None);
 					let _ = recv_bw.set(None);
 
-					// An auth rejection is terminal however long the session lived: the
-					// wire's UNAUTHORIZED is specified, so this is the peer telling us
-					// these credentials will never work, not a code we guessed at.
+					// An auth rejection is terminal however long the session lived, and
+					// whether or not we would otherwise redial: the wire's UNAUTHORIZED is
+					// specified, so this is the peer telling us these credentials will
+					// never work, not a code we guessed at.
 					if let Ended::Closed(Err(err)) = &ended {
 						let err = Error::from(err.clone());
 						if err.is_auth() {
 							return Err(err);
 						}
 					}
+
+					// One-shot mode: the session ending ends the connection. Its close
+					// reason is the terminal error, mirroring `moq_net::Session::closed`.
+					if !client.reconnect {
+						return match ended {
+							Ended::Closed(res) => res.map_err(Error::from),
+							// The GOAWAY arm is not polled in one-shot mode.
+							Ended::Goaway(_) => Ok(()),
+						};
+					}
+
 
 					if healthy {
 						// Reset the backoff window so a one-off drop reconnects promptly.
@@ -460,7 +483,7 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					if err.is_auth() {
+					if err.is_auth() || !client.reconnect {
 						return Err(err);
 					}
 					last_error = Some(err);
@@ -471,6 +494,32 @@ impl Reconnect {
 			tokio::time::sleep(delay).await;
 			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
 		}
+	}
+
+	/// Poll until a session is established (the first connect, or the current one).
+	///
+	/// `Ready(Ok(session))` while a session is live (during a GOAWAY handover this is the
+	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
+	/// otherwise.
+	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::Session>> {
+		match ready!(self.state.poll(waiter, |state| match (state.status, &state.session) {
+			(Some(Status::Connected | Status::Migrating), Some(session)) => Poll::Ready(session.clone()),
+			_ => Poll::Pending,
+		})) {
+			Ok(session) => Poll::Ready(Ok(session)),
+			Err(state) => Poll::Ready(Err(terminal(&state))),
+		}
+	}
+
+	/// Wait until a session is established, returning it.
+	///
+	/// Returns as soon as a session is live, so the first call waits out the initial dial
+	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
+	/// mode). Useful when a caller wants dial errors up front rather than through
+	/// [`closed`](Self::closed). The loop lives in the handle, not the returned session:
+	/// drop the [`Connection`] and nothing redials.
+	pub async fn established(&self) -> crate::Result<moq_net::Session> {
+		kio::wait(|waiter| self.poll_established(waiter)).await
 	}
 
 	/// Poll for the next connection status change since this handle last reported one.
@@ -518,6 +567,15 @@ impl Reconnect {
 		self.state.read().version
 	}
 
+	/// The live [`moq_net::Session`], or `None` while between sessions.
+	///
+	/// An escape hatch for callers that need the raw session (during a GOAWAY handover
+	/// this is the old session, which is still serving). Sessions are refcounted, so a
+	/// clone held here keeps that transport open even after the loop moves on.
+	pub fn session(&self) -> Option<moq_net::Session> {
+		self.state.read().session.clone()
+	}
+
 	/// A consumer for the live session's estimated send bitrate, mirroring
 	/// [`moq_net::Session::send_bandwidth`].
 	///
@@ -535,11 +593,11 @@ impl Reconnect {
 		self.recv_bandwidth.clone()
 	}
 
-	/// Poll whether the reconnect loop has stopped.
+	/// Poll whether the connection loop has stopped.
 	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, or an auth
-	/// rejection), `Ready(Ok(()))` if stopped by dropping the handle, `Pending` while
-	/// it's still running.
+	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, an auth
+	/// rejection, or the session ending in one-shot mode), `Ready(Ok(()))` if stopped
+	/// by dropping the handle, `Pending` while it's still running.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
@@ -548,7 +606,7 @@ impl Reconnect {
 		})
 	}
 
-	/// Wait until the reconnect loop stops.
+	/// Wait until the connection loop stops.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -574,7 +632,7 @@ enum Ended {
 /// An old session kept alive after a GOAWAY so its in-flight groups finish.
 ///
 /// Held by the reconnect loop rather than a detached task, so dropping the
-/// [`Reconnect`] handle tears the old session down with everything else instead
+/// [`Connection`] handle tears the old session down with everything else instead
 /// of leaving an orphan holding the connection open.
 struct Draining {
 	session: moq_net::Session,
@@ -638,17 +696,19 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
 }
 
 /// Wait for `session` to close or receive a GOAWAY, forwarding its send/recv bandwidth estimates
-/// into the persistent producers meanwhile so [`Reconnect`] consumers track the live estimates
+/// into the persistent producers meanwhile so [`Connection`] consumers track the live estimates
 /// across the connection, and draining any predecessor left over from an earlier migration.
 ///
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
-/// polled through the waiter's own waker.
+/// polled through the waiter's own waker. `migrate` is whether a GOAWAY ends this session's
+/// tenure ([`Ended::Goaway`]); when false the arm isn't polled and only a close returns.
 async fn run_session(
 	send_bw: &BandwidthProducer,
 	recv_bw: &BandwidthProducer,
 	session: &moq_net::Session,
 	draining: &mut Option<Draining>,
+	migrate: bool,
 ) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
@@ -669,7 +729,7 @@ async fn run_session(
 
 		// Checked before the close arm: a GOAWAY means the session is still up, and
 		// migrating from it is not the same as reconnecting after it died.
-		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
+		if migrate && let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
 			return Poll::Ready(Ended::Goaway(msg));
 		}
 
@@ -703,7 +763,7 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 	}
 }
 
-impl Drop for Reconnect {
+impl Drop for Connection {
 	fn drop(&mut self) {
 		self.abort.abort();
 	}
@@ -713,7 +773,7 @@ impl Drop for Reconnect {
 fn terminal(state: &State) -> Error {
 	match &state.error {
 		Some(err) => err.clone(),
-		None => Error::Reconnect("reconnect stopped".to_string()),
+		None => Error::Reconnect("connection stopped".to_string()),
 	}
 }
 

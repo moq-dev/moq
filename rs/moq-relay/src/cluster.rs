@@ -982,7 +982,7 @@ impl Cluster {
 		// a failed attempt, so an A-redirects-to-B-redirects-to-A loop escalates
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
-		let mut reconnect = client.reconnect(url.clone());
+		let mut reconnect = client.connect(url.clone());
 		let mut connection = None;
 		loop {
 			match reconnect.status().await? {
