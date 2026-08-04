@@ -1,32 +1,27 @@
-import { Decoder } from "@moq/flate";
 import type * as Moq from "@moq/net";
-import type * as z from "zod/mini";
-import { merge } from "../diff.ts";
-import type { Config } from "./producer.ts";
+
+import { Decoder } from "./decoder.ts";
+import type { Config } from "./encoder.ts";
 
 /**
  * Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
  *
- * Reads each group's snapshot (frame 0) and applies the following frames as merge patches. A live
- * consumer yields each update as it arrives; a consumer that has fallen behind (or just joined)
- * collapses the buffered backlog and yields only the latest value. See {@link next}.
+ * A {@link Decoder} that owns its track: it reads groups, routes each frame by its position, and
+ * yields the reconstructed value. A live consumer yields each update as it arrives; a consumer that
+ * has fallen behind (or just joined) collapses the buffered backlog and yields only the latest
+ * value. See {@link next}. When something else already owns the track, use the {@link Decoder}
+ * directly.
  */
 export class Consumer<T> {
 	#track: Moq.Track.Subscriber;
-	#schema?: z.ZodMiniType<T>;
-	// Whether frames are `deflate-raw` compressed. Must match the producer's {@link Config.compression}.
-	#decompress: boolean;
+	#decoder: Decoder<T>;
 
 	#group?: Moq.Group.Consumer;
-	// Per-group DEFLATE decoder, built lazily on the first frame of a group and reset at each boundary.
-	#decoder?: Decoder;
-	#current?: unknown;
 	#framesRead = 0;
 
 	constructor(track: Moq.Track.Subscriber, config: Config<T> = {}) {
 		this.#track = track;
-		this.#schema = config.schema;
-		this.#decompress = config.compression ?? false;
+		this.#decoder = new Decoder(config);
 	}
 
 	/**
@@ -44,21 +39,18 @@ export class Consumer<T> {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
 				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
-				this.#current = undefined;
+				// The next frame is the new group's snapshot, which also restarts the decoder's window.
 				this.#framesRead = 0;
-				// Each group is its own compressed stream, so start a fresh decoder.
-				this.#decoder = undefined;
 			}
 
 			// Drain every frame already buffered, keeping only the latest reconstructed value: a late
 			// joiner (or any consumer that fell behind) catches up to the head in one step.
-			let value: T | undefined;
 			let advanced = false;
 			for (let frame = this.#group.tryReadFrame(); frame !== undefined; frame = this.#group.tryReadFrame()) {
-				value = this.#apply(frame.payload);
+				this.#apply(frame.payload);
 				advanced = true;
 			}
-			if (advanced) return value;
+			if (advanced) return this.#decoder.decode();
 
 			// Nothing buffered: block for the next frame (or the group's end).
 			let frame: Moq.Group.Frame | undefined;
@@ -78,7 +70,8 @@ export class Consumer<T> {
 				continue;
 			}
 
-			return this.#apply(frame.payload);
+			this.#apply(frame.payload);
+			return this.#decoder.decode();
 		}
 	}
 
@@ -90,22 +83,13 @@ export class Consumer<T> {
 		}
 	}
 
-	// Frame 0 of a group is a snapshot, the rest are merge patches. When compressed, frames share one
-	// per-group DEFLATE stream, so they decode in order through a decoder built on the group's first frame.
-	#apply(frame: Uint8Array): T {
-		let payload = frame;
-		if (this.#decompress) {
-			this.#decoder ??= new Decoder();
-			payload = this.#decoder.frame(frame);
-		}
-		const parsed = JSON.parse(new TextDecoder().decode(payload));
+	// Frame 0 of a group is a snapshot, the rest are merge patches.
+	#apply(payload: Uint8Array): void {
 		if (this.#framesRead === 0) {
-			this.#current = parsed;
+			this.#decoder.snapshot(payload);
 		} else {
-			this.#current = merge(this.#current, parsed);
+			this.#decoder.delta(payload);
 		}
 		this.#framesRead += 1;
-
-		return this.#schema ? this.#schema.parse(this.#current) : (this.#current as T);
 	}
 }

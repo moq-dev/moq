@@ -7,6 +7,12 @@
 //!
 //! Pick [`snapshot`] when consumers care about "what is the value now" (a catalog, a status
 //! document) and [`stream`] when they care about every record (an event log, a media timeline).
+//!
+//! Each mode comes in two layers. `Producer`/`Consumer` own a [`moq_net`] track and manage its
+//! groups. `Encoder`/`Decoder` are the same logic without the track: values in, frame payloads out
+//! (and back), with the encoder saying where the group boundaries fall. Reach for the codec layer
+//! when something else already owns the track, such as a `moq_mux::container::Producer` also
+//! managing a timeline and a catalog estimate.
 
 mod diff;
 pub mod snapshot;
@@ -31,6 +37,13 @@ pub enum Error {
 	/// A compressed frame could not be decoded (malformed, truncated, or oversized).
 	#[error(transparent)]
 	Flate(#[from] moq_flate::Error),
+
+	/// A merge patch arrived with no snapshot to apply it to.
+	///
+	/// Every group opens with a full snapshot, so this means frames reached
+	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
+	#[error("delta before snapshot")]
+	MissingSnapshot,
 }
 
 impl From<serde_json::Error> for Error {

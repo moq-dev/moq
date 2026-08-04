@@ -12,8 +12,16 @@
  * following frames are RFC 7396 JSON Merge Patch deltas applied in order. Interoperable with the
  * Rust `moq_json::snapshot`.
  *
+ * {@link Producer} and {@link Consumer} own a track: hand one a track and it manages the groups for
+ * you. {@link Encoder} and {@link Decoder} are the same logic without the track. The encoder turns
+ * values into {@link Encoded} frame payloads and says where the group boundaries fall; the decoder
+ * reconstructs a value from those payloads. Reach for them when something else is already in charge
+ * of the track.
+ *
  * @module
  */
 
 export { Consumer } from "./consumer.ts";
-export { type Config, Producer, type ProducerConfig } from "./producer.ts";
+export { Decoder } from "./decoder.ts";
+export { type Config, type Encoded, Encoder } from "./encoder.ts";
+export { Producer, type ProducerConfig } from "./producer.ts";
