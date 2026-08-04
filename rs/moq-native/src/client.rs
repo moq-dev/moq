@@ -97,6 +97,13 @@ impl ClientConfig {
 			moq_net::Versions::from(self.version.clone())
 		}
 	}
+
+	/// The Happy Eyeballs stagger to use, resolving the default. Every backend
+	/// reads it from here so the four dial paths can't drift apart.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+	pub(crate) fn failover_delay(&self) -> std::time::Duration {
+		self.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY)
+	}
 }
 
 impl Default for ClientConfig {
@@ -205,13 +212,17 @@ impl Client {
 		};
 
 		let versions = config.versions();
+		// Read before the struct literal below moves fields out of `config`.
+		#[cfg(feature = "tcp")]
+		let failover_delay = config.failover_delay();
+
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
 			backoff: config.backoff,
 			#[cfg(feature = "tcp")]
-			failover_delay: config.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY),
+			failover_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,

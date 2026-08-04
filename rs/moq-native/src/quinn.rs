@@ -280,7 +280,7 @@ impl QuinnClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY),
+			failover_delay: config.failover_delay(),
 			dual_stack,
 		})
 	}

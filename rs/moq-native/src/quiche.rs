@@ -244,7 +244,7 @@ impl QuicheClient {
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			quic,
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY),
+			failover_delay: config.failover_delay(),
 			identity,
 		})
 	}
