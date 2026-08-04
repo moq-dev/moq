@@ -149,13 +149,14 @@ mod test {
 
 		let mut out = Vec::new();
 		for value in values {
-			let Some(encoded) = encoder.update(value).unwrap() else {
+			let Some(frame) = encoder.update(value).unwrap() else {
 				continue;
 			};
-			match encoded.keyframe {
-				true => decoder.snapshot(&encoded.payload).unwrap(),
-				false => decoder.delta(&encoded.payload).unwrap(),
+			match frame.keyframe {
+				true => decoder.snapshot(&frame.payload).unwrap(),
+				false => decoder.delta(&frame.payload).unwrap(),
 			}
+			frame.commit();
 			out.push(decoder.decode().unwrap().unwrap());
 		}
 		out
@@ -213,11 +214,12 @@ mod test {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {
-			let encoded = encoder.update(&json!({ "n": n })).unwrap().unwrap();
-			match encoded.keyframe {
-				true => decoder.snapshot(&encoded.payload).unwrap(),
-				false => decoder.delta(&encoded.payload).unwrap(),
+			let frame = encoder.update(&json!({ "n": n })).unwrap().unwrap();
+			match frame.keyframe {
+				true => decoder.snapshot(&frame.payload).unwrap(),
+				false => decoder.delta(&frame.payload).unwrap(),
 			}
+			frame.commit();
 		}
 
 		assert_eq!(decoder.decode().unwrap(), Some(json!({ "n": 20 })));

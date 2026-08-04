@@ -89,6 +89,51 @@ pub struct Encoded {
 	pub keyframe: bool,
 }
 
+/// An encoded frame the caller has not yet acknowledged writing.
+///
+/// Returned by [`Encoder::update`]. Read [`payload`](Encoded::payload) and
+/// [`keyframe`](Encoded::keyframe) through the [`Deref`](std::ops::Deref) to [`Encoded`], write the
+/// frame, then [`commit`](Self::commit).
+///
+/// Dropping it uncommitted [`Encoder::reset`]s, so a frame that never reached the wire leaves the
+/// encoder resynchronizing with a fresh snapshot rather than emitting deltas against a baseline no
+/// consumer received. Note that this is a recovery, not a rollback: producing a delta payload
+/// advances the group's DEFLATE window, and that can't be undone, so a snapshot is the only sound
+/// way back. Forgetting to commit a frame that *was* written is therefore merely wasteful (one
+/// redundant snapshot), never incorrect.
+#[must_use = "the frame must be written and committed, or dropped to resynchronize the encoder"]
+pub struct Pending<'a, T> {
+	encoder: &'a mut Encoder<T>,
+	encoded: Encoded,
+	committed: bool,
+}
+
+impl<T> Pending<'_, T> {
+	/// Acknowledge that the frame reached the wire, keeping the encoder's state.
+	///
+	/// Only call this once the write has actually succeeded. Committing a frame that failed to write
+	/// is the one thing that corrupts the stream.
+	pub fn commit(mut self) {
+		self.committed = true;
+	}
+}
+
+impl<T> std::ops::Deref for Pending<'_, T> {
+	type Target = Encoded;
+
+	fn deref(&self) -> &Encoded {
+		&self.encoded
+	}
+}
+
+impl<T> Drop for Pending<'_, T> {
+	fn drop(&mut self) {
+		if !self.committed {
+			self.encoder.reset();
+		}
+	}
+}
+
 /// Encodes a JSON value into frame payloads, choosing snapshots and deltas automatically.
 ///
 /// The track-free core of [`Producer`](super::Producer): it decides *what bytes go in a frame* and
@@ -98,20 +143,26 @@ pub struct Encoded {
 /// that is also managing a timeline and a catalog estimate:
 ///
 /// ```ignore
-/// if let Some(encoded) = encoder.update(&value)? {
+/// if let Some(frame) = encoder.update(&value)? {
 ///     container.write(moq_mux::container::Frame {
 ///         timestamp,
 ///         duration: None,
-///         payload: encoded.payload,
-///         keyframe: encoded.keyframe,
-///     })?;
+///         payload: frame.payload.clone(),
+///         keyframe: frame.keyframe,
+///     })?; // an early return here drops `frame`, resetting the encoder
+///     frame.commit();
 /// }
 /// ```
 ///
 /// Frames must reach the wire in the order they were encoded, and a frame with
 /// [`keyframe`](Encoded::keyframe) set must open a new group: both the merge patches and the
-/// group-scoped DEFLATE window depend on it. If the caller cuts a group for its own reasons, call
-/// [`reset`](Self::reset) so the next value is encoded as a snapshot.
+/// group-scoped DEFLATE window depend on it. [`update`](Self::update) hands back a [`Pending`]
+/// rather than a bare [`Encoded`] so a frame that never reaches the wire can't silently desync the
+/// encoder: dropping it uncommitted [`reset`](Self::reset)s, and the next value is encoded as a
+/// fresh snapshot. Committing a frame you failed to write is the one way to corrupt the stream.
+///
+/// If the caller cuts a group for its own reasons (a `cut`, `seek`, or discontinuity), call
+/// [`reset`](Self::reset) directly so the next value opens the new group with a snapshot.
 pub struct Encoder<T> {
 	config: ProducerConfig,
 
@@ -176,8 +227,21 @@ impl<T: Serialize> Encoder<T> {
 	/// Encode a new value, as a snapshot or a delta.
 	///
 	/// Returns `None` when the value is unchanged from the last one encoded, so nothing needs to be
-	/// written.
-	pub fn update(&mut self, value: &T) -> Result<Option<Encoded>> {
+	/// written. Otherwise the frame comes back as a [`Pending`] the caller writes and then
+	/// [`commit`](Pending::commit)s; dropping it uncommitted resynchronizes the encoder.
+	pub fn update(&mut self, value: &T) -> Result<Option<Pending<'_, T>>> {
+		Ok(self.encode(value)?.map(|encoded| Pending {
+			encoder: self,
+			encoded,
+			committed: false,
+		}))
+	}
+
+	/// Encode a new value into a bare frame, advancing the encoder's state.
+	///
+	/// The state change is what [`Pending`] guards, so this stays private: every caller goes through
+	/// [`update`](Self::update) and has to say whether the frame reached the wire.
+	fn encode(&mut self, value: &T) -> Result<Option<Encoded>> {
 		// The first update (or the first after a `reset`) has no baseline to diff against, so it seeds
 		// the stream with a snapshot.
 		let Some(last) = self.last.as_ref() else {
@@ -279,14 +343,29 @@ mod test {
 	use super::*;
 	use serde_json::json;
 
-	/// Encode a sequence of values, returning `(keyframe, payload_len)` per emitted frame.
+	/// Encode a sequence of values, committing each frame, and return `(keyframe, payload_len)` per
+	/// emitted frame.
 	fn encode(config: ProducerConfig, values: &[Value]) -> Vec<(bool, usize)> {
 		let mut encoder = Encoder::<Value>::new(config);
-		values
-			.iter()
-			.filter_map(|value| encoder.update(value).unwrap())
-			.map(|encoded| (encoded.keyframe, encoded.payload.len()))
-			.collect()
+		let mut out = Vec::new();
+		for value in values {
+			if let Some(frame) = encoder.update(value).unwrap() {
+				out.push((frame.keyframe, frame.payload.len()));
+				frame.commit();
+			}
+		}
+		out
+	}
+
+	/// Encode one value and commit it, returning the frame.
+	fn commit(encoder: &mut Encoder<Value>, value: &Value) -> Option<Encoded> {
+		let frame = encoder.update(value).unwrap()?;
+		let encoded = Encoded {
+			payload: frame.payload.clone(),
+			keyframe: frame.keyframe,
+		};
+		frame.commit();
+		Some(encoded)
 	}
 
 	#[test]
@@ -362,11 +441,47 @@ mod test {
 	#[test]
 	fn reset_forces_the_next_update_to_be_a_keyframe() {
 		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
-		assert!(encoder.update(&json!({ "a": 1 })).unwrap().unwrap().keyframe);
-		assert!(!encoder.update(&json!({ "a": 2 })).unwrap().unwrap().keyframe);
+		assert!(commit(&mut encoder, &json!({ "a": 1 })).unwrap().keyframe);
+		assert!(!commit(&mut encoder, &json!({ "a": 2 })).unwrap().keyframe);
 
 		encoder.reset();
-		assert!(encoder.update(&json!({ "a": 3 })).unwrap().unwrap().keyframe);
+		assert!(commit(&mut encoder, &json!({ "a": 3 })).unwrap().keyframe);
+	}
+
+	/// A frame the caller never wrote must not leave the encoder emitting deltas against a baseline
+	/// no consumer received. Dropping the [`Pending`] uncommitted is what a failed write looks like,
+	/// and it has to resynchronize on its own: a caller cannot be relied on to remember.
+	#[test]
+	fn an_uncommitted_frame_resynchronizes_the_encoder() {
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
+		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
+
+		// The caller wrote this one and said so, so the next value can still ride as a delta.
+		commit(&mut encoder, &json!({ "a": 2 })).unwrap();
+
+		// This one fails to write, so the caller drops it without committing.
+		drop(encoder.update(&json!({ "a": 3 })).unwrap().expect("a delta"));
+
+		// The next value opens a new group with a full snapshot rather than patching a state the
+		// consumer never reached.
+		let recovered = commit(&mut encoder, &json!({ "a": 4 })).expect("a resynchronizing snapshot");
+		assert!(recovered.keyframe);
+		assert_eq!(
+			serde_json::from_slice::<Value>(&recovered.payload).unwrap(),
+			json!({ "a": 4 }),
+			"the snapshot carries the whole value, not a patch"
+		);
+	}
+
+	/// The same recovery when the very first frame is lost: the encoder must not treat the value as
+	/// already published and skip it as unchanged.
+	#[test]
+	fn an_uncommitted_first_frame_is_reencoded() {
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
+		drop(encoder.update(&json!({ "a": 1 })).unwrap().expect("a snapshot"));
+
+		let retried = commit(&mut encoder, &json!({ "a": 1 })).expect("the same value, re-encoded");
+		assert!(retried.keyframe);
 	}
 
 	/// A reset value is republished even when it matches the last one encoded: the new group has to
@@ -374,11 +489,14 @@ mod test {
 	#[test]
 	fn reset_republishes_an_unchanged_value() {
 		let mut encoder = Encoder::<Value>::new(ProducerConfig::default());
-		encoder.update(&json!({ "a": 1 })).unwrap().unwrap();
+		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
 
 		encoder.reset();
-		let encoded = encoder.update(&json!({ "a": 1 })).unwrap().expect("a fresh snapshot");
-		assert!(encoded.keyframe);
+		assert!(
+			commit(&mut encoder, &json!({ "a": 1 }))
+				.expect("a fresh snapshot")
+				.keyframe
+		);
 	}
 
 	#[test]
@@ -423,11 +541,16 @@ mod test {
 	fn a_snapshot_serializes_its_value_once() {
 		let value = Ticking(std::cell::Cell::new(0));
 		let mut encoder = Encoder::<Ticking>::new(ProducerConfig::default());
-		let encoded = encoder.update(&value).unwrap().expect("a snapshot");
+		let payload = {
+			let frame = encoder.update(&value).unwrap().expect("a snapshot");
+			let payload = frame.payload.clone();
+			frame.commit();
+			payload
+		};
 
 		assert_eq!(value.0.get(), 1, "the value should be serialized exactly once");
 
-		let emitted: Value = serde_json::from_slice(&encoded.payload).unwrap();
+		let emitted: Value = serde_json::from_slice(&payload).unwrap();
 		assert_eq!(emitted, json!({ "n": 0 }));
 		assert_eq!(encoder.value(), Some(&emitted), "the baseline must be what was emitted");
 	}
@@ -437,8 +560,8 @@ mod test {
 		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_delta_ratio(100));
 		assert_eq!(encoder.value(), None);
 
-		encoder.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		encoder.update(&json!({ "a": 1, "b": 2 })).unwrap();
+		commit(&mut encoder, &json!({ "a": 1, "b": 1 }));
+		commit(&mut encoder, &json!({ "a": 1, "b": 2 }));
 
 		// The delta was folded into the baseline, so it reflects what was actually published.
 		assert_eq!(encoder.value(), Some(&json!({ "a": 1, "b": 2 })));

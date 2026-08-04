@@ -61,6 +61,27 @@ export interface Encoded {
 }
 
 /**
+ * An encoded frame the caller has not yet acknowledged writing, returned by {@link Encoder.update}.
+ *
+ * Write the frame, then {@link commit}. A frame that is never committed never reached the wire, so
+ * the encoder resynchronizes on the next {@link Encoder.update}: it starts a fresh snapshot rather
+ * than emitting deltas against a baseline no consumer received.
+ *
+ * This is a recovery, not a rollback. Producing a delta payload advances the group's DEFLATE window
+ * and that can't be undone, so a snapshot is the only sound way back. Forgetting to commit a frame
+ * that *was* written is therefore merely wasteful (one redundant snapshot), never incorrect.
+ */
+export interface Pending extends Encoded {
+	/**
+	 * Acknowledge that the frame reached the wire, keeping the encoder's state.
+	 *
+	 * Only call this once the write has actually succeeded. Committing a frame that failed to write
+	 * is the one thing that corrupts the stream.
+	 */
+	commit(): void;
+}
+
+/**
  * Encodes a JSON value into frame payloads, choosing snapshots and deltas automatically.
  *
  * The track-free core of {@link Producer}: it decides *what bytes go in a frame* and *where the
@@ -69,7 +90,15 @@ export interface Encoded {
  *
  * Frames must reach the wire in the order they were encoded, and a frame with
  * {@link Encoded.keyframe} set must open a new group: both the merge patches and the group-scoped
- * DEFLATE window depend on it. If the caller closes a group for its own reasons, call
+ * DEFLATE window depend on it. {@link update} hands back a {@link Pending} rather than a bare
+ * {@link Encoded} so a frame that never reaches the wire can't silently desync the encoder: leave it
+ * uncommitted and the next update resynchronizes with a fresh snapshot.
+ *
+ * (The Rust `moq-json` encoder does the same thing through `Drop`, so it resynchronizes the moment
+ * the frame is discarded. JavaScript has no destructor, so the check happens on the next update
+ * instead. The resulting stream is identical either way.)
+ *
+ * If the caller closes a group for its own reasons, call
  * {@link reset} so the next value is encoded as a snapshot.
  */
 export class Encoder<T> {
@@ -92,6 +121,10 @@ export class Encoder<T> {
 	// The current group's `deflate-raw` stream, swapped for a fresh one (cold window) at each
 	// snapshot, so a snapshot and its deltas share one stream.
 	#flate?: Flate;
+
+	// Whether the frame from the last {@link update} is still unacknowledged. An uncommitted frame
+	// never reached the wire, so the next update resynchronizes before encoding anything new.
+	#pending = false;
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
@@ -116,15 +149,22 @@ export class Encoder<T> {
 		this.#deltaBytes = 0;
 		this.#snapshotLen = 0;
 		this.#groupFrames = 0;
+		this.#pending = false;
 	}
 
 	/**
 	 * Encode a new value, as a snapshot or a delta.
 	 *
 	 * Returns `undefined` when the value is unchanged from the last one encoded, so nothing needs to
-	 * be written.
+	 * be written. Otherwise the frame comes back as a {@link Pending} the caller writes and then
+	 * commits; leaving one uncommitted resynchronizes the encoder here, on the next call.
 	 */
-	update(value: T): Encoded | undefined {
+	update(value: T): Pending | undefined {
+		// The previous frame was never acknowledged, so it never reached the wire. Drop the baseline
+		// and the DEFLATE window so this value goes out as a fresh snapshot rather than as a patch
+		// against a state no consumer holds.
+		if (this.#pending) this.reset();
+
 		const valid = this.#config.schema ? this.#config.schema.parse(value) : value;
 
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
@@ -140,10 +180,21 @@ export class Encoder<T> {
 			const payload = this.#frame(delta);
 			this.#deltaBytes += payload.length;
 			this.#groupFrames += 1;
-			return { payload, keyframe: false };
+			return this.#pend({ payload, keyframe: false });
 		}
 
-		return { payload: this.#snapshot(new TextEncoder().encode(text)), keyframe: true };
+		return this.#pend({ payload: this.#snapshot(new TextEncoder().encode(text)), keyframe: true });
+	}
+
+	// Hand a frame to the caller, marking it unacknowledged until they commit.
+	#pend(encoded: Encoded): Pending {
+		this.#pending = true;
+		return {
+			...encoded,
+			commit: () => {
+				this.#pending = false;
+			},
+		};
 	}
 
 	// Resolved delta ratio: the configured value, or the default when unset. `0` disables deltas.

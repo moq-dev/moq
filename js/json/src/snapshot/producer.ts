@@ -33,18 +33,13 @@ export class Producer<T> {
 
 	/** Publish a new value, emitting a snapshot or delta automatically. No-op if unchanged. */
 	update(value: T): void {
-		const encoded = this.#encoder.update(value);
-		if (!encoded) return;
+		const frame = this.#encoder.update(value);
+		if (!frame) return;
 
-		try {
-			this.#write(encoded);
-		} catch (err) {
-			// A write that fails leaves the encoder's baseline ahead of what reached the wire, so drop
-			// the baseline and let the next update resynchronize with a fresh snapshot. A delta against
-			// a snapshot no consumer ever saw would be unreadable.
-			this.#encoder.reset();
-			throw err;
-		}
+		// A throw here leaves the frame uncommitted, so the next update resynchronizes with a fresh
+		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
+		this.#write(frame);
+		frame.commit();
 	}
 
 	#write(encoded: Encoded): void {

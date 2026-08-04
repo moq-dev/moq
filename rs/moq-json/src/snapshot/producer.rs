@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{Encoder, ProducerConfig};
+use super::{Encoded, Encoder, ProducerConfig};
 use crate::Result;
 
 /// Publishes a JSON value over a track, choosing snapshots and deltas automatically.
@@ -35,7 +35,7 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a subscriber for the underlying track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
-		self.inner.lock().unwrap().track.subscribe(None)
+		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
 }
 
@@ -44,9 +44,11 @@ impl<T: Serialize> Producer<T> {
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
-				track,
-				group: None,
-				deltas: config.delta_ratio != 0,
+				track: Track {
+					inner: track,
+					group: None,
+					deltas: config.delta_ratio != 0,
+				},
 				encoder: Encoder::new(config),
 			})),
 			_marker: PhantomData,
@@ -155,8 +157,41 @@ impl<T: Serialize> Drop for Guard<'_, T> {
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
+///
+/// The track and the encoder are separate fields so a [`Pending`](super::Pending) frame (which
+/// borrows the encoder) and the write that consumes it (which borrows the track) don't contend for
+/// one `&mut self`.
 struct Inner<T> {
-	track: moq_net::track::Producer,
+	track: Track,
+	encoder: Encoder<T>,
+}
+
+impl<T: Serialize> Inner<T> {
+	fn update(&mut self, value: &T) -> Result<()> {
+		// Split the borrow so `frame` can hold the encoder while `track` is written through.
+		let Inner { track, encoder } = self;
+
+		let Some(frame) = encoder.update(value)? else {
+			return Ok(());
+		};
+
+		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
+		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
+		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
+		track.write(&frame)?;
+		frame.commit();
+
+		Ok(())
+	}
+
+	fn finish(&mut self) -> Result<()> {
+		self.track.finish()
+	}
+}
+
+/// The track half of [`Inner`]: where an encoded frame goes and how groups are rolled.
+struct Track {
+	inner: moq_net::track::Producer,
 
 	/// The group a delta would be appended to, open only while deltas are enabled.
 	group: Option<moq_net::group::Producer>,
@@ -164,28 +199,15 @@ struct Inner<T> {
 	/// Whether the encoder can emit deltas at all. With them off every frame is a snapshot, so a
 	/// group is closed the moment it's written and never held open.
 	deltas: bool,
-
-	encoder: Encoder<T>,
 }
 
-impl<T: Serialize> Inner<T> {
-	fn update(&mut self, value: &T) -> Result<()> {
-		let Some(encoded) = self.encoder.update(value)? else {
-			return Ok(());
-		};
-
-		// A write that fails leaves the encoder's baseline ahead of what reached the wire, so drop the
-		// baseline and let the next update resynchronize with a fresh snapshot. Most failures kill the
-		// track outright, but a rejected frame (too large) doesn't, and a delta against a snapshot no
-		// consumer ever saw would be unreadable.
-		let res = match encoded.keyframe {
-			true => self.write_snapshot(encoded.payload),
-			false => self.write_delta(encoded.payload),
-		};
-		if res.is_err() {
-			self.encoder.reset();
+impl Track {
+	/// Write one encoded frame, rolling a group when it's a snapshot.
+	fn write(&mut self, encoded: &Encoded) -> Result<()> {
+		match encoded.keyframe {
+			true => self.write_snapshot(encoded.payload.clone()),
+			false => self.write_delta(encoded.payload.clone()),
 		}
-		res
 	}
 
 	/// Close the open group and write a snapshot as the first frame of a new one.
@@ -195,7 +217,7 @@ impl<T: Serialize> Inner<T> {
 			group.finish()?;
 		}
 
-		let mut group = self.track.append_group()?;
+		let mut group = self.inner.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), payload)?;
 
 		match self.deltas {
@@ -221,7 +243,7 @@ impl<T: Serialize> Inner<T> {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.track.finish()?;
+		self.inner.finish()?;
 		Ok(())
 	}
 }

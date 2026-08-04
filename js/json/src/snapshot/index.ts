@@ -18,10 +18,15 @@
  * reconstructs a value from those payloads. Reach for them when something else is already in charge
  * of the track.
  *
+ * Encoding advances state that the frame's consumers depend on, so {@link Encoder.update} hands back
+ * a {@link Pending} the caller commits once the write succeeds. Leaving one uncommitted
+ * resynchronizes the encoder, which keeps a frame that never reached the wire from desyncing the
+ * stream.
+ *
  * @module
  */
 
 export { Consumer } from "./consumer.ts";
 export { Decoder } from "./decoder.ts";
-export { type Config, type Encoded, Encoder } from "./encoder.ts";
+export { type Config, type Encoded, Encoder, type Pending } from "./encoder.ts";
 export { Producer, type ProducerConfig } from "./producer.ts";

@@ -26,6 +26,10 @@
 //! value from those payloads. Reach for them when something else is already in charge of the track,
 //! for example a `moq_mux::container::Producer` also managing a timeline and a catalog estimate.
 //! [`Encoded::keyframe`] maps straight onto `moq_mux::container::Frame::keyframe`.
+//!
+//! Encoding advances state that the frame's consumers depend on, so [`Encoder::update`] hands back a
+//! [`Pending`] the caller commits once the write succeeds. Dropping it uncommitted resynchronizes
+//! the encoder, which keeps a frame that never reached the wire from desyncing the stream.
 
 mod consumer;
 mod decoder;
@@ -34,7 +38,7 @@ mod producer;
 
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder};
-pub use encoder::{Encoded, Encoder, ProducerConfig};
+pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::{Guard, Producer};
 
 #[cfg(test)]
