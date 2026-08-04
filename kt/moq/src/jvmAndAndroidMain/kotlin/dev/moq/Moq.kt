@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.Flow
 import uniffi.moq.MoqAnnounced
 import uniffi.moq.MoqAnnouncedBroadcast
 import uniffi.moq.MoqAnnouncement
-import uniffi.moq.MoqBackoff
 import uniffi.moq.MoqBroadcastConsumer
 import uniffi.moq.MoqClient
 import uniffi.moq.MoqOriginOptions
@@ -100,7 +99,7 @@ class Moq internal constructor(
             tlsKey: String? = null,
             bind: String? = null,
             reconnect: Boolean? = null,
-            backoff: MoqBackoff? = null,
+            backoff: Backoff? = null,
             publish: MoqOriginProducer? = null,
             subscribe: MoqOriginProducer? = null,
         ): Moq {

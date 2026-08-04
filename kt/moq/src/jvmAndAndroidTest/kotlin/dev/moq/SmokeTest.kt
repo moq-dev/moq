@@ -57,11 +57,20 @@ class SmokeTest {
         val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
         val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
+        val backoff: Backoff = Backoff(
+            initialMs = 500uL,
+            multiplier = 2u,
+            maxMs = 10_000uL,
+            timeoutMs = 0uL,
+        )
+        val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
+        assertEquals(500uL, backoff.initialMs)
+        assertEquals(ConnectionStatus.CONNECTED, status)
     }
 
     @Test
