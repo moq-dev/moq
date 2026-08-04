@@ -30,7 +30,16 @@ impl Client {
 			.established()
 			.await
 			.map_err(map_connect_error)?;
-		let session = connection.session().ok_or(MoqError::Closed)?;
+		// A peer that closes right after the handshake can clear the session between
+		// `established` returning and this read. The connection knows why it ended, so
+		// surface that rather than a bare "closed" that names no cause.
+		let session = match connection.session() {
+			Some(session) => session,
+			None => {
+				connection.closed().await.map_err(map_connect_error)?;
+				return Err(MoqError::Closed);
+			}
+		};
 
 		Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
 	}
