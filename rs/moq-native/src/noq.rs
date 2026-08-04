@@ -267,7 +267,7 @@ impl NoqClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
-			failover_delay: config.failover_delay(),
+			failover_delay: config.effective_failover_delay(),
 			dual_stack,
 		})
 	}
