@@ -144,6 +144,11 @@ pub enum Error {
 	/// truncated while the fragments kept the full value, putting them on different timelines.
 	#[error("timescale {0} does not fit the 32-bit mdhd field")]
 	TimescaleTooLarge(u64),
+
+	/// A `Cmaf` rendition's init passes through from the catalog at its own scale, so
+	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
+	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
+	TimescaleOverride,
 }
 
 impl From<mp4_atom::Error> for Error {
