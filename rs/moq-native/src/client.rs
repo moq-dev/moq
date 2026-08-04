@@ -34,6 +34,25 @@ pub struct ClientConfig {
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
+	/// Maximum time for one [`Client::connect`], covering the dial and the MoQ
+	/// handshake. Set to 0 to wait forever.
+	///
+	/// This has to live above the transports rather than inside one: QUIC bounds its
+	/// own dial, but the WebSocket fallback and the handshake that follows either
+	/// transport have no deadline of their own, so a peer that accepts TCP and then
+	/// never speaks would hang the whole connect. [`Client::reconnect`] only re-arms
+	/// its backoff between attempts, so an attempt that never returns stalls the
+	/// retry loop indefinitely.
+	#[arg(
+		id = "client-connect-timeout",
+		long = "client-connect-timeout",
+		default_value = "30s",
+		env = "MOQ_CLIENT_CONNECT_TIMEOUT",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(with = "humantime_serde")]
+	pub timeout: std::time::Duration,
+
 	/// QUIC transport tuning (`--client-quic-*`): stream limits, GSO, timeouts.
 	#[command(flatten)]
 	#[serde(default)]
@@ -90,6 +109,7 @@ impl Default for ClientConfig {
 			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
+			timeout: std::time::Duration::from_secs(30),
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
@@ -113,6 +133,8 @@ pub struct Client {
 	versions: moq_net::Versions,
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
+	/// Deadline for one [`Client::connect`], from [`ClientConfig::timeout`]. Zero waits forever.
+	timeout: std::time::Duration,
 	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
@@ -189,6 +211,7 @@ impl Client {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
+			timeout: config.timeout,
 			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
@@ -329,7 +352,19 @@ impl Client {
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let pair = Box::pin(self.connect_inner(url)).await?;
+		let attempt = Box::pin(self.connect_inner(url));
+
+		// The deadline covers the dial AND the handshake, for every transport: it is the
+		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
+		// arm was still pending.
+		let pair = match self.timeout.is_zero() {
+			true => attempt.await?,
+			false => match tokio::time::timeout(self.timeout, attempt).await {
+				Ok(res) => res?,
+				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
+			},
+		};
+
 		tracing::info!(version = %pair.0.version(), "connected");
 		Ok(crate::spawn_session(pair))
 	}
@@ -920,5 +955,59 @@ mod tests {
 		.expect("race waited for WebSocket after QUIC transport connected")
 		.unwrap();
 		assert_eq!(value, super::TransportRace::Quic("quic"));
+	}
+
+	#[test]
+	fn connect_timeout_defaults_to_thirty_seconds() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.timeout, std::time::Duration::from_secs(30));
+	}
+
+	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
+	/// gives up on its own, but the WebSocket arm has no deadline of its own, so the
+	/// race stays pending forever. Without the connect timeout this test hangs.
+	///
+	/// That is what wedged a publisher against a livelocked relay: `Reconnect` only
+	/// re-arms its backoff (and checks its give-up timeout) *between* attempts, so an
+	/// attempt that never returns stalls the retry loop for good.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn connect_times_out_against_a_peer_that_never_speaks() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+
+		// Accept, then hold the connections open without ever writing a byte. Dropping
+		// them would surface as a clean EOF and let the fallback fail on its own.
+		tokio::spawn(async move {
+			let mut held = Vec::new();
+			while let Ok((stream, _)) = listener.accept().await {
+				held.push(stream);
+			}
+		});
+
+		let timeout = std::time::Duration::from_secs(1);
+		let client = ClientConfig {
+			timeout,
+			..Default::default()
+		}
+		.init()
+		.unwrap();
+
+		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket
+		// arm alone against the silent peer.
+		let url: Url = format!("https://127.0.0.1:{}/", addr.port()).parse().unwrap();
+
+		let started = std::time::Instant::now();
+		let err = match client.connect(url).await {
+			Err(err) => err,
+			Ok(_) => panic!("connected to a peer that never spoke"),
+		};
+
+		assert!(matches!(err, Error::ConnectTimeout(_)), "unexpected error: {err}");
+		assert!(
+			started.elapsed() < std::time::Duration::from_secs(15),
+			"connect outlived its own deadline by too much: {:?}",
+			started.elapsed()
+		);
 	}
 }

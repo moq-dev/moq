@@ -40,6 +40,16 @@ pub enum Error {
 	#[error("failed to connect to server")]
 	ConnectFailed,
 
+	/// The dial and handshake together outlived the connect timeout.
+	///
+	/// Not every transport bounds its own dial: QUIC gives up on its own, but a peer
+	/// that completes the TCP handshake and then never speaks leaves the WebSocket
+	/// fallback (and the MoQ handshake that follows either transport) pending with
+	/// nothing to time it out. This deadline turns that into an error the caller can
+	/// retry instead of a wait that never ends.
+	#[error("connect timed out after {0:?}")]
+	ConnectTimeout(std::time::Duration),
+
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
 	#[error(transparent)]
 	Connect(#[from] crate::ConnectError),
