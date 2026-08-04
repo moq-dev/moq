@@ -414,6 +414,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
+	let mut seen_setup = false;
 
 	loop {
 		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
@@ -425,23 +426,37 @@ async fn run_unis<S: web_transport_trait::Session>(
 		// need it (the MoQ Cluster negotiation) waits on `peer_setup` instead, so a
 		// slow SETUP delays announcements rather than the whole session.
 		if kind == setup::SETUP_V17 {
+			// Exactly one SETUP per endpoint. A second would let a peer restate its
+			// declared identity mid-session, silently re-attributing every route
+			// already built from the first.
+			if std::mem::replace(&mut seen_setup, true) {
+				return Err(Error::ProtocolViolation);
+			}
+
 			let peer_setup = peer_setup.clone();
+			let session = session.clone();
 			tasks.push(async move {
+				// The negotiation gates the announce and dispatch loops, so a SETUP we
+				// cannot read must end the session rather than leave them parked on a
+				// slot nothing will ever fill.
 				let msg = match reader.decode::<setup::Setup>().await {
 					Ok(msg) => msg,
 					Err(err) => {
 						tracing::warn!(%err, "setup decode error");
+						session.close(Error::ProtocolViolation.to_code(), "invalid setup");
 						return;
 					}
 				};
 
 				if let Some(peer_setup) = peer_setup {
-					// A SETUP we can't parse still settles the negotiation as "off",
-					// so the publisher isn't left waiting on a peer that already spoke.
-					let peer = decode_peer_cluster(msg.parameters, version).unwrap_or_else(|err| {
-						tracing::warn!(%err, "setup parameter decode error");
-						cluster::Peer::default()
-					});
+					let peer = match decode_peer_cluster(msg.parameters, version) {
+						Ok(peer) => peer,
+						Err(err) => {
+							tracing::warn!(%err, "setup parameter decode error");
+							session.close(Error::ProtocolViolation.to_code(), "invalid setup parameters");
+							return;
+						}
+					};
 					peer_setup.set(peer);
 				}
 

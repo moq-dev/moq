@@ -211,12 +211,12 @@ pub struct Namespace<'a> {
 impl Namespace<'_> {
 	/// Decode the message body, expecting the extended form when the session negotiated
 	/// the MoQ Cluster extension. See [`super::PublishNamespace::decode_body`].
-	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, cluster: bool) -> Result<Self, DecodeError> {
+	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r, version)?;
 
 		// The base form has no Parameters field at all, so there is nothing to read
 		// (and nothing to reject) unless the extension is on.
-		let cluster = match cluster {
+		let cluster = match negotiated {
 			true => super::publish_namespace::decode_cluster_params(r, version, true)?,
 			false => None,
 		};

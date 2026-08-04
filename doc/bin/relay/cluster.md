@@ -72,7 +72,7 @@ A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits a
 
 ## Origin id
 
-Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. Each end declares it at session setup, so the other can avoid announcing (or serving) a path that already flows through it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
+Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.
 
 Set `cluster.id` to pin a stable id across restarts:
 

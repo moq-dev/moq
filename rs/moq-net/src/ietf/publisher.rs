@@ -43,6 +43,18 @@ impl Watched {
 			dead: false,
 		}
 	}
+
+	/// Record what the peer now holds, retiring any linger the old advertisement armed.
+	///
+	/// Only a discounted advertisement has a cost to restore. Leaving `idle_at` set past
+	/// one that isn't would keep [`Publisher::linger_deadline`] handing back an expired
+	/// instant that nothing ever clears, and the announce loops would spin on it.
+	fn set_sent(&mut self, sent: Advert) {
+		if !sent.discounted() {
+			self.idle_at = None;
+		}
+		self.sent = sent;
+	}
 }
 
 /// What to advertise to this peer for one broadcast.
@@ -898,7 +910,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			false => Advert::None,
 		};
 		if let Some(watch) = watched.get_mut(suffix) {
-			watch.sent = sent;
+			watch.set_sent(sent);
 		}
 		Ok(())
 	}
@@ -951,7 +963,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 
 		if let Some(watch) = watched.get_mut(suffix) {
-			watch.sent = advert;
+			watch.set_sent(advert);
 		}
 		Ok(())
 	}
@@ -1247,6 +1259,53 @@ mod tests {
 
 		let local = consumer.get_broadcast("from/us").unwrap();
 		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
+	}
+
+	/// A drained broadcast arms a linger so the cold cost is restored after a grace
+	/// period. If the advertisement stops being discounted before that fires, the
+	/// linger must go with it: an expired deadline that nothing clears makes
+	/// `linger_deadline` hand back the same instant every turn, and the announce loops
+	/// spin on it forever.
+	#[tokio::test]
+	async fn linger_clears_when_the_advert_stops_being_discounted() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let broadcast = origin
+			.clone()
+			.create_broadcast("cam", crate::broadcast::Route::announced())
+			.unwrap();
+
+		let mut watch = Watched::new(broadcast.consume());
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+
+		// Discounted (cost 0) and drained: the linger is running.
+		watch.set_sent(Advert::Cluster(cluster::Advert {
+			hops: cluster::HopPath::new(hops.clone()),
+			cost: 0,
+		}));
+		watch.idle_at = Some(web_async::time::Instant::now());
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert!(Publisher::<SinkSession>::linger_deadline(&watched).is_some());
+
+		// A re-priced advertisement has a cost to advertise, so there is nothing left
+		// to restore.
+		let mut watch = watched.into_values().next().unwrap();
+		watch.set_sent(Advert::Cluster(cluster::Advert {
+			hops: cluster::HopPath::new(hops),
+			cost: 9,
+		}));
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert_eq!(
+			Publisher::<SinkSession>::linger_deadline(&watched),
+			None,
+			"a non-discounted advert must not leave a deadline behind"
+		);
+
+		// So does one that stopped being advertisable at all.
+		let mut watch = watched.into_values().next().unwrap();
+		watch.idle_at = Some(web_async::time::Instant::now());
+		watch.set_sent(Advert::None);
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast

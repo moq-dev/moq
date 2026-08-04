@@ -30,13 +30,13 @@ impl PublishNamespace<'_> {
 	/// The negotiation is session state rather than anything in the message, so the
 	/// caller supplies it. A negotiated session that omits HOP_PATH is a protocol
 	/// violation, which surfaces here as [`DecodeError::InvalidValue`].
-	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, cluster: bool) -> Result<Self, DecodeError> {
+	pub fn decode_body<R: bytes::Buf>(r: &mut R, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
 			let _required_request_id_delta = u64::decode(r, version)?;
 		}
 		let track_namespace = decode_namespace(r, version)?;
-		let cluster = decode_cluster_params(r, version, cluster)?;
+		let cluster = decode_cluster_params(r, version, negotiated)?;
 
 		Ok(Self {
 			request_id,
