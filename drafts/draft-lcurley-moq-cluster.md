@@ -71,7 +71,7 @@ It also enables the extended NAMESPACE message ({{namespace}}), which is what le
 On a session that negotiated the extension, an endpoint MUST include HOP_PATH on every PUBLISH_NAMESPACE and NAMESPACE it sends, and a receiver MUST close the session with a PROTOCOL_VIOLATION if one arrives without it.
 
 ## Relay Cost
-An endpoint MAY declare what this link costs to cross:
+The client MAY declare what this link costs to cross; a server MUST NOT send this option, so one side owns the price:
 
 ~~~
 RELAY_COST Setup Option {
@@ -80,7 +80,7 @@ RELAY_COST Setup Option {
 }
 ~~~
 
-Both endpoints add this value to the ROUTE_COST of every advertisement they receive over the connection, so the link is priced the same in both directions.
+Both endpoints add the client's value to the ROUTE_COST of every advertisement they receive over the connection, so the link is priced the same in both directions.
 An absent option means 1, under which the accumulated cost equals the hop count.
 0 is meaningful and distinct from absent: it makes the link free, which is how a deployment describes two relays in the same datacenter.
 
@@ -177,6 +177,7 @@ When it stops carrying the namespace it SHOULD restore the accumulated value, op
 
 Two relays that independently begin carrying the same namespace would each see the other's 0 as cheaper than its own source, and both switching at once would leave the namespace with no source.
 Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose HOP_PATH has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the namespace and each Hop ID, so exactly one side moves.
+Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and neither side SHOULD move.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 ## Updating an Advertisement {#updating}

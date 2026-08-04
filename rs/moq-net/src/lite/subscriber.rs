@@ -987,6 +987,31 @@ mod tests {
 		assert_eq!(hops, vec![assigned]);
 	}
 
+	/// A peer with no assigned identity is attributed the reserved origin 0
+	/// (UNKNOWN), not a random one: a random id would look like a real identity
+	/// the peer never agreed to and cannot exclude for loop detection.
+	#[tokio::test]
+	async fn absent_peer_origin_stamps_unknown() {
+		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+
+		let mut routes = HashMap::new();
+		subscriber
+			.start_announce(
+				Path::new("room/host").to_owned(),
+				crate::OriginList::new(),
+				RouteCost::default(),
+				0,
+				None,
+				&mut routes,
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
+		assert_eq!(hops, vec![crate::Origin::UNKNOWN]);
+	}
+
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {
 		let origin = origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();

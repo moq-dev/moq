@@ -45,8 +45,8 @@ It defines a binding over TCP and over TLS, but a WebSocket binding is out of sc
 
 A WebSocket binding is nevertheless useful: WebSocket [RFC6455] is available where UDP is blocked, in web browsers that lack WebTransport, and behind HTTP load balancers that cannot route raw TCP or QUIC.
 
-This document specifies how to carry QMux over WebSocket: the message framing, the subprotocol negotiation used in place of TLS ALPN, keep-alive behavior, and datagrams.
-All other QMux semantics (in-order STREAM frame delivery, stream identifiers, flow control, transport parameters, and connection close) apply unchanged from [qmux].
+This document specifies how to carry QMux over WebSocket: the message framing, the subprotocol negotiation used in place of TLS ALPN, keep-alive behavior, connection close, and datagrams.
+All other QMux semantics (in-order STREAM frame delivery, stream identifiers, flow control, and transport parameters) apply unchanged from [qmux].
 
 This binding is application agnostic: any QUIC application that can run over QMux can run over QMux over WebSocket.
 Media over QUIC Transport [moqt] is the motivating use case, but nothing in this document is specific to it.
@@ -77,7 +77,7 @@ It also determines the QMux wire-format version, so there is no separate QMux ve
 
 A client offers one or more identifiers in the `Sec-WebSocket-Protocol` request header, in decreasing order of preference, one per protocol version it is willing to use.
 A server selects at most one, in its own order of preference, and echoes it in the response header; if it supports none of the offered identifiers, it MUST fail the handshake.
-A client MUST treat the absence of a `Sec-WebSocket-Protocol` response header, or a response value it did not offer, as a failed handshake per [RFC6455].
+A client MUST treat a response value it did not offer as a failed handshake per [RFC6455], and this binding additionally requires a selection: a client MUST treat the absence of a `Sec-WebSocket-Protocol` response header as a failed handshake too, since without one no QMux version was agreed.
 
 
 # Record Framing {#framing}

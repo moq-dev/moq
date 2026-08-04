@@ -145,7 +145,7 @@ This ensures that all Frames within a Group arrive reliably and in order.
 In contrast, Groups may arrive out of order due to network congestion and prioritization.
 The application SHOULD process or buffer groups out of order to avoid blocking on flow control.
 
-A small Group MAY instead be transmitted as a single QUIC datagram when reliability is not required (see [Datagrams](#datagrams)).
+A small single-frame Group MAY instead be transmitted as a QUIC datagram when reliability is not required (see [Datagrams](#datagrams)).
 
 ## Frame
 A Frame is a payload of bytes within a Group.
@@ -451,8 +451,8 @@ The subscriber MAY cache the error and potentially retry later.
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
-A publisher MAY transmit any Group as a single QUIC datagram in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions.
-A datagram-delivered group contains exactly one Frame and is not cached or retransmitted; a publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
+A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
+A datagram-delivered group is not cached or retransmitted; a publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
 There is no separate subscription for datagram delivery: datagrams are routed to existing subscriptions via the Subscribe ID, and a subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
 
 Each datagram body has the following encoding (note: there is no message length prefix; the QUIC datagram boundary delimits the payload):
@@ -728,6 +728,7 @@ When the relay stops carrying the broadcast it SHOULD restore the accumulated va
 
 Two relays that independently begin carrying the same broadcast would each see the other's 0 as cheaper than its own source, and both switching at once would leave the broadcast with no source.
 Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose path has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the broadcast path and each Hop ID, so exactly one side moves.
+Equal Hop IDs (including two relays that both declared 0) cannot be ordered, and neither side SHOULD move.
 Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted immediately.
 
 

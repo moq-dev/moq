@@ -4706,11 +4706,6 @@ mod tests {
 		dynamic_a.assert_no_request();
 	}
 
-	/// A local standby with the same original publisher joining a front that is
-	/// carrying the broadcast from a peer must splice the live subscription onto
-	/// the new source, never tear it down (#2473, e2e finding 2). Redundant
-	/// publishers sharing an origin id MUST produce the same tracks, so the
-	/// splice resumes seamlessly at the group boundary.
 	/// Two publishers that never declared an identity both arrive with a first
 	/// hop of UNKNOWN. They are unrelated content, so the second MUST replace the
 	/// first rather than joining it as an interchangeable standby: splicing them
@@ -4777,6 +4772,11 @@ mod tests {
 		drop(source_b);
 	}
 
+	/// A local standby with the same original publisher joining a front that is
+	/// carrying the broadcast from a peer must splice the live subscription onto
+	/// the new source, never tear it down (#2473, e2e finding 2). Redundant
+	/// publishers sharing an origin id MUST produce the same tracks, so the
+	/// splice resumes seamlessly at the group boundary.
 	#[tokio::test]
 	async fn test_standby_join_splices_live_subscriber() {
 		tokio::time::pause();
