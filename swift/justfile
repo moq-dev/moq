@@ -31,10 +31,10 @@ clean:
 # non-empty and none match the Swift scope. Run `just swift ci` (no
 
 # FILES) to force-run.
-ci FILES="":
+ci $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(swift/|rs/moq-ffi/)'; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(swift/|rs/moq-ffi/)' <<< "$FILES"; then
     	echo "swift: no Swift changes; skipping."
     	exit 0
     fi

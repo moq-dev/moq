@@ -6,6 +6,11 @@
 
 set working-directory := '.'
 
+# Paths a JS check depends on: every bun workspace (they are not all under js/,
+# see the root package.json) plus the config shared by all of them. `check`,
+# `fix`, and `ci` all skip themselves when a diff misses this.
+scope := '^(js/|doc/|demo/(boy|web)/|test/smoke/clients/js|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+
 # Run all checks by default.
 default:
     just check
@@ -13,18 +18,37 @@ default:
 install:
     bun install
 
+# Takes an optional newline-separated list of changed files and skips if none
+# match the JS scope; `just js check` (no FILES) always runs.
+#
+# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
+# latter into the recipe source, where a filename like `$(...)` would run as a
+# command. Git-derived paths are untrusted input, so they stay data.
+
 # Lint, type-check, and biome-format all packages.
-check:
+check $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "js: no JS changes; skipping."
+    	exit 0
+    fi
     bun install --frozen-lockfile
-    if tty -s; then \
-    	bun run --filter='*' --elide-lines=0 check; \
-    else \
-    	bun run --filter='*' check; \
+    if tty -s; then
+    	bun run --filter='*' --elide-lines=0 check
+    else
+    	bun run --filter='*' check
     fi
     bun biome check
 
-# Auto-fix lint and formatting issues.
-fix:
+# Auto-fix lint and formatting issues. Skips on the same terms as `check`.
+fix $FILES="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
+    	echo "js: no JS changes; skipping."
+    	exit 0
+    fi
     bun install
     bun biome check --write
 
@@ -57,10 +81,10 @@ clean:
 # changed files; skips if FILES is non-empty and none match the JS
 
 # scope. Run `just js ci` (no FILES) to force-run everything.
-ci FILES="":
+ci $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(js/|package\.json$|bun\.lock$|bun\.lockb$|biome\.jsonc$)'; then
+    if [[ -n "$FILES" ]] && ! grep -qE '{{ scope }}' <<< "$FILES"; then
     	echo "js: no JS changes; skipping."
     	exit 0
     fi

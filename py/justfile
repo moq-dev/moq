@@ -85,10 +85,10 @@ docs:
 # Python scope (which includes rs/moq-ffi because moq-ffi bundles it via
 
 # maturin). Run `just py ci` (no FILES) to force-run everything.
-ci FILES="":
+ci $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)'; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/)' <<< "$FILES"; then
     	echo "py: no Python changes; skipping."
     	exit 0
     fi

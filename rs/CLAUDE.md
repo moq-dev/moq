@@ -140,7 +140,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+- `just check` lints and compiles the crates your branch changed plus every crate depending on them; `just fix` auto-fixes formatting/lint over the same set (`just rs _select` does the selection, via `cargo metadata`). `just check-all` / `just fix-all` cover every default member. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
 
 - **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
   `slow-timeout` with `terminate-after`, so a wedged test is reported as a
@@ -166,7 +166,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
 
-- **`just check` only compiles the host's platform, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
+- **Local checks only compile the host's platform, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
   - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
