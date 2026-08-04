@@ -234,6 +234,11 @@ impl Muxer {
 	///
 	/// `base_dts` must be monotonically non-decreasing across a track's fragments. Returns an
 	/// empty `Bytes` when `frames` is empty.
+	///
+	/// Set [`Frame::duration`] on a per-frame call. Sample durations are inferred from the
+	/// following frame, and a fragment's last frame has none to look at, so it falls back to the
+	/// catalog cadence: a one-frame fragment whose real cadence differs writes a `trun` duration
+	/// that doesn't reach the next fragment's `base_dts`.
 	pub fn fragment_at(&self, sequence: u32, base_dts: moq_net::Timestamp, frames: &[Frame]) -> crate::Result<Bytes> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
@@ -423,13 +428,21 @@ mod tests {
 	// would leave the init and the fragments on different timelines.
 	#[test]
 	fn with_timescale_rejects_a_cmaf_rendition() {
-		// Any valid single-track init will do; a synthesized one saves a fixture.
-		let init = video_muxer().init().unwrap().unwrap();
+		// Any valid single-track init will do; a synthesized one saves a fixture. Build it at
+		// 48 kHz so the scale can only have come from the init: the framerate below would
+		// otherwise derive 30_000, and the catalog carries no timescale of its own.
+		let init = video_muxer()
+			.with_timescale(moq_net::Timescale::new(48_000).unwrap())
+			.unwrap()
+			.init()
+			.unwrap()
+			.unwrap();
 		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30.0);
 		config.container = CatalogContainer::Cmaf { init };
 
 		let muxer = Muxer::video(&config).unwrap();
-		assert_eq!(muxer.timescale().as_u64(), 30_000, "read from the init segment");
+		assert_eq!(muxer.timescale().as_u64(), 48_000, "read from the init segment");
 		assert!(muxer.with_timescale(moq_net::Timescale::new(90_000).unwrap()).is_err());
 	}
 
