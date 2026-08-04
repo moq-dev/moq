@@ -14,8 +14,12 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		Algorithm::HS256 => generate_hmac_key::<32>(),
 		Algorithm::HS384 => generate_hmac_key::<48>(),
 		Algorithm::HS512 => generate_hmac_key::<64>(),
-		Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => generate_rsa_key(2048),
-		Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512 => generate_rsa_key(2048),
+		Algorithm::RS256
+		| Algorithm::RS384
+		| Algorithm::RS512
+		| Algorithm::PS256
+		| Algorithm::PS384
+		| Algorithm::PS512 => generate_rsa_key(2048),
 		Algorithm::ES256 => generate_ec_key::<p256::NistP256>(EllipticCurve::P256),
 		Algorithm::ES384 => generate_ec_key::<p384::NistP384>(EllipticCurve::P384),
 		Algorithm::EdDSA => generate_ed25519_key(),

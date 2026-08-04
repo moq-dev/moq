@@ -196,6 +196,10 @@ Client settings used when connecting to other relays (clustering).
 
 ```toml
 [client]
+# Maximum time for one outbound dial and MoQ handshake. Defaults to 30s.
+# Set to "0" to wait forever.
+timeout = "30s"
+
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
@@ -208,6 +212,9 @@ tls.disable_verify = true
 # Defaults to true only when no custom root is set.
 # tls.system_roots = true
 ```
+
+The connect timeout is also available as `--client-connect-timeout` or
+`MOQ_CLIENT_CONNECT_TIMEOUT`.
 
 ### \[server.quic] and \[client.quic]
 

@@ -247,9 +247,9 @@ impl Rendition {
 	/// The wall-clock time of a media timestamp, when the timeline advertises an anchor.
 	pub(crate) fn wall_clock(&self, pts: moq_net::Timestamp) -> Option<SystemTime> {
 		let wall = self.section.wall?;
-		let timescale = moq_net::Timescale::new(self.section.timescale as u64).ok()?;
-		let units = wall as u128 + pts.as_scale(timescale);
-		let unix_ms = MOQ_EPOCH_UNIX_MILLIS as u128 + units * 1000 / timescale.as_u64() as u128;
+		let timescale = moq_net::Timescale::new(u64::from(self.section.timescale)).ok()?;
+		let units = u128::from(wall) + pts.as_scale(timescale);
+		let unix_ms = u128::from(MOQ_EPOCH_UNIX_MILLIS) + units * 1000 / u128::from(timescale.as_u64());
 		Some(SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(unix_ms).ok()?))
 	}
 

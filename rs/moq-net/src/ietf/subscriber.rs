@@ -262,14 +262,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Some(track)
 	}
 
-	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
+	/// The prefixes to issue SUBSCRIBE_NAMESPACE for: this handle's permitted scope,
+	/// relative to its root.
+	///
+	/// The scope is what we may ASK the peer for; the root is where what comes back
+	/// MOUNTS locally. Those are independent, and only coincide when the peer shares
+	/// our namespace -- a peer outside it has never heard of our root, so a rooted
+	/// subscriber asks for its scope and mounts the replies under the root.
+	pub fn subscribe_prefixes(&self) -> Vec<PathOwned> {
+		self.origin.allowed().map(|p| p.to_owned()).collect()
+	}
+
+	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
-	/// (virtual for v14/v15, real bidi for v16+).
+	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
 	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
+		prefix: PathOwned,
 	) -> Result<(), Error> {
-		let prefix = self.origin.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
@@ -362,6 +373,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut data = stream.reader.read_exact(size as usize).await?;
 
 			match type_id {
+				// The suffix is relative to the prefix we subscribed, which is itself
+				// relative to our root -- so the join is too, which is what everything
+				// below wants (`create_broadcast` joins the root itself).
 				ietf::Namespace::ID => {
 					let msg = ietf::Namespace::decode_body(&mut data, self.version, peer.negotiated())?;
 					if !data.is_empty() {
@@ -1212,6 +1226,92 @@ mod tests {
 			resolve_track_alias(aliases.consume(), 7).await,
 			Err(Error::NotFound)
 		));
+	}
+
+	async fn settle() {
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+	}
+
+	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
+		let writes = log.writes.lock().unwrap();
+		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// A rooted subscriber asks the peer for its permitted SCOPE. The root names where
+	/// replies mount on our side, which is meaningless to a peer outside our namespace,
+	/// so sending it asks for a prefix that matches nothing there.
+	#[tokio::test]
+	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let scoped = origin
+			.with_root("rootns")
+			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
+			.expect("scope the origin");
+
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			scoped,
+			Control::new(None, false),
+			None,
+			Version::Draft16,
+			tasks,
+		);
+
+		assert_eq!(
+			subscriber.subscribe_prefixes(),
+			vec![crate::Path::new("cam").to_owned()],
+			"one SUBSCRIBE_NAMESPACE per permitted prefix, relative to the root",
+		);
+
+		let stream = Stream::open(&session, Version::Draft16).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("cam").to_owned()));
+		// Parks awaiting the peer's response; the request is already on the wire.
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		assert_eq!(occurrences(&log, b"cam"), 1, "asked the peer for our scope");
+		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
+	}
+
+	/// A suffix the peer returns is relative to the prefix we asked for, and mounts
+	/// under our root exactly once.
+	#[tokio::test]
+	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let scoped = origin
+			.with_root("rootns")
+			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
+			.expect("scope the origin");
+
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			scoped,
+			Control::new(None, false),
+			None,
+			Version::Draft16,
+			tasks,
+		);
+
+		// What the NAMESPACE arm does with a suffix, using the prefix we subscribed.
+		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
+		let path = prefix.join(crate::Path::new("x.hang"));
+		subscriber.start_announce(path).unwrap();
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("rootns/cam/x.hang").is_some(),
+			"the reply mounts under the root once",
+		);
+		assert!(
+			consumer.get_broadcast("rootns/rootns/cam/x.hang").is_none(),
+			"the root was applied twice",
+		);
 	}
 
 	#[test]

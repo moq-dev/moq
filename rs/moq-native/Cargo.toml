@@ -96,5 +96,6 @@ bytes = "1"
 chrono = "0.4"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
 toml = "1.1"
 tracing-test = "0.2"

@@ -125,7 +125,7 @@ pub fn start<S: web_transport_trait::Session>(
 				);
 
 				let dispatch_session = adapter.clone();
-				let mut sub_ns = subscriber.clone();
+				let sub_ns = subscriber.clone();
 				let sub_ns_adapter = adapter.clone();
 
 				// Every half only ends the session on error (err_only parks on clean
@@ -145,19 +145,32 @@ pub fn start<S: web_transport_trait::Session>(
 					version
 				)));
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
+				// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`:
+				// the scope is what we may ask for, and it is not the origin's root.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let stream = match version {
-						Version::Draft16 => {
-							let (send, recv) = sub_ns_adapter.open_native_bi().await?;
-							Stream {
-								writer: crate::coding::Writer::new(send, version),
-								reader: crate::coding::Reader::new(recv, version),
+					let mut prefixes = futures::stream::FuturesUnordered::new();
+					for prefix in sub_ns.subscribe_prefixes() {
+						let mut sub_ns = sub_ns.clone();
+						let sub_ns_adapter = sub_ns_adapter.clone();
+						prefixes.push(async move {
+							let stream = match version {
+								Version::Draft16 => {
+									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+									Stream {
+										writer: crate::coding::Writer::new(send, version),
+										reader: crate::coding::Reader::new(recv, version),
+									}
+								}
+								_ => Stream::open(&sub_ns_adapter, version).await?,
+							};
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 							}
-						}
-						_ => Stream::open(&sub_ns_adapter, version).await?,
-					};
-					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+							Ok::<(), Error>(())
+						});
+					}
+					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+						result?;
 					}
 					Ok(())
 				}));
@@ -221,7 +234,7 @@ pub fn start<S: web_transport_trait::Session>(
 				);
 
 				let sub_ns_session = session.clone();
-				let mut sub_ns = subscriber.clone();
+				let sub_ns = subscriber.clone();
 
 				// When the peer's SETUP was pre-read (a gated server accept), monitor
 				// GOAWAY on that stream here; otherwise `run_unis` does it when the SETUP
@@ -252,10 +265,22 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut publisher_run = std::pin::pin!(err_only(publisher.run()));
 				let mut goaway = std::pin::pin!(err_only(goaway));
 				let mut setup = std::pin::pin!(setup);
+				// One SUBSCRIBE_NAMESPACE per permitted prefix; see the draft-16 arm.
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
-					let stream = Stream::open(&sub_ns_session, version).await?;
-					if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
-						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+					let mut prefixes = futures::stream::FuturesUnordered::new();
+					for prefix in sub_ns.subscribe_prefixes() {
+						let mut sub_ns = sub_ns.clone();
+						let sub_ns_session = sub_ns_session.clone();
+						prefixes.push(async move {
+							let stream = Stream::open(&sub_ns_session, version).await?;
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+							}
+							Ok::<(), Error>(())
+						});
+					}
+					while let Some(result) = futures::StreamExt::next(&mut prefixes).await {
+						result?;
 					}
 					Ok(())
 				}));
@@ -582,5 +607,60 @@ async fn run_goaway<R: web_transport_trait::RecvStream>(
 		Err(Error::Unsupported)
 	} else {
 		Err(Error::UnexpectedMessage)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
+		let writes = log.writes.lock().unwrap();
+		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// A subscriber issues one SUBSCRIBE_NAMESPACE per PERMITTED PREFIX, and asks for
+	/// those prefixes rather than the root it mounts replies under. Driven through
+	/// `start` so the per-prefix fan-out is exercised, not just one stream in
+	/// isolation: a loop that opened a single stream would still satisfy a test that
+	/// called `run_subscribe_namespace` itself.
+	#[tokio::test]
+	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let scoped = origin
+			.with_root("rootns")
+			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam"), crate::Path::new("mic")]))
+			.expect("scope the origin to two prefixes");
+
+		let gate = kio::Producer::new(true);
+		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+
+		let driver = start(
+			session,
+			None,
+			None,
+			true,
+			None,
+			Some(scoped),
+			None,
+			Version::Draft18,
+			None,
+			None,
+		)
+		.expect("start the session");
+		let _driver = tokio::spawn(driver);
+
+		// Both requests are written before either peer response, which never comes.
+		for _ in 0..100 {
+			if occurrences(&log, b"cam") > 0 && occurrences(&log, b"mic") > 0 {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+		}
+
+		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
+		assert_eq!(occurrences(&log, b"mic"), 1, "one SUBSCRIBE_NAMESPACE for mic");
+		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 }

@@ -334,6 +334,27 @@ congestion_control = "loss"
 		);
 	}
 
+	/// The client connect timeout is optional at the clap layer so an absent CLI
+	/// flag does not replace the TOML value with the resolved 30-second default.
+	#[test]
+	fn cli_does_not_clobber_toml_client_connect_timeout() {
+		let _env = EnvGuard::clear(&["MOQ_CLIENT_CONNECT_TIMEOUT"]);
+
+		let toml = r#"
+[client]
+timeout = "2m"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client-connect-timeout-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(config.client.timeout, Some(std::time::Duration::from_secs(120)));
+	}
+
 	#[test]
 	fn cli_does_not_clobber_toml_web_https_cert_arrays() {
 		let _env = EnvGuard::clear(&["MOQ_WEB_HTTPS_CERT", "MOQ_WEB_HTTPS_KEY"]);
