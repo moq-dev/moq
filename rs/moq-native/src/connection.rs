@@ -217,10 +217,44 @@ pub struct GoawayConfig {
 	pub handover: Option<Duration>,
 }
 
-/// Floor for [`Backoff::initial`], which paces the retries and sets the bar for
-/// calling a session healthy. Small enough to stay out of the way of a fast
-/// config, large enough that a session closed on sight never clears it.
+/// Floor for the retry delay, which also sets the bar for calling a session
+/// healthy. Small enough to stay out of the way of a fast config, large enough
+/// that a session closed on sight never clears it.
 const MIN_BACKOFF: Duration = Duration::from_millis(50);
+
+/// The retry pacing a connection actually runs on: [`Backoff`] with the floors
+/// applied.
+///
+/// Every knob can zero the delay on its own, and a delay of zero is a dial loop
+/// that runs as fast as the runtime allows. `initial` seeds it, `multiplier`
+/// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
+/// Resolving them once, here, keeps that from having to be re-argued at each of
+/// the three places the loop reaches for them.
+struct Pacing {
+	/// The first delay, and the bar a session must clear to count as healthy. At
+	/// zero every session looks healthy, which resets the give-up window forever.
+	initial: Duration,
+	/// Never below `initial`, so the cap cannot undo the floor on later retries.
+	max: Duration,
+	/// At least 1, since zero would shrink the delay back to nothing.
+	multiplier: u32,
+}
+
+impl Pacing {
+	fn new(backoff: &Backoff) -> Self {
+		let initial = backoff.initial.max(MIN_BACKOFF);
+		Self {
+			initial,
+			max: backoff.max.max(initial),
+			multiplier: backoff.multiplier.max(1),
+		}
+	}
+
+	/// The delay for the attempt after one that waited `delay`.
+	fn next(&self, delay: Duration) -> Duration {
+		std::cmp::min(delay.saturating_mul(self.multiplier), self.max)
+	}
+}
 
 /// Default handover window, and the ceiling a GOAWAY deadline is capped to when
 /// the config names none.
@@ -348,13 +382,8 @@ impl Connection {
 	) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.clone();
-		// This value does double duty: the first retry delay, and the bar a session
-		// has to clear to count as healthy. At zero both collapse. Every session would
-		// be healthy (`elapsed() >= 0`), which resets the give-up window; the delay
-		// would stay zero through the multiplier; and a peer that closes on sight
-		// would be redialed as fast as the runtime allows, forever. Floor it so both
-		// roles keep their meaning.
-		let initial = backoff.initial.max(MIN_BACKOFF);
+		let pacing = Pacing::new(&backoff);
+		let initial = pacing.initial;
 		let mut delay = initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<Error> = None;
@@ -435,7 +464,7 @@ impl Connection {
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(delay, &mut draining).await;
-						delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+						delay = pacing.next(delay);
 						continue;
 					}
 
@@ -496,7 +525,7 @@ impl Connection {
 
 			tracing::warn!(%url, ?delay, "reconnecting after backoff");
 			tokio::time::sleep(delay).await;
-			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+			delay = pacing.next(delay);
 		}
 	}
 
@@ -954,6 +983,65 @@ mod tests {
 			Some(5443),
 			"a different port on the same host is followed"
 		);
+	}
+
+	/// Every pacing knob can zero the retry delay on its own, and a zero delay is a
+	/// dial loop bounded by nothing. The floors are what keep a degenerate config
+	/// (or a binding that passes zeros) from turning unlimited retries into a spin.
+	#[test]
+	fn pacing_floors_every_degenerate_knob() {
+		// A zero initial would also make every session look healthy, resetting the
+		// give-up window forever.
+		let pacing = Pacing::new(&Backoff {
+			initial: Duration::ZERO,
+			..Default::default()
+		});
+		assert_eq!(pacing.initial, MIN_BACKOFF);
+		assert!(pacing.next(pacing.initial) >= MIN_BACKOFF);
+
+		// A cap below the floor would clamp the delay straight back down.
+		let pacing = Pacing::new(&Backoff {
+			max: Duration::ZERO,
+			..Default::default()
+		});
+		assert_eq!(pacing.max, pacing.initial);
+		assert_eq!(pacing.next(pacing.initial), pacing.initial);
+
+		// A zero multiplier would shrink it to nothing on the second attempt.
+		let pacing = Pacing::new(&Backoff {
+			multiplier: 0,
+			..Default::default()
+		});
+		assert_eq!(pacing.next(pacing.initial), pacing.initial);
+
+		// All at once: still paced.
+		let pacing = Pacing::new(&Backoff {
+			initial: Duration::ZERO,
+			max: Duration::ZERO,
+			multiplier: 0,
+			..Default::default()
+		});
+		let mut delay = pacing.initial;
+		for _ in 0..10 {
+			delay = pacing.next(delay);
+			assert!(delay >= MIN_BACKOFF, "the retry delay collapsed to {delay:?}");
+		}
+	}
+
+	/// A sane config is left alone: the delay doubles up to the cap and stays there.
+	#[test]
+	fn pacing_grows_to_the_cap() {
+		let pacing = Pacing::new(&Backoff {
+			initial: Duration::from_millis(100),
+			multiplier: 2,
+			max: Duration::from_millis(400),
+			..Default::default()
+		});
+
+		assert_eq!(pacing.initial, Duration::from_millis(100));
+		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
+		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
+		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
 	}
 
 	#[test]
