@@ -102,10 +102,14 @@ impl Default for ProducerConfig {
 	}
 }
 
-/// Cap on consumer-requested (vs traffic-created) track pairs per group
-/// broadcast. Requests mint real tracks, so a connected subscriber probing
-/// arbitrary tier names must hit a bound. Sized far above any real tier set
-/// (a deployment has on the order of ten tiers, three track kinds each).
+/// Cap on concurrently-held consumer-requested (vs traffic-created) track
+/// pairs per group broadcast. Requests mint real tracks, so a connected
+/// subscriber probing arbitrary tier names must hit a bound - but only while
+/// its subscriptions are actually held: a requested pair that loses its last
+/// consumer before its tier ever records is reclaimed on the next drain,
+/// refunding the cap, so a disconnected prober cannot deny a later collector.
+/// Sized far above any real tier set (a deployment has on the order of ten
+/// tiers, three track kinds each).
 const MAX_REQUESTED_TRACKS: usize = 64;
 
 /// Keeps the publish task alive: the task holds only a `Weak` to this, so it
@@ -297,6 +301,13 @@ impl Task {
 					}
 				}
 
+				// A requested pair whose tier just recorded becomes an ordinary
+				// tier pair: kept for the broadcast's life, no longer counting
+				// against the requested quota.
+				for name in frames.keys().chain(session_frames.keys()) {
+					publisher.requested.remove(name);
+				}
+
 				flush_dynamic(&mut publisher.broadcast, &mut publisher.traffic_tracks, &frames);
 				flush_dynamic(&mut publisher.broadcast, &mut publisher.session_tracks, &session_frames);
 			}
@@ -386,6 +397,11 @@ impl<T: Serialize> TrackPair<T> {
 		}
 	}
 
+	/// Whether any consumer exists on either flavor.
+	fn is_used(&self) -> bool {
+		self.plain.is_used() || self.compressed.is_used()
+	}
+
 	/// Publish `frame` on both flavors; moq-json skips unchanged values.
 	fn update(&mut self, name: &str, frame: &T) {
 		if let Err(err) = self.plain.update(frame) {
@@ -448,8 +464,11 @@ struct GroupPublisher {
 	/// tier track no drain has created yet parks (served next tick) instead of
 	/// being rejected `NotFound` on the spot.
 	dynamic: broadcast::Dynamic,
-	/// Consumer-requested pairs created so far, bounding [`MAX_REQUESTED_TRACKS`].
-	requested: usize,
+	/// Names of consumer-requested pairs whose tier has not recorded yet. Its
+	/// size is the [`MAX_REQUESTED_TRACKS`] quota; a name leaves the set by
+	/// recording real traffic (now an ordinary tier pair, kept forever) or by
+	/// losing its last consumer (reclaimed, quota refunded).
+	requested: HashSet<String>,
 	traffic_tracks: HashMap<String, TrackPair<TrafficFrame>>,
 	session_tracks: HashMap<String, TrackPair<SessionsFrame>>,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
@@ -501,7 +520,7 @@ impl GroupPublisher {
 		Some(Self {
 			broadcast,
 			dynamic,
-			requested: 0,
+			requested: HashSet::new(),
 			traffic_tracks,
 			session_tracks,
 			local: HashMap::new(),
@@ -520,6 +539,23 @@ impl GroupPublisher {
 	/// ([`flush_dynamic`] finds the pair already created). Names that do not
 	/// match the stats track shape are rejected as before.
 	fn serve_requests(&mut self) {
+		// Reclaim requested pairs whose last consumer left before their tier
+		// ever recorded: cached state nobody is watching. Dropping the pair
+		// closes its tracks, so a returning subscriber re-requests and is
+		// re-adopted. Refunding the quota first means a disconnected prober
+		// can never deny this drain's legitimate requests.
+		self.requested.retain(|name| {
+			let used = match self.traffic_tracks.get(name) {
+				Some(pair) => pair.is_used(),
+				None => self.session_tracks.get(name).is_some_and(TrackPair::is_used),
+			};
+			if !used {
+				self.traffic_tracks.remove(name);
+				self.session_tracks.remove(name);
+			}
+			used
+		});
+
 		// Pop everything queued, grouping the two flavors of one plain name so
 		// the pair is built from the actual requests where present.
 		let noop = kio::Waiter::noop();
@@ -566,14 +602,16 @@ impl GroupPublisher {
 	fn adopt_pair<T: Serialize + Default>(
 		broadcast: &mut broadcast::Producer,
 		tracks: &mut HashMap<String, TrackPair<T>>,
-		requested: &mut usize,
+		requested: &mut HashSet<String>,
 		plain: String,
 		pending: PendingPair,
 	) {
-		// A pair created between the request queuing and this drain means the
-		// tracks already exist: this late request can only be rejected, and the
-		// requester's retry resolves against the live track. Also the cap.
-		if tracks.contains_key(&plain) || *requested >= MAX_REQUESTED_TRACKS {
+		// An existing pair here is defensive only: a request racing the pair's
+		// creation is fulfilled by `create_track` itself and never reaches this
+		// queue. Rejecting is still safe - the requester's retry resolves
+		// against the live track. The cap is real: it bounds concurrently-held
+		// requested pairs (see [`MAX_REQUESTED_TRACKS`]).
+		if tracks.contains_key(&plain) || requested.len() >= MAX_REQUESTED_TRACKS {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
@@ -581,8 +619,8 @@ impl GroupPublisher {
 			Ok(mut pair) => {
 				// Hold the subscription open with zeros until the tier records.
 				pair.update(&plain, &T::default());
-				tracks.insert(plain, pair);
-				*requested += 1;
+				tracks.insert(plain.clone(), pair);
+				requested.insert(plain);
 			}
 			Err(err) => tracing::warn!(?err, name = %plain, "stats: failed to adopt requested track"),
 		}
@@ -1199,23 +1237,76 @@ mod tests {
 		assert!(subscribing.await.is_err(), "a non-stats name is rejected");
 	}
 
-	/// Consumer-requested pairs are bounded; a request past the cap is rejected.
+	/// A request queued just before its tier's first traffic must not be
+	/// stranded: the tick's own `create_track` fulfills the queued request, so
+	/// the subscriber and the traffic-created pair are one track and the first
+	/// real frame reaches the waiting subscription.
 	#[tokio::test(start_paused = true)]
-	async fn requested_tracks_are_capped() {
+	async fn request_racing_first_traffic_is_fulfilled() {
 		let (producer, origin) = test_producer(Some("sjc"));
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 
-		for i in 0..MAX_REQUESTED_TRACKS {
-			let name = format!("t{i}/publisher.json");
-			let subscribing = broadcast.track(&name).expect("track").subscribe(None);
-			drive_tick().await;
-			subscribing.await.expect("within the cap");
+		// Queue the request and drive it far enough to reach the stats
+		// broadcast's request queue (the serve chain runs on yields)...
+		let subscribing = broadcast.track("rtmp/publisher.json").expect("track").subscribe(None);
+		assert!(subscribing.poll_ok(&moq_net::kio::Waiter::noop()).is_pending());
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
 		}
 
-		let subscribing = broadcast.track("over/publisher.json").expect("track").subscribe(None);
+		// ...then the tier records its first traffic before the next tick.
+		let _rtmp = feed(producer.registry(), Tier::new("rtmp"), "foo/live", true, 1, 7).await;
 		drive_tick().await;
-		assert!(subscribing.await.is_err(), "past the cap is rejected");
+
+		// The queued subscription resolves and carries the tier's first data.
+		let mut sub = subscribing.await.expect("fulfilled by the tick's own creation");
+		let frame = sub.read_frame().await.expect("ok").expect("frame");
+		let parsed: BTreeMap<String, Traffic> = serde_json::from_slice(&frame.payload).expect("json");
+		assert_eq!(parsed.get("foo/live").expect("entry").bytes, 7);
+	}
+
+	/// The requested-pair quota binds only while its subscriptions are held: a
+	/// prober that fills it and disconnects cannot deny a later collector,
+	/// because unused requested pairs are reclaimed and the quota refunded.
+	#[tokio::test(start_paused = true)]
+	async fn requested_quota_recovers_after_disconnect() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 42).await;
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+
+		// Fill the whole quota and HOLD it.
+		let mut held = Vec::new();
+		for i in 0..MAX_REQUESTED_TRACKS {
+			let name = format!("junk{i}/publisher.json");
+			let subscribing = broadcast.track(&name).expect("track").subscribe(None);
+			drive_tick().await;
+			held.push(subscribing.await.expect("within the cap"));
+		}
+
+		// While held, the next request is denied.
+		let subscribing = broadcast.track("real/publisher.json").expect("track").subscribe(None);
+		drive_tick().await;
+		assert!(subscribing.await.is_err(), "the cap binds while held");
+
+		// Disconnecting frees it: once the origin releases its idle copies
+		// (the track linger) the next drain reclaims the pairs, and a
+		// legitimate collector's request is served again. Yield first so the
+		// serve tasks observe the demand edge and ARM the linger, then advance
+		// past it, then let a few drains observe the releases.
+		drop(held);
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+		tokio::time::advance(Duration::from_secs(31)).await;
+		for _ in 0..3 {
+			drive_tick().await;
+		}
+
+		let subscribing = broadcast.track("real/publisher.json").expect("track").subscribe(None);
+		drive_tick().await;
+		subscribing.await.expect("quota reclaimed after disconnect");
 	}
 }

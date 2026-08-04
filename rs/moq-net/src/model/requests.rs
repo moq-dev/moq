@@ -88,6 +88,19 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		self.pending.remove(key)
 	}
 
+	/// Remove and return the pending request for `key`, purging its queue entry
+	/// too, so a handler can never pop a key whose request was fulfilled
+	/// elsewhere (a producer creating the track a consumer already asked for).
+	pub fn take<Q>(&mut self, key: &Q) -> Option<V>
+	where
+		K: Borrow<Q>,
+		Q: Eq + Hash + ?Sized,
+	{
+		let value = self.pending.remove(key)?;
+		self.order.retain(|k| k.borrow() != key);
+		Some(value)
+	}
+
 	/// Remove the pending request for `key` if `f` says it's the caller's own,
 	/// leaving a newer entry that replaced it alone.
 	pub fn remove_if<Q>(&mut self, key: &Q, f: impl FnOnce(&V) -> bool) -> Option<V>

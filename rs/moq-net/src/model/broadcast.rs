@@ -350,9 +350,26 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
+		let name = name.into();
 		let info = info.into().unwrap_or_default();
+		let mut state = self.state.lock();
+
+		// A consumer may have requested this name before it existed (a live
+		// [`Dynamic`] queues such requests). Creating the track fulfills that
+		// request: its consumers resolve against this very producer. Without
+		// this they would be stranded, since the name is taken the moment the
+		// track exists, so no handler could ever serve their queue entry.
+		if let Some(request) = state.requests.take(name.as_ref()) {
+			let track = request.with_stats(self.stats.clone()).accept(info);
+			// Cache it like a served request so concurrent lookups coalesce; a
+			// live same-name entry cannot exist (its presence would have kept
+			// the request from queuing).
+			let _ = state.tracks.insert(name, track.weak());
+			return Ok(track);
+		}
+
 		let track = track::Producer::new(self.info.clone(), name, info).with_stats(self.stats.clone());
-		self.state.lock().insert_track(track.weak())?;
+		state.insert_track(track.weak())?;
 		Ok(track)
 	}
 
@@ -1454,6 +1471,34 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	/// Creating a track a consumer already requested fulfills that request: the
+	/// waiting subscriber resolves against the created producer, and no handler
+	/// ever sees the (now-taken) name. Without this the requester is stranded:
+	/// the name exists the moment the track does, so the queue entry could
+	/// never be served under it.
+	#[tokio::test]
+	async fn create_track_fulfills_queued_request() {
+		let mut producer = Info::new().produce();
+		let mut dynamic = producer.dynamic();
+		let bc = dynamic.consume();
+
+		// Queue a request for a track that doesn't exist yet.
+		let subscribing = subscribe_pending!(bc, "video");
+
+		// The producer creates the track before any handler drains the queue.
+		let mut track = producer.create_track("video", None).unwrap();
+		let mut sub = subscribing.await.expect("fulfilled by create_track");
+
+		// The fulfilled subscription is live against this very producer.
+		track.append_group().unwrap();
+		sub.recv_group().await.expect("recv").expect("group");
+
+		// The handler never sees the request; a fresh subscribe reuses the track.
+		dynamic.assert_no_request();
+		let again = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		again.assert_is_clone(&track.subscribe(None));
 	}
 
 	// Cloning a `Consumer` resets its route cursor: a clone that inherited the
