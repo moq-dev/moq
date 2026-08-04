@@ -1022,3 +1022,59 @@ test("integration: a republish is not served from the previous generation's cach
 	client.close();
 	server.close();
 });
+
+test("integration: a blind handle picks up a publisher that arrives late", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url),
+	]);
+
+	// Without discovery there is no announcement to wait for, so the handle consumes blind.
+	const watched = client.announcedBroadcast(Path.from("later"));
+	const blind = await waitFor(watched.active, (b) => b !== undefined);
+	if (!blind) throw new Error("expected a blind consumer");
+
+	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
+	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
+	await expect(blind.subscribe("video").readString()).rejects.toThrow();
+	expect(watched.active.peek()).toBe(blind);
+
+	// So a subscribe made after the publisher finally shows up still works, on the same handle.
+	const producer = new BroadcastProducer();
+	const serving = (async () => {
+		for (;;) {
+			const req = await producer.requested();
+			if (!req) break;
+			req.accept().writeString("late");
+		}
+	})();
+	server.publish(Path.from("later"), producer);
+
+	expect(await blind.subscribe("video").readString()).toBe("late");
+
+	watched.close();
+	producer.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
+test("integration: a blind handle goes offline when the session dies", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url),
+	]);
+
+	const watched = client.announcedBroadcast(Path.from("whatever"));
+	await waitFor(watched.active, (b) => b !== undefined);
+
+	// The gated path goes offline when the announcement stream ends with the session. There is
+	// no stream here, so the session itself is what has to clear it.
+	server.close();
+	client.close();
+	await waitFor(watched.active, (b) => b === undefined);
+
+	watched.close();
+});

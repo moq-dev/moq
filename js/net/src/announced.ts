@@ -167,7 +167,11 @@ export interface BroadcastProps {
  * drops to `undefined` while disconnected and resolves again once the new connection announces it.
  *
  * Falls back to consuming blind (and warns once) on a relay without
- * {@link Established.discovery}, where there is no announcement to wait for.
+ * {@link Established.discovery}, where there is no announcement to wait for. `active` then
+ * means *assumed present* rather than known live: nothing reports whether the path exists, so
+ * a subscribe to a missing broadcast is how a caller finds out. The handle stays usable either
+ * way, and because it is scoped to the path rather than to one publisher, a subscribe made
+ * after a publisher finally appears succeeds.
  *
  * If discovery fails on a live session (the announcement stream is reset, or the relay
  * refuses it) the handle goes offline and stays there: nothing reopens the stream on that
@@ -215,9 +219,11 @@ export class Broadcast {
 				effect.cleanup(() => blind.close());
 				effect.set(this.#active, blind, undefined);
 
-				// Nothing will announce it back, but `active` still promises a *live* broadcast,
-				// so stop advertising this one once the wire resets it.
-				void blind.closed.then(() => {
+				// The announcement-gated path below goes offline when the stream ends with the
+				// session; without discovery there is no stream, so watch the session itself.
+				// A consumed broadcast is a path-scoped handle, not a subscription, so its own
+				// `closed` says nothing about whether the path exists or the session is alive.
+				void conn.closed.then(() => {
 					if (this.#active.peek() === blind) this.#active.set(undefined);
 				});
 				return;
