@@ -289,8 +289,15 @@ test("update after finish reports the closed track", async () => {
 // A root that isn't an object has no recursive merge patch, so it forces a snapshot regardless of
 // the delta budget. Matches the Rust `a_non_object_root_forces_a_keyframe`.
 test("a non-object root forces a keyframe", () => {
-	const frames = encode({ deltaRatio: 100 } as Config<unknown>, [{ a: 1 }, [1, 2, 3]] as Doc[]);
-	expect(frames.map((f) => f[0])).toEqual([true, true]);
+	// Typed as `unknown` because the root deliberately stops being an object partway through.
+	const encoder = new Encoder<unknown>({ deltaRatio: 100 });
+
+	const object = encoder.update({ a: 1 });
+	object?.commit();
+	const array = encoder.update([1, 2, 3]);
+	array?.commit();
+
+	expect([object?.keyframe, array?.keyframe]).toEqual([true, true]);
 });
 
 // The per-group frame cap rolls a new snapshot even when the byte budget is nowhere near spent, so a
