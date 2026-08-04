@@ -2274,7 +2274,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	client_config.tls.disable_verify = Some(true);
 	client_config.reconnect = Some(false);
 	// A tiny backoff so a buggy redial happens well within the sleep below.
-	client_config.backoff.initial = Duration::from_millis(10);
+	client_config.backoff.initial = Some(Duration::from_millis(10));
 	let client = client_config.init().expect("failed to init client");
 
 	let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
@@ -2763,8 +2763,8 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
-	client_config.backoff.initial = Duration::ZERO;
-	client_config.backoff.timeout = Duration::from_millis(500);
+	client_config.backoff.initial = Some(Duration::ZERO);
+	client_config.backoff.timeout = Some(Duration::from_millis(500));
 	let client = client_config.init().expect("failed to init client");
 
 	let connection = client.connect(url);
