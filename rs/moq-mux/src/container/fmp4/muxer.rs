@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
-use mp4_atom::Encode;
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
@@ -171,34 +170,7 @@ impl Muxer {
 			CatalogContainer::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 		}
 
-		let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf).map_err(Error::from)?;
-		moov.encode(&mut buf).map_err(Error::from)?;
-		Ok(Some(Bytes::from(buf)))
+		Ok(Some(super::encode_init(ftyp, traks, trexs)?))
 	}
 
 	/// Encode frames as one moof+mdat fragment.
