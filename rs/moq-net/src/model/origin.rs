@@ -1173,11 +1173,6 @@ impl Producer {
 	}
 }
 
-/// How many times every attached source may refuse a single track (rejecting it,
-/// or never resolving its info) before the track is aborted instead of retried.
-/// Bounds the retry loop against a table that keeps rejecting one track.
-const MAX_TRACK_RETRIES: u32 = 3;
-
 /// How long a spliced track stays warm after its last reader leaves.
 ///
 /// Within the window a returning viewer, or the next of a run of back-to-back
@@ -1849,40 +1844,37 @@ async fn run_front(
 
 /// Serves one spliced logical track: splices in the best source's copy of the
 /// track, re-splicing on handover or failure, until the track completes or the
-/// front closes. A source that refuses the track (rejects it, or its info never
-/// resolves) is skipped for this track and the next-best route is tried; only a
-/// full sweep with every source refusing counts toward [`MAX_TRACK_RETRIES`],
-/// after which the track aborts as [`Error::Unroutable`]. Failures after a splice
-/// (a serving session dying mid-stream) are normal failover and re-splice from
-/// the next source at the first missing group.
+/// front closes. A source that refuses the track (rejects it, or hands over a
+/// copy that already ended in an error) aborts the logical track immediately:
+/// which tracks a broadcast carries is the publisher's contract (announce after
+/// the tracks exist), so the dispatched source's answer is authoritative and
+/// there is nothing to retry. Failures after a splice (a serving session dying
+/// mid-stream) are normal failover and re-splice from the next source at the
+/// first missing group; a source that errors while *closing* is likewise a
+/// corpse to fail over past (its watcher is about to detach it), not a verdict
+/// on the track.
 async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resume: super::resume::Producer) {
 	enum Step {
 		Closed,
 		Splice(u64, broadcast::Consumer),
 		Complete,
 		Failed,
-		/// The route we were serving from left the table and every source still in
-		/// it has refused this track: close out the sweep and try them again.
-		Resweep,
+		/// The route we were serving from left the table with nothing servable
+		/// to replace it (an empty table, or only corpses awaiting detach):
+		/// drop our handle and park for the table to move on.
+		NoRoute,
 		/// The linger expired with the track still unread: release the segment.
 		Idle,
 		/// A reader arrived or the last one left: recompute the demand gate.
 		Demand,
 	}
 
-	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
-	// Sources that refused this track. A standby joining a live front wins
-	// dispatch the moment it attaches, which is before a real publisher has
-	// created every track, so its refusal must cost the incumbent nothing: we
-	// keep serving from a route that has the track, and re-try the refuser on the
-	// next sweep.
-	let mut refused: HashSet<u64> = HashSet::new();
 	// Sources whose splice failed because they had already closed. Their watchers
 	// are about to detach them, so wait for the table to move on rather than
-	// burning the strike budget on a corpse (ids are never reused, so this cannot
-	// wedge).
+	// treating a corpse's error as the track's fate (ids are never reused, so
+	// this cannot wedge).
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
 	let mut idle_since: Option<web_async::time::Instant> = None;
@@ -1891,32 +1883,11 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
 
-		// Close out a sweep in which every attached source refused the track.
-		// Reached either by working through the table one refusal at a time, or by
-		// the route we were serving from leaving it, which is exactly the failover
-		// a refuser deserves to be re-tried on. Re-trying is what lets a publisher
-		// that had not created the track yet serve it once it has, so the sweep
-		// itself is the strike: a track no source will ever carry still ends after
-		// [`MAX_TRACK_RETRIES`] of them rather than looping forever.
+		// Drop corpses the table has detached, so a source that reattaches (under
+		// a fresh id) is dispatchable while a still-detaching one stays skipped.
 		{
 			let s = state.read();
-			refused.retain(|id| s.routes.iter().any(|r| r.id == *id));
 			dead.retain(|id| s.routes.iter().any(|r| r.id == *id));
-			let exhausted = !s.routes.is_empty()
-				&& s.serve_route(|id| refused.contains(&id) || dead.contains(&id))
-					.is_none();
-			// A sweep blocked only by a source we watched close is not the table's
-			// verdict: park for its detach instead of spending a strike.
-			if exhausted && dead.is_empty() {
-				drop(s);
-				fails += 1;
-				if fails >= MAX_TRACK_RETRIES {
-					tracing::debug!(name = %name, "aborting unservable track");
-					let _ = resume.abort(Error::Unroutable);
-					return;
-				}
-				refused.clear();
-			}
 		}
 
 		// Demand gates both directions: an unread track never splices a source in,
@@ -1938,12 +1909,11 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 		deadline.set(idle_since.and_then(|at| at.checked_add(TRACK_IDLE_LINGER)));
 
 		let step = {
-			let skip = |id: u64| refused.contains(&id) || dead.contains(&id);
+			let skip = |id: u64| dead.contains(&id);
 			kio::wait(|waiter| {
 				// Watch the source table: the front closing, a better servable
-				// source than the one spliced in (skipping any we already know
-				// can't serve this track), or the served route leaving the table,
-				// which retires the refusals collected against it. Splicing waits
+				// source than the one spliced in (skipping corpses awaiting
+				// detach), or the served route leaving the table. Splicing waits
 				// for a reader.
 				match state.poll(waiter, |s| {
 					let gone = serving_id.is_some_and(|id| !s.routes.iter().any(|r| r.id == id));
@@ -1960,7 +1930,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							return Poll::Ready(Step::Closed);
 						}
 						let Some(next) = guard.serve_route(skip) else {
-							return Poll::Ready(Step::Resweep);
+							return Poll::Ready(Step::NoRoute);
 						};
 						let source = guard
 							.routes
@@ -2011,21 +1981,18 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				return;
 			}
 			Step::Failed => {
-				// The spliced copy died mid-serve: failover, not a strike.
-				// Re-splice from the (possibly same) active source.
+				// The spliced copy died mid-serve: failover. Re-splice from the
+				// (possibly same) active source.
 				serving = None;
 			}
 			// The outer loop recomputes `used` and the countdown on the next pass.
 			Step::Demand => {}
-			// The sweep is closed out at the top of the loop, which clears the
-			// refusals so the retry below picks a source.
-			//
 			// Forget which route we were serving from, or the `gone` edge that woke
 			// us keeps firing: the id stays absent from the table, the wait returns
 			// Ready at once, and the loop spins on a full core without ever parking.
 			// The segment itself stays spliced into `resume` (readers keep whatever
 			// it delivered) until a replacement is proven servable.
-			Step::Resweep => serving = None,
+			Step::NoRoute => serving = None,
 			Step::Idle => {
 				// Nobody has read the track for the linger: drop the source's copy so
 				// its session can release the track (and the cached `track::Info` that
@@ -2046,7 +2013,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 						// `into_inner` sheds the `Pending` future wrapper so only
 						// the pollable (which is `Sync`) is held across the await.
 						let query = track.info().into_inner();
-						let skip = |id: u64| refused.contains(&id) || dead.contains(&id);
+						let skip = |id: u64| dead.contains(&id);
 						let info = kio::wait(|waiter| {
 							if let Poll::Ready(result) = query.poll(waiter) {
 								return Poll::Ready(Some(result));
@@ -2064,12 +2031,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 						})
 						.await;
 						match info {
-							// The table changed under us; retry from the top
-							// without a strike.
+							// The table changed under us; re-pick from the top.
 							None => continue,
 							// A copy that is already aborted can't be spliced;
-							// count a strike, or a source pinning a dead track
-							// alive would spin this loop without ever yielding.
+							// its error is the source's answer for the track.
 							Some(Ok(_)) => match track.poll_complete(&kio::Waiter::noop()) {
 								Poll::Ready(Err(err)) => Err(err),
 								_ => Ok(track),
@@ -2087,28 +2052,25 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							// aborted); nothing left to serve.
 							return;
 						}
-						// A successful splice proves the track servable: reset
-						// the strike budget. `refused` stays: re-trying the
-						// refusers now would only re-refuse and re-splice, and
-						// the loop would spin. A failover clears it instead.
-						fails = 0;
 						dead.clear();
 						serving = Some((id, track));
 					}
 					// The source itself closed or deliberately ended: not a
-					// rejection, so no strike. Park until its watcher detaches
+					// verdict on the track. Park until its watcher detaches
 					// it and the table promotes a replacement.
 					Err(_) if source.is_closing() => {
 						dead.insert(id);
 						serving = None;
 					}
-					// This source can't serve the track: rule it out of this track
-					// only and let the next-best route try. The strike is spent by
-					// the sweep, at the top of the loop.
+					// The dispatched source does not carry the track, and its
+					// answer is authoritative: a publisher announces a broadcast
+					// only once its tracks exist, so there is no later sweep that
+					// would find the track and nothing to retry. Fail now, loudly,
+					// with the source's own error.
 					Err(err) => {
-						tracing::debug!(name = %name, source = id, %err, "source refused track");
-						refused.insert(id);
-						serving = None;
+						tracing::debug!(name = %name, source = id, %err, "source refused track; aborting");
+						let _ = resume.abort(err);
+						return;
 					}
 				}
 			}
@@ -3752,10 +3714,11 @@ mod tests {
 		late.assert_closed();
 	}
 
-	/// A successful splice resets the retry budget: transient pre-splice failures
-	/// spread over a track's lifetime never accumulate into an abort.
+	/// A source rejecting a track ends the logical track immediately, with the
+	/// source's own error: which tracks a broadcast carries is the publisher's
+	/// contract, so there is no sweep of other routes and no retry budget.
 	#[tokio::test]
-	async fn test_serve_resets_retry_budget() {
+	async fn test_refused_track_aborts_instantly() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -3768,26 +3731,14 @@ mod tests {
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		// Queue the track; the subscription resolves once a serve finally sticks.
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-
-		// Alternate a pre-splice failure with a successful splice, well past the
-		// retry cap; the resets keep the track alive.
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
-				.await
-				.expect("timed out waiting for a retry")
-				.unwrap();
-			request.reject(Error::NotFound);
-			let producer = accept_track(&mut dynamic, "video").await;
-			settle().await;
-			drop(producer);
-		}
-
-		let _producer = accept_track(&mut dynamic, "video").await;
+		let request = dynamic.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
 		settle().await;
-		let mut sub = subscribing.await.unwrap();
-		sub.assert_not_closed();
+
+		// One refusal is the verdict; the source is never re-asked.
+		assert!(matches!(subscribing.await, Err(Error::NotFound)));
+		dynamic.assert_no_request();
 	}
 
 	/// A better source attaching mid-subscription takes the track over at an
@@ -4201,12 +4152,11 @@ mod tests {
 	///
 	/// An ungraceful loss empties the route table while the front waits out its
 	/// linger, so the route a track is spliced from is gone with no replacement to
-	/// serve it: the resweep. The task has to park for the whole window on the
-	/// strength of dropping the departed route, because nothing else bounds it. The
-	/// strike budget is gated on `!routes.is_empty()`, so an empty table never spends
-	/// one, and a "route gone" edge that keeps firing yields a wait that is Ready on
-	/// every poll: a full core per subscribed track, and the runtime that has to
-	/// deliver the reconnect starved along with it.
+	/// serve it. The task has to park for the whole window on the strength of
+	/// dropping the departed route, because nothing else bounds it: a "route gone"
+	/// edge that keeps firing yields a wait that is Ready on every poll, a full
+	/// core per subscribed track, and the runtime that has to deliver the
+	/// reconnect starved along with it.
 	///
 	/// Under a paused clock that spin never yields, so a regression hangs here
 	/// rather than failing.
@@ -4818,14 +4768,13 @@ mod tests {
 		sub.assert_not_closed();
 	}
 
-	/// The standby wins dispatch the instant it attaches, which is before a real
-	/// publisher has created every track: a live `moq import` announces its
-	/// broadcast on connect and only creates each track once its demuxer reaches
-	/// it. Refusing one track must cost the incumbent nothing (#2473, e2e finding
-	/// 2 in the field): the subscription keeps flowing from the route that has the
-	/// track, and the standby is re-tried once it does.
+	/// A standby that wins dispatch without carrying the track ends the logical
+	/// track immediately, even over an incumbent that was serving it: which
+	/// tracks a broadcast carries is the publisher's contract (announce after
+	/// the tracks exist), so the newly-dispatched source's refusal is the
+	/// track's verdict rather than the start of a retry sweep.
 	#[tokio::test]
-	async fn test_standby_missing_track_keeps_incumbent() {
+	async fn test_standby_missing_track_aborts() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -4851,42 +4800,22 @@ mod tests {
 		producer_remote.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
 
-		// The standby joins and wins dispatch, but has not created "audio" yet.
-		// Refuse it more times than the strike budget: the old code aborted the
-		// logical track after three, killing a subscription the incumbent was
-		// happily serving.
+		// The standby joins and wins dispatch, but has not created "audio" yet:
+		// its refusal ends the logical track, incumbent notwithstanding.
 		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
 		let mut dynamic_local = source_local.dynamic();
 		settle().await;
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			if let Some(Ok(request)) = dynamic_local.requested_track().now_or_never() {
-				assert_eq!(request.name(), "audio");
-				request.reject(Error::NotFound);
-			}
-			settle().await;
-		}
-
-		// Still spliced to the incumbent, still delivering.
-		producer_remote.append_group().unwrap();
-		assert_eq!(sub.assert_group().sequence, 1);
-		sub.assert_not_closed();
-
-		// The incumbent going away re-tries the standby, which by now has the
-		// track: the subscription splices across instead of ending.
-		source_remote.abort(Error::Dropped).unwrap();
+		let request = dynamic_local.requested_track().await.unwrap();
+		assert_eq!(request.name(), "audio");
+		request.reject(Error::NotFound);
 		settle().await;
-		settle().await;
-		let mut producer_local = accept_track(&mut dynamic_local, "audio").await;
-		settle().await;
-		producer_local.create_group(group::Info { sequence: 2 }).unwrap();
-		assert_eq!(sub.assert_group().sequence, 2);
-		sub.assert_not_closed();
+		sub.assert_closed();
 	}
 
-	/// A track every source refuses still aborts, but the verdict is not cached:
-	/// it belongs to the sources attached at the time, so a later request re-asks
-	/// them. Otherwise one early request for a track the publisher had not created
-	/// yet leaves the name dead for the life of the front.
+	/// A refused track aborts, but the verdict is not cached: it belongs to the
+	/// request that received it, so a later request re-asks the source. Otherwise
+	/// one early request for a track the publisher had not created yet leaves the
+	/// name dead for the life of the front.
 	#[tokio::test]
 	async fn test_unservable_track_retried_by_a_later_request() {
 		tokio::time::pause();
@@ -4900,14 +4829,12 @@ mod tests {
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		// Nothing serves it: the strike budget runs out and the track aborts.
+		// Nothing serves it: the refusal aborts the track with the source's error.
 		let subscribing = broadcast.track("audio").unwrap().subscribe(None);
-		for _ in 0..MAX_TRACK_RETRIES {
-			let request = dynamic.requested_track().await.unwrap();
-			request.reject(Error::NotFound);
-			settle().await;
-		}
-		assert!(matches!(subscribing.await, Err(Error::Unroutable)));
+		let request = dynamic.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
+		settle().await;
+		assert!(matches!(subscribing.await, Err(Error::NotFound)));
 
 		// The publisher has the track now; a fresh request must reach it.
 		let retry = broadcast.track("audio").unwrap().subscribe(None);
@@ -4955,13 +4882,11 @@ mod tests {
 		settle().await;
 
 		// The peer is pinned to the clean source, so the fallback the front would
-		// take for everyone else is not reachable from their subscription.
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			if let Some(Ok(request)) = dynamic_clean.requested_track().now_or_never() {
-				request.reject(Error::NotFound);
-			}
-			settle().await;
-		}
+		// take for everyone else is not reachable from their subscription: the
+		// refusal aborts the track rather than asking the tainted route.
+		let request = dynamic_clean.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
+		settle().await;
 		dynamic_tainted.assert_no_request();
 	}
 
