@@ -78,9 +78,10 @@ export class Producer<T> {
 	/**
 	 * Mutate the current value in place and publish the result.
 	 *
-	 * The callback receives a deep clone of the last-published value, falling back to
-	 * {@link Config.initial} if nothing has been published yet (throws if neither exists). Edit it in
-	 * place; on return the result is published via {@link update}, a no-op if unchanged:
+	 * The callback receives a deep clone of the current value: everything published through this
+	 * producer so far, composed, falling back to {@link Config.initial} if nothing has been (throws if
+	 * neither exists). Edit it in place; on return the result is published via {@link update}, a no-op
+	 * if unchanged:
 	 *
 	 * ```ts
 	 * producer.mutate((catalog) => {
@@ -91,6 +92,12 @@ export class Producer<T> {
 	 * Independent owners can share a single Producer and each edit only their own keys: every call
 	 * starts from the latest value, so sections compose instead of clobbering one another. Use
 	 * {@link update} to replace the whole value instead.
+	 *
+	 * After a rejected write the current value is what the producer last *tried* to publish, which
+	 * consumers never received. That is deliberate: dropping a rejected owner's field would clobber it
+	 * for whoever edits next, which is the failure this API exists to prevent. The owner whose write
+	 * failed sees the error, and the next successful publish is a full snapshot carrying the composed
+	 * value, so consumers converge on it either way.
 	 */
 	mutate(fn: (value: T) => void): void {
 		// Start from the last-published value, falling back to the configured initial value. We

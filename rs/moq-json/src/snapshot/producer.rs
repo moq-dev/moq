@@ -64,9 +64,16 @@ impl<T: Serialize> Producer<T> {
 
 	/// Lock the current value for in-place editing, publishing on drop.
 	///
-	/// The returned [`Guard`] derefs to the last-published value (or `T::default()` if nothing has
-	/// been published yet). Editing it through [`DerefMut`] marks the guard dirty; when a dirty
-	/// guard drops it publishes the result, a no-op if unchanged.
+	/// The returned [`Guard`] derefs to the current value: everything published through this producer
+	/// so far, composed, or `T::default()` if nothing has been. Editing it through [`DerefMut`] marks
+	/// the guard dirty; when a dirty guard drops it publishes the result, a no-op if unchanged.
+	///
+	/// After a rejected frame the current value is what the producer last *tried* to publish, which
+	/// consumers never received. That is deliberate. The guard exists so independent owners can each
+	/// edit their own field without clobbering, and dropping a rejected owner's field would clobber it
+	/// for whoever edits next, which is the failure this API exists to prevent. The owner whose write
+	/// failed sees the error and can act on it; the next successful publish is a full snapshot
+	/// carrying the composed value, so consumers converge on it either way.
 	///
 	/// This is the counterpart to a callback: hold the guard, mutate, drop. The guard holds the
 	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from

@@ -303,10 +303,16 @@ test("a non-object root forces a keyframe", () => {
 // The per-group frame cap rolls a new snapshot even when the byte budget is nowhere near spent, so a
 // late joiner can always read frame 0. Matches the Rust `frame_cap_forces_a_keyframe`.
 test("the frame cap forces a keyframe", () => {
-	const values: Doc[] = Array.from({ length: 257 }, (_, n) => ({ n }));
-	const frames = encode({ deltaRatio: 1_000_000 }, values);
+	// Mirrors MAX_DELTA_FRAMES in the encoder; a ratio this large takes the byte budget out of play,
+	// so the cap is the only thing that can roll the group.
+	const FRAME_CAP = 256;
+	const UNBOUNDED_RATIO = 1_000_000;
 
-	expect(frames.length).toBe(257);
+	const values: Doc[] = Array.from({ length: FRAME_CAP + 1 }, (_, n) => ({ n }));
+	const frames = encode({ deltaRatio: UNBOUNDED_RATIO }, values);
+
+	// The snapshot plus FRAME_CAP - 1 deltas fill the group, then the cap rolls it.
+	expect(frames.length).toBe(FRAME_CAP + 1);
 	expect(frames.filter((f) => f[0]).length).toBe(2);
-	expect(frames[256][0]).toBe(true);
+	expect(frames[FRAME_CAP][0]).toBe(true);
 });

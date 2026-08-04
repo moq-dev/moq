@@ -265,9 +265,14 @@ export class Encoder<T> {
 	// Encode a group's snapshot (frame 0), returning its payload. On the compressed path this opens a
 	// fresh stream (cold window), so the snapshot and its deltas share one DEFLATE window.
 	#snapshot(frame: Uint8Array): Uint8Array {
-		this.#flate = this.#compress ? new Flate() : undefined;
+		// Build the window locally and install it only once framing succeeds. Assigning it first would
+		// leave a throw with a cold window in place, no resync pending, and the old group counters
+		// intact, so the next delta would compress against a window the decoder cannot follow. This is
+		// the same ordering the Rust encoder gets by keeping the encoder in a local.
+		const flate = this.#compress ? new Flate() : undefined;
+		const payload = flate ? flate.frame(frame) : frame;
 
-		const payload = this.#frame(frame);
+		this.#flate = flate;
 		this.#snapshotLen = payload.length;
 		this.#deltaBytes = 0;
 		this.#groupFrames = 1;
