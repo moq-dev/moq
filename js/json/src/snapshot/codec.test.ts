@@ -251,3 +251,21 @@ test("a resync keeps the value for mutate", () => {
 	encoder.reset();
 	expect(encoder.value).toEqual({ video: "v1", scte35: 1 });
 });
+
+// The reconstruction is the base every later delta merges into, so handing out the live object lets
+// a caller change fields that no frame ever carried.
+test("the decoder does not expose its live reconstruction", () => {
+	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const decoder = new Decoder<Doc>({});
+
+	const snapshot = commit(encoder, { a: 1, b: 1 });
+	decoder.snapshot(snapshot?.payload as Uint8Array);
+
+	const leaked = decoder.decode() as { a: number };
+	leaked.a = 99;
+
+	// An unrelated delta must not carry the caller's mutation along with it.
+	const delta = commit(encoder, { a: 1, b: 2 });
+	decoder.delta(delta?.payload as Uint8Array);
+	expect(decoder.decode()).toEqual({ a: 1, b: 2 });
+});

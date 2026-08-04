@@ -52,15 +52,26 @@ export class Decoder<T> {
 		this.#current = merge(this.#current, this.#parse(payload));
 	}
 
-	/** The reconstructed value as raw JSON, or `undefined` before the first snapshot. */
+	/**
+	 * A copy of the reconstructed value as raw JSON, or `undefined` before the first snapshot.
+	 *
+	 * Copied rather than shared: it is the base every later {@link delta} merges into, so a caller
+	 * mutating it would change fields no frame ever carried.
+	 */
 	get value(): unknown {
-		return this.#current;
+		return this.#current === undefined ? undefined : structuredClone(this.#current);
 	}
 
-	/** Materialize the reconstructed value, or `undefined` before the first snapshot. */
+	/**
+	 * Materialize the reconstructed value, or `undefined` before the first snapshot.
+	 *
+	 * The result is the caller's own copy, for the same reason as {@link value}. (A schema already
+	 * produces a fresh object, so it only needs cloning without one. The Rust decoder deserializes a
+	 * fresh `T` every call and never exposes its internal state at all.)
+	 */
 	decode(): T | undefined {
 		if (this.#current === undefined) return undefined;
-		return this.#schema ? this.#schema.parse(this.#current) : (this.#current as T);
+		return this.#schema ? this.#schema.parse(this.#current) : (structuredClone(this.#current) as T);
 	}
 
 	// Decompress a frame against the group's window when compressing, then parse it as JSON.

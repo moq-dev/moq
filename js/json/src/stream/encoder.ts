@@ -55,6 +55,9 @@ export class Encoder<T> {
 	#desynced = false;
 	// Whether the record from the last {@link encode} is still unacknowledged.
 	#pending = false;
+	// Bumped for each record handed out, so a commit that arrives after the encoder has moved on can
+	// tell that it is acknowledging a record that is no longer the outstanding one.
+	#generation = 0;
 
 	constructor(config: ProducerConfig = {}) {
 		this.#compress = config.compression ?? false;
@@ -99,10 +102,15 @@ export class Encoder<T> {
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
 		this.#pending = true;
+		const generation = ++this.#generation;
+
 		return {
 			payload,
 			commit: () => {
-				this.#pending = false;
+				// A caller that starts the next encode before this record settles has already made the
+				// encoder account for it. Acknowledging it now would clear the flag belonging to the newer
+				// record, so a later loss of that one would go unnoticed.
+				if (this.#generation === generation) this.#pending = false;
 			},
 		};
 	}

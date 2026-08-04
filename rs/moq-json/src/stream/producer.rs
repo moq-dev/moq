@@ -77,14 +77,15 @@ impl<T: Serialize> Inner<T> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
-		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so
-		// failing here would desync the encoder over a group that was never even opened.
-		track.open()?;
-
-		// A failed write drops `record` uncommitted. The log rides a single group and has no keyframe
-		// to resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
-		// consumer cannot decode.
+		// Encode first, so a value that can't be serialized doesn't publish an empty group that
+		// subscribers would advance into and wait on. Opening the group afterwards is safe because
+		// `record` guards the window: any failure below drops it uncommitted.
 		let record = encoder.encode(value)?;
+
+		// A failed open or write drops `record` uncommitted. The log rides a single group and has no
+		// keyframe to resynchronize on, so a compressed encoder refuses to continue rather than emit
+		// frames the consumer cannot decode.
+		track.open()?;
 		track.write(record.payload())?;
 		record.commit();
 

@@ -24,14 +24,15 @@ export class Producer<T> {
 
 	/** Append one record to the log. */
 	append(value: T): void {
-		// Open the group before encoding. Encoding folds the record into the DEFLATE window, so
-		// failing here would desync the encoder over a group that was never even opened.
-		this.#group ??= this.#track.appendGroup();
-
-		// A throw leaves the record uncommitted. The log rides a single group and has no keyframe to
-		// resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
-		// consumer cannot decode.
+		// Encode first, so a value that can't be serialized doesn't publish an empty group that
+		// subscribers would advance into and wait on. Opening the group afterwards is safe because
+		// the record stays uncommitted until the write lands.
 		const record = this.#encoder.encode(value);
+
+		// A throw below leaves the record uncommitted. The log rides a single group and has no keyframe
+		// to resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
+		// consumer cannot decode.
+		this.#group ??= this.#track.appendGroup();
 		this.#group.writeFrame({ payload: record.payload, timestamp: Time.Timestamp.now() });
 		record.commit();
 	}

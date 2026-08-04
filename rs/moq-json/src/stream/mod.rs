@@ -150,6 +150,25 @@ mod test {
 		);
 	}
 
+	/// A record the encoder rejects must not have published a group first: a live consumer would
+	/// advance into it and wait there even though nothing was ever appended.
+	#[test]
+	fn a_rejected_record_does_not_open_a_group() {
+		// A map with non-string keys can't be represented as JSON, so serialization fails.
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let mut producer = Producer::<std::collections::BTreeMap<(u8, u8), u8>>::new(track, ProducerConfig::default());
+
+		let mut bad = std::collections::BTreeMap::new();
+		bad.insert((1, 2), 3);
+		assert!(producer.append(&bad).is_err());
+
+		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+	}
+
 	#[test]
 	fn embedded_newlines_survive() {
 		// Each record is its own frame (one JSON object), and JSON escapes control characters, so a

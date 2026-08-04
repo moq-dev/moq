@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { Track } from "@moq/net";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
+import { Producer } from "./producer.ts";
 
 type Rec = { n: number };
 
@@ -95,4 +97,33 @@ test("a record JSON cannot represent is rejected", () => {
 	const encoder = new Encoder<unknown>({});
 	expect(() => encoder.encode(undefined)).toThrow("not representable as JSON");
 	expect(() => encoder.encode(() => {})).toThrow("not representable as JSON");
+});
+
+// A record the encoder rejects must not have published a group first: a live consumer would advance
+// into it and wait there even though nothing was ever appended.
+test("a rejected record does not open a group", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe();
+	const producer = new Producer<unknown>(track);
+
+	expect(() => producer.append(undefined)).toThrow("not representable as JSON");
+
+	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
+	producer.finish();
+	expect(await subscriber.nextGroup()).toBeUndefined();
+});
+
+// The same stale-commit hazard the snapshot encoder has: acknowledging a superseded record must not
+// clear the flag belonging to the newer one, or a desync goes undetected.
+test("a stale commit does not clear a newer pending record", () => {
+	const encoder = new Encoder<Rec>({ compression: true });
+	const first = encoder.encode({ n: 0 });
+	first.commit();
+
+	// This one fails to write, so it stays outstanding. Committing the old handle a second time must
+	// not acknowledge it on its behalf, or the desync goes undetected.
+	encoder.encode({ n: 1 });
+	first.commit();
+
+	expect(() => encoder.encode({ n: 2 })).toThrow("compression desynchronized");
 });
