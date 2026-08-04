@@ -723,7 +723,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
-	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
+	let track = broadcast.unique_track(".ts", catalog.track_info())?;
 	let name = track.name().to_string();
 
 	// Build the media producer before advertising the track. It is fallible (its

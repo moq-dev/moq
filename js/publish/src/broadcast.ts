@@ -22,6 +22,13 @@ export type BroadcastInput = {
 
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
+
+	// How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
+	// milliseconds. Declared on every media track we accept; see {@link Container.trackInfo}.
+	// Defaults to {@link Container.LATENCY_MAX_MS}, sized so a segmented egress (HLS/DASH) can
+	// serve a full playlist window. A retention budget, not a delivery one, so lowering it does
+	// not reduce latency -- it only shortens how far back a fetch can reach.
+	latencyMax: Getter<number>;
 };
 
 /**
@@ -69,6 +76,7 @@ export class Broadcast {
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			latencyMax: getter(props?.latencyMax ?? Container.LATENCY_MAX_MS),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -223,7 +231,7 @@ export class Broadcast {
 			// Media, so declare the retention a FETCH-based consumer needs (the catalog above
 			// keeps the bare defaults: it is read at the live edge, which is always retained).
 			// Matches what a Rust publisher declares via `hang::container::track_info`.
-			const track = request.accept(Container.trackInfo());
+			const track = request.accept(Container.trackInfo(this.in.latencyMax.peek()));
 
 			// A second subscription for the same name supersedes the first: close the old producer.
 			signal.peek()?.close();
