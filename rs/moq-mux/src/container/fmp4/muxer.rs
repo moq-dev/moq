@@ -287,18 +287,28 @@ impl Muxer {
 	/// correct, so reordered frames keep their presentation order and `tfdt` stays monotonic
 	/// across fragments.
 	///
+	/// **Every frame must carry a [`duration`](Frame::duration)**, or this errors with
+	/// [`Error::MissingFrameDuration`](super::Error::MissingFrameDuration). Inferring one would
+	/// put a number in the `trun` that the caller can't reproduce, so its next `base_dts` would
+	/// not line up with where this fragment ends and the two would drift apart. Opus is the
+	/// exception: its packets state their own duration, which is read from the payload rather
+	/// than inferred.
+	///
 	/// `base_dts` must be monotonically non-decreasing across a track's fragments. Returns an
 	/// empty `Bytes` when `frames` is empty.
-	///
-	/// Set [`Frame::duration`] on a per-frame call. Sample durations are inferred from the
-	/// following frame, and a fragment's last frame has none to look at, so it falls back to the
-	/// catalog cadence: a one-frame fragment whose real cadence differs writes a `trun` duration
-	/// that doesn't reach the next fragment's `base_dts`.
 	///
 	/// Prefer [`fragments`](Self::fragments) when the whole run is available: it owns the
 	/// timeline, so there is no contract to keep.
 	pub fn fragment_at(&self, sequence: u32, base_dts: moq_net::Timestamp, frames: &[Frame]) -> crate::Result<Bytes> {
-		let frames = self.resolve_durations(frames);
+		let mut frames = frames.to_vec();
+		// Opus states its duration in the TOC byte, so reading it back is a parse of what the
+		// caller already sent, not an inference the caller would have to guess at.
+		apply_codec_durations(&mut frames, self.opus);
+
+		if let Some(i) = frames.iter().position(|f| f.duration.is_none_or(|d| d.is_zero())) {
+			return Err(Error::MissingFrameDuration(i).into());
+		}
+
 		Ok(super::encode_fragment_at(self.info(sequence), base_dts, &frames)?)
 	}
 
@@ -511,6 +521,57 @@ mod tests {
 			.map(|f| f.data)
 			.collect();
 		assert_eq!(cut, authored);
+	}
+
+	// fragment_at hands the timeline to the caller, so inventing a duration would put a number in
+	// the trun the caller can't reproduce and the two would drift apart.
+	#[test]
+	fn fragment_at_requires_an_explicit_duration() {
+		let muxer = video_muxer();
+		let base_dts = Timestamp::from_scale(0, 30_000).unwrap();
+		let err = muxer
+			.fragment_at(0, base_dts, &[tick_frame(0, true), untimed_frame(1_000, false)])
+			.unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::MissingFrameDuration(1))),
+			"got {err:?}"
+		);
+
+		// A zero duration is as unusable as none, and reported the same way.
+		let zeroed = Frame {
+			duration: Some(Timestamp::from_scale(0, 30_000).unwrap()),
+			..tick_frame(0, true)
+		};
+		assert!(matches!(
+			muxer.fragment_at(0, base_dts, &[zeroed]).unwrap_err(),
+			crate::Error::Cmaf(Error::MissingFrameDuration(0))
+		));
+
+		// fragment() still infers, so the whole-slice path is unaffected.
+		assert!(!muxer.fragment(0, &[untimed_frame(0, true)]).unwrap().is_empty());
+	}
+
+	// Opus states its duration in the TOC byte, so reading it back is a parse of what the caller
+	// already sent rather than an inference it would have to guess at.
+	#[tokio::test]
+	async fn fragment_at_reads_opus_durations_from_the_payload() {
+		use hang::catalog::AudioCodec;
+
+		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		let muxer = Muxer::audio(&config).unwrap();
+		// 20 ms of 48 kHz Opus: TOC config 15 (SILK wideband, 20 ms).
+		let opus = Frame {
+			payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+			..frame(0, true)
+		};
+
+		let base_dts = Timestamp::from_scale(0, 48_000).unwrap();
+		let fragment = muxer.fragment_at(0, base_dts, &[opus]).unwrap();
+		assert_eq!(
+			super::super::trun_durations(&fragment),
+			vec![Some(960)],
+			"20 ms at 48 kHz"
+		);
 	}
 
 	// A per-frame caller owns the decode timeline, so a reordered (I, P, B) run keeps its

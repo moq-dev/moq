@@ -149,6 +149,12 @@ pub enum Error {
 	/// truncated while the fragments kept the full value, putting them on different timelines.
 	#[error("timescale {0} does not fit the 32-bit mdhd field")]
 	TimescaleTooLarge(u64),
+
+	/// [`Muxer::fragment_at`] gives the decode timeline to the caller, so it refuses to invent a
+	/// duration: an inferred one would land in the `trun` without the caller being able to
+	/// reproduce it, and the fragments would stop tiling the timeline the caller is authoring.
+	#[error("frame {0} has no duration, which Muxer::fragment_at requires on every frame")]
+	MissingFrameDuration(usize),
 }
 
 impl From<mp4_atom::Error> for Error {
