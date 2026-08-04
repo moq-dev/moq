@@ -68,7 +68,7 @@ struct State {
 	// Track aliases chosen by the remote publisher.
 	aliases: TrackAliases,
 
-	// Each broadcast created by either a PUBLISH or PUBLISH_NAMESPACE message.
+	// Each broadcast created by a PUBLISH_NAMESPACE message.
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 }
 
@@ -88,7 +88,7 @@ struct BroadcastState {
 	// the origin unannounces once the last source detaches.
 	producer: crate::model::broadcast::SourceGuard,
 
-	// active number of PUBLISH or PUBLISH_NAMESPACE messages.
+	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
 	// The first entry of the advertised path: the original publisher. `None` on an
@@ -572,17 +572,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// Handle an incoming PUBLISH on its bidi stream.
 	/// Reject an incoming PUBLISH.
 	///
 	/// PUBLISH offers a single track, so honoring it means routing per
-	/// (namespace, track). Our model routes per namespace: a source attaches at a path
-	/// and serves every track under it. Accepting a PUBLISH would mean inventing a
-	/// namespace-level source out of a track-level offer, and that fiction then
-	/// contradicts any real PUBLISH_NAMESPACE for the same path.
+	/// (namespace, track). Our model routes per namespace: a source attaches at a
+	/// path and serves every track under it, resolved on demand via SUBSCRIBE.
+	/// Accepting a PUBLISH would mean inventing a namespace-level source out of a
+	/// track-level offer, and that fiction then contradicts any real
+	/// PUBLISH_NAMESPACE for the same path.
 	///
-	/// Declining the request rather than failing the session, since a peer using a
-	/// feature we don't implement is not a protocol violation.
+	/// Declining the request rather than failing the session, since a peer using
+	/// a feature we don't implement is not a protocol violation.
 	async fn run_publish_stream(
 		&mut self,
 		mut stream: Stream<S, Version>,
@@ -1257,6 +1257,9 @@ mod tests {
 			scoped,
 			Control::new(None, false),
 			None,
+			cluster::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
 			Version::Draft16,
 			tasks,
 		);
@@ -1276,10 +1279,38 @@ mod tests {
 		assert_eq!(occurrences(&log, b"rootns"), 0, "asked the peer for our local root");
 	}
 
-	/// A suffix the peer returns is relative to the prefix we asked for, and mounts
-	/// under our root exactly once.
+	/// The peer's REQUEST_OK followed by one NAMESPACE, framed exactly as
+	/// `run_subscribe_namespace` reads it -- built with the crate's own writer so the
+	/// framing can't drift from the encoder under test.
+	async fn namespace_response(version: Version, suffix: &str) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::Namespace::ID).await.unwrap();
+		writer
+			.encode(&ietf::Namespace {
+				suffix: crate::Path::new(suffix),
+				cluster: None,
+			})
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// A NAMESPACE suffix is relative to the prefix we subscribed, and mounts under
+	/// our root exactly once.
+	///
+	/// Driven through the real response stream rather than by recomputing the join
+	/// here: a test that did its own `prefix.join(suffix)` would still pass if the
+	/// NAMESPACE arm went back to joining the root.
 	#[tokio::test]
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
+		const VERSION: Version = Version::Draft18;
+
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let scoped = origin
@@ -1287,22 +1318,38 @@ mod tests {
 			.and_then(|rooted| rooted.scope(&[crate::Path::new("cam")]))
 			.expect("scope the origin");
 
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "x.hang").await);
 		let (tasks, _task_set) = crate::util::TaskSet::new();
+		// Draft-18 can negotiate the cluster extension, so the subscriber waits for
+		// the peer's SETUP before resolving advertisements; settle it as extension-off.
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer::default());
 		let mut subscriber = Subscriber::new(
-			session,
+			session.clone(),
 			scoped,
 			Control::new(None, false),
 			None,
-			Version::Draft16,
+			peer_setup,
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
 			tasks,
 		);
 
-		// What the NAMESPACE arm does with a suffix, using the prefix we subscribed.
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
-		let path = prefix.join(crate::Path::new("x.hang"));
-		subscriber.start_announce(path).unwrap();
-		settle().await;
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		// Parks on the read after the scripted NAMESPACE is consumed.
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		for _ in 0..100 {
+			// The result is deliberately ignored: a regressed mount lands out of scope
+			// and errors here, which the assertions below name far better than a poll
+			// would.
+			let _ = futures::poll!(run.as_mut());
+			if consumer.get_broadcast("rootns/cam/x.hang").is_some() {
+				break;
+			}
+			settle().await;
+		}
 
 		assert!(
 			consumer.get_broadcast("rootns/cam/x.hang").is_some(),
@@ -1720,6 +1767,11 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"a rejected PUBLISH must not announce a broadcast"
+		);
+		assert_eq!(
+			occurrences(&session.log, b"PUBLISH is not supported"),
+			1,
+			"the decline reaches the peer"
 		);
 	}
 }

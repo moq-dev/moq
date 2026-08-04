@@ -36,6 +36,24 @@ pub struct ClientConfig {
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
+	/// Delay before also dialing the next resolved address (Happy Eyeballs).
+	///
+	/// When DNS returns multiple addresses, attempts alternate between IPv6 and
+	/// IPv4, each starting this long after the previous one (or immediately when
+	/// it fails), and the first connection to complete wins. `0s` dials every
+	/// address at once. Defaults to 250ms. Applies to the QUIC and `tcp://` dials.
+	///
+	/// This staggers the attempts within one [`Client::connect`]; [`Self::timeout`]
+	/// bounds that call as a whole.
+	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+	#[arg(
+		id = "client-failover-delay",
+		long = "client-failover-delay",
+		env = "MOQ_CLIENT_FAILOVER_DELAY",
+		value_parser = humantime::parse_duration,
+	)]
+	pub failover_delay: Option<std::time::Duration>,
+
 	/// Maximum time for one [`Client::connect`], covering the dial and the MoQ
 	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
 	///
@@ -103,6 +121,13 @@ impl ClientConfig {
 		}
 	}
 
+	/// The Happy Eyeballs stagger to use, resolving the default. Every backend
+	/// reads it from here so the four dial paths can't drift apart.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+	pub(crate) fn effective_failover_delay(&self) -> std::time::Duration {
+		self.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY)
+	}
+
 	fn connect_timeout(&self) -> std::time::Duration {
 		self.timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT)
 	}
@@ -114,6 +139,7 @@ impl Default for ClientConfig {
 			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
+			failover_delay: None,
 			timeout: None,
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
@@ -141,6 +167,10 @@ pub struct Client {
 	/// Deadline for one [`Client::connect`], from [`ClientConfig::timeout`]. Zero waits forever.
 	timeout: std::time::Duration,
 	backoff: Backoff,
+	/// The resolved Happy Eyeballs stagger, used by the `tcp://` dial here; the
+	/// QUIC backends capture their own copy from the config.
+	#[cfg(feature = "tcp")]
+	failover_delay: std::time::Duration,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
@@ -212,13 +242,19 @@ impl Client {
 		};
 
 		let versions = config.versions();
+		// Read before the struct literal below moves fields out of `config`.
+		#[cfg(feature = "tcp")]
+		let failover_delay = config.effective_failover_delay();
 		let timeout = config.connect_timeout();
+
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
 			timeout,
 			backoff: config.backoff,
+			#[cfg(feature = "tcp")]
+			failover_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -411,7 +447,7 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
+			let session = crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay).await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -814,6 +850,26 @@ mod tests {
 	fn test_cli_no_disable_verify() {
 		let config = ClientConfig::parse_from(["test"]);
 		assert_eq!(config.tls.disable_verify, None);
+	}
+
+	#[test]
+	fn test_toml_failover_delay_survives_update_from() {
+		let toml = r#"
+			failover_delay = "1s"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_secs(1)));
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-failover-delay flag).
+		config.update_from(["test"]);
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_secs(1)));
+	}
+
+	#[test]
+	fn test_cli_failover_delay() {
+		let config = ClientConfig::parse_from(["test", "--client-failover-delay", "50ms"]);
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_millis(50)));
 	}
 
 	#[test]

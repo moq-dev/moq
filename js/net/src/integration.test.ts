@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { Getter } from "@moq/signals";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import { RemoteError } from "./error.ts";
@@ -877,6 +878,239 @@ test("integration: subscribe to non-existent broadcast", async () => {
 		})(),
 	).rejects.toThrow();
 
+	client.close();
+	server.close();
+});
+
+// Resolves once `signal` satisfies `pred`, returning the matching value.
+async function waitFor<T>(signal: Getter<T>, pred: (value: T) => boolean): Promise<T> {
+	for (;;) {
+		const value = signal.peek();
+		if (pred(value)) return value;
+		await signal.changed();
+	}
+}
+
+test("integration: announcedBroadcast waits for a late publisher", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	// Serves every requested track with `payload`, until the broadcast closes.
+	const serve = async (broadcast: BroadcastProducer, payload: string) => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			req.accept().writeString(payload);
+		}
+	};
+
+	// Nobody publishes this path yet. A blind consume would be reset (see the
+	// "subscribe to non-existent broadcast" test); the handle just stays offline.
+	const watched = client.announcedBroadcast(Path.from("late"));
+	await sleep(50);
+	expect(watched.active.peek()).toBeUndefined();
+
+	// The publisher arrives afterwards.
+	const first = new BroadcastProducer();
+	const servingFirst = serve(first, "hello");
+	server.publish(Path.from("late"), first);
+
+	const active = await waitFor(watched.active, (b) => b !== undefined);
+	if (!active) throw new Error("expected an active broadcast");
+	expect(await active.subscribe("video").readString()).toBe("hello");
+
+	// It goes away.
+	first.close();
+	await servingFirst;
+	await waitFor(watched.active, (b) => b === undefined);
+
+	// And comes back under the same name: a fresh consumer, not the dead one.
+	const second = new BroadcastProducer();
+	const servingSecond = serve(second, "world");
+	server.publish(Path.from("late"), second);
+
+	const republished = await waitFor(watched.active, (b) => b !== undefined);
+	if (!republished) throw new Error("expected a republished broadcast");
+	expect(republished).not.toBe(active);
+	expect(await republished.subscribe("video").readString()).toBe("world");
+
+	// Closing the handle releases the broadcast it held.
+	watched.close();
+	expect(watched.active.peek()).toBeUndefined();
+	expect(republished.closed.peek()).not.toBeUndefined();
+
+	second.close();
+	await servingSecond;
+	client.close();
+	server.close();
+});
+
+test("integration: announcedBroadcast consumes blind without discovery", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url),
+	]);
+
+	const broadcast = new BroadcastProducer();
+	const serving = (async () => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			req.accept().writeString("blind");
+		}
+	})();
+	server.publish(Path.from("test"), broadcast);
+
+	// No announcement ever arrives, so waiting for one would hang. Subscribe anyway.
+	const watched = client.announcedBroadcast(Path.from("test"));
+	const active = await waitFor(watched.active, (b) => b !== undefined);
+	if (!active) throw new Error("expected an active broadcast");
+	expect(await active.subscribe("video").readString()).toBe("blind");
+
+	watched.close();
+	broadcast.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
+test("integration: a republish is not served from the previous generation's cache", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const serve = async (broadcast: BroadcastProducer, payload: string) => {
+		for (;;) {
+			const req = await broadcast.requested();
+			if (!req) break;
+			req.accept().writeString(payload);
+		}
+	};
+
+	const first = new BroadcastProducer();
+	const servingFirst = serve(first, "old");
+	server.publish(Path.from("shared"), first);
+
+	const watched = client.announcedBroadcast(Path.from("shared"));
+	const active = await waitFor(watched.active, (b) => b !== undefined);
+	if (!active) throw new Error("expected an active broadcast");
+	expect(await active.subscribe("video").readString()).toBe("old");
+
+	// A second holder of the same path, which is what makes the cache reachable: consumed
+	// broadcasts are reference-counted, so the handle closing its own copy below does not
+	// release the shared one.
+	const bystander = client.consume(Path.from("shared"));
+
+	first.close();
+	await servingFirst;
+	await waitFor(watched.active, (b) => b === undefined);
+
+	// The republish must subscribe fresh. Cloning the cached entry would resolve the previous
+	// generation's tracks, which the wire has already reset.
+	const second = new BroadcastProducer();
+	const servingSecond = serve(second, "new");
+	server.publish(Path.from("shared"), second);
+
+	const republished = await waitFor(watched.active, (b) => b !== undefined);
+	if (!republished) throw new Error("expected a republished broadcast");
+	expect(await republished.subscribe("video").readString()).toBe("new");
+
+	bystander.close();
+	watched.close();
+	second.close();
+	await servingSecond;
+	client.close();
+	server.close();
+});
+
+test("integration: a blind handle picks up a publisher that arrives late", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url),
+	]);
+
+	// Without discovery there is no announcement to wait for, so the handle consumes blind.
+	const watched = client.announcedBroadcast(Path.from("later"));
+	const blind = await waitFor(watched.active, (b) => b !== undefined);
+	if (!blind) throw new Error("expected a blind consumer");
+
+	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
+	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
+	await expect(blind.subscribe("video").readString()).rejects.toThrow();
+	expect(watched.active.peek()).toBe(blind);
+
+	// So a subscribe made after the publisher finally shows up still works, on the same handle.
+	const producer = new BroadcastProducer();
+	const serving = (async () => {
+		for (;;) {
+			const req = await producer.requested();
+			if (!req) break;
+			req.accept().writeString("late");
+		}
+	})();
+	server.publish(Path.from("later"), producer);
+
+	expect(await blind.subscribe("video").readString()).toBe("late");
+
+	watched.close();
+	producer.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
+test("integration: a blind handle goes offline when the session dies", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url),
+	]);
+
+	const watched = client.announcedBroadcast(Path.from("whatever"));
+	await waitFor(watched.active, (b) => b !== undefined);
+
+	// The gated path goes offline when the announcement stream ends with the session. There is
+	// no stream here, so the session itself is what has to clear it.
+	server.close();
+	client.close();
+	await waitFor(watched.active, (b) => b === undefined);
+
+	watched.close();
+});
+
+// The handle and the consume-cache eviction are protocol-agnostic, but their implementations
+// are not: each subscriber resolves announcements its own way. These mirror the lite cases.
+test("integration: ietf blind handle picks up a publisher that arrives late", async () => {
+	const pair = createMockTransportPair("");
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client, discovery: false }),
+		accept(pair.server, url, { version: Ietf.Version.DRAFT_14 }),
+	]);
+
+	const watched = client.announcedBroadcast(Path.from("later"));
+	const blind = await waitFor(watched.active, (b) => b !== undefined);
+	if (!blind) throw new Error("expected a blind consumer");
+
+	// Rejects with 404 rather than resetting the whole handle.
+	await expect(blind.subscribe("video").readString()).rejects.toThrow();
+	expect(watched.active.peek()).toBe(blind);
+
+	const producer = new BroadcastProducer();
+	const serving = (async () => {
+		for (;;) {
+			const req = await producer.requested();
+			if (!req) break;
+			req.accept().writeString("ietf-late");
+		}
+	})();
+	server.publish(Path.from("later"), producer);
+
+	expect(await blind.subscribe("video").readString()).toBe("ietf-late");
+
+	watched.close();
+	producer.close();
+	await serving;
 	client.close();
 	server.close();
 });

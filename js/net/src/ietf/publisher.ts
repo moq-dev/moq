@@ -1,4 +1,4 @@
-import * as announce from "../announced.ts";
+import { type Dispose, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
@@ -31,10 +31,8 @@ export class Publisher {
 	#session: Session;
 
 	// Our published broadcasts.
-	#broadcasts: Map<Path.Valid, broadcast.Producer> = new Map();
-
-	// Any consumers that want each new announcement.
-	#announcedConsumers = new Set<announce.Producer>();
+	// It's a signal so we can live update any subscribe_namespace streams.
+	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
 
 	/**
 	 * Creates a new Publisher instance.
@@ -50,71 +48,21 @@ export class Publisher {
 
 	/**
 	 * Publishes a broadcast with any associated tracks.
-	 * Opens a bidi stream to send PublishNamespace and waits for response.
+	 * The namespace is only advertised in response to a SUBSCRIBE_NAMESPACE
+	 * (see {@link runSubscribeNamespace}), mirroring the moq-lite publisher.
 	 */
 	publish(path: Path.Valid, broadcast: broadcast.Producer) {
-		this.#broadcasts.set(path, broadcast);
-		this.#notifyConsumers(path, true);
-		void this.#runPublish(path, broadcast);
-	}
+		this.#broadcasts.mutate((broadcasts) => {
+			if (!broadcasts) throw new Error("closed");
+			broadcasts.set(path, broadcast);
+		});
 
-	async #runPublish(path: Path.Valid, broadcast: broadcast.Producer) {
-		try {
-			const requestId = await this.#session.nextRequestId();
-			if (requestId === undefined) return;
-
-			const stream = await this.#session.openBi();
-
-			try {
-				// Write PublishNamespace
-				await stream.writer.u53(PublishNamespace.id);
-				const msg = new PublishNamespace({ requestId, trackNamespace: path });
-				await msg.encode(stream.writer, this.#session.version);
-
-				// Read response (RequestOk and PublishNamespaceOk share 0x07)
-				const respTypeId = await stream.reader.u53();
-				if (respTypeId === RequestOk.id) {
-					// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
-					if (this.#session.version === Version.DRAFT_14) {
-						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
-					} else {
-						await RequestOk.decode(stream.reader, this.#session.version);
-					}
-				} else {
-					throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
-				}
-
-				// Wait for broadcast to close or stream to close (peer cancelled)
-				await Promise.race([broadcast.closed, stream.reader.closed]);
-
-				// For v14-v16: send explicit PublishNamespaceDone (removed in v17+)
-				if (
-					this.#session.version === Version.DRAFT_14 ||
-					this.#session.version === Version.DRAFT_15 ||
-					this.#session.version === Version.DRAFT_16
-				) {
-					try {
-						await stream.writer.u53(PublishNamespaceDone.id);
-						const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
-						await done.encode(stream.writer, this.#session.version);
-					} catch {
-						// Stream might already be closed
-					}
-				}
-
-				stream.close();
-			} catch (err) {
-				stream.abort(error(err));
-				throw err;
-			}
-		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
-		} finally {
-			broadcast.close();
-			this.#broadcasts.delete(path);
-			this.#notifyConsumers(path, false);
-		}
+		// Remove the broadcast from the lookup when it's closed.
+		void broadcast.closed.then(() => {
+			this.#broadcasts.mutate((broadcasts) => {
+				broadcasts?.delete(path);
+			});
+		});
 	}
 
 	/**
@@ -126,7 +74,7 @@ export class Publisher {
 	async runSubscribe(msg: Subscribe, stream: Stream) {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
-		const broadcast = this.#broadcasts.get(name);
+		const broadcast = this.#broadcasts.peek()?.get(name);
 
 		if (!broadcast) {
 			// Write error response
@@ -252,13 +200,22 @@ export class Publisher {
 
 	/**
 	 * Handles an incoming SUBSCRIBE_NAMESPACE on a bidi stream.
-	 * Sends RequestOk, then streams Namespace/NamespaceDone entries.
+	 *
+	 * Namespaces are only advertised in response to one of these, and the state
+	 * is local to this stream's task, mirroring the moq-lite publisher. Draft-16+
+	 * streams Namespace/NamespaceDone entries inline; draft-14/15 predate those
+	 * messages, so each advertisement is a PUBLISH_NAMESPACE request of its own
+	 * over the control stream, closed out with PUBLISH_NAMESPACE_DONE.
 	 *
 	 * @internal
 	 */
 	async runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream) {
 		const version = this.#session.version;
 		const prefix = msg.namespace;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+
+		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
+		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
 
 		try {
 			// Send OK response
@@ -274,39 +231,62 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			}
 
-			const announced = new announce.Producer(prefix);
-			for (const name of this.#broadcasts.keys()) {
+			const advertise = async (suffix: Path.Valid) => {
+				if (legacy) {
+					await this.#advertise(prefix, suffix, requests);
+				} else {
+					await stream.writer.u53(SubscribeNamespaceEntry.id);
+					await new SubscribeNamespaceEntry({ suffix }).encode(stream.writer, version);
+				}
+			};
+			const withdraw = async (suffix: Path.Valid) => {
+				if (legacy) {
+					await this.#withdraw(suffix, requests);
+				} else {
+					await stream.writer.u53(SubscribeNamespaceEntryDone.id);
+					await new SubscribeNamespaceEntryDone({ suffix }).encode(stream.writer, version);
+				}
+			};
+
+			// Advertise the currently published broadcasts under the prefix.
+			let active = new Set<Path.Valid>();
+			for (const name of this.#broadcasts.peek()?.keys() ?? []) {
 				const suffix = Path.stripPrefix(prefix, name);
 				if (suffix === null) continue;
-				announced.append({ path: suffix, active: true });
+				active.add(suffix);
 			}
-			this.#announcedConsumers.add(announced);
-			const consumer = announced.consume();
+			for (const suffix of active) {
+				await advertise(suffix);
+			}
 
-			// Close the consumer when the stream closes
-			stream.reader.closed.then(
-				() => announced.close(),
-				() => announced.close(),
-			);
+			// Wait for updates to the broadcasts.
+			for (;;) {
+				// TODO Make a better helper within Signals.
+				let dispose!: Dispose;
+				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+					dispose = this.#broadcasts.changed(resolve);
+				});
 
-			try {
-				for (;;) {
-					const entry = await consumer.next();
-					if (!entry) break;
+				// Wait until the map of broadcasts changes or the peer unsubscribes.
+				const broadcasts = await Promise.race([changed, stream.reader.closed]);
+				dispose();
+				if (!broadcasts) break;
 
-					if (entry.active) {
-						await stream.writer.u53(SubscribeNamespaceEntry.id);
-						const e = new SubscribeNamespaceEntry({ suffix: entry.path });
-						await e.encode(stream.writer, version);
-					} else {
-						await stream.writer.u53(SubscribeNamespaceEntryDone.id);
-						const e = new SubscribeNamespaceEntryDone({ suffix: entry.path });
-						await e.encode(stream.writer, version);
-					}
+				const newActive = new Set<Path.Valid>();
+				for (const name of broadcasts.keys()) {
+					const suffix = Path.stripPrefix(prefix, name);
+					if (suffix === null) continue;
+					newActive.add(suffix);
 				}
-			} finally {
-				announced.close();
-				this.#announcedConsumers.delete(announced);
+
+				for (const added of newActive.difference(active)) {
+					await advertise(added);
+				}
+				for (const removed of active.difference(newActive)) {
+					await withdraw(removed);
+				}
+
+				active = newActive;
 			}
 
 			stream.close();
@@ -314,7 +294,76 @@ export class Publisher {
 			const e = error(err);
 			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
+		} finally {
+			// This subscription's advertisements die with it: close out every open
+			// draft-14/15 PUBLISH_NAMESPACE request.
+			for (const suffix of [...requests.keys()]) {
+				await this.#withdraw(suffix, requests);
+			}
 		}
+	}
+
+	/**
+	 * Advertise one namespace on its own PUBLISH_NAMESPACE request (draft-14/15,
+	 * which have no NAMESPACE entry message). A declined request is logged and
+	 * skipped rather than failing the subscription.
+	 */
+	async #advertise(
+		prefix: Path.Valid,
+		suffix: Path.Valid,
+		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
+	) {
+		const path = Path.join(prefix, suffix);
+
+		const requestId = await this.#session.nextRequestId();
+		if (requestId === undefined) return;
+
+		const request = await this.#session.openBi();
+		try {
+			await request.writer.u53(PublishNamespace.id);
+			const msg = new PublishNamespace({ requestId, trackNamespace: path });
+			await msg.encode(request.writer, this.#session.version);
+
+			// Read response (RequestOk and PublishNamespaceOk share 0x07)
+			const respTypeId = await request.reader.u53();
+			if (respTypeId !== RequestOk.id) {
+				throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+			}
+			// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
+			if (this.#session.version === Version.DRAFT_14) {
+				await PublishNamespaceOk.decode(request.reader, this.#session.version);
+			} else {
+				await RequestOk.decode(request.reader, this.#session.version);
+			}
+
+			requests.set(suffix, { path, requestId, stream: request });
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
+			request.abort(e);
+		}
+	}
+
+	/**
+	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE
+	 * (draft-14/15).
+	 */
+	async #withdraw(
+		suffix: Path.Valid,
+		requests: Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>,
+	) {
+		const request = requests.get(suffix);
+		if (!request) return;
+		requests.delete(suffix);
+
+		try {
+			await request.stream.writer.u53(PublishNamespaceDone.id);
+			const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
+			await done.encode(request.stream.writer, this.#session.version);
+		} catch {
+			// Stream might already be closed
+		}
+		request.stream.close();
 	}
 
 	/**
@@ -347,15 +396,17 @@ export class Publisher {
 		stream.close();
 	}
 
-	#notifyConsumers(path: Path.Valid, active: boolean) {
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
-			if (suffix === null) continue;
-			try {
-				consumer.append({ path: suffix, active });
-			} catch {
-				// Consumer already closed, will be cleaned up
+	/**
+	 * Closes every published broadcast and stops accepting new ones.
+	 *
+	 * @internal
+	 */
+	close() {
+		this.#broadcasts.update((broadcasts) => {
+			for (const broadcast of broadcasts?.values() ?? []) {
+				broadcast.close();
 			}
-		}
+			return undefined;
+		});
 	}
 }

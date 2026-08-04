@@ -35,8 +35,22 @@ export interface Established {
 	/** Publish a broadcast at the given path. */
 	publish(path: Path.Valid, broadcast: broadcast.Producer): void;
 
-	/** Consume the broadcast at the given path. */
+	/**
+	 * Consume the broadcast at the given path, immediately.
+	 *
+	 * The subscription is reset if nobody publishes the path, so use
+	 * {@link announcedBroadcast} instead when the broadcast may not be online yet.
+	 */
 	consume(path: Path.Valid): broadcast.Consumer;
+
+	/**
+	 * A reactive handle to the broadcast at the given path, live only while it is announced.
+	 *
+	 * The announcement-gated counterpart to {@link consume}: it waits for the broadcast to come
+	 * online instead of resetting, and drops back to `undefined` when it goes away. See
+	 * {@link announce.Broadcast}. Close the handle when done.
+	 */
+	announcedBroadcast(path: Path.Valid): announce.Broadcast;
 
 	/**
 	 * Snapshot the transport's counters, querying it fresh on each call.

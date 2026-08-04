@@ -294,10 +294,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.map(|at| at + crate::broadcast::COST_LINGER)
 	}
 
-	pub async fn run(self) -> Result<(), Error> {
-		self.run_announce().await
-	}
-
 	/// Handle an incoming bidi stream dispatched by the session.
 	pub fn handle_stream(
 		&self,
@@ -775,103 +771,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Outgoing PublishNamespace: announce each namespace via a bidi stream.
-	async fn run_announce(self) -> Result<(), Error> {
-		// Each accepted namespace holds a `publisher()` announce guard (bumps
-		// `announced` / `announced_closed`) alongside its stream, so dropping the
-		// tuple on unannounce or cleanup records the close.
-		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)> = HashMap::new();
-		let mut announced = self.origin.announced();
-		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
-
-		// The extension changes what a PUBLISH_NAMESPACE carries, so nothing can be
-		// advertised until the peer's SETUP says whether it speaks it.
-		let peer = self.peer().await;
-		let mut linger = kio::time::Deadline::new();
-
-		loop {
-			linger.set(Self::linger_deadline(&watched));
-
-			// Wait for the next (un)announce, watched route change, or cost restore,
-			// bailing once the session dies.
-			let event = {
-				let mut closed = std::pin::pin!(self.session.closed());
-				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
-						return Poll::Ready(NamespaceEvent::Closed(Ok(())));
-					}
-					if let Poll::Ready(update) = announced.poll_next(waiter) {
-						return Poll::Ready(NamespaceEvent::Update(update));
-					}
-					// Stamped per poll rather than kept: the turn always ends in a
-					// `Ready` below once it fires, so it never has to survive.
-					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
-					match Self::poll_watched(&mut watched, fired, waiter) {
-						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
-						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
-						Poll::Pending => {}
-					}
-					match fired.is_some() {
-						true => Poll::Ready(NamespaceEvent::Linger),
-						false => Poll::Pending,
-					}
-				})
-				.await
-			};
-
-			match event {
-				NamespaceEvent::Closed(res) => return res,
-				NamespaceEvent::Linger => continue,
-				NamespaceEvent::Update(None) => break,
-				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
-					let suffix = path.to_owned();
-					match broadcast {
-						Some(broadcast) => {
-							watched.insert(suffix.clone(), Watched::new(broadcast));
-							self.sync_publish_namespace(&suffix, &peer, &mut watched, &mut namespace_streams)
-								.await?;
-						}
-						None => {
-							watched.remove(&suffix);
-							// A no-op for a namespace that was never announced (no stream
-							// to tear down).
-							self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-						}
-					}
-				}
-				NamespaceEvent::Routes(suffix) => {
-					self.sync_publish_namespace(&suffix, &peer, &mut watched, &mut namespace_streams)
-						.await?;
-				}
-				NamespaceEvent::Idle(suffix) => {
-					if let Some(watch) = watched.get_mut(&suffix) {
-						watch.idle_at = Some(web_async::time::Instant::now());
-					}
-				}
-			}
-		}
-
-		// Clean up remaining streams
-		let suffixes: Vec<crate::PathOwned> = namespace_streams.keys().cloned().collect();
-		for suffix in suffixes {
-			self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-		}
-
-		Ok(())
-	}
-
 	/// Bring the peer's view of one namespace in line with the current selection.
 	///
-	/// A namespace that became advertisable opens its stream, one that stopped tears it
-	/// down, and one whose path or cost moved is updated by re-sending PUBLISH_NAMESPACE
-	/// **on the stream that already carries it**: opening a second stream would leave
-	/// two claiming one namespace and let the superseded one retract its replacement.
-	async fn sync_publish_namespace(
+	/// Draft-16+ re-sends NAMESPACE on the SUBSCRIBE_NAMESPACE stream (the receiver
+	/// treats a repeat as a replacement) and retracts with NAMESPACE_DONE.
+	/// Draft-14/15 carry each advertisement on its own PUBLISH_NAMESPACE request:
+	/// an update re-sends PUBLISH_NAMESPACE **on the stream that already carries
+	/// it**, since a second stream would leave two claiming one namespace, and a
+	/// withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
+	async fn sync_namespace(
 		&self,
 		suffix: &crate::PathOwned,
+		path: &crate::PathOwned,
 		peer: &cluster::Peer,
 		watched: &mut HashMap<crate::PathOwned, Watched>,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		stream: &mut Stream<S, Version>,
 	) -> Result<(), Error> {
 		let Some(watch) = watched.get(suffix) else {
 			return Ok(());
@@ -880,172 +795,196 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		if advert == watch.sent {
 			return Ok(());
 		}
+		let held = watch.sent.wanted();
 
-		match (advert.wanted(), namespace_streams.get_mut(suffix)) {
-			(false, _) => self.unannounce_namespace(suffix, namespace_streams).await,
-			(true, Some((request_id, stream))) => {
-				tracing::debug!(broadcast = %self.origin.absolute(suffix), "announce update");
-				let request_id = *request_id;
-				stream.writer.encode(&ietf::PublishNamespace::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishNamespace {
-						request_id,
-						track_namespace: suffix.as_path(),
-						cluster: advert.params(),
-					})
-					.await?;
+		let absolute = self.origin.absolute(path).to_owned();
+		let sent = match self.version {
+			Version::Draft14 | Version::Draft15 => {
+				match (advert.wanted(), requests.get_mut(suffix)) {
+					(false, _) => {
+						if held {
+							tracing::debug!(broadcast = %absolute, "namespace_done");
+						}
+						self.withdraw_namespace(stream, requests, suffix.clone()).await?;
+					}
+					(true, Some(request)) => {
+						tracing::debug!(broadcast = %absolute, "announce update");
+						request.stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+						request
+							.stream
+							.writer
+							.encode(&ietf::PublishNamespace {
+								request_id: request.request_id,
+								track_namespace: request.path.as_path(),
+								cluster: advert.params(),
+							})
+							.await?;
+					}
+					(true, None) => {
+						tracing::debug!(broadcast = %absolute, "namespace");
+						self.advertise_namespace(requests, path, suffix.clone(), advert.params())
+							.await?;
+					}
+				}
+				// The peer can reject a fresh PUBLISH_NAMESPACE, which leaves no request
+				// behind. Record what it actually holds, so a later route change retries
+				// instead of believing the namespace is already advertised.
+				match requests.contains_key(suffix) {
+					true => advert,
+					false => Advert::None,
+				}
 			}
-			(true, None) => {
-				self.announce_namespace(suffix.clone(), advert.params(), namespace_streams)
-					.await?
+			_ => {
+				match (advert.wanted(), held) {
+					(true, _) => {
+						tracing::debug!(broadcast = %absolute, "namespace");
+						stream.writer.encode(&ietf::Namespace::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::Namespace {
+								suffix: suffix.as_path(),
+								cluster: advert.params(),
+							})
+							.await?;
+					}
+					(false, true) => {
+						tracing::debug!(broadcast = %absolute, "namespace_done");
+						stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::NamespaceDone {
+								suffix: suffix.as_path(),
+							})
+							.await?;
+					}
+					// Never advertised and still not advertisable: nothing to say.
+					(false, false) => {}
+				}
+				advert
 			}
-		}
-
-		// The peer can reject a fresh PUBLISH_NAMESPACE, which leaves no stream behind.
-		// Record what it actually holds, so a later route change retries instead of
-		// believing the namespace is already advertised.
-		let sent = match namespace_streams.contains_key(suffix) {
-			true => advert,
-			false => Advert::None,
 		};
+
 		if let Some(watch) = watched.get_mut(suffix) {
 			watch.set_sent(sent);
 		}
 		Ok(())
 	}
 
-	/// Bring the peer's view of one namespace in line with the current selection, on the
-	/// SUBSCRIBE_NAMESPACE response stream.
-	///
-	/// A namespace whose path or cost moved is updated by re-sending NAMESPACE on the
-	/// same stream; the receiver treats the repeat as a replacement rather than a
-	/// duplicate. One that stopped being advertisable gets a NAMESPACE_DONE, which
-	/// carries no cluster state of its own.
-	async fn sync_namespace<W: SendStream>(
+	/// Open a PUBLISH_NAMESPACE request for one namespace (draft-14/15, which have
+	/// no NAMESPACE message), recording it in `requests` so an update or withdrawal
+	/// reuses the same stream. A declined request records nothing.
+	async fn advertise_namespace(
 		&self,
-		suffix: &crate::PathOwned,
-		peer: &cluster::Peer,
-		watched: &mut HashMap<crate::PathOwned, Watched>,
-		writer: &mut Writer<W, Version>,
-	) -> Result<(), Error> {
-		let Some(watch) = watched.get(suffix) else {
-			return Ok(());
-		};
-		let advert = self.select(watch, peer);
-		if advert == watch.sent {
-			return Ok(());
-		}
-
-		let absolute = self.origin.absolute(suffix).to_owned();
-		match (advert.wanted(), watch.sent.wanted()) {
-			(true, _) => {
-				tracing::debug!(broadcast = %absolute, "namespace");
-				writer.encode(&ietf::Namespace::ID).await?;
-				writer
-					.encode(&ietf::Namespace {
-						suffix: suffix.as_path(),
-						cluster: advert.params(),
-					})
-					.await?;
-			}
-			(false, true) => {
-				tracing::debug!(broadcast = %absolute, "namespace_done");
-				writer.encode(&ietf::NamespaceDone::ID).await?;
-				writer
-					.encode(&ietf::NamespaceDone {
-						suffix: suffix.as_path(),
-					})
-					.await?;
-			}
-			// Never advertised and still not advertisable: nothing to say.
-			(false, false) => {}
-		}
-
-		if let Some(watch) = watched.get_mut(suffix) {
-			watch.set_sent(advert);
-		}
-		Ok(())
-	}
-
-	/// Open a bidi stream and send a PublishNamespace, recording the stream for later teardown.
-	async fn announce_namespace(
-		&self,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
 		cluster: Option<cluster::Advert>,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
 	) -> Result<(), Error> {
-		let absolute = self.origin.absolute(&suffix).to_owned();
-		tracing::debug!(broadcast = %absolute, "announce");
-
 		let request_id = self.control.next_request_id().await?;
-		let mut stream = Stream::open(&self.session, self.version).await?;
+		let mut request = Stream::open(&self.session, self.version).await?;
 
-		stream.writer.encode(&ietf::PublishNamespace::ID).await?;
-		stream
+		request.writer.encode(&ietf::PublishNamespace::ID).await?;
+		request
 			.writer
 			.encode(&ietf::PublishNamespace {
 				request_id,
-				track_namespace: suffix.as_path(),
+				track_namespace: path.as_path(),
 				cluster,
 			})
 			.await?;
 
-		let type_id: u64 = stream.reader.decode().await?;
-		let size: u16 = stream.reader.decode().await?;
-		let mut data = stream.reader.read_exact(size as usize).await?;
+		let type_id: u64 = request.reader.decode().await?;
+		let size: u16 = request.reader.decode().await?;
+		let mut data = request.reader.read_exact(size as usize).await?;
 
 		match (self.version, type_id) {
 			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
 				let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
-				namespace_streams.insert(suffix, (request_id, stream));
 			}
 			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
+				return Ok(());
 			}
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
-				namespace_streams.insert(suffix, (request_id, stream));
 			}
 			(_, ietf::RequestError::ID) => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
+				return Ok(());
 			}
 			_ => return Err(Error::UnexpectedMessage),
 		}
 
+		requests.insert(
+			suffix,
+			NamespaceRequest {
+				path: path.clone(),
+				request_id,
+				stream: request,
+			},
+		);
 		Ok(())
 	}
 
-	/// Tear down the namespace stream for a suffix, sending PublishNamespaceDone where required.
-	async fn unannounce_namespace(
+	/// Withdraw an advertised namespace: NAMESPACE_DONE inline on draft-16+, or
+	/// PUBLISH_NAMESPACE_DONE closing its own request on draft-14/15.
+	async fn withdraw_namespace(
 		&self,
-		suffix: &crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
-	) {
-		tracing::debug!(broadcast = %self.origin.absolute(suffix), "unannounce");
-		if let Some((request_id, mut stream)) = namespace_streams.remove(suffix) {
-			// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
-			match self.version {
-				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-					let _ = stream
+		stream: &mut Stream<S, Version>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		suffix: crate::PathOwned,
+	) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 | Version::Draft15 => {
+				if let Some(mut request) = requests.remove(&suffix) {
+					// Best effort: the peer may already be gone.
+					let _ = request
+						.stream
 						.writer
 						.encode_message(&ietf::PublishNamespaceDone {
-							track_namespace: suffix.as_path(),
-							request_id,
+							track_namespace: request.path.as_path(),
+							request_id: request.request_id,
 						})
 						.await;
+					request.stream.writer.finish().ok();
 				}
-				_ => {}
 			}
-			stream.writer.finish().ok();
+			_ => {
+				stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::NamespaceDone {
+						suffix: suffix.as_path(),
+					})
+					.await?;
+			}
+		}
+		Ok(())
+	}
+
+	/// Close out every open draft-14/15 PUBLISH_NAMESPACE request. A no-op on
+	/// later drafts, whose entries ride the SUBSCRIBE_NAMESPACE stream itself.
+	async fn withdraw_requests(
+		&self,
+		stream: &mut Stream<S, Version>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+	) {
+		let suffixes: Vec<crate::PathOwned> = requests.keys().cloned().collect();
+		for suffix in suffixes {
+			let _ = self.withdraw_namespace(stream, requests, suffix).await;
 		}
 	}
 
 	/// Handle a SUBSCRIBE_NAMESPACE on its bidi stream.
+	///
+	/// Namespaces are only advertised in response to one of these, and all the
+	/// announce state is local to this task (mirroring `lite::Publisher`'s
+	/// announce handling): whatever this subscription advertised is withdrawn
+	/// when its stream ends.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -1089,108 +1028,106 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		match self.version {
-			// v14/v15: Namespace/NamespaceDone don't exist. After OK, the publisher
-			// sends PUBLISH_NAMESPACE/PUBLISH_NAMESPACE_DONE as separate control
-			// stream messages (handled by run_announce). Just wait for stream close.
-			Version::Draft14 | Version::Draft15 => {
-				return stream.reader.closed().await;
-			}
-			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
-			_ => {
-				let mut announced = origin.announced();
-				let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+		let mut announced = origin.announced();
+		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
+		// namespace. Empty on later drafts, whose entries ride `stream` inline.
+		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
-				// The extension changes the NAMESPACE encoding, so nothing can be sent
-				// until the peer's SETUP says whether it speaks it.
-				let peer = self.peer().await;
-				let mut linger = kio::time::Deadline::new();
+		// The extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+		let mut linger = kio::time::Deadline::new();
 
-				// Send initial NAMESPACE messages for currently active namespaces.
-				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
-					if let Some(broadcast) = broadcast {
-						let suffix = path
-							.strip_prefix(&prefix)
-							.expect("origin returned invalid path")
-							.to_owned();
-						watched.insert(suffix.clone(), Watched::new(broadcast));
-						self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
-							.await?;
+		// Stream updates (origin (un)announces plus watched route and demand
+		// changes), bailing if the peer closes its side first.
+		let res = loop {
+			linger.set(Self::linger_deadline(&watched));
+
+			let event = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(NamespaceEvent::Closed(res));
 					}
+					if let Poll::Ready(update) = announced.poll_next(waiter) {
+						return Poll::Ready(NamespaceEvent::Update(update));
+					}
+					// Stamped per poll rather than kept: the turn always ends in a
+					// `Ready` below once it fires, so it never has to survive.
+					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+					match Self::poll_watched(&mut watched, fired, waiter) {
+						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
+						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
+						Poll::Pending => {}
+					}
+					match fired.is_some() {
+						true => Poll::Ready(NamespaceEvent::Linger),
+						false => Poll::Pending,
+					}
+				})
+				.await
+			};
+
+			match event {
+				NamespaceEvent::Closed(res) => break res,
+				NamespaceEvent::Linger => continue,
+				NamespaceEvent::Update(None) => {
+					// The origin is gone: withdraw everything, then finish the
+					// stream and wait for delivery.
+					self.withdraw_requests(&mut stream, &mut requests).await;
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
 				}
+				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let path = path.to_owned();
 
-				// Stream updates (origin (un)announces plus watched route and demand
-				// changes), bailing if the peer closes its side first.
-				loop {
-					linger.set(Self::linger_deadline(&watched));
-
-					let event = {
-						let mut closed = std::pin::pin!(stream.reader.closed());
-						kio::wait(|waiter| {
-							if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
-								return Poll::Ready(NamespaceEvent::Closed(res));
-							}
-							if let Poll::Ready(update) = announced.poll_next(waiter) {
-								return Poll::Ready(NamespaceEvent::Update(update));
-							}
-							let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
-							match Self::poll_watched(&mut watched, fired, waiter) {
-								Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
-								Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
-								Poll::Pending => {}
-							}
-							match fired.is_some() {
-								true => Poll::Ready(NamespaceEvent::Linger),
-								false => Poll::Pending,
-							}
-						})
-						.await
-					};
-
-					match event {
-						NamespaceEvent::Closed(res) => return res,
-						NamespaceEvent::Linger => continue,
-						NamespaceEvent::Update(None) => {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
-						}
-						NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
-							let suffix = path
-								.strip_prefix(&prefix)
-								.expect("origin returned invalid path")
-								.to_owned();
-
-							match broadcast {
-								Some(broadcast) => {
-									watched.insert(suffix.clone(), Watched::new(broadcast));
-									self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
-										.await?;
-								}
-								None => {
-									// Only close out namespaces the peer actually saw.
-									let sent = watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
-									if sent {
-										tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
-										stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-										stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
-									}
-								}
-							}
-						}
-						NamespaceEvent::Routes(suffix) => {
-							self.sync_namespace(&suffix, &peer, &mut watched, &mut stream.writer)
+					match broadcast {
+						Some(broadcast) => {
+							watched.insert(suffix.clone(), Watched::new(broadcast));
+							self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
 								.await?;
 						}
-						NamespaceEvent::Idle(suffix) => {
-							if let Some(watch) = watched.get_mut(&suffix) {
-								watch.idle_at = Some(web_async::time::Instant::now());
+						None => {
+							// Only close out namespaces the peer actually saw.
+							let held = watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
+							if held {
+								tracing::debug!(broadcast = %self.origin.absolute(&path), "namespace_done");
+								self.withdraw_namespace(&mut stream, &mut requests, suffix).await?;
 							}
 						}
 					}
 				}
+				NamespaceEvent::Routes(suffix) => {
+					let path = prefix.join(&suffix);
+					self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
+						.await?;
+				}
+				NamespaceEvent::Idle(suffix) => {
+					if let Some(watch) = watched.get_mut(&suffix) {
+						watch.idle_at = Some(web_async::time::Instant::now());
+					}
+				}
 			}
-		}
+		};
+
+		// This subscription's advertisements die with it.
+		self.withdraw_requests(&mut stream, &mut requests).await;
+
+		res
 	}
+}
+
+/// One draft-14/15 advertisement: the PUBLISH_NAMESPACE request it rode on and
+/// what closes it out with PUBLISH_NAMESPACE_DONE.
+struct NamespaceRequest<S: web_transport_trait::Session> {
+	path: crate::PathOwned,
+	request_id: RequestId,
+	stream: Stream<S, Version>,
 }
 
 #[cfg(test)]
@@ -1382,5 +1319,127 @@ mod tests {
 			2,
 			"NAMESPACE_DONE after the last clean route detaches"
 		);
+	}
+
+	/// The peer's OK to a PUBLISH_NAMESPACE, framed exactly as the announce path
+	/// reads it -- built with the crate's own writer so the framing can't drift
+	/// from the encoder under test.
+	async fn publish_namespace_ok(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		match version {
+			Version::Draft14 => {
+				writer.encode(&ietf::PublishNamespaceOk::ID).await.unwrap();
+				writer
+					.encode(&ietf::PublishNamespaceOk {
+						request_id: RequestId(1),
+					})
+					.await
+					.unwrap();
+			}
+			_ => {
+				writer.encode(&ietf::RequestOk::ID).await.unwrap();
+				writer
+					.encode(&ietf::RequestOk {
+						request_id: Some(RequestId(1)),
+					})
+					.await
+					.unwrap();
+			}
+		}
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// Draft-14/15 predate the NAMESPACE message, so a SUBSCRIBE_NAMESPACE is
+	/// answered with one PUBLISH_NAMESPACE request per matching namespace over the
+	/// control stream, and PUBLISH_NAMESPACE_DONE withdraws it. The state is local
+	/// to the subscription's task, mirroring lite's announce handling.
+	#[tokio::test]
+	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+
+		// Announced before the peer subscribes: it must only hit the wire after.
+		let early = origin
+			.create_broadcast("early-cam", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		settle().await;
+
+		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE (the peer stays quiet after);
+		// streams 2 and 3 answer our two PUBLISH_NAMESPACE requests.
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new(), ok.clone(), ok]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session.clone(),
+			consumer,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			VERSION,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+
+		// The subscription solicits the already-announced namespace.
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"early-cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"early-cam"),
+			1,
+			"PUBLISH_NAMESPACE after subscribing"
+		);
+
+		// A later announce reaches the same subscription.
+		let _late = origin
+			.create_broadcast("late-cam", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"late-cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"late-cam"),
+			1,
+			"PUBLISH_NAMESPACE for a live announce"
+		);
+
+		// An unannounce closes out its own request with PUBLISH_NAMESPACE_DONE.
+		drop(early);
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"early-cam") >= 2 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"early-cam"),
+			2,
+			"PUBLISH_NAMESPACE_DONE on unannounce"
+		);
+
+		// One stream for the subscription itself, one per PUBLISH_NAMESPACE: the
+		// withdrawal rode the announce's own request, not a new stream.
+		assert_eq!(log.bi_opens(), 3, "no extra stream for the withdrawal");
 	}
 }

@@ -56,6 +56,24 @@ pub enum Error {
 	/// The qmux handshake failed while accepting.
 	#[error("qmux accept failed")]
 	Accept(#[source] qmux::Error),
+
+	/// DNS resolved the host to no addresses at all.
+	#[error("no addresses resolved")]
+	NoAddresses,
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a refused port behind whichever address happened to be
+	/// unroutable or to blackhole until its timeout. A host with a single address
+	/// reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Failure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -63,17 +81,45 @@ type Result<T> = std::result::Result<T, Error>;
 /// Dial a `tcp://host:port` URL, advertising `protocols` for in-band ALPN
 /// negotiation. Returns a qmux session over plain TCP.
 ///
+/// When DNS returns multiple addresses they are raced Happy Eyeballs style,
+/// staggered by `failover_delay` (see [`crate::failover`]).
+///
 /// The port is required; there is no default for the `tcp` scheme.
-pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
+pub(crate) async fn connect(
+	url: Url,
+	protocols: &[&str],
+	failover_delay: std::time::Duration,
+) -> Result<qmux::Session> {
 	let host = url.host_str().ok_or(Error::MissingHostname)?;
 	let port = url.port().ok_or(Error::MissingPort)?;
 
 	tracing::debug!(%url, "connecting via TCP");
-	qmux::tcp::Config::new(WIRE_VERSION)
-		.protocols(protocols.iter().copied())
-		.connect((host, port))
-		.await
-		.map_err(Error::Connect)
+	let addrs = tokio::net::lookup_host((host, port)).await?;
+	connect_addrs(crate::failover::interleave(addrs), protocols, failover_delay).await
+}
+
+/// Dial the already-resolved `candidates` in Happy Eyeballs order, performing the
+/// qmux handshake on each attempt; the first session to complete wins.
+async fn connect_addrs(
+	candidates: Vec<net::SocketAddr>,
+	protocols: &[&str],
+	failover_delay: std::time::Duration,
+) -> Result<qmux::Session> {
+	if candidates.is_empty() {
+		return Err(Error::NoAddresses);
+	}
+
+	crate::failover::race(candidates, failover_delay, |addr| {
+		let protocols: Vec<String> = protocols.iter().map(|&p| p.to_owned()).collect();
+		async move {
+			qmux::tcp::Config::new(WIRE_VERSION)
+				.protocols(protocols.iter().map(String::as_str))
+				.connect(addr)
+				.await
+				.map_err(Error::Connect)
+		}
+	})
+	.await
 }
 
 /// Listens for incoming plain-TCP qmux connections on a TCP port.
@@ -125,5 +171,44 @@ impl Listener {
 			}
 			Err(e) => Some(Err(e.into())),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::time::Duration;
+	use web_transport_trait::Session as _;
+
+	/// End-to-end failover: the preferred candidate blackholes (TEST-NET-1 never
+	/// answers, or is unroutable outright in a sandbox), so the race must fall
+	/// through to the loopback listener within the stagger delay.
+	#[tokio::test]
+	async fn failover_recovers_from_blackhole_candidate() {
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.expect("bind listener")
+			.with_protocols(["moq-test"]);
+		let addr = listener.local_addr().expect("local addr");
+
+		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+
+		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
+		let session = tokio::time::timeout(
+			Duration::from_secs(5),
+			connect_addrs(vec![blackhole, addr], &["moq-test"], Duration::from_millis(50)),
+		)
+		.await
+		.expect("failover timed out")
+		.expect("connect failed");
+
+		assert_eq!(session.protocol(), Some("moq-test"));
+		accept.await.expect("accept task panicked");
+	}
+
+	#[tokio::test]
+	async fn connect_addrs_rejects_empty() {
+		let res = connect_addrs(Vec::new(), &["moq-test"], Duration::ZERO).await;
+		assert!(matches!(res, Err(Error::NoAddresses)));
 	}
 }

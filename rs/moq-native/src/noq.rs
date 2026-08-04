@@ -109,7 +109,7 @@ pub enum Error {
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
-	/// DNS resolved, but no address matched the local socket's family.
+	/// DNS resolved the host to no addresses at all.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
@@ -208,6 +208,20 @@ pub enum Error {
 	/// The certificates or roots could not be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a rejected certificate or a refused port behind
+	/// whichever address happened to be unroutable or to blackhole until its
+	/// timeout. A host with a single address reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Failure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -222,6 +236,8 @@ pub(crate) struct NoqClient {
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: Duration,
 	/// Whether the bound socket really came back dual-stack, which decides
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
@@ -251,6 +267,7 @@ impl NoqClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
+			failover_delay: config.effective_failover_delay(),
 			dual_stack,
 		})
 	}
@@ -267,13 +284,17 @@ impl NoqClient {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Look up the DNS entry. Noq doesn't support happy eyeballs, so we commit to
-		// a single address; `pick_addr` documents how that one is chosen.
+		// Resolve every DNS entry, adapted to the local socket's family; the dial
+		// below races them Happy Eyeballs style so one broken family can't stall
+		// the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let ip = crate::util::pick_addr(addrs, local, self.dual_stack).ok_or(Error::NoDnsEntries)?;
+		let candidates = crate::failover::match_local(addrs, local, self.dual_stack);
+		if candidates.is_empty() {
+			return Err(Error::NoDnsEntries);
+		}
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -321,12 +342,21 @@ impl NoqClient {
 		let mut config = noq::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, %ip, "connecting");
+		tracing::debug!(%url, ?candidates, "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);
 
-		let connection = self.quic.connect_with(config, ip, &host_name)?.await?;
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let endpoint = self.quic.clone();
+			let config = config.clone();
+			let host_name = host_name.clone();
+			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
+		})
+		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
@@ -363,6 +393,7 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::Client(err) => classify_client_error(err),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
 	}

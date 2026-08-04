@@ -145,6 +145,20 @@ pub enum Error {
 	/// The TLS configuration was invalid. See [`crate::tls::Error`].
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a rejected certificate or a refused port behind
+	/// whichever address happened to be unroutable or to blackhole until its
+	/// timeout. A host with a single address reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Failure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -193,6 +207,8 @@ pub(crate) struct QuicheClient {
 	pub http_bootstrap: bool,
 	pub quic: Resolved,
 	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: std::time::Duration,
 	identity: Option<Arc<ClientIdentity>>,
 }
 
@@ -213,12 +229,22 @@ impl QuicheClient {
 			_ => return Err(crate::tls::Error::IncompleteClientAuth.into()),
 		};
 
+		// Warn once here rather than on every dial: the constraint is a property of
+		// the config, and a relay reconnecting to its peers would repeat it forever.
+		if config.bind.port() != 0 {
+			tracing::warn!(
+				bind = %config.bind,
+				"pinned client bind port; only the first resolved address is dialed (address failover needs an ephemeral port on this backend)"
+			);
+		}
+
 		Ok(Self {
 			bind: config.bind,
 			verification: config.tls.verification()?,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			quic,
 			host_name: config.tls.host_name.clone(),
+			failover_delay: config.effective_failover_delay(),
 			identity,
 		})
 	}
@@ -257,18 +283,130 @@ impl QuicheClient {
 			_ => return Err(Error::InvalidScheme),
 		};
 
+		// Resolve the trust anchors once: loading the native root store can hit the
+		// disk, which shouldn't repeat for every raced address.
+		//
+		// quiche/boringssl takes a concrete root list rather than a rustls
+		// verifier, so the platform verifier the other backends use isn't
+		// available here. Trust the native store for system roots; on
+		// platforms without one (iOS/Android) this yields nothing and the
+		// handshake fails closed.
+		let roots = match &verification {
+			Verification::Roots { custom, system } => {
+				let mut roots = custom.clone();
+				if *system {
+					let native = rustls_native_certs::load_native_certs();
+					for err in native.errors {
+						tracing::warn!(%err, "failed to load native root cert");
+					}
+					roots.extend(native.certs);
+				}
+				roots
+			}
+			_ => Vec::new(),
+		};
+
+		// Bind the first attempt now so candidate selection uses the socket's actual
+		// family and dual-stack state. Later attempts bind their own ephemeral
+		// sockets because each quiche connection must own its socket.
+		let socket = crate::bind::udp(self.bind)?;
+		let local = socket.local_addr()?;
+		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
+
+		// Resolve every DNS entry, adapted to the bound socket's reachability; the dial
+		// below races them Happy Eyeballs style so one broken family can't stall
+		// the connect.
+		let addrs = tokio::net::lookup_host((host.as_str(), port))
+			.await
+			.map_err(Error::DnsLookup)?;
+		let mut candidates = crate::failover::match_local(addrs, local, dual_stack);
+		if candidates.is_empty() {
+			return Err(Error::NoDnsEntries);
+		}
+
+		// Each attempt binds its own socket, and a pinned non-zero source port only
+		// fits one socket at a time: an overlapping attempt would fail its bind with
+		// AddrInUse and burn a candidate for nothing. The attempts can't share a
+		// socket either (each quiche instance owns its socket and would consume the
+		// other's packets), so keep the preferred candidate only, the same single
+		// dial as before failover existed. `new` warns about this once.
+		if self.bind.port() != 0 {
+			candidates.truncate(1);
+		}
+
+		tracing::debug!(%url, ?candidates, "connecting via quiche");
+
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let mut first_socket = Some(socket);
+		let conn = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let socket = first_socket.take();
+			let this = self.clone();
+			let alpns = alpns.clone();
+			let verification = verification.clone();
+			let roots = roots.clone();
+			let host = host.clone();
+			async move {
+				let socket = match socket {
+					Some(socket) => socket,
+					None => crate::bind::udp(this.bind)?,
+				};
+				let builder = this.builder(socket, alpns, &verification, roots, &host)?;
+				let conn = builder
+					.connect(&addr.ip().to_string(), addr.port())
+					.await
+					.map_err(Error::Connect)?
+					.established()
+					.await
+					.map_err(Error::Establish)?;
+				Ok::<_, Error>(conn)
+			}
+		})
+		.await?;
+
+		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
+		for alpn in versions.alpns() {
+			request = request.with_protocol(alpn.to_string());
+		}
+
+		match url.scheme() {
+			"https" => {
+				// WebTransport over HTTP/3
+				let session = web_transport_quiche::Connection::connect(conn, request)
+					.await
+					.map_err(map_client_error)?;
+				Ok(session)
+			}
+			"moqt" | "moql" => {
+				// Raw QUIC mode
+				let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
+				let alpn = std::str::from_utf8(&alpn)?;
+
+				let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
+				Ok(web_transport_quiche::Connection::raw(conn, request, response))
+			}
+			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
+		}
+	}
+
+	/// Assemble the per-attempt client builder: settings, its bound socket, SNI,
+	/// client identity, and the verification policy
+	/// (with `roots` already resolved by the caller).
+	fn builder(
+		&self,
+		socket: net::UdpSocket,
+		alpns: Vec<Vec<u8>>,
+		verification: &crate::tls::Verification,
+		roots: Vec<CertificateDer<'static>>,
+		host: &str,
+	) -> Result<web_transport_quiche::ez::ClientBuilder> {
+		use crate::tls::Verification;
+
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.verify_peer = !matches!(verification, Verification::Disabled);
 		settings.alpn = alpns;
 		apply_settings(&mut settings, &self.quic)?;
-
-		let socket = crate::bind::udp(self.bind)?;
-		let local = socket.local_addr()?;
-		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
-		let addrs = tokio::net::lookup_host((host.as_str(), port))
-			.await
-			.map_err(Error::DnsLookup)?;
-		let remote = crate::util::pick_addr(addrs, local, dual_stack).ok_or(Error::NoDnsEntries)?;
 
 		let mut builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
@@ -279,9 +417,9 @@ impl QuicheClient {
 			builder = builder.with_keep_alive(interval);
 		}
 
-		// The builder dials the resolved IP below, so always set the original
-		// hostname explicitly for SNI and verification unless the caller overrides it.
-		builder = builder.with_server_name(self.host_name.as_deref().unwrap_or(&host));
+		// The builder dials a resolved IP, so always set the original hostname
+		// explicitly for SNI and verification unless the caller overrides it.
+		builder = builder.with_server_name(self.host_name.as_deref().unwrap_or(host));
 
 		if let Some(identity) = &self.identity {
 			builder = builder.with_single_cert(identity.chain.clone(), identity.key.clone_key());
@@ -291,68 +429,16 @@ impl QuicheClient {
 			// No hook: tokio-quiche's default config with verify_peer = false.
 			Verification::Disabled => {}
 			Verification::Fingerprints(hashes) => {
-				builder = builder.with_server_certificate_hashes(hashes);
+				builder = builder.with_server_certificate_hashes(hashes.clone());
 			}
-			Verification::Roots { custom, system } => {
-				// quiche/boringssl takes a concrete root list rather than a rustls
-				// verifier, so the platform verifier the other backends use isn't
-				// available here. Trust the native store for system roots; on
-				// platforms without one (iOS/Android) this yields nothing and the
-				// handshake fails closed.
-				let mut roots = custom;
-				if system {
-					let native = rustls_native_certs::load_native_certs();
-					for err in native.errors {
-						tracing::warn!(%err, "failed to load native root cert");
-					}
-					roots.extend(native.certs);
-				}
+			Verification::Roots { .. } => {
 				if !roots.is_empty() {
 					builder = builder.with_root_certificates(roots);
 				}
 			}
 		}
 
-		tracing::debug!(%url, "connecting via quiche");
-
-		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
-		for alpn in versions.alpns() {
-			request = request.with_protocol(alpn.to_string());
-		}
-
-		match url.scheme() {
-			"https" => {
-				// WebTransport over HTTP/3
-				let conn = builder
-					.connect(&remote.ip().to_string(), remote.port())
-					.await
-					.map_err(Error::Connect)?
-					.established()
-					.await
-					.map_err(Error::Establish)?;
-				let session = web_transport_quiche::Connection::connect(conn, request)
-					.await
-					.map_err(map_client_error)?;
-				Ok(session)
-			}
-			"moqt" | "moql" => {
-				// Raw QUIC mode
-				let conn = builder
-					.connect(&remote.ip().to_string(), remote.port())
-					.await
-					.map_err(Error::Connect)?
-					.established()
-					.await
-					.map_err(Error::Establish)?;
-
-				let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
-				let alpn = std::str::from_utf8(&alpn)?;
-
-				let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
-				Ok(web_transport_quiche::Connection::raw(conn, request, response))
-			}
-			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
-		}
+		Ok(builder)
 	}
 }
 
@@ -383,6 +469,7 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::ClientConnect(err) => classify_client_error(err),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
 			_ => None,
 		}
 	}

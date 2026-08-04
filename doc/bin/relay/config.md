@@ -211,10 +211,27 @@ tls.disable_verify = true
 # e.g. to dial a local relay with a private CA and a remote one with a public CA.
 # Defaults to true only when no custom root is set.
 # tls.system_roots = true
+
+# Delay before also dialing the next resolved address (Happy Eyeballs).
+# When DNS returns both IPv6 and IPv4, attempts alternate between the families,
+# each starting this long after the previous one (or immediately, if that one
+# fails outright), and the first connection to complete wins. "0s" dials every
+# address at once. Defaults to 250ms, RFC 8305's Connection Attempt Delay.
+# failover_delay = "250ms"
 ```
 
 The connect timeout is also available as `--client-connect-timeout` or
-`MOQ_CLIENT_CONNECT_TIMEOUT`.
+`MOQ_CLIENT_CONNECT_TIMEOUT`, and the failover delay as
+`--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`. The two compose: the
+failover delay staggers the attempts within one dial, and the timeout bounds
+that dial as a whole.
+
+Pinning the source port (a non-zero port in `--client-bind`) disables address
+failover on the `quiche` backend, which binds a fresh socket per attempt and so
+can only dial one address at a time from a fixed port. The relay logs a warning
+at startup when both are set. Leave the bind port at `0` to keep failover, or
+use the `quinn` or `noq` backend, which share one socket across attempts and are
+unaffected.
 
 ### \[server.quic] and \[client.quic]
 

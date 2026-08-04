@@ -294,6 +294,21 @@ export class Reload {
 	}
 
 	/**
+	 * A reactive handle to one broadcast, spanning reconnects.
+	 *
+	 * The same {@link Announce.Broadcast} as {@link Established.announcedBroadcast}, but it
+	 * follows the reconnect loop: the broadcast drops to `undefined` when the connection dies
+	 * and resolves again once the new connection announces the path. Use it instead of
+	 * consuming off {@link Reload.established} whenever the broadcast may come online after you
+	 * do, which is exactly the case a blind `consume` loses.
+	 *
+	 * Close the handle when done; {@link Reload.close} only drops it to `undefined`.
+	 */
+	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
+		return new Announce.Broadcast({ connection: this.established, path });
+	}
+
+	/**
 	 * Snapshot the live connection's transport counters, or undefined while disconnected.
 	 * See {@link Established.stats}.
 	 */

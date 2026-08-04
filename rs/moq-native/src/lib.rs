@@ -17,6 +17,8 @@ mod client;
 mod connect;
 mod crypto;
 mod error;
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
 mod log;
