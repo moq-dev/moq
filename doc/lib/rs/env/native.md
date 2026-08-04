@@ -74,7 +74,7 @@ Wire an [`origin::Producer`](https://docs.rs/moq-net/latest/moq_net/origin/struc
 ```rust
 // Publish into an origin wired before connecting: it outlives any one session,
 // so the broadcast survives a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::new().produce();
+let origin = moq_net::Origin::random().produce();
 let _connection = client.with_publisher(origin.consume()).connect(url);
 
 let route = moq_net::broadcast::Route::new().with_announce(true);
@@ -93,14 +93,14 @@ Subscribing works the same way round: wire an origin in before connecting and re
 ```rust
 // Consume into an origin wired before connecting, so announcements keep flowing
 // across a reconnect. Hold the connection to keep redialing.
-let origin = moq_net::Origin::new().produce();
+let origin = moq_net::Origin::random().produce();
 let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
 // Wait for broadcasts to be announced.
-while let Some((path, broadcast)) = announced.next().await {
-    let Some(broadcast) = broadcast else {
-        tracing::info!(%path, "broadcast ended");
+while let Some(update) = announced.next().await {
+    let Some(broadcast) = update.broadcast else {
+        tracing::info!(path = %update.path, "broadcast ended");
         continue;
     };
     // Subscribe to tracks on this broadcast...

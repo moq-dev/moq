@@ -288,11 +288,12 @@ your broadcasts and subscriptions carry across reconnects:
 
 ```rust
 // Subscribe: wait for broadcasts to be announced.
-let origin = moq_net::Origin::new().produce();
-let mut consumer = origin.consume();
+let origin = moq_net::Origin::random().produce();
+let mut announced = origin.consume().announced();
 let _connection = client.with_subscriber(origin).connect(url);
 
-while let Some((path, broadcast)) = consumer.announced().await {
+while let Some(update) = announced.next().await {
+    // `update.broadcast` is None when the path went away.
     // ... subscribe to tracks on each broadcast ...
 }
 ```
