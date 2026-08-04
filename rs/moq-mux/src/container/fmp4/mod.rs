@@ -702,8 +702,9 @@ fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec
 /// Assemble a fragmented init segment (ftyp + moov) around already-built traks.
 ///
 /// `ftyp` is the one a passed-through CMAF init carried, if any; otherwise a plain `isom` one
-/// is synthesized. A `Cmaf` rendition's `tkhd` is left exactly as its publisher wrote it, but
-/// the `mvhd` is ours either way, so it declares the unknown duration a fragmented stream has.
+/// is synthesized. The `mvhd` is ours either way, so it declares the unknown duration and the
+/// movie timescale of the assembled init rather than of whatever source a trak came from.
+/// [`extract_init`] normalizes a passed-through trak to match.
 pub(crate) fn encode_init(
 	ftyp: Option<mp4_atom::Ftyp>,
 	traks: Vec<mp4_atom::Trak>,
