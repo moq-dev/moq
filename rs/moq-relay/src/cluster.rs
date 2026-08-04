@@ -391,6 +391,13 @@ pub struct Cluster {
 	/// returns) so traffic classes land in separate counter sets. Defaults
 	/// to a disabled (no-op) registry until [`with_stats`](Self::with_stats) is called.
 	pub stats: moq_net::stats::Registry,
+
+	/// Keeps the stats publish task running for as long as any handle on this
+	/// cluster lives. The task holds only a `Weak` to its producer, so it stops
+	/// when the last [`moq_stats::Producer`] clone drops; parking one here means
+	/// serving and publishing end together, instead of publishing ending early
+	/// because a caller dropped a producer it never asked for.
+	_stats_publisher: Option<moq_stats::Producer>,
 }
 
 impl Cluster {
@@ -424,6 +431,7 @@ impl Cluster {
 			info,
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
+			_stats_publisher: None,
 		})
 	}
 
@@ -473,15 +481,16 @@ impl Cluster {
 		self.connection_ids.fetch_add(1, Ordering::Relaxed)
 	}
 
-	/// Attach a stats registry. Replaces the default disabled registry.
+	/// Attach a stats producer, replacing the default disabled registry with its
+	/// registry and taking over keeping its publish task alive.
 	///
-	/// Build a publishing `moq_stats::Producer` with
-	/// [`StatsConfig::build`](crate::StatsConfig::build) (passing
-	/// [`Self::origin`] so it publishes through the same origin cluster peers
-	/// read from) and pass its registry here; keep the producer alive for as
-	/// long as the cluster runs.
-	pub fn with_stats(mut self, stats: moq_net::stats::Registry) -> Self {
-		self.stats = stats;
+	/// Build one with [`StatsConfig::build`](crate::StatsConfig::build), passing
+	/// [`Self::origin`] so it publishes through the same origin cluster peers read
+	/// from. The cluster holds the producer from here on, so the caller may drop
+	/// its own handle: publishing lasts exactly as long as the cluster does.
+	pub fn with_stats(mut self, stats: moq_stats::Producer) -> Self {
+		self.stats = stats.registry().clone();
+		self._stats_publisher = Some(stats);
 		self
 	}
 
@@ -1107,6 +1116,57 @@ where
 mod tests {
 	use super::*;
 	use crate::Config;
+
+	/// The publish task holds only a `Weak` to its producer, so it stops when the
+	/// last `moq_stats::Producer` clone drops. Attaching one must therefore hand
+	/// its lifetime to the cluster: an embedder driving its own loop takes the
+	/// pieces it needs off a `Relay` and drops the rest, and a relay that keeps
+	/// serving while silently publishing nothing is exactly the class of failure
+	/// this API exists to rule out. Moving the ONLY handle in must keep it alive.
+	///
+	/// Asserts the broadcast is still live AFTER a few publish intervals, not
+	/// merely that one appeared: the task publishes once before it can notice its
+	/// producer is gone, so a first announcement races through either way and
+	/// proves nothing.
+	#[tokio::test]
+	async fn stats_publishing_outlives_the_producer_handle() {
+		let config = crate::StatsConfig {
+			enabled: Some(true),
+			node: Some("test".to_string()),
+			..Default::default()
+		};
+
+		let cluster = Cluster::new(ClusterConfig::default()).expect("cluster");
+		let stats = config.build(cluster.origin.clone());
+		let cluster = cluster.with_stats(stats);
+
+		let path = moq_net::Path::new(".stats").join("node").join("test");
+		let broadcast = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			cluster.origin.consume().announced_broadcast(&path),
+		)
+		.await
+		.expect("stats broadcast announced within 5s")
+		.expect("stats broadcast present");
+
+		// Several publish intervals (1s each by default) after the handle went out
+		// of scope, the task is still running and its broadcast still open. The
+		// re-check is bounded: without the keepalive the broadcast is gone and
+		// `announced_broadcast` waits forever, which must read as a failure rather
+		// than a hung test.
+		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+		let still_live = tokio::time::timeout(
+			std::time::Duration::from_secs(2),
+			cluster.origin.consume().announced_broadcast(&path),
+		)
+		.await;
+		assert!(
+			matches!(still_live, Ok(Some(_))),
+			"stats broadcast unannounced after the producer handle was dropped: \
+			 the publish task stopped while the cluster kept serving"
+		);
+		drop(broadcast);
+	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
 	/// query params survive, and a garbage value is an error rather than a
