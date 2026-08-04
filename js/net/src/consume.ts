@@ -50,6 +50,13 @@ export class BroadcastCache {
 	 * generation's cached tracks alive and hand them to whoever consumes the path next.
 	 * Existing handles are left alone: they belong to their holders, and the wire resets
 	 * whatever they still have open.
+	 *
+	 * Eviction is unconditional, which costs a dedup miss when two announcement streams watch
+	 * one path: the second stream's retraction can arrive after the first has already seen the
+	 * replacement, dropping the fresh entry so the next request subscribes again instead of
+	 * sharing. Telling that stale retraction from a live one needs a generation id on the
+	 * advertisement (moq-lite's `Epoch`, not yet on the wire), so until then this errs toward a
+	 * duplicate subscription rather than risk handing out a dead one.
 	 */
 	evict(path: Path.Valid): void {
 		this.#cache.delete(path);
