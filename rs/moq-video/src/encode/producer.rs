@@ -60,14 +60,14 @@ impl<E: CatalogExt> Producer<E> {
 	) -> Result<Self, Error> {
 		let codecs = match codec {
 			Codec::H264 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3", catalog.track_info())?;
+				let track = moq_mux::import::unique_track_with(&mut broadcast, ".avc3", catalog.track_info())?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
 					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?,
 				}
 			}
 			Codec::H265 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1", catalog.track_info())?;
+				let track = moq_mux::import::unique_track_with(&mut broadcast, ".hev1", catalog.track_info())?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
 					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), Default::default())?,

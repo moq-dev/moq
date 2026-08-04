@@ -208,6 +208,23 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
+
+	/// Whether this source threads [`Import::latency_max`] into the catalog it publishes.
+	///
+	/// The stdin containers, HLS, and capture build their catalog in this crate, so they honor
+	/// it. The remaining gateways build theirs inside moq-rtmp / moq-srt / moq-rtc, which take
+	/// no retention yet -- so the flag is REFUSED there rather than silently ignored.
+	pub fn honors_latency_max(&self) -> bool {
+		if self.stdin_format().is_some() {
+			return true;
+		}
+		match self {
+			Self::Hls(_) => true,
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => true,
+			_ => false,
+		}
+	}
 }
 
 // ------------------------------------------------------------------ export

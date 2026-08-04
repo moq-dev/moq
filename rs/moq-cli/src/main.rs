@@ -135,6 +135,14 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
+	// Refuse a retention this source can't apply rather than accepting the flag and quietly
+	// publishing at the default: the gateways build their catalogs inside their own crates.
+	anyhow::ensure!(
+		import.latency_max == hang::container::LATENCY_MAX || import.source.honors_latency_max(),
+		"--latency-max is not supported for this source yet; it applies to the stdin container \
+		 formats, hls, and capture"
+	);
+
 	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
 	// an outbound client has one: a `--server-bind` publisher's sessions are
 	// inbound and never surfaced here, so it stays `None` and those sources encode
@@ -178,7 +186,8 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
 				let origin = origin.clone();
-				tasks.spawn(async move { hls::import(&origin, name, hls.playlist).await });
+				let latency_max = import.latency_max;
+				tasks.spawn(async move { hls::import(&origin, name, hls.playlist, latency_max).await });
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -217,7 +226,12 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 				let broadcast = origin
 					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 					.context("failed to create broadcast")?;
-				local = Some(Publish::capture(broadcast, &capture, send_bandwidth)?);
+				local = Some(Publish::capture(
+					broadcast,
+					&capture,
+					send_bandwidth,
+					import.latency_max,
+				)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}

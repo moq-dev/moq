@@ -242,7 +242,7 @@ impl Publish {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?.with_latency_max(latency_max);
 		let source = match format {
 			PublishFormat::Avc3 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3", catalog.track_info())?;
+				let track = moq_mux::import::unique_track_with(&mut broadcast, ".avc3", catalog.track_info())?;
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
 				Source::Stream(PublishDecoder::Avc3 {
@@ -275,6 +275,7 @@ impl Publish {
 		mut broadcast: moq_net::broadcast::Producer,
 		args: &CaptureArgs,
 		bandwidth: Option<moq_net::bandwidth::Consumer>,
+		latency_max: std::time::Duration,
 	) -> anyhow::Result<Self> {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?.with_latency_max(latency_max);
 

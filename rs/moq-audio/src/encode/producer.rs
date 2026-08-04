@@ -136,7 +136,9 @@ impl<E: CatalogExt> Producer<E> {
 			Some(name) => broadcast.create_track(name.clone(), catalog.track_info())?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
-			None => moq_mux::import::unique_track(broadcast, &format!(".{}", options.codec), catalog.track_info())?,
+			None => {
+				moq_mux::import::unique_track_with(broadcast, &format!(".{}", options.codec), catalog.track_info())?
+			}
 		};
 		let name = track.name().to_string();
 		let track = catalog.media_producer(track, moq_mux::container::legacy::Wire)?;

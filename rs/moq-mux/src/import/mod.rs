@@ -27,13 +27,23 @@ pub use track::*;
 
 /// Mint a fresh unique track for a legacy single-codec importer.
 ///
-/// Picks a unique name from `suffix` and applies `info`, so the relay gets timing without
-/// parsing the payload. Hand the result to the importer's `new`.
+/// Picks a unique name from `suffix` and applies [`hang::container::track_info`], so the
+/// relay gets timing without parsing the payload. Hand the result to the importer's `new`.
 ///
-/// Pass the catalog's own [`track_info`](crate::catalog::Producer::track_info) rather than
-/// `hang::container::track_info()` directly, so the track inherits whatever retention that
-/// catalog declares instead of silently taking the default.
+/// Use [`unique_track_with`] when a catalog is in scope, so the track inherits whatever
+/// retention that catalog declares rather than the default.
 pub fn unique_track(
+	broadcast: &mut moq_net::broadcast::Producer,
+	suffix: &str,
+) -> crate::Result<moq_net::track::Producer> {
+	unique_track_with(broadcast, suffix, hang::container::track_info())
+}
+
+/// [`unique_track`] with explicit track properties.
+///
+/// Pass the catalog's own [`track_info`](crate::catalog::Producer::track_info), so a broadcast
+/// that declared a non-default media retention actually gets it on every track it mints.
+pub fn unique_track_with(
 	broadcast: &mut moq_net::broadcast::Producer,
 	suffix: &str,
 	info: moq_net::track::Info,
