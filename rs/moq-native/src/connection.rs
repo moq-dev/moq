@@ -480,9 +480,14 @@ impl Connection {
 	///
 	/// `err` is the code the peer sees. Locally this is still a deliberate stop, so
 	/// [`closed`](Self::closed) reports `Ok` rather than `err`.
+	///
+	/// Aborting the task is not enough on its own: it drops the loop's producer, but
+	/// the final state stays readable through every surviving handle, and the session
+	/// clone parked in it would hold the transport open until the last one went away.
+	/// Closing the session here is what makes "stop now" mean it, and closing it with
+	/// `err` is what carries the code to the peer, since the drop path only ever
+	/// sends a bare `Cancel`.
 	pub fn abort(&self, err: moq_net::Error) {
-		// Carry the code to the peer before the loop's teardown gets there: dropping
-		// the last session clone closes with a bare `Cancel`, which would lose it.
 		if let Some(session) = self.state.read().session.clone() {
 			session.abort(err);
 		}

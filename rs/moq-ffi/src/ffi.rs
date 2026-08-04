@@ -66,6 +66,13 @@ impl<T: Send + 'static> Task<T> {
 			}
 		});
 
+		// Dropping a JoinHandle detaches its task rather than stopping it, so a caller
+		// that gives up (an `asyncio.wait_for` timeout, a cancelled Swift/Kotlin task)
+		// would leave the closure running with the state lock held. It then consumes
+		// the very event the next call is waiting for, and that call blocks behind it
+		// meanwhile. Tie the work to the caller's future instead.
+		let _abort = AbortOnDrop(handle.abort_handle());
+
 		match handle.await {
 			Ok(result) => result,
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
@@ -85,5 +92,16 @@ impl<T: Send + 'static> Task<T> {
 impl<T: Send + 'static> Drop for Task<T> {
 	fn drop(&mut self) {
 		self.cancel();
+	}
+}
+
+/// Aborts a spawned task when the future awaiting it is dropped.
+///
+/// Aborting one that already finished is a no-op, so this is inert on the happy path.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
 	}
 }

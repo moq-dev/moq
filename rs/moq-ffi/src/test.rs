@@ -1899,17 +1899,14 @@ async fn rejected_session_surfaces_through_closed() {
 	// Either the dial fails outright, or the optimistic connect resolves and the
 	// rejection lands as the session's terminal close. Both must surface within
 	// the timeout.
-	match tokio::time::timeout(TIMEOUT, client.connect(url))
+	if let Ok(cs) = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect neither resolved nor failed")
 	{
-		Ok(cs) => {
-			tokio::time::timeout(TIMEOUT, cs.closed())
-				.await
-				.expect("closed timed out")
-				.expect_err("a rejected session must surface as an error");
-		}
-		Err(_) => {}
+		tokio::time::timeout(TIMEOUT, cs.closed())
+			.await
+			.expect("closed timed out")
+			.expect_err("a rejected session must surface as an error");
 	}
 
 	reject.abort();
@@ -1933,4 +1930,83 @@ async fn cancel_before_connect_fails_fast() {
 		panic!("connect must fail after cancel");
 	};
 	assert!(matches!(err, MoqError::Cancelled), "unexpected error: {err}");
+}
+
+/// A caller that stops waiting must not swallow the event it gave up on.
+/// Dropping the future returned by a `Task::run` call used to leave the spawned
+/// closure detached and still holding the state lock, so it consumed the next
+/// transition into its own cursor and the retry blocked behind it, missing the
+/// edge. Every repeatable read on the bindings (`status`, `next`, `read_frame`,
+/// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
+#[tokio::test]
+async fn cancelled_status_does_not_swallow_the_next_transition() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	// Accept exactly once. Nothing serves the redial, so `Disconnected` is the
+	// only transition left after the kill: if it gets eaten, nothing replaces it.
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_backoff(MoqBackoff {
+		initial_ms: 50,
+		multiplier: 2,
+		max_ms: 200,
+		timeout_ms: 0,
+	});
+
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("status timed out")
+		.expect("status errored");
+	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	// Give up on a status that isn't coming. The window is generous on purpose:
+	// the abandoned call has to actually reach its await for this to prove
+	// anything, and a spawn that never got there would pass either way.
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), cs.status())
+			.await
+			.is_err(),
+		"no transition was pending, so this must be the caller giving up",
+	);
+
+	// The transition the abandoned call would have eaten.
+	server_session.cancel(0);
+
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("the cancelled waiter swallowed the disconnect")
+		.expect("status errored");
+	assert_eq!(status, MoqConnectionStatus::Disconnected);
+
+	cs.cancel(0);
+	server.cancel();
 }
