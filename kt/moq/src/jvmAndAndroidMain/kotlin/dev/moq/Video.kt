@@ -16,7 +16,8 @@ val hardwareEncoder: VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind.Hardware
 val softwareEncoder: VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind.Software
 
 /**
- * A specific backend, e.g. `"videotoolbox"`, `"mediafoundation"`, `"nvenc"`,
- * `"vaapi"`, or `"openh264"`.
+ * A specific backend these bindings compile: `"videotoolbox"` (macOS),
+ * `"mediafoundation"` (Windows), or `"openh264"` (software, everywhere).
+ * Naming one this build lacks fails with a no-encoder error.
  */
 fun namedEncoder(name: String): VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind.Named(name)

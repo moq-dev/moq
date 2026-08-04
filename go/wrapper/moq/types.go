@@ -153,8 +153,10 @@ func SoftwareEncoder() VideoEncoderKind {
 	return VideoEncoderKindSoftware{}
 }
 
-// NamedEncoder selects a specific backend, e.g. "videotoolbox", "nvenc",
-// "vaapi", "mediafoundation", or "openh264".
+// NamedEncoder selects a specific backend these bindings compile:
+// "videotoolbox" (macOS), "mediafoundation" (Windows), or "openh264"
+// (software, everywhere). Naming one this build lacks fails with a no-encoder
+// error.
 func NamedEncoder(name string) VideoEncoderKind {
 	return VideoEncoderKindNamed{Name: name}
 }

@@ -47,16 +47,23 @@ impl From<MoqVideoCodec> for moq_video::encode::Codec {
 }
 
 /// Which encoder implementation to use.
+///
+/// These bindings compile VideoToolbox (macOS), Media Foundation (Windows), and
+/// openh264 (software, everywhere). The Linux hardware codecs (NVENC, VAAPI)
+/// are a libmoq-only build option, so Linux here is software-only.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqVideoEncoderKind {
-	/// Prefer a platform hardware encoder, falling back to software.
+	/// Prefer a platform hardware encoder, falling back to software. On Linux
+	/// that fallback is the only option these bindings have.
 	Auto,
-	/// Hardware only; fails if none is available.
+	/// Hardware only; fails if none is available, which on Linux is always.
 	Hardware,
 	/// Software only (openh264, H.264 only).
 	Software,
-	/// A specific backend, e.g. `"videotoolbox"`, `"mediafoundation"`,
-	/// `"nvenc"`, `"vaapi"`, `"openh264"`.
+	/// A specific backend that moq-ffi compiles: `"videotoolbox"` (macOS),
+	/// `"mediafoundation"` (Windows), or `"openh264"` (software, everywhere).
+	/// Naming one this build lacks fails with a no-encoder error, so reach for
+	/// this only when [`Auto`](Self::Auto) picks the wrong one.
 	Named { name: String },
 }
 
