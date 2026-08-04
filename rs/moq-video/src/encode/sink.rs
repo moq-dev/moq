@@ -82,6 +82,18 @@ impl Sink {
 		self.0.set_bitrate(bitrate).await
 	}
 
+	/// Empty the codec at a boundary the output has to respect, leaving it ready
+	/// for the frames that follow. See [`Encoder::flush`](super::Encoder::flush).
+	///
+	/// A live track needs this at every group boundary: a backend that pipelines
+	/// is still holding the last frames of a group when it ends, and they would
+	/// otherwise surface in the next group ahead of its keyframe, where a
+	/// subscriber joining there cannot decode them. Publishing frame by frame
+	/// with no group structure needs none of it.
+	pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+		self.0.flush().await
+	}
+
 	/// Drain the codec, returning every access unit it was still holding, and
 	/// shut the encoder down.
 	///
@@ -124,6 +136,12 @@ mod threaded {
 		SetBitrate {
 			bitrate: u64,
 			resp: oneshot::Sender<Result<(), Error>>,
+		},
+		/// Empty the codec at a group boundary, leaving it running. Unlike
+		/// `Finish` the encoder survives, so this is served like any other
+		/// request.
+		Flush {
+			resp: oneshot::Sender<Result<Vec<Encoded>, Error>>,
 		},
 		/// Drain the codec and shut down, returning the tail. Last request the
 		/// thread serves: `Encoder::finish` consumes the encoder, so the loop has
@@ -177,6 +195,9 @@ mod threaded {
 							Request::SetBitrate { bitrate, resp } => {
 								let _ = resp.send(encoder.set_bitrate(bitrate));
 							}
+							Request::Flush { resp } => {
+								let _ = resp.send(encoder.flush());
+							}
 							Request::Finish { resp } => {
 								draining = Some(resp);
 								break;
@@ -222,6 +243,10 @@ mod threaded {
 
 		pub async fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 			self.request(|resp| Request::SetBitrate { bitrate, resp }).await
+		}
+
+		pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			self.request(|resp| Request::Flush { resp }).await
 		}
 
 		pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
@@ -297,6 +322,10 @@ mod inline {
 			self.0.set_bitrate(bitrate)
 		}
 
+		pub async fn flush(&mut self) -> Result<Vec<Encoded>, Error> {
+			self.0.flush()
+		}
+
 		pub async fn finish(self) -> Result<Vec<Encoded>, Error> {
 			self.0.finish()
 		}
@@ -354,6 +383,7 @@ mod tests {
 		// Drive it the way an FFI handle gets driven: a fresh caller thread every
 		// time, none of them the thread that opened it.
 		let mut callers = vec![std::thread::current().id()];
+		let mut flushed = Vec::new();
 		for index in 0..3u64 {
 			let sink = sink.clone();
 			let caller = std::thread::spawn(move || {
@@ -362,10 +392,24 @@ mod tests {
 				sink.keyframe();
 				pollster::block_on(sink.encode(gray(index))).unwrap();
 				pollster::block_on(sink.set_bitrate(500_000 + index)).unwrap();
-				std::thread::current().id()
+				// Only the first frame closes a group, so the two after it stay in
+				// the codec and leave the drain below something to find.
+				let flushed = match index {
+					0 => pollster::block_on(sink.flush()).unwrap(),
+					_ => Vec::new(),
+				};
+				(std::thread::current().id(), flushed)
 			});
-			callers.push(caller.join().unwrap());
+			let (caller, drained) = caller.join().unwrap();
+			callers.push(caller);
+			flushed.extend(drained);
 		}
+
+		// The probe holds each frame back by one, so a flush that reached the codec
+		// hands back the frame the group ended on. An inherited no-op would return
+		// nothing here and silently drop it into the next group.
+		let flushed: Vec<_> = flushed.iter().map(|frame| frame.timestamp.as_micros()).collect();
+		assert_eq!(flushed, vec![0], "the group boundary did not empty the codec");
 
 		// ...and finished, so dropped, from yet another.
 		let closer = std::thread::spawn(move || {
@@ -376,13 +420,13 @@ mod tests {
 		let (closer, tail) = closer.join().unwrap();
 		callers.push(closer);
 
-		// The probe holds each frame back by one, so the drain has to hand back the
-		// last one. Dropping the sink without draining would lose it silently.
+		// Frame 2 never came back from an encode call and no flush claimed it, so
+		// the drain has to. Dropping the sink instead would lose it silently.
 		let tail: Vec<_> = tail.iter().map(|frame| frame.timestamp.as_micros()).collect();
 		assert_eq!(tail, vec![2 * 33_333], "the drain lost the codec's tail");
 
 		let log = probe::take();
-		for what in ["open", "encode", "set_bitrate", "finish", "drop"] {
+		for what in ["open", "encode", "set_bitrate", "flush", "finish", "drop"] {
 			assert!(log.iter().any(|(event, _)| *event == what), "no {what} in {log:?}");
 		}
 
