@@ -51,7 +51,7 @@ bool MoQOutput::Start()
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
 		LOG_ERROR("Failed to get service from output");
-		obs_output_signal_stop(output, OBS_OUTPUT_ERROR);
+		SignalStop(OBS_OUTPUT_ERROR);
 		return false;
 	}
 
@@ -69,7 +69,7 @@ bool MoQOutput::Start()
 	server_url = server_value ? server_value : "";
 	if (server_url.empty()) {
 		LOG_ERROR("Server URL is empty");
-		obs_output_signal_stop(output, OBS_OUTPUT_BAD_PATH);
+		SignalStop(OBS_OUTPUT_BAD_PATH);
 		return false;
 	}
 
@@ -91,6 +91,13 @@ bool MoQOutput::Start()
 	}
 
 	LOG_INFO("Connecting to MoQ server: %s", server_url.c_str());
+
+	// Held from the connect through obs_output_begin_data_capture. The status
+	// callback takes the same lock before reporting anything, so this attempt's
+	// terminal cannot signal a failure against an output that is only half
+	// started: it waits until the output is committed, and OBS then handles the
+	// stop through its normal active-output path.
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 
 	uint64_t attempt;
 	{
@@ -126,15 +133,19 @@ bool MoQOutput::Start()
 	bool superseded;
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
+		// Holding signal_mutex keeps this attempt current: libmoq delivers the
+		// terminal on its runtime thread, which parks in SessionClosed until we
+		// commit. The check stands guard over that assumption rather than trusting
+		// libmoq's threading to stay as it is.
 		superseded = session_attempt != attempt;
 		if (!superseded)
 			session = handle;
 	}
 
 	if (superseded) {
-		// The terminal callback beat us here: the session died during connect and
-		// already reported the failure to OBS. Refuse the start rather than
-		// capturing data into a session that is gone.
+		// The session died during connect without going through the callback's
+		// signal path. Refuse the start rather than capturing into a dead session;
+		// OBS surfaces the last error we recorded when info.start returns false.
 		LOG_ERROR("MoQ session failed before the output started: %s", server_url.c_str());
 		return false;
 	}
@@ -161,6 +172,8 @@ bool MoQOutput::Start()
 
 void MoQOutput::Stop(bool signal)
 {
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+
 	Reset();
 
 	if (signal) {
@@ -168,8 +181,19 @@ void MoQOutput::Stop(bool signal)
 	}
 }
 
+void MoQOutput::SignalStop(int code)
+{
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+	obs_output_signal_stop(output, code);
+}
+
 void MoQOutput::Reset()
 {
+	// Excludes the status callback's report: retiring the attempt and signalling
+	// a failure must not interleave, or a stop that already happened gets followed
+	// by a failure OBS turns into a reconnect.
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+
 	int stale;
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
@@ -252,6 +276,13 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 		reason = message ? message : "unknown error";
 	}
 
+	// Held across both the decision below and the signal itself. Taking it before
+	// session_mutex is the required lock order, and holding it through the signal
+	// is what stops a teardown from landing in between: without that, Stop() can
+	// retire the attempt after we decide to report, and OBS turns the late
+	// OBS_OUTPUT_DISCONNECTED into a reconnect of a stopped stream.
+	std::unique_lock<std::recursive_mutex> signal_lock(signal_mutex);
+
 	bool current;
 	bool connected = false;
 	{
@@ -286,6 +317,10 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 		obs_output_signal_stop(output, connected ? OBS_OUTPUT_DISCONNECTED : OBS_OUTPUT_CONNECT_FAILED);
 	}
 
+	// Drop it before the wait below: the destructor blocks on session_cv holding
+	// session_mutex, and its Reset() wants signal_mutex.
+	signal_lock.unlock();
+
 	// Terminal callback: the session task has ended and will not touch `this`
 	// again. Release the lifetime reference the destructor waits on. This is the
 	// last access to `this`.
@@ -297,6 +332,9 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 void MoQOutput::Data(struct encoder_packet *packet)
 {
 	if (!packet) {
+		// One report for the pair, so a session failure can't slip between the
+		// teardown and the encode error and report a second time.
+		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 		Stop(false);
 		obs_output_signal_stop(output, OBS_OUTPUT_ENCODE_ERROR);
 		return;

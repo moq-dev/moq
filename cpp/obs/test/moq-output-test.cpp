@@ -13,6 +13,7 @@
 #include <climits>
 #include <cstdio>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,17 +31,31 @@ namespace {
 struct RecordedSignal {
 	int code;
 	std::string last_error;
+	// How many times capture had begun when this was signalled, so a test can tell
+	// "committed the output, then reported" from "reported, then committed".
+	int begin_capture_at;
 };
 
+// The plugin serializes its own signalling, but the tests read these from a
+// different thread than the callback writes them, so the stubs carry their own
+// lock. Always go through the helpers below.
+std::mutex g_signals_mutex;
 std::vector<RecordedSignal> g_signals;
 std::string g_last_error;
-int g_begin_capture = 0;
+std::atomic<int> g_begin_capture{0};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
 // Released from inside Start(), just before it rewrites the members a stale
 // callback might read, so the two genuinely overlap.
 std::atomic<bool> *g_start_gate = nullptr;
+// obs_output_set_last_error sits between deciding to report a failure and
+// reporting it, so the stub announces that it is in that window and then holds
+// it open. A test can use this to drive a concurrent Stop() into the gap: with
+// signal_mutex held across the whole report the Stop() blocks, and without it
+// the stale report lands after the stop, which is the bug.
+std::atomic<bool> g_stall_last_error{false};
+std::atomic<bool> g_in_report_window{false};
 } // namespace
 
 extern "C" {
@@ -84,12 +99,22 @@ bool obs_output_begin_data_capture(obs_output_t *, uint32_t)
 
 void obs_output_set_last_error(obs_output_t *, const char *message)
 {
-	g_last_error = message ? message : "";
+	{
+		std::lock_guard<std::mutex> lock(g_signals_mutex);
+		g_last_error = message ? message : "";
+	}
+	if (g_stall_last_error) {
+		g_in_report_window.store(true, std::memory_order_relaxed);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
 }
 
 void obs_output_signal_stop(obs_output_t *, int code)
 {
-	g_signals.push_back({code, g_last_error});
+	{
+		std::lock_guard<std::mutex> lock(g_signals_mutex);
+		g_signals.push_back({code, g_last_error, g_begin_capture});
+	}
 	if (g_on_signal)
 		g_on_signal();
 }
@@ -116,8 +141,12 @@ void *g_user_data = nullptr;
 std::atomic<int> g_next_handle{10};
 std::atomic<int> g_last_handle{0};
 std::atomic<int> g_closed_handle{0};
-// libmoq is allowed to deliver the terminal before connect returns.
+// libmoq is allowed to deliver the terminal before connect returns. "inline" is
+// the defensive case (same thread); "thread" is what libmoq actually does, from
+// its runtime thread, which is the ordering signal_mutex has to handle.
 std::atomic<bool> g_connect_fires_terminal{false};
+std::atomic<bool> g_connect_fires_terminal_threaded{false};
+std::thread g_connect_terminal_thread;
 const char *g_error = "unauthorized";
 } // namespace
 
@@ -173,6 +202,11 @@ int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_
 	if (g_connect_fires_terminal) {
 		g_on_status(g_user_data, -34);
 		g_on_status = nullptr;
+	} else if (g_connect_fires_terminal_threaded) {
+		auto cb = g_on_status;
+		auto ud = g_user_data;
+		g_on_status = nullptr;
+		g_connect_terminal_thread = std::thread([cb, ud] { cb(ud, -34); });
 	}
 	return handle;
 }
@@ -192,11 +226,24 @@ int32_t moq_session_close(uint32_t session)
 namespace {
 int g_failures = 0;
 
-// Indexing g_signals directly turns a missing signal into a segfault, which
-// hides which assertion actually regressed.
+// Indexing directly turns a missing signal into a segfault, which hides which
+// assertion actually regressed.
 RecordedSignal signalAt(size_t i)
 {
-	return i < g_signals.size() ? g_signals[i] : RecordedSignal{INT_MIN, "<no signal>"};
+	std::lock_guard<std::mutex> lock(g_signals_mutex);
+	return i < g_signals.size() ? g_signals[i] : RecordedSignal{INT_MIN, "<no signal>", -1};
+}
+
+size_t signalCount()
+{
+	std::lock_guard<std::mutex> lock(g_signals_mutex);
+	return g_signals.size();
+}
+
+std::vector<RecordedSignal> signalsSince(size_t from)
+{
+	std::lock_guard<std::mutex> lock(g_signals_mutex);
+	return {g_signals.begin() + static_cast<long>(from), g_signals.end()};
 }
 
 void fire(int code)
@@ -215,14 +262,20 @@ void fire(int code)
 
 void reset()
 {
-	g_signals.clear();
-	g_last_error.clear();
+	{
+		std::lock_guard<std::mutex> lock(g_signals_mutex);
+		g_signals.clear();
+		g_last_error.clear();
+	}
 	g_on_signal = nullptr;
 	g_on_status = nullptr;
 	g_closed_handle = 0;
 	g_begin_capture = 0;
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
+	g_connect_fires_terminal_threaded = false;
+	g_stall_last_error = false;
+	g_in_report_window = false;
 }
 } // namespace
 
@@ -246,7 +299,7 @@ int main()
 		CHECK(o.Start());
 		fire(1);
 		fire(-34);
-		CHECK(g_signals.size() == 1);
+		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_DISCONNECTED);
 		CHECK(signalAt(0).last_error == "unauthorized");
 	}
@@ -258,7 +311,7 @@ int main()
 		MoQOutput o(nullptr, out);
 		CHECK(o.Start());
 		fire(-34);
-		CHECK(g_signals.size() == 1);
+		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 	}
 	printf("fatal before connect: ok\n");
@@ -271,7 +324,7 @@ int main()
 		fire(1);
 		o.Stop(false);
 		fire(0);
-		CHECK(g_signals.empty());
+		CHECK(signalCount() == 0);
 	}
 	printf("clean close: ok\n");
 
@@ -286,7 +339,7 @@ int main()
 		o.Stop(false);
 		CHECK(o.Start());
 		stale_cb(stale_ud, -34);
-		CHECK(g_signals.empty());
+		CHECK(signalCount() == 0);
 		int live = g_last_handle;
 		g_closed_handle = 0;
 		o.Stop(false);
@@ -304,7 +357,7 @@ int main()
 		MoQOutput o(nullptr, out);
 		CHECK(!o.Start());
 		CHECK(g_begin_capture == 0);
-		CHECK(g_signals.size() == 1);
+		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 		g_closed_handle = 0;
 		o.Stop(false);
@@ -327,7 +380,7 @@ int main()
 		CHECK(o.Start());
 		fire(1);
 		fire(-34);
-		CHECK(g_signals.size() == 2);
+		CHECK(signalCount() == 2);
 		CHECK(signalAt(0).code == OBS_OUTPUT_DISCONNECTED);
 		CHECK(signalAt(1).code == OBS_OUTPUT_SUCCESS);
 	}
@@ -355,7 +408,7 @@ int main()
 		late.join();
 		CHECK(elapsed > std::chrono::milliseconds(100));
 		CHECK(elapsed < std::chrono::seconds(2));
-		CHECK(g_signals.size() == 1);
+		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
 	}
 	printf("terminal during destruction: ok\n");
@@ -368,15 +421,78 @@ int main()
 		CHECK(o.Start());
 		fire(1);
 		fire(-34);
-		CHECK(g_signals.size() == 1);
+		CHECK(signalCount() == 1);
 		g_closed_handle = 0;
 		CHECK(o.Start());
 		CHECK(g_closed_handle == 0); // the dead handle is retired, not closed
 		fire(-34);
-		CHECK(g_signals.size() == 2);
+		CHECK(signalCount() == 2);
 		CHECK(signalAt(1).code == OBS_OUTPUT_CONNECT_FAILED);
 	}
 	printf("OBS-driven restart: ok\n");
+
+	// libmoq delivers the terminal on its own thread while Start() is still
+	// committing. It must not report against a half-started output: signal_mutex
+	// parks it until capture has begun, so OBS sees a started-then-stopped output
+	// rather than an active one with no session.
+	{
+		reset();
+		g_connect_fires_terminal_threaded = true;
+		MoQOutput o(nullptr, out);
+		CHECK(o.Start());
+		if (g_connect_terminal_thread.joinable())
+			g_connect_terminal_thread.join();
+		// Capture began before the report, so OBS's normal stop path applies.
+		// The report must land after capture began, so OBS sees an active output and
+		// runs its normal stop path instead of one that was never committed.
+		CHECK(signalAt(0).begin_capture_at == 1);
+		CHECK(signalCount() == 1);
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+		CHECK(signalAt(0).last_error == "unauthorized");
+	}
+	printf("terminal during startup commit: ok\n");
+
+	// A terminal racing a user-initiated Stop must not report afterwards: OBS
+	// turns a late OBS_OUTPUT_DISCONNECTED into a reconnect of a stopped stream,
+	// because obs_output_signal_stop never checks whether the output is active.
+	{
+		reset();
+		g_stall_last_error = true;
+		const int rounds = 50;
+		int reconnect_after_stop = 0;
+		for (int i = 0; i < rounds; i++) {
+			MoQOutput o(nullptr, out);
+			o.Start();
+			fire(1); // connected, so a failure would ask OBS to reconnect
+			auto cb = g_on_status;
+			auto ud = g_user_data;
+			g_on_status = nullptr;
+
+			size_t before = signalCount();
+			g_in_report_window = false;
+			std::thread terminal([cb, ud] { cb(ud, -34); });
+
+			// Wait until the callback has committed to reporting a failure and is
+			// sitting in the window, then stop from underneath it.
+			while (!g_in_report_window.load(std::memory_order_relaxed))
+				std::this_thread::yield();
+			o.Stop(true); // the user pressed stop
+			terminal.join();
+
+			// Whatever the interleaving, a DISCONNECTED must never follow the
+			// SUCCESS that reported the user's stop.
+			bool stopped = false;
+			for (const auto &s : signalsSince(before)) {
+				if (s.code == OBS_OUTPUT_SUCCESS)
+					stopped = true;
+				else if (stopped && s.code == OBS_OUTPUT_DISCONNECTED)
+					reconnect_after_stop++;
+			}
+		}
+		CHECK(reconnect_after_stop == 0);
+		printf("terminal racing user Stop: ok (%d late reconnect signals over %d rounds)\n",
+		       reconnect_after_stop, rounds);
+	}
 
 	// The dock reads the connect time as the live "connected" indicator, so it
 	// must not outlive the attempt it describes.
@@ -416,7 +532,7 @@ int main()
 			terminal.join();
 		}
 		size_t fatal = 0, success = 0;
-		for (auto &s : g_signals) {
+		for (const auto &s : signalsSince(0)) {
 			if (s.code == OBS_OUTPUT_SUCCESS)
 				success++;
 			else if (s.code == OBS_OUTPUT_DISCONNECTED || s.code == OBS_OUTPUT_CONNECT_FAILED)
@@ -427,7 +543,7 @@ int main()
 		// Exactly one SUCCESS per round from the destructor's Stop(), plus a fatal
 		// only where the terminal beat Stop() to the attempt.
 		CHECK(success == static_cast<size_t>(rounds));
-		CHECK(g_signals.size() == success + fatal);
+		CHECK(signalCount() == success + fatal);
 		printf("terminal racing Stop: ok (%zu of %d rounds signalled)\n", fatal, rounds);
 	}
 

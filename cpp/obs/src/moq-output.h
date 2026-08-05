@@ -41,6 +41,10 @@ private:
 	void SessionConnected(const SessionRef &ref, int epoch);
 	void SessionClosed(const SessionRef &ref, int code);
 
+	// Tell OBS the output stopped. Every obs_output_signal_stop goes through here
+	// or through an explicit signal_mutex hold.
+	void SignalStop(int code);
+
 	// Tear down the publish state without telling OBS.
 	void Reset();
 
@@ -50,6 +54,22 @@ private:
 	void AudioData(struct encoder_packet *packet);
 
 	obs_output_t *output;
+
+	// Serializes reporting the output's fate to OBS against tearing it down, and
+	// is held across the OBS calls themselves. Without it the status callback can
+	// decide to report a failure, lose the race to Stop(), and still signal:
+	// OBS_OUTPUT_DISCONNECTED then makes OBS reconnect a stream the user just
+	// stopped, since obs_output_signal_stop never checks whether the output is
+	// still active. Start() also holds it from the connect through
+	// obs_output_begin_data_capture, so a session that dies mid-startup cannot
+	// report against an output that isn't committed yet.
+	//
+	// Recursive because obs_output_signal_stop runs the frontend's handlers
+	// inline, and a frontend may call obs_output_stop straight back into Stop().
+	//
+	// Lock order: signal_mutex first, then session_mutex. Never the reverse, and
+	// never take signal_mutex from inside a libmoq call.
+	std::recursive_mutex signal_mutex;
 
 	std::string server_url;
 	std::string path;
