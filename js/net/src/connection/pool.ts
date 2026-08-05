@@ -276,6 +276,7 @@ class Lease implements Established {
 		// with us.
 		const watch = new announce.Broadcast({ connection: this, path });
 		this.#broadcasts.add(watch);
+		void watch.closed.then(() => this.#broadcasts.delete(watch));
 		return watch;
 	}
 
@@ -283,6 +284,12 @@ class Lease implements Established {
 		return await this.#session.stats();
 	}
 
+	/**
+	 * Resolves when the shared session closes, which is not when you release this handle.
+	 *
+	 * Somebody else may still be using the connection after your {@link close}, so don't await
+	 * this to find out that your own teardown finished; it says the connection is gone.
+	 */
 	get closed(): Promise<void> {
 		return this.#session.closed;
 	}

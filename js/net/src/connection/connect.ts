@@ -75,10 +75,11 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 }
 
 /**
- * Options for {@link connect} and {@link Reload}.
+ * Options for {@link connect} and `Reload`.
  *
- * The last three are about staying connected, so only {@link Reload} honors them; {@link connect}
- * takes the URL as an argument and connects exactly once.
+ * {@link ConnectProps.url}, {@link ConnectProps.enabled}, and {@link ConnectProps.reload} are about
+ * staying connected, so only `Reload` honors them; {@link connect} takes the URL as an argument
+ * and connects exactly once.
  */
 export interface ConnectProps {
 	/** WebTransport options. */
@@ -139,6 +140,9 @@ export interface ConnectProps {
 	 * `false` connects once and gives up when that session ends. An object tunes the backoff.
 	 */
 	reload?: boolean | ReloadDelay;
+
+	/** @internal Superseded by {@link ConnectProps.reload}, which also disables the loop. */
+	delay?: ReloadDelay;
 }
 
 // Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would

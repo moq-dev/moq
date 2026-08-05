@@ -13,15 +13,8 @@ import type { Established } from "./established.ts";
 import type { PoolProps } from "./pool.ts";
 import type { Probe, Stats } from "./stats.ts";
 
-/**
- * Connection and retry options for {@link Reload}.
- *
- * @internal
- */
-export type ReloadProps = ConnectProps & {
-	/** @internal Superseded by `reload`, which also disables the loop. */
-	delay?: ReloadDelay;
-};
+/** @internal Superseded by {@link ConnectProps}, which {@link Reload} takes directly. */
+export type ReloadProps = ConnectProps;
 
 /** The backoff used when nothing else is asked for. */
 const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 30000 };
@@ -99,7 +92,7 @@ export class Reload {
 	// Use the serialized URL as the reactive connection key. URL objects use identity
 	// equality, but replacing one with an equivalent instance should not reconnect.
 	#url: Getter<string | undefined>;
-	constructor(props?: ReloadProps) {
+	constructor(props?: ConnectProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.reload = props?.reload !== false;
@@ -212,8 +205,7 @@ export class Reload {
 
 		// One attempt was all that was asked for, so this is the end of the line.
 		if (!this.reload) {
-			if (cause === undefined) this.#closedResolve();
-			else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
+			this.#finish(cause);
 			return;
 		}
 
@@ -235,8 +227,7 @@ export class Reload {
 			if (elapsed >= timeout) {
 				console.warn("reconnect timed out");
 				// A graceful close has no error, so report the timeout itself.
-				if (cause === undefined) this.#closedReject(new Error("reconnect timed out"));
-				else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
+				this.#finish(cause ?? new Error("reconnect timed out"));
 				return;
 			}
 		}
@@ -335,7 +326,20 @@ export class Reload {
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
 	close() {
+		this.#finish();
+	}
+
+	/**
+	 * Stop for good: tear down the effect scope, then settle {@link Reload.closed}.
+	 *
+	 * Both terminal paths run through here so neither leaves the page listeners, the `probe`
+	 * computed, and the `announced()` pumps behind. Settling twice is a no-op, so the public
+	 * {@link Reload.close} after a timeout keeps the original cause.
+	 */
+	#finish(cause?: unknown): void {
 		this.#signals.close();
-		this.#closedResolve();
+
+		if (cause === undefined) this.#closedResolve();
+		else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
 	}
 }

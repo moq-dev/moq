@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { ALPN_05 } from "../lite/version.ts";
-import { createMockTransportPair, type MockTransport } from "../mock.ts";
+import {
+	createMockTransportPair,
+	createPendingTransports,
+	type MockTransport,
+	type PendingTransports,
+} from "../mock.ts";
 import * as Path from "../path.ts";
 import { connect } from "./connect.ts";
 import { resetPool } from "./pool.ts";
@@ -11,11 +16,12 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-// A tiny window keeps the linger tests quick without mocking timers.
+// A tiny window keeps the linger tests quick without mocking timers. The wait is a wide
+// multiple of it so a loaded runner's timer drift can't be mistaken for the session lingering.
 const grace = 20;
 
 async function expired() {
-	await new Promise((resolve) => setTimeout(resolve, grace * 3));
+	await new Promise((resolve) => setTimeout(resolve, grace * 15));
 }
 
 const original = globalThis.WebTransport;
@@ -47,25 +53,10 @@ function stubTransports(): { transports: MockTransport[]; servers: MockTransport
 }
 
 /** Hand out a transport that never finishes connecting, counting dials and closes. */
-function stubPending(): { connects: () => number; closes: () => number } {
-	let connects = 0;
-	let closes = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		constructor() {
-			connects++;
-		}
-
-		close() {
-			closes++;
-		}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
-	return { connects: () => connects, closes: () => closes };
+function stubPending(): PendingTransports {
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
+	return pending;
 }
 
 test("two connections to one URL share a session", async () => {

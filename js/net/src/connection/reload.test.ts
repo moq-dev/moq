@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, createPendingTransports } from "../mock.ts";
 import * as Path from "../path.ts";
 import { accept } from "./index.ts";
 import { resetPool } from "./pool.ts";
@@ -18,20 +18,8 @@ beforeEach(() => {
 
 test("equivalent URL instances do not restart a pending connection", async () => {
 	const original = globalThis.WebTransport;
-	let connects = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		constructor() {
-			connects++;
-		}
-
-		close() {}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 	const reload = new Reload({
 		enabled: true,
 		url: new URL("https://example.com/broadcast"),
@@ -40,15 +28,15 @@ test("equivalent URL instances do not restart a pending connection", async () =>
 
 	try {
 		await settle();
-		expect(connects).toBe(1);
+		expect(pending.connects()).toBe(1);
 
 		reload.url.set(new URL("https://example.com/broadcast"));
 		await settle();
-		expect(connects).toBe(1);
+		expect(pending.connects()).toBe(1);
 
 		reload.url.set(new URL("https://example.com/other"));
 		await settle();
-		expect(connects).toBe(2);
+		expect(pending.connects()).toBe(2);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -57,18 +45,8 @@ test("equivalent URL instances do not restart a pending connection", async () =>
 
 test("aborting the signal stops the loop", async () => {
 	const original = globalThis.WebTransport;
-	let closes = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		close() {
-			closes++;
-		}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 	const controller = new AbortController();
 	const reload = new Reload({
 		url: new URL("https://example.com/signal"),
@@ -82,7 +60,7 @@ test("aborting the signal stops the loop", async () => {
 
 		controller.abort();
 		await settle();
-		expect(closes).toBe(1);
+		expect(pending.closes()).toBe(1);
 		await reload.closed;
 	} finally {
 		reload.close();
@@ -92,25 +70,13 @@ test("aborting the signal stops the loop", async () => {
 
 test("connecting is the default", async () => {
 	const original = globalThis.WebTransport;
-	let connects = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		constructor() {
-			connects++;
-		}
-
-		close() {}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 	const reload = new Reload({ url: new URL("https://example.com/default"), websocket: { enabled: false } });
 
 	try {
 		await settle();
-		expect(connects).toBe(1);
+		expect(pending.connects()).toBe(1);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -178,6 +144,13 @@ test("reload: false gives up after one session", async () => {
 		// Nothing is scheduled, so it stays down.
 		await settle();
 		expect(connects).toBe(1);
+
+		// Settling `closed` also tears the effect scope down, so the page listeners, the probe
+		// computed, and the announce pumps go with it. A URL change proves it: a live scope
+		// would rerun the connect effect and dial again.
+		reload.url.set(new URL("https://example.com/once-again"));
+		await settle();
+		expect(connects).toBe(1);
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -186,18 +159,8 @@ test("reload: false gives up after one session", async () => {
 
 test("closing mid-connect aborts the pending attempt", async () => {
 	const original = globalThis.WebTransport;
-	let closes = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		close() {
-			closes++;
-		}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 	const reload = new Reload({
 		enabled: true,
 		url: new URL("https://example.com/broadcast"),
@@ -206,11 +169,11 @@ test("closing mid-connect aborts the pending attempt", async () => {
 
 	try {
 		await settle();
-		expect(closes).toBe(0);
+		expect(pending.closes()).toBe(0);
 
 		reload.close();
 		await settle();
-		expect(closes).toBe(1);
+		expect(pending.closes()).toBe(1);
 	} finally {
 		globalThis.WebTransport = original;
 	}

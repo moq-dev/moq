@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 import { ALPN_05 } from "../lite/version.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, createPendingTransports } from "../mock.ts";
 import { connect } from "./connect.ts";
 import { resetPool } from "./pool.ts";
 
@@ -17,20 +17,8 @@ beforeEach(() => {
 
 test("already-aborted signal rejects without connecting", async () => {
 	const original = globalThis.WebTransport;
-	let connects = 0;
-
-	class CountingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		constructor() {
-			connects++;
-		}
-
-		close() {}
-	}
-
-	globalThis.WebTransport = CountingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 
 	try {
 		const controller = new AbortController();
@@ -42,7 +30,7 @@ test("already-aborted signal rejects without connecting", async () => {
 		);
 		expect(err).toBeInstanceOf(DOMException);
 		expect((err as DOMException).name).toBe("AbortError");
-		expect(connects).toBe(0);
+		expect(pending.connects()).toBe(0);
 	} finally {
 		globalThis.WebTransport = original;
 	}
@@ -50,18 +38,8 @@ test("already-aborted signal rejects without connecting", async () => {
 
 test("abort mid-connect rejects with the reason and closes the transport", async () => {
 	const original = globalThis.WebTransport;
-	let closes = 0;
-
-	class PendingWebTransport {
-		ready = new Promise<void>(() => {});
-		closed = new Promise<void>(() => {});
-
-		close() {
-			closes++;
-		}
-	}
-
-	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
 
 	try {
 		const controller = new AbortController();
@@ -73,13 +51,13 @@ test("abort mid-connect rejects with the reason and closes the transport", async
 		);
 
 		await settle();
-		expect(closes).toBe(0);
+		expect(pending.closes()).toBe(0);
 
 		controller.abort(reason);
 		expect(await result).toBe(reason);
 
 		await settle();
-		expect(closes).toBe(1);
+		expect(pending.closes()).toBe(1);
 	} finally {
 		globalThis.WebTransport = original;
 	}

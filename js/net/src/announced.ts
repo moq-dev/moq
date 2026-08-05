@@ -130,9 +130,15 @@ export class Consumer {
 }
 
 // Relays already warned about missing broadcast discovery, so the fallback logs at most once
-// per relay instead of once per watched path. Keyed by URL rather than by session, since
+// per relay instead of once per watched path. Keyed by relay rather than by session, since
 // several handles can share one connection.
 const warnedNoDiscovery = new Set<string>();
+
+// Never the full href: the query carries the auth token, so keying on it would pin every token
+// an app ever used in memory and mint an entry per rotation. Origin plus path is the relay.
+function relayKey(url: URL): string {
+	return `${url.origin}${url.pathname}`;
+}
 
 /**
  * What to watch, for {@link Broadcast}.
@@ -219,8 +225,9 @@ export class Broadcast {
 
 			// Without discovery no announcement ever arrives, so waiting would hang forever.
 			if (!conn.discovery) {
-				if (!warnedNoDiscovery.has(conn.url.href)) {
-					warnedNoDiscovery.add(conn.url.href);
+				const key = relayKey(conn.url);
+				if (!warnedNoDiscovery.has(key)) {
+					warnedNoDiscovery.add(key);
 					console.warn("relay does not support broadcast discovery; consuming without waiting.");
 				}
 
@@ -285,6 +292,11 @@ export class Broadcast {
 				offline();
 			});
 		});
+	}
+
+	/** Resolves once the handle is closed, so an owner can drop its reference. */
+	get closed(): Promise<void> {
+		return this.#signals.closed;
 	}
 
 	/** Closes the handle and the broadcast it currently holds. Idempotent. */
