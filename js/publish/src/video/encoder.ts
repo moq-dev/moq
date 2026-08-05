@@ -3,7 +3,16 @@ import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	type Computed,
+	Effect,
+	type Getter,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type { Capture } from "./capture";
 import type { Source } from "./types";
@@ -114,6 +123,13 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
+	// The codec the browser will actually encode with, probed against the hardware.
+	#codec = new Signal<{ codec: string; hardwareAcceleration: HardwareAcceleration } | undefined>(undefined);
+
+	// Only the codec prefix the user asked for, narrowed out of `config` so tuning any other knob
+	// doesn't re-probe the hardware.
+	#codecFilter: Computed<string>;
+
 	#signals = new Effect();
 
 	constructor(name: string, props?: EncoderProps) {
@@ -125,8 +141,10 @@ export class Encoder {
 			bandwidth: getter(props?.bandwidth),
 		};
 		this.config = Signal.from(props?.config);
+		this.#codecFilter = this.#signals.computed((effect) => effect.get(this.config)?.codec ?? "");
 
 		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runCodec.bind(this));
 		this.#signals.run(this.#runResolved.bind(this));
 		this.#signals.run(this.#runDimensions.bind(this));
 		this.#signals.run(this.#runRegister.bind(this));
@@ -252,6 +270,27 @@ export class Encoder {
 		effect.set(this.#out.catalog, catalog);
 	}
 
+	// Probe the hardware for the best codec. Deliberately depends on as little as possible: every
+	// rerun blanks the codec (and with it the resolved config and the catalog entry) for however long
+	// the probe takes, which on a busy GPU process is a long time.
+	#runCodec(effect: Effect): void {
+		if (!effect.get(this.in.enabled)) return;
+
+		const dimensions = effect.get(this.#dimensions);
+		if (!dimensions) return;
+
+		const required = effect.get(this.#codecFilter) ?? "";
+
+		effect.spawn(async () => {
+			const detected = await this.#bestCodec(required, dimensions);
+			if (!detected) return;
+
+			effect.set(this.#codec, detected);
+		});
+	}
+
+	// Size the bitrate for the detected codec. Synchronous, so a new bandwidth estimate updates the
+	// config within the same microtask instead of leaving it blank while something re-derives it.
 	#runResolved(effect: Effect): void {
 		// NOTE: dimensions already factors in user provided maxPixels.
 		// It's a separate effect in order to deduplicate.
@@ -266,6 +305,11 @@ export class Encoder {
 		const dimensions = effect.get(this.#dimensions);
 		if (!dimensions) return;
 
+		const detected = effect.get(this.#codec);
+		if (!detected) return;
+
+		const { codec, hardwareAcceleration } = detected;
+
 		const settings = source.getSettings();
 
 		// Get the user provided config.
@@ -277,78 +321,54 @@ export class Encoder {
 		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
 		const bitrateScale = user.bitrateScale ?? 0.07;
 
-		effect.spawn(async () => {
-			const detectedCodec = await this.#bestCodec(effect);
-			if (!detectedCodec) return;
+		// TARGET BITRATE CALCULATION (h264)
+		// 480p@30 = 1.0mbps
+		// 480p@60 = 1.5mbps
+		// 720p@30 = 2.5mbps
+		// 720p@60 = 3.5mpbs
+		// 1080p@30 = 4.5mbps
+		// 1080p@60 = 6.0mbps
 
-			const { codec, hardwareAcceleration } = detectedCodec;
+		// 30fps is the baseline, applying a multiplier for higher framerates.
+		// Framerate does not cause a multiplicative increase in bitrate because of delta encoding.
+		// TODO Make this better.
+		const framerateFactor = 30.0 + (framerate - 30) / 2;
 
-			// TARGET BITRATE CALCULATION (h264)
-			// 480p@30 = 1.0mbps
-			// 480p@60 = 1.5mbps
-			// 720p@30 = 2.5mbps
-			// 720p@60 = 3.5mpbs
-			// 1080p@30 = 4.5mbps
-			// 1080p@60 = 6.0mbps
+		// ACTUAL BITRATE CALCULATION
+		// 480p@30 = 409920 * 30 * 0.07 = 0.9 Mb/s
+		// 480p@60 = 409920 * 45 * 0.07 = 1.3 Mb/s
+		// 720p@30 = 921600 * 30 * 0.07 = 1.9 Mb/s
+		// 720p@60 = 921600 * 45 * 0.07 = 2.9 Mb/s
+		// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
+		// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
+		let bitrate = Math.round(maxPixels * bitrateScale * framerateFactor * codecBitrateScale(codec));
 
-			// 30fps is the baseline, applying a multiplier for higher framerates.
-			// Framerate does not cause a multiplicative increase in bitrate because of delta encoding.
-			// TODO Make this better.
-			const framerateFactor = 30.0 + (framerate - 30) / 2;
-			let bitrate = Math.round(maxPixels * bitrateScale * framerateFactor);
+		bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
 
-			// ACTUAL BITRATE CALCULATION
-			// 480p@30 = 409920 * 30 * 0.07 = 0.9 Mb/s
-			// 480p@60 = 409920 * 45 * 0.07 = 1.3 Mb/s
-			// 720p@30 = 921600 * 30 * 0.07 = 1.9 Mb/s
-			// 720p@60 = 921600 * 45 * 0.07 = 2.9 Mb/s
-			// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
-			// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
-
-			// We scale the bitrate for more efficient codecs.
-			// TODO This shouldn't be linear, as the efficiency is very similar at low bitrates.
-			if (codec.startsWith("avc1")) {
-				bitrate *= 1.0; // noop
-			} else if (codec.startsWith("hev1")) {
-				bitrate *= 0.7;
-			} else if (codec.startsWith("vp09")) {
-				bitrate *= 0.8;
-			} else if (codec.startsWith("av01")) {
-				bitrate *= 0.6;
-			} else if (codec === "vp8") {
-				// Worse than H.264 but it's a backup plan.
-				bitrate *= 1.1;
-			} else {
-				throw new Error(`unknown codec: ${codec}`);
+		// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
+		if (!user.maxBitrate) {
+			const estimate = effect.get(this.in.bandwidth);
+			if (estimate != null) {
+				// Reserve ~10% for audio and protocol overhead.
+				const cap = Math.round(estimate * 0.9);
+				bitrate = Math.min(bitrate, cap);
 			}
+		}
 
-			bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
+		const config: VideoEncoderConfig = {
+			codec,
+			width: dimensions.width,
+			height: dimensions.height,
+			framerate,
+			bitrate,
+			avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
+			// @ts-expect-error Typescript needs to be updated.
+			hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
+			latencyMode: "realtime",
+			hardwareAcceleration,
+		};
 
-			// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
-			if (!user.maxBitrate) {
-				const estimate = effect.get(this.in.bandwidth);
-				if (estimate != null) {
-					// Reserve ~10% for audio and protocol overhead.
-					const cap = Math.round(estimate * 0.9);
-					bitrate = Math.min(bitrate, cap);
-				}
-			}
-
-			const config: VideoEncoderConfig = {
-				codec,
-				width: dimensions.width,
-				height: dimensions.height,
-				framerate,
-				bitrate,
-				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
-				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-				latencyMode: "realtime",
-				hardwareAcceleration,
-			};
-
-			effect.set(this.#out.resolved, config);
-		});
+		effect.set(this.#out.resolved, config);
 	}
 
 	#runDimensions(effect: Effect): void {
@@ -385,19 +405,16 @@ export class Encoder {
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(effect: Effect): Promise<
+	async #bestCodec(
+		required: string,
+		dimensions: { width: number; height: number },
+	): Promise<
 		| {
 				codec: string;
 				hardwareAcceleration: HardwareAcceleration;
 		  }
 		| undefined
 	> {
-		const config = effect.get(this.config);
-		const required = config?.codec ?? "";
-
-		const dimensions = effect.get(this.#dimensions);
-		if (!dimensions) return;
-
 		// A list of codecs to try, in order of preference.
 		const HARDWARE_CODECS = [
 			// VP9
@@ -510,6 +527,19 @@ export class Encoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+// Scale the bitrate for more efficient codecs, relative to H.264.
+// TODO This shouldn't be linear, as the efficiency is very similar at low bitrates.
+function codecBitrateScale(codec: string): number {
+	if (codec.startsWith("avc1")) return 1.0;
+	if (codec.startsWith("hev1")) return 0.7;
+	if (codec.startsWith("vp09")) return 0.8;
+	if (codec.startsWith("av01")) return 0.6;
+	// Worse than H.264 but it's a backup plan.
+	if (codec === "vp8") return 1.1;
+
+	throw new Error(`unknown codec: ${codec}`);
 }
 
 function sourceConstraintPixels(source: Source): number | undefined {
