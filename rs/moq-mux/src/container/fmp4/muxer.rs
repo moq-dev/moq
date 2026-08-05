@@ -41,21 +41,25 @@ fn default_frame(kind: &Kind, timescale: moq_net::Timescale) -> crate::Result<mo
 	fallback_duration(timescale.as_u64(), rate)
 }
 
-/// Muxes one rendition's fetched groups into standalone CMAF, without a live subscription.
+/// Muxes one rendition into standalone CMAF, a group or a frame at a time.
 ///
-/// The pull-based [`Export`](super::Export) subscribes to a whole broadcast and interleaves
-/// its tracks; `Muxer` is the building block for a fetch-on-demand consumer (an HLS/DASH
-/// origin) that retrieves one group at a time via
-/// [`track::Consumer::fetch_group`](moq_net::track::Consumer::fetch_group):
+/// The pull-based [`Export`](super::Export) subscribes to a whole broadcast and interleaves its
+/// tracks. `Muxer` is the building block for a consumer that drives the timing itself: an HLS or
+/// DASH origin fetching one group at a time via
+/// [`track::Consumer::fetch_group`](moq_net::track::Consumer::fetch_group), or a relay
+/// repackaging a live subscription frame by frame.
 ///
 /// 1. [`read`](Self::read) decodes a fetched group into media [`Frame`]s, normalizing the
 ///    codec shape (Annex-B H.264/H.265 becomes length-prefixed, with the config record
 ///    synthesized from the in-band parameter sets).
 /// 2. [`init`](Self::init) builds the rendition's init segment (ftyp+moov).
-/// 3. [`fragment`](Self::fragment) encodes frames as one moof+mdat whose `tfdt` carries their
-///    real presentation time, so a fragment built from a mid-stream group stands alone.
-///    [`fragments`](Self::fragments) cuts the same run into one fragment per frame, for a
-///    consumer that addresses individual frames (LL-HLS Partial Segments).
+/// 3. One of three, by how much of the run the caller has in hand:
+///    - [`fragment`](Self::fragment) packs frames into a single moof+mdat whose `tfdt` carries
+///      their real presentation time, so a fragment built from a mid-stream group stands alone.
+///    - [`fragments`](Self::fragments) cuts that same run into one fragment per frame, for a
+///      consumer whose smallest addressable unit is a frame (LL-HLS Partial Segments).
+///    - [`fragment_at`](Self::fragment_at) takes the decode time from the caller, for one that
+///      authors a continuous timeline across calls and can't wait for the whole run.
 ///
 /// For inline-parameter-set codecs (catalog `description` absent), [`init`](Self::init) returns
 /// `None` until a group has been [`read`](Self::read) to resolve the config from a keyframe.

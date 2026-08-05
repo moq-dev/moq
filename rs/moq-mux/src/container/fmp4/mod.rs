@@ -1154,7 +1154,7 @@ mod tests {
 		);
 	}
 
-	// One fragment per frame, the shape a fetch-on-demand origin storing one object per encoded
+	// One fragment per frame, the shape a consumer storing one media object per encoded
 	// frame produces. Anchoring each fragment at its own frame would collapse every cts to zero
 	// and let tfdt follow the reordered PTS; a caller-authored base keeps both right.
 	#[test]
