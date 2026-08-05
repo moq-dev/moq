@@ -55,7 +55,7 @@ impl Size {
 
 		if !representable {
 			return Err(Error::Codec(anyhow::anyhow!(
-				"{what} {self} at {framerate}fps: too large to encode"
+				"{what} {self} at {framerate}fps: dimensions too large to represent"
 			)));
 		}
 		Ok(())
@@ -99,10 +99,10 @@ mod tests {
 		assert!(Size::new(320, 241).validate("frame").is_err());
 	}
 
-	#[test]
 	/// Regression: `u32` dimensions can reach a pixel count whose derived
 	/// quantities overflow. A binding hands these straight through, and a panic
 	/// there aborts the host process, so the size has to be refused first.
+	#[test]
 	fn validate_encodable_rejects_unrepresentable_sizes() {
 		// A frame nobody can encode, but whose arithmetic still fits: the backend
 		// decides, not us.

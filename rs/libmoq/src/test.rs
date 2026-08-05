@@ -1761,6 +1761,8 @@ fn video_raw_publish_rejects_invalid_config() {
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.
+	// Asserted on the reason, not just the code, since a backend refusing it looks
+	// the same from the outside as the boundary refusing it.
 	let merely_huge = moq_video_encoder_input {
 		width: 65534,
 		height: 65534,
@@ -1769,6 +1771,12 @@ fn video_raw_publish_rejects_invalid_config() {
 	let huge = unsafe { moq_publish_video_raw(broadcast, &merely_huge, &valid_output) };
 	if huge > 0 {
 		assert_eq!(moq_publish_video_raw_finish(id(huge)), 0);
+	} else {
+		let reason = unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_str().unwrap();
+		assert!(
+			!reason.contains("too large to represent"),
+			"the representability check rejected a size it should have left to the backend: {reason}"
+		);
 	}
 
 	let bad_codec = moq_video_encoder_output {
