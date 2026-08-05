@@ -8,7 +8,8 @@
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
 //!
-//! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
+//! See [`Client`] for connecting to relays and [`Server`] for accepting
+//! connections. [`mdns`] finds peers to connect to on the local network.
 
 #![warn(missing_docs)]
 
@@ -41,7 +42,7 @@ pub mod websocket;
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
 pub use client::{Client, ClientConfig};
-pub use connect::ConnectError;
+pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::Log;
@@ -77,6 +78,9 @@ pub mod quiche;
 
 #[cfg(feature = "iroh")]
 pub mod iroh;
+
+#[cfg(feature = "mdns")]
+pub mod mdns;
 
 /// The QUIC backend to use for connections.
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

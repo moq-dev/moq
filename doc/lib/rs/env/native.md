@@ -45,6 +45,19 @@ The client supports several URL schemes:
 The URL path and query mean the same thing on every scheme.
 Raw QUIC has no request URI to put them in, so the client sends them in the MoQ SETUP instead; the server sees the same request path either way.
 
+### Several Addresses for One Peer
+
+`connect` takes a `Url` for the usual case of a peer at a known address.
+When the same peer has several candidate addresses and only some of them route from here, pass [`Addrs`](https://docs.rs/moq-native/latest/moq_native/struct.Addrs.html) instead: each attempt walks them in order and keeps the first that connects.
+
+```rust
+let addrs = moq_native::Addrs::new(primary).or(fallback);
+let connection = client.connect(addrs).established().await?;
+```
+
+This is for a peer that was *discovered* rather than configured, where the record lists every interface it answered on and nothing says which one reaches you.
+`Addrs` is non-empty by construction, so a connection always has somewhere to dial; use `Addrs::collect` when the addresses come from an iterator that may be empty.
+
 ### Transport Racing
 
 `client.connect()` automatically races QUIC and WebSocket connections.

@@ -1,4 +1,4 @@
-use crate::{Backoff, Connection, Error, GoawayConfig, QuicBackend};
+use crate::{Addrs, Backoff, Connection, Error, GoawayConfig, QuicBackend};
 #[cfg(feature = "websocket")]
 use std::future::Future;
 use std::net;
@@ -294,7 +294,7 @@ impl Client {
 		self
 	}
 
-	/// Open a connection to the given URL.
+	/// Open a connection to the given peer.
 	///
 	/// A background task dials, completes the MoQ handshake, and (by default)
 	/// redials with exponential backoff whenever the session drops. Wait for the
@@ -302,8 +302,13 @@ impl Client {
 	/// with [`Connection::closed`]; drop the handle to stop it. Disable the
 	/// redialing with [`ClientConfig::reconnect`] / [`Self::with_reconnect`] for
 	/// a one-shot dial.
-	pub fn connect(&self, url: Url) -> Connection {
-		Connection::new(self.clone(), url)
+	///
+	/// Takes a [`Url`] for the usual case of a peer at a known address. Pass
+	/// [`Addrs`] instead when the same peer has several candidate addresses and
+	/// only some of them route from here; each attempt walks them in order and
+	/// keeps the first that connects.
+	pub fn connect(&self, addrs: impl Into<Addrs>) -> Connection {
+		Connection::new(self.clone(), addrs.into())
 	}
 
 	/// Connect to the configured [`ClientConfig::connect`] URL, publishing

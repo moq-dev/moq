@@ -6,7 +6,22 @@ use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthPro
 use moq_net::kio;
 use url::Url;
 
-use crate::{Client, Error};
+use crate::{Addrs, Client, Error};
+
+/// How long one address gets before [`Connection`] moves to the peer's next one.
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
+
+/// The deadline for the attempt at candidate `index` of `total`, or `None` to
+/// let it run.
+///
+/// A black-holed address answers nothing rather than refusing, so without a
+/// bound the QUIC idle timeout would decide how long the remaining candidates
+/// wait. Only an attempt with a later candidate to fall back on is worth
+/// bounding: cutting the last one short just turns a slow connect into a failed
+/// one, on every reconnect cycle.
+fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
+	(index + 1 < total).then_some(CONNECT_ATTEMPT)
+}
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
@@ -423,7 +438,7 @@ pub struct Connection {
 }
 
 impl Connection {
-	pub(crate) fn new(client: Client, url: Url) -> Self {
+	pub(crate) fn new(client: Client, addrs: Addrs) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 
@@ -441,7 +456,7 @@ impl Connection {
 				send_bw,
 				recv_bw,
 			};
-			if let Err(err) = Self::run(&shared, client, url).await {
+			if let Err(err) = Self::run(&shared, client, addrs).await {
 				// In one-shot mode the session ending is the expected lifecycle, and
 				// its close reason arrives here; don't dress it up as a loop failure.
 				match reconnect {
@@ -461,7 +476,7 @@ impl Connection {
 		}
 	}
 
-	async fn run(shared: &Shared, client: Client, url: Url) -> crate::Result<()> {
+	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.clone();
 		let pacing = Pacing::new(&backoff);
@@ -471,8 +486,8 @@ impl Connection {
 		let mut last_error: Option<Error> = None;
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
 		// later drop redials wherever we were last sent. Scoped to this loop, so a
-		// fresh Connection starts from the configured URL again.
-		let mut url = url;
+		// fresh Connection starts from the configured addresses again.
+		let mut addrs = addrs;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
 
@@ -486,24 +501,8 @@ impl Connection {
 				return Err(Error::Reconnect(msg));
 			}
 
-			tracing::info!(%url, "connecting");
-
-			// Keep a predecessor's handover bounded across the dial. A GOAWAY off a
-			// healthy session comes straight here with the old one still draining, and
-			// a slow or blackholed replacement would otherwise hold it past the
-			// deadline we promised, still reported as `Migrating`, until the dial
-			// returned.
-			let mut dial = std::pin::pin!(client.dial(url.clone()));
-			let dialed = kio::wait(|waiter| {
-				if poll_draining(&mut draining, waiter) {
-					shared.disconnected();
-				}
-				waiter.poll_future(dial.as_mut())
-			})
-			.await;
-
-			match dialed {
-				Ok(session) => {
+			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
+				Ok((url, session)) => {
 					tracing::info!(%url, "connected");
 					shared.connected(&session);
 
@@ -520,8 +519,11 @@ impl Connection {
 					let healthy = connected.elapsed() >= initial;
 
 					if let Ended::Goaway(msg) = &ended {
-						// A redirect is an assignment: keep dialing it from here on.
-						url = goaway.redirect().resolve(&msg.uri, &url);
+						// A redirect is an assignment: keep dialing it from here on, and
+						// only it. The peer named exactly one place to go, which retires
+						// whatever other addresses got us to this session.
+						let url = goaway.redirect().resolve(&msg.uri, &url);
+						addrs = Addrs::new(url.clone());
 
 						// Hand over gracefully however the backoff bookkeeping scores this
 						// session. The old one keeps serving until it closes or overstays,
@@ -606,7 +608,9 @@ impl Connection {
 				}
 			}
 
-			tracing::warn!(%url, ?delay, "reconnecting after backoff");
+			// No URL here: with several candidates there isn't one to name, and each
+			// attempt already logged the address it tried.
+			tracing::warn!(?delay, "reconnecting after backoff");
 			// Drain-aware: a GOAWAY off a healthy session continues straight to the
 			// replacement dial, so a predecessor can still be draining when that dial
 			// fails and lands here. A plain sleep would stop enforcing its handover
@@ -615,6 +619,60 @@ impl Connection {
 			sleep_draining(delay, &mut draining, shared).await;
 			delay = pacing.next(delay);
 		}
+	}
+
+	/// Try each address in turn, returning the first session that connects and the
+	/// address that produced it.
+	///
+	/// A peer discovered rather than configured can advertise several addresses,
+	/// only some of which route from here (its loopback, a container bridge, an
+	/// interface on another subnet). Nothing in the record says which, so every
+	/// attempt walks the whole list rather than pinning whichever sorted first.
+	///
+	/// A predecessor left over from a migration keeps draining across the whole
+	/// walk, not just one attempt: its handover deadline is wall-clock, and a walk
+	/// past several black-holed addresses is exactly when it would overstay.
+	async fn dial_any(
+		shared: &Shared,
+		client: &Client,
+		addrs: &Addrs,
+		draining: &mut Option<Draining>,
+	) -> crate::Result<(Url, moq_net::Session)> {
+		let candidates = addrs.as_slice();
+		let mut last = None;
+
+		for (index, url) in candidates.iter().enumerate() {
+			tracing::info!(%url, "connecting");
+
+			let mut dial = std::pin::pin!(client.dial(url.clone()));
+			let dialed = kio::wait(|waiter| {
+				if poll_draining(draining, waiter) {
+					shared.disconnected();
+				}
+				waiter.poll_future(dial.as_mut())
+			});
+
+			let dialed = match attempt_timeout(index, candidates.len()) {
+				None => dialed.await,
+				Some(limit) => match tokio::time::timeout(limit, dialed).await {
+					Ok(dialed) => dialed,
+					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {url}"))),
+				},
+			};
+
+			match dialed {
+				Ok(session) => return Ok((url.clone(), session)),
+				// Credentials are the peer's answer, not this address's, so don't keep
+				// offering them at the rest of its addresses.
+				Err(err) if err.is_auth() => return Err(err),
+				Err(err) => {
+					tracing::debug!(%url, %err, "address unreachable");
+					last = Some(err);
+				}
+			}
+		}
+
+		Err(last.expect("Addrs is never empty, so at least one attempt ran"))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -1249,5 +1307,110 @@ mod tests {
 		src.abort(moq_net::Error::Cancel).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
 		assert!(bw.is_none());
+	}
+
+	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
+
+	fn url(value: &str) -> Url {
+		value.parse().expect("valid url")
+	}
+
+	/// A loopback TCP port with nothing on it, which refuses instantly.
+	///
+	/// A dead address that *refuses* rather than black-holes is what keeps these
+	/// tests fast and deterministic: the walk itself is what's under test, and
+	/// bounding a black-holed attempt is covered by
+	/// [`only_a_candidate_with_a_fallback_is_bounded`] as a pure function.
+	#[cfg(feature = "tcp")]
+	fn refused() -> Url {
+		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+		let port = probe.local_addr().expect("local addr").port();
+		drop(probe);
+		url(&format!("tcp://127.0.0.1:{port}/"))
+	}
+
+	/// A bound stream listener, the URL that reaches it, and a client for it.
+	#[cfg(feature = "tcp")]
+	fn pair() -> (crate::Server, Url, Client) {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+		for _ in 0..20 {
+			let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+			let port = probe.local_addr().expect("local addr").port();
+			drop(probe);
+
+			let mut config = crate::ServerConfig::default();
+			config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("valid address"));
+			let Ok(server) = config.init() else { continue };
+
+			let mut config = crate::ClientConfig::default();
+			config.tls.disable_verify = Some(true);
+			let client = config.init().expect("build client");
+
+			return (server, url(&format!("tcp://127.0.0.1:{port}/")), client);
+		}
+		panic!("could not bind a free TCP port after 20 attempts");
+	}
+
+	fn shared() -> Shared {
+		Shared {
+			state: kio::Producer::default(),
+			send_bw: BandwidthProducer::new(),
+			recv_bw: BandwidthProducer::new(),
+		}
+	}
+
+	/// The first address that answers wins, however many dead ones precede it.
+	/// This is what keeps a peer reachable when discovery advertises an interface
+	/// that doesn't route from here ahead of the one that does.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn dial_any_walks_past_the_dead_addresses() {
+		let (mut server, live, client) = pair();
+		tokio::spawn(async move { while server.accept().await.is_some() {} });
+
+		let addrs = Addrs::collect([refused(), refused(), live.clone()]).expect("not empty");
+		let shared = shared();
+		let mut draining = None;
+
+		let (connected, _session) = tokio::time::timeout(
+			WALK_TIMEOUT,
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+		)
+		.await
+		.expect("the walk must not hang")
+		.expect("the live address must connect");
+		assert_eq!(connected, live, "the walk must land on the one that answers");
+	}
+
+	/// With nothing reachable the walk reports a failure rather than hanging.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn dial_any_reports_failure_when_nothing_answers() {
+		let (_server, _live, client) = pair();
+
+		let addrs = Addrs::collect([refused(), refused()]).expect("not empty");
+		let shared = shared();
+		let mut draining = None;
+
+		let result = tokio::time::timeout(
+			WALK_TIMEOUT,
+			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+		)
+		.await
+		.expect("the walk must not hang");
+		assert!(result.is_err(), "every address refused, so the walk must fail");
+	}
+
+	/// Only an attempt with somewhere to fall back on is bounded. The last
+	/// candidate runs to completion, so a reachable-but-slow final address is not
+	/// cancelled and then re-cancelled on every reconnect cycle.
+	#[test]
+	fn only_a_candidate_with_a_fallback_is_bounded() {
+		assert_eq!(attempt_timeout(0, 1), None, "a lone address");
+		assert_eq!(attempt_timeout(0, 2), Some(CONNECT_ATTEMPT), "one more to try");
+		assert_eq!(attempt_timeout(1, 2), None, "the last of two");
+		assert_eq!(attempt_timeout(1, 3), Some(CONNECT_ATTEMPT), "still one more");
+		assert_eq!(attempt_timeout(2, 3), None, "the last of three");
 	}
 }
