@@ -83,9 +83,12 @@ impl Internal {
 		self
 	}
 
-	/// Build the ops router (`/metrics`, `/health`, and `/nodes`).
+	/// Build the ops router (`/metrics`, `/health`, and `/nodes`), returning a
+	/// state-erased [`Router`] an embedder can extend (`merge`/`nest` its own ops
+	/// routes) before handing it back to [`serve`](Self::serve).
 	///
-	/// Exposed so embedders can mount it on their own listener.
+	/// Anything merged in inherits this listener's "unauthenticated,
+	/// trusted-plane-only" contract; see the module docs.
 	pub fn routes(&self) -> Router {
 		Router::new()
 			.route("/metrics", get(serve_metrics))
@@ -97,23 +100,36 @@ impl Internal {
 			})
 	}
 
-	/// Serve on [`InternalConfig::listen`] until it shuts down.
+	/// Serve `app` on [`InternalConfig::listen`] until it shuts down.
+	///
+	/// The mirror of [`Web::serve`](crate::Web::serve): the caller builds `app`
+	/// from [`routes`](Self::routes) plus whatever extra ops routes it merged in,
+	/// and this owns the listener. An embedder that binds the socket itself
+	/// instead would fork both the socket options and the disabled-listener
+	/// contract below.
 	///
 	/// When no listen address is configured the future stays pending (never
 	/// resolves), so it drops cleanly into a `select!` as a disabled no-op -
 	/// mirroring how the relay treats other optional services.
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn serve(self, app: Router) -> anyhow::Result<()> {
 		let Some(listen) = self.config.listen else {
 			std::future::pending::<()>().await;
 			return Ok(());
 		};
 
-		let router = self.routes().into_make_service();
 		let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
 		// No blanket "…server failed" context here: the caller (main.rs) adds
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
-		axum_server::from_tcp(listener)?.serve(router).await?;
+		axum_server::from_tcp(listener)?.serve(app.into_make_service()).await?;
 		Ok(())
+	}
+
+	/// Serves the default ops router on the configured listener until it shuts
+	/// down. Convenience for the standalone binary; equivalent to
+	/// `internal.serve(internal.routes())`.
+	pub async fn run(self) -> anyhow::Result<()> {
+		let app = self.routes();
+		self.serve(app).await
 	}
 }
 
@@ -257,6 +273,67 @@ fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// `serve` hosts the router it is HANDED, so an embedder's extra ops routes
+	/// answer on the same internal listener as the built-in ones. That is what
+	/// lets an embedder extend this surface without binding a socket of its own
+	/// and forking both the socket options and the disabled-listener contract.
+	#[tokio::test]
+	async fn serve_hosts_merged_routes_alongside_the_defaults() {
+		// A throwaway bind picks a free port, released before `serve` claims it
+		// for real (`bind::tcp` sets SO_REUSEADDR, and nothing ever connected).
+		let listen = std::net::TcpListener::bind("127.0.0.1:0")
+			.expect("probe bind")
+			.local_addr()
+			.expect("probe addr");
+
+		let internal = Internal::new(
+			InternalConfig { listen: Some(listen) },
+			moq_net::stats::Registry::disabled(),
+		);
+		let app = internal
+			.routes()
+			.merge(Router::new().route("/embedder", get(async || "embedded\n")));
+		let server = tokio::spawn(internal.serve(app));
+
+		// `serve` binds inside the task, so poll rather than assume it is up the
+		// instant the spawn returns.
+		let client = reqwest::Client::new();
+		let url = format!("http://{listen}");
+		let mut embedder = None;
+		for _ in 0..200 {
+			if let Ok(res) = client.get(format!("{url}/embedder")).send().await {
+				embedder = Some(res);
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+		let embedder = embedder.expect("internal listener never accepted a connection");
+
+		assert_eq!(embedder.status(), reqwest::StatusCode::OK);
+		assert_eq!(embedder.text().await.expect("embedder body"), "embedded\n");
+
+		let health = client
+			.get(format!("{url}/health"))
+			.send()
+			.await
+			.expect("health request");
+		assert_eq!(health.status(), reqwest::StatusCode::OK);
+
+		server.abort();
+	}
+
+	/// An unconfigured listener leaves `serve` pending rather than resolving, so
+	/// dropping it into a `select!` disables the listener instead of completing
+	/// an arm immediately and tearing the rest of the process down with it.
+	#[tokio::test(start_paused = true)]
+	async fn serve_stays_pending_without_a_listen_address() {
+		let internal = Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled());
+		let app = internal.routes();
+
+		let elapsed = tokio::time::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
+		assert!(elapsed.is_err(), "serve resolved with no listen address configured");
+	}
 
 	#[tokio::test]
 	async fn nodes_endpoint_is_empty_without_an_attached_cluster() {
