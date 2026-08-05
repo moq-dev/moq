@@ -488,7 +488,21 @@ impl Connection {
 
 			tracing::info!(%url, "connecting");
 
-			match client.dial(url.clone()).await {
+			// Keep a predecessor's handover bounded across the dial. A GOAWAY off a
+			// healthy session comes straight here with the old one still draining, and
+			// a slow or blackholed replacement would otherwise hold it past the
+			// deadline we promised, still reported as `Migrating`, until the dial
+			// returned.
+			let mut dial = std::pin::pin!(client.dial(url.clone()));
+			let dialed = kio::wait(|waiter| {
+				if poll_draining(&mut draining, waiter) {
+					shared.disconnected();
+				}
+				waiter.poll_future(dial.as_mut())
+			})
+			.await;
+
+			match dialed {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
 					shared.connected(&session);
@@ -789,6 +803,22 @@ impl Draining {
 	}
 }
 
+/// Poll a draining predecessor, retiring it once it closes or overstays its
+/// handover window. `true` on the pass that retires it.
+///
+/// A `poll_*` step: on return the waiter is registered for the next change. The
+/// caller decides what the retirement means, because that depends on whether a
+/// replacement is already serving.
+fn poll_draining(draining: &mut Option<Draining>, waiter: &kio::Waiter) -> bool {
+	if let Some(old) = draining.as_mut()
+		&& old.poll(waiter)
+	{
+		*draining = None;
+		return true;
+	}
+	false
+}
+
 /// Sleep for `delay` while keeping a draining predecessor's deadline enforced.
 ///
 /// The drain is otherwise only polled from [`run_session`], which is reached only
@@ -798,14 +828,11 @@ impl Draining {
 async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
 	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
 	kio::wait(|waiter| {
-		if let Some(old) = draining.as_mut()
-			&& old.poll(waiter)
-		{
-			*draining = None;
-			// Nothing is serving now: the predecessor closed or overstayed its
-			// handover, and the replacement is still a dial away. Leaving the state
-			// on `Migrating` would keep handing callers a session that is already
-			// closed, with its stats and version, until the next connect overwrote it.
+		// Nothing is serving once it retires: the predecessor closed or overstayed
+		// its handover, and the replacement is still a dial away. Leaving the state
+		// on `Migrating` would keep handing callers a session that is already closed,
+		// with its stats and version, until the next connect overwrote it.
+		if poll_draining(draining, waiter) {
 			shared.disconnected();
 		}
 		waiter.poll_future(sleep.as_mut())
@@ -838,11 +865,8 @@ async fn run_session(
 		poll_forward(&mut recv, &shared.recv_bw, waiter);
 
 		// Retire the predecessor once it closes or overstays its handover window.
-		if let Some(old) = draining.as_mut()
-			&& old.poll(waiter)
-		{
-			*draining = None;
-		}
+		// The replacement is already serving, so the state stays as it is.
+		poll_draining(draining, waiter);
 
 		// Checked before the close arm: a GOAWAY means the session is still up, and
 		// migrating from it is not the same as reconnecting after it died.
