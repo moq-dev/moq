@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::ffi::ReturnCode;
 use std::ffi::{c_char, c_void};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -2236,4 +2237,449 @@ fn session_connect_and_close() {
 	// user_data is safe to free.
 	assert_eq!(moq_session_close(session), 0);
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+}
+
+/// A handle that parses but was never handed out: IDs come from a counter starting at 1,
+/// so the top of the range stays free. Distinct from 0, which is not a handle at all.
+const UNUSED_ID: u32 = i32::MAX as u32;
+
+/// Borrow a `&str` as the `moq_string` the list setters take.
+fn moq_str(s: &str) -> moq_string {
+	moq_string {
+		data: s.as_ptr() as *const c_char,
+		len: s.len(),
+	}
+}
+
+#[test]
+fn client_create_and_close() {
+	let client = id(moq_client_create());
+	assert_eq!(moq_client_close(client), 0);
+	assert!(
+		moq_client_close(client) < 0,
+		"closing a released client handle should fail"
+	);
+}
+
+#[test]
+fn client_setters_reject_unknown_handle() {
+	// Every setter funnels through the same lookup, so one is enough to pin the code.
+	// Zero is not a handle at all, so it fails the range check before the lookup;
+	// UNUSED_ID is in range and simply was never handed out.
+	assert_eq!(moq_client_set_tls_disable_verify(0, true), Error::InvalidId.code());
+	assert_eq!(
+		moq_client_set_connect_timeout(UNUSED_ID, 1000),
+		Error::ClientNotFound.code()
+	);
+}
+
+#[test]
+fn client_set_versions_round_trips() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	assert_eq!(
+		unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) },
+		0
+	);
+
+	// An empty list clears the pin, restoring the default of offering everything.
+	assert_eq!(unsafe { moq_client_set_versions(client, std::ptr::null(), 0) }, 0);
+}
+
+#[test]
+fn client_set_versions_rejects_unknown_name() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-carrier-pigeon-01")];
+	let ret = unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) };
+	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn client_set_bind_rejects_a_bad_address() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let good = b"127.0.0.1:0";
+	assert_eq!(
+		unsafe { moq_client_set_bind(client, good.as_ptr() as *const c_char, good.len()) },
+		0
+	);
+
+	let bad = b"not-an-address";
+	let ret = unsafe { moq_client_set_bind(client, bad.as_ptr() as *const c_char, bad.len()) };
+	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
+}
+
+#[test]
+fn client_optional_strings_clear_on_null() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let name = b"relay.example.com";
+	assert_eq!(
+		unsafe { moq_client_set_tls_host_name(client, name.as_ptr() as *const c_char, name.len()) },
+		0
+	);
+	// NULL and empty both mean "unset", so one setter both sets and clears.
+	assert_eq!(unsafe { moq_client_set_tls_host_name(client, std::ptr::null(), 0) }, 0);
+	assert_eq!(
+		unsafe { moq_client_set_tls_host_name(client, b"".as_ptr() as *const c_char, 0) },
+		0
+	);
+}
+
+#[test]
+fn client_set_quic_rejects_unknown_congestion_control() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let bogus = "sideways";
+	let ret = unsafe { moq_client_set_quic_congestion_control(client, bogus.as_ptr() as *const c_char, bogus.len()) };
+	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
+
+	let delay = "delay";
+	assert_eq!(
+		unsafe { moq_client_set_quic_congestion_control(client, delay.as_ptr() as *const c_char, delay.len()) },
+		0
+	);
+
+	// NULL puts it back to the backend default, so the knob can return to automatic.
+	assert_eq!(
+		unsafe { moq_client_set_quic_congestion_control(client, std::ptr::null(), 0) },
+		0
+	);
+}
+
+/// Every QUIC and backoff knob is its own setter, so adding one stays additive. Nothing
+/// here is a struct field, which is what keeps a new knob off the ABI.
+#[test]
+fn client_quic_and_backoff_setters_apply() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	assert_eq!(moq_client_set_backoff_initial(client, 500), 0);
+	assert_eq!(moq_client_set_backoff_multiplier(client, 3), 0);
+	assert_eq!(moq_client_set_backoff_max(client, 10_000), 0);
+	assert_eq!(moq_client_set_backoff_timeout(client, 0), 0);
+
+	assert_eq!(moq_client_set_quic_max_streams(client, 4096), 0);
+	assert_eq!(moq_client_set_quic_idle_timeout(client, 15_000), 0);
+	assert_eq!(moq_client_set_quic_keep_alive(client, 0), 0);
+	assert_eq!(moq_client_set_quic_gso(client, false), 0);
+	assert_eq!(moq_client_set_quic_mtu_discovery(client, true), 0);
+
+	let dir = "/tmp/qlog";
+	assert_eq!(
+		unsafe { moq_client_set_quic_qlog(client, dir.as_ptr() as *const c_char, dir.len()) },
+		0
+	);
+	assert_eq!(unsafe { moq_client_set_quic_qlog(client, std::ptr::null(), 0) }, 0);
+
+	// Every one of them rejects an unknown handle rather than silently doing nothing.
+	assert_eq!(
+		moq_client_set_quic_max_streams(UNUSED_ID, 1),
+		Error::ClientNotFound.code()
+	);
+	assert_eq!(
+		moq_client_set_backoff_initial(UNUSED_ID, 1),
+		Error::ClientNotFound.code()
+	);
+}
+
+/// A knob never set reads back as its default, which is what lets a UI show the real
+/// ones. Pinned against the config each comes from rather than a literal copied here, so
+/// retuning a default without following through to C fails right here.
+#[test]
+fn a_fresh_handle_reads_back_the_defaults() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let config = moq_native::ClientConfig::default();
+	let quic = moq_native::quic::Resolved::default();
+
+	let mut value = 0u64;
+	assert_eq!(unsafe { moq_client_get_connect_timeout(client, &mut value) }, 0);
+	assert_eq!(value, config.connect_timeout().as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_failover_delay(client, &mut value) }, 0);
+	assert_eq!(value, config.effective_failover_delay().as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_backoff_initial(client, &mut value) }, 0);
+	assert_eq!(value, config.backoff.initial.as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_backoff_max(client, &mut value) }, 0);
+	assert_eq!(value, config.backoff.max.as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_backoff_timeout(client, &mut value) }, 0);
+	assert_eq!(value, config.backoff.timeout.as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_quic_max_streams(client, &mut value) }, 0);
+	assert_eq!(value, quic.max_streams);
+
+	assert_eq!(unsafe { moq_client_get_quic_idle_timeout(client, &mut value) }, 0);
+	assert_eq!(value, quic.idle_timeout.as_millis() as u64);
+
+	assert_eq!(unsafe { moq_client_get_quic_keep_alive(client, &mut value) }, 0);
+	assert_eq!(value, quic.keep_alive.map(|d| d.as_millis() as u64).unwrap_or(0));
+
+	assert_eq!(unsafe { moq_client_get_websocket_delay(client, &mut value) }, 0);
+	assert_eq!(value, config.websocket.delay.map(|d| d.as_millis() as u64).unwrap_or(0));
+
+	let mut multiplier = 0u32;
+	assert_eq!(unsafe { moq_client_get_backoff_multiplier(client, &mut multiplier) }, 0);
+	assert_eq!(multiplier, config.backoff.multiplier);
+
+	let mut enabled = false;
+	assert_eq!(unsafe { moq_client_get_websocket_enabled(client, &mut enabled) }, 0);
+	assert_eq!(enabled, config.websocket.enabled);
+}
+
+/// A getter reports what the matching setter wrote, so the pair can't drift.
+#[test]
+fn getters_read_back_what_the_setters_wrote() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	assert_eq!(moq_client_set_quic_idle_timeout(client, 15_000), 0);
+	assert_eq!(moq_client_set_backoff_timeout(client, 0), 0);
+	assert_eq!(moq_client_set_quic_keep_alive(client, 0), 0);
+
+	let mut value = 0u64;
+	assert_eq!(unsafe { moq_client_get_quic_idle_timeout(client, &mut value) }, 0);
+	assert_eq!(value, 15_000);
+
+	// Zero is a real setting for both of these, not "unset": retry forever, and no
+	// keep-alive pings. So they must read back as zero rather than as their defaults.
+	assert_eq!(unsafe { moq_client_get_backoff_timeout(client, &mut value) }, 0);
+	assert_eq!(value, 0);
+	assert_eq!(unsafe { moq_client_get_quic_keep_alive(client, &mut value) }, 0);
+	assert_eq!(value, 0);
+
+	assert_eq!(
+		unsafe { moq_client_get_quic_idle_timeout(client, std::ptr::null_mut()) },
+		Error::InvalidPointer.code()
+	);
+	assert_eq!(
+		unsafe { moq_client_get_quic_idle_timeout(UNUSED_ID, &mut value) },
+		Error::ClientNotFound.code()
+	);
+}
+
+/// An idle timeout past QUIC's millisecond varint used to panic inside the backend while
+/// the global state lock was held, which poisoned it for every later call in the process.
+/// It has to come back as an ordinary error instead.
+#[test]
+fn client_connect_rejects_an_unrepresentable_idle_timeout() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	assert_eq!(moq_client_set_quic_idle_timeout(client, u64::MAX), 0);
+
+	let url = b"moqt://localhost:1";
+	let ret = unsafe {
+		moq_client_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			client,
+			0,
+			0,
+			None,
+			std::ptr::null_mut(),
+		)
+	};
+	assert!(ret < 0, "connect must fail, got {ret}");
+
+	// The real damage was to everything after: a poisoned lock takes the whole process
+	// down with it, so prove the next call still works.
+	let next = id(moq_client_create());
+	moq_client_close(next);
+}
+
+/// The backend variants are feature-gated, so a hardcoded menu offers options this
+/// build rejects. Every name reported must be one the setter takes, same contract as
+/// `moq_versions`.
+#[test]
+fn backends_lists_only_what_the_setter_accepts() {
+	let count = unsafe { moq_backends(std::ptr::null_mut(), 0) };
+	assert!(count > 0, "expected at least one compiled backend, got {count}");
+
+	let mut names = vec![
+		moq_string {
+			data: std::ptr::null(),
+			len: 0
+		};
+		count as usize
+	];
+	assert_eq!(unsafe { moq_backends(names.as_mut_ptr(), names.len()) }, count);
+
+	for name in &names {
+		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("backend name is UTF-8");
+		let client = id(moq_client_create());
+		assert_eq!(
+			unsafe { moq_client_set_backend(client, name.as_ptr() as *const c_char, name.len()) },
+			0,
+			"listed backend {name} must be settable"
+		);
+		moq_client_close(client);
+	}
+
+	// And the converse: a backend this build lacks is not listed, so the menu can't
+	// offer a dead option.
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+	for candidate in ["quinn", "quiche", "noq"] {
+		let listed = names.iter().any(|n| {
+			unsafe { ffi::parse_str(n.data, n.len) }
+				.map(|s| s == candidate)
+				.unwrap_or(false)
+		});
+		let accepted =
+			unsafe { moq_client_set_backend(client, candidate.as_ptr() as *const c_char, candidate.len()) } == 0;
+		assert_eq!(listed, accepted, "{candidate}: listed and accepted must agree");
+	}
+}
+
+/// Whether a qlog directory works at all is a compile-time feature, so the capability
+/// has to agree with what a dial does. Both branches matter: `just check` runs without
+/// `--all-features` and only ever sees the unsupported one, while CI runs with them and
+/// only sees the supported one.
+#[test]
+fn qlog_support_matches_what_a_dial_accepts() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	// A real directory: with capture compiled in, the dial creates a trace file inside
+	// it, so a path that doesn't exist would fail for that reason instead of the one
+	// under test. The pid keeps concurrent test binaries out of each other's way.
+	let dir = std::env::temp_dir().join(format!("moq-qlog-test-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).expect("create the qlog directory");
+	let path = dir.to_str().expect("temp dir is UTF-8").to_string();
+
+	assert_eq!(
+		unsafe { moq_client_set_quic_qlog(client, path.as_ptr() as *const c_char, path.len()) },
+		0,
+		"the setter stores the path either way; the dial is what rejects it"
+	);
+
+	let url = b"moqt://localhost:1";
+	let ret = unsafe {
+		moq_client_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			client,
+			0,
+			0,
+			None,
+			std::ptr::null_mut(),
+		)
+	};
+
+	match moq_qlog_supported() {
+		true => {
+			assert!(ret > 0, "qlog is supported, so the dial must start: {ret}");
+			moq_session_close(id(ret));
+		}
+		false => assert!(ret < 0, "qlog is unsupported, so the dial must be refused"),
+	}
+
+	std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn versions_lists_the_offered_set() {
+	let count = unsafe { moq_versions(std::ptr::null_mut(), 0) };
+	assert!(count > 0, "expected at least one offered version, got {count}");
+
+	let mut names = vec![
+		moq_string {
+			data: std::ptr::null(),
+			len: 0
+		};
+		count as usize
+	];
+	assert_eq!(unsafe { moq_versions(names.as_mut_ptr(), names.len()) }, count);
+
+	for name in &names {
+		let name = unsafe { ffi::parse_str(name.data, name.len) }.expect("version name is UTF-8");
+		// Every listed name must be one the setter accepts, or the menu it builds is a lie.
+		let one = [moq_str(name)];
+		let client = id(moq_client_create());
+		assert_eq!(unsafe { moq_client_set_versions(client, one.as_ptr(), one.len()) }, 0);
+		moq_client_close(client);
+	}
+}
+
+#[test]
+fn client_connect_applies_the_config() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	let versions = [moq_str("moq-lite-05")];
+	assert_eq!(
+		unsafe { moq_client_set_versions(client, versions.as_ptr(), versions.len()) },
+		0
+	);
+	assert_eq!(moq_client_set_connect_timeout(client, 100), 0);
+
+	let cb = Callback::new();
+	let url = b"moqt://localhost:1";
+	let session = id(unsafe {
+		moq_client_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			client,
+			0,
+			0,
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	assert_eq!(moq_session_close(session), 0);
+	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+}
+
+#[test]
+fn client_connect_rejects_unknown_client() {
+	let url = b"moqt://localhost:1";
+	let ret = unsafe {
+		moq_client_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			UNUSED_ID,
+			0,
+			0,
+			None,
+			std::ptr::null_mut(),
+		)
+	};
+	assert_eq!(ret, Error::ClientNotFound.code());
 }

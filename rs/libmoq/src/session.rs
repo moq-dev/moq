@@ -27,12 +27,13 @@ pub struct Session {
 impl Session {
 	pub fn connect(
 		&mut self,
+		config: moq_native::ClientConfig,
 		url: Url,
 		publish: Option<moq_net::origin::Producer>,
 		consume: Option<moq_net::origin::Producer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
-		let mut client = moq_native::ClientConfig::default().init()?;
+		let mut client = config.init()?;
 		if let Some(publish) = &publish {
 			client = client.with_publisher(publish);
 		}

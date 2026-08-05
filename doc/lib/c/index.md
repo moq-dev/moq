@@ -87,6 +87,62 @@ root `target/` (two levels up from `rs/libmoq/`): `../../target/release/libmoq.a
 (static) and `../../target/release/libmoq.{so,dylib,dll}` (dynamic), with the
 generated header at `../../target/release/moq.h`.
 
+## Client configuration
+
+`moq_session_connect` dials with the defaults. To pin a protocol version, adjust TLS trust, or tune the transport, build a client config and dial with `moq_client_connect` instead:
+
+```c
+int client = moq_client_create();
+
+// Pin the handshake to one draft instead of offering every supported version.
+struct moq_string version = { "moq-lite-05", 11 };
+moq_client_set_versions(client, &version, 1);
+
+// Trust one self-signed relay without accepting every certificate.
+struct moq_string fingerprint = { hex_sha256, strlen(hex_sha256) };
+moq_client_set_tls_fingerprints(client, &fingerprint, 1);
+
+moq_client_set_quic_congestion_control(client, "delay", 5);
+
+int session = moq_client_connect(url, url_len, client, origin, 0, on_status, user_data);
+
+// The config is copied into the session, so the handle can be released (or reused
+// for another dial, or edited in between) right away.
+moq_client_close(client);
+```
+
+A `client` of `0` means the defaults, so `moq_client_connect(url, len, 0, ...)` is exactly `moq_session_connect`.
+
+The setters fall into a few groups:
+
+- **Protocol**: `moq_client_set_versions` restricts what's offered during the handshake. Names are spelled the way the CLI spells them (`moq-lite-05`, `moq-transport-19`); `moq_versions` lists what this build offers so a menu can't drift from what the setter accepts. An empty list restores the default of offering everything.
+- **TLS**: `moq_client_set_tls_fingerprints` (pin a SHA-256 hex fingerprint, the native equivalent of the browser's `serverCertificateHashes`), `moq_client_set_tls_roots`, `moq_client_set_tls_system_roots`, `moq_client_set_tls_host_name` (SNI override), `moq_client_set_tls_cert` / `moq_client_set_tls_key` (mTLS), and `moq_client_set_tls_disable_verify` (development only: it accepts any certificate, so prefer a fingerprint).
+- **Transport**: `moq_client_set_backend`, `moq_client_set_bind`, `moq_client_set_connect_timeout`, `moq_client_set_failover_delay`, and `moq_client_set_websocket_enabled` / `moq_client_set_websocket_delay` for the fallback that gets you through a UDP-blocked network. The QUIC backends are compile-time optional, so use `moq_backends` for the names this build actually accepts rather than assuming all three.
+- **Tuning**: `moq_client_set_backoff_initial` / `_multiplier` / `_max` / `_timeout` for reconnect pacing, and `moq_client_set_quic_max_streams` / `_idle_timeout` / `_keep_alive` / `_gso` / `_mtu_discovery` / `_congestion_control` / `_qlog` for the transport. The QUIC ones are ignored by the WebSocket fallback.
+
+Every knob is its own setter, and a knob you never set stays at its default. That is deliberate rather than incidental: the C ABI is stable, so a new knob has to be a new function. Bundling several into one `struct` you pass by pointer would freeze their layout, and adding a field later would break every caller compiled against the old size. The optional strings (`congestion_control`, `qlog`, the TLS paths) are set-or-clear, where NULL or empty puts the knob back to automatic, so a setting can be undone without rebuilding the handle.
+
+Every setter has a matching `moq_client_get_*`, and a knob you never set reads back as its default:
+
+```c
+uint32_t client = moq_client_create();
+uint64_t idle;
+moq_client_get_quic_idle_timeout(client, &idle);   // 30000
+```
+
+So a fresh handle *is* the defaults, and a settings UI can read them instead of hardcoding numbers that go stale when a default is retuned. Same reason `moq_versions` exists for the version menu. The getters take an out-parameter and return zero or a negative code, since every value is a valid one and the return channel is for errors.
+
+The knobs whose default depends on the backend (GSO, path MTU discovery, congestion control, the TLS root store) have no getter: there is no single value to report, and they stay on the backend's choice until you set them.
+
+Two capabilities are compile-time optional, so ask before offering them:
+
+- `moq_backends` lists the QUIC backends this build has, the same way `moq_versions` lists the drafts. A name it doesn't report is rejected by `moq_client_set_backend`.
+- `moq_qlog_supported` reports whether traces can be captured. `moq_client_set_quic_qlog` stores a directory either way, but dialing fails without the support.
+
+Combinations that would quietly drop a setting are rejected at dial rather than resolved by precedence. `moq_client_set_tls_disable_verify` accepts every certificate, so pairing it with a fingerprint or a root fails instead of ignoring the trust material, and the reconnect knobs must leave a non-zero delay or retrying would spin.
+
+Setters validate what they can parse, so a typo'd version or an unparseable bind address fails at the setter with the reason in `moq_error()`, rather than being silently dropped at connect time. A value that parses but the transport can't express (an idle timeout past QUIC's millisecond varint, say) is caught when the connection is dialed instead. Either way `moq_error()` names it.
+
 ## Callback lifetime
 
 Any function that registers a callback (`moq_session_connect`, `moq_origin_announced`, `moq_origin_consume_announced`, `moq_origin_request`, `moq_consume_catalog`, `moq_consume_video`, `moq_consume_audio`, `moq_consume_track`, `moq_consume_datagrams`, `moq_consume_video_raw`, `moq_consume_audio_raw`, `moq_consume_json_snapshot`, `moq_consume_json_stream`) takes a `void *user_data` pointer that libmoq passes back to every callback invocation. The status code carries the lifecycle:

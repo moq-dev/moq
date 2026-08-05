@@ -45,6 +45,14 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
+	/// The idle timeout is longer than QUIC's millisecond varint can carry.
+	#[error("idle timeout must be under 2^62 milliseconds")]
+	IdleTimeoutRange,
+
+	/// The backoff would retry with no delay at all, spinning instead of pacing.
+	#[error("backoff initial, multiplier, and max must all be non-zero, or reconnecting spins")]
+	BackoffUnpaced,
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,

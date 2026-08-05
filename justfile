@@ -222,8 +222,8 @@ ci BASE="":
     # when the diff has no JS-scoped files.
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    shfmt --diff $(shfmt -f . | grep -v '\.direnv/')
-    shellcheck $(shfmt -f . | grep -v '\.direnv/')
+    shfmt --diff $(just _shell-files)
+    shellcheck $(just _shell-files)
     RUST_LOG=error taplo format --check
     nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*')
     for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done

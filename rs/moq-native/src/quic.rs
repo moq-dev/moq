@@ -60,6 +60,15 @@ pub enum CongestionControl {
 	Delay,
 }
 
+/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`), case-insensitively.
+impl std::str::FromStr for CongestionControl {
+	type Err = String;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		<Self as clap::ValueEnum>::from_str(s, true)
+	}
+}
+
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
@@ -166,14 +175,30 @@ fn validate_qlog(qlog: Option<&PathBuf>) -> crate::Result<()> {
 	}
 }
 
+/// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
+/// can't go on the wire.
+const MAX_IDLE_TIMEOUT: Duration = Duration::from_millis((1 << 62) - 1);
+
+/// Reject an idle timeout no QUIC connection can express.
+///
+/// Checked here rather than in each backend because the conversion the backends do is
+/// infallible-by-panic, and this config reaches them from a TOML file or a C caller.
+fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
+	match idle_timeout {
+		Some(timeout) if timeout > MAX_IDLE_TIMEOUT => Err(crate::Error::IdleTimeoutRange),
+		_ => Ok(()),
+	}
+}
+
 impl Client {
 	/// Reject knobs this build can't honor. Called when the client is built.
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		validate_qlog(self.qlog.as_ref())
+		validate_qlog(self.qlog.as_ref())?;
+		validate_idle_timeout(self.idle_timeout)
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
-	pub(crate) fn resolve(&self) -> Resolved {
+	pub fn resolve(&self) -> Resolved {
 		Resolved::new(
 			self.max_streams,
 			self.gso,
@@ -183,6 +208,13 @@ impl Client {
 			self.congestion_control,
 			self.qlog.clone(),
 		)
+	}
+}
+
+/// Every knob at its default, which is what an untouched [`Client`] resolves to.
+impl Default for Resolved {
+	fn default() -> Self {
+		Client::default().resolve()
 	}
 }
 
@@ -319,7 +351,8 @@ pub struct Server {
 impl Server {
 	/// Reject knobs this build can't honor. Called when the server is built.
 	pub(crate) fn validate(&self) -> crate::Result<()> {
-		validate_qlog(self.qlog.as_ref())
+		validate_qlog(self.qlog.as_ref())?;
+		validate_idle_timeout(self.idle_timeout)
 	}
 
 	/// The per-connection knobs with defaults applied, ready to hand to a backend.
@@ -339,10 +372,15 @@ impl Server {
 /// A resolved view of the per-connection knobs (defaults filled in), shared by
 /// [`Client`] and [`Server`] so backends apply them the same way regardless of role.
 ///
-/// Internal: the backends consume it and [`crate::iroh::EndpointConfig::bind`]
-/// resolves it from a [`Client`], so it never appears in the public surface.
+/// The backends consume it, and [`Client::resolve`] produces it. [`Resolved::default`]
+/// is therefore the canonical statement of what every QUIC knob defaults to, which is
+/// what a UI should show rather than repeating the numbers.
+///
+/// Non-exhaustive because it gains a field for every knob [`Client`] gains, so build it
+/// from [`Client::resolve`] or [`Resolved::default`] rather than a struct literal.
 #[derive(Clone, Debug)]
-pub(crate) struct Resolved {
+#[non_exhaustive]
+pub struct Resolved {
 	/// Max concurrent streams (bidi and uni).
 	pub max_streams: u64,
 	/// GSO override, or `None` to leave the backend default (on).
@@ -522,6 +560,29 @@ mod tests {
 		} else {
 			assert!(matches!(set.validate(), Err(crate::Error::QlogUnsupported)));
 		}
+	}
+
+	/// The backends convert this duration with an infallible-by-panic `expect`, and the
+	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
+	#[test]
+	fn idle_timeout_beyond_the_varint_is_rejected() {
+		let over = Client {
+			idle_timeout: Some(MAX_IDLE_TIMEOUT + Duration::from_millis(1)),
+			..Default::default()
+		};
+		assert!(matches!(over.validate(), Err(crate::Error::IdleTimeoutRange)));
+
+		let server = Server {
+			idle_timeout: Some(Duration::from_millis(u64::MAX)),
+			..Default::default()
+		};
+		assert!(matches!(server.validate(), Err(crate::Error::IdleTimeoutRange)));
+
+		let at_limit = Client {
+			idle_timeout: Some(MAX_IDLE_TIMEOUT),
+			..Default::default()
+		};
+		assert!(at_limit.validate().is_ok());
 	}
 
 	#[test]

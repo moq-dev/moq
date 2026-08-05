@@ -240,11 +240,14 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
 ///
-/// Used to hand a C caller a JSON document that lives inside libmoq's storage.
-/// The pointer borrows that storage and is only valid until the owning resource
-/// is freed (see the function that fills it for the exact lifetime).
+/// Used in both directions. As an output (e.g. a JSON document libmoq hands back) the
+/// pointer borrows libmoq's own storage and is only valid until the owning resource is
+/// freed; see the function that fills it for the exact lifetime. As an input (e.g. a
+/// `moq_client_set_*` list) the pointer borrows the caller's storage and is only read
+/// during the call.
 #[repr(C)]
 #[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
 pub struct moq_string {
 	/// Pointer to `len` bytes of UTF-8, NOT NULL terminated.
 	pub data: *const c_char,
@@ -406,6 +409,804 @@ pub extern "C" fn moq_error() -> *const c_char {
 	ffi::last_error_ptr()
 }
 
+/// The protocol version names this build offers by default, spelled the way
+/// [moq_client_set_versions] expects. Built once; the slices are valid for the life of
+/// the process.
+static VERSION_NAMES: std::sync::LazyLock<Vec<String>> =
+	std::sync::LazyLock::new(|| moq_net::Versions::all().iter().map(|v| v.to_string()).collect());
+
+/// List the protocol versions offered during the handshake by default.
+///
+/// Writes up to `count` names into `dst` and returns the total number available, which
+/// may be larger than `count`. Pass a NULL `dst` with a zero `count` to size the array
+/// first. Each name borrows a static string valid for the life of the process, so a
+/// caller building a menu can hold them indefinitely.
+///
+/// Work-in-progress versions are omitted, since they are not advertised unless pinned;
+/// [moq_client_set_versions] still accepts them by name.
+///
+/// Returns the total count on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is either NULL with a zero `count`, or a valid
+///   pointer to `count` writable [moq_string] values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_versions(dst: *mut moq_string, count: usize) -> i32 {
+	ffi::enter(move || {
+		if !dst.is_null() {
+			let dst = unsafe { std::slice::from_raw_parts_mut(dst, count) };
+			for (slot, name) in dst.iter_mut().zip(VERSION_NAMES.iter()) {
+				slot.data = name.as_ptr().cast::<c_char>();
+				slot.len = name.len();
+			}
+		} else if count != 0 {
+			return Err(Error::InvalidPointer);
+		}
+
+		Ok(VERSION_NAMES.len())
+	})
+}
+
+/// The QUIC backend names this build offers, spelled the way [moq_client_set_backend]
+/// expects. Built once; the slices are valid for the life of the process.
+static BACKEND_NAMES: std::sync::LazyLock<Vec<&'static str>> =
+	std::sync::LazyLock::new(|| moq_native::QuicBackend::compiled().iter().map(|b| b.as_str()).collect());
+
+/// List the QUIC backends this build was compiled with.
+///
+/// Writes up to `count` names into `dst` and returns the total number available, which
+/// may be larger than `count`. Pass a NULL `dst` with a zero `count` to size the array
+/// first. Each name borrows a static string valid for the life of the process.
+///
+/// The backends are compile-time optional, so a caller building a menu must read this
+/// rather than listing names: an option this build lacks is rejected by
+/// [moq_client_set_backend], which would leave a menu entry that can only fail.
+///
+/// Returns the total count on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is either NULL with a zero `count`, or a valid
+///   pointer to `count` writable [moq_string] values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_backends(dst: *mut moq_string, count: usize) -> i32 {
+	ffi::enter(move || {
+		if !dst.is_null() {
+			let dst = unsafe { std::slice::from_raw_parts_mut(dst, count) };
+			for (slot, name) in dst.iter_mut().zip(BACKEND_NAMES.iter()) {
+				slot.data = name.as_ptr().cast::<c_char>();
+				slot.len = name.len();
+			}
+		} else if count != 0 {
+			return Err(Error::InvalidPointer);
+		}
+
+		Ok(BACKEND_NAMES.len())
+	})
+}
+
+/// Whether this build can capture qlog traces.
+///
+/// Capture is compile-time optional. [moq_client_set_quic_qlog] accepts a directory
+/// either way, but dialing fails when the support is absent, so a caller offering the
+/// knob should hide it rather than surface an option that cannot work.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_qlog_supported() -> bool {
+	moq_native::qlog_supported()
+}
+
+/// A duration as the milliseconds the setters take, saturating rather than wrapping.
+fn millis(duration: std::time::Duration) -> u64 {
+	duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+/// Create a client configuration for [moq_client_connect].
+///
+/// A fresh handle carries the same defaults [moq_session_connect] dials with; the
+/// `moq_client_set_*` functions override one knob at a time. Connecting clones the
+/// config, so one handle can open any number of sessions and stays editable in between.
+///
+/// Returns a non-zero handle on success, or a negative code on failure. Release it with
+/// [moq_client_close]; that does not disturb sessions already dialed from it.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_create() -> i32 {
+	ffi::enter(move || State::lock().client.create())
+}
+
+/// Release a client configuration created by [moq_client_create].
+///
+/// Sessions already dialed from it keep running: each connect took its own copy.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_close(client: u32) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.close(client)
+	})
+}
+
+/// Restrict the protocol versions offered during the handshake.
+///
+/// By default every supported version is offered and the server picks one. Pass a
+/// subset to pin the negotiation, in the same spelling the CLI uses: `moq-lite-01`
+/// through `moq-lite-06-wip`, or `moq-transport-14` through `moq-transport-19`. An
+/// empty list restores the default.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or a version
+/// string is unrecognized.
+///
+/// # Safety
+/// - The caller must ensure that `versions` is either NULL with a zero `count`, or a
+///   valid pointer to `count` [moq_string] values, each valid for its own length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_versions(client: u32, versions: *const moq_string, count: usize) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		let versions = unsafe { ffi::parse_strings(versions, count)? }
+			.into_iter()
+			.map(|version| moq_net::Version::from_str(&version).map_err(Error::InvalidConfig))
+			.collect::<Result<Vec<_>, Error>>()?;
+
+		State::lock().client.get_mut(client)?.version = versions;
+		Ok(())
+	})
+}
+
+/// Choose the QUIC backend: `"quinn"`, `"quiche"`, or `"noq"`.
+///
+/// Defaults to whichever is compiled in, preferring quinn. A NULL or empty value
+/// restores that auto-detection.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or the backend
+/// is unrecognized (which includes a backend this build was compiled without).
+///
+/// # Safety
+/// - The caller must ensure that `backend` is NULL or a valid pointer to `backend_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_backend(client: u32, backend: *const c_char, backend_len: usize) -> i32 {
+	ffi::enter(move || {
+		let backend = match unsafe { ffi::parse_str_optional(backend, backend_len)? } {
+			Some(backend) => Some(moq_native::QuicBackend::from_str(backend).map_err(Error::InvalidConfig)?),
+			None => None,
+		};
+
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.backend = backend;
+		Ok(())
+	})
+}
+
+/// Set the local UDP socket address to bind, e.g. `"[::]:0"` (the default) or
+/// `"192.0.2.7:0"` to pin the outgoing interface.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or the address
+/// does not parse.
+///
+/// # Safety
+/// - The caller must ensure that `addr` is a valid pointer to `addr_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_bind(client: u32, addr: *const c_char, addr_len: usize) -> i32 {
+	ffi::enter(move || {
+		let addr = unsafe { ffi::parse_str(addr, addr_len)? };
+		let addr: std::net::SocketAddr = addr
+			.parse()
+			.map_err(|err| Error::InvalidConfig(format!("invalid bind address {addr:?}: {err}")))?;
+
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.bind = addr;
+		Ok(())
+	})
+}
+
+/// Bound one connection attempt, covering both the dial and the MoQ handshake, in
+/// milliseconds.
+///
+/// Defaults to 30s; zero waits forever. The reconnect loop only re-arms its backoff
+/// between attempts, so this is what stops a peer that accepts the connection and then
+/// never speaks from wedging the loop.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_connect_timeout(client: u32, timeout_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.timeout = Some(std::time::Duration::from_millis(timeout_ms));
+		Ok(())
+	})
+}
+
+/// Delay before also dialing the next resolved address (Happy Eyeballs), in milliseconds.
+///
+/// When DNS returns several addresses, attempts alternate between IPv6 and IPv4, each
+/// starting this long after the previous one, and the first to complete wins. Defaults
+/// to 250ms; zero dials every address at once.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_failover_delay(client: u32, delay_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.failover_delay = Some(std::time::Duration::from_millis(delay_ms));
+		Ok(())
+	})
+}
+
+/// Delay before racing a WebSocket fallback against the QUIC dial, in milliseconds.
+///
+/// Defaults to 200ms, and drops to zero for a server WebSocket already won against.
+/// This is what gets a publisher through a network that blocks UDP.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_websocket_delay(client: u32, delay_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.websocket.delay = Some(std::time::Duration::from_millis(delay_ms));
+		Ok(())
+	})
+}
+
+/// Enable or disable the WebSocket fallback entirely.
+///
+/// Enabled by default. Disabling it makes a UDP-blocked network fail outright rather
+/// than falling back, which is what you want when measuring the QUIC path.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_websocket_enabled(client: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.websocket.enabled = enabled;
+		Ok(())
+	})
+}
+
+/// Skip TLS certificate verification.
+///
+/// Development only: it accepts any certificate, so it defeats the point of TLS. Prefer
+/// [moq_client_set_tls_fingerprints] to trust one known self-signed certificate.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_tls_disable_verify(client: u32, disable: bool) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.disable_verify = Some(disable);
+		Ok(())
+	})
+}
+
+/// Whether to also trust the platform's native root certificates.
+///
+/// By default the system roots are trusted only when no custom roots are configured.
+/// Set this to true to trust them alongside the roots from [moq_client_set_tls_roots],
+/// or false to trust only those.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_tls_system_roots(client: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.system_roots = Some(enabled);
+		Ok(())
+	})
+}
+
+/// Trust these PEM root certificate files.
+///
+/// An empty list restores the default of using the platform's native root store.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `paths` is either NULL with a zero `count`, or a valid
+///   pointer to `count` [moq_string] values, each valid for its own length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_tls_roots(client: u32, paths: *const moq_string, count: usize) -> i32 {
+	ffi::enter(move || {
+		let paths = unsafe { ffi::parse_strings(paths, count)? };
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.root = paths.into_iter().map(Into::into).collect();
+		Ok(())
+	})
+}
+
+/// Pin the peer to a certificate with one of these SHA-256 fingerprints, hex encoded.
+///
+/// The native equivalent of the browser's WebTransport `serverCertificateHashes`, taking
+/// the same values a relay reports for its self-signed certificate. Use it instead of
+/// [moq_client_set_tls_disable_verify] to trust one known certificate without accepting
+/// every certificate. An empty list clears any pinned fingerprints.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `fingerprints` is either NULL with a zero `count`, or a
+///   valid pointer to `count` [moq_string] values, each valid for its own length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_tls_fingerprints(
+	client: u32,
+	fingerprints: *const moq_string,
+	count: usize,
+) -> i32 {
+	ffi::enter(move || {
+		let fingerprints = unsafe { ffi::parse_strings(fingerprints, count)? };
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.fingerprint = fingerprints;
+		Ok(())
+	})
+}
+
+/// Override the TLS server name (SNI) sent during the handshake.
+///
+/// Defaults to the host in the dial URL. Set this to reach a relay by IP while still
+/// validating its certificate against the name it was issued for. A NULL or empty value
+/// restores the default.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `name` is NULL or a valid pointer to `name_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_tls_host_name(client: u32, name: *const c_char, name_len: usize) -> i32 {
+	ffi::enter(move || {
+		let name = unsafe { ffi::parse_str_optional(name, name_len)? }.map(str::to_string);
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.host_name = name;
+		Ok(())
+	})
+}
+
+/// Present this PEM certificate chain when the relay requires mTLS.
+///
+/// Only certificates are read from the file; any private keys in it are ignored. Must be
+/// paired with [moq_client_set_tls_key] or the connect fails. A NULL or empty path clears it.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `path` is NULL or a valid pointer to `path_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_tls_cert(client: u32, path: *const c_char, path_len: usize) -> i32 {
+	ffi::enter(move || {
+		let path = unsafe { ffi::parse_str_optional(path, path_len)? }.map(Into::into);
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.cert = path;
+		Ok(())
+	})
+}
+
+/// Present this PEM private key when the relay requires mTLS.
+///
+/// Only the private key is read from the file; any certificates in it are ignored. Must
+/// be paired with [moq_client_set_tls_cert] or the connect fails. A NULL or empty path
+/// clears it.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `path` is NULL or a valid pointer to `path_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_tls_key(client: u32, path: *const c_char, path_len: usize) -> i32 {
+	ffi::enter(move || {
+		let path = unsafe { ffi::parse_str_optional(path, path_len)? }.map(Into::into);
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.tls.key = path;
+		Ok(())
+	})
+}
+
+/// Set the delay before the first reconnect attempt, in milliseconds.
+///
+/// The delay grows from here by the multiplier after each failure. Defaults to 1s.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_backoff_initial(client: u32, delay_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.backoff.initial = std::time::Duration::from_millis(delay_ms);
+		Ok(())
+	})
+}
+
+/// Set the multiplier applied to the reconnect delay after each failed attempt.
+///
+/// Defaults to 2. A multiplier of 1 keeps the delay flat.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_backoff_multiplier(client: u32, multiplier: u32) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.backoff.multiplier = multiplier;
+		Ok(())
+	})
+}
+
+/// Set the ceiling on the growing reconnect delay, in milliseconds.
+///
+/// Defaults to 30s.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_backoff_max(client: u32, delay_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.backoff.max = std::time::Duration::from_millis(delay_ms);
+		Ok(())
+	})
+}
+
+/// Set how long to keep retrying before giving up, in milliseconds.
+///
+/// Zero retries forever. Defaults to 5 minutes. This is also how long published
+/// broadcasts linger across a drop, so a longer timeout papers over a longer relay
+/// outage.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_backoff_timeout(client: u32, timeout_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.backoff.timeout = std::time::Duration::from_millis(timeout_ms);
+		Ok(())
+	})
+}
+
+/// Set the maximum concurrent QUIC streams per connection, bidirectional and
+/// unidirectional alike.
+///
+/// Defaults to 1024. MoQ opens a stream per group, so a busy publisher wants this high.
+/// QUIC only; the WebSocket fallback ignores it.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_quic_max_streams(client: u32, max_streams: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.max_streams = Some(max_streams);
+		Ok(())
+	})
+}
+
+/// Set the idle timeout before an inactive connection is dropped, in milliseconds.
+///
+/// Defaults to 30s. QUIC carries this as a millisecond varint, so a value of 2^62 or
+/// more is rejected when the connection is dialed. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_quic_idle_timeout(client: u32, timeout_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.idle_timeout = Some(std::time::Duration::from_millis(timeout_ms));
+		Ok(())
+	})
+}
+
+/// Set the keep-alive ping interval, in milliseconds.
+///
+/// Defaults to 5s; zero disables the pings. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_quic_keep_alive(client: u32, interval_ms: u64) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.keep_alive = Some(std::time::Duration::from_millis(interval_ms));
+		Ok(())
+	})
+}
+
+/// Enable or disable UDP generic segmentation offload.
+///
+/// GSO batches sends into one syscall for throughput, and defaults to on. Some NICs and
+/// middleboxes mangle segmented packets, so turn it off if large sends vanish. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_quic_gso(client: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.gso = Some(enabled);
+		Ok(())
+	})
+}
+
+/// Enable or disable path MTU discovery.
+///
+/// Defaults to off. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_client_set_quic_mtu_discovery(client: u32, enabled: bool) -> i32 {
+	ffi::enter(move || {
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.mtu_discovery = Some(enabled);
+		Ok(())
+	})
+}
+
+/// Set the congestion control family.
+///
+/// Either `"loss"` (CUBIC, throughput-oriented) or `"delay"` (BBR, which keeps queues
+/// short and the send rate steady enough for an encoder to track). A NULL or empty value
+/// puts it back to the backend's own default. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or the family is
+/// unrecognized.
+///
+/// # Safety
+/// - The caller must ensure that `family` is either NULL or valid for `family_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_quic_congestion_control(
+	client: u32,
+	family: *const c_char,
+	family_len: usize,
+) -> i32 {
+	ffi::enter(move || {
+		// Parse before taking the lock, so a bad value leaves the config untouched.
+		let family = match unsafe { ffi::parse_str_optional(family, family_len)? } {
+			Some(value) => Some(moq_native::quic::CongestionControl::from_str(value).map_err(Error::InvalidConfig)?),
+			None => None,
+		};
+
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.congestion_control = family;
+		Ok(())
+	})
+}
+
+/// Set the directory to write qlog traces into.
+///
+/// A NULL or empty value disables them. Dialing errors if this build has no qlog
+/// support. QUIC only.
+///
+/// Returns zero on success, or a negative code if the handle is unknown.
+///
+/// # Safety
+/// - The caller must ensure that `dir` is either NULL or valid for `dir_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_set_quic_qlog(client: u32, dir: *const c_char, dir_len: usize) -> i32 {
+	ffi::enter(move || {
+		let dir = unsafe { ffi::parse_str_optional(dir, dir_len)? }.map(Into::into);
+		let client = ffi::parse_id(client)?;
+		State::lock().client.get_mut(client)?.quic.qlog = dir;
+		Ok(())
+	})
+}
+
+/// Read the connect timeout, in milliseconds. See [moq_client_set_connect_timeout].
+///
+/// A knob never set reads back as its default, so a fresh [moq_client_create] handle
+/// reports the defaults a dial would use. That is what a settings UI should show,
+/// rather than repeating numbers that go stale when a default is retuned.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_connect_timeout(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.connect_timeout());
+		Ok(())
+	})
+}
+
+/// Read the Happy Eyeballs stagger, in milliseconds. See [moq_client_set_failover_delay]
+/// and [moq_client_get_connect_timeout] for what an unset knob reports.
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_failover_delay(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.effective_failover_delay());
+		Ok(())
+	})
+}
+
+/// Read the first reconnect delay, in milliseconds. See [moq_client_set_backoff_initial].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_backoff_initial(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.backoff.initial);
+		Ok(())
+	})
+}
+
+/// Read the reconnect delay multiplier. See [moq_client_set_backoff_multiplier].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint32_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_backoff_multiplier(client: u32, out: *mut u32) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = State::lock().client.get_mut(client)?.backoff.multiplier;
+		Ok(())
+	})
+}
+
+/// Read the reconnect delay ceiling, in milliseconds. See [moq_client_set_backoff_max].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_backoff_max(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.backoff.max);
+		Ok(())
+	})
+}
+
+/// Read how long reconnecting keeps trying, in milliseconds. Zero means forever. See
+/// [moq_client_set_backoff_timeout].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_backoff_timeout(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.backoff.timeout);
+		Ok(())
+	})
+}
+
+/// Read the maximum concurrent QUIC streams. See [moq_client_set_quic_max_streams].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_quic_max_streams(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = State::lock().client.get_mut(client)?.quic.resolve().max_streams;
+		Ok(())
+	})
+}
+
+/// Read the QUIC idle timeout, in milliseconds. See [moq_client_set_quic_idle_timeout].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_quic_idle_timeout(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = millis(State::lock().client.get_mut(client)?.quic.resolve().idle_timeout);
+		Ok(())
+	})
+}
+
+/// Read the QUIC keep-alive interval, in milliseconds. Zero means the pings are
+/// disabled. See [moq_client_set_quic_keep_alive].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_quic_keep_alive(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		let keep_alive = State::lock().client.get_mut(client)?.quic.resolve().keep_alive;
+		*out = keep_alive.map(millis).unwrap_or(0);
+		Ok(())
+	})
+}
+
+/// Read whether the WebSocket fallback races the QUIC attempt. See
+/// [moq_client_set_websocket_enabled].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_websocket_enabled(client: u32, out: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		*out = State::lock().client.get_mut(client)?.websocket.enabled;
+		Ok(())
+	})
+}
+
+/// Read the WebSocket fallback delay, in milliseconds. See
+/// [moq_client_set_websocket_delay].
+///
+/// Returns zero on success, or a negative code if the handle is unknown or `out` is NULL.
+///
+/// # Safety
+/// - The caller must ensure that `out` points to a writable `uint64_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_get_websocket_delay(client: u32, out: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let client = ffi::parse_id(client)?;
+		let delay = State::lock().client.get_mut(client)?.websocket.delay;
+		*out = delay.map(millis).unwrap_or(0);
+		Ok(())
+	})
+}
+
+/// Start establishing a connection to a MoQ server using a client configuration.
+///
+/// Identical to [moq_session_connect] but dials with the settings on `client` (created
+/// by [moq_client_create]) instead of the defaults. The config is cloned, so the handle
+/// stays reusable and editable afterwards. A `client` of 0 means the defaults, which is
+/// exactly what [moq_session_connect] does.
+///
+/// Returns a non-zero session handle on success, or a negative code on (immediate)
+/// failure. Close it with [moq_session_close]. See [moq_session_connect] for the
+/// `on_status` contract, which is the same here.
+///
+/// # Safety
+/// - The caller must ensure that url is a valid pointer to url_len bytes of data.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_status` callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_client_connect(
+	url: *const c_char,
+	url_len: usize,
+	client: u32,
+	origin_publish: u32,
+	origin_consume: u32,
+	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let url = ffi::parse_url(url, url_len)?;
+
+		let mut state = State::lock();
+		let config = state.client.config(ffi::parse_id_optional(client)?)?;
+		let publish = ffi::parse_id_optional(origin_publish)?
+			.map(|id| state.origin.get(id))
+			.transpose()?
+			.cloned();
+		let consume = ffi::parse_id_optional(origin_consume)?
+			.map(|id| state.origin.get(id))
+			.transpose()?
+			.cloned();
+
+		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
+		state.session.connect(config, url, publish, consume, on_status)
+	})
+}
+
 /// Start establishing a connection to a MoQ server.
 ///
 /// Takes origin handles, which are used for publishing and consuming broadcasts respectively.
@@ -415,6 +1216,9 @@ pub extern "C" fn moq_error() -> *const c_char {
 ///
 /// This may be called multiple times to connect to different servers.
 /// Origins can be shared across sessions, useful for fanout or relaying.
+///
+/// Dials with the default settings. Use [moq_client_connect] to pin a protocol version,
+/// adjust TLS trust, or tune the transport.
 ///
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
@@ -462,7 +1266,8 @@ pub unsafe extern "C" fn moq_session_connect(
 			.cloned();
 
 		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
-		state.session.connect(url, publish, consume, on_status)
+		let config = moq_native::ClientConfig::default();
+		state.session.connect(config, url, publish, consume, on_status)
 	})
 }
 

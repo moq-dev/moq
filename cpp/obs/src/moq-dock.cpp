@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-dock.h"
+#include "moq-advanced-dialog.h"
+#include "moq-settings.h"
 #include "logger.h"
 
 #include <obs-module.h>
@@ -112,6 +114,15 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	button->setCursor(Qt::PointingHandCursor);
 	connect(button, &QPushButton::clicked, this, &MoQDock::ToggleStream);
 
+	// The advanced settings open in their own window; there are too many to fit in a
+	// dock that has to stay narrow.
+	advancedButton = new QPushButton("Advanced…", this);
+	advancedButton->setCursor(Qt::PointingHandCursor);
+	connect(advancedButton, &QPushButton::clicked, this, &MoQDock::OpenAdvanced);
+
+	advanced = OBSDataAutoRelease(obs_data_create());
+	MoQSettings::Defaults(advanced);
+
 	status = new QLabel(this);
 	status->setWordWrap(true);
 	QFont statusFont = status->font();
@@ -126,6 +137,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	layout->setSpacing(10);
 	layout->addLayout(form);
 	layout->addWidget(button);
+	layout->addWidget(advancedButton);
 	layout->addWidget(status);
 	layout->addStretch();
 	layout->addWidget(versionLabel);
@@ -153,6 +165,13 @@ void MoQDock::ToggleStream()
 	} else {
 		StartStream();
 	}
+}
+
+void MoQDock::OpenAdvanced()
+{
+	MoQAdvancedDialog dialog(advanced, this);
+	if (dialog.exec() == QDialog::Accepted)
+		SaveSettings();
 }
 
 bool MoQDock::CreateConfiguredEncoders()
@@ -251,6 +270,9 @@ void MoQDock::StartStream()
 	// The MoQ output reads the server URL / path from its attached service, so
 	// build a throwaway service from the dock fields.
 	OBSDataAutoRelease serviceSettings = obs_data_create();
+	// The advanced settings ride along on the service, which is where the output reads
+	// them from regardless of whether the dock or Settings -> Stream configured it.
+	obs_data_apply(serviceSettings, advanced);
 	obs_data_set_string(serviceSettings, "server", url.c_str());
 	obs_data_set_string(serviceSettings, "key", path.c_str());
 	service =
@@ -322,6 +344,9 @@ void MoQDock::SetRunning(bool isRunning)
 
 	urlEdit->setEnabled(!isRunning);
 	pathEdit->setEnabled(!isRunning);
+	// The settings are read once at connect, so editing them mid-stream would look
+	// like it applied when it hadn't.
+	advancedButton->setEnabled(!isRunning);
 
 	if (!isRunning) {
 		status->setText("● Disconnected");
@@ -358,6 +383,12 @@ void MoQDock::LoadSettings()
 		urlEdit->setText(url);
 	if (obs_data_has_user_value(data, "path"))
 		pathEdit->setText(broadcast ? broadcast : "");
+
+	// Applied over the defaults set in the constructor, so a settings file written by
+	// an older build (missing keys that have since been added) still loads.
+	OBSDataAutoRelease saved = obs_data_get_obj(data, "advanced");
+	if (saved)
+		obs_data_apply(advanced, saved);
 }
 
 void MoQDock::SaveSettings()
@@ -371,6 +402,7 @@ void MoQDock::SaveSettings()
 	OBSDataAutoRelease data = obs_data_create();
 	obs_data_set_string(data, "url", urlEdit->text().toUtf8().constData());
 	obs_data_set_string(data, "path", pathEdit->text().toUtf8().constData());
+	obs_data_set_obj(data, "advanced", advanced);
 	obs_data_save_json(data, path.c_str());
 }
 
