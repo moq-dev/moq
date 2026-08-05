@@ -83,6 +83,24 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		}
 	}
 
+	/// Finish the stream and wait for the peer to acknowledge everything written.
+	///
+	/// [`Self::finish`] alone is not enough to deliver a final message. A stream that has sent
+	/// its FIN is still retransmitting unacknowledged data, and a RESET_STREAM from that state
+	/// discards it, so the [`Drop`] fallback below can throw away bytes the peer never read.
+	/// Consuming the writer is what removes that fallback, and waiting for the acknowledgement
+	/// is what makes the bytes safe.
+	pub async fn close(mut self) -> Result<(), Error> {
+		let Some(mut stream) = self.stream.take() else {
+			return Ok(());
+		};
+
+		stream.finish().map_err(Error::from_transport)?;
+		stream.closed().await.map_err(Error::from_transport)?;
+
+		Ok(())
+	}
+
 	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
 	pub async fn closed(&mut self) -> Result<(), Error> {
 		self.stream

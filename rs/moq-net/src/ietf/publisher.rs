@@ -469,18 +469,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			})
 			.await;
 
-		stream.writer.finish().ok();
+		// PUBLISH_DONE is the last thing on this stream, so it needs the acknowledgement too.
+		let _ = stream.writer.close().await;
 
 		res
 	}
 
 	/// Reject a SUBSCRIBE, ending the request stream.
 	///
-	/// Takes the whole stream because the finish is the half that makes the error arrive:
-	/// [`Writer`] resets on drop, and a reset that races the write discards the bytes the peer
-	/// has not read yet, so the subscriber sees no response and waits forever. Finishing first
-	/// leaves that reset a no-op. The rejection is the whole exchange, so don't wait on the
-	/// peer's close.
+	/// Takes the whole stream because delivering the error is the other half of the job:
+	/// [`Writer`] resets on drop, and a reset discards data the peer has not acknowledged, so
+	/// returning here without [`Writer::close`] leaves the subscriber waiting on a request we
+	/// already refused.
 	async fn reject_subscribe(
 		&self,
 		mut stream: Stream<S, Version>,
@@ -490,7 +490,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		self.write_subscribe_error(&mut stream.writer, request_id, error_code, reason)
 			.await?;
-		let _ = stream.writer.finish();
+
+		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
+		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
@@ -740,7 +742,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Reject a FETCH, ending the request stream. See [`Self::reject_subscribe`] for why the
-	/// finish is not optional.
+	/// close is not optional.
 	async fn reject_fetch(
 		&self,
 		mut stream: Stream<S, Version>,
@@ -750,7 +752,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		self.write_fetch_error(&mut stream.writer, request_id, error_code, reason)
 			.await?;
-		let _ = stream.writer.finish();
+
+		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
