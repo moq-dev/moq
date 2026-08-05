@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Backoff, isRetryable, Terminal } from "./retry.ts";
+import { Backoff } from "./retry.ts";
 
 test("the window escalates to the cap, each delay inside its jitter band", () => {
 	const backoff = new Backoff({ initial: 1000, multiplier: 2, max: 8000, timeout: 0 });
@@ -46,18 +46,4 @@ test("the budget is a deadline over the whole sequence", async () => {
 	// A reset says the earlier failures no longer describe reality, so the budget refills.
 	backoff.reset();
 	expect(backoff.delay()).toBeDefined();
-});
-
-test("only a Terminal failure stops the retry", () => {
-	expect(isRetryable(new Terminal("unsupported WebTransport protocol: moq-99"))).toBe(false);
-
-	// The browser hands back untyped failures, and those are overwhelmingly the network.
-	expect(isRetryable(new Error("connection lost"))).toBe(true);
-	expect(isRetryable(new DOMException("closed", "AbortError"))).toBe(true);
-
-	// A lost transport race: worth repeating if any half of it was.
-	expect(isRetryable(new AggregateError([new Terminal("no WebSocket"), new Error("timed out")]))).toBe(true);
-	expect(isRetryable(new AggregateError([new Terminal("no WebSocket"), new Terminal("no WebTransport")]))).toBe(
-		false,
-	);
 });

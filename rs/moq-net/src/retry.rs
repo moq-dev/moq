@@ -1,9 +1,12 @@
 //! The retry schedule shared by every loop that re-attempts a failed operation.
 //!
-//! Two halves, kept apart on purpose. [`Error::is_retryable`](crate::Error::is_retryable) (and its
-//! counterparts in the crates above) answers *whether* an attempt is worth repeating; [`Backoff`]
-//! answers *when*. A loop that only has the second half retries deterministic failures forever, which
-//! is the bug this module exists to prevent, so classify first and back off second.
+//! [`Backoff`] answers *when* to try again, and its budget is what ends a loop. There is deliberately
+//! no counterpart answering *whether* a given error is worth repeating: a transport layer can't tell
+//! a permanent failure from a temporary one without guessing, and a wrong guess either strands a
+//! recoverable connection or hammers a dead one. The budget bounds the damage instead.
+//!
+//! The one exception is [`status_retryable`], where a peer sent an HTTP status whose meaning the
+//! protocol defines. That's reading an answer, not inferring one.
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), moq_net::Error> {
@@ -12,9 +15,7 @@
 //! loop {
 //!     match attempt().await {
 //!         Ok(()) => return Ok(()),
-//!         // Deterministic: the next attempt fails the same way, so surface it now.
-//!         Err(err) if !err.is_retryable() => return Err(err),
-//!         // Transient, but the budget is spent: stop rather than retry forever.
+//!         // Out of budget: surface the failure instead of looping on it.
 //!         Err(err) if !backoff.sleep().await => return Err(err),
 //!         Err(_) => continue,
 //!     }
@@ -24,24 +25,6 @@
 
 use kio::time::{Duration, Instant};
 use rand::RngExt;
-
-/// Whether an OS-level failure is worth another attempt.
-///
-/// Configuration mistakes reach a caller as [`std::io::Error`] too: a path that doesn't exist, a
-/// port another process holds, an address this host can't bind. Those repeat forever. What's left
-/// (refused, unreachable, reset, timed out) is the network being the network.
-pub fn io_retryable(err: &std::io::Error) -> bool {
-	!matches!(
-		err.kind(),
-		std::io::ErrorKind::NotFound
-			| std::io::ErrorKind::PermissionDenied
-			| std::io::ErrorKind::AddrInUse
-			| std::io::ErrorKind::AddrNotAvailable
-			| std::io::ErrorKind::InvalidInput
-			| std::io::ErrorKind::InvalidData
-			| std::io::ErrorKind::Unsupported
-	)
-}
 
 /// Whether an HTTP response status means "ask again later".
 ///

@@ -146,76 +146,26 @@ impl Error {
 		self.connect_error().is_some_and(|err| err.is_auth())
 	}
 
-	/// Whether reconnecting could plausibly succeed with nothing else changing.
+	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
 	///
-	/// A reconnect loop should call this before every retry. Half of what can go wrong here is
-	/// configuration (an unbuildable TLS config, a URL no compiled-in backend can dial, a flag the
-	/// backend doesn't support) or credentials, and those fail identically forever: the loop has to
-	/// surface them instead of hiding them behind a warning every few seconds.
-	///
-	/// Retryable is the explicit case, never the fallback. The match is exhaustive so a new variant
-	/// is a decision rather than an accident.
-	pub fn is_retryable(&self) -> bool {
+	/// `None` covers everything else: a dial that never got a response, a QUIC handshake that
+	/// failed, a URL we couldn't parse. Only a status the peer actually sent shows up here, and
+	/// [`moq_net::retry::status_retryable`] is what decides whether it invites another attempt. This
+	/// deliberately does not try to say whether some *other* kind of failure is worth retrying;
+	/// that's a guess, and the caller's backoff budget bounds it instead.
+	pub fn status(&self) -> Option<u16> {
 		match self {
-			// The OS refused a socket or a file. `kind` separates a refused port from a missing
-			// certificate, which is the difference between a retry and a typo.
-			Self::Io(err) => io_retryable(err),
-
-			// The MoQ session's own classification, once the transport was up.
-			Self::MoqNet(err) => err.is_retryable(),
-
-			// Every backend gave up, or the dial plus handshake outlived its deadline. Both are the
-			// network failing to answer.
-			Self::ConnectFailed | Self::ConnectTimeout(_) => true,
-
-			// The race is retryable if either half is: one transport being permanently unusable
-			// (say, no WebSocket route) shouldn't retire the other.
-			#[cfg(feature = "websocket")]
-			Self::TransportRace { quic, websocket } => quic.is_retryable() || websocket.is_retryable(),
-
 			#[cfg(feature = "quinn")]
-			Self::Quinn(err) => err.is_retryable(),
+			Self::Quinn(err) => err.status(),
 			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.is_retryable(),
+			Self::Noq(err) => err.status(),
 			#[cfg(feature = "quiche")]
-			Self::Quiche(err) => err.is_retryable(),
-			#[cfg(feature = "iroh")]
-			Self::Iroh(err) => err.is_retryable(),
+			Self::Quiche(err) => err.status(),
 			#[cfg(feature = "websocket")]
-			Self::WebSocket(err) => err.is_retryable(),
-			#[cfg(feature = "tcp")]
-			Self::Tcp(err) => err.is_retryable(),
-			#[cfg(all(feature = "uds", unix))]
-			Self::Unix(err) => err.is_retryable(),
-
-			// The server rejected our credentials. Retrying needs a new token, not a new attempt.
-			Self::Connect(_) => false,
-
-			// Build and configuration failures: nothing about the next attempt differs.
-			Self::NoBackend(_) | Self::QlogUnsupported | Self::MtlsUnsupported | Self::InvalidStatusCode => false,
-			#[cfg(feature = "iroh")]
-			Self::IrohDisabled => false,
-			Self::Tls(_) => false,
-
-			// Process setup, reached long before any connect.
-			Self::Directive(_) | Self::SetSubscriber(_) | Self::Logcat(_) => false,
-
-			// A reconnect loop already gave up here. Retrying it is the nested-retry bug.
-			Self::Reconnect(_) => false,
+			Self::WebSocket(err) => err.status(),
+			_ => None,
 		}
 	}
-}
-
-pub(crate) use moq_net::retry::io_retryable;
-
-/// Whether an HTTP failure is worth another attempt.
-///
-/// No response at all is the network failing; a response that did arrive is the server's answer, so
-/// only [`moq_net::retry::status_retryable`] statuses invite another try.
-#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
-pub(crate) fn http_retryable(err: &reqwest::Error) -> bool {
-	err.status()
-		.is_none_or(|status| moq_net::retry::status_retryable(status.as_u16()))
 }
 
 // The wrapped sources aren't `Clone`, so `#[from]` can't store them behind `Arc`

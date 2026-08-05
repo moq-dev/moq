@@ -10,9 +10,13 @@ use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
 ///
-/// Only failures that could plausibly clear on their own are retried at all
-/// ([`Error::is_retryable`]); this decides how long to wait between those retries and when to stop.
-/// The delays carry jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
+/// This decides how long to wait between reconnect attempts and when to give up. The delays carry
+/// jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
+///
+/// [`timeout`](Self::timeout) is what ends a hopeless loop, not a judgment about the error: the only
+/// failures short-circuited are the ones a server states outright (an auth rejection, or a CONNECT
+/// status that isn't an invitation to retry). A zero timeout removes that backstop, so it belongs
+/// only where an unattended process must outlive an outage of any length.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -114,8 +118,8 @@ struct State {
 	status: Option<Status>,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
-	/// Set when the reconnect loop permanently gives up: a failure no retry can clear, or the
-	/// backoff timeout expiring.
+	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or a server
+	/// answer that redialing cannot change.
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
@@ -141,9 +145,9 @@ impl ConnectionStatsReader {
 /// Handle to a background reconnect loop.
 ///
 /// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. This loop is the only retry owner for the connection: a caller that rebuilds it on
-/// failure restarts the backoff from its initial delay, which turns the escalation back into a tight
-/// loop. Watch [`closed`](Self::closed) instead.
+/// backoff until [`Backoff::timeout`] runs out. This loop is the only retry owner for the connection:
+/// a caller that rebuilds it on failure restarts the backoff from its initial delay, which turns the
+/// escalation back into a tight loop. Watch [`closed`](Self::closed) instead.
 ///
 /// The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
 /// that transparently reconnects: [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
@@ -241,9 +245,6 @@ impl Reconnect {
 						// sleep below so repeated flaps escalate instead of spinning the CPU.
 						if let Err(err) = closed {
 							let err = Error::from(err);
-							if !err.is_retryable() {
-								return Err(err);
-							}
 							tracing::warn!(%url, %err, "session severed immediately, retrying");
 							last_error = Some(err);
 						} else {
@@ -252,10 +253,16 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					// Auth, TLS material, an unsupported flag, a URL no backend can dial: the next
-					// dial is byte-for-byte the same, so surface it instead of hiding it behind a
-					// warning every few seconds.
-					if !err.is_retryable() {
+					// The two answers a server can give that redialing cannot change: it rejected our
+					// credentials, or it answered the CONNECT with a status that isn't an invitation
+					// to come back. Everything else falls through to the backoff, whose budget is
+					// what eventually stops the loop.
+					if err.is_auth() {
+						return Err(err);
+					}
+					if let Some(status) = err.status()
+						&& !moq_net::retry::status_retryable(status)
+					{
 						return Err(err);
 					}
 					last_error = Some(err);

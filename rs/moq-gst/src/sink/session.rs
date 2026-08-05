@@ -29,7 +29,7 @@ pub(crate) static CAT: LazyLock<gst::DebugCategory> =
 /// The publish connection's lifecycle, surfaced as the `status` property.
 ///
 /// Bundles what a bare `connected` bool can't: `Failed` (a terminal give-up) is distinct from
-/// `Disconnected` (a transient drop the reconnect loop is still retrying), so a consumer watching
+/// `Disconnected` (a drop the reconnect loop is still retrying), so a consumer watching
 /// `notify::status` learns when a connection is newly established or permanently rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, glib::Enum)]
 #[enum_type(name = "GstMoqSinkConnectionStatus")]
@@ -42,7 +42,8 @@ pub enum ConnectionStatus {
 	/// A session is connected and publishing.
 	#[enum_value(name = "Connected: session established", nick = "connected")]
 	Connected,
-	/// The reconnect loop gave up permanently (a non-retryable error, e.g. auth rejection). Terminal.
+	/// The reconnect loop gave up permanently (an auth rejection, or a CONNECT status that isn't an
+	/// invitation to retry). Terminal.
 	#[enum_value(name = "Failed: connection rejected, gave up", nick = "failed")]
 	Failed,
 }
@@ -137,11 +138,12 @@ impl Session {
 
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
-		// outages of any length. Safe to leave unbounded because the loop only retries what a retry
-		// can fix (`moq_native::Error::is_retryable`): a rejected token, unusable TLS material, or a
-		// URL no backend can dial still ends it, posting the bus error below. During an outage the pad
-		// threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up from
-		// a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
+		// outages of any length, which is the trade this element wants: a pipeline nobody is watching
+		// should still be publishing when the relay comes back. The loop still ends on the two answers
+		// a server states outright (an auth rejection, or a CONNECT status that isn't an invitation to
+		// retry), posting the bus error below. During an outage the pad threads keep writing (bounded
+		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
+		// reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let mut config = moq_native::ClientConfig::default();
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
 		config.backoff.timeout = std::time::Duration::ZERO;

@@ -125,39 +125,15 @@ pub enum Error {
 }
 
 impl Error {
-	/// Whether repeating the failed operation could plausibly succeed with nothing else changing.
-	/// See [`moq_net::Error::is_retryable`].
+	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
-	/// The gateway sits between an HTTP origin and a MoQ relay, so both halves can be transient. A
-	/// playlist that didn't parse, a segment whose byte range didn't add up, or a URL that isn't one
-	/// will fail identically on the next pass: those end the import instead of looping on it.
-	pub fn is_retryable(&self) -> bool {
+	/// The import loop reads this through [`moq_net::retry::status_retryable`]: a `503` on a playlist
+	/// fetch is worth another pass, a `404` is the origin's settled answer. Nothing else here is
+	/// classified; a failure with no status falls through to the backoff budget.
+	pub fn status(&self) -> Option<u16> {
 		match self {
-			Self::Moq(err) => err.is_retryable(),
-			Self::Mux(err) => err.is_retryable(),
-			Self::Io(err) => moq_net::retry::io_retryable(err),
-			// No response at all is the network; a response that arrived is the origin's answer.
-			Self::Reqwest(err) => err
-				.status()
-				.is_none_or(|status| moq_net::retry::status_retryable(status.as_u16())),
-
-			// The playlist, its URLs, or the segments it points at are malformed.
-			Self::InvalidPlaylistUrl
-			| Self::InvalidFilePath
-			| Self::InvalidFileUrl
-			| Self::UrlParse(_)
-			| Self::ParsePlaylist(_)
-			| Self::NoVariants
-			| Self::MissingMap
-			| Self::EmptySegmentUri
-			| Self::MissingByteRangeOffset { .. }
-			| Self::InvalidByteRange { .. }
-			| Self::ByteRangeLengthMismatch { .. }
-			| Self::ByteRangeResponseMismatch { .. }
-			| Self::SequenceOverflow { .. } => false,
-
-			// Untyped, so there is nothing to classify on.
-			Self::Other(_) => false,
+			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
+			_ => None,
 		}
 	}
 }
@@ -187,25 +163,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
 	use super::*;
 
-	/// The import loop retries on this classification, so a malformed playlist ending up on the
-	/// retryable side is an infinite loop that publishes nothing.
+	/// The import loop consults this, so an origin's settled answer has to reach it intact.
 	#[test]
-	fn only_transient_failures_are_retryable() {
-		assert!(Error::Moq(moq_net::Error::Transport("connection lost".to_string())).is_retryable());
-		assert!(Error::from(std::io::Error::from(std::io::ErrorKind::ConnectionReset)).is_retryable());
-
-		for err in [
-			Error::ParsePlaylist("not a playlist".to_string()),
-			Error::NoVariants,
-			Error::MissingMap,
-			Error::InvalidPlaylistUrl,
-			Error::SequenceOverflow {
-				kind: SequenceKind::Media,
-				value: u64::MAX,
-			},
-			Error::from(std::io::Error::from(std::io::ErrorKind::NotFound)),
-		] {
-			assert!(!err.is_retryable(), "{err} should be terminal");
-		}
+	fn an_http_failure_reports_its_status() {
+		// A failure the origin never answered carries no status, so the budget decides instead.
+		assert_eq!(Error::NoVariants.status(), None);
+		assert_eq!(Error::ParsePlaylist("not a playlist".to_string()).status(), None);
+		assert_eq!(Error::Moq(moq_net::Error::Transport("lost".to_string())).status(), None);
 	}
 }

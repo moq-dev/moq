@@ -1,5 +1,4 @@
 import * as Ietf from "../ietf/index.ts";
-import { Terminal } from "../retry.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 
 /**
@@ -59,7 +58,7 @@ async function receiveSetup(
 
 	const streamType = await reader.u53();
 	if (streamType !== Ietf.Setup.id) {
-		throw new Terminal(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
+		throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
 	}
 	await Ietf.Setup.decode(reader, version);
 

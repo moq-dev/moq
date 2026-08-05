@@ -1,8 +1,8 @@
-//! What the reconnect loop retries, and what it refuses to.
+//! What ends the reconnect loop.
 //!
-//! Both cases dial over plain TCP (`tcp://`), which fails fast and locally: no TLS material, no
-//! QUIC handshake, no server. That keeps the assertions about the *policy* rather than about how
-//! long a particular backend takes to give up.
+//! Dials over plain TCP (`tcp://`), which fails fast and locally: no TLS material, no QUIC
+//! handshake, no server. That keeps the assertion about the *budget* rather than about how long a
+//! particular backend takes to give up.
 
 #![cfg(feature = "tcp")]
 
@@ -13,30 +13,6 @@ fn client(backoff: moq_native::Backoff) -> moq_native::Client {
 	let mut config = moq_native::ClientConfig::default();
 	config.backoff = backoff;
 	config.init().expect("failed to init client")
-}
-
-/// A failure no retry can clear must surface immediately. The initial delay is far longer than the
-/// timeout below, so a single retry would blow the deadline: reaching the assertion at all is the
-/// proof that exactly one attempt was made.
-#[tokio::test]
-async fn a_deterministic_failure_makes_one_attempt() {
-	let mut backoff = moq_native::Backoff::default();
-	backoff.initial = Duration::from_secs(30);
-
-	// `tcp://` has no default port, so this URL can never be dialed, however many times we try.
-	let url = "tcp://localhost".parse().expect("failed to parse url");
-	let reconnect = client(backoff).reconnect(url);
-
-	let err = tokio::time::timeout(Duration::from_secs(5), reconnect.closed())
-		.await
-		.expect("reconnect loop retried a deterministic failure")
-		.expect_err("reconnect loop stopped without an error");
-
-	assert!(!err.is_retryable(), "gave up on a retryable error: {err}");
-	assert!(
-		matches!(err, moq_native::Error::Tcp(_)),
-		"reported {err} instead of the failure that stopped it"
-	);
 }
 
 /// A transient failure is retried, escalating, until the budget runs out. The give-up error names

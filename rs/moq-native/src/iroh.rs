@@ -115,40 +115,6 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-impl Error {
-	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
-	pub(crate) fn is_retryable(&self) -> bool {
-		match self {
-			// Reading or writing the secret key file. `kind` tells a transient failure from a path
-			// that isn't there.
-			Self::Io(err) => crate::error::io_retryable(err),
-
-			// The endpoint's UDP socket, which relay discovery and hole punching sit on top of.
-			Self::Bind(_) => true,
-
-			// The exchange with the peer: dial, handshake, established connection, WebTransport.
-			Self::Connect(_)
-			| Self::Connecting(_)
-			| Self::Alpn(_)
-			| Self::Connection(_)
-			| Self::Client(_)
-			| Self::Server(_)
-			| Self::RecvRequest(_) => true,
-
-			// Configuration: the key, the bind address, or a URL that isn't an endpoint id.
-			Self::Secret(_)
-			| Self::BindAddr(_)
-			| Self::MissingHost
-			| Self::InvalidEndpointId(_)
-			| Self::InvalidUrl
-			| Self::Url(_) => false,
-
-			// Negotiation produced something we can't speak, and GSO can't be turned off here.
-			Self::DecodeAlpn(_) | Self::UnsupportedAlpn(_) | Self::GsoUnsupported => false,
-		}
-	}
-}
-
 /// Settings for the shared iroh endpoint, used by both the client and server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]

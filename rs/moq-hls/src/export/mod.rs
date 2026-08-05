@@ -38,9 +38,10 @@ pub use rendition::{Kind, Rendition};
 /// for that reason: a source that stays silent for an hour must not be polled four times a second
 /// for an hour.
 ///
-/// Deliberately no give-up budget. The broadcast closing is what ends the wait, and a relay-side
-/// broadcast outlives its publisher's session, so any deadline here is a window in which a publisher
-/// outage leaves the broadcaster permanently empty with nothing to recover it.
+/// Deliberately no give-up budget, and no attempt to judge which failures are worth waiting on. The
+/// broadcast closing is what ends the wait, and a relay-side broadcast outlives its publisher's
+/// session, so any deadline here is a window in which a publisher outage leaves the broadcaster
+/// permanently empty with nothing to recover it.
 fn catalog_backoff() -> moq_net::retry::Backoff {
 	let mut config = moq_net::retry::Config::default();
 	config.initial = Duration::from_millis(250);
@@ -182,20 +183,6 @@ impl Drop for Broadcaster {
 	}
 }
 
-/// Whether a failed catalog subscription is worth waiting on.
-///
-/// Any moq-level failure means "not yet": the publisher announced the broadcast before creating its
-/// catalog track, the route is still resolving, the session blipped. Waiting is the whole point of
-/// [`watch_catalog`]'s first loop, and the broadcast closing is what ends the wait.
-///
-/// Deliberately *not* [`moq_net::Error::is_retryable`], which reads `NotFound` as needing an
-/// external change before another attempt can help. That is true in general, but here the external
-/// change is the publisher writing the track, which is precisely what this loop exists to wait for.
-/// Everything else is a catalog this build cannot read, and no amount of waiting fixes that.
-fn catalog_pending(err: &moq_mux::Error) -> bool {
-	matches!(err, moq_mux::Error::Moq(_))
-}
-
 async fn watch_catalog(
 	source: moq_mux::Source,
 	broadcast: moq_net::broadcast::Consumer,
@@ -207,11 +194,6 @@ async fn watch_catalog(
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
-			Err(err) if !catalog_pending(&err) => {
-				tracing::warn!(%err, "cannot subscribe to broadcast catalog");
-				renditions.close();
-				return;
-			}
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 				tokio::select! {
@@ -243,21 +225,6 @@ async fn watch_catalog(
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// The startup race this loop exists for: an exporter that subscribes between the announcement
-	/// and the publisher creating `catalog.json` sees the track as absent, and has to keep waiting.
-	/// Treating that as terminal leaves the broadcaster permanently empty with no error anywhere.
-	#[test]
-	fn a_missing_catalog_track_keeps_waiting() {
-		assert!(catalog_pending(&moq_net::Error::NotFound.into()));
-		assert!(catalog_pending(&moq_net::Error::Unroutable.into()));
-		assert!(catalog_pending(
-			&moq_net::Error::Transport("connection lost".to_string()).into()
-		));
-
-		// A catalog that arrived and could not be understood is not a waiting problem.
-		assert!(!catalog_pending(&moq_mux::Error::UnknownFormat("mystery".to_string())));
-	}
 
 	fn frame(micros: u64, keyframe: bool) -> moq_mux::container::Frame {
 		moq_mux::container::Frame {

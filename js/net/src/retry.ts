@@ -1,10 +1,10 @@
 /**
  * The retry schedule shared by every loop that re-attempts a failed operation.
  *
- * Two halves, kept apart on purpose. {@link isRetryable} answers *whether* an attempt is worth
- * repeating; {@link Backoff} answers *when*. A loop with only the second half retries deterministic
- * failures forever, which is the bug this module exists to prevent, so classify first and back off
- * second.
+ * {@link Backoff} answers *when* to try again, and its budget is what ends a loop. There is
+ * deliberately no counterpart answering *whether* a given error is worth repeating: the browser
+ * hands back whatever the platform threw, and guessing wrong either strands a connection a retry
+ * would have recovered or hammers a dead one. The budget bounds the damage instead.
  *
  * @module
  */
@@ -41,42 +41,6 @@ export type BackoffProps = {
 	 */
 	timeout?: DOMHighResTimeStamp;
 };
-
-/**
- * A failure that a retry cannot clear.
- *
- * Throw this instead of a plain `Error` when the next attempt is byte-for-byte the same as the one
- * that just failed: a relay speaking a protocol this build doesn't, a certificate that won't parse,
- * an option combination that leaves no usable transport. {@link isRetryable} reports `false` for it,
- * so a reconnect loop surfaces it rather than repeating it every few seconds.
- *
- * @public
- */
-export class Terminal extends Error {
-	constructor(message: string, options?: { cause?: unknown }) {
-		super(message, options);
-		this.name = "Terminal";
-	}
-}
-
-/**
- * Whether repeating the failed operation could plausibly succeed with nothing else changing.
- *
- * Only {@link Terminal} is treated as settled. Unlike the Rust side, which classifies an error enum
- * variant by variant, the browser hands back whatever the platform threw: a `WebTransportError`, a
- * `DOMException`, an `AggregateError` wrapping a lost race, a bare `Error` from a relay. Defaulting
- * those to terminal would strand a connection that a retry would have recovered, so the burden sits
- * on whoever *knows* a failure is settled to say so.
- */
-export function isRetryable(err: unknown): boolean {
-	if (err instanceof Terminal) return false;
-
-	// `Promise.any` rejects with every transport's failure at once; the attempt is worth repeating
-	// if any of them was.
-	if (err instanceof AggregateError) return err.errors.some(isRetryable);
-
-	return true;
-}
 
 /**
  * A capped exponential backoff with jitter and a give-up budget.

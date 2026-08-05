@@ -178,61 +178,6 @@ impl Error {
 		}
 	}
 
-	/// Whether repeating the failed operation could plausibly succeed with nothing else changing.
-	///
-	/// True only for the failures a flaky link produces. Everything else is deterministic: a decode
-	/// failure, an auth rejection, or a version mismatch will fail identically on the next attempt,
-	/// so a loop that retries it burns the network and hides the real cause behind a warning.
-	///
-	/// Retryable is the explicit case, never the fallback: a variant nobody has classified is
-	/// terminal. The match is exhaustive so adding one is a decision rather than an accident.
-	///
-	/// This says nothing about *when* to retry. Pair it with [`retry::Backoff`](crate::retry::Backoff).
-	pub fn is_retryable(&self) -> bool {
-		match self {
-			// The link itself failed. A session that drops for any reason lands here (see
-			// [`Session::closed`](crate::Session::closed)), which is the case reconnect loops exist for.
-			Self::Transport(_) => true,
-			// A stream took too long to open or transmit, so the path was congested or black-holing.
-			Self::Timeout => true,
-			// Memory pressure dropped a group that is still inside the publisher's window, so a
-			// re-fetch can genuinely get it back.
-			Self::Evicted => true,
-
-			// Deterministic protocol and coding failures: the same bytes fail the same way.
-			Self::Decode(_)
-			| Self::Encode(_)
-			| Self::BoundsExceeded(_)
-			| Self::Version
-			| Self::RequiredExtension
-			| Self::UnexpectedStream
-			| Self::UnexpectedMessage
-			| Self::ProtocolViolation
-			| Self::InvalidRole
-			| Self::TooManyParameters
-			| Self::Unsupported
-			| Self::UnknownAlpn(_)
-			| Self::WrongSize
-			| Self::FrameTooLarge
-			| Self::TimestampMismatch
-			| Self::Duplicate => false,
-
-			// Authorization needs new credentials, not another attempt.
-			Self::Unauthorized => false,
-
-			// Absent content. Retrying can only help once somebody publishes it, which is an
-			// external change the caller should wait on (an announcement) rather than poll for.
-			Self::NotFound | Self::Unroutable => false,
-
-			// Lifecycle, not failure: the operation is over and there is nothing left to repeat.
-			Self::Cancel | Self::Closed | Self::Dropped | Self::Old | Self::Lagged => false,
-
-			// Chosen by the application or the peer, so this layer can't say. Whoever assigned the
-			// code is the one that knows whether it's worth another try.
-			Self::App(_) | Self::Remote(_) => false,
-		}
-	}
-
 	/// Convert a transport error into an [Error], decoding stream reset codes.
 	pub fn from_transport(err: impl web_transport_trait::Error) -> Self {
 		match err.stream_error() {
@@ -274,30 +219,5 @@ mod tests {
 		assert_eq!(Error::App(0).to_code(), 64);
 		assert_eq!(Error::App(404).to_code(), 468);
 		assert_eq!(Error::Remote(468).to_code(), 468);
-	}
-
-	/// A dropped session always surfaces as `Transport`, so this is the classification a
-	/// reconnect loop actually depends on.
-	#[test]
-	fn transport_failures_are_retryable() {
-		assert!(Error::Transport("connection lost".to_string()).is_retryable());
-		assert!(Error::Timeout.is_retryable());
-	}
-
-	/// The failures a retry can only repeat. Each of these was previously retried forever by at
-	/// least one loop in the workspace.
-	#[test]
-	fn deterministic_failures_are_not_retryable() {
-		for err in [
-			Error::Unauthorized,
-			Error::Version,
-			Error::ProtocolViolation,
-			Error::Unsupported,
-			Error::UnknownAlpn("moqt-99".to_string()),
-			Error::NotFound,
-			Error::Cancel,
-		] {
-			assert!(!err.is_retryable(), "{err} should be terminal");
-		}
 	}
 }

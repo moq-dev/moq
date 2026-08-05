@@ -3,7 +3,7 @@ import * as Announce from "../announced.ts";
 import { error } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
-import { Backoff, isRetryable } from "../retry.ts";
+import { Backoff } from "../retry.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
@@ -12,7 +12,7 @@ import type { Probe, Stats } from "./stats.ts";
  * Exponential backoff settings for {@link Reload}'s reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Only failures a retry could clear are retried at all; see {@link isRetryable}.
+ * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the loop.
  */
 export type ReloadDelay = {
 	/** The delay in milliseconds before reconnecting (default: 1000). */
@@ -90,8 +90,8 @@ export class Reload {
 	/**
 	 * Resolves when the reconnect loop stops via {@link Reload.close}.
 	 *
-	 * Rejects when the loop gives up instead: the retry window expired, or the failure was one no
-	 * retry can clear (see {@link isRetryable}).
+	 * Rejects when the loop gives up instead, carrying the failure that was in flight when the
+	 * retry window expired.
 	 */
 	closed: Promise<void>;
 	#closedResolve!: () => void;
@@ -204,24 +204,15 @@ export class Reload {
 	}
 
 	/**
-	 * Schedule the next connect attempt after the current backoff, or stop when the failure isn't
-	 * one a retry can clear and when the retry window has expired. `connected` is when the dead
-	 * session was established, if it ever was, and `cause` the error that killed it, if it died
-	 * with one.
+	 * Schedule the next connect attempt after the current backoff, or stop once the retry window
+	 * has expired. `connected` is when the dead session was established, if it ever was, and
+	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
 		// Any session is dead now: report disconnected during the backoff rather than
 		// when the retry reruns the effect.
 		this.established.set(undefined);
 		this.status.set("disconnected");
-
-		// A relay speaking a protocol this build doesn't, a certificate that won't parse, no usable
-		// transport at all: every attempt produces the same failure, so surface it instead of
-		// hiding it behind a console warning every few seconds.
-		if (cause !== undefined && !isRetryable(cause)) {
-			this.#closedReject(error(cause));
-			return;
-		}
 
 		// A session that outlived the initial delay was healthy, so clear the backoff and
 		// start a fresh retry window: a one-off drop should reconnect promptly. Anything

@@ -76,28 +76,6 @@ impl crate::failover::Aggregate for Error {
 	}
 }
 
-impl Error {
-	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
-	pub(crate) fn is_retryable(&self) -> bool {
-		match self {
-			// The TCP socket and DNS. `kind` tells a refused port from an unusable address.
-			Self::Io(err) => crate::error::io_retryable(err),
-
-			// The qmux handshake, which is the exchange over an established socket.
-			Self::Connect(_) | Self::Accept(_) => true,
-
-			// DNS answers propagate; an empty one now may not be empty in a minute.
-			Self::NoAddresses => true,
-
-			// Retryable if any raced address is: one unroutable address must not retire the rest.
-			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
-
-			// The URL is missing what `tcp://` requires, which no retry supplies.
-			Self::MissingHostname | Self::MissingPort => false,
-		}
-	}
-}
-
 type Result<T> = std::result::Result<T, Error>;
 
 /// Dial a `tcp://host:port` URL, advertising `protocols` for in-band ALPN

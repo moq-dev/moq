@@ -398,61 +398,20 @@ impl Error {
 		}
 	}
 
-	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
-	pub(crate) fn is_retryable(&self) -> bool {
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
 		match self {
-			// Local socket and endpoint setup. `kind` tells a port already in use (permanent until
-			// something else moves) from a transient failure to allocate one.
-			Self::BindSocket(err) | Self::CreateEndpoint(err) | Self::LocalAddr(err) | Self::ResolveBind(err) => {
-				crate::error::io_retryable(err)
-			}
-
-			// DNS is a service like any other: a lookup failure, or an answer that hasn't
-			// propagated yet, resolves on its own.
-			Self::DnsLookup(_) | Self::NoDnsEntries => true,
-
-			// The `http://` fingerprint bootstrap, which is a plain HTTP request to the relay.
 			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
-				crate::error::http_retryable(err)
+				err.status().map(|status| status.as_u16())
 			}
-
-			// A CONNECT the server actually answered is its settled response unless the status says
-			// otherwise, so a wrong path (404) or an endpoint that doesn't speak WebTransport (405)
-			// surfaces now instead of burning the whole reconnect budget.
-			Self::Client(err) => client_status(err).is_none_or(moq_net::retry::status_retryable),
-
-			// The rest of the QUIC exchange: handshake, established connection, and the server side
-			// of a CONNECT.
-			Self::Connection(_) | Self::Establish(_) | Self::Server(_) | Self::RecvRequest(_) => true,
-
-			// Retryable if any raced address is: one unroutable address must not retire the rest.
-			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
-
-			// noq refused before a packet left the machine, so the next attempt is identical.
-			Self::Connect(_) => false,
-
-			// The server's settled answer on our credentials.
-			Self::ConnectRejected(_) => false,
-
-			// Configuration: the URL, the QUIC-LB sizing, the TLS material, or a missing runtime.
-			Self::NoRuntime
-			| Self::InvalidDnsName
-			| Self::InvalidFingerprint(_)
-			| Self::InvalidScheme
-			| Self::UnsupportedScheme(_)
-			| Self::QuicLbNonceTooSmall
-			| Self::QuicLbCidTooLong(_)
-			| Self::ClientVerifier(_)
-			| Self::NoInitialCipherSuite(_)
-			| Self::Tls(_) => false,
-
-			// Negotiation produced something we can't speak. Both ends have to change first.
-			Self::MissingHandshake
-			| Self::MissingAlpn
-			| Self::DecodeAlpn(_)
-			| Self::UnsupportedAlpn(_)
-			| Self::MissingServerName
-			| Self::BuildUrl(_) => false,
+			Self::Client(err) => client_status(err),
+			// One address answering is not the set answering, so a raced dial reports nothing
+			// rather than letting a single response speak for the rest.
+			Self::Failover(_) => None,
+			_ => None,
 		}
 	}
 }
@@ -473,9 +432,9 @@ fn classify_client_error(err: &web_transport_noq::ClientError) -> Option<crate::
 /// all (as opposed to the connection failing underneath the request).
 ///
 /// Both classifications read this: [`classify_client_error`] turns an auth status into a
-/// [`crate::ConnectError`], and [`Error::is_retryable`] decides whether the status invites another
-/// attempt. A `404` or `405` is the server's settled answer, so retrying it just burns the reconnect
-/// budget on a URL that will never work.
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// [`moq_net::retry::status_retryable`]. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
 fn client_status(err: &web_transport_noq::ClientError) -> Option<u16> {
 	match err {
 		web_transport_noq::ClientError::HttpError(err) => connect_status(err),

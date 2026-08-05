@@ -599,12 +599,10 @@ impl Import {
 
 	/// Run the import loop until cancelled.
 	///
-	/// A transient step failure (an origin 503, a dropped connection) is logged and retried with
-	/// escalating backoff. A failure that says the source is broken rather than briefly unavailable
-	/// (a playlist that doesn't parse, a segment whose byte range doesn't add up) ends the import:
-	/// the next pass reads the same bytes and fails the same way, so looping on it only hides the
-	/// cause. The import also ends once the backoff budget is spent, so a permanently unreachable
-	/// origin surfaces instead of being retried forever.
+	/// A failed step is logged and retried with escalating backoff, and the import ends once the
+	/// backoff budget is spent, so a broken source surfaces instead of looping forever. The one
+	/// shortcut is an HTTP status the origin actually sent: a `404` playlist ends the import
+	/// immediately, since no amount of waiting turns it into a `200`.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut backoff = error_backoff();
 
@@ -614,7 +612,15 @@ impl Import {
 					backoff.reset();
 					outcome
 				}
-				Err(err) if !err.is_retryable() => return Err(err),
+				// A status the origin actually sent is its answer: a 404 playlist is not going to
+				// become a 200 on the next pass. Everything else rides the backoff budget.
+				Err(err)
+					if err
+						.status()
+						.is_some_and(|status| !moq_net::retry::status_retryable(status)) =>
+				{
+					return Err(err);
+				}
 				Err(err) => {
 					warn!(%err, "HLS import step failed, retrying");
 					if !backoff.sleep().await {
