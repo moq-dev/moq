@@ -1886,6 +1886,12 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
+	// The delivered edge when that copy spliced in. A copy that dies without
+	// advancing it never delivered anything, which is what [`Step::Failed`]
+	// uses to tell a refusal from a mid-stream failover. Snapshotted per splice,
+	// not per wake: an unrelated wake between the copy's last group and its
+	// death must not launder its delivered progress away.
+	let mut spliced_edge: Option<u64> = None;
 	// Sources that refused this track, and the most recent refusal's error. A
 	// standby joining a live front wins dispatch the moment it attaches, which is
 	// before a real publisher has created every track, so its refusal must cost
@@ -1903,9 +1909,6 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
-		// The delivered edge as of this pass; what [`Step::Failed`] compares
-		// against to tell a mid-stream failover from a refusal.
-		let delivered = resume.latest();
 
 		// The table's verdict: once every attached source has refused, nothing
 		// will ever serve the track (refusals are never retried) and it aborts
@@ -2021,14 +2024,14 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				return;
 			}
 			Step::Failed(err) => {
-				// The spliced copy died mid-serve. With delivered progress it's a
-				// normal failover: re-splice from the (possibly same) active
-				// source. A copy that died before producing anything is a refusal
-				// (a source whose track keeps dying right after acceptance must
-				// not re-splice forever), unless the source itself is closing:
-				// that corpse parks for its detach so a reconnect gets the
-				// seamless splice.
-				if resume.latest() == delivered
+				// The spliced copy died mid-serve. With delivered progress since
+				// its splice it's a normal failover: re-splice from the (possibly
+				// same) active source. A copy that died before producing anything
+				// is a refusal (a source whose track keeps dying right after
+				// acceptance must not re-splice forever), unless the source
+				// itself is closing: that corpse parks for its detach so a
+				// reconnect gets the seamless splice.
+				if resume.latest() == spliced_edge
 					&& let Some(id) = serving_id
 				{
 					let closing = state
@@ -2117,6 +2120,9 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							return;
 						}
 						dead.clear();
+						// The new segment has produced nothing yet, so this is
+						// the edge the copy is asked to advance.
+						spliced_edge = resume.latest();
 						serving = Some((id, track));
 					}
 					// The source itself closed or deliberately ended: not a
@@ -5014,6 +5020,50 @@ mod tests {
 		let mut sub = retry.await.expect("a fresh request must reach the source");
 		producer.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
+	}
+
+	/// A copy that delivered and later died is a failover even when unrelated
+	/// wakes happened between its last group and its death: progress is tracked
+	/// per splice, so a demand edge must not launder it into a zero-progress
+	/// refusal that aborts the only route.
+	#[tokio::test]
+	async fn test_delivered_copy_death_survives_unrelated_wakes() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// Unrelated demand-edge wakes after the copy's last group: the reader
+		// leaves and a new one arrives.
+		drop(sub);
+		settle().await;
+		let resubscribing = broadcast.track("video").unwrap().subscribe(None);
+		settle().await;
+		let mut sub = resubscribing.await.unwrap();
+		assert_eq!(sub.assert_group().sequence, 0, "cached group re-served");
+
+		// The copy then dies having delivered: failover, so the source is
+		// re-asked and the subscription resumes.
+		drop(producer);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
 	}
 
 	/// The front picks a source per track and re-picks on failover, so a route
