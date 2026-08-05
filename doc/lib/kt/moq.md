@@ -16,7 +16,7 @@ Full API reference: [javadoc.io/doc/dev.moq/moq](https://javadoc.io/doc/dev.moq/
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("dev.moq:moq:0.4.1")
+    implementation("dev.moq:moq:0.4.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 ```

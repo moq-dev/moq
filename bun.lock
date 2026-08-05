@@ -181,7 +181,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "dependencies": {
         "@moq/qmux": "^0.3.2",
         "@moq/signals": "workspace:*",
@@ -264,7 +264,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/msf": "workspace:^",
