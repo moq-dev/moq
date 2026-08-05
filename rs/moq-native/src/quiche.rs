@@ -484,9 +484,19 @@ impl Error {
 				err.status().map(|status| status.as_u16())
 			}
 			Self::ClientConnect(err) => client_status(err),
-			// One address answering is not the set answering, so a raced dial reports nothing
-			// rather than letting a single response speak for the rest.
-			Self::Failover(_) => None,
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
 			_ => None,
 		}
 	}
