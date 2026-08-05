@@ -355,7 +355,7 @@ impl QuinnClient {
 		let mut config = quinn::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, ?candidates, "connecting");
+		tracing::debug!(peer = %crate::connect::Endpoint(&url), ?candidates, "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);

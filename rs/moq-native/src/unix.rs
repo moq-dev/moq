@@ -142,7 +142,7 @@ pub struct PeerCred {
 /// path: `unix:///run/moq/internal.sock`.
 pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
-	tracing::debug!(%url, "connecting via Unix socket");
+	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
 	qmux::uds::Config::new(WIRE_VERSION)
 		.protocols(protocols.iter().copied())
 		.connect(path)

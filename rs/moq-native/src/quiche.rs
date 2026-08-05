@@ -334,7 +334,7 @@ impl QuicheClient {
 			candidates.truncate(1);
 		}
 
-		tracing::debug!(%url, ?candidates, "connecting via quiche");
+		tracing::debug!(peer = %crate::connect::Endpoint(&url), ?candidates, "connecting via quiche");
 
 		// Race only the QUIC handshake: the winner alone performs the WebTransport
 		// CONNECT below, so the server sees a single request no matter how many

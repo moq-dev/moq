@@ -49,6 +49,35 @@ impl From<Url> for Addrs {
 	}
 }
 
+/// A dial URL reduced to the part that names the peer, for logs and errors.
+///
+/// A dial URL's path and query are exactly where credentials live: `?jwt=` on a
+/// relay dial, and a LAN mesh membership proof, which rides as a path segment
+/// because raw QUIC has no headers to put it in. Formatting one into a log line
+/// puts a replayable credential wherever logs are shipped, so nothing outside
+/// this type formats a dial `Url` directly.
+///
+/// Dropping both rather than redacting known-secret spellings is deliberate: a
+/// denylist only covers the credentials that exist today, and the next one to be
+/// added would leak until someone remembered to extend it.
+pub(crate) struct Endpoint<'a>(pub &'a Url);
+
+impl std::fmt::Display for Endpoint<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}://", self.0.scheme())?;
+		let Some(host) = self.0.host_str() else {
+			// No host at all, e.g. a `unix:` socket, where the path is the address
+			// rather than a credential and is the only thing that identifies it.
+			return write!(f, "{}", self.0.path());
+		};
+		write!(f, "{host}")?;
+		match self.0.port() {
+			Some(port) => write!(f, ":{port}"),
+			None => Ok(()),
+		}
+	}
+}
+
 /// Error returned when connection setup fails for a terminal auth reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -115,6 +144,42 @@ mod tests {
 			three.as_slice(),
 			[url("moqt://a:4443"), url("moqt://b:4443"), url("moqt://c:4443")]
 		);
+	}
+
+	/// The whole point of [`Endpoint`]: a dial URL's credentials live in its path
+	/// and query, so neither may survive into anything loggable.
+	///
+	/// The LAN mesh case is the sharp one. Its membership proof is a path segment
+	/// (raw QUIC has no headers to put it in), so a dial URL logged verbatim hands
+	/// a replayable credential to anyone who can read logs.
+	#[test]
+	fn endpoint_keeps_credentials_out_of_logs() {
+		const SECRET: &str = "a4f1c93e8b7d";
+
+		for dial in [
+			// A LAN mesh dial: the proof is a path segment.
+			&format!("moqt://192.168.1.5:4443/.cluster/{SECRET}"),
+			// A relay dial: the token is in the query.
+			&format!("https://relay.example.com/anon?jwt={SECRET}"),
+			// Both at once, plus userinfo.
+			&format!("https://user:{SECRET}@relay.example.com:8443/room/{SECRET}?jwt={SECRET}"),
+		] {
+			let rendered = Endpoint(&url(dial)).to_string();
+			assert!(!rendered.contains(SECRET), "{dial} leaked through as {rendered}");
+		}
+
+		// It still names the peer, which is what a log line is for.
+		assert_eq!(
+			Endpoint(&url("moqt://192.168.1.5:4443/.cluster/abc")).to_string(),
+			"moqt://192.168.1.5:4443"
+		);
+		// A default port is elided rather than invented.
+		assert_eq!(
+			Endpoint(&url("https://relay.example.com/anon?jwt=abc")).to_string(),
+			"https://relay.example.com"
+		);
+		// A socket path is the address, not a credential, so it survives.
+		assert_eq!(Endpoint(&url("unix:/run/moq.sock")).to_string(), "unix:///run/moq.sock");
 	}
 
 	/// A peer that advertised nothing reachable is `None` at construction, not a

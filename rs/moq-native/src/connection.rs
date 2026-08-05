@@ -7,6 +7,7 @@ use moq_net::kio;
 use rand::RngExt;
 use url::Url;
 
+use crate::connect::Endpoint;
 use crate::{Addrs, Client, Error};
 
 /// How long one address gets before [`Connection`] moves to the peer's next one.
@@ -576,7 +577,7 @@ impl Connection {
 
 			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
 				Ok((url, session)) => {
-					tracing::info!(%url, "connected");
+					tracing::info!(peer = %Endpoint(&url), "connected");
 					shared.connected(&session);
 
 					let connected = tokio::time::Instant::now();
@@ -611,7 +612,7 @@ impl Connection {
 						// so its routes stay attached and live tracks splice onto the
 						// replacement at a group boundary. Tearing it down here instead
 						// would drop every group published until the replacement caught up.
-						tracing::info!(%url, "upstream GOAWAY; migrating");
+						tracing::info!(peer = %Endpoint(&url), "upstream GOAWAY; migrating");
 						shared.migrating();
 						// Retire any predecessor first: overwriting would drop its deadline
 						// on the floor and leave it holding the connection open.
@@ -636,7 +637,7 @@ impl Connection {
 						let Some(wait) = retry_wait(delay, retry_start, timeout) else {
 							return Err(timeout_error(timeout, last_error.as_ref()));
 						};
-						tracing::warn!(%url, ?wait, "peer redirected immediately; retrying after backoff");
+						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
@@ -669,7 +670,7 @@ impl Connection {
 
 					if healthy {
 						// Reset the backoff window so a one-off drop reconnects promptly.
-						tracing::warn!(%url, "session closed, reconnecting");
+						tracing::warn!(peer = %Endpoint(&url), "session closed, reconnecting");
 						delay = initial;
 						retry_start = tokio::time::Instant::now();
 						last_error = None;
@@ -695,10 +696,10 @@ impl Connection {
 						// a caller observes those rejections directly.
 						match err {
 							Some(err) => {
-								tracing::warn!(%url, %err, "session severed immediately, retrying");
+								tracing::warn!(peer = %Endpoint(&url), %err, "session severed immediately, retrying");
 								last_error = Some(err);
 							}
-							None => tracing::warn!(%url, "session severed immediately, retrying"),
+							None => tracing::warn!(peer = %Endpoint(&url), "session severed immediately, retrying"),
 						}
 					}
 				}
@@ -752,7 +753,7 @@ impl Connection {
 		let mut last = None;
 
 		for (index, url) in candidates.iter().enumerate() {
-			tracing::info!(%url, "connecting");
+			tracing::info!(peer = %Endpoint(url), "connecting");
 
 			let mut dial = std::pin::pin!(client.dial(url.clone()));
 			let dialed = kio::wait(|waiter| {
@@ -766,7 +767,7 @@ impl Connection {
 				None => dialed.await,
 				Some(limit) => match tokio::time::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
-					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {url}"))),
+					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
 			};
 
@@ -776,7 +777,7 @@ impl Connection {
 				// offering them at the rest of its addresses.
 				Err(err) if err.is_auth() => return Err(err),
 				Err(err) => {
-					tracing::debug!(%url, %err, "address unreachable");
+					tracing::debug!(peer = %Endpoint(url), %err, "address unreachable");
 					last = Some(err);
 				}
 			}
@@ -1527,6 +1528,37 @@ mod tests {
 		.await
 		.expect("the walk must not hang");
 		assert!(result.is_err(), "every address refused, so the walk must fail");
+	}
+
+	/// Dialing must not write the LAN mesh's membership credential to the log.
+	///
+	/// The proof rides as a URL path segment, since raw QUIC has no headers to put
+	/// it in, and a dial URL logged verbatim would hand a replayable credential to
+	/// anyone who can read logs. This drives the real `tracing` stack rather than
+	/// [`Endpoint`]'s `Display`, so it also catches a log site that forgot to use
+	/// it.
+	#[cfg(feature = "tcp")]
+	#[tracing_test::traced_test]
+	#[tokio::test]
+	async fn dialing_never_logs_the_credential() {
+		const SECRET: &str = "b91d7fe20c4a";
+
+		let (_server, _live, client) = pair();
+		let mut target = refused();
+		target.set_path(&format!("/.cluster/{SECRET}"));
+
+		let addrs = Addrs::new(target);
+		let shared = shared();
+		let mut draining = None;
+		// `Session` isn't `Debug`, so unwrap the failure by hand.
+		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
+			panic!("a refused address must fail");
+		};
+
+		// The log line did happen, so the assertion below isn't vacuously true.
+		assert!(logs_contain("connecting"), "the dial never logged at all");
+		assert!(!logs_contain(SECRET), "a log line leaked the credential");
+		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
 	}
 
 	/// Only an attempt with somewhere to fall back on is bounded. The last
