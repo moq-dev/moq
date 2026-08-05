@@ -67,10 +67,21 @@ run:
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Unlike the lint recipes, this one never skips: a test gate that reports
+    # success without running anything is worse than no gate, and nothing else
+    # covers this code.
     cxx="${CXX:-c++}"
+    unsupported="'$cxx' cannot build with -fsanitize=thread. These tests need a clang or gcc style
+    driver with ThreadSanitizer: set CXX, or on Windows run them from WSL, since neither MSVC
+    nor clang on Windows implements ThreadSanitizer."
     if ! command -v "$cxx" >/dev/null; then
-        echo "no C++ compiler ($cxx); skipping" >&2
-        exit 0
+        echo "no C++ compiler at '$cxx'." >&2
+        echo "$unsupported" >&2
+        exit 1
+    fi
+    if ! printf 'int main(){}\n' | "$cxx" -x c++ -fsanitize=thread -o /dev/null - >/dev/null 2>&1; then
+        echo "$unsupported" >&2
+        exit 1
     fi
 
     # libobs headers: the obs-deps framework (macOS/Windows), the OBS sources
