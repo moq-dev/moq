@@ -21,7 +21,9 @@ use crate::{Error, Frame};
 
 mod openh264;
 
-#[cfg(test)]
+// Only the thread-confinement tests ask for this backend, and macOS is exempt
+// from those by design: the inline sink decodes on the calling thread.
+#[cfg(all(test, not(target_os = "macos")))]
 pub(crate) mod probe;
 
 #[cfg(target_os = "macos")]
@@ -110,14 +112,14 @@ const SOFTWARE: Candidate = Candidate {
 /// Test-only backends. Deliberately in neither list above, so `Auto` /
 /// `Hardware` / `Software` can never select one: they exist to be asked for by
 /// name.
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 const NAMED_ONLY: &[Candidate] = &[Candidate {
 	name: probe::NAME,
 	supports: |c| matches!(c, Codec::H264),
 	open: probe::Probe::open,
 }];
 
-#[cfg(not(test))]
+#[cfg(not(all(test, not(target_os = "macos"))))]
 const NAMED_ONLY: &[Candidate] = &[];
 
 /// Open the best decoder for `codec` and `config`, trying candidates in priority

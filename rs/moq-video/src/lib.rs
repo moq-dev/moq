@@ -74,6 +74,9 @@ mod color;
 mod error;
 pub mod frame;
 mod size;
+// Only the threaded sinks use this, and macOS decodes and encodes inline on the
+// calling thread instead, so there is no worker there to build.
+#[cfg(not(target_os = "macos"))]
 mod worker;
 
 #[cfg(target_os = "windows")]
