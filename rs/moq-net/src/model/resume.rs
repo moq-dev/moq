@@ -1678,7 +1678,11 @@ mod test {
 
 		// The copy is alive and will never carry group 0 (no fetch handler):
 		// its answer surfaces instead of parking for a takeover.
-		assert!(matches!(consumer.fetch_group(0, None).await, Err(Error::NotFound)));
+		let result = consumer
+			.fetch_group(0, None)
+			.now_or_never()
+			.expect("a live copy's answer must resolve immediately");
+		assert!(matches!(result, Err(Error::NotFound)));
 	}
 
 	#[tokio::test]
