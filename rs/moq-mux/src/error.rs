@@ -150,7 +150,39 @@ impl Error {
 		match self {
 			Self::Moq(err) => err.is_retryable(),
 			Self::Io(err) => moq_net::retry::io_retryable(err),
-			_ => false,
+
+			// Container and catalog parsing. Exhaustive rather than a catch-all so a variant that
+			// is genuinely transient has to say so instead of inheriting this by accident.
+			Self::Hang(_)
+			| Self::Json(_)
+			| Self::Cmaf(_)
+			| Self::Mkv(_)
+			| Self::Msf(_)
+			| Self::Loc(_)
+			| Self::Mp4(_)
+			| Self::UnknownFormat(_)
+			| Self::UnsupportedContainer(_)
+			| Self::ReservedSection(_)
+			| Self::InvalidTimescale(_) => false,
+
+			// Codec bitstream parsing.
+			Self::Annexb(_)
+			| Self::Aac(_)
+			| Self::Opus(_)
+			| Self::Flac(_)
+			| Self::Mp3(_)
+			| Self::H264(_)
+			| Self::H265(_)
+			| Self::Av1(_)
+			| Self::Vp8(_)
+			| Self::Vp9(_)
+			| Self::Legacy(_) => false,
+
+			// Timing and framing that the bytes themselves determine.
+			Self::TimestampOverflow(_) | Self::MissingKeyframe(_) | Self::NegativeFlvPts { .. } => false,
+
+			// A URL that isn't one, and the untyped `anyhow` catch-all: nothing to classify on.
+			Self::Url(_) | Self::Other(_) => false,
 		}
 	}
 }

@@ -232,7 +232,7 @@ impl Error {
 
 			// A non-101 upgrade is the server's answer, so only the "ask again later" statuses are
 			// worth another try. Every other qmux failure is the TCP/TLS exchange.
-			Self::Connect(qmux::Error::Http(status)) => matches!(status, 408 | 429 | 502 | 503 | 504),
+			Self::Connect(qmux::Error::Http(status)) => moq_net::retry::status_retryable(*status),
 			Self::Connect(_) | Self::Accept(_) | Self::WebSocketConnect(_) => true,
 
 			// The server's settled answer on our credentials.

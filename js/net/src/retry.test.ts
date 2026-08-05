@@ -34,11 +34,13 @@ test("a zero timeout never gives up", () => {
 	for (let i = 0; i < 64; i++) expect(backoff.delay()).toBeDefined();
 });
 
-test("the budget is a deadline over the whole sequence", () => {
-	// Already expired by the time the second call reads the clock.
-	const backoff = new Backoff({ initial: 1, multiplier: 2, max: 8, timeout: 0.0001 });
+test("the budget is a deadline over the whole sequence", async () => {
+	const backoff = new Backoff({ initial: 1, multiplier: 2, max: 8, timeout: 5 });
 
+	// The first delay starts the clock; outliving the budget is what stops the sequence. Sleeping
+	// past it rather than shrinking the timeout keeps the test off `performance.now()`'s resolution.
 	expect(backoff.delay()).toBeDefined();
+	await Bun.sleep(15);
 	expect(backoff.delay()).toBeUndefined();
 
 	// A reset says the earlier failures no longer describe reality, so the budget refills.

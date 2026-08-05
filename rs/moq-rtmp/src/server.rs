@@ -238,6 +238,11 @@ pub struct Server {
 	/// [`accept`](Self::accept) so consecutive failures keep escalating across calls, and resets on
 	/// the next connection that does come in.
 	accept_backoff: moq_net::retry::Backoff,
+
+	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
+	/// being polled meanwhile: a connection that already got through must not wait out a backoff
+	/// earned by a different one.
+	accept_retry: Option<tokio::time::Instant>,
 }
 
 impl Server {
@@ -259,6 +264,7 @@ impl Server {
 			tls: None,
 			pending: FuturesUnordered::new(),
 			accept_backoff: moq_net::retry::Backoff::new(backoff),
+			accept_retry: None,
 		})
 	}
 
@@ -285,6 +291,9 @@ impl Server {
 	/// if the listener itself stops (it currently never does).
 	pub async fn accept(&mut self) -> Option<Request<Conn>> {
 		loop {
+			// Copied out so the timer arm below doesn't borrow `self` alongside the other two.
+			let retry = self.accept_retry;
+
 			tokio::select! {
 				// A handshake finished: yield its request, or skip a dead connection.
 				Some(maybe) = self.pending.next(), if !self.pending.is_empty() => {
@@ -292,8 +301,12 @@ impl Server {
 						return Some(request);
 					}
 				}
-				// A new TCP connection: start its (TLS +) handshake concurrently.
-				res = self.listener.accept(), if self.pending.len() < MAX_PENDING_REQUESTS => match res {
+				// A failed accept's backoff elapsed: start asking the listener again.
+				() = sleep_until(retry), if retry.is_some() => self.accept_retry = None,
+
+				// A new TCP connection: start its (TLS +) handshake concurrently. Paused while a
+				// failed accept is backing off, so a persistent error doesn't busy-spin.
+				res = self.listener.accept(), if retry.is_none() && self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
 						// A connection got through, so whatever the last failure was has cleared.
 						self.accept_backoff.reset();
@@ -340,13 +353,27 @@ impl Server {
 						// (descriptor exhaustion, a connection the firewall dropped mid-handshake)
 						// are per-connection or clear on their own, and none of them is a reason to
 						// stop serving. Escalate the wait so a persistent one stops busy-spinning
-						// instead of retrying ten times a second forever.
+						// instead of retrying ten times a second forever. Recorded as a deadline
+						// rather than slept on here, so the loop keeps serving in-flight handshakes
+						// through the pause.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						self.accept_backoff.sleep().await;
+						let delay = self.accept_backoff.delay().expect("unlimited accept budget");
+						self.accept_retry = Some(tokio::time::Instant::now() + delay);
 					}
 				},
 			}
 		}
+	}
+}
+
+/// Sleep until `at`, or park forever when there is nothing to wait for.
+///
+/// The `select!` arm that uses this is guarded on `at` being set; the pending branch keeps the arm
+/// well-formed rather than leaving the macro with a `None` to unwrap.
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+	match at {
+		Some(at) => tokio::time::sleep_until(at).await,
+		None => std::future::pending().await,
 	}
 }
 

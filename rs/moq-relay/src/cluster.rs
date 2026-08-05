@@ -935,8 +935,17 @@ impl Cluster {
 			let result = self.run_remote_once(&url, cost).await;
 			let elapsed = started.elapsed();
 
+			// A session that lasted is a healthy peer, however it ended: clear the escalation so a
+			// one-off drop redials promptly. Keyed on how long it ran rather than on the outcome,
+			// because `run_remote_session` reports even a clean close as an error (it hands back the
+			// session's close reason). An outcome-keyed reset would therefore never fire, and a peer
+			// that had been up for hours would redial on a stale five-minute window.
+			if elapsed >= stable_threshold {
+				backoff.reset();
+			}
+
 			match result {
-				Ok(()) if elapsed >= stable_threshold => backoff.reset(),
+				Ok(()) if elapsed >= stable_threshold => {}
 				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
 				// A rejected token, an ALPN neither side speaks, a URL this build can't dial: every
 				// redial produces the same failure, so stop and let the operator see it. The peer

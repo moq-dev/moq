@@ -171,10 +171,16 @@ impl Backoff {
 	/// Draw the actual delay from the top half of `window`, so peers that failed together spread out.
 	fn jitter(&self, window: Duration) -> Duration {
 		let half = window / 2;
-		match half.is_zero() {
-			true => window,
-			false => half + Duration::from_nanos(rand::rng().random_range(0..half.as_nanos() as u64)),
+
+		// A window past ~584 years holds more nanoseconds than a `u64`, and truncating one would
+		// hand `random_range` an empty range to panic on. `max` is caller-configurable (a humantime
+		// string on the CLI), so saturate rather than trust it to be sane.
+		let span = u64::try_from(half.as_nanos()).unwrap_or(u64::MAX);
+		if span == 0 {
+			return window;
 		}
+
+		half.saturating_add(Duration::from_nanos(rand::rng().random_range(0..span)))
 	}
 }
 
@@ -222,6 +228,23 @@ mod tests {
 		// One shared draw could collide by chance; a run of them colliding means no jitter at all.
 		let differs = (0..8).any(|_| a.delay() != b.delay());
 		assert!(differs, "identical backoffs produced identical delays");
+	}
+
+	/// `max` comes from a caller-supplied humantime string, so an absurd one has to degrade rather
+	/// than panic: a window past ~584 years has more nanoseconds than the jitter sample can hold.
+	#[tokio::test(start_paused = true)]
+	async fn an_absurd_window_does_not_panic() {
+		let mut backoff = Backoff::new(Config {
+			initial: Duration::new(36_893_488_147, 419_103_232),
+			max: Duration::MAX,
+			..config()
+		});
+
+		let delay = backoff.delay().expect("unlimited budget");
+		assert!(
+			delay >= Duration::new(18_446_744_073, 709_551_616),
+			"{delay:?} below half"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]

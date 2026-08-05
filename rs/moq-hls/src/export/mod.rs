@@ -34,9 +34,13 @@ pub use rendition::{Kind, Rendition};
 /// Backoff for the initial catalog subscription.
 ///
 /// The usual failure is a publisher that has announced its broadcast but not yet written its
-/// catalog track, so this waits for external state rather than repeating a failed request. Unbounded
-/// for that reason, but escalating: a source that stays silent for an hour must not be polled four
-/// times a second for an hour. The broadcast closing is what ends the wait.
+/// catalog track, so this waits for external state rather than repeating a failed request. Escalating
+/// for that reason: a source that stays silent for an hour must not be polled four times a second
+/// for an hour.
+///
+/// Deliberately no give-up budget. The broadcast closing is what ends the wait, and a relay-side
+/// broadcast outlives its publisher's session, so any deadline here is a window in which a publisher
+/// outage leaves the broadcaster permanently empty with nothing to recover it.
 fn catalog_backoff() -> moq_net::retry::Backoff {
 	let mut config = moq_net::retry::Config::default();
 	config.initial = Duration::from_millis(250);

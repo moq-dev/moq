@@ -87,7 +87,12 @@ export class Reload {
 	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
 	#signals = new Effect();
 
-	/** Resolves when the reconnect loop stops via {@link Reload.close} or the retry timeout. */
+	/**
+	 * Resolves when the reconnect loop stops via {@link Reload.close}.
+	 *
+	 * Rejects when the loop gives up instead: the retry window expired, or the failure was one no
+	 * retry can clear (see {@link isRetryable}).
+	 */
 	closed: Promise<void>;
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
@@ -117,6 +122,11 @@ export class Reload {
 			this.#closedResolve = resolve;
 			this.#closedReject = reject;
 		});
+
+		// A caller is free to never await `closed`, and giving up rejects it unprompted. Marking the
+		// rejection handled here keeps that from surfacing as an `unhandledrejection`; a consumer
+		// awaiting the same promise still receives it.
+		this.closed.catch(() => {});
 
 		if (typeof window !== "undefined" && typeof document !== "undefined") {
 			this.#signals.event(window, "pagehide", () => this.#suspended.set(true));

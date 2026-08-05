@@ -106,7 +106,8 @@ export class Backoff {
 
 	constructor(props?: BackoffProps) {
 		this.#initial = props?.initial ?? DEFAULT_INITIAL;
-		this.#multiplier = props?.multiplier ?? DEFAULT_MULTIPLIER;
+		// Below 1 the window would shrink per failure, turning the escalation into a tight loop.
+		this.#multiplier = Math.max(props?.multiplier ?? DEFAULT_MULTIPLIER, 1);
 		this.#max = props?.max ?? DEFAULT_MAX;
 		this.#timeout = props?.timeout ?? DEFAULT_TIMEOUT;
 		this.#window = this.#initial;

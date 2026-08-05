@@ -122,10 +122,10 @@ async function settle(times = 20): Promise<void> {
  * deciding the outcome.
  */
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Date.now() + 10000;
+	const deadline = Date.now() + WAIT_TIMEOUT;
 	while (!pred()) {
 		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
 	}
 }
 
@@ -137,7 +137,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
  * stopped rather than mid-wait.
  */
 async function waitSpent(media: FakeMediaDevices): Promise<void> {
-	const quiet = (Retry.DELAY.max ?? 0) + 100;
+	const quiet = (Retry.DELAY.max ?? 0) + QUIET_MARGIN;
 
 	let seen = -1;
 	while (seen !== media.attempts) {
@@ -147,8 +147,14 @@ async function waitSpent(media: FakeMediaDevices): Promise<void> {
 	await settle();
 }
 
-// Burning the whole budget waits out every backoff, which outlasts the default per-test timeout.
-const SPENT_TIMEOUT = 30000;
+/** How long a `waitUntil` polls before calling the condition unreachable. */
+const WAIT_TIMEOUT = 10_000;
+/** How often `waitUntil` re-checks; short, since everything it watches is in-process. */
+const POLL_INTERVAL = 5;
+/** Quiet time past the largest backoff that proves the capture really stopped reopening. */
+const QUIET_MARGIN = 100;
+/** Burning the whole budget waits out every backoff, which outlasts the default per-test timeout. */
+const SPENT_TIMEOUT = 30_000;
 
 /** The track a source published, or undefined. */
 function published(source: { track: MediaStreamTrack } | MediaStreamTrack | undefined): unknown {
@@ -295,15 +301,15 @@ test(
 );
 
 test(
-	"fixing a constraint revives a capture whose retries all failed",
+	"changing the constraints revives a capture whose retries all failed",
 	async () => {
 		const media = install(new FakeMediaDevices());
 
 		const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
 		await settle();
 
-		// An impossible constraint fails instantly on every attempt, which is the quickest way to spend
-		// the whole budget.
+		// Spend the whole budget. The fake ignores constraints, so `missing` is what makes every
+		// attempt fail; the constraint edit only moves the settings the budget is keyed to.
 		media.missing = true;
 		mic.constraints.set({ channelCount: 98 });
 		await waitSpent(media);
@@ -311,6 +317,8 @@ test(
 		const spent = media.tracks.length;
 		expect(mic.out.source.peek()).toBeUndefined();
 
+		// Editing a constraint is new intent rather than another go at the same thing, so it buys a
+		// fresh budget. Nothing else here would rerun the capture: the device list never changed.
 		media.missing = false;
 		mic.constraints.set({ channelCount: 1 });
 		await waitUntil(() => media.tracks.length > spent);
