@@ -14,11 +14,11 @@ use crate::{Client, Error};
 /// This decides how long to wait between reconnect attempts and when to give up. The delays carry
 /// jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
 ///
-/// [`timeout`](Self::timeout) is what ends a hopeless loop, not a judgment about the error: every
-/// failure is retried the same way (except an auth rejection, which a redial cannot change), and
-/// the short default budget is what surfaces a broken target instead of hiding it. A zero timeout
-/// removes that backstop, so it belongs only where an unattended process must outlive an outage of
-/// any length.
+/// [`timeout`](Self::timeout) is what ends a hopeless loop: every failure rides the same backoff,
+/// and the short default budget is what surfaces a broken target instead of hiding it. The only
+/// failures short-circuited are answers a server actually gave (an auth rejection, or a CONNECT
+/// status that isn't an invitation to retry). A zero timeout removes the backstop, so it belongs
+/// only where an unattended process must outlive an outage of any length.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -118,8 +118,8 @@ struct State {
 	status: Option<Status>,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
-	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or an auth
-	/// rejection that redialing cannot change.
+	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or a server
+	/// answer that redialing cannot change.
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
@@ -258,11 +258,16 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					// An auth rejection is the one answer redialing cannot change. Everything else
-					// falls through to the backoff, whose budget is what stops the loop: a failure
-					// that clears within the budget was transient, and one that doesn't surfaces as
-					// the last real error rather than being guessed at up front.
+					// The two answers a server can give that redialing cannot change: it rejected our
+					// credentials, or it answered the CONNECT with a status that isn't an invitation
+					// to come back. Everything else falls through to the backoff, whose budget is
+					// what stops the loop.
 					if err.is_auth() {
+						return Err(err);
+					}
+					if let Some(status) = err.status()
+						&& !crate::error::status_retryable(status)
+					{
 						return Err(err);
 					}
 					last_error = Some(err);

@@ -99,11 +99,14 @@ struct StepOutcome {
 	/// nothing to add this pass, not a failure. Counting segments instead would read a quiet
 	/// playlist as a dead one.
 	ok: usize,
-	/// The first rendition failure from this step, if any.
+	/// A rendition failure from this step, if any.
 	///
 	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
 	/// `Ok` having imported nothing at all. The loop needs to tell that apart from a quiet playlist
 	/// with no new segments, or it treats a permanently broken source as steady progress.
+	///
+	/// When several renditions fail, this is the one whose failure another pass could still clear,
+	/// so a single permanently-dead variant doesn't end an import the others could still serve.
 	failed: Option<Error>,
 }
 
@@ -610,7 +613,8 @@ impl Import {
 	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
 	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
-	/// instead of looping forever.
+	/// instead of looping forever. The one shortcut is an HTTP status the origin actually sent: a
+	/// `404` playlist ends the import immediately, since no amount of waiting turns it into a `200`.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
@@ -639,6 +643,11 @@ impl Import {
 					delay = STEP_RETRY_MIN;
 					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
 					outcome
+				}
+				// A status the origin actually sent is its answer: a 404 playlist is not going to
+				// become a 200 on the next pass. Everything else rides the backoff budget.
+				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
+					return Err(err);
 				}
 				Err(err) => {
 					let now = tokio::time::Instant::now();
@@ -715,8 +724,14 @@ impl Import {
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
 						warn!(label = %track.label, %err, "rendition import step failed, will retry");
-						// Keep the first failure so the outcome doesn't depend on rendition order.
-						failed.get_or_insert(err);
+						// Prefer a failure another pass could still clear, so a single
+						// permanently-dead variant doesn't end an import the others could still
+						// serve. Keeping whichever error came last instead would make the outcome
+						// depend on rendition order.
+						let recoverable = err.status().is_none_or(crate::status_retryable);
+						if recoverable || failed.is_none() {
+							failed = Some(err);
+						}
 					}
 				},
 			}

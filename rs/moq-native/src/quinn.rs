@@ -410,6 +410,33 @@ impl Error {
 			_ => None,
 		}
 	}
+
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
+		match self {
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				err.status().map(|status| status.as_u16())
+			}
+			Self::Client(err) => client_status(err),
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
+			_ => None,
+		}
+	}
 }
 
 fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
@@ -421,26 +448,35 @@ fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// the status. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
+fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		web_transport_quinn::ClientError::HttpError(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quinn::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		web_transport_quinn::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
@@ -685,6 +721,43 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn connect_rejected(status: u16) -> Error {
+		Error::Client(web_transport_quinn::ClientError::HttpError(
+			web_transport_quinn::ConnectError::ErrorStatus(
+				web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
+			),
+		))
+	}
+
+	/// A CONNECT the relay answered carries its status through to the caller, so a wrong path or an
+	/// endpoint that doesn't speak WebTransport can surface immediately rather than after the whole
+	/// reconnect budget.
+	#[test]
+	fn a_rejected_connect_reports_its_status() {
+		for status in [400, 404, 405, 410, 501] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(
+				!crate::error::status_retryable(status),
+				"{status} should stop the reconnect loop"
+			);
+		}
+
+		for status in [408, 429, 502, 503, 504] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(crate::error::status_retryable(status), "{status} should be retried");
+		}
+
+		// Auth is peeled off into its own variant before reaching the generic client arm.
+		assert_eq!(
+			connect_rejected(401).connect_error(),
+			Some(crate::ConnectError::Unauthorized)
+		);
+		assert_eq!(
+			connect_rejected(403).connect_error(),
+			Some(crate::ConnectError::Forbidden)
+		);
+	}
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete quinn implementation it must map to.

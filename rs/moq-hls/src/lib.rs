@@ -25,6 +25,7 @@ pub mod import;
 #[cfg(feature = "server")]
 pub mod server;
 
+pub(crate) use error::status_retryable;
 pub use error::*;
 #[cfg(feature = "server")]
 pub use server::Server;

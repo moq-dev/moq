@@ -473,6 +473,33 @@ impl Error {
 			_ => None,
 		}
 	}
+
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
+		match self {
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				err.status().map(|status| status.as_u16())
+			}
+			Self::ClientConnect(err) => client_status(err),
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
+			_ => None,
+		}
+	}
 }
 
 fn map_client_error(err: web_transport_quiche::ClientError) -> Error {
@@ -484,26 +511,35 @@ fn map_client_error(err: web_transport_quiche::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quiche::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// the status. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
+fn client_status(err: &web_transport_quiche::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quiche::ClientError::Connect(err) => classify_connect_error(err),
+		web_transport_quiche::ClientError::Connect(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quiche::h3::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quiche::h3::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quiche::h3::ConnectError::Status(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quiche::h3::ConnectError::Proto(err) => classify_proto_error(err),
+		web_transport_quiche::h3::ConnectError::Status(status) => Some(status.as_u16()),
+		web_transport_quiche::h3::ConnectError::Proto(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quiche::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quiche::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quiche::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quiche::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quiche::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }

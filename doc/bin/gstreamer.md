@@ -43,10 +43,11 @@ signal when it changes, so you can poll it via `g_object_get` or connect to `not
 
 `status` distinguishes a drop the reconnect loop is still retrying (`disconnected`) from a permanent
 give-up (`failed`), which a bare `connected` bool cannot. The sink retries for as long as the
-pipeline runs, so a relay outage of any length is ridden out; it goes `failed` only on a rejected
-token, the one answer redialing cannot change. Everything else keeps retrying, so watch the logs
-when a sink stays `disconnected` from the very first attempt: a pipeline that has never connected
-once is far more likely misconfigured than waiting out an outage.
+pipeline runs, so a relay outage of any length is ridden out; it goes `failed` only on an answer the
+relay actually gave that redialing cannot change: a rejected token, or a CONNECT answered with a
+status that isn't an invitation to retry. Everything else keeps retrying, so watch the logs when a
+sink stays `disconnected` from the very first attempt: a pipeline that has never connected once is
+far more likely misconfigured than waiting out an outage.
 
 ## Prerequisites
 
