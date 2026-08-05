@@ -99,14 +99,6 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     sed -e "s|@VERSION@|${VERSION}|g" \
         -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
         "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
-
-    # A placeholder added to a template but not to the seds above ships a zip
-    # whose find_package(moq) hands the linker a literal `@FOO@`, and the only
-    # thing that notices is a downstream build. Fail here instead.
-    if grep -nE '@[A-Z_]+@' "$PACKAGE_DIR/lib/cmake/moq"/*.cmake; then
-        echo "Error: unsubstituted placeholder in the generated CMake config (see above)" >&2
-        exit 1
-    fi
 else
     # Native builds use the bare flake output; the one supported cross is the
     # Intel mac release built on an Apple Silicon runner (the Determinate Nix
@@ -137,6 +129,22 @@ else
     cp -RL "$RESULT_LINK/include/." "$PACKAGE_DIR/include/"
     chmod -R u+w "$PACKAGE_DIR"
 fi
+
+# A placeholder added to cmake/*.cmake.in but not to every substituter (the seds
+# above, nix/overlay.nix) ships a config whose find_package(moq) hands the linker
+# a literal `@FOO@`, and the only thing that notices is a downstream build. Both
+# paths land the config here, so check them both.
+for cmake_file in moq-config.cmake moq-config-version.cmake; do
+    CMAKE_CONFIG="$PACKAGE_DIR/lib/cmake/moq/$cmake_file"
+    if [[ ! -f "$CMAKE_CONFIG" ]]; then
+        echo "Error: $CMAKE_CONFIG missing from the package" >&2
+        exit 1
+    fi
+    if grep -nE '@[A-Z_]+@' "$CMAKE_CONFIG"; then
+        echo "Error: unsubstituted placeholder in $CMAKE_CONFIG (see above)" >&2
+        exit 1
+    fi
+done
 
 # Create archive
 cd "$OUTPUT_DIR"
