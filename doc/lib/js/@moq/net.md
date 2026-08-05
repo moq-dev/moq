@@ -92,6 +92,8 @@ if (err instanceof Moq.RemoteError && err.code === Moq.SessionCode.Unauthorized)
 }
 ```
 
+`Connection.closed` rejects with that same error when the reconnect loop gives up, and an `Unauthorized` close ends it immediately: the same credentials cannot start working, so retrying only burns the window. Every other close keeps retrying under the usual backoff.
+
 Errors this side detects keep their own messages, like the `Group.Lagged` a read throws after frames were evicted before it got to them.
 
 ### Authentication

@@ -395,6 +395,15 @@ pub enum Error {
 	#[error("goaway timeout")]
 	GoawayTimeout,
 
+	/// The peer could not parse the track's content.
+	#[error("malformed track")]
+	MalformedTrack,
+
+	/// The stream was torn down because the session closed. The specific reason travels on
+	/// the session close, not here.
+	#[error("session closed")]
+	SessionClosed,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -434,6 +443,8 @@ impl Error {
 			Self::Evicted => 31,
 			Self::GoingAway => 32,
 			Self::GoawayTimeout => 33,
+			Self::MalformedTrack => 22,
+			Self::SessionClosed => 25,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}
@@ -498,9 +509,14 @@ impl From<StreamError> for Error {
 			StreamError::FrameTooLarge => Self::FrameTooLarge,
 			StreamError::TimestampMismatch => Self::TimestampMismatch,
 			StreamError::App(app) => Self::App(app),
-			StreamError::Session(inner) => inner.into(),
+			// Deliberately not `inner.into()`: that yields a session-space value, which the
+			// stream re-encode would then put back on a stream. The inner reason is always
+			// Internal off the wire anyway, since the stream never carried it.
+			StreamError::Session(_) => Self::SessionClosed,
 			// No local counterpart, so keep the code rather than inventing a meaning.
-			StreamError::Internal | StreamError::MalformedTrack => Self::Remote(err.to_code()),
+			StreamError::MalformedTrack => Self::MalformedTrack,
+			// No local counterpart, so keep the code rather than inventing a meaning.
+			StreamError::Internal => Self::Remote(err.to_code()),
 			StreamError::Unknown(code) => Self::Remote(code),
 		}
 	}
@@ -514,7 +530,7 @@ impl From<StreamError> for Error {
 impl From<&Error> for SessionError {
 	fn from(err: &Error) -> Self {
 		match err {
-			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
+			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::RequiredExtension => Self::RequiredExtension,
@@ -527,9 +543,15 @@ impl From<&Error> for SessionError {
 			| Error::UnexpectedMessage
 			| Error::Duplicate
 			| Error::Decode(_)
+			| Error::Encode(_)
+			| Error::WrongSize
 			| Error::BoundsExceeded(_) => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
-			Error::Remote(code) => Self::Unknown(*code),
+			// A code we did not recognize, so we cannot say which space it came from.
+			// Forwarding it into this one risks landing on a value that IS registered here
+			// (a session 0x4 would become the stream's GOING_AWAY), and the draft already
+			// says an unrecognized code is an unspecified error. Send that instead.
+			Error::Remote(_) => Self::Internal,
 			_ => Self::Internal,
 		}
 	}
@@ -543,6 +565,7 @@ impl From<&Error> for StreamError {
 	fn from(err: &Error) -> Self {
 		match err {
 			Error::Cancel | Error::Closed => Self::Cancel,
+			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
 			Error::Lagged => Self::TooFarBehind,
@@ -553,9 +576,12 @@ impl From<&Error> for StreamError {
 			Error::TimestampMismatch => Self::TimestampMismatch,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
-			Error::Decode(_) | Error::BoundsExceeded(_) => Self::MalformedTrack,
+			// Our own parse failure is, from the peer's side, a malformed track.
+			Error::Decode(_) | Error::BoundsExceeded(_) | Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
-			Error::Remote(code) => Self::Unknown(*code),
+			// See the SessionError impl: an unregistered code carries no registry, so
+			// re-sending the number could mistranslate it.
+			Error::Remote(_) => Self::Internal,
 			// Session-scoped: the peer learns the detail from the session close.
 			Error::Unauthorized
 			| Error::Version
@@ -697,6 +723,37 @@ mod tests {
 			StreamError::from_code(0x3),
 			StreamError::Session(SessionError::Internal)
 		);
+	}
+
+	// A relay decodes a peer's code into `Error` and re-encodes it when it tears down the
+	// corresponding downstream stream. That hop must not change what the code means.
+	#[test]
+	fn relaying_a_code_does_not_change_registries() {
+		// SESSION_CLOSED used to decode into a session-space value, which came back out as
+		// 0x1: downstream read a routine CANCELLED for an upstream session teardown.
+		let relayed = StreamError::from(&Error::from(StreamError::from_code(0x3)));
+		assert_eq!(relayed.to_code(), 0x3);
+
+		// Registered stream codes survive the hop unchanged.
+		for code in [0x0, 0x1, 0x2, 0x4, 0x5, 0x12] {
+			let relayed = StreamError::from(&Error::from(StreamError::from_code(code)));
+			assert_eq!(relayed.to_code(), code, "stream {code:#x} changed across a relay");
+		}
+
+		// So do app codes, in both spaces.
+		assert_eq!(StreamError::from(&Error::from(StreamError::from_code(64 + 7))).to_code(), 64 + 7);
+		assert_eq!(
+			SessionError::from(&Error::from(SessionError::from_code(64 + 7))).to_code(),
+			64 + 7
+		);
+
+		// An unregistered code carries no registry, so it must not be re-sent as a number
+		// that means something here: session 0x4 and 0x5 are GOING_AWAY and TOO_FAR_BEHIND
+		// on a stream. Downgrade to the unspecified-error code instead.
+		for code in [0x4, 0x5, 0x1f] {
+			let crossed = StreamError::from(&Error::from(SessionError::from_code(code)));
+			assert_eq!(crossed, StreamError::Internal, "session {code:#x} leaked into the stream space");
+		}
 	}
 
 	// The registry a code is read with depends on what failed, and picking the wrong one

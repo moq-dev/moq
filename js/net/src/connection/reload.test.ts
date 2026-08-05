@@ -177,7 +177,7 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	}
 });
 
-test("a session closed with a code surfaces it to the app, and still reconnects", async () => {
+test("a session rejected as unauthorized surfaces the code and stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 	const closes: (Error | null)[] = [];
@@ -209,14 +209,19 @@ test("a session closed with a code surfaces it to the app, and still reconnects"
 	});
 
 	try {
-		// The code reaches the app verbatim rather than being flattened away. What it
-		// means is between the app and its peer, so the loop keeps reconnecting: the
-		// library has no basis to call an arbitrary code terminal.
-		await Bun.sleep(50);
-		const err = closes.find((e) => e instanceof RemoteError);
+		// The code reaches the app rather than being flattened away, and because
+		// UNAUTHORIZED is specified rather than guessed at, the loop treats it as terminal
+		// instead of retrying credentials that cannot work. `timeout: 0` means unlimited
+		// retries, so `closed` settling at all is what proves it stopped on the rejection.
+		const err = await reload.closed.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
 		expect(err).toBeInstanceOf(RemoteError);
 		expect((err as RemoteError).code).toBe(SessionCode.Unauthorized);
-		expect(closes.length).toBeGreaterThan(1);
+
+		// It still surfaced through the established session before the loop gave up.
+		expect(closes.find((e) => e instanceof RemoteError)).toBeInstanceOf(RemoteError);
 	} finally {
 		watch.close();
 		reload.close();

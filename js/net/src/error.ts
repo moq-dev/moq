@@ -130,6 +130,27 @@ export function fromTransport(err: unknown): Error {
 }
 
 /**
+ * Build the `reason` to hand `abort()` / `cancel()` so the transport puts `code` on the wire.
+ *
+ * Both the WebTransport spec and the WebSocket fallback take the reset code from a
+ * `WebTransportError`'s `streamErrorCode` and send 0 for anything else, a plain `Error`
+ * included. Since 0 is {@link StreamCode.Internal}, cancelling with a bare `Error` tells the
+ * peer we failed rather than that we are done.
+ *
+ * The native constructor exists exactly where native WebTransport does, which is where the
+ * fallback isn't used, so mint a matching shape elsewhere rather than feature-detect a global
+ * that will not be there.
+ *
+ * @internal
+ */
+export function toTransport(code: number, message: string): Error {
+	const Native = (globalThis as { WebTransportError?: typeof WebTransportError }).WebTransportError;
+	if (Native) return new Native(message, { source: "stream", streamErrorCode: code });
+
+	return Object.assign(new Error(message), { source: "stream" as const, streamErrorCode: code });
+}
+
+/**
  * Decode a session close into its terminal error: `null` for a clean close
  * ({@link SessionCode.Cancel}), otherwise a {@link RemoteError} carrying the peer's code.
  *

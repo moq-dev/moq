@@ -451,6 +451,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
+	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
 	use bytes::{BufMut, Bytes};
 
@@ -696,7 +697,9 @@ mod tests {
 		// with no origin; RequiredExtension (or similar) is what an
 		// auto-created origin's first interaction with a Lite01 peer trips.
 		let (code, _) = fake.wait_for_first_close().await;
-		assert_ne!(code, Error::Version.to_code(), "SessionInfo failed to decode");
+		// Session closes encode through the session registry, so compare against that one:
+		// `Error::Version.to_code()` is the local table's value and would never match.
+		assert_ne!(code, SessionError::Version.to_code(), "SessionInfo failed to decode");
 	}
 
 	#[tokio::test(start_paused = true)]

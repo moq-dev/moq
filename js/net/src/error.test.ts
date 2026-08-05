@@ -1,18 +1,26 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError } from "@moq/qmux";
-import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode } from "./error.ts";
+import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode, toTransport } from "./error.ts";
 
-// Minimal stand-in for the DOM WebTransportError, which the test runtime may not define.
+// Stand-in for the DOM WebTransportError, which the test runtime may not define. The
+// constructor mirrors the real `(message, options)` signature rather than a convenient one,
+// since code under test calls it: a differently-shaped stub silently passes arguments to the
+// wrong fields and reports a correct caller as broken.
 class FakeWebTransportError extends Error {
 	readonly source: string;
 	readonly streamErrorCode: number | null;
 
-	constructor(source: string, streamErrorCode: number | null, message = "") {
-		super(message);
+	constructor(message?: string, options?: { source?: string; streamErrorCode?: number | null }) {
+		super(message ?? "");
 		this.name = "WebTransportError";
-		this.source = source;
-		this.streamErrorCode = streamErrorCode;
+		this.source = options?.source ?? "stream";
+		this.streamErrorCode = options?.streamErrorCode ?? null;
 	}
+}
+
+/** The old positional shape, kept so the existing cases stay readable. */
+function fake(source: string, streamErrorCode: number | null, message = ""): FakeWebTransportError {
+	return new FakeWebTransportError(message, { source, streamErrorCode });
 }
 
 const globals = globalThis as { WebTransportError?: unknown };
@@ -29,7 +37,7 @@ afterEach(() => {
 });
 
 test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
-	const src = new FakeWebTransportError("stream", 2);
+	const src = fake("stream", 2);
 	const err = fromTransport(src);
 	expect(err).toBeInstanceOf(RemoteError);
 	expect((err as RemoteError).code).toBe(2);
@@ -41,7 +49,7 @@ test("fromTransport: a stream reset keeps the peer's code verbatim", () => {
 test("fromTransport: code 0 is a code like any other", () => {
 	// 0 is what a transport sends for a stream dropped with no code of its own. What it
 	// means is up to the peer, so it gets no special treatment here.
-	expect((fromTransport(new FakeWebTransportError("stream", 0)) as RemoteError).code).toBe(0);
+	expect((fromTransport(fake("stream", 0)) as RemoteError).code).toBe(0);
 });
 
 test("fromTransport: decodes a fallback error with no WebTransportError global", () => {
@@ -54,7 +62,7 @@ test("fromTransport: decodes a fallback error with no WebTransportError global",
 });
 
 test("fromTransport: a session failure has no stream code, so it passes through", () => {
-	const src = new FakeWebTransportError("session", null, "connection lost");
+	const src = fake("session", null, "connection lost");
 	expect(fromTransport(src)).toBe(src);
 });
 
@@ -80,17 +88,15 @@ test("reason: empty message falls back to the type name", () => {
 
 test("reason: WebTransportError with a blank message surfaces source and code", () => {
 	// The Safari case from the bug report: a RESET_STREAM with no message.
-	expect(reason(new FakeWebTransportError("stream", 0))).toBe("WebTransportError: source=stream code=0");
+	expect(reason(fake("stream", 0))).toBe("WebTransportError: source=stream code=0");
 });
 
 test("reason: WebTransportError omits a null stream error code", () => {
-	expect(reason(new FakeWebTransportError("session", null))).toBe("WebTransportError: source=session");
+	expect(reason(fake("session", null))).toBe("WebTransportError: source=session");
 });
 
 test("reason: WebTransportError keeps a populated message and appends details", () => {
-	expect(reason(new FakeWebTransportError("stream", 42, "Received RESET_STREAM."))).toBe(
-		"Received RESET_STREAM. (source=stream code=42)",
-	);
+	expect(reason(fake("stream", 42, "Received RESET_STREAM."))).toBe("Received RESET_STREAM. (source=stream code=42)");
 });
 
 test("reason: a decoded remote error names its code", () => {
@@ -140,4 +146,29 @@ test("fromTransport: decodes a real qmux stream reset", () => {
 	const err = fromTransport(new StreamError(2, "RESET_STREAM"));
 	expect(err).toBeInstanceOf(RemoteError);
 	expect((err as RemoteError).code).toBe(2);
+});
+
+// The transports read the reset code off a WebTransportError's `streamErrorCode` and send 0
+// for anything else. 0 is INTERNAL_ERROR, so cancelling with a bare Error tells the peer we
+// failed: every routine unsubscribe would land as a publisher-side error rather than a cancel.
+test("toTransport: carries a code the transports will actually send", () => {
+	const reason = toTransport(StreamCode.Cancel, "cancel");
+	expect((reason as unknown as { source: string }).source).toBe("stream");
+	expect((reason as unknown as { streamErrorCode: number }).streamErrorCode).toBe(StreamCode.Cancel);
+
+	// A plain Error carries nothing, which is what makes the mistake silent.
+	expect(fromTransport(new Error("cancel"))).not.toBeInstanceOf(RemoteError);
+
+	// Round trip: what we send is what a peer decodes.
+	const decoded = fromTransport(reason);
+	expect(decoded).toBeInstanceOf(RemoteError);
+	expect((decoded as RemoteError).code).toBe(StreamCode.Cancel);
+	expect((decoded as RemoteError).code).not.toBe(StreamCode.Internal);
+});
+
+// Without the global, the fallback must still produce the shape qmux and fromTransport read.
+test("toTransport: works with no WebTransportError global", () => {
+	globals.WebTransportError = undefined;
+	const decoded = fromTransport(toTransport(StreamCode.TooFarBehind, "lagged"));
+	expect((decoded as RemoteError).code).toBe(StreamCode.TooFarBehind);
 });

@@ -2,7 +2,7 @@ use std::{cmp, fmt::Debug, io};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::{Error, coding::*};
+use crate::{Error, StreamError, coding::*};
 
 /// A reader for decoding messages from a stream.
 pub struct Reader<S: web_transport_trait::RecvStream, V> {
@@ -149,7 +149,9 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 	/// Abort the stream with the given error.
 	pub fn abort(&mut self, err: &Error) {
-		self.stream.stop(err.to_code());
+		// STOP_SENDING is a stream operation, so it carries a stream code. Sending the
+		// session code here would have the peer read it against the wrong registry.
+		self.stream.stop(StreamError::from(err).to_code());
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.
@@ -159,5 +161,52 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			buffer: self.buffer,
 			version,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::StreamError;
+
+	/// Records the STOP_SENDING code so a test can assert which registry it came from.
+	#[derive(Default)]
+	struct StopLog {
+		stops: Vec<u32>,
+	}
+
+	impl web_transport_trait::RecvStream for StopLog {
+		type Error = crate::lite::test_transport::SinkError;
+
+		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			Ok(None)
+		}
+
+		fn stop(&mut self, code: u32) {
+			self.stops.push(code);
+		}
+
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+	}
+
+	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session
+	/// table here would have the peer decode it against the wrong registry: `Cancel` would
+	/// arrive as INTERNAL_ERROR, and `Unauthorized` as KEY_VALUE_FORMATTING_ERROR.
+	#[test]
+	fn abort_stops_with_a_stream_code() {
+		for (err, expected) in [
+			(Error::Cancel, StreamError::Cancel.to_code()),
+			(Error::Lagged, StreamError::TooFarBehind.to_code()),
+			(Error::Unauthorized, StreamError::Session(crate::SessionError::Unauthorized).to_code()),
+		] {
+			let mut reader = Reader::new(StopLog::default(), ());
+			reader.abort(&err);
+			assert_eq!(reader.stream.stops, vec![expected], "{err:?} used the wrong registry");
+		}
+
+		// The two registries disagree about 0 and 1, which is what makes the mix-up silent.
+		assert_ne!(StreamError::Cancel.to_code(), crate::SessionError::Cancel.to_code());
 	}
 }
