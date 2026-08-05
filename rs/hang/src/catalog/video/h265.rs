@@ -25,7 +25,7 @@ pub struct H265 {
 	/// exactly as the bitstream and the `hvcC` box carry them (`flag[0]` is the most
 	/// significant bit of the first byte).
 	///
-	/// RFC 6381 renders this bit-reversed, so raw `[0x60, 0, 0, 0]` prints as `6`.
+	/// The HEVC codec string renders this bit-reversed, so raw `[0x60, 0, 0, 0]` prints as `6`.
 	pub profile_compatibility_flags: [u8; 4],
 
 	/// Tier flag: false = 'L' (Low), true = 'H' (High)
@@ -41,9 +41,8 @@ pub struct H265 {
 
 impl fmt::Display for H265 {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		// RFC 6381 section 3.3: the 32 bits of general_profile_compatibility_flags in
-		// REVERSE BIT order (flag[31] first), hex encoded, leading zeros omitted. That
-		// is a bit reversal of the whole 32-bit value, not a byte swap.
+		// The codec string lists the 32 general_profile_compatibility_flags in reverse
+		// bit order, hex encoded with leading zeros omitted.
 		let compatibility = format!(
 			"{:X}",
 			u32::from_be_bytes(self.profile_compatibility_flags).reverse_bits()
@@ -228,7 +227,7 @@ mod tests {
 		};
 		assert_eq!(decoded.to_string(), "hvc1.1.6.L150");
 		assert_eq!(H265::from_str("hvc1.1.6.L150").unwrap(), decoded);
-		// And tolerate the dangling-'.' form older muxers emitted for the same stream.
+		// Parsing accepts an empty trailing constraint field.
 		assert_eq!(H265::from_str("hvc1.1.6.L150.").unwrap(), decoded);
 	}
 

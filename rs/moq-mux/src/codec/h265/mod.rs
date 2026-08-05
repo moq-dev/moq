@@ -602,12 +602,8 @@ mod tests {
 		assert_eq!(params[2].as_ref(), pps);
 	}
 
-	/// The bitstream path and the catalog-string path must agree on what
-	/// `profile_compatibility_flags` means. The SPS parser hands us the raw
-	/// big-endian flags; rendering them per RFC 6381 and parsing that string back
-	/// has to land on the same bytes. These were two different encodings, and
-	/// because they were wrong in mirror-image ways the round-trip inside `hang`
-	/// still passed.
+	/// The SPS and catalog paths keep `profile_compatibility_flags` as raw
+	/// big-endian bytes, including across codec-string formatting and parsing.
 	#[test]
 	fn bitstream_and_catalog_paths_agree() {
 		use std::str::FromStr;
