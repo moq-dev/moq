@@ -334,7 +334,9 @@ The `broadcast` field overrides that, naming a different broadcast that publishe
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
 It uses the `.` and `..` semantics of a relative URL reference ({{!RFC3986, Section 5.2.4}}), for example `../source`.
-A publisher MUST NOT use an absolute path, and a consumer MUST ignore a rendition whose `broadcast` escapes above the root.
+A publisher MUST NOT use an absolute path, nor a reference that escapes above the root.
+The root is the consumer's authorized subtree, so such a reference names content the consumer cannot reach.
+A consumer MUST reject a catalog containing one, rather than resolving the reference against a different broadcast or ignoring the rendition.
 
 This lets a publisher author a catalog that points at tracks it does not republish.
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
@@ -501,6 +503,9 @@ A publisher SHOULD carry the end of the last group's content into that value, si
 
 
 # Security Considerations
+A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the consumer's root, which is the subtree it is authorized for.
+Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
+
 TODO Security
 
 

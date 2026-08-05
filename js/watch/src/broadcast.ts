@@ -24,6 +24,39 @@ function skipDiscovery(conn: Moq.Connection.Established): boolean {
 	return true;
 }
 
+/**
+ * The name of the first rendition whose `broadcast` reference walks above the root, if any.
+ *
+ * The root is the consumer's authorized subtree, so such a reference names content this
+ * consumer cannot reach. It rejects the whole catalog rather than the one rendition: a
+ * publisher that emits one has a bug, and quietly serving the rest hides that while the
+ * missing rendition resurfaces later as a track that never fills.
+ */
+function findEscaping(base: Moq.Path.Valid, catalog: Catalog.Root): string | undefined {
+	// Every section carrying renditions must be listed here; one left out silently exempts
+	// its renditions from the containment check.
+	const renditions = [
+		...Object.entries(catalog.video?.renditions ?? {}),
+		...Object.entries(catalog.audio?.renditions ?? {}),
+		...Object.entries(catalog.text?.renditions ?? {}),
+	];
+
+	for (const [name, config] of renditions) {
+		if (config.broadcast && Path.resolve(base, config.broadcast) === undefined) return name;
+	}
+
+	return undefined;
+}
+
+/** Throw if any rendition's `broadcast` reference escapes the root. */
+function assertResolvable(base: Moq.Path.Valid, catalog: Catalog.Root): Catalog.Root {
+	const escaping = findEscaping(base, catalog);
+	if (escaping !== undefined) {
+		throw new Error(`rendition ${JSON.stringify(escaping)}: broadcast reference escapes the root ${base}`);
+	}
+	return catalog;
+}
+
 // Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
 // DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
 // catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
@@ -197,10 +230,18 @@ export class Broadcast {
 		const format: CatalogFormat = catalogFormat ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_FORMAT;
 
 		if (format === "manual") {
-			// Mirror the caller-supplied catalog into the effective output.
+			// Mirror the caller-supplied catalog into the effective output. A caller-supplied
+			// catalog is rejected the same way a fetched one is, minus the throw: this runs in
+			// the effect body, where an exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
-			effect.set(this.#out.catalog, catalog, undefined);
-			this.#out.status.set(catalog ? "live" : "loading");
+			const escaping = catalog && findEscaping(name, catalog);
+			if (escaping !== undefined) {
+				console.error("rejecting catalog: broadcast reference escapes the root", name, escaping);
+			}
+
+			const accepted = escaping === undefined ? catalog : undefined;
+			effect.set(this.#out.catalog, accepted, undefined);
+			this.#out.status.set(accepted ? "live" : "loading");
 			return;
 		}
 
@@ -237,11 +278,11 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
-					this.#out.catalog.set(update);
+					this.#out.catalog.set(assertResolvable(name, update));
 					this.#out.status.set("live");
 				}
 			} catch (err) {
-				console.warn("error fetching catalog", this.in.name.peek(), err);
+				console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
 				this.#out.catalog.set(undefined);
 				this.#out.status.set("offline");
@@ -256,6 +297,10 @@ export class Broadcast {
 	 * relative to this broadcast's name and consume the resolved broadcast on the same
 	 * connection. Otherwise return the catalog's own active broadcast.
 	 *
+	 * Returns `undefined` for a reference that walks above the root: hang requires such a
+	 * rendition to be ignored, since clamping at the root would point it at an unrelated
+	 * broadcast.
+	 *
 	 * The consumer is scoped to the caller's `effect` (closed on its next run), so a
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
@@ -265,11 +310,14 @@ export class Broadcast {
 
 		const base = effect.get(this.in.name);
 		const resolved = Path.resolve(base, rel);
+		if (resolved === undefined) {
+			console.warn("ignoring rendition: broadcast reference escapes the root", base, rel);
+			return undefined;
+		}
 
-		// A reference that walks back to the catalog's own broadcast (or resolves to
-		// the empty root, via excess `..`) is served by the catalog broadcast itself,
-		// avoiding a duplicate subscription on the same path.
-		if (resolved === base || resolved === Path.empty()) return effect.get(this.out.active);
+		// A reference that walks back to the catalog's own broadcast is served by the
+		// catalog broadcast itself, avoiding a duplicate subscription on the same path.
+		if (resolved === base) return effect.get(this.out.active);
 
 		if (!effect.get(this.in.enabled)) return undefined;
 

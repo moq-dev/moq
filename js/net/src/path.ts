@@ -194,22 +194,28 @@ export function normalizeRelative(rel: string): string {
  * Resolve a relative path reference against a base path.
  *
  * `..` segments pop the last segment of the base; other segments are appended.
- * `.` and empty segments are no-ops. Excess `..` once the base is empty is also a
- * no-op (subsequent named segments still append). An empty / normalized-empty `rel`
- * returns the base path unchanged.
+ * `.` and empty segments are no-ops. An empty / normalized-empty `rel` returns the
+ * base path unchanged.
  *
- * Mirrors the Rust `Path::resolve`, used by hang catalogs to express
- * cross-broadcast track references (a rendition's `broadcast` field).
+ * Returns `undefined` when a `..` has nothing left to pop, i.e. the reference walks
+ * above the root and names nothing. Popping to exactly the root is fine and yields the
+ * empty path, which still names a broadcast. The alternative, clamping, would silently
+ * land `../../../../x` on an unrelated `x`, so the caller decides what an out-of-range
+ * reference means (the hang catalog rejects such a catalog outright).
+ *
+ * Mirrors the Rust `Path::resolve`, used by hang catalogs to express cross-broadcast
+ * track references (a rendition's `broadcast` field).
  *
  * @example
  * ```typescript
  * Path.resolve(Path.from("a/b/c"), "../source"); // "a/b/source"
  * Path.resolve(Path.from("a/b"), "x/y");         // "a/b/x/y"
- * Path.resolve(Path.from("a"), "../../x");       // "x"
  * Path.resolve(Path.from("a/b"), "./c");         // "a/b/c"
+ * Path.resolve(Path.from("a"), "..");            // "" (the root)
+ * Path.resolve(Path.from("a"), "../../x");       // undefined
  * ```
  */
-export function resolve(base: Valid, rel: string): Valid {
+export function resolve(base: Valid, rel: string): Valid | undefined {
 	const segments = base === "" ? [] : base.split("/");
 
 	for (const seg of rel.split("/")) {
@@ -217,7 +223,8 @@ export function resolve(base: Valid, rel: string): Valid {
 			continue;
 		}
 		if (seg === "..") {
-			segments.pop();
+			// Nothing left to pop: the reference walks above the root.
+			if (segments.pop() === undefined) return undefined;
 		} else {
 			segments.push(seg);
 		}

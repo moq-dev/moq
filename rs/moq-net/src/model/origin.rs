@@ -1071,9 +1071,12 @@ impl Producer {
 		// off route transitions.
 		let ingress = self.stats.ingress(&full);
 
-		let mut source = broadcast::Info { origin: self.info() }
-			.produce()
-			.with_stats(ingress.clone());
+		let mut source = broadcast::Info {
+			origin: self.info(),
+			path: full.clone(),
+		}
+		.produce()
+		.with_stats(ingress.clone());
 		source.set_route(route).expect("fresh producer");
 
 		web_async::spawn(run_source(self.info(), node, full, rest, source.consume(), ingress));
@@ -1706,6 +1709,7 @@ fn attach_source(
 	let announce = route.announce;
 	let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
 		origin: ctx.origin.clone(),
+		path: ctx.full.clone(),
 	});
 	let _ = broadcast.clone().set_route(route.clone());
 	let state = kio::Producer::new(FrontState {

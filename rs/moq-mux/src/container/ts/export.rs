@@ -194,8 +194,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Shared constructor. The public entry points each live on a concrete
 	/// `Export<E>` impl that pins `E`, so the extension is chosen by which one you call.
 	async fn build(source: crate::Source, catalog_format: CatalogFormat) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast().await?;
-		let catalog = crate::catalog::Consumer::<E>::new(&broadcast, catalog_format).await?;
+		let catalog = source.catalog::<E>(catalog_format).await?;
 		Ok(Self {
 			source,
 			catalog: Some(catalog),
@@ -1187,8 +1186,9 @@ fn dts_reserve(config: &VideoConfig) -> u64 {
 mod tests {
 	use std::time::Duration;
 
-	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section};
 	use moq_net::Timestamp;
+
+	use super::{DEFAULT_DTS_RESERVE, PSI_INTERVAL, author_dts, due, is_complete_section};
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()

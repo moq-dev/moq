@@ -318,7 +318,10 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> Result<()> {
-		// A rendition we can't parse is ignored rather than failing the whole export.
+		// A rendition we can't parse is ignored rather than failing the whole export. Drop it
+		// before the snapshot is cached, since the init segment expects a track for every
+		// rendition in it. (An escaping `broadcast` reference is already gone: the catalog
+		// stream drops those.)
 		let mut catalog = catalog.clone();
 		catalog
 			.video

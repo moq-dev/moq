@@ -94,12 +94,14 @@ The section is omitted entirely when a broadcast publishes no captions.
 A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"../source"`), pointing at another broadcast that publishes the actual track.
 A consumer resolves the reference against the catalog broadcast's own path (`..` pops a segment, other segments append) and subscribes to the track on the resolved broadcast over the same connection.
 When the field is absent, the track lives in the same broadcast as the catalog.
+A reference that walks above the root (more `..` than the catalog path has segments) names no broadcast, so the whole catalog is rejected rather than pointed at whatever path the walk stops on.
+The root is the consumer's authorized subtree, so such a reference is an attempt to name content it cannot reach: a publisher emitting one has a bug, and quietly serving the remaining renditions would hide that.
 
 This lets a transcoder publish a sidecar catalog that adds new renditions while pointing unchanged ones at the original broadcast, instead of re-publishing those bytes through the transcoder.
 For example, a transcoder consuming `room/source` can publish `room/transcode` whose catalog contains a downscaled `480p` rendition plus the original `1080p` rendition marked `"broadcast": "../source"`.
 A viewer of `room/transcode` then pulls `480p` from the transcoder and `1080p` directly from the source, and the relay dedupes the source subscription with the transcoder's own.
 
-`@moq/watch` resolves the reference automatically. In Rust, the `moq-mux` exporters do the same: they take a `Source::new(origin, path)`, and both the catalog broadcast and any referenced broadcast resolve through the origin over the same connection.
+Rejection happens where the catalog is read, not where a track is subscribed: the rendition set drives track layouts, playlists, codec lists, and quality selectors, so a reference caught any later would already have been offered and chosen. In Rust the `moq-mux` catalog stream rejects it and every exporter reads through that stream; `@moq/watch` rejects the catalog it would otherwise publish.
 
 ### Extensions
 

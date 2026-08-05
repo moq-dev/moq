@@ -1282,8 +1282,12 @@ impl Producer {
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
+		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
+		// deadlocking against the `consume()` below.
+		let broadcast = self.state.read().broadcast.clone();
 		Subscriber {
 			name: self.name.clone(),
+			broadcast,
 			info,
 			inner: SubscriberKind::Plain(PlainSubscriber {
 				state: self.state.consume(),
@@ -1762,6 +1766,9 @@ impl Demand {
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
+	// The broadcast this track belongs to, so a catalog track can name the path its
+	// relative references resolve against.
+	broadcast: Arc<broadcast::Info>,
 	inner: ConsumerKind,
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
 	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
@@ -1776,17 +1783,20 @@ enum ConsumerKind {
 
 impl Consumer {
 	fn plain(name: Arc<str>, state: kio::Consumer<TrackState>) -> Self {
+		let broadcast = state.read().broadcast.clone();
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Plain(state),
 			stats: stats::Scope::default(),
 		}
 	}
 
 	/// A consumer over a spliced logical track (a route-fed broadcast's track).
-	pub(crate) fn spliced(name: Arc<str>, resume: super::resume::Consumer) -> Self {
+	pub(crate) fn spliced(name: Arc<str>, broadcast: Arc<broadcast::Info>, resume: super::resume::Consumer) -> Self {
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Spliced(resume),
 			stats: stats::Scope::default(),
 		}
@@ -1802,6 +1812,12 @@ impl Consumer {
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The broadcast this track belongs to. Its [`path`](broadcast::Info::path) is what a
+	/// catalog's relative `broadcast` references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
 	}
 
 	/// Open a live subscription.
@@ -1825,6 +1841,7 @@ impl Consumer {
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
 			inner,
 			subscription,
 			stats: self.stats.clone(),
@@ -2068,6 +2085,7 @@ impl Consumer {
 /// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct Subscribing {
 	name: Arc<str>,
+	broadcast: Arc<broadcast::Info>,
 	inner: SubscribingKind,
 	subscription: kio::Producer<Subscription>,
 	stats: stats::Scope,
@@ -2090,6 +2108,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Plain(PlainSubscriber {
 						state: state.clone(),
@@ -2111,6 +2130,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Spliced(Box::new(resume.subscribe_shared(self.subscription.clone()))),
 					stats: self.stats.clone(),
@@ -2380,6 +2400,8 @@ impl kio::Pollable for Fetching {
 /// for. Set both to skip them *and* avoid the transfer.
 pub struct Subscriber {
 	name: Arc<str>,
+	// The broadcast this track belongs to; see [`Self::broadcast`].
+	broadcast: Arc<broadcast::Info>,
 	info: Info,
 	inner: SubscriberKind,
 	// Egress stats scope, used to meter the groups this subscriber reads. Empty
@@ -2515,6 +2537,12 @@ impl Subscriber {
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The broadcast this track belongs to. Its [`path`](broadcast::Info::path) is what a
+	/// catalog's relative `broadcast` references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences.
@@ -3413,7 +3441,14 @@ mod test {
 	/// track's own window is clamped down to it on bind.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		let origin = crate::origin::Info::default().with_cache_duration(cap);
-		Producer::new(Arc::new(broadcast::Info { origin }), name, info)
+		Producer::new(
+			Arc::new(broadcast::Info {
+				origin,
+				..Default::default()
+			}),
+			name,
+			info,
+		)
 	}
 
 	#[test]

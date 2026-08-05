@@ -508,7 +508,13 @@ mod tests {
 			..Default::default()
 		};
 
-		let output = moq_net::broadcast::Info::default().produce();
+		// The passthrough reference (`..`) resolves against the output broadcast's path, so
+		// the output must be minted through an origin: a standalone producer has no path, and
+		// `..` from it would escape, failing the catalog read below.
+		let origin = moq_net::Origin::random().produce();
+		let output = origin
+			.create_broadcast("room/transcode", moq_net::broadcast::Route::new())
+			.unwrap();
 		let consumer = output.consume();
 		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
 

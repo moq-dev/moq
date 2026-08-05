@@ -196,8 +196,7 @@ impl Subscribe {
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
 	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {
-		let broadcast = self.source.broadcast().await?;
-		let consumer = catalog::Consumer::new(&broadcast, self.catalog).await?;
+		let consumer = self.source.catalog(self.catalog).await?;
 		Ok(consumer.select(self.args.selection()?))
 	}
 

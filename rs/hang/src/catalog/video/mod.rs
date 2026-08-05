@@ -147,6 +147,9 @@ pub struct VideoConfig {
 	///
 	/// This allows a transcoder to author a downstream catalog that points unchanged
 	/// renditions at the source broadcast without re-publishing the bytes.
+	///
+	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
+	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 

@@ -249,6 +249,9 @@ async fn watch_catalog(
 	renditions: renditions::Producer,
 	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 ) {
+	// Built from the caller's `broadcast` handle rather than re-resolving through `source`, so
+	// the catalog, the timeline subscription, and the closed check below all refer to the same
+	// resolution. A same-name replacement between the two lookups would otherwise split them.
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,

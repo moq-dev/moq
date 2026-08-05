@@ -33,6 +33,15 @@ pub struct Info {
 	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
 	/// broadcast with no relay origin).
 	pub origin: super::origin::Info,
+
+	/// This broadcast's path, relative to the root of the origin it was created under
+	/// (stamped by [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast),
+	/// including through a scoped producer). Relative references in a catalog served by this
+	/// broadcast (hang's `broadcast` field) resolve against it.
+	///
+	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
+	/// root: any `..` reference escapes.
+	pub path: crate::PathOwned,
 }
 
 impl Info {
@@ -1068,7 +1077,11 @@ impl Consumer {
 				spliced.tracks.remove(name);
 			}
 			if let Some(producer) = spliced.tracks.get(name) {
-				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+				return Ok(track::Consumer::spliced(
+					name.into(),
+					self.info.clone(),
+					producer.consume(),
+				));
 			}
 			// A deliberately-ended broadcast serves nothing new; nothing drains the
 			// pending queue once the front is torn down.
@@ -1080,7 +1093,7 @@ impl Consumer {
 			let consumer = producer.consume();
 			spliced.tracks.insert(name.clone(), producer);
 			spliced.pending.push_back(name.clone());
-			return Ok(track::Consumer::spliced(name, consumer));
+			return Ok(track::Consumer::spliced(name, self.info.clone(), consumer));
 		}
 
 		// Reuse a live producer if one is already publishing the track. `get` drops a
