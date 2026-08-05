@@ -237,7 +237,7 @@ pub struct Server {
 	/// Escalating delay after a failed `accept`. Lives on the server rather than inside
 	/// [`accept`](Self::accept) so consecutive failures keep escalating across calls, and resets on
 	/// the next connection that does come in.
-	accept_backoff: moq_net::retry::Backoff,
+	accept_backoff: kio::time::Backoff,
 
 	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
 	/// being polled meanwhile: a connection that already got through must not wait out a backoff
@@ -253,7 +253,7 @@ impl Server {
 		// The listener is supervised for the process's lifetime, so there is no give-up budget: the
 		// descriptor pressure or firewall rule behind a failed accept clears on its own, and the
 		// next connection resets the escalation.
-		let mut backoff = moq_net::retry::Config::default();
+		let mut backoff = kio::time::Config::default();
 		backoff.initial = Duration::from_millis(100);
 		backoff.max = Duration::from_secs(5);
 		backoff.timeout = Duration::ZERO;
@@ -263,7 +263,7 @@ impl Server {
 			#[cfg(feature = "tls")]
 			tls: None,
 			pending: FuturesUnordered::new(),
-			accept_backoff: moq_net::retry::Backoff::new(backoff),
+			accept_backoff: kio::time::Backoff::new(backoff),
 			accept_retry: None,
 		})
 	}

@@ -446,7 +446,7 @@ fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate
 ///
 /// Both classifications read this: [`classify_client_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
-/// [`moq_net::retry::status_retryable`]. A `404` or `405` is the server's settled answer, so retrying
+/// [`crate::error::status_retryable`]. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
 fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
@@ -728,14 +728,14 @@ mod tests {
 		for status in [400, 404, 405, 410, 501] {
 			assert_eq!(connect_rejected(status).status(), Some(status));
 			assert!(
-				!moq_net::retry::status_retryable(status),
+				!crate::error::status_retryable(status),
 				"{status} should stop the reconnect loop"
 			);
 		}
 
 		for status in [408, 429, 502, 503, 504] {
 			assert_eq!(connect_rejected(status).status(), Some(status));
-			assert!(moq_net::retry::status_retryable(status), "{status} should be retried");
+			assert!(crate::error::status_retryable(status), "{status} should be retried");
 		}
 
 		// Auth is peeled off into its own variant before reaching the generic client arm.

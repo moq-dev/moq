@@ -33,6 +33,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 byteorder = "1"
 bytes = "1"
 futures = "0.3"
+kio = { workspace = true, features = ["time"] }
 hang = { workspace = true }
 hmac = "0.13"
 moq-mux = { workspace = true }

@@ -509,7 +509,7 @@ fn classify_client_error(err: &web_transport_quiche::ClientError) -> Option<crat
 ///
 /// Both classifications read this: [`classify_client_error`] turns an auth status into a
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
-/// [`moq_net::retry::status_retryable`]. A `404` or `405` is the server's settled answer, so retrying
+/// [`crate::error::status_retryable`]. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
 fn client_status(err: &web_transport_quiche::ClientError) -> Option<u16> {
 	match err {

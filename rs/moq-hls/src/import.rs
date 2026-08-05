@@ -36,11 +36,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// outage the caller should hear about, not one the import should paper over indefinitely while
 /// publishing nothing. The ceiling is lower than the default, since a live playlist window is
 /// measured in seconds and a longer wait would blow past it anyway.
-fn error_backoff() -> moq_net::retry::Backoff {
-	let mut config = moq_net::retry::Config::default();
+fn error_backoff() -> kio::time::Backoff {
+	let mut config = kio::time::Config::default();
 	config.initial = Duration::from_secs(1);
 	config.max = Duration::from_secs(10);
-	moq_net::retry::Backoff::new(config)
+	kio::time::Backoff::new(config)
 }
 
 /// How far back from the live edge to start when (re-)anchoring to a playlist window.
@@ -96,11 +96,14 @@ struct StepOutcome {
 	wrote_segments: usize,
 	/// Target segment duration (in seconds) from the playlist, if known.
 	target_duration: Option<u64>,
-	/// The last rendition failure of this step, if any.
+	/// A rendition failure from this step, if any.
 	///
 	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
 	/// `Ok` having imported nothing at all. The loop needs to tell that apart from a quiet playlist
 	/// with no new segments, or it treats a permanently broken source as steady progress.
+	///
+	/// When several renditions fail, this is the one whose failure another pass could still clear,
+	/// so a single permanently-dead variant doesn't end an import the others could still serve.
 	failed: Option<Error>,
 }
 
@@ -633,11 +636,7 @@ impl Import {
 				}
 				// A status the origin actually sent is its answer: a 404 playlist is not going to
 				// become a 200 on the next pass. Everything else rides the backoff budget.
-				Err(err)
-					if err
-						.status()
-						.is_some_and(|status| !moq_net::retry::status_retryable(status)) =>
-				{
+				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
 					return Err(err);
 				}
 				Err(err) => {
@@ -702,7 +701,15 @@ impl Import {
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
 						warn!(label = %track.label, %err, "rendition import step failed, will retry");
-						failed = Some(err);
+						// Prefer a failure another pass could still clear. The import is worth
+						// continuing as long as *any* rendition might come back, even when another is
+						// permanently gone, so one dead variant must not end an import the rest could
+						// still serve. Keeping whichever error came last instead would make the
+						// outcome depend on rendition order.
+						let recoverable = err.status().is_none_or(|status| crate::status_retryable(status));
+						if recoverable || failed.is_none() {
+							failed = Some(err);
+						}
 					}
 				},
 			}

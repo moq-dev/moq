@@ -42,12 +42,12 @@ pub use rendition::{Kind, Rendition};
 /// broadcast closing is what ends the wait, and a relay-side broadcast outlives its publisher's
 /// session, so any deadline here is a window in which a publisher outage leaves the broadcaster
 /// permanently empty with nothing to recover it.
-fn catalog_backoff() -> moq_net::retry::Backoff {
-	let mut config = moq_net::retry::Config::default();
+fn catalog_backoff() -> kio::time::Backoff {
+	let mut config = kio::time::Config::default();
 	config.initial = Duration::from_millis(250);
 	config.max = Duration::from_secs(5);
 	config.timeout = Duration::ZERO;
-	moq_net::retry::Backoff::new(config)
+	kio::time::Backoff::new(config)
 }
 
 /// Export tuning shared across renditions.

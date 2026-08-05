@@ -35,9 +35,10 @@ export type BackoffProps = {
 	max?: DOMHighResTimeStamp;
 
 	/**
-	 * How long to keep retrying before giving up, in milliseconds (default: 300000, five minutes).
-	 * Measured from the first delay after a {@link Backoff.reset}. Zero retries forever, which only
-	 * belongs in a supervisor whose job is to outlive an outage.
+	 * How long to keep trying before giving up, in milliseconds (default: 300000, five minutes).
+	 * Measured from construction or the last {@link Backoff.reset}, and covering the attempts
+	 * themselves rather than just the waits between them. Zero retries forever, which only belongs
+	 * in a supervisor whose job is to outlive an outage.
 	 */
 	timeout?: DOMHighResTimeStamp;
 };
@@ -65,7 +66,7 @@ export class Backoff {
 	/** The current window's upper bound, grown per failure. */
 	#window: DOMHighResTimeStamp;
 
-	/** When the budget runs out, or undefined while the sequence hasn't started. */
+	/** When the budget runs out, or undefined when there isn't one. */
 	#deadline: DOMHighResTimeStamp | undefined;
 
 	constructor(props?: BackoffProps) {
@@ -75,19 +76,23 @@ export class Backoff {
 		this.#max = props?.max ?? DEFAULT_MAX;
 		this.#timeout = props?.timeout ?? DEFAULT_TIMEOUT;
 		this.#window = this.#initial;
+		this.#deadline = this.#budget();
+	}
+
+	/** When the budget runs out, or undefined when there isn't one. */
+	#budget(): DOMHighResTimeStamp | undefined {
+		return this.#timeout > 0 ? performance.now() + this.#timeout : undefined;
 	}
 
 	/** How long to wait before the next attempt, or undefined once the budget is spent. */
 	delay(): DOMHighResTimeStamp | undefined {
 		let remaining = Number.POSITIVE_INFINITY;
 
-		if (this.#timeout > 0) {
-			const now = performance.now();
-			// The first delay of a sequence starts the clock, so a loop that ran healthy for hours
-			// still gets its full budget when it finally does fail.
-			this.#deadline ??= now + this.#timeout;
-
-			remaining = this.#deadline - now;
+		if (this.#deadline !== undefined) {
+			// Out of budget. The clock runs from construction or the last `reset`, so it covers the
+			// attempts as well as the waits between them: a caller whose every attempt hangs for most
+			// of the budget would otherwise outlive it many times over.
+			remaining = this.#deadline - performance.now();
 			if (remaining <= 0) return undefined;
 		}
 
@@ -110,6 +115,6 @@ export class Backoff {
 	 */
 	reset(): void {
 		this.#window = this.#initial;
-		this.#deadline = undefined;
+		this.#deadline = this.#budget();
 	}
 }

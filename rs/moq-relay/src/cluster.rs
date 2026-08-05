@@ -920,10 +920,10 @@ impl Cluster {
 		// A peer is supervised for the life of the relay, so there is no give-up deadline: one that is
 		// unreachable for an hour still has to be redialed when it comes back. Nothing ends this
 		// loop; the escalating delay is what keeps a permanently-dead peer cheap.
-		let mut config = moq_net::retry::Config::default();
+		let mut config = kio::time::Config::default();
 		config.max = tokio::time::Duration::from_secs(300);
 		config.timeout = tokio::time::Duration::ZERO;
-		let mut backoff = moq_net::retry::Backoff::new(config);
+		let mut backoff = kio::time::Backoff::new(config);
 
 		// Sessions shorter than this are treated as churn: we keep backing off
 		// instead of resetting, otherwise a peer that rejects us instantly would

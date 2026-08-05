@@ -73,7 +73,7 @@ impl Default for Backoff {
 	}
 }
 
-impl From<&Backoff> for moq_net::retry::Config {
+impl From<&Backoff> for kio::time::Config {
 	fn from(backoff: &Backoff) -> Self {
 		let mut config = Self::default();
 		config.initial = backoff.initial;
@@ -204,7 +204,7 @@ impl Reconnect {
 		url: Url,
 		backoff: Backoff,
 	) -> crate::Result<()> {
-		let mut retry = moq_net::retry::Backoff::new((&backoff).into());
+		let mut retry = kio::time::Backoff::new((&backoff).into());
 		let mut last_error: Option<Error> = None;
 
 		loop {
@@ -261,7 +261,7 @@ impl Reconnect {
 						return Err(err);
 					}
 					if let Some(status) = err.status()
-						&& !moq_net::retry::status_retryable(status)
+						&& !crate::error::status_retryable(status)
 					{
 						return Err(err);
 					}

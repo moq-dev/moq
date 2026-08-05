@@ -25,12 +25,12 @@ use crate::Error;
 /// No give-up budget: the engine outlives any one device, and the user plugging a headset back in is
 /// exactly the external change a retry is waiting for. Unlimited retries are also what keeps this
 /// clock-free, so the driver thread can stay on [`std::time::Instant`].
-fn retry_backoff() -> moq_net::retry::Backoff {
-	let mut config = moq_net::retry::Config::default();
+fn retry_backoff() -> kio::time::Backoff {
+	let mut config = kio::time::Config::default();
 	config.initial = Duration::from_millis(500);
 	config.max = Duration::from_secs(4);
 	config.timeout = Duration::ZERO;
-	moq_net::retry::Backoff::new(config)
+	kio::time::Backoff::new(config)
 }
 
 /// Problems tolerated in [`ERROR_WINDOW`] before the stream is rebuilt.
@@ -426,7 +426,7 @@ struct Driver {
 	/// from one the live stream raised.
 	generation: u64,
 	/// Escalating delay before reopening a device that would not start.
-	retry: moq_net::retry::Backoff,
+	retry: kio::time::Backoff,
 	/// When a failed start may be retried, and what the command wait times out
 	/// against. `None` while the stream is healthy.
 	retry_at: Option<Instant>,

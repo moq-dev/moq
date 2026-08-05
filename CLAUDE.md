@@ -101,13 +101,13 @@ The rename/removal rationale lives in the commit message and PR description, not
 
 Retrying is the reflex that hides bugs, so a new retry loop has to answer three questions in the code, not in the reviewer's head.
 
-- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Use the shared primitive rather than a hand-rolled `sleep`: `moq_net::retry::Backoff` in Rust, `Retry.Backoff` from `@moq/net` in TypeScript.
+- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Use the shared primitive rather than a hand-rolled `sleep`: `kio::time::Backoff` in Rust, `Retry.Backoff` from `@moq/net` in TypeScript.
 - **When does it stop?** A deadline or an attempt budget, and that budget is what ends the loop. Unlimited retries belong only to a supervisor whose job is to outlive an outage (a reconnecting publisher, a cluster peer, a listener), where the escalating delay is what keeps a permanently-dead target cheap.
 - **Who owns the budget?** Exactly one layer. An outer supervisor that rebuilds an inner retry loop resets its backoff to the initial delay, so the escalation never happens and a fixed-interval hammer wears an exponential costume. Watch the inner loop's terminal signal instead of restarting it.
 
 **Don't classify errors as retryable.** It is tempting to give an error type an `is_retryable()` and skip the wait when the answer is no. Resist it: deciding whether a failure is permanent means guessing, the guess has to stay correct as every wrapped error type evolves, and getting it wrong either strands a connection a retry would have recovered or hammers a dead one. The budget already bounds the damage; the only thing classification buys is surfacing a config error sooner.
 
-The exception is an answer a peer actually gave, where the protocol defines the meaning. An HTTP status is the one we have: `moq_net::retry::status_retryable` covers `408`, `429`, `502`, `503`, and `504`, and `moq_native::Error::status` / `moq_hls::Error::status` report the status a server sent so a caller can consult it. That is reading a response, not inferring intent from a failure.
+The exception is an answer a peer actually gave, where the protocol defines the meaning. An HTTP status is the one we have: `moq_native::Error::status` and `moq_hls::Error::status` report the status a server sent, and each crate decides what to do with it (`408`, `429`, `502`, `503`, and `504` are worth another try). That is reading a response, not inferring intent from a failure.
 
 Resetting a backoff is its own claim: only after an outcome that says the earlier failures no longer describe reality (a session that stayed healthy, a request that succeeded, a changed destination). Resetting on an attempt that failed immediately turns escalation into a tight loop.
 

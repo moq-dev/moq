@@ -117,13 +117,12 @@ Cluster peers must authenticate to each other:
 
 See [Authentication](/bin/relay/auth) for the full setup.
 
-A peer that is merely unreachable is redialed indefinitely, with exponential backoff and jitter so a
-restarting cluster doesn't reconnect in lockstep. A peer that *rejects* us is not: a bad token, an
-ALPN neither side speaks, or a URL this build can't dial produces the same failure on every dial, so
-the relay logs `cluster peer rejected us` and gives up on that peer rather than hiding the cause
-behind a warning every few seconds. After fixing the cause, the peer is dialed again once it leaves
-and re-enters the dial set (it stops and resumes gossiping, or drops out of and back into the
-`connect_api` list); a static `connect` entry needs a relay restart.
+Peers are redialed indefinitely, with exponential backoff and jitter so a restarting cluster doesn't
+reconnect in lockstep. That includes a peer that rejects us: a bad token logs `cluster peer error;
+will retry` on every attempt rather than giving up, so watch for a peer that never reaches
+`cluster peer session closed`. The delay escalates to five minutes, which is what keeps a
+permanently-rejected peer cheap rather than noisy. A session that stays up for ten seconds is
+treated as healthy and clears the escalation, so a peer that comes back redials promptly.
 
 ## Migration from older configs
 

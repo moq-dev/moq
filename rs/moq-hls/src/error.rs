@@ -18,6 +18,15 @@ impl std::fmt::Display for SequenceKind {
 	}
 }
 
+/// Whether an HTTP response status means "ask again later".
+///
+/// A response that arrived is the server's answer, and only this narrow set invites another
+/// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
+/// `404` and `403` included, is settled.
+pub(crate) fn status_retryable(status: u16) -> bool {
+	matches!(status, 408 | 429 | 502 | 503 | 504)
+}
+
 /// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -127,7 +136,7 @@ pub enum Error {
 impl Error {
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
-	/// The import loop reads this through [`moq_net::retry::status_retryable`]: a `503` on a playlist
+	/// The import loop reads this through [`status_retryable`]: a `503` on a playlist
 	/// fetch is worth another pass, a `404` is the origin's settled answer. Nothing else here is
 	/// classified; a failure with no status falls through to the backoff budget.
 	pub fn status(&self) -> Option<u16> {
