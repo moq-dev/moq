@@ -11,6 +11,7 @@
 #include <moq.h>
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,8 +28,10 @@ typedef struct {
 } ctx_t;
 
 // Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx
-// lives on main's stack and outlives the callbacks (main blocks until got/
-// timeout, then the process exits), so there's no use-after-free.
+// lives on main's stack, and libmoq keeps the pointer until each registration's
+// terminal (<= 0) callback fires, which this client never waits for. So once
+// anything is registered, main must not return: every path from there on ends in
+// _exit, which keeps the frame alive for as long as the callbacks can run.
 static void on_status(void *ud, int32_t code) {
     (void)ud;
     fprintf(stderr, "session status: %d\n", code);
@@ -86,6 +89,24 @@ static void on_catalog(void *ud, int32_t catalog) {
     moq_consume_catalog_free((uint32_t)catalog);
 }
 
+// Report a failure and exit 1, for the paths where libmoq still holds &c.
+//
+// _exit rather than a return, for two reasons. It leaves main's frame (and so
+// ctx) intact for the callbacks still pointing at it, and it skips the atexit
+// teardown: libmoq statically bundles moq-video (openh264/cuda), whose worker
+// threads use priority-protected mutexes, and tearing them down at normal exit
+// can trip a glibc pthread priority assertion and abort. An abort here would
+// replace the message we just printed with a SIGABRT, which is exactly the
+// wrong thing to do on the path that explains why the test failed.
+static _Noreturn void fail(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fflush(stderr);
+    _exit(1);
+}
+
 int main(int argc, char **argv) {
     const char *url = NULL, *broadcast = NULL;
     double timeout_s = 20.0;
@@ -116,6 +137,8 @@ int main(int argc, char **argv) {
     // origin_publish = 0 disables publishing; consume via our origin.
     int32_t session = moq_session_connect(url, strlen(url), 0, (uint32_t)origin, on_status, &c);
     if (session <= 0) {
+        // A registration that fails never invokes its callback, so &c isn't held
+        // yet and returning is still safe here.
         fprintf(stderr, "error: moq_session_connect failed: %d\n", session);
         return 1;
     }
@@ -129,8 +152,7 @@ int main(int argc, char **argv) {
     // available; we block on the condvar until then (or the deadline).
     int32_t wait = moq_origin_consume_announced((uint32_t)origin, broadcast, strlen(broadcast), on_broadcast, &c);
     if (wait <= 0) {
-        fprintf(stderr, "error: moq_origin_consume_announced failed: %d\n", wait);
-        return 1;
+        fail("error: moq_origin_consume_announced failed: %d\n", wait);
     }
 
     pthread_mutex_lock(&c.mu);
@@ -140,14 +162,12 @@ int main(int argc, char **argv) {
     int32_t bc = c.broadcast;
     pthread_mutex_unlock(&c.mu);
     if (bc <= 0) {
-        fprintf(stderr, "error: broadcast never announced\n");
-        return 1;
+        fail("error: broadcast never announced\n");
     }
 
     int32_t cat = moq_consume_catalog((uint32_t)bc, on_catalog, &c);
     if (cat <= 0) {
-        fprintf(stderr, "error: moq_consume_catalog failed: %d\n", cat);
-        return 1;
+        fail("error: moq_consume_catalog failed: %d\n", cat);
     }
 
     pthread_mutex_lock(&c.mu);
@@ -160,13 +180,10 @@ int main(int argc, char **argv) {
     if (got) {
         fprintf(stderr, "received a frame from %s\n", broadcast);
         // The data path succeeded, which is all this smoke client verifies.
-        // libmoq statically bundles moq-video (openh264/cuda), whose
-        // worker threads use priority-protected mutexes; tearing them down at
-        // normal exit can trip a glibc pthread priority assertion and abort.
-        // Skip that atexit teardown with _exit now that we have our result.
+        // _exit for the reasons on fail() above: the callbacks still point at
+        // ctx, and the atexit teardown can abort.
         fflush(stderr);
         _exit(0);
     }
-    fprintf(stderr, "error: timed out waiting for data\n");
-    return 1;
+    fail("error: timed out waiting for data\n");
 }
