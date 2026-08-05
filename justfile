@@ -100,10 +100,12 @@ check $BASE="":
 
     just _check-common
 
-# Check every JavaScript workspace and every default Rust member.
+# Check every JavaScript workspace, every default Rust member, and moq-wasm.
 check-all *args:
     just js check
     just rs check {{ args }}
+    # Not covered by the line above: moq-wasm only exists on the wasm32 target.
+    just rs wasm
     just obs check
     just _check-common
 
