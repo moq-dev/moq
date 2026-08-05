@@ -310,21 +310,39 @@ struct Defer {
 }
 
 impl<T> FanInner<T> {
+	fn defer_if_held(&self) -> bool {
+		let mut defer = self.defer.lock().expect("mutex poisoned");
+		if defer.held == 0 {
+			return false;
+		}
+
+		defer.owed = true;
+		true
+	}
+
 	fn notify(&self) {
+		// A projected fan can wake inline while the caller holds the target lock.
+		if self.defer_if_held() {
+			return;
+		}
+
 		// Gone already: whatever was parked went with it.
 		let Some(lock) = self.target.upgrade() else {
 			return;
 		};
 
 		let mut waiters = {
-			// Check the hold only after taking the target lock. A wake blocked on that
-			// lock must observe any hold created while it was waiting.
 			let mut state = lock.lock();
+
+			// A wake can block on the target after the first check. Recheck while the
+			// target is locked, and keep both locks through the drain, so a hold
+			// created in that window defers it.
 			let mut defer = self.defer.lock().expect("mutex poisoned");
 			if defer.held > 0 {
 				defer.owed = true;
 				return;
 			}
+
 			(self.project)(&mut state).take()
 		};
 
