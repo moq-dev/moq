@@ -1576,6 +1576,33 @@ mod test {
 		}
 	}
 
+	/// A reader that misses more than [`MAX_SEGMENTS`] failovers loses the pruned
+	/// ranges: the segments are gone from its next snapshot, so it resumes at the
+	/// retained ones, exactly like any other live loss (the groups stay fetchable
+	/// upstream). Deliberate: the alternative pins every dead session's cache
+	/// until the slowest reader drains it.
+	#[tokio::test]
+	async fn unpolled_reader_skips_pruned_ranges() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+		recv_pending(&mut sub);
+
+		let count = 2 * MAX_SEGMENTS as u64;
+		let mut tracks = Vec::new();
+		for sequence in 0..count {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "g");
+			tracks.push(track);
+		}
+
+		// Never polled during the churn: only the retained segments deliver.
+		for sequence in count - MAX_SEGMENTS as u64..count {
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		recv_pending(&mut sub);
+	}
+
 	#[tokio::test]
 	async fn datagram_poller_bounds_pruned_cursors() {
 		let mut producer = Producer::new();
