@@ -1134,9 +1134,6 @@ The `Message Length` describes the payload size on the wire.
 
 # Appendix A: Changelog
 
-## moq-lite-07
-- Made the SETUP `Cost` parameter directional: it declares what subscribing from the sender costs and both endpoints send their own, so the two directions are priced independently. A receiver MAY charge a locally configured value instead of the declared one. Previously only the client sent it and both ends charged that single value; the parameter ID and the absent-means-1 default are unchanged.
-
 ## moq-lite-06
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
 - Extended the SETUP `Path` parameter to carry the URI query: a client appends `?` and the query component after the path, matching moq-transport's PATH option. The credential a deployment puts in the query was previously unrepresentable on a binding with no request URI.
@@ -1150,7 +1147,7 @@ The `Message Length` describes the payload size on the wire.
 - Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_UPDATE: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
-- Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
+- Added a SETUP `Cost` parameter (0x4) declaring what subscribing from the sender costs, added by the receiver to every announcement that sender forwards. Both endpoints send their own, so the two directions are priced independently, and a receiver MAY charge a locally configured value instead. Unpriced directions default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).

@@ -522,11 +522,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// An endpoint updates an advertisement by re-sending it on the stream that
 		// already carries it, so keep reading until the stream closes (which is also how
 		// v14-16's PublishNamespaceDone arrives, via the adapter).
+		//
+		// `attached` survives the call so a stream that detached mid-flight (a reflected
+		// update) is not released twice here.
+		let mut attached = true;
 		let res = self
-			.run_publish_namespace_updates(&mut stream, &path, request_id, peer)
+			.run_publish_namespace_updates(&mut stream, &path, request_id, peer, &mut attached)
 			.await;
 
-		self.stop_announce(path, true)?;
+		if attached {
+			self.stop_announce(path, true)?;
+		}
 
 		res
 	}
@@ -538,6 +544,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		path: &PathOwned,
 		request_id: RequestId,
 		peer: cluster::Peer,
+		attached: &mut bool,
 	) -> Result<(), Error> {
 		loop {
 			let type_id: u64 = match stream.reader.decode_maybe().await? {
@@ -566,15 +573,28 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Err(Error::ProtocolViolation);
 			}
 
-			// A route that now loops through us is the peer retracting it, so detach
-			// rather than keep serving a path we cannot use.
+			// A path that now runs through us is unusable, so detach rather than keep
+			// serving it. Keep reading though: this stream is the only channel the
+			// advertisement has, so a later clean path arrives here or nowhere. Ending
+			// the stream is also not ours to do, since a peer MAY legitimately send a
+			// path carrying our Hop ID when a redundant sibling shares it.
 			let Some(advert) = self.route(msg.cluster.as_ref(), &peer) else {
-				tracing::debug!(%path, "publish_namespace now loops back; dropping");
-				return Ok(());
+				if std::mem::take(attached) {
+					tracing::debug!(%path, "publish_namespace now loops back; detaching");
+					let _ = self.stop_announce(path.clone(), true);
+				}
+				continue;
 			};
 
 			tracing::debug!(%path, hops = advert.route.hops.len(), cost = advert.route.cost, "publish_namespace update");
-			self.update_announce(path.clone(), advert)?;
+			match *attached {
+				true => self.update_announce(path.clone(), advert)?,
+				// Re-attach: a clean path replaced the reflected one we detached from.
+				false => {
+					self.start_announce(path.clone(), advert)?;
+					*attached = true;
+				}
+			}
 		}
 	}
 
@@ -1695,6 +1715,190 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"the superseded route must not stay attached"
+		);
+	}
+
+	/// The peer's advertisement updates, framed exactly as the update loop reads them,
+	/// built with the crate's own writer so the framing cannot drift from the encoder.
+	async fn publish_namespace_updates(
+		request_id: RequestId,
+		path: &str,
+		updates: &[Option<cluster::Advert>],
+	) -> Vec<u8> {
+		const VERSION: Version = Version::Draft19;
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+
+		for cluster in updates {
+			writer.encode(&ietf::PublishNamespace::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespace {
+					request_id,
+					track_namespace: crate::Path::new(path),
+					cluster: cluster.clone(),
+				})
+				.await
+				.unwrap();
+		}
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// Build a subscriber whose peer replays `updates` on one PUBLISH_NAMESPACE stream,
+	/// with the advertisement already attached.
+	async fn reflected_harness(
+		self_origin: crate::Origin,
+		request_id: RequestId,
+		peer: &cluster::Peer,
+		attached: &cluster::Advert,
+		updates: &[Option<cluster::Advert>],
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::origin::Consumer,
+		Stream<crate::lite::test_transport::ScriptedSession, Version>,
+	) {
+		const VERSION: Version = Version::Draft19;
+		let script = publish_namespace_updates(request_id, "room/host", updates).await;
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let origin = crate::origin::Info::new(self_origin).produce();
+		let consumer = origin.consume();
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		// The tests drive the loop directly, so nothing spawns; leaking keeps the
+		// handles alive without a spawner.
+		std::mem::forget(task_set);
+
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			self_origin,
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let advert = subscriber.route(Some(attached), peer).expect("route");
+		subscriber.start_announce(path, advert).unwrap();
+		settle().await;
+		assert!(consumer.get_broadcast("room/host").is_some(), "attached to start with");
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		(subscriber, consumer, stream)
+	}
+
+	fn peer_9() -> cluster::Peer {
+		cluster::Peer {
+			origin: Some(crate::Origin::new(9).unwrap()),
+			cost: None,
+		}
+	}
+
+	/// A clean path, and one that runs back through us (Hop ID 5).
+	fn clean_and_looped() -> (cluster::Advert, cluster::Advert) {
+		(
+			cluster::Advert {
+				hops: hop_path(&[7, 9]),
+				cost: 0,
+			},
+			cluster::Advert {
+				hops: hop_path(&[7, 5, 9]),
+				cost: 0,
+			},
+		)
+	}
+
+	/// A reflected update detaches the route but MUST NOT end the stream. Updates ride
+	/// the stream that already carries the advertisement, so closing it strands the
+	/// namespace even when the peer's path goes clean again. It is also not ours to
+	/// close: a peer MAY legitimately send a path carrying our Hop ID when a redundant
+	/// sibling shares it, which the draft answers with "discard", not PROTOCOL_VIOLATION.
+	#[tokio::test]
+	async fn a_reflected_update_detaches_but_keeps_the_stream() {
+		let self_origin = crate::Origin::new(5).unwrap();
+		let request_id = RequestId(1);
+		let peer = peer_9();
+		let (clean, looped) = clean_and_looped();
+
+		let (mut subscriber, consumer, mut stream) =
+			reflected_harness(self_origin, request_id, &peer, &clean, &[Some(looped)]).await;
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				&path,
+				request_id,
+				peer,
+				&mut attached,
+			));
+
+			for _ in 0..100 {
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"the stream must stay open after a reflected update"
+				);
+				if consumer.get_broadcast("room/host").is_none() {
+					break;
+				}
+				settle().await;
+			}
+		}
+
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an unusable path must not stay attached"
+		);
+		assert!(!attached, "the caller must not release it a second time");
+	}
+
+	/// Having kept the stream, a later usable path re-attaches on it. This is the whole
+	/// reason the stream stays open.
+	#[tokio::test]
+	async fn a_clean_update_after_a_reflection_reattaches() {
+		let self_origin = crate::Origin::new(5).unwrap();
+		let request_id = RequestId(1);
+		let peer = peer_9();
+		let (clean, looped) = clean_and_looped();
+
+		let (mut subscriber, consumer, mut stream) = reflected_harness(
+			self_origin,
+			request_id,
+			&peer,
+			&clean,
+			&[Some(looped), Some(clean.clone())],
+		)
+		.await;
+
+		let path = crate::Path::new("room/host").to_owned();
+		let mut attached = true;
+		{
+			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
+				&mut stream,
+				&path,
+				request_id,
+				peer,
+				&mut attached,
+			));
+
+			// Both updates apply, then the loop parks on the exhausted script. The
+			// intermediate detach is not observable (one poll can drain both messages),
+			// so the end state is what this asserts; the detach itself is covered by
+			// `a_reflected_update_detaches_but_keeps_the_stream`.
+			for _ in 0..20 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+		}
+
+		assert!(attached, "the clean path must re-attach");
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"the namespace is routable again",
 		);
 	}
 
