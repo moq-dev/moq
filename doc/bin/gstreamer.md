@@ -42,8 +42,10 @@ signal when it changes, so you can poll it via `g_object_get` or connect to `not
 | `estimated-recv-bitrate` | uint64 | Estimated receive bitrate in bits per second; 0 when unavailable |
 
 `status` distinguishes a transient drop (`disconnected`, the reconnect loop is still retrying) from a
-permanent give-up (`failed`, a non-retryable error such as an auth rejection), which a bare
-`connected` bool cannot.
+permanent give-up (`failed`), which a bare `connected` bool cannot. The sink retries transport
+failures for as long as the pipeline runs, so a relay outage of any length is ridden out; it goes
+`failed` only on something a retry cannot clear, such as a rejected token, unusable TLS material, or
+a URL no compiled-in backend can dial.
 
 ## Prerequisites
 

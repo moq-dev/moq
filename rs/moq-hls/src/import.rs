@@ -29,9 +29,19 @@ use crate::{Error, Result, SequenceKind};
 /// Per-request timeout for the default HTTP client (playlist + segment fetches).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Backoff before retrying after a failed import step, so a transient upstream
-/// error (a 5xx, a truncated segment) doesn't tear down the whole import.
-const ERROR_BACKOFF: Duration = Duration::from_secs(1);
+/// Backoff for retrying a failed import step, so a transient upstream error (a 503, a dropped
+/// connection) doesn't tear down the whole import.
+///
+/// Bounded by the default give-up budget: an origin that has been unreachable for minutes is an
+/// outage the caller should hear about, not one the import should paper over indefinitely while
+/// publishing nothing. The ceiling is lower than the default, since a live playlist window is
+/// measured in seconds and a longer wait would blow past it anyway.
+fn error_backoff() -> moq_net::retry::Backoff {
+	let mut config = moq_net::retry::Config::default();
+	config.initial = Duration::from_secs(1);
+	config.max = Duration::from_secs(10);
+	moq_net::retry::Backoff::new(config)
+}
 
 /// How far back from the live edge to start when (re-)anchoring to a playlist window.
 ///
@@ -589,15 +599,27 @@ impl Import {
 
 	/// Run the import loop until cancelled.
 	///
-	/// A failed step (e.g. a transient playlist fetch error) is logged and
-	/// retried after a short backoff rather than ending the import.
+	/// A transient step failure (an origin 503, a dropped connection) is logged and retried with
+	/// escalating backoff. A failure that says the source is broken rather than briefly unavailable
+	/// (a playlist that doesn't parse, a segment whose byte range doesn't add up) ends the import:
+	/// the next pass reads the same bytes and fails the same way, so looping on it only hides the
+	/// cause. The import also ends once the backoff budget is spent, so a permanently unreachable
+	/// origin surfaces instead of being retried forever.
 	pub async fn run(&mut self) -> Result<()> {
+		let mut backoff = error_backoff();
+
 		loop {
 			let outcome = match self.step(OnError::Warn).await {
-				Ok(outcome) => outcome,
+				Ok(outcome) => {
+					backoff.reset();
+					outcome
+				}
+				Err(err) if !err.is_retryable() => return Err(err),
 				Err(err) => {
 					warn!(%err, "HLS import step failed, retrying");
-					tokio::time::sleep(ERROR_BACKOFF).await;
+					if !backoff.sleep().await {
+						return Err(err);
+					}
 					continue;
 				}
 			};

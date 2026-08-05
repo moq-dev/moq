@@ -136,10 +136,12 @@ impl Session {
 		let errored = Arc::new(AtomicBool::new(false));
 
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
-		// `timeout = 0` retries transport/connection failures indefinitely so an unattended publisher
-		// outlives relay/QUIC outages; non-retryable errors (e.g. auth) stay terminal. During an outage
-		// the pad threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up
-		// from a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
+		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
+		// outages of any length. Safe to leave unbounded because the loop only retries what a retry
+		// can fix (`moq_native::Error::is_retryable`): a rejected token, unusable TLS material, or a
+		// URL no backend can dial still ends it, posting the bus error below. During an outage the pad
+		// threads keep writing (bounded by moq-net's per-group eviction) and the relay catches up from
+		// a group boundary on reconnect. A bounded policy is available via `ClientConfig::backoff`.
 		let mut config = moq_native::ClientConfig::default();
 		config.tls.disable_verify = Some(settings.tls_disable_verify);
 		config.backoff.timeout = std::time::Duration::ZERO;

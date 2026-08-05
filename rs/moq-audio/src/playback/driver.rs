@@ -18,12 +18,20 @@ use super::mixer::{self, Mixer};
 use super::sink::{Registration, Sink};
 use crate::Error;
 
-/// Backoff bounds for reopening a device that failed. The first retry is quick
-/// because the common case is a device that came right back (a USB re-enumerate,
-/// a sample-rate change); the ceiling keeps a permanently gone device from
-/// spinning.
-const RETRY_MIN: Duration = Duration::from_millis(500);
-const RETRY_MAX: Duration = Duration::from_secs(4);
+/// Backoff for reopening a device that failed. The first retry is quick because the common case is
+/// a device that came right back (a USB re-enumerate, a sample-rate change); the ceiling keeps a
+/// permanently gone device from spinning.
+///
+/// No give-up budget: the engine outlives any one device, and the user plugging a headset back in is
+/// exactly the external change a retry is waiting for. Unlimited retries are also what keeps this
+/// clock-free, so the driver thread can stay on [`std::time::Instant`].
+fn retry_backoff() -> moq_net::retry::Backoff {
+	let mut config = moq_net::retry::Config::default();
+	config.initial = Duration::from_millis(500);
+	config.max = Duration::from_secs(4);
+	config.timeout = Duration::ZERO;
+	moq_net::retry::Backoff::new(config)
+}
 
 /// Problems tolerated in [`ERROR_WINDOW`] before the stream is rebuilt.
 ///
@@ -355,7 +363,7 @@ pub(super) fn run(
 		stream: None,
 		retired: None,
 		generation: 0,
-		retry: RETRY_MIN,
+		retry: retry_backoff(),
 		retry_at: None,
 		underruns: 0,
 		unclassified: 0,
@@ -417,7 +425,8 @@ struct Driver {
 	/// Bumped on every stream, so an error from a retired one can be told apart
 	/// from one the live stream raised.
 	generation: u64,
-	retry: Duration,
+	/// Escalating delay before reopening a device that would not start.
+	retry: moq_net::retry::Backoff,
 	/// When a failed start may be retried, and what the command wait times out
 	/// against. `None` while the stream is healthy.
 	retry_at: Option<Instant>,
@@ -475,7 +484,7 @@ impl Driver {
 		// Replaces the previous receiver, dropping anything the old stream
 		// retired and never got drained.
 		self.retired = Some(retired_rx);
-		self.retry = RETRY_MIN;
+		self.retry.reset();
 
 		tracing::info!(rate, channels, ?format, "opened audio output");
 		Ok(())
@@ -592,11 +601,11 @@ impl Driver {
 		tracing::warn!("audio output is not keeping up with sink changes");
 	}
 
-	/// When the next restart may be attempted, doubling the backoff.
+	/// When the next restart may be attempted, escalating the backoff.
+	///
+	/// The backoff never gives up, so this always yields a deadline.
 	fn schedule(&mut self) -> Instant {
-		let at = Instant::now() + self.retry;
-		self.retry = (self.retry * 2).min(RETRY_MAX);
-		at
+		Instant::now() + self.retry.delay().expect("unlimited retry budget")
 	}
 
 	/// Whether a failure reported by stream `generation` should rebuild the
@@ -798,7 +807,7 @@ mod tests {
 			stream: None,
 			retired: None,
 			generation: 7,
-			retry: RETRY_MIN,
+			retry: retry_backoff(),
 			retry_at: None,
 			underruns: 0,
 			unclassified: 0,

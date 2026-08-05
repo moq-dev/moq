@@ -1,12 +1,19 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { error } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
+import { Backoff, isRetryable } from "../retry.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
 
-/** Exponential backoff settings for {@link Reload}'s reconnect loop. */
+/**
+ * Exponential backoff settings for {@link Reload}'s reconnect loop.
+ *
+ * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
+ * lockstep. Only failures a retry could clear are retried at all; see {@link isRetryable}.
+ */
 export type ReloadDelay = {
 	/** The delay in milliseconds before reconnecting (default: 1000). */
 	initial: DOMHighResTimeStamp;
@@ -85,10 +92,9 @@ export class Reload {
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
 
-	#delay: DOMHighResTimeStamp;
-
-	// Timestamp when the current retry sequence started (for timeout).
-	#retryStart: DOMHighResTimeStamp | undefined;
+	// The current retry sequence's schedule, built from `delay` when the sequence starts. Undefined
+	// between sequences, so a later edit to `delay` applies to the next one.
+	#backoff: Backoff | undefined;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -106,8 +112,6 @@ export class Reload {
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
-
-		this.#delay = this.delay.initial;
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
@@ -190,9 +194,10 @@ export class Reload {
 	}
 
 	/**
-	 * Schedule the next connect attempt after the current backoff, or give up when the
-	 * retry window has expired. `connected` is when the dead session was established, if
-	 * it ever was, and `cause` the error that killed it, if it died with one.
+	 * Schedule the next connect attempt after the current backoff, or stop when the failure isn't
+	 * one a retry can clear and when the retry window has expired. `connected` is when the dead
+	 * session was established, if it ever was, and `cause` the error that killed it, if it died
+	 * with one.
 	 */
 	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
 		// Any session is dead now: report disconnected during the backoff rather than
@@ -200,34 +205,34 @@ export class Reload {
 		this.established.set(undefined);
 		this.status.set("disconnected");
 
+		// A relay speaking a protocol this build doesn't, a certificate that won't parse, no usable
+		// transport at all: every attempt produces the same failure, so surface it instead of
+		// hiding it behind a console warning every few seconds.
+		if (cause !== undefined && !isRetryable(cause)) {
+			this.#closedReject(error(cause));
+			return;
+		}
+
 		// A session that outlived the initial delay was healthy, so clear the backoff and
 		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
 		// shorter is a peer that accepts and immediately severs, which has to keep
 		// escalating or we hammer it forever at the initial delay.
 		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
-			this.#delay = this.delay.initial;
-			this.#retryStart = undefined;
+			this.#backoff = undefined;
 		}
 
-		// Track retry start for timeout.
-		this.#retryStart ??= performance.now();
+		this.#backoff ??= new Backoff(this.delay);
 
-		const timeout = this.delay.timeout ?? 300000;
-		if (timeout > 0) {
-			const elapsed = performance.now() - this.#retryStart;
-			if (elapsed >= timeout) {
-				console.warn("reconnect timed out");
-				// A graceful close has no error, so report the timeout itself.
-				if (cause === undefined) this.#closedReject(new Error("reconnect timed out"));
-				else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
-				return;
-			}
+		const wait = this.#backoff.delay();
+		if (wait === undefined) {
+			console.warn("reconnect timed out");
+			// A graceful close has no error, so report the timeout itself.
+			this.#closedReject(cause === undefined ? new Error("reconnect timed out") : error(cause));
+			return;
 		}
 
 		const tick = this.#tick.peek() + 1;
-		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
-
-		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
 	}
 
 	/**

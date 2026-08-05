@@ -121,6 +121,23 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
+	pub(crate) fn is_retryable(&self) -> bool {
+		match self {
+			// The socket. A peer that hasn't created its socket yet reports `NotFound`, which is
+			// permanent as far as this layer knows: whoever starts it is the external change.
+			Self::Io(err) => crate::error::io_retryable(err),
+
+			// The qmux handshake, which is the exchange over an established socket.
+			Self::Connect(_) | Self::Accept(_) => true,
+
+			// The URL has no path, or the path is occupied by something we refuse to unlink.
+			Self::MissingPath | Self::NotASocket(_) => false,
+		}
+	}
+}
+
 /// Credentials of a connected Unix-socket peer.
 ///
 /// `pid` is `None` on platforms that don't report it (e.g. some macOS versions);

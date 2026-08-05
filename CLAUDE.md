@@ -97,6 +97,19 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
 
+## Retries
+
+Retrying is the reflex that hides bugs, so a new retry loop has to answer four questions in the code, not in the reviewer's head.
+
+- **What is worth retrying?** Only failures a retry could plausibly clear: a dropped connection, a timed-out request, an OS error that isn't a missing file or an occupied port, and the narrow "ask again later" HTTP set (408, 429, 502, 503, 504). Auth rejections, parse and transmux failures, unsupported features, invalid URLs, and configuration errors fail identically forever; surface them instead. Retryable is the explicit case, never the fallback, so classification lives in an exhaustive `match` on the error type and a new variant forces a decision. Rust: `moq_net::Error::is_retryable` and the same method on `moq_native`, `moq_mux`, and `moq_hls` errors. TypeScript is the deliberate exception (the browser throws untyped platform errors, and defaulting those to terminal would strand recoverable connections), so it inverts: `@moq/net`'s `Retry.Terminal` marks what is settled and everything else is retried.
+- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Use the shared primitive rather than a hand-rolled `sleep`: `moq_net::retry::Backoff` in Rust, `Retry.Backoff` from `@moq/net` in TypeScript.
+- **When does it stop?** A deadline or an attempt budget. Unlimited retries belong only to a supervisor whose job is to outlive an outage (a reconnecting publisher, a cluster peer, a listener), and only once classification is doing the stopping.
+- **Who owns the budget?** Exactly one layer. An outer supervisor that rebuilds an inner retry loop resets its backoff to the initial delay, so the escalation never happens and a fixed-interval hammer wears an exponential costume. Watch the inner loop's terminal signal instead of restarting it.
+
+Resetting a backoff is its own claim: only after an outcome that says the earlier failures no longer describe reality (a session that stayed healthy, a request that succeeded, a changed destination). Resetting on an attempt that failed immediately turns escalation into a tight loop.
+
+Not every wait is a retry. Periodic refreshes, readiness probes, stream reads, alternate-address races, and test synchronization don't repeat a failed operation, so none of this applies to them.
+
 ## Root Cause First
 
 - Before fixing a bug, reproduce it and explain the mechanism. A fix that adds a retry, sleep, widened timeout, defensive check, or call-site special case without a stated mechanism is a symptom patch, not a fix.

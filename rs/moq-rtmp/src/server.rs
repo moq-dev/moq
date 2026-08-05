@@ -233,17 +233,32 @@ pub struct Server {
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
 	/// the connection closed or errored before issuing a publish or play.
 	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
+
+	/// Escalating delay after a failed `accept`. Lives on the server rather than inside
+	/// [`accept`](Self::accept) so consecutive failures keep escalating across calls, and resets on
+	/// the next connection that does come in.
+	accept_backoff: moq_net::retry::Backoff,
 }
 
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
 		let listener = TcpListener::bind(addr).await?;
+
+		// The listener is supervised for the process's lifetime, so there is no give-up budget: the
+		// descriptor pressure or firewall rule behind a failed accept clears on its own, and the
+		// next connection resets the escalation.
+		let mut backoff = moq_net::retry::Config::default();
+		backoff.initial = Duration::from_millis(100);
+		backoff.max = Duration::from_secs(5);
+		backoff.timeout = Duration::ZERO;
+
 		Ok(Self {
 			listener,
 			#[cfg(feature = "tls")]
 			tls: None,
 			pending: FuturesUnordered::new(),
+			accept_backoff: moq_net::retry::Backoff::new(backoff),
 		})
 	}
 
@@ -280,6 +295,8 @@ impl Server {
 				// A new TCP connection: start its (TLS +) handshake concurrently.
 				res = self.listener.accept(), if self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
+						// A connection got through, so whatever the last failure was has cleared.
+						self.accept_backoff.reset();
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
 						let tls = self.tls.clone();
@@ -319,10 +336,13 @@ impl Server {
 						}
 					}
 					Err(err) => {
-						// A failed accept must not take the listener down; back off so a
-						// persistent error doesn't busy-spin.
+						// A failed accept must not take the listener down: the usual causes
+						// (descriptor exhaustion, a connection the firewall dropped mid-handshake)
+						// are per-connection or clear on their own, and none of them is a reason to
+						// stop serving. Escalate the wait so a persistent one stops busy-spinning
+						// instead of retrying ten times a second forever.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						tokio::time::sleep(Duration::from_millis(100)).await;
+						self.accept_backoff.sleep().await;
 					}
 				},
 			}

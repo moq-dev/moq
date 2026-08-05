@@ -473,6 +473,59 @@ impl Error {
 			_ => None,
 		}
 	}
+
+	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
+	// The deprecated variants are never constructed, but an exhaustive match is what makes a new
+	// variant a deliberate classification rather than a silent "not retryable".
+	#[allow(deprecated)]
+	pub(crate) fn is_retryable(&self) -> bool {
+		match self {
+			// Sockets and local addresses. `kind` tells a port already in use (permanent until
+			// something else moves) from a transient failure to allocate one.
+			Self::Io(err) | Self::ResolveBind(err) | Self::Connect(err) | Self::ServerBuild(err) => {
+				crate::error::io_retryable(err)
+			}
+
+			// DNS is a service like any other: a lookup failure, or an answer that hasn't
+			// propagated yet, resolves on its own.
+			Self::DnsLookup(_) | Self::NoDnsEntries => true,
+
+			// The `http://` fingerprint bootstrap, which is a plain HTTP request to the relay.
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				crate::error::http_retryable(err)
+			}
+
+			// The QUIC exchange itself: handshake, established connection, WebTransport CONNECT.
+			Self::Connection(_)
+			| Self::Establish(_)
+			| Self::ClientConnect(_)
+			| Self::AcceptRequest(_)
+			| Self::Accept(_)
+			| Self::Reject(_) => true,
+
+			// Retryable if any raced address is: one unroutable address must not retire the rest.
+			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
+
+			// The server's settled answer on our credentials.
+			Self::ConnectRejected(_) => false,
+
+			// Configuration: the URL, the certificates, the fingerprint, or an unbound server.
+			Self::InvalidDnsName
+			| Self::InvalidFingerprint(_)
+			| Self::FingerprintLength(_)
+			| Self::InvalidScheme
+			| Self::NoLocalAddr
+			| Self::CertRequired
+			| Self::CertPairMismatch
+			| Self::Tls(_) => false,
+
+			// Negotiation produced something we can't speak. Both ends have to change first.
+			Self::MissingAlpn | Self::DecodeAlpn(_) | Self::UnsupportedAlpn(_) => false,
+
+			// Unsupported build/flag combinations, kept only so old code still compiles.
+			Self::FingerprintUnsupported | Self::HostNameUnsupported | Self::GsoUnsupported => false,
+		}
+	}
 }
 
 fn map_client_error(err: web_transport_quiche::ClientError) -> Error {

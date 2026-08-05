@@ -917,14 +917,18 @@ impl Cluster {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
-		let base_backoff = tokio::time::Duration::from_secs(1);
-		let max_backoff = tokio::time::Duration::from_secs(300);
+		// A peer is supervised for the life of the relay, so there is no give-up deadline: one that
+		// is unreachable for an hour still has to be redialed when it comes back. What ends the loop
+		// is classification, not a budget.
+		let mut config = moq_net::retry::Config::default();
+		config.max = tokio::time::Duration::from_secs(300);
+		config.timeout = tokio::time::Duration::ZERO;
+		let mut backoff = moq_net::retry::Backoff::new(config);
+
 		// Sessions shorter than this are treated as churn: we keep backing off
 		// instead of resetting, otherwise a peer that rejects us instantly would
 		// turn into a tight reconnect loop.
 		let stable_threshold = tokio::time::Duration::from_secs(10);
-
-		let mut backoff = base_backoff;
 
 		loop {
 			let started = tokio::time::Instant::now();
@@ -932,18 +936,16 @@ impl Cluster {
 			let elapsed = started.elapsed();
 
 			match result {
-				Ok(()) if elapsed >= stable_threshold => backoff = base_backoff,
-				Ok(()) => {
-					tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off");
-					backoff = (backoff * 2).min(max_backoff);
-				}
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					backoff = (backoff * 2).min(max_backoff);
-				}
+				Ok(()) if elapsed >= stable_threshold => backoff.reset(),
+				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
+				// A rejected token, an ALPN neither side speaks, a URL this build can't dial: every
+				// redial produces the same failure, so stop and let the operator see it. The peer
+				// comes back when something external changes and re-announces it.
+				Err(err) if !peer_is_retryable(&err) => return Err(err.context("cluster peer rejected us")),
+				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
 			}
 
-			tokio::time::sleep(backoff).await;
+			backoff.sleep().await;
 		}
 	}
 
@@ -984,6 +986,21 @@ impl Cluster {
 
 		Err(cs.closed().await.into())
 	}
+}
+
+/// Whether a failed peer dial is worth repeating.
+///
+/// The dial and the session both report typed errors that classify themselves; anything else is an
+/// internal invariant or a malformed peer entry, which no redial fixes.
+fn peer_is_retryable(err: &anyhow::Error) -> bool {
+	if let Some(err) = err.downcast_ref::<moq_native::Error>() {
+		return err.is_retryable();
+	}
+	if let Some(err) = err.downcast_ref::<moq_net::Error>() {
+		return err.is_retryable();
+	}
+
+	false
 }
 
 /// Extract and remove the `cost` query param from a peer URL.
@@ -1118,6 +1135,23 @@ where
 mod tests {
 	use super::*;
 	use crate::Config;
+
+	/// A dropped session is what a redial exists for; a rejected token is not. Both reach the loop
+	/// as `anyhow`, wrapped in the `.context` the dial adds, so the classification has to survive
+	/// that wrapping (it's the whole reason this helper exists rather than a `matches!`).
+	#[test]
+	fn peer_retries_only_transient_failures() {
+		let dropped = anyhow::Error::from(moq_net::Error::Transport("connection lost".to_string()));
+		assert!(peer_is_retryable(&dropped));
+
+		let rejected = anyhow::Error::from(moq_native::Error::from(moq_native::ConnectError::Unauthorized))
+			.context("failed to connect to cluster peer");
+		assert!(!peer_is_retryable(&rejected));
+
+		// Nothing typed to go on: an internal invariant, or a peer entry that never parsed.
+		let internal = anyhow::anyhow!("cluster peer dial without an attached QUIC client");
+		assert!(!peer_is_retryable(&internal));
+	}
 
 	/// The publish task holds only a `Weak` to its producer, so it stops when the
 	/// last `moq_stats::Producer` clone drops. Attaching one must therefore hand

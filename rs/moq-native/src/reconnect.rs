@@ -9,6 +9,10 @@ use url::Url;
 use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
+///
+/// Only failures that could plausibly clear on their own are retried at all
+/// ([`Error::is_retryable`]); this decides how long to wait between those retries and when to stop.
+/// The delays carry jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -65,6 +69,17 @@ impl Default for Backoff {
 	}
 }
 
+impl From<&Backoff> for moq_net::retry::Config {
+	fn from(backoff: &Backoff) -> Self {
+		let mut config = Self::default();
+		config.initial = backoff.initial;
+		config.multiplier = backoff.multiplier;
+		config.max = backoff.max;
+		config.timeout = backoff.timeout;
+		config
+	}
+}
+
 impl Backoff {
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
@@ -99,7 +114,8 @@ struct State {
 	status: Option<Status>,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
-	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
+	/// Set when the reconnect loop permanently gives up: a failure no retry can clear, or the
+	/// backoff timeout expiring.
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
@@ -125,7 +141,11 @@ impl ConnectionStatsReader {
 /// Handle to a background reconnect loop.
 ///
 /// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
+/// backoff. This loop is the only retry owner for the connection: a caller that rebuilds it on
+/// failure restarts the backoff from its initial delay, which turns the escalation back into a tight
+/// loop. Watch [`closed`](Self::closed) instead.
+///
+/// The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
 /// that transparently reconnects: [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`connected`](Self::connected)
@@ -180,20 +200,10 @@ impl Reconnect {
 		url: Url,
 		backoff: Backoff,
 	) -> crate::Result<()> {
-		let mut delay = backoff.initial;
-		let mut retry_start = tokio::time::Instant::now();
+		let mut retry = moq_net::retry::Backoff::new((&backoff).into());
 		let mut last_error: Option<Error> = None;
 
 		loop {
-			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
-				let timeout = backoff.timeout;
-				let msg = match last_error {
-					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
-					None => format!("reconnect timed out after {timeout:?}"),
-				};
-				return Err(Error::Reconnect(msg));
-			}
-
 			tracing::info!(%url, "connecting");
 
 			match client.connect(url.clone()).await {
@@ -222,8 +232,7 @@ impl Reconnect {
 						// Stayed up past the initial backoff: a healthy session. Reset the backoff
 						// window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
-						delay = backoff.initial;
-						retry_start = tokio::time::Instant::now();
+						retry.reset();
 						last_error = None;
 					} else {
 						// Connected then dropped almost immediately (e.g. the server accepts then
@@ -232,6 +241,9 @@ impl Reconnect {
 						// sleep below so repeated flaps escalate instead of spinning the CPU.
 						if let Err(err) = closed {
 							let err = Error::from(err);
+							if !err.is_retryable() {
+								return Err(err);
+							}
 							tracing::warn!(%url, %err, "session severed immediately, retrying");
 							last_error = Some(err);
 						} else {
@@ -240,16 +252,25 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					if err.is_auth() {
+					// Auth, TLS material, an unsupported flag, a URL no backend can dial: the next
+					// dial is byte-for-byte the same, so surface it instead of hiding it behind a
+					// warning every few seconds.
+					if !err.is_retryable() {
 						return Err(err);
 					}
 					last_error = Some(err);
 				}
 			}
 
-			tracing::warn!(%url, ?delay, "reconnecting after backoff");
-			tokio::time::sleep(delay).await;
-			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+			tracing::warn!(%url, "reconnecting after backoff");
+			if !retry.sleep().await {
+				let timeout = backoff.timeout;
+				let msg = match last_error {
+					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
+					None => format!("reconnect timed out after {timeout:?}"),
+				};
+				return Err(Error::Reconnect(msg));
+			}
 		}
 	}
 
@@ -315,8 +336,9 @@ impl Reconnect {
 
 	/// Poll whether the reconnect loop has stopped.
 	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded), `Ready(Ok(()))` if
-	/// stopped by dropping the handle, `Pending` while it's still running.
+	/// `Ready(Err)` if it permanently gave up (a failure no retry can clear, or the backoff timeout
+	/// expiring), `Ready(Ok(()))` if stopped by dropping the handle, `Pending` while it's still
+	/// running.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {

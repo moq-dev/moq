@@ -139,6 +139,20 @@ impl Error {
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
 		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
 	}
+
+	/// Whether repeating the failed operation could plausibly succeed with nothing else changing.
+	/// See [`moq_net::Error::is_retryable`].
+	///
+	/// Only the transport and local I/O can be transient here. Everything else is a property of the
+	/// bytes themselves: a container, codec, or catalog that failed to parse once parses to the same
+	/// failure every time, so a loop that retries it never converges.
+	pub fn is_retryable(&self) -> bool {
+		match self {
+			Self::Moq(err) => err.is_retryable(),
+			Self::Io(err) => moq_net::retry::io_retryable(err),
+			_ => false,
+		}
+	}
 }
 
 impl From<anyhow::Error> for Error {

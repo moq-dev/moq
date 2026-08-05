@@ -19,6 +19,8 @@ export { RemoteError } from "./error.ts";
 export * as Group from "./group.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */
 export * as Path from "./path.ts";
+/** Retry policy: which failures are worth repeating, and how long to wait before repeating them. */
+export * as Retry from "./retry.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
 export * as Time from "./time.ts";
 /** Track role handles. */

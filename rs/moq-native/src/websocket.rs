@@ -223,6 +223,28 @@ impl Error {
 			_ => None,
 		}
 	}
+
+	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
+	pub(crate) fn is_retryable(&self) -> bool {
+		match self {
+			// The TCP socket. `kind` tells a refused port from a bind address this host can't use.
+			Self::Io(err) => crate::error::io_retryable(err),
+
+			// A non-101 upgrade is the server's answer, so only the "ask again later" statuses are
+			// worth another try. Every other qmux failure is the TCP/TLS exchange.
+			Self::Connect(qmux::Error::Http(status)) => matches!(status, 408 | 429 | 502 | 503 | 504),
+			Self::Connect(_) | Self::Accept(_) | Self::WebSocketConnect(_) => true,
+
+			// The server's settled answer on our credentials.
+			Self::ConnectRejected(_) => false,
+
+			// Configuration: the fallback is switched off, or the URL can't carry WebSocket.
+			Self::Disabled | Self::MissingHostname | Self::UnsupportedScheme(_) => false,
+
+			// The handshake request couldn't even be built, so there is nothing to send again.
+			Self::BuildRequest(_) | Self::ProtocolHeader(_) => false,
+		}
+	}
 }
 
 /// Listens for incoming WebSocket connections on a TCP port.

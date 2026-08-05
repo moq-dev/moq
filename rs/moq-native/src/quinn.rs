@@ -410,6 +410,63 @@ impl Error {
 			_ => None,
 		}
 	}
+
+	/// Whether another dial could plausibly succeed. See [`crate::Error::is_retryable`].
+	pub(crate) fn is_retryable(&self) -> bool {
+		match self {
+			// Local socket and endpoint setup. `kind` tells a port already in use (permanent until
+			// something else moves) from a transient failure to allocate one.
+			Self::BindSocket(err) | Self::CreateEndpoint(err) | Self::LocalAddr(err) | Self::ResolveBind(err) => {
+				crate::error::io_retryable(err)
+			}
+
+			// DNS is a service like any other: a lookup failure, or an answer that hasn't
+			// propagated yet, resolves on its own.
+			Self::DnsLookup(_) | Self::NoDnsEntries => true,
+
+			// The `http://` fingerprint bootstrap, which is a plain HTTP request to the relay.
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				crate::error::http_retryable(err)
+			}
+
+			// The QUIC exchange itself: handshake, established connection, WebTransport CONNECT.
+			// Deliberately not decomposed. A rejected certificate arrives as a closed connection
+			// here and is retried until the give-up budget expires, which is the right call while
+			// certificates rotate underneath a long-lived publisher.
+			Self::Connection(_) | Self::Establish(_) | Self::Client(_) | Self::Server(_) | Self::RecvRequest(_) => true,
+
+			// Retryable if any raced address is: one unroutable address must not retire the rest.
+			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
+
+			// Quinn refused before a packet left the machine, so the next attempt is identical.
+			Self::Connect(_) => false,
+
+			// The server's settled answer on our credentials.
+			Self::ConnectRejected(_) => false,
+
+			// Configuration: the URL, the qlog directory, the QUIC-LB sizing, the TLS material,
+			// or a runtime that isn't there.
+			Self::CreateQlog(_)
+			| Self::NoRuntime
+			| Self::InvalidDnsName
+			| Self::InvalidFingerprint(_)
+			| Self::InvalidScheme
+			| Self::UnsupportedScheme(_)
+			| Self::QuicLbNonceTooSmall
+			| Self::QuicLbCidTooLong(_)
+			| Self::ClientVerifier(_)
+			| Self::NoInitialCipherSuite(_)
+			| Self::Tls(_) => false,
+
+			// Negotiation produced something we can't speak. Both ends have to change first.
+			Self::MissingHandshake
+			| Self::MissingAlpn
+			| Self::DecodeAlpn(_)
+			| Self::UnsupportedAlpn(_)
+			| Self::MissingServerName
+			| Self::BuildUrl(_) => false,
+		}
+	}
 }
 
 fn map_client_error(err: web_transport_quinn::ClientError) -> Error {

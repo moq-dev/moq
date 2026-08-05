@@ -31,8 +31,19 @@ use moq_mux::catalog::{self, CatalogFormat, Stream};
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
-/// How long to wait before retrying the initial catalog subscription.
-const CATALOG_RETRY: Duration = Duration::from_millis(250);
+/// Backoff for the initial catalog subscription.
+///
+/// The usual failure is a publisher that has announced its broadcast but not yet written its
+/// catalog track, so this waits for external state rather than repeating a failed request. Unbounded
+/// for that reason, but escalating: a source that stays silent for an hour must not be polled four
+/// times a second for an hour. The broadcast closing is what ends the wait.
+fn catalog_backoff() -> moq_net::retry::Backoff {
+	let mut config = moq_net::retry::Config::default();
+	config.initial = Duration::from_millis(250);
+	config.max = Duration::from_secs(5);
+	config.timeout = Duration::ZERO;
+	moq_net::retry::Backoff::new(config)
+}
 
 /// Export tuning shared across renditions.
 ///
@@ -173,13 +184,23 @@ async fn watch_catalog(
 	config: Config,
 	renditions: renditions::Producer,
 ) {
+	let mut backoff = catalog_backoff();
+
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
+			// The catalog exists but this build can't read it, or the session is gone. Waiting
+			// changes neither, and a broadcast with no servable renditions is what an empty
+			// rendition set already means.
+			Err(err) if !err.is_retryable() => {
+				tracing::warn!(%err, "cannot subscribe to broadcast catalog");
+				renditions.close();
+				return;
+			}
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
 				tokio::select! {
-					_ = tokio::time::sleep(CATALOG_RETRY) => {}
+					_ = backoff.sleep() => {}
 					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
 						renditions.close();
 						return;

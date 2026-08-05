@@ -84,6 +84,7 @@ mod setup;
 mod util;
 mod version;
 
+pub mod retry;
 pub mod stats;
 
 pub use client::*;

@@ -1,6 +1,7 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
+import { Terminal } from "../retry.ts";
 import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import { isWebTransportSupported } from "./browser.ts";
@@ -155,7 +156,7 @@ async function connectInner(url: URL, props: ConnectProps | undefined, abort: Pr
 			: undefined;
 
 	if (!websocket && !webtransport) {
-		throw new Error("no transport available; WebTransport not supported and WebSocket is disabled");
+		throw new Terminal("no transport available; WebTransport not supported and WebSocket is disabled");
 	}
 
 	// Race the available transports, using `.any` to ignore if one participant has an error.
@@ -220,7 +221,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		setupVersion = Ietf.Version.DRAFT_14;
 	} else {
-		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
+		throw new Terminal(`unsupported WebTransport protocol: ${protocol}`);
 	}
 
 	const stream = await Stream.open(session);
@@ -245,7 +246,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 
 	const serverCompat = await stream.reader.u53();
 	if (serverCompat !== Lite.StreamId.ServerCompat) {
-		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
+		throw new Terminal(`unsupported server message type: ${serverCompat.toString()}`);
 	}
 
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
@@ -270,7 +271,7 @@ async function connectTransport(url: URL, session: WebTransport, discovery: bool
 			version: server.version as Ietf.IetfVersion,
 		});
 	} else {
-		throw new Error(`unsupported server version: ${server.version.toString()}`);
+		throw new Terminal(`unsupported server version: ${server.version.toString()}`);
 	}
 }
 
@@ -305,7 +306,7 @@ type WebTransportHash = NonNullable<WebTransportOptions["serverCertificateHashes
 function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
 	const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
 	if (!match) {
-		throw new Error("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
+		throw new Terminal("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
 	}
 
 	const binary = atob(match[1].replace(/\s+/g, ""));
