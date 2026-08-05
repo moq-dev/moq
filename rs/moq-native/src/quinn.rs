@@ -429,11 +429,16 @@ impl Error {
 				crate::error::http_retryable(err)
 			}
 
-			// The QUIC exchange itself: handshake, established connection, WebTransport CONNECT.
-			// Deliberately not decomposed. A rejected certificate arrives as a closed connection
-			// here and is retried until the give-up budget expires, which is the right call while
-			// certificates rotate underneath a long-lived publisher.
-			Self::Connection(_) | Self::Establish(_) | Self::Client(_) | Self::Server(_) | Self::RecvRequest(_) => true,
+			// A CONNECT the server actually answered is its settled response unless the status says
+			// otherwise, so a wrong path (404) or an endpoint that doesn't speak WebTransport (405)
+			// surfaces now instead of burning the whole reconnect budget.
+			Self::Client(err) => client_status(err).is_none_or(moq_net::retry::status_retryable),
+
+			// The rest of the QUIC exchange: handshake, established connection, and the server side
+			// of a CONNECT. Deliberately not decomposed. A rejected certificate arrives as a closed
+			// connection here and is retried until the give-up budget expires, which is the right
+			// call while certificates rotate underneath a long-lived publisher.
+			Self::Connection(_) | Self::Establish(_) | Self::Server(_) | Self::RecvRequest(_) => true,
 
 			// Retryable if any raced address is: one unroutable address must not retire the rest.
 			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
@@ -478,26 +483,35 @@ fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::is_retryable`] decides whether the status invites another
+/// attempt. A `404` or `405` is the server's settled answer, so retrying it just burns the reconnect
+/// budget on a URL that will never work.
+fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		web_transport_quinn::ClientError::HttpError(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quinn::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		web_transport_quinn::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
@@ -742,6 +756,41 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn connect_rejected(status: u16) -> Error {
+		Error::Client(web_transport_quinn::ClientError::HttpError(
+			web_transport_quinn::ConnectError::ErrorStatus(
+				web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
+			),
+		))
+	}
+
+	/// A CONNECT the relay answered is its settled response: a wrong path or an endpoint that
+	/// doesn't speak WebTransport must surface immediately rather than after the whole reconnect
+	/// budget. Only the "ask again later" statuses buy another attempt.
+	#[test]
+	fn a_rejected_connect_status_is_terminal() {
+		for status in [400, 404, 405, 410, 501] {
+			assert!(
+				!connect_rejected(status).is_retryable(),
+				"{status} should stop the reconnect loop"
+			);
+		}
+
+		for status in [408, 429, 502, 503, 504] {
+			assert!(connect_rejected(status).is_retryable(), "{status} should be retried");
+		}
+
+		// Auth is peeled off into its own variant before reaching the generic client arm.
+		assert_eq!(
+			connect_rejected(401).connect_error(),
+			Some(crate::ConnectError::Unauthorized)
+		);
+		assert_eq!(
+			connect_rejected(403).connect_error(),
+			Some(crate::ConnectError::Forbidden)
+		);
+	}
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete quinn implementation it must map to.

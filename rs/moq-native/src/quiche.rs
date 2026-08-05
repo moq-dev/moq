@@ -495,13 +495,16 @@ impl Error {
 				crate::error::http_retryable(err)
 			}
 
-			// The QUIC exchange itself: handshake, established connection, WebTransport CONNECT.
-			Self::Connection(_)
-			| Self::Establish(_)
-			| Self::ClientConnect(_)
-			| Self::AcceptRequest(_)
-			| Self::Accept(_)
-			| Self::Reject(_) => true,
+			// A CONNECT the server actually answered is its settled response unless the status says
+			// otherwise, so a wrong path (404) or an endpoint that doesn't speak WebTransport (405)
+			// surfaces now instead of burning the whole reconnect budget.
+			Self::ClientConnect(err) => client_status(err).is_none_or(moq_net::retry::status_retryable),
+
+			// The rest of the QUIC exchange: handshake, established connection, and the server side
+			// of a CONNECT.
+			Self::Connection(_) | Self::Establish(_) | Self::AcceptRequest(_) | Self::Accept(_) | Self::Reject(_) => {
+				true
+			}
 
 			// Retryable if any raced address is: one unroutable address must not retire the rest.
 			Self::Failover(failures) => failures.iter().any(|failure| failure.error.is_retryable()),
@@ -537,26 +540,35 @@ fn map_client_error(err: web_transport_quiche::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quiche::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::is_retryable`] decides whether the status invites another
+/// attempt. A `404` or `405` is the server's settled answer, so retrying it just burns the reconnect
+/// budget on a URL that will never work.
+fn client_status(err: &web_transport_quiche::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quiche::ClientError::Connect(err) => classify_connect_error(err),
+		web_transport_quiche::ClientError::Connect(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quiche::h3::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quiche::h3::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quiche::h3::ConnectError::Status(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quiche::h3::ConnectError::Proto(err) => classify_proto_error(err),
+		web_transport_quiche::h3::ConnectError::Status(status) => Some(status.as_u16()),
+		web_transport_quiche::h3::ConnectError::Proto(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quiche::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quiche::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quiche::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quiche::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quiche::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
