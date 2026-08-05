@@ -203,6 +203,24 @@ mod test {
 		);
 	}
 
+	/// Closing the rejected group is only half the recovery. The record that never landed desyncs a
+	/// compressed encoder, so without a matching reset every later append fails with
+	/// [`Error::Desync`](crate::Error::Desync) before it can use the fresh group that closing prepared.
+	#[test]
+	fn a_rejected_record_leaves_the_encoder_able_to_retry() {
+		let track = rejecting_track();
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_compression(true));
+
+		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
+
+		// The retry fails on the same track, but it has to fail for the same reason: a desync here
+		// would mean the producer had latched itself shut instead of starting a new group.
+		assert!(
+			matches!(producer.append(&json!({ "n": 2 })), Err(crate::Error::Net(_))),
+			"the encoder latched a desync instead of retrying into a fresh group"
+		);
+	}
+
 	#[test]
 	fn embedded_newlines_survive() {
 		// Each record is its own frame (one JSON object), and JSON escapes control characters, so a

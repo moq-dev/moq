@@ -82,13 +82,22 @@ impl<T: Serialize> Inner<T> {
 		// `record` guards the window: any failure below drops it uncommitted.
 		let record = encoder.encode(value)?;
 
-		// A failed open or write drops `record` uncommitted. The log rides a single group and has no
-		// keyframe to resynchronize on, so a compressed encoder refuses to continue rather than emit
-		// frames the consumer cannot decode.
-		track.open()?;
-		track.write(record.payload())?;
-		record.commit();
+		let result = match track.open() {
+			Ok(()) => track.write(record.payload()),
+			Err(err) => Err(err),
+		};
 
+		if let Err(err) = result {
+			// The record never reached the wire, so dropping it desyncs a compressed encoder. `Track`
+			// has already closed the group it published, which is the group roll that recovery needs;
+			// reset the encoder to finish it, or the desync latch refuses every later record even
+			// though the fresh group could carry one.
+			drop(record);
+			encoder.reset();
+			return Err(err);
+		}
+
+		record.commit();
 		Ok(())
 	}
 

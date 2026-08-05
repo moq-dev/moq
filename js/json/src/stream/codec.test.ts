@@ -143,3 +143,20 @@ test("a commit from before a reset does not acknowledge a newer record", () => {
 
 	expect(() => encoder.encode({ n: 2 })).toThrow("compression desynchronized");
 });
+
+// Closing the rejected group is only half the recovery. The record that never landed leaves a
+// compressed encoder desynced, so without a matching reset every later append throws before it can
+// use the fresh group that closing prepared. (Mirrors the Rust
+// `a_rejected_record_leaves_the_encoder_able_to_retry`.)
+test("a rejected record leaves the producer able to retry", () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Rec>(track, { compression: true });
+
+	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
+	track.close();
+	expect(() => producer.append({ n: 1 })).toThrow();
+
+	// The retry fails on the same closed track, but it must fail for that reason rather than the
+	// encoder having latched itself shut.
+	expect(() => producer.append({ n: 2 })).not.toThrow("compression desynchronized");
+});
