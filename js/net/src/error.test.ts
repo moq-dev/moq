@@ -122,10 +122,10 @@ test("the code tables match the spec", () => {
 	expect(StreamCode.SessionClosed).toBe(0x3);
 	expect(StreamCode.TooFarBehind).toBe(0x5);
 
-	// Ours sit in the moq-lite range, clear of both moq-transport and the app range.
-	for (const code of [SessionCode.RequiredExtension, StreamCode.Old, StreamCode.Evicted]) {
-		expect(code).toBeGreaterThanOrEqual(32);
-		expect(code).toBeLessThan(64);
+	// The tables carry only what the draft assigns. 32-63 is reserved, so a code there is
+	// something an implementation happens to send, not a meaning to publish.
+	for (const code of [...Object.values(SessionCode), ...Object.values(StreamCode)]) {
+		expect(code).toBeLessThan(32);
 	}
 
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.

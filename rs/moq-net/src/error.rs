@@ -2,10 +2,13 @@ use crate::coding;
 
 /// A code sent when terminating the session.
 ///
-/// One of the two wire registries specified by moq-lite, which mirror moq-transport's:
-/// 0-31 are moq-transport's codes with moq-transport's meaning, 32-63 are moq-lite's, and
-/// 64+ are the application's. The stream registry is [`StreamError`] and the two are
-/// disjoint, so the same integer means different things in each.
+/// One of the two wire registries specified by moq-lite, which reuse moq-transport's codes
+/// unchanged; 64+ are the application's. The stream registry is [`StreamError`] and the two
+/// are disjoint, so the same integer means different things in each.
+///
+/// Variants above the shared codes encode into the draft's reserved 32-63 range. Those are
+/// placeholders, not assignments: we send them because there has to be *some* code, but a
+/// receiver must not read one back (see [`from_code`](Self::from_code)).
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SessionError {
@@ -85,8 +88,12 @@ impl SessionError {
 
 	/// Decode a code received off the wire.
 	///
-	/// Unlike a raw peer code, these are specified, so decoding is a wire contract rather
-	/// than an assumption. Anything unregistered stays [`Self::Unknown`].
+	/// Unlike a raw peer code, the registered ones are specified, so decoding them is a
+	/// wire contract rather than an assumption. Anything unregistered stays
+	/// [`Self::Unknown`], including 32-63: we emit placeholders there for conditions the
+	/// shared codes don't cover, but the draft assigns it no meaning, so a received one is
+	/// not read back as our own placeholder. `to_code` is deliberately not injective as a
+	/// result.
 	pub fn from_code(code: u32) -> Self {
 		match code {
 			0x0 => Self::Cancel,
@@ -97,9 +104,6 @@ impl SessionError {
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x15 => Self::Version,
-			0x20 => Self::RequiredExtension,
-			0x21 => Self::InvalidRole,
-			0x22 => Self::UnexpectedStream,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -113,6 +117,10 @@ impl SessionError {
 ///
 /// The counterpart to [`SessionError`], and a disjoint space: a stream reset of 0 is
 /// [`Internal`](Self::Internal), not a cancellation ([`Cancel`](Self::Cancel) is 1).
+///
+/// Variants above the shared codes encode into the draft's reserved 32-63 range. Those are
+/// placeholders, not assignments: we send them because there has to be *some* code, but a
+/// receiver must not read one back (see [`from_code`](Self::from_code)).
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamError {
@@ -213,6 +221,11 @@ impl StreamError {
 
 	/// Decode a code received off the wire.
 	///
+	/// Only the registered codes decode. 32-63 is the reserved range: we emit placeholders
+	/// there for conditions the shared codes don't cover, but the draft assigns it no
+	/// meaning, so a received one stays [`Unknown`](Self::Unknown) rather than being read
+	/// as our own placeholder. `to_code` is deliberately not injective as a result.
+	///
 	/// `SESSION_CLOSED` decodes to `Session(SessionError::Internal)`: the peer's actual
 	/// session code is not on this stream, so the specific reason is unknown here.
 	pub fn from_code(code: u32) -> Self {
@@ -224,13 +237,6 @@ impl StreamError {
 			0x4 => Self::GoingAway,
 			0x5 => Self::TooFarBehind,
 			0x12 => Self::MalformedTrack,
-			0x20 => Self::NotFound,
-			0x21 => Self::Unroutable,
-			0x22 => Self::Old,
-			0x23 => Self::Evicted,
-			0x24 => Self::WrongSize,
-			0x25 => Self::FrameTooLarge,
-			0x26 => Self::TimestampMismatch,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::Unknown(code),
@@ -602,7 +608,8 @@ mod tests {
 	// every code we send must decode back to what we meant.
 	#[test]
 	fn session_codes_round_trip() {
-		let variants = [
+		// Only the registered codes are a wire contract, so only they round trip.
+		let registered = [
 			SessionError::Cancel,
 			SessionError::Internal,
 			SessionError::Unauthorized,
@@ -611,13 +618,10 @@ mod tests {
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::Version,
-			SessionError::RequiredExtension,
-			SessionError::InvalidRole,
-			SessionError::UnexpectedStream,
 			SessionError::App(0),
 			SessionError::App(404),
 		];
-		for err in variants {
+		for err in registered {
 			assert_eq!(
 				SessionError::from_code(err.to_code()),
 				err,
@@ -629,21 +633,44 @@ mod tests {
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
-		// Ours sit in the moq-lite range, clear of both.
-		assert!((0x20..0x40).contains(&SessionError::RequiredExtension.to_code()));
+
+		// The rest encode into 32-63, which the draft reserves rather than assigns. We
+		// send a placeholder because there has to be some code, but decoding one back
+		// would be reading a meaning the wire does not carry, so it stays Unknown. That
+		// makes to_code deliberately non-injective.
+		for err in [
+			SessionError::RequiredExtension,
+			SessionError::InvalidRole,
+			SessionError::UnexpectedStream,
+		] {
+			let code = err.to_code();
+			assert!((0x20..0x40).contains(&code), "{err:?} left the reserved range");
+			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
+		}
+
 		// Unregistered codes keep their value instead of being given a meaning.
 		assert_eq!(SessionError::from_code(0x1f), SessionError::Unknown(0x1f));
 	}
 
 	#[test]
 	fn stream_codes_round_trip() {
-		let variants = [
+		// Only the registered codes are a wire contract, so only they round trip.
+		let registered = [
 			StreamError::Internal,
 			StreamError::Cancel,
 			StreamError::DeliveryTimeout,
 			StreamError::GoingAway,
 			StreamError::TooFarBehind,
 			StreamError::MalformedTrack,
+			StreamError::App(7),
+		];
+		for err in registered {
+			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
+		}
+
+		// The rest encode into the reserved 32-63 range and decode back as Unknown, for
+		// the same reason as the session codes above.
+		for err in [
 			StreamError::NotFound,
 			StreamError::Unroutable,
 			StreamError::Old,
@@ -651,10 +678,10 @@ mod tests {
 			StreamError::WrongSize,
 			StreamError::FrameTooLarge,
 			StreamError::TimestampMismatch,
-			StreamError::App(7),
-		];
-		for err in variants {
-			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
+		] {
+			let code = err.to_code();
+			assert!((0x20..0x40).contains(&code), "{err:?} left the reserved range");
+			assert_eq!(StreamError::from_code(code), StreamError::Unknown(code));
 		}
 
 		// The spaces are disjoint: 0 is a cancellation for a session but an internal
@@ -713,7 +740,11 @@ mod tests {
 		assert!(matches!(stream(0x1), Error::Cancel));
 		assert!(matches!(stream(0x0), Error::Remote(0)));
 		assert!(matches!(stream(0x5), Error::Lagged));
-		assert!(matches!(stream(0x22), Error::Old));
+
+		// 0x22 is what our own `Old` encodes to, but the draft reserves 32-63 rather than
+		// assigning it, so a peer's 0x22 stays opaque instead of being read as `Old`.
+		assert!(matches!(stream(0x22), Error::Remote(0x22)));
+		assert!(matches!(session(0x22), Error::Remote(0x22)));
 
 		// Neither: the transport itself failed.
 		assert!(matches!(

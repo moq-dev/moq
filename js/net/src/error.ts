@@ -7,9 +7,13 @@
 /**
  * Codes a peer sends when terminating the session, mirroring the Rust `SessionError`.
  *
- * Specified by moq-lite: 0-31 are moq-transport's codes with moq-transport's meaning,
- * 32-63 are moq-lite's, and 64+ are the application's. {@link StreamCode} is the other
- * registry, and the two are disjoint, so the same integer means different things in each.
+ * Specified by moq-lite, which reuses moq-transport's codes unchanged; 64 and up are the
+ * application's. {@link StreamCode} is the other registry, and the two are disjoint, so the
+ * same integer means different things in each.
+ *
+ * Codes 32-63 are reserved rather than assigned. An implementation may send one for a
+ * condition with no code here, but the draft gives it no meaning, so treat anything not
+ * listed below as an unspecified error rather than guessing.
  *
  * @public
  */
@@ -30,12 +34,6 @@ export const SessionCode = {
 	Timeout: 0x11,
 	/** No version could be negotiated. */
 	Version: 0x15,
-	/** A required extension was not offered. */
-	RequiredExtension: 0x20,
-	/** The peer acted against the role it advertised at SETUP. */
-	InvalidRole: 0x21,
-	/** A stream was opened with an unknown or disallowed type. */
-	UnexpectedStream: 0x22,
 } as const;
 
 /** A session termination code. See {@link SessionCode}. */
@@ -46,6 +44,8 @@ export type SessionCode = (typeof SessionCode)[keyof typeof SessionCode];
  *
  * The counterpart to {@link SessionCode}, and a disjoint space: a stream reset of 0 is
  * {@link StreamCode.Internal}, not a cancellation ({@link StreamCode.Cancel} is 1).
+ *
+ * Codes 32-63 are reserved rather than assigned, same as {@link SessionCode}.
  *
  * @public
  */
@@ -64,20 +64,6 @@ export const StreamCode = {
 	TooFarBehind: 0x5,
 	/** The track's content could not be parsed. */
 	MalformedTrack: 0x12,
-	/** The requested broadcast or track does not exist. */
-	NotFound: 0x20,
-	/** The broadcast is neither announced nor served, so there is no route to it. */
-	Unroutable: 0x21,
-	/** The group was superseded by a newer group and dropped. */
-	Old: 0x22,
-	/** The group was dropped under memory pressure; unlike Old, it can be re-fetched. */
-	Evicted: 0x23,
-	/** A frame's payload length disagreed with its declared size. */
-	WrongSize: 0x24,
-	/** A frame declared a payload larger than the receiver accepts. */
-	FrameTooLarge: 0x25,
-	/** A frame's timestamp doesn't match its track's negotiated timescale. */
-	TimestampMismatch: 0x26,
 } as const;
 
 /** A stream reset code. See {@link StreamCode}. */
@@ -97,7 +83,7 @@ export type StreamCode = (typeof StreamCode)[keyof typeof StreamCode];
  * try {
  *   frame = await group.readFrame();
  * } catch (err) {
- *   if (err instanceof RemoteError && err.code === StreamCode.Old) return;
+ *   if (err instanceof RemoteError && err.code === StreamCode.Cancel) return;
  *   throw err;
  * }
  * ```

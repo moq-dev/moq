@@ -238,68 +238,64 @@ After resetting the send direction, an endpoint MAY close the recv direction (ST
 However, it is ultimately the other peer's responsibility to close their send direction.
 
 ## Error Codes {#error-codes}
-There are two independent error code spaces, matching {{moqt}}: one for terminating the session and one for resetting a stream.
+There are two independent error code spaces, one for terminating the session and one for resetting a stream.
 The same numeric value means different things in each, so an endpoint MUST select the code from the space matching what it is terminating.
 
-Each space is divided into three ranges:
+Both spaces reuse the codes moq-transport assigns, unchanged and with the same meaning, so an endpoint that speaks both protocols has one vocabulary and a relay can forward a peer's code without translating it.
+The codes moq-lite uses are listed in full below; an endpoint MUST NOT assign a moq-lite specific meaning to any code below 32.
 
-| Range | Assigned by | Description |
-| ------- | ------------- | ----------- |
-|  0-31   | {{moqt}} | Used unchanged, with the meaning {{moqt}} assigns. |
-| ------- | ------------- | ----------- |
-|  32-63  | moq-lite | Specific to moq-lite; listed below. |
-| ------- | ------------- | ----------- |
-|  64+    | the application | Opaque to moq-lite. |
-| ------- | ------------- | ----------- |
-
-Sharing the low range means an endpoint that speaks both protocols has one vocabulary, and a relay can forward a peer's code without translating it.
-An endpoint MUST NOT assign a moq-lite specific meaning to a code below 32.
-
+Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
 An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
+
+Codes 32 through 63 are reserved and MUST NOT be interpreted.
+Implementations currently emit values in this range for conditions with no code above, but those values are provisional placeholders, not assignments: a receiver MUST treat one as an unspecified error, exactly as it would any other unregistered code.
+A future revision will assign this range, or fold the conditions into the shared codes.
 
 ### Session Error Codes
 Sent when terminating the session, via the transport's session close.
 
-The following {{moqt}} session codes are used unchanged: NO_ERROR (0x0), INTERNAL_ERROR (0x1), UNAUTHORIZED (0x2), PROTOCOL_VIOLATION (0x3), KEY_VALUE_FORMATTING_ERROR (0x6), GOAWAY_TIMEOUT (0x10), CONTROL_MESSAGE_TIMEOUT (0x11), and VERSION_NEGOTIATION_FAILED (0x15).
-
-moq-lite adds:
-
 | Code | Name | Description |
 | ------- | ------------- | ----------- |
-|  0x20  | Required Extension | A required extension was not offered by the peer. |
+|  0x0   | NO_ERROR | The session was terminated without error. |
 | ------- | ------------- | ----------- |
-|  0x21  | Invalid Role | The peer acted against the role it advertised in SETUP. |
+|  0x1   | INTERNAL_ERROR | An implementation-specific error. |
 | ------- | ------------- | ----------- |
-|  0x22  | Unexpected Stream | A stream was opened with an unknown or disallowed type. |
+|  0x2   | UNAUTHORIZED | The endpoint is not authorized to establish the session, or to perform an operation on it. |
+| ------- | ------------- | ----------- |
+|  0x3   | PROTOCOL_VIOLATION | The peer violated this specification. |
+| ------- | ------------- | ----------- |
+|  0x6   | KEY_VALUE_FORMATTING_ERROR | A key-value pair was malformed, or repeated more than allowed. |
+| ------- | ------------- | ----------- |
+|  0x10  | GOAWAY_TIMEOUT | The peer did not close within the GOAWAY drain deadline. |
+| ------- | ------------- | ----------- |
+|  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
+| ------- | ------------- | ----------- |
+|  0x15  | VERSION_NEGOTIATION_FAILED | No version could be negotiated. |
 | ------- | ------------- | ----------- |
 
 ### Stream Error Codes
 Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (STOP_SENDING).
 
-The following {{moqt}} stream codes are used unchanged: INTERNAL_ERROR (0x0), CANCELED (0x1), DELIVERY_TIMEOUT (0x2), SESSION_CLOSED (0x3), GOING_AWAY (0x4), TOO_FAR_BEHIND (0x5), and MALFORMED_TRACK (0x12).
-
-Note that CANCELED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
-An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
-
-moq-lite adds:
-
 | Code | Name | Description |
 | ------- | ------------- | ----------- |
-|  0x20  | Not Found | The requested broadcast or track does not exist. |
+|  0x0   | INTERNAL_ERROR | An implementation-specific error. |
 | ------- | ------------- | ----------- |
-|  0x21  | Unroutable | The broadcast is neither announced nor served, so there is no route to it. |
+|  0x1   | CANCELLED | The stream was cancelled by either endpoint. A routine unsubscribe. |
 | ------- | ------------- | ----------- |
-|  0x22  | Old | The group was superseded by a newer group and dropped. See [Expiration](#expiration). |
+|  0x2   | DELIVERY_TIMEOUT | The content missed its delivery deadline. |
 | ------- | ------------- | ----------- |
-|  0x23  | Evicted | The group was dropped under memory pressure. Unlike Old it was still current, so it MAY be re-fetched. |
+|  0x3   | SESSION_CLOSED | The session is closing, taking this stream with it. |
 | ------- | ------------- | ----------- |
-|  0x24  | Wrong Size | A frame's payload length disagreed with its declared size. |
+|  0x4   | GOING_AWAY | A GOAWAY was sent or received. |
 | ------- | ------------- | ----------- |
-|  0x25  | Frame Too Large | A frame declared a payload larger than the receiver accepts. |
+|  0x5   | TOO_FAR_BEHIND | The reader fell too far behind and content was dropped to catch up. |
 | ------- | ------------- | ----------- |
-|  0x26  | Timestamp Mismatch | A frame's timestamp did not match the track's negotiated timescale. |
+|  0x12  | MALFORMED_TRACK | The track's content could not be parsed. |
 | ------- | ------------- | ----------- |
+
+Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
+An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
 
 ## Handshake
 See the [Session](#session) section for ALPN negotiation and session activation details.
@@ -1339,7 +1335,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the GOAWAY New Session URI at 8,192 bytes, matching moq-transport.
 - Restricted the GOAWAY New Session URI to servers, specified a duplicate GOAWAY as a protocol violation, and recommended scheme continuity and sticky redirects.
 - Exempted a ceiling-cost serving path from the actively-carrying cost discount: a relay whose serving path costs the saturation ceiling (primarily a session that received a GOAWAY) advertises the ceiling instead of 0, so the drain propagates downstream instead of being re-masked by each carrying hop. Keyed on the value, not the reason, which does not travel on the wire.
-- Added the Error Codes section, defining separate session and stream code spaces, each split into three ranges: 0-31 assigned by moq-transport and used unchanged, 32-63 specific to moq-lite, and 64+ opaque application codes. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELED is 0x1).
+- Added the Error Codes section, defining separate session and stream code spaces and listing the codes moq-lite uses, reused unchanged from moq-transport. Codes 64+ are the application's; 32-63 are reserved and MUST NOT be interpreted, pending a future revision. Previously the codes were unspecified, so an endpoint could neither send one a peer would understand nor safely interpret one it received. Note this renumbers every code an existing implementation sent, and that a stream reset of 0x0 is now INTERNAL_ERROR rather than a cancellation (CANCELLED is 0x1).
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.
