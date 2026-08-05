@@ -7,7 +7,10 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
 };
 
-use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster};
+use super::{
+	Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter, cluster,
+	subscriber::is_protocol_violation,
+};
 
 /// Everything one moq-transport session needs to start.
 pub struct Config<S: web_transport_trait::Session> {
@@ -167,6 +170,11 @@ pub fn start<S: web_transport_trait::Session>(
 								_ => Stream::open(&sub_ns_adapter, version).await?,
 							};
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								// The peer breaking the protocol is fatal, and the driver
+								// below turns this into the session close the draft wants.
+								if is_protocol_violation(&err) {
+									return Err(err);
+								}
 								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 							}
 							Ok::<(), Error>(())
@@ -273,6 +281,11 @@ pub fn start<S: web_transport_trait::Session>(
 						prefixes.push(async move {
 							let stream = Stream::open(&sub_ns_session, version).await?;
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+								// The peer breaking the protocol is fatal, and the driver
+								// below turns this into the session close the draft wants.
+								if is_protocol_violation(&err) {
+									return Err(err);
+								}
 								tracing::warn!(%err, "subscribe_namespace failed, continuing without");
 							}
 							Ok::<(), Error>(())
@@ -625,6 +638,76 @@ mod tests {
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();
 		writes.windows(needle.len()).filter(|window| *window == needle).count()
+	}
+
+	/// The peer's REQUEST_OK followed by a NAMESPACE in the base form: no cluster
+	/// parameters, so no HOP_PATH. Built with the crate's own writer so the framing
+	/// can't drift from the encoder under test.
+	async fn namespace_without_hop_path(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		writer.encode(&ietf::RequestOk::ID).await.unwrap();
+		writer.encode(&ietf::RequestOk { request_id: None }).await.unwrap();
+		writer.encode(&ietf::Namespace::ID).await.unwrap();
+		writer
+			.encode(&ietf::Namespace {
+				suffix: crate::Path::new("cam"),
+				cluster: None,
+			})
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// A session that negotiated the MoQ Cluster extension requires HOP_PATH on every
+	/// NAMESPACE, and the draft answers a missing one by closing the session.
+	///
+	/// Driven through `start` rather than `run_subscribe_namespace` directly: that
+	/// stream always surfaced the error, and the bug was this loop logging it and
+	/// carrying on, so a test below the loop would pass either way.
+	#[tokio::test]
+	async fn a_namespace_without_a_hop_path_closes_the_session() {
+		const VERSION: Version = Version::Draft19;
+
+		// A driver that swallows the violation parks forever instead of failing, so
+		// bound it: paused time makes the deadline fire the moment nothing else can run.
+		tokio::time::pause();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
+		let log = session.log.clone();
+
+		let driver = start(Config {
+			session,
+			setup: None,
+			request_id_max: None,
+			client: true,
+			publish: None,
+			subscribe: Some(origin),
+			peer_origin: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			peer_setup_stream: None,
+			// A peer that declared its Hop ID negotiated the extension, which is what
+			// makes the cluster parameters mandatory in both directions.
+			peer_cluster: Some(cluster::Peer {
+				origin: Some(crate::Origin::new(2).unwrap()),
+				cost: None,
+			}),
+		})
+		.expect("start the session");
+
+		let err = tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+			.await
+			.expect("the session ended rather than carrying on")
+			.expect_err("a malformed NAMESPACE fails the session");
+
+		assert!(is_protocol_violation(&err), "not treated as the peer's fault: {err}");
+		assert_eq!(log.closes(), vec![(err.to_code(), err.to_string())]);
 	}
 
 	/// A subscriber issues one SUBSCRIBE_NAMESPACE per PERMITTED PREFIX, and asks for

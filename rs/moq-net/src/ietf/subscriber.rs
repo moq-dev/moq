@@ -36,12 +36,12 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 /// Whether an error means the peer broke the protocol, as opposed to a stream or
 /// transport failing on its own.
 ///
-/// Only the former justifies taking the whole session down.
-fn is_protocol_violation(err: &Error) -> bool {
+/// Only the former justifies taking the whole session down. An encode error is ours,
+/// so it stays out: we cannot ask the peer to answer for a message we failed to write.
+pub(super) fn is_protocol_violation(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Decode(_)
-			| Error::Encode(_)
 			| Error::BoundsExceeded(_)
 			| Error::WrongSize
 			| Error::TooManyParameters
@@ -304,6 +304,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
+	///
+	/// A failure here is per-prefix, so the caller decides what it means for the
+	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
+	/// stream of ours that simply died (survivable).
 	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
