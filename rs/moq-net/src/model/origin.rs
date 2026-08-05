@@ -117,6 +117,17 @@ pub struct Info {
 	/// ceiling, leaving each track's own window in force.
 	pub cache_duration: Duration,
 
+	/// The retention window given to a track whose publisher advertises none.
+	///
+	/// moq-lite 05+ carries [`latency_max`](track::Info::latency_max) in TRACK_INFO, so a
+	/// track relayed over it keeps the window its publisher chose. Every moq-transport
+	/// draft and moq-lite 01-04 have no such wire property, so a track arriving over one
+	/// of them lands here instead. Raise it on a relay fronting a segmented egress
+	/// (HLS/DASH), which needs a playlist window's worth of history rather than the live
+	/// edge. Defaults to [`track::DEFAULT_LATENCY_MAX`], and [`Self::cache_duration`]
+	/// still caps it.
+	pub latency_default: Duration,
+
 	/// How long a broadcast under this origin outlives the *ungraceful* loss of its
 	/// last source before closing. Within the window the path stays announced and a
 	/// source re-attaching at it (a session reconnecting, a publisher re-announcing)
@@ -136,6 +147,7 @@ impl Default for Info {
 			id: Origin::UNKNOWN,
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
+			latency_default: track::DEFAULT_LATENCY_MAX,
 			linger: Duration::ZERO,
 		}
 	}
@@ -157,6 +169,13 @@ impl Info {
 	/// under this origin, returning `self` for chaining.
 	pub fn with_cache_duration(mut self, cache_duration: Duration) -> Self {
 		self.cache_duration = cache_duration;
+		self
+	}
+
+	/// Set the retention window (see [`Self::latency_default`]) used for tracks whose
+	/// publisher advertises none, returning `self` for chaining.
+	pub fn with_latency_default(mut self, latency_default: Duration) -> Self {
+		self.latency_default = latency_default;
 		self
 	}
 
@@ -914,6 +933,10 @@ pub struct Producer {
 	// [`Info::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
+	// Retention window for a track whose publisher advertises none (see
+	// [`Info::latency_default`]).
+	latency_default: Duration,
+
 	// How long a broadcast outlives ungracefully losing its last source (see
 	// [`Info::linger`]). Zero by default.
 	linger: Duration,
@@ -944,6 +967,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: info.pool,
 			cache_duration: info.cache_duration,
+			latency_default: info.latency_default,
 			linger: info.linger,
 			stats: stats::Session::default(),
 		}
@@ -977,8 +1001,15 @@ impl Producer {
 			id: self.info,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 		}
+	}
+
+	// The retention window for a track whose publisher advertises none (see
+	// [`Info::latency_default`]). Cheaper than `info()`, which clones the pool.
+	pub(crate) fn latency_default(&self) -> Duration {
+		self.latency_default
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -993,6 +1024,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
+			latency_default: track::DEFAULT_LATENCY_MAX,
 			linger: Duration::ZERO,
 			stats: stats::Session::default(),
 		}
@@ -1095,6 +1127,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})
@@ -1151,6 +1184,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})

@@ -1281,6 +1281,109 @@ async fn broadcast_negotiate_client_all_server_transport_19() {
 	broadcast_test("moqt", None, Some("moq-transport-19")).await;
 }
 
+// ── Retention window (track::Info::latency_max) ─────────────────────
+
+/// The window the publisher advertises, distinct from both the model default and
+/// the accepting side's [`LATENCY_DEFAULT`] so the assertions can tell them apart.
+const LATENCY_PUBLISHED: Duration = Duration::from_secs(2);
+
+/// The window the subscribing origin assigns to a track whose publisher advertises
+/// none. Deliberately longer than the publisher's, like a relay fronting a
+/// segmented egress that serves a playlist window's worth of history.
+const LATENCY_DEFAULT: Duration = Duration::from_secs(30);
+
+/// Publish a track advertising [`LATENCY_PUBLISHED`], subscribe to it through an
+/// origin configured with [`LATENCY_DEFAULT`], and return the window the subscriber
+/// ends up with.
+async fn latency_max_test(version: &str) -> Duration {
+	let version: moq_net::Version = version.parse().expect("invalid version");
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let pub_origin = Origin::random().produce();
+	let mut broadcast = pub_origin
+		.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("create broadcast");
+	let info = moq_net::track::Info::default().with_latency_max(LATENCY_PUBLISHED);
+	let track = broadcast.create_track("video", info).expect("create track");
+
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".to_string());
+	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec![version];
+	let mut server = server_config.init().expect("init server");
+	let addr = server.local_addr().expect("local addr");
+
+	let handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&pub_origin).ok().await?;
+		let _broadcast = broadcast;
+		let _track = track;
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	// The origin the session writes remote broadcasts into decides the window for
+	// tracks whose protocol can't carry the publisher's.
+	let sub_origin = moq_net::origin::Info::new(Origin::random())
+		.with_latency_default(LATENCY_DEFAULT)
+		.produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.version = vec![version];
+	let client = client_config.init().expect("init client");
+	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
+		.await
+		.expect("connect timeout")
+		.expect("connect failed");
+
+	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "test");
+	let broadcast = broadcast.expect("expected announce");
+
+	let sub = broadcast
+		.track("video")
+		.unwrap()
+		.subscribe(None)
+		.await
+		.expect("subscribe failed");
+	let latency_max = sub.info().latency_max;
+
+	drop(sub);
+	drop(session);
+	handle.await.expect("server panicked").expect("server failed");
+
+	latency_max
+}
+
+/// moq-lite-05 carries the publisher's window in TRACK_INFO, so it wins over the
+/// subscribing origin's default.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_latency_max_lite_05() {
+	assert_eq!(latency_max_test("moq-lite-05").await, LATENCY_PUBLISHED);
+}
+
+/// moq-lite-01 has no TRACK stream, so the publisher's window never reaches us and
+/// the subscribing origin's default applies.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_latency_max_lite_01() {
+	assert_eq!(latency_max_test("moq-lite-01").await, LATENCY_DEFAULT);
+}
+
+/// moq-transport carries no publisher retention property at all, so an IETF-relayed
+/// track used to fall back to the 5s model default no matter how the deployment was
+/// configured (issue #2645).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_latency_max_transport_18() {
+	assert_eq!(latency_max_test("moq-transport-18").await, LATENCY_DEFAULT);
+}
+
 // ── WebTransport (https://) – same version on both sides ────────────
 
 #[tracing_test::traced_test]

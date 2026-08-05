@@ -63,6 +63,19 @@ pub struct CacheConfig {
 	#[arg(long = "cache-duration", env = "MOQ_CACHE_DURATION", value_parser = humantime::parse_duration)]
 	#[serde(default, with = "humantime_serde")]
 	pub duration: Option<Duration>,
+
+	/// Retention window for a track whose publisher advertises none, e.g. "30s".
+	/// Defaults to 5s.
+	///
+	/// moq-lite 05+ publishers advertise their own window and it is used verbatim.
+	/// Every moq-transport draft and moq-lite 01-04 have no such wire property, so a
+	/// track relayed over one of them retains for this long instead. Raise it when
+	/// this relay fronts a segmented egress (HLS/DASH) that advertises a longer
+	/// playlist window, since serving an older segment means a cache hit that far
+	/// back. `duration` still caps it.
+	#[arg(long = "cache-latency-default", env = "MOQ_CACHE_LATENCY_DEFAULT", value_parser = humantime::parse_duration)]
+	#[serde(default, with = "humantime_serde")]
+	pub latency_default: Option<Duration>,
 }
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
@@ -75,6 +88,11 @@ pub struct Cache {
 	/// track is always kept). [`Duration::MAX`] imposes no ceiling, leaving each
 	/// track's own window in force.
 	pub duration: Duration,
+
+	/// Retention window for a track whose publisher advertises none, which is every
+	/// moq-transport peer and moq-lite 01-04. Defaults to
+	/// [`moq_net::track::DEFAULT_LATENCY_MAX`].
+	pub latency_default: Duration,
 }
 
 impl CacheConfig {
@@ -100,9 +118,14 @@ impl CacheConfig {
 			tracing::info!(?duration, "cache duration ceiling set");
 		}
 
+		if let Some(latency_default) = self.latency_default {
+			tracing::info!(?latency_default, "cache latency default set");
+		}
+
 		Ok(Cache {
 			pool,
 			duration: self.duration.unwrap_or(Duration::MAX),
+			latency_default: self.latency_default.unwrap_or(moq_net::track::DEFAULT_LATENCY_MAX),
 		})
 	}
 }

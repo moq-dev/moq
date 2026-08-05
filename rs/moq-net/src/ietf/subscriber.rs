@@ -606,7 +606,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Set the track timescale to microseconds: IETF object timestamps default to
 		// microseconds, and `create_frame` normalizes each frame into the track scale.
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
-		let info = track::Info::default().with_timescale(crate::Timescale::MICRO);
+		//
+		// moq-transport carries no publisher retention property, so the window comes
+		// from the accepting side (see `origin::Info::latency_default`) rather than
+		// from the peer.
+		let info = track::Info::default()
+			.with_timescale(crate::Timescale::MICRO)
+			.with_latency_max(self.origin.latency_default());
 		let mut track = request.accept(info);
 
 		let request_id = match self.control.next_request_id().await {

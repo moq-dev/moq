@@ -471,6 +471,15 @@ headroom = "2GiB"
 # stays cached. The latest group of every track is always retained, as it is
 # the live edge. Unbounded (each track keeps its own window) when unset.
 duration = "30s"
+
+# Retention window for a track whose publisher advertises none ("30s"), which
+# is every moq-transport peer and moq-lite 01-04: those wire formats carry no
+# publisher retention property, so the relay picks the window instead. Raise it
+# when this relay fronts a segmented egress (HLS/DASH) that advertises a longer
+# playlist window, since serving an older segment is a cache hit that far back.
+# moq-lite 05+ publishers advertise their own window and keep it. Defaults to
+# 5s, and `duration` still caps it.
+latency_default = "30s"
 ```
 
 The `capacity` budget counts group payload bytes, not process RSS, so leave
@@ -486,9 +495,13 @@ until it resumes or the broadcast closes; under memory pressure the byte budget
 is repaid by the tracks that are still writing. A publisher that disconnects has
 its groups released once the broadcast closes (see `cluster.linger`).
 
-All three flags also accept CLI arguments (`--cache-capacity`,
-`--cache-headroom`, `--cache-duration`) and environment variables
-(`MOQ_CACHE_CAPACITY`, `MOQ_CACHE_HEADROOM`, `MOQ_CACHE_DURATION`).
+`duration` only ever lowers retention. `latency_default` is the one knob that
+raises it, and only for peers whose protocol never told us what to keep.
+
+All four flags also accept CLI arguments (`--cache-capacity`,
+`--cache-headroom`, `--cache-duration`, `--cache-latency-default`) and
+environment variables (`MOQ_CACHE_CAPACITY`, `MOQ_CACHE_HEADROOM`,
+`MOQ_CACHE_DURATION`, `MOQ_CACHE_LATENCY_DEFAULT`).
 
 ### \[iroh]
 
