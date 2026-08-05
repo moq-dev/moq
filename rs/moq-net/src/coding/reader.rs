@@ -199,7 +199,10 @@ mod tests {
 		for (err, expected) in [
 			(Error::Cancel, StreamError::Cancel.to_code()),
 			(Error::Lagged, StreamError::TooFarBehind.to_code()),
-			(Error::Unauthorized, StreamError::Session(crate::SessionError::Unauthorized).to_code()),
+			(
+				Error::Unauthorized,
+				StreamError::Session(crate::SessionError::Unauthorized).to_code(),
+			),
 		] {
 			let mut reader = Reader::new(StopLog::default(), ());
 			reader.abort(&err);

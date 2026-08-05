@@ -248,7 +248,7 @@ pub fn start<S: web_transport_trait::Session>(
 		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
-				session.close(1, "");
+				session.close(SessionError::Internal.to_code(), "");
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
@@ -256,7 +256,7 @@ pub fn start<S: web_transport_trait::Session>(
 			}
 			_ => {
 				tracing::info!("session closed");
-				session.close(0, "");
+				session.close(SessionError::Cancel.to_code(), "");
 			}
 		}
 

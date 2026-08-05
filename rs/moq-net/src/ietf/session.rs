@@ -369,7 +369,7 @@ pub fn start<S: web_transport_trait::Session>(
 		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
-				session.close(1, "");
+				session.close(SessionError::Internal.to_code(), "");
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
@@ -377,7 +377,7 @@ pub fn start<S: web_transport_trait::Session>(
 			}
 			_ => {
 				tracing::info!("session closed");
-				session.close(0, "");
+				session.close(SessionError::Cancel.to_code(), "");
 			}
 		}
 
@@ -833,7 +833,11 @@ mod tests {
 			.expect_err("a malformed NAMESPACE fails the session");
 
 		assert!(is_protocol_violation(&err), "not treated as the peer's fault: {err}");
-		assert_eq!(log.closes(), vec![(err.to_code(), err.to_string())]);
+		// A session close carries a session code, so the peer is told PROTOCOL_VIOLATION
+		// rather than the local table's value for whichever decode error we hit.
+		let (code, reason) = log.closes().first().cloned().expect("the session was closed");
+		assert_eq!(code, SessionError::ProtocolViolation.to_code());
+		assert_eq!(reason, err.to_string());
 	}
 
 	/// A subscriber issues one SUBSCRIBE_NAMESPACE per PERMITTED PREFIX, and asks for

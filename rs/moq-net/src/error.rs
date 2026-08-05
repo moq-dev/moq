@@ -741,7 +741,10 @@ mod tests {
 		}
 
 		// So do app codes, in both spaces.
-		assert_eq!(StreamError::from(&Error::from(StreamError::from_code(64 + 7))).to_code(), 64 + 7);
+		assert_eq!(
+			StreamError::from(&Error::from(StreamError::from_code(64 + 7))).to_code(),
+			64 + 7
+		);
 		assert_eq!(
 			SessionError::from(&Error::from(SessionError::from_code(64 + 7))).to_code(),
 			64 + 7
@@ -752,7 +755,11 @@ mod tests {
 		// on a stream. Downgrade to the unspecified-error code instead.
 		for code in [0x4, 0x5, 0x1f] {
 			let crossed = StreamError::from(&Error::from(SessionError::from_code(code)));
-			assert_eq!(crossed, StreamError::Internal, "session {code:#x} leaked into the stream space");
+			assert_eq!(
+				crossed,
+				StreamError::Internal,
+				"session {code:#x} leaked into the stream space"
+			);
 		}
 	}
 
