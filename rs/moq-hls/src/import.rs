@@ -720,7 +720,7 @@ impl Import {
 						// permanently gone, so one dead variant must not end an import the rest could
 						// still serve. Keeping whichever error came last instead would make the
 						// outcome depend on rendition order.
-						let recoverable = err.status().is_none_or(|status| crate::status_retryable(status));
+						let recoverable = err.status().is_none_or(crate::status_retryable);
 						if recoverable || failed.is_none() {
 							failed = Some(err);
 						}
