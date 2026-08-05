@@ -204,11 +204,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Base moq-transport has no hops on the wire, so the chain is a single entry
 	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
 	/// supplied an identity).
-	fn session_route(&self) -> broadcast::Route {
+	///
+	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
+	/// which reads as 0, but the draft charges every advertisement for the direction it
+	/// arrived over regardless. Skipping it would forward a paid upstream to
+	/// cluster-aware peers as free and pull subscriptions onto the wrong relay.
+	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
 		let mut hops = crate::OriginList::new();
 		hops.push(self.session_origin)
 			.expect("an empty hop chain has room for one entry");
-		broadcast::Route::new().with_hops(hops).with_announce(true)
+		broadcast::Route::new()
+			.with_hops(hops)
+			.with_cost(cluster::link_cost(self.cost, peer))
+			.with_announce(true)
 	}
 
 	/// The route an advertisement describes, or `None` when it must be discarded.
@@ -220,7 +228,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn route(&self, advert: Option<&cluster::Advert>, peer: &cluster::Peer) -> Option<Advertised> {
 		let Some(advert) = advert else {
 			return Some(Advertised {
-				route: self.session_route(),
+				route: self.session_route(peer),
 				publisher: None,
 			});
 		};
@@ -1551,6 +1559,30 @@ mod tests {
 			cost: Some(0),
 		};
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost, 2);
+	}
+
+	/// An advertisement with no path of its own (a peer that did not negotiate the
+	/// extension) still pays for the link it arrived over. Forwarding it as free would
+	/// advertise a paid upstream as the cheapest route in the mesh.
+	#[test]
+	fn a_pathless_advert_still_pays_for_its_link() {
+		let (unpriced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		let peer = cluster::Peer::default();
+
+		// Nothing priced this direction, so it ranks by hop count.
+		assert_eq!(unpriced.route(None, &peer).unwrap().route.cost, cluster::DEFAULT_COST);
+
+		// A peer that declared its egress price is charged it, extension or not.
+		let priced_peer = cluster::Peer {
+			origin: None,
+			cost: Some(4),
+		};
+		assert_eq!(unpriced.route(None, &priced_peer).unwrap().route.cost, 4);
+
+		// Local policy still wins over what the peer declared.
+		let (mut priced, _origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
+		priced.cost = Some(6);
+		assert_eq!(priced.route(None, &priced_peer).unwrap().route.cost, 6);
 	}
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
