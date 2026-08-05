@@ -23,8 +23,10 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "quinn", "websocket", "uds"]
+default = ["iroh", "cluster-lan", "quinn", "websocket", "uds"]
 iroh = ["moq-native/iroh"]
+# Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
+cluster-lan = ["moq-native/mdns"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]

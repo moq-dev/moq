@@ -68,6 +68,37 @@ When two gossiping nodes discover each other, only one of them dials: the node w
 
 A relay with `node` + `mesh` and no `connect` is a passive rendezvous: it sits and waits for inbound connections, then helps everyone else find each other.
 
+### On a local network
+
+On a LAN there may be no seed peer to gossip through and no external service to
+list peers. `cluster.lan` advertises this relay over mDNS and dials the peers
+that advertise themselves back, so a rack or a home lab meshes with no seed list
+at all:
+
+```toml
+[cluster]
+node = "us-west.local:4443"
+
+[cluster.lan]
+enabled = true
+secret  = "/etc/moq/cluster.key"
+```
+
+mDNS only replaces *how peers find each other*. They are dialed at their `node`
+URL and authenticate with `cluster.token` exactly like a gossiped or
+`connect_api` peer, the same tiebreaker decides which side dials, and the same
+dial map means a peer found two ways still opens one session. `lan.enabled`
+without `node` is an error, since there'd be no address to advertise.
+
+`lan.secret` is required rather than optional, and every peer needs the same
+value (`openssl rand -hex 32 > cluster.key`). mDNS is an open channel: anyone on
+the network can advertise, including an attacker naming a URL it controls. Since
+the relay attaches `cluster.token` to any peer it dials, an unauthenticated
+advertisement would be enough to collect that token. So each advertisement
+carries a proof of key possession, bound to the record it travels in so it
+cannot be copied into someone else's, and a relay only dials peers whose proof
+verifies.
+
 ## Origin id
 
 Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.

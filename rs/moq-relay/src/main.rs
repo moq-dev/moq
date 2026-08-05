@@ -84,6 +84,12 @@ async fn main() -> anyhow::Result<()> {
 		None => tracing::info!("listening (stream transports only)"),
 	}
 
+	// Validate the cluster and bind its LAN advertisement before claiming to be
+	// ready: `cluster.run()` below is first polled after the notify, so a bad key
+	// or an mDNS failure would otherwise release dependent units on a relay that
+	// is about to exit.
+	let startup = cluster.start().context("cluster failed to start")?;
+
 	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
@@ -94,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
 	tokio::select! {
-		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
+		Err(err) = cluster.clone().run(startup) => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
 		Err(err) = internal.run() => return Err(err).context("internal server failed"),
 		Err(err) = serve(server, cluster, auth, shutdown) => return Err(err).context("server failed"),
