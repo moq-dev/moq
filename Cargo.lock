@@ -4601,6 +4601,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "flume",
  "futures",
  "hex",
  "hmac 0.13.0",

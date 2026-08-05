@@ -103,6 +103,12 @@ carries a proof of key possession, bound to the record it travels in so it
 cannot be copied into someone else's, and a relay only dials peers whose proof
 verifies.
 
+Startup waits for the mesh to come up before the relay reports itself ready
+(`READY=1` under systemd), so a bad key, a missing `node`, or a host where
+multicast is blocked fails the relay rather than releasing the units that depend
+on it. One working interface is enough: a down VPN adapter or a container bridge
+with multicast off doesn't hold startup back.
+
 ## Origin id
 
 Each relay has an origin id: the value it adds to a broadcast's hop list for loop detection and shortest-path routing. On `moq-lite`, and on a `moqt-17`-or-later session that negotiated the cluster extension, each end declares it at setup so the other can avoid announcing (or serving) a path that already flows through it. Older sessions carry no identity, so a peer only has one if you assign it. By default a fresh random id is picked on every start, which is fine for loop detection but means a relay looks like a brand-new node each time it restarts.

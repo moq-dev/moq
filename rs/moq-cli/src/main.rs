@@ -78,7 +78,7 @@ pub enum Direction {
 ///
 /// Readiness is signaled once every attachment is live, so a bind, mDNS, or key
 /// failure surfaces before the process claims to be up.
-fn spawn_server(
+async fn spawn_server(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	moq: &MoqSide,
 	origin: &moq_net::origin::Producer,
@@ -94,12 +94,7 @@ fn spawn_server(
 
 	#[cfg(feature = "cluster-lan")]
 	let lan = match moq.lan() {
-		true => Some(cluster::Lan::start(
-			&moq.cluster,
-			origin.clone(),
-			&server,
-			moq.client.clone(),
-		)?),
+		true => Some(cluster::Lan::start(&moq.cluster, origin.clone(), &server, moq.client.clone()).await?),
 		false => None,
 	};
 	moq::notify_ready();
@@ -245,7 +240,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		}
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Import)?;
+	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Import).await?;
 
 	// Foreign side: the single source.
 	if let Some(format) = import.source.stdin_format() {
@@ -340,7 +335,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 		moq::notify_ready();
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Export)?;
+	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Export).await?;
 
 	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {

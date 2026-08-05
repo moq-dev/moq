@@ -45,7 +45,7 @@ impl Lan {
 	/// configured, so peers and ordinary clients share a port and a certificate.
 	/// Returns the live [`mdns::Discovery`] alongside, so a bind or mDNS failure
 	/// surfaces before readiness is signaled and [`run`](Self::run) can consume it.
-	pub fn start(
+	pub async fn start(
 		args: &Args,
 		origin: moq_net::origin::Producer,
 		server: &moq_native::Server,
@@ -70,7 +70,7 @@ impl Lan {
 		// been unreachable; mDNS expiry is what ends a dial, not a retry budget.
 		client.backoff.timeout = Some(std::time::Duration::ZERO);
 
-		let discovery = config.advertise()?;
+		let discovery = config.advertise().await?;
 		let credential = discovery.credential().map(str::to_string);
 		Ok((
 			Self {

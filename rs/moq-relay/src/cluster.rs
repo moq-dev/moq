@@ -679,7 +679,7 @@ impl Cluster {
 	///
 	/// Bails when `mesh` gossip is on without `node`, or when peers are configured
 	/// to dial but no client was attached via [`with_client`](Self::with_client).
-	pub fn start(&self) -> anyhow::Result<Startup> {
+	pub async fn start(&self) -> anyhow::Result<Startup> {
 		let (gossip, node) = self.resolve_mesh()?;
 		anyhow::ensure!(
 			!gossip || node.is_some(),
@@ -754,7 +754,7 @@ impl Cluster {
 					.secret
 					.as_deref()
 					.expect("--cluster-lan requires --cluster-lan-secret");
-				Some(lan_discovery(node, secret)?)
+				Some(lan_discovery(node, secret).await?)
 			}
 			false => None,
 		};
@@ -1274,7 +1274,7 @@ impl Cluster {
 /// URL itself, which is what keeps the relay's normal name-and-certificate path
 /// intact. The key is what makes the advertised URL trustworthy enough to dial.
 #[cfg(feature = "cluster-lan")]
-fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::Discovery> {
+async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::Discovery> {
 	let url = peer_url(node)?;
 	// The advertisement is multicast in the clear. The secret authenticates the
 	// record, it does not hide it, so an inline token here would be handed to
@@ -1289,7 +1289,8 @@ fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::D
 	Ok(moq_native::mdns::Config::new(port)
 		.with_node(url)
 		.with_secret(secret)
-		.advertise()?)
+		.advertise()
+		.await?)
 }
 
 /// Extract and remove the `cost` query param from a peer URL.
@@ -1689,13 +1690,13 @@ mod tests {
 
 	/// Enabling gossip (`--cluster-mesh`) without `--cluster-node` has no address to
 	/// advertise, so it must fail fast with a message naming the missing flag.
-	#[test]
-	fn gossip_without_node_errors() {
+	#[tokio::test]
+	async fn gossip_without_node_errors() {
 		let config = ClusterConfig {
 			mesh: Some("true".to_string()),
 			..Default::default()
 		};
-		let err = Cluster::new(config).unwrap().start().expect_err("should error");
+		let err = Cluster::new(config).unwrap().start().await.expect_err("should error");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
 		assert!(msg.contains("--cluster-mesh"), "missing --cluster-mesh in: {msg}");
@@ -1746,7 +1747,7 @@ mod tests {
 		let mut watcher = cluster.origin.consume().announced();
 
 		let cluster_run = cluster.clone();
-		let startup = cluster_run.start().expect("cluster start");
+		let startup = cluster_run.start().await.expect("cluster start");
 		let mut handle = tokio::spawn(async move { cluster_run.run(startup).await });
 
 		// Give the runtime a moment to execute the synchronous setup work.
@@ -1989,8 +1990,8 @@ mod tests {
 
 	/// The LAN needs an address to advertise, like gossip does.
 	#[cfg(feature = "cluster-lan")]
-	#[test]
-	fn lan_without_node_errors() {
+	#[tokio::test]
+	async fn lan_without_node_errors() {
 		let config = ClusterConfig {
 			lan: LanConfig {
 				enabled: Some(true),
@@ -2001,6 +2002,7 @@ mod tests {
 		let err = Cluster::new(config)
 			.unwrap()
 			.start()
+			.await
 			.expect_err("--cluster-lan without --cluster-node must fail");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-node"), "missing --cluster-node in: {msg}");
@@ -2012,8 +2014,8 @@ mod tests {
 	/// key. Starting without one would leak the token to any advertiser, so it is
 	/// refused rather than defaulted to an open mesh.
 	#[cfg(feature = "cluster-lan")]
-	#[test]
-	fn lan_without_a_secret_errors() {
+	#[tokio::test]
+	async fn lan_without_a_secret_errors() {
 		let config = ClusterConfig {
 			node: Some("https://us-west.example.com".to_string()),
 			lan: LanConfig {
@@ -2025,6 +2027,7 @@ mod tests {
 		let err = Cluster::new(config)
 			.unwrap()
 			.start()
+			.await
 			.expect_err("--cluster-lan without --cluster-lan-secret must fail");
 		let msg = format!("{err}");
 		assert!(msg.contains("--cluster-lan-secret"), "missing the secret in: {msg}");

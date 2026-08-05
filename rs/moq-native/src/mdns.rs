@@ -36,6 +36,14 @@ use url::Url;
 /// The DNS-SD service MoQ processes advertise under.
 const SERVICE_TYPE: &str = "_moq._udp.local.";
 
+/// How long [`Config::advertise`] waits for the daemon to announce on some
+/// interface before giving up.
+///
+/// Generous, because this only has to outlast the daemon opening a socket and
+/// writing one multicast packet; the cost of being wrong is refusing to start a
+/// process that would have meshed fine.
+const ANNOUNCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The TXT key carrying the listener certificate's hex SHA-256 fingerprint.
 const TXT_FINGERPRINT: &str = "fp";
 
@@ -70,6 +78,12 @@ enum ErrorKind {
 
 	#[error("secret must be 64 hexadecimal characters or a path to a file containing them, and {0} is neither")]
 	SecretFile(String, #[source] std::io::Error),
+
+	#[error("no network interface could announce on the LAN within {0:?}")]
+	NoInterface(std::time::Duration),
+
+	#[error("no network interface could announce on the LAN")]
+	Interface(#[source] mdns_sd::Error),
 }
 
 impl From<mdns_sd::Error> for Error {
@@ -270,8 +284,12 @@ impl Config {
 	}
 
 	/// Register the advertisement and start browsing for peers.
-	pub fn advertise(self) -> Result<Discovery> {
-		Discovery::new(self)
+	///
+	/// Waits for the daemon to announce on at least one interface before
+	/// returning, so a caller can treat success as "the mesh is live" and gate
+	/// process readiness on it. Errors if no interface works within 5 seconds.
+	pub async fn advertise(self) -> Result<Discovery> {
+		Discovery::new(self).await
 	}
 }
 
@@ -363,7 +381,7 @@ pub struct Discovery {
 }
 
 impl Discovery {
-	fn new(config: Config) -> Result<Self> {
+	async fn new(config: Config) -> Result<Self> {
 		let instance = format!("{:016x}", rand::random::<u64>());
 		let id = match &config.node {
 			Some(node) => node.to_string(),
@@ -399,6 +417,12 @@ impl Discovery {
 		});
 
 		let daemon = ServiceDaemon::new()?;
+		// Subscribe before registering. The daemon opens its multicast sockets
+		// lazily on its own thread, so `ServiceDaemon::new` succeeding proves
+		// nothing; the announcement (or the failure) arrives here. Subscribing
+		// after `register` would race the very event we are waiting for.
+		let monitor = daemon.monitor()?;
+
 		let service = ServiceInfo::new(
 			SERVICE_TYPE,
 			&instance,
@@ -411,6 +435,7 @@ impl Discovery {
 		daemon.register(service)?;
 		let events = daemon.browse(SERVICE_TYPE)?;
 
+		announced(&monitor).await?;
 		tracing::info!(%id, port = config.port, "advertising on the LAN");
 		Ok(Self {
 			instance,
@@ -579,6 +604,52 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 		IpAddr::V6(ip) => format!("moqt://[{ip}]:{}", addr.port()),
 	};
 	url.parse().ok()
+}
+
+/// Wait for the daemon to announce on at least one interface.
+///
+/// The daemon opens its multicast sockets lazily on its own thread, so a
+/// per-interface bind or permission failure never reaches the constructor: it
+/// arrives here as [`mdns_sd::DaemonEvent::Error`]. Without this wait, a process
+/// on a host where multicast is blocked reports itself ready and then sits
+/// permanently isolated, which is the failure this whole gate exists to catch.
+///
+/// One interface is enough. A box routinely has interfaces that cannot carry
+/// mDNS (a down VPN adapter, a container bridge with multicast off), and
+/// refusing to start over one of those would be wrong; an error only decides the
+/// outcome if *nothing* announces.
+async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
+	let deadline = tokio::time::Instant::now() + ANNOUNCE_TIMEOUT;
+	// Kept so a total failure reports why rather than just "timed out".
+	let mut failure = None;
+
+	loop {
+		let event = match tokio::time::timeout_at(deadline, monitor.recv_async()).await {
+			Ok(Ok(event)) => event,
+			// The daemon died, or nothing announced in time. Either way the mesh is
+			// not live, which is exactly what the caller is gating on.
+			Ok(Err(_)) | Err(_) => {
+				return Err(Error(match failure {
+					Some(err) => ErrorKind::Interface(err),
+					None => ErrorKind::NoInterface(ANNOUNCE_TIMEOUT),
+				}));
+			}
+		};
+
+		match event {
+			mdns_sd::DaemonEvent::Announce(service, intf) => {
+				tracing::debug!(%service, %intf, "announced on an interface");
+				return Ok(());
+			}
+			// Not fatal on its own: another interface may still work. Keep the
+			// first one, since it's the likeliest explanation if none does.
+			mdns_sd::DaemonEvent::Error(err) => {
+				tracing::warn!(%err, "an interface could not join the LAN mesh");
+				failure.get_or_insert(err);
+			}
+			_ => continue,
+		}
+	}
 }
 
 /// The instance portion of a DNS-SD fullname like `<instance>._moq._udp.local.`.
@@ -906,12 +977,12 @@ mod tests {
 	}
 
 	/// Advertise on a port nothing listens on, purely to exercise the record.
-	fn discovery(secret: Option<&str>, fingerprint: &str) -> Discovery {
+	async fn discovery(secret: Option<&str>, fingerprint: &str) -> Discovery {
 		let mut config = Config::new(4443).with_fingerprint(fingerprint);
 		if let Some(secret) = secret {
 			config = config.with_secret(Secret::new(secret).expect("valid secret"));
 		}
-		config.advertise().expect("advertise")
+		config.advertise().await.expect("advertise")
 	}
 
 	/// Wait for the peer advertising `fingerprint`, or give up.
@@ -940,14 +1011,62 @@ mod tests {
 	/// pass whether or not the filter ran. [`verify_admits_only_the_secret_holder`]
 	/// and [`a_stolen_proof_does_not_transfer`] prove that half deterministically.
 	///
+	/// One working interface is enough, even when others failed first.
+	///
+	/// The daemon reports per-interface failures as it goes, and a host routinely
+	/// has interfaces that cannot carry mDNS (a down VPN adapter, a container
+	/// bridge with multicast off). Treating the first error as fatal would refuse
+	/// to start a process whose real NIC was fine.
+	#[tokio::test]
+	async fn announce_on_any_interface_is_enough() {
+		let (tx, rx) = flume::unbounded();
+		tx.send(mdns_sd::DaemonEvent::Error(mdns_sd::Error::Msg("eth1 is down".into())))
+			.expect("send");
+		tx.send(mdns_sd::DaemonEvent::Announce(
+			SERVICE_TYPE.to_string(),
+			"eth0".to_string(),
+		))
+		.expect("send");
+
+		announced(&rx).await.expect("one usable interface is enough");
+	}
+
+	/// The whole point of the gate: when nothing announces, advertising fails
+	/// rather than reporting a mesh that is permanently isolated.
+	///
+	/// `ServiceDaemon::new` cannot catch this. It returns before the daemon thread
+	/// opens any socket, so a blocked or unpermitted multicast surfaces only here.
+	#[tokio::test(start_paused = true)]
+	async fn no_usable_interface_fails_the_gate() {
+		// Every interface reported a failure, and none ever announced.
+		let (tx, rx) = flume::unbounded();
+		tx.send(mdns_sd::DaemonEvent::Error(mdns_sd::Error::Msg(
+			"multicast not permitted".into(),
+		)))
+		.expect("send");
+		let err = announced(&rx).await.expect_err("no interface announced");
+		// The per-interface cause, not just "timed out".
+		assert!(format!("{err:#}").contains("no network interface"), "{err}");
+		assert!(
+			std::error::Error::source(&err).is_some(),
+			"the interface failure must be kept as the cause"
+		);
+
+		// And silence is a failure too, not an indefinite wait.
+		let (tx, rx) = flume::unbounded::<mdns_sd::DaemonEvent>();
+		let err = announced(&rx).await.expect_err("silence must not hang");
+		assert!(format!("{err}").contains("within"), "{err}");
+		drop(tx);
+	}
+
 	/// Ignored because it multicasts on the host network, which CI runners may
 	/// block; run it by hand when touching discovery:
 	/// `just rs test -p moq-native --features mdns --run-ignored ignored-only`.
 	#[tokio::test]
 	#[ignore = "needs multicast on the host network; run manually"]
 	async fn a_shared_secret_carries_through_real_mdns() {
-		let mut ours = discovery(Some(KEY_A), "ours");
-		let mut theirs = discovery(Some(KEY_A), "theirs");
+		let mut ours = discovery(Some(KEY_A), "ours").await;
+		let mut theirs = discovery(Some(KEY_A), "theirs").await;
 
 		let (on_ours, on_theirs) = tokio::join!(find(&mut ours, "theirs"), find(&mut theirs, "ours"));
 

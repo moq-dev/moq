@@ -202,7 +202,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		cluster_config.connect = vec![format!("tcp://127.0.0.1:{port_a}/")];
 		let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 
-		let startup = cluster.start().expect("cluster start");
+		let startup = cluster.start().await.expect("cluster start");
 		let cluster_run = tokio::spawn(cluster.clone().run(startup));
 
 		// A dials in; hold its server-side session so we can drain it.
@@ -318,7 +318,7 @@ async fn spawn_relay_with_upstream(
 
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
 
-	let startup = cluster.start().expect("cluster start");
+	let startup = cluster.start().await.expect("cluster start");
 	let handle = tokio::spawn(async move {
 		let cluster_run = cluster.clone();
 		tokio::spawn(async move {
@@ -607,7 +607,7 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let mut cluster_config = ClusterConfig::default();
 	cluster_config.connect = vec![format!("tcp://127.0.0.1:{port}/")];
 	let cluster = Cluster::new(cluster_config).expect("cluster init").with_client(client);
-	let startup = cluster.start().expect("cluster start");
+	let startup = cluster.start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(cluster.clone().run(startup));
 
 	let first_dial = within("upstream accepts the cluster dial", accepted.recv())
