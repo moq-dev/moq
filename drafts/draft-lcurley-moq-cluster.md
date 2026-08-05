@@ -168,6 +168,7 @@ An advertisement arriving from an upstream that did not negotiate the extension 
 
 On receipt, a relay MUST discard an advertisement whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
 This receiver-side check catches loops of any length and is the only loop defense required.
+A conforming sender never sends one ({{selection}}), so a receiver MAY instead close the session with a PROTOCOL_VIOLATION; discarding is what keeps a mesh working when one member does not conform.
 
 ## Accumulating Cost
 A relay MUST add the cost the sending endpoint declared ({{relay-cost}}) to the ROUTE_COST it received before forwarding or acting on an advertisement.
@@ -203,7 +204,9 @@ This is advisory: a receiver MAY apply local policy such as measured RTT instead
 Two advertisements whose HOP_PATH begins with the same non-zero Hop ID share a publisher and carry interchangeable content, so a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor.
 If the first entries differ, or either is 0, they are distinct publishers reusing a namespace: a receiver MUST NOT treat them as interchangeable and SHOULD treat the later as replacing the earlier.
 
-A publisher SHOULD advertise, per session, the best path whose HOP_PATH does not contain the Hop ID that peer declared, and SHOULD advertise nothing when every known path contains it.
+A publisher MUST NOT advertise a path whose HOP_PATH contains the Hop ID that peer declared.
+The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
+Of the paths that remain a publisher SHOULD advertise the best, and advertises nothing when every known path contains that Hop ID.
 Because selection is per session, a peer that the serving path flows through still receives the best standby, which is what lets it fail over if its own copy dies.
 
 When serving a subscription, a publisher MUST select the source by that same rule.
