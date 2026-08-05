@@ -107,6 +107,7 @@ impl Server {
 				stream_id,
 				peer,
 				latency: self.latency,
+				latency_max: None,
 			};
 
 			// `m=request` reads a broadcast out; everything else publishes one in.
@@ -133,6 +134,9 @@ struct Pending {
 	peer: SocketAddr,
 	/// The SRT receive latency, reused as the egress skip threshold on a subscribe.
 	latency: Duration,
+	/// Retention declared on the media tracks an ingest mints, or `None` for hang's own
+	/// default. Override with [`Publish::with_latency_max`].
+	latency_max: Option<Duration>,
 }
 
 /// What an accepted SRT connection wants: to contribute media ([`Publish`]) or to
@@ -205,6 +209,22 @@ impl Publish {
 		self.0.peer
 	}
 
+	/// Set how long relays keep a non-latest group of this publish's media tracks
+	/// fetchable. `None` keeps hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters.
+	///
+	/// Unrelated to the SRT receive latency [`Server::bind`] negotiates, which is a
+	/// transport buffer on this hop.
+	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
+		self.0.latency_max = latency_max.into();
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// connection's MPEG-TS into it until the client disconnects.
 	///
@@ -216,7 +236,7 @@ impl Publish {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
 		tracing::info!(peer = %self.0.peer, %path, "SRT publish accepted");
-		serve_publish(origin, path.as_str(), socket).await
+		serve_publish(origin, path.as_str(), socket, self.0.latency_max).await
 	}
 
 	/// Reject the publish, sending the client a `Forbidden` rejection.
@@ -289,10 +309,15 @@ async fn reject_log(request: ConnectionRequest, reason: ServerRejectReason, peer
 }
 
 /// Pump one accepted SRT socket's MPEG-TS payload into the origin (`m=publish`).
-pub(crate) async fn serve_publish(origin: &origin::Producer, path: &str, mut socket: SrtSocket) -> Result<()> {
+pub(crate) async fn serve_publish(
+	origin: &origin::Producer,
+	path: &str,
+	mut socket: SrtSocket,
+	latency_max: Option<Duration>,
+) -> Result<()> {
 	use futures::TryStreamExt;
 
-	let mut publisher = crate::ts::Publisher::new(origin, path)?;
+	let mut publisher = crate::ts::Publisher::new(origin, path, latency_max)?;
 
 	// Run the read/feed loop so an error surfaces here instead of unwinding past
 	// the publisher, which would drop it (and its tracks) with a bare Error::Dropped.
