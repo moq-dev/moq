@@ -266,3 +266,30 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		globalThis.WebTransport = original;
 	}
 });
+
+test("closing a live connection reports disconnected", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/live");
+
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({ url, websocket: { enabled: false } });
+
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.status.peek()).toBe("connected");
+
+		// Whoever is watching these gets the state they're left holding, not the dead session.
+		reload.close();
+		expect(reload.established.peek()).toBeUndefined();
+		expect(reload.status.peek()).toBe("disconnected");
+		await reload.closed;
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});

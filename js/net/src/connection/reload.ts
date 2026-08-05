@@ -13,8 +13,13 @@ import type { Established } from "./established.ts";
 import type { PoolProps } from "./pool.ts";
 import type { Probe, Stats } from "./stats.ts";
 
-/** @internal Superseded by {@link ConnectProps}, which {@link Reload} takes directly. */
-export type ReloadProps = ConnectProps;
+/**
+ * The {@link ConnectProps} a {@link Reload} accepts.
+ *
+ * Everything {@link connect} takes except `transport`: a supplied session is good for one
+ * connection, and a loop that reconnects has nothing to reuse after the first drop.
+ */
+export type ReloadProps = Omit<ConnectProps, "transport">;
 
 /** The backoff used when nothing else is asked for. */
 const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 30000 };
@@ -92,7 +97,7 @@ export class Reload {
 	// Use the serialized URL as the reactive connection key. URL objects use identity
 	// equality, but replacing one with an equivalent instance should not reconnect.
 	#url: Getter<string | undefined>;
-	constructor(props?: ConnectProps) {
+	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.reload = props?.reload !== false;
@@ -337,6 +342,8 @@ export class Reload {
 	 * {@link Reload.close} after a timeout keeps the original cause.
 	 */
 	#finish(cause?: unknown): void {
+		// Closing the scope also restores `established` and `status`, since the connect run set
+		// them through `effect.set`.
 		this.#signals.close();
 
 		if (cause === undefined) this.#closedResolve();

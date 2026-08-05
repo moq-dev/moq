@@ -141,7 +141,7 @@ export interface ConnectProps {
 	 */
 	reload?: boolean | ReloadDelay;
 
-	/** @internal Superseded by {@link ConnectProps.reload}, which also disables the loop. */
+	/** @internal Backoff settings, ignored when {@link ConnectProps.reload} carries its own. */
 	delay?: ReloadDelay;
 }
 
