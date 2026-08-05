@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include "logger.h"
@@ -25,16 +26,20 @@ public:
 	inline int GetConnectTime() { return connect_time_ms; }
 
 private:
-	// Handed to libmoq as the status callback's user_data, so a callback can tell
-	// which Start() attempt it belongs to. Freed by the terminal callback.
+	// Handed to libmoq as the status callback's user_data. Carries everything a
+	// callback needs about its own Start() attempt, so it never has to read a
+	// member the OBS thread may already be rewriting for the next attempt.
+	// Freed by the terminal callback.
 	struct SessionRef {
 		MoQOutput *output;
 		uint64_t attempt;
+		std::string url;
+		std::chrono::steady_clock::time_point started;
 	};
 
 	static void SessionStatus(void *user_data, int code);
-	void SessionConnected(uint64_t attempt, int epoch);
-	void SessionClosed(uint64_t attempt, int code);
+	void SessionConnected(const SessionRef &ref, int epoch);
+	void SessionClosed(const SessionRef &ref, int code);
 
 	// Tear down the publish state without telling OBS.
 	void Reset();
@@ -53,7 +58,6 @@ private:
 	// Written by the session status callback (libmoq runtime thread), read by
 	// GetConnectTime() (OBS thread); atomic to avoid a data race.
 	std::atomic<int> connect_time_ms;
-	std::chrono::steady_clock::time_point connect_start;
 
 	int origin;
 	int broadcast;
@@ -65,14 +69,15 @@ private:
 	// so a late callback can't touch freed memory.
 	//
 	// The rest of this group is shared with that callback thread, so it is all
-	// guarded by session_mutex. Note the handles above are not: only `session`
-	// is reachable from a callback.
+	// guarded by session_mutex. It is also the only state a callback may touch:
+	// everything a callback needs about its own attempt is copied into its
+	// SessionRef, since the members above belong to whichever attempt is current.
 	std::mutex session_mutex;
 	std::condition_variable session_cv;
 	int outstanding_sessions;
-	// The live session handle, or 0 once retired. libmoq frees the handle before
-	// firing the terminal callback and may hand the same id to the next connect,
-	// so a retired handle must never be closed.
+	// The live session handle, or 0 when there is none. libmoq drops the handle
+	// before firing the terminal callback, so it is retired there rather than
+	// closed later (the close would just fail with "session not found").
 	int session;
 	// Bumped whenever the publish state is torn down or restarted. A status
 	// callback stamped with an older value belongs to a superseded attempt and
