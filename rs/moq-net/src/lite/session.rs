@@ -169,9 +169,9 @@ pub fn start<S: web_transport_trait::Session>(
 		version,
 		peer_setup,
 		peer_origin,
-		// The dialing side prices the link in its own SETUP, so that is also where the
-		// subscriber reads our price from. A server never sets one, leaving the
-		// subscriber to take the price out of the client's SETUP instead.
+		// Local policy for what pulling from this peer costs. Set only when we
+		// configured a price; otherwise the subscriber charges what the peer declared
+		// for its own egress.
 		cost: our_cost,
 		tasks,
 	});

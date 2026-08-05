@@ -6,7 +6,8 @@
 //!
 //! - each endpoint declares its own [`Origin`](crate::Origin) (Hop ID) via the
 //!   RELAY_HOPS Setup Option, which is also what negotiates the extension;
-//! - the dialing side prices the link via the RELAY_COST Setup Option;
+//! - each endpoint prices what subscribing from it costs via the RELAY_COST Setup
+//!   Option, so the two directions are priced independently;
 //! - every advertisement carries the HOP_PATH it traversed and the accumulated
 //!   ROUTE_COST of that path, as Key-Value-Pair message parameters.
 //!
@@ -25,8 +26,8 @@ use super::{Param, Version};
 /// this extension. Odd, so the value is a length-prefixed byte string holding one varint.
 pub const RELAY_HOPS: u64 = 0x40B55;
 
-/// RELAY_COST Setup Option: what crossing this link costs. Even, so the value is a
-/// bare varint. Declared by the client only, so one side owns the price.
+/// RELAY_COST Setup Option: what subscribing from the sender costs. Even, so the value
+/// is a bare varint. Directional, so each endpoint declares its own.
 pub const RELAY_COST: u64 = 0x40B56;
 
 /// HOP_PATH message parameter: the ordered Hop IDs an advertisement traversed.
@@ -37,12 +38,12 @@ pub const HOP_PATH: u64 = 0x40B57;
 /// Even, so the value is a bare varint.
 pub const ROUTE_COST: u64 = 0x40B58;
 
-/// The cost of crossing a link that the client did not price.
+/// The cost of pulling across a direction nobody priced.
 ///
 /// One, so an unpriced mesh accumulates a route cost equal to the hop count and
 /// ranks routes by shortest path. Zero is meaningful and distinct from absent: it
-/// makes the link free, which is how a deployment describes two relays in the same
-/// datacenter.
+/// makes that direction free, which is how a deployment describes two relays in the
+/// same datacenter.
 pub const DEFAULT_COST: u64 = 1;
 
 /// Whether a version negotiates this extension.
@@ -188,9 +189,9 @@ pub struct Peer {
 	/// there is nothing to exclude.
 	pub origin: Option<Origin>,
 
-	/// What the client priced this link at, or `None` when it priced nothing (meaning
-	/// [`DEFAULT_COST`]). Both endpoints charge the client's value, so the link costs
-	/// the same in both directions.
+	/// What the peer said subscribing from it costs, or `None` when it priced nothing
+	/// (meaning [`DEFAULT_COST`]). Directional: this prices what we pull from the peer,
+	/// while our own declaration prices the other way, and the two need not match.
 	pub cost: Option<u64>,
 }
 
@@ -207,13 +208,13 @@ impl Peer {
 	}
 }
 
-/// What crossing this link costs, added to the route cost of every advertisement
-/// received over it.
+/// What pulling content across this link costs, added to the route cost of every
+/// advertisement received over it.
 ///
-/// The dialing side owns the price (it lives in its connect config) and declares it in
-/// SETUP, so the accepting side reads it back out and both ends charge the same amount
-/// for the same link. `local` is our own configured price, set only when we dialed.
-/// Falls back to [`DEFAULT_COST`] when nobody priced it.
+/// RELAY_COST is directional: each endpoint declares what subscribing from *it* costs,
+/// so the peer's declaration is what prices this direction. `local` overrides it, since
+/// what we charge our own routing is local policy and a peer should not be able to
+/// reprice our mesh unilaterally. Falls back to [`DEFAULT_COST`] when neither priced it.
 pub fn link_cost(local: Option<u64>, peer: &Peer) -> u64 {
 	local.or(peer.cost).unwrap_or(DEFAULT_COST)
 }
@@ -469,21 +470,27 @@ mod tests {
 	}
 
 	#[test]
-	fn link_cost_prefers_our_own_price() {
+	fn link_cost_prefers_local_policy_over_the_peer() {
 		let unpriced = Peer::default();
 		let priced = Peer {
 			origin: Some(origin(9)),
 			cost: Some(7),
 		};
+		let free = Peer {
+			origin: Some(origin(9)),
+			cost: Some(0),
+		};
 
-		// We dialed and priced the link: our value is what both ends charge, so the
-		// peer's (absent, since a server never sends one) is irrelevant.
-		assert_eq!(link_cost(Some(3), &unpriced), 3);
-		// Zero is a price, not "unset".
-		assert_eq!(link_cost(Some(0), &priced), 0);
-		// We accepted, so the dialer's declared price is what we charge.
+		// The peer prices its own egress, so absent local policy that is what
+		// pulling from it costs, whichever side dialed.
 		assert_eq!(link_cost(None, &priced), 7);
-		// Nobody priced it.
+		// Zero is a price, not "unset": the peer declared this direction free.
+		assert_eq!(link_cost(None, &free), 0);
+		// Local policy wins: a peer cannot reprice our routing by declaring a
+		// cheaper egress than we are willing to believe.
+		assert_eq!(link_cost(Some(3), &priced), 3);
+		assert_eq!(link_cost(Some(0), &priced), 0);
+		// Nobody priced it, so this direction ranks by hop count.
 		assert_eq!(link_cost(None, &unpriced), DEFAULT_COST);
 	}
 

@@ -47,7 +47,7 @@ It lists every node an advertisement has passed through, starting with the origi
 Each connection also declares its own Hop ID at SETUP, so loops are avoided even across multiple connections between the same pair of relays.
 
 Not every route is equal: one crossing a metered backbone costs more than one inside a datacenter.
-The RELAY_COST Setup Option prices a link, defaulting to 1 so an unpriced mesh simply ranks by hop count.
+The RELAY_COST Setup Option prices what subscribing from an endpoint costs, defaulting to 1 so an unpriced mesh simply ranks by hop count.
 The ROUTE_COST parameter carries the accumulated price per namespace, and a relay may lower it to advertise that it already has the content cached, steering subscribers toward a warm copy.
 
 
@@ -71,7 +71,7 @@ It also enables the extended NAMESPACE message ({{namespace}}), which is what le
 On a session that negotiated the extension, an endpoint MUST include HOP_PATH on every PUBLISH_NAMESPACE and NAMESPACE it sends, and a receiver MUST close the session with a PROTOCOL_VIOLATION if one arrives without it.
 
 ## Relay Cost
-The client MAY declare what this link costs to cross; a server MUST NOT send this option, so one side owns the price:
+An endpoint MAY declare what subscribing from it costs:
 
 ~~~
 RELAY_COST Setup Option {
@@ -80,9 +80,12 @@ RELAY_COST Setup Option {
 }
 ~~~
 
-Both endpoints add the client's value to the ROUTE_COST of every advertisement they receive over the connection, so the link is priced the same in both directions.
+The option prices one direction, the sender's own egress, so each endpoint declares its own and the two need not match.
+A receiver adds the value the sender declared to the ROUTE_COST of every advertisement that sender forwards.
 An absent option means 1, under which the accumulated cost equals the hop count.
-0 is meaningful and distinct from absent: it makes the link free, which is how a deployment describes two relays in the same datacenter.
+0 is meaningful and distinct from absent: it makes that direction free, which is how a deployment describes two relays in the same datacenter.
+
+A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot reprice its neighbours by declaring itself cheap.
 
 
 # Hop IDs
@@ -154,7 +157,7 @@ ROUTE_COST Parameter {
 ~~~
 
 It is OPTIONAL and absent means 0, so an endpoint that prices nothing sends nothing.
-Costs still accumulate across such a mesh, because each receiver adds its own link's price ({{relay-cost}}) regardless.
+Costs still accumulate across such a mesh, because each receiver adds the price for the direction it received over ({{relay-cost}}) regardless.
 
 The original publisher seeds the value with its production cost: 0 for content it is already producing, higher for content it would have to spin up on demand, such as a standby transcoder advertising everything it *could* serve.
 
@@ -167,7 +170,7 @@ On receipt, a relay MUST discard an advertisement whose HOP_PATH already contain
 This receiver-side check catches loops of any length and is the only loop defense required.
 
 ## Accumulating Cost
-A relay MUST add the session's link cost ({{relay-cost}}) to the ROUTE_COST it received before forwarding or acting on an advertisement.
+A relay MUST add the cost the sending endpoint declared ({{relay-cost}}) to the ROUTE_COST it received before forwarding or acting on an advertisement.
 The addition MUST saturate rather than wrap, so an absurd upstream value ranks last instead of overflowing to best.
 
 A relay actively carrying the namespace (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, so one more subscriber costs only the links below it.

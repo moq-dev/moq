@@ -49,7 +49,9 @@ connect = [
 ]
 ```
 
-The dialing relay declares the price during setup and both ends charge it: every announcement crossing the link adds `N` to its cost. An unpriced link costs 1, which reproduces plain hop counting. The param is consumed locally; it is never sent as part of the URL.
+`?cost=N` prices what *this* relay charges to pull a broadcast from that peer, so it steers this relay's own routing. It is also declared during setup, which tells the peer what pulling from us costs, so a link priced on one side alone still ranks the same from both. The param is consumed locally; it is never sent as part of the URL.
+
+Price is per direction. Pulling from a metered origin can cost far more than pushing to it, so each end declares its own and the two need not match; a relay that receives a price it disagrees with keeps its own `?cost=` for its own routing. An unpriced direction costs 1, which reproduces plain hop counting.
 
 The cost a relay advertises is the *marginal* cost of pulling the broadcast through it. A relay actively carrying a broadcast (a subscriber is pulling it) re-announces it at cost 0: its upstream fetch is already paid for, so a sibling should pull the warm copy over a free intra-DC link instead of opening a second metered fetch. When the last subscriber leaves, the cost decays back after a short grace period. Standby publishers (e.g. a transcoder pool) can seed a large cost so they are only selected when nothing cheaper exists, and the winner's cost drops to 0 once it starts working.
 

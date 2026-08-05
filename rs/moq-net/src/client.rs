@@ -79,18 +79,19 @@ impl Client {
 		self
 	}
 
-	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
-	/// `moqt-17`+ via the MoQ Cluster extension).
+	/// Price what subscribing from us costs, in the units the rest of the mesh uses
+	/// (moq-lite-06+, and `moqt-17`+ via the MoQ Cluster extension).
 	///
-	/// Every announcement crossing the connection adds this to its route cost, so
-	/// routing prefers cheap paths over short ones. Use `0` for a link that should
-	/// look free (a sibling in the same datacenter), and something large for one that
-	/// should be a last resort (a metered backbone). An unpriced link costs `1`,
-	/// which makes the cost track the hop count and so reproduces plain
-	/// shortest-path routing.
+	/// Declared in our SETUP; the peer adds it to the route cost of every announcement
+	/// we forward it, so routing prefers cheap paths over short ones. Use `0` for a
+	/// direction that should look free (a sibling in the same datacenter), and
+	/// something large for one that should be a last resort (metered egress). When we
+	/// declare nothing the peer charges `1`, which makes the cost track the hop count
+	/// and so reproduces plain shortest-path routing.
 	///
-	/// The dialing side owns the price: it is declared in our SETUP so the server
-	/// charges the same link the same amount. A server never sets one.
+	/// This prices one direction only. What *we* pay to pull from the peer is whatever
+	/// the peer declares, so an asymmetric link is described by each side setting its
+	/// own value, and a symmetric one by both setting the same.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = Some(cost);
 		self

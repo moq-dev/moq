@@ -19,7 +19,7 @@ pub struct Config<S: web_transport_trait::Session> {
 
 	pub request_id_max: Option<RequestId>,
 
-	/// Whether we dialed. Only the dialing side prices the link (see [`Self::cost`]).
+	/// Whether we dialed, which sets the request-id parity.
 	pub client: bool,
 
 	/// Traffic stats are attributed through these origin handles: tag them with
@@ -32,9 +32,10 @@ pub struct Config<S: web_transport_trait::Session> {
 	/// declares its own, which wins.
 	pub peer_origin: Option<Origin>,
 
-	/// What crossing this link costs, declared in our SETUP (see
-	/// [`cluster::RELAY_COST`]). Client-only: `None` on the accepting side, and on a
-	/// dialer that priced nothing.
+	/// What subscribing from us costs, declared in our SETUP (see
+	/// [`cluster::RELAY_COST`]) for the peer to charge. Directional, so what we charge
+	/// in the other direction is whatever the peer declared. `None` leaves it unpriced,
+	/// which the peer reads as the default of 1.
 	pub cost: Option<u64>,
 
 	pub version: Version,

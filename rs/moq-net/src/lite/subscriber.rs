@@ -37,9 +37,8 @@ pub(super) struct SubscriberConfig<S: web_transport_trait::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_origin`.
 	pub peer_origin: Option<crate::Origin>,
-	/// What this session's link costs, when we are the side that dialed it and so
-	/// owns the price. `None` on an accepted session, which reads the dialer's
-	/// price out of its SETUP instead so both ends agree.
+	/// Local policy for what pulling from this peer costs, overriding whatever it
+	/// declared in its SETUP. `None` charges the peer's declared price.
 	pub cost: Option<u64>,
 	/// Driver-owned scope for broadcast and track handlers.
 	pub tasks: Tasks,
@@ -76,8 +75,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
-	/// Our own price for this link when we dialed it; `None` when we accepted and
-	/// the dialer's SETUP carries the price instead.
+	/// Local policy overriding the peer's declared egress price. See `resolve_cost`.
 	cost: Option<u64>,
 	tasks: Tasks,
 }
@@ -113,13 +111,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// What crossing this session's link costs, added to the route cost of every
-	/// announcement received over it.
+	/// What pulling content across this session's link costs, added to the route cost
+	/// of every announcement received over it.
 	///
-	/// The dialing side owns the price (it lives in its connect config) and declares
-	/// it in SETUP, so the accepting side reads it back out and both ends charge the
-	/// same amount for the same link. Falls back to [`super::DEFAULT_COST`] when
-	/// nobody priced it.
+	/// The Cost Parameter is directional: each endpoint declares what subscribing from
+	/// it costs, so the peer's declaration prices this direction while ours prices the
+	/// other. A locally configured price overrides it, since what we charge our own
+	/// routing is local policy. Falls back to [`super::DEFAULT_COST`] when neither
+	/// priced it.
 	async fn resolve_cost(&self) -> u64 {
 		// Older versions carry no cost on the wire, so nothing is charged and their
 		// routes rank on hop count alone. Returning early also avoids blocking on a
@@ -893,8 +892,8 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
-			peer_origin: None,
 			cost: None,
+			peer_origin: None,
 			tasks,
 		});
 		let subscribes = subscriber.subscribes.clone();
@@ -959,8 +958,8 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
-			peer_origin: Some(assigned),
 			cost: None,
+			peer_origin: Some(assigned),
 			tasks,
 		});
 
@@ -1024,8 +1023,8 @@ mod tests {
 			recv_bandwidth: None,
 			version: VERSION,
 			peer_setup: Default::default(),
-			peer_origin: None,
 			cost: None,
+			peer_origin: None,
 			tasks,
 		});
 		(subscriber, consumer)

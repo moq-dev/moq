@@ -137,7 +137,8 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	self_origin: crate::Origin,
 	// What the peer declared in its SETUP.
 	peer_setup: cluster::PeerSetup,
-	// What we priced this link at, set only when we dialed. See `cluster::link_cost`.
+	// Local policy for what pulling from this peer costs, overriding whatever it
+	// declared. See `cluster::link_cost`.
 	cost: Option<u64>,
 	state: Lock<State>,
 	tasks: Tasks,

@@ -599,13 +599,15 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection (see [Routing](#routing)).
+The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to the Route Cost of every announcement that sender forwards (see [Routing](#routing)).
 
 The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
 An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
-A value of 0 is meaningful and distinct from absent: it makes the link free, e.g. between two relays in the same datacenter.
+A value of 0 is meaningful and distinct from absent: it makes that direction free, e.g. between two relays in the same datacenter.
 
-Only the client sends it, so both ends charge the same link the same amount; a server MUST NOT send it and a relay MUST NOT forward it.
+Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
+
+A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot reprice its neighbours by declaring itself cheap.
 
 ### Origin Parameter {#origin-parameter}
 The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards.
@@ -720,7 +722,7 @@ A Hop ID value of 0 means the hop is unknown: either it was never assigned or a 
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
 The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder).
-When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+When forwarding an announcement received from an upstream peer, a relay adds the cost that peer declared (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, which is what lets a cluster deduplicate onto a warm copy.
 The discount applies only to the path the relay actually serves from; a standby path keeps its accumulated value, since serving from it means opening a fresh ingest.
@@ -1131,6 +1133,9 @@ The `Message Length` describes the payload size on the wire.
 
 
 # Appendix A: Changelog
+
+## moq-lite-07
+- Made the SETUP `Cost` parameter directional: it declares what subscribing from the sender costs and both endpoints send their own, so the two directions are priced independently. A receiver MAY charge a locally configured value instead of the declared one. Previously only the client sent it and both ends charged that single value; the parameter ID and the absent-means-1 default are unchanged.
 
 ## moq-lite-06
 - Moved the Qmux-over-WebSocket binding details to draft-lcurley-qmux-websocket; the binding itself is unchanged.
