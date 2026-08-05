@@ -119,6 +119,11 @@ if(PROJECT_IS_TOP_LEVEL)
     # Generate and install CMake package config files
     include(CMakePackageConfigHelpers)
 
+    # The remaining placeholders in cmake/moq-config.cmake.in. rs/libmoq/build.sh
+    # and nix/overlay.nix fill the same two in for the release artifacts.
+    get_filename_component(LIB_FILE "${RUST_LIB}" NAME)
+    set(VERSION "${PROJECT_VERSION}")
+
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-config.cmake.in
         ${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake

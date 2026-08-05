@@ -85,12 +85,28 @@ if [[ "$TARGET" == *"-windows-"* ]]; then
     # Generate CMake config files from templates (no pkg-config on Windows).
     mkdir -p "$PACKAGE_DIR/lib/cmake/moq"
     MAJOR_VERSION="${VERSION%%.*}"
+
+    # The native libraries an external linker must pass alongside moq.lib,
+    # quoted the way rs/libmoq/CMakeLists.txt and nix/overlay.nix format them.
+    # Windows entries are all plain library names; `framework:` is Apple-only.
+    NATIVE_LIBS_QUOTED=$(awk 'NF && $1 !~ /^#/ { printf "%s\"%s\"", sep, $1; sep = " " }' \
+        "$SCRIPT_DIR/native-libs/windows.txt")
+
     sed -e "s|@LIB_FILE@|${LIB_FILE}|g" \
         -e "s|@VERSION@|${VERSION}|g" \
+        -e "s|@MOQ_NATIVE_LIBS_QUOTED@|${NATIVE_LIBS_QUOTED}|g" \
         "$SCRIPT_DIR/cmake/moq-config.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
     sed -e "s|@VERSION@|${VERSION}|g" \
         -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
         "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" >"$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
+
+    # A placeholder added to a template but not to the seds above ships a zip
+    # whose find_package(moq) hands the linker a literal `@FOO@`, and the only
+    # thing that notices is a downstream build. Fail here instead.
+    if grep -nE '@[A-Z_]+@' "$PACKAGE_DIR/lib/cmake/moq"/*.cmake; then
+        echo "Error: unsubstituted placeholder in the generated CMake config (see above)" >&2
+        exit 1
+    fi
 else
     # Native builds use the bare flake output; the one supported cross is the
     # Intel mac release built on an Apple Silicon runner (the Determinate Nix
