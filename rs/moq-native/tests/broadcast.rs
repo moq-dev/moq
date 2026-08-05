@@ -1335,10 +1335,19 @@ async fn latency_max_test(version: &str) -> Duration {
 	client_config.version = vec![version];
 	let client = client_config.init().expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("connect timeout")
-		.expect("connect failed");
+	// Reconnecting off: the assertions below are written against a single dial, and
+	// a background redial would re-announce behind them.
+	let session = tokio::time::timeout(
+		TIMEOUT,
+		client
+			.with_subscriber(sub_origin)
+			.with_reconnect(false)
+			.connect(url)
+			.established(),
+	)
+	.await
+	.expect("connect timeout")
+	.expect("connect failed");
 
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "test");
@@ -2793,7 +2802,9 @@ async fn session_close_surfaces_a_rejection_code() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let session = tokio::time::timeout(TIMEOUT, connect_once(test_client(), url))
+	// The client is held so the endpoint outlives the dial; the session is what the
+	// rejection arrives on.
+	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(test_client(), url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");

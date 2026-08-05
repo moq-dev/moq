@@ -60,7 +60,7 @@ pub struct ClientConfig {
 	/// This has to live above the transports rather than inside one: QUIC bounds its
 	/// own dial, but the WebSocket fallback and the handshake that follows either
 	/// transport have no deadline of their own, so a peer that accepts TCP and then
-	/// never speaks would hang the whole connect. [`Client::reconnect`] only re-arms
+	/// never speaks would hang the whole connect. [`Connection`] only re-arms
 	/// its backoff between attempts, so an attempt that never returns stalls the
 	/// retry loop indefinitely.
 	#[arg(
@@ -1099,7 +1099,7 @@ mod tests {
 	/// gives up on its own, but the WebSocket arm has no deadline of its own, so the
 	/// race stays pending forever. Without the connect timeout this test hangs.
 	///
-	/// That is what wedged a publisher against a livelocked relay: `Reconnect` only
+	/// That is what wedged a publisher against a livelocked relay: [`Connection`] only
 	/// re-arms its backoff (and checks its give-up timeout) *between* attempts, so an
 	/// attempt that never returns stalls the retry loop for good.
 	#[cfg(feature = "websocket")]
@@ -1120,7 +1120,9 @@ mod tests {
 		// arm alone against the silent peer.
 		let url: Url = format!("https://127.0.0.1:{}/", addr.port()).parse().unwrap();
 
-		let mut attempt = Box::pin(client.connect(url));
+		// `dial` rather than `connect`: this is about one attempt's deadline, and
+		// `connect` now hands back a reconnect loop that would redial past it.
+		let mut attempt = Box::pin(client.dial(url));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),
