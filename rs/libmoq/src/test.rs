@@ -1796,7 +1796,10 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		.recv_timeout(TIMEOUT)
 		.expect("an unrelated call was waiting on the stalled encode");
 	assert!(created > 0, "creating an origin failed while a producer was stalled");
-	assert_eq!(published, 0, "a second producer could not encode while the first stalled");
+	assert_eq!(
+		published, 0,
+		"a second producer could not encode while the first stalled"
+	);
 	unrelated.join().unwrap();
 
 	// ...and the stalled publish was still in flight the whole time, so the calls

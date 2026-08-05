@@ -107,7 +107,7 @@ Because the terminal callback runs on libmoq's thread, bindings that own thread-
 
 Every function may be called from any thread, and a handle is not tied to the thread that created it.
 
-The raw publish functions (`moq_publish_video_raw_frame`, `moq_publish_audio_raw_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Only other calls on that same producer wait behind it, served in arrival order: a second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
+The raw publish functions (`moq_publish_video_raw_frame`, `moq_publish_audio_raw_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Calls on the same producer are serialized, but concurrent calls have no defined order, so use one thread when frame, cut, or bitrate order matters. A second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
 
 ## Error handling
 
