@@ -62,6 +62,20 @@ run:
 check:
     #!/usr/bin/env bash
     set -euo pipefail
+    if grep -Fq '"MOQ_VERSION"' CMakePresets.json; then
+        echo "CMakePresets.json must not pin MOQ_VERSION" >&2
+        exit 1
+    fi
+    build_dir=$(mktemp -d)
+    trap 'rm -rf "$build_dir"' EXIT
+    if cmake -S . -B "$build_dir" -DMOQ_LOCAL= >"$build_dir/configure.log" 2>&1; then
+        echo "CMake accepted a release build without MOQ_VERSION" >&2
+        exit 1
+    fi
+    if ! grep -Fq "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/libmoq" "$build_dir/configure.log"; then
+        cat "$build_dir/configure.log" >&2
+        exit 1
+    fi
     if command -v clang-format >/dev/null; then
         git ls-files 'src/*.cpp' 'src/*.h' | xargs clang-format --dry-run --Werror
     fi

@@ -1,5 +1,27 @@
 cmake_minimum_required(VERSION 3.28)
 
+# Build the in-tree libmoq by default. Release-only builds clear MOQ_LOCAL and
+# must select the published archive explicitly, so this never silently drifts
+# to an old static version.
+set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
+set(MOQ_VERSION "" CACHE STRING "Published libmoq version (required without MOQ_LOCAL)")
+
+if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+  set(_moq_manifest "${MOQ_LOCAL}/rs/libmoq/Cargo.toml")
+  file(STRINGS "${_moq_manifest}" _moq_version_lines REGEX "^version = \"[^\"]+\"$")
+  list(LENGTH _moq_version_lines _moq_version_count)
+  if(NOT _moq_version_count EQUAL 1)
+    message(FATAL_ERROR "Expected one package version in ${_moq_manifest}, found ${_moq_version_count}")
+  endif()
+  list(GET _moq_version_lines 0 _moq_version_line)
+  string(REGEX REPLACE "^version = \"([^\"]+)\"$" "\\1" _moq_link_version "${_moq_version_line}")
+else()
+  if(NOT MOQ_VERSION)
+    message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain rs/libmoq")
+  endif()
+  set(_moq_link_version "${MOQ_VERSION}")
+endif()
+
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
 
 project(${_name} VERSION ${_version})
@@ -37,11 +59,6 @@ endif()
 
 target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
-# Default to the in-tree moq checkout (this file lives at cpp/obs, so the repo
-# root is two levels up). A consumer building cpp/obs in isolation can point
-# MOQ_LOCAL elsewhere, or unset it to fall back to the published release.
-set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
-
 if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
   add_subdirectory("${MOQ_LOCAL}/rs/libmoq" moq)
   target_link_libraries(obs-moq PRIVATE moq)
@@ -50,7 +67,7 @@ else()
   FetchContent_Declare(
     moq
     URL
-      https://github.com/moq-dev/moq/releases/download/libmoq-v${MOQ_VERSION}/moq-${MOQ_VERSION}-${MOQ_TARGET}.${MOQ_ARCHIVE}
+      https://github.com/moq-dev/moq/releases/download/libmoq-v${_moq_link_version}/moq-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
   )
   FetchContent_MakeAvailable(moq)
 
@@ -137,7 +154,7 @@ target_sources(
 # The dock requires both the frontend API (to register it) and Qt (to build it).
 if(ENABLE_FRONTEND_API AND ENABLE_QT)
   target_sources(obs-moq PRIVATE src/moq-dock.cpp src/moq-dock.h)
-  target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${MOQ_VERSION}")
+  target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}")
 endif()
 
 if(${BUILD_PLUGIN})
