@@ -6,7 +6,14 @@ cmake_minimum_required(VERSION 3.28)
 set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds rs/libmoq in-tree)")
 set(MOQ_VERSION "" CACHE STRING "Published libmoq version (required without MOQ_LOCAL)")
 
+# One predicate for both the version derivation here and the link/fetch choice
+# below, so the two can't drift apart.
+set(_moq_local_build FALSE)
 if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+  set(_moq_local_build TRUE)
+endif()
+
+if(_moq_local_build)
   set(_moq_manifest "${MOQ_LOCAL}/rs/libmoq/Cargo.toml")
   file(STRINGS "${_moq_manifest}" _moq_version_lines REGEX "^version = \"[^\"]+\"$")
   list(LENGTH _moq_version_lines _moq_version_count)
@@ -59,7 +66,7 @@ endif()
 
 target_link_libraries(obs-moq PRIVATE OBS::libobs)
 
-if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/rs/libmoq/CMakeLists.txt")
+if(_moq_local_build)
   add_subdirectory("${MOQ_LOCAL}/rs/libmoq" moq)
   target_link_libraries(obs-moq PRIVATE moq)
 else()

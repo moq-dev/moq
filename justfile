@@ -89,6 +89,11 @@ check $BASE="":
     if [[ -n "$files" ]]; then
     	just js check "$files"
     	just rs check-changed "$files"
+    	# The OBS plugin has no compile job in PR CI, so its lint + CMake
+    	# guards are the only automated coverage it gets.
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs check
+    	fi
     else
     	echo "check: nothing changed."
     fi
@@ -99,6 +104,7 @@ check $BASE="":
 check-all *args:
     just js check
     just rs check {{ args }}
+    just obs check
     just _check-common
 
 # Repository-wide non-compiling checks shared by `check` and `check-all`.
@@ -150,6 +156,15 @@ ci BASE="":
     	just go    ci "$files"
     fi
 
+    # The OBS plugin has no compile job in PR CI, so its lint + CMake guards
+    # are the only automated coverage it gets. Empty $files is a force-run,
+    # so run then.
+    if [[ -z "$files" ]] || echo "$files" | grep -q '^cpp/obs/'; then
+    	just obs check
+    else
+    	echo "ci: no cpp/obs changes; skipping obs check."
+    fi
+
     # Validate the flake (eval + dev shell build) via `nix flake check`. This no
     # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
     # to `just rs ci` (plain cargo), leaving only lightweight Nix checks -- so
@@ -186,6 +201,9 @@ fix $BASE="":
     if [[ -n "$files" ]]; then
     	just js fix "$files"
     	just rs fix-changed "$files"
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs fix
+    	fi
     else
     	echo "fix: nothing changed."
     fi
@@ -198,6 +216,7 @@ fix-all:
     just js fix
     just rs fix
     just py fix
+    just obs fix
     just _fix-common
 
 # Optional tools skip if missing locally. `bun install` for the same reason as
