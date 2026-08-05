@@ -44,7 +44,7 @@ pub async fn import(
 	origin: &moq_net::origin::Producer,
 	name: String,
 	playlist: String,
-	latency_max: std::time::Duration,
+	latency_max: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
 	let mut producer = origin
 		.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
@@ -52,7 +52,7 @@ pub async fn import(
 
 	// Create catalog tracks before the broadcast becomes visible so a subscriber
 	// can consume the catalog as soon as it observes the announcement.
-	let catalog = moq_mux::catalog::Producer::new(&mut producer)?.with_latency_max(latency_max);
+	let catalog = crate::publish::apply_latency_max(moq_mux::catalog::Producer::new(&mut producer)?, latency_max);
 
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 

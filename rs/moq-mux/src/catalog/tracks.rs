@@ -211,16 +211,10 @@ impl<E: CatalogExt> Reserved<E> {
 		Self { catalog }
 	}
 
-	/// Track properties for a media track under this catalog, carrying its declared retention.
-	/// See [`Producer::with_latency_max`](super::Producer::with_latency_max).
+	/// Track properties for a media track under this catalog, carrying any retention it declares.
+	/// See [`Producer::track_info`](super::Producer::track_info).
 	pub fn track_info(&self) -> moq_net::track::Info {
 		self.catalog.track_info()
-	}
-
-	/// [`track_info`](Self::track_info) at an explicit timescale, for a container that keeps the
-	/// source's own rather than normalizing to the container default.
-	pub fn track_info_at(&self, timescale: moq_net::Timescale) -> moq_net::track::Info {
-		self.catalog.track_info_at(timescale)
 	}
 
 	/// Reserve a rendition of config type `C` under `name`, returning a guard to fill it in.

@@ -24,11 +24,11 @@ export type BroadcastInput = {
 	flip: Getter<boolean>;
 
 	// How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
-	// milliseconds. Declared on every media track we accept; see {@link Container.trackInfo}.
-	// Defaults to {@link Container.LATENCY_MAX_MS}, sized so a segmented egress (HLS/DASH) can
-	// serve a full playlist window. A retention budget, not a delivery one, so lowering it does
-	// not reduce latency -- it only shortens how far back a fetch can reach.
-	latencyMax: Getter<number>;
+	// milliseconds. Declared on every media track we accept; see {@link Container.trackInfo},
+	// whose default is sized so a segmented egress (HLS/DASH) can serve a full playlist window.
+	// A retention budget, not a delivery one, so lowering it does not reduce latency -- it only
+	// shortens how far back a fetch can reach.
+	latencyMax: Getter<number | undefined>;
 };
 
 /**
@@ -76,7 +76,7 @@ export class Broadcast {
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
-			latencyMax: getter(props?.latencyMax ?? Container.LATENCY_MAX_MS),
+			latencyMax: getter(props?.latencyMax),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
