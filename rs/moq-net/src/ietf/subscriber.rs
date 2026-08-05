@@ -221,31 +221,31 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// The route for an advertisement that carries no path of its own.
 	///
-	/// Base moq-transport has no hops on the wire, so the chain is reconstructed here,
-	/// as the MoQ Cluster draft requires of an advertisement from an upstream that did
-	/// not negotiate the extension: a single `Origin::UNKNOWN` for that upstream. The
-	/// first entry is the original publisher and `UNKNOWN` is how the draft spells "we
-	/// cannot name it", which is the truth here: whoever produced this is somewhere
-	/// behind the peer and the wire never said who.
+	/// Base moq-transport has no hops on the wire, so the chain is a single entry
+	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
+	/// supplied an identity).
 	///
-	/// An identity the caller assigned the peer (`Client::with_peer_origin`) names the
-	/// *link* we received it over, not that publisher, so it follows as a second hop
-	/// exactly where a relay appends its own. Collapsing the two would let a peer
-	/// reflecting our own broadcast back at us look like a rival publisher claiming the
-	/// path, which evicts the source we are publishing from.
+	/// That entry doubles as the content identity, which is what makes an assigned
+	/// identity worth having: every session dialing the same relay produces the same
+	/// first hop, so a reconnect splices into the front its predecessor was serving
+	/// instead of replacing it. The cost is that we cannot tell the peer's own content
+	/// apart from our own coming back through it, since neither carries a chain. Loop
+	/// detection for that case is `FrontState::excluded`, not the chain.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
 	/// arrived over regardless. Skipping it would forward a paid upstream to
 	/// cluster-aware peers as free and pull subscriptions onto the wrong relay.
+	///
+	/// It is charged only one hop, though the chain it stands for may be arbitrarily
+	/// long: a peer that carries no hop ids hides its depth, so this route understates
+	/// its true length and can out-rank a longer-looking but genuinely shorter one.
+	/// Price such a link with [`crate::Client::with_cost`] rather than trusting the
+	/// default.
 	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
 		let mut hops = crate::OriginList::new();
-		hops.push(crate::Origin::UNKNOWN)
+		hops.push(self.session_origin)
 			.expect("an empty hop chain has room for one entry");
-		if self.session_origin != crate::Origin::UNKNOWN {
-			hops.push(self.session_origin)
-				.expect("a one-entry hop chain has room for another");
-		}
 		broadcast::Route::new()
 			.with_hops(hops)
 			.with_cost(cluster::link_cost(self.cost, peer))
@@ -1488,8 +1488,8 @@ mod tests {
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
 	/// attributed to a random per-connection origin. An identity assigned via
 	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
-	/// resolve to one recognizable route. It names the link, so it follows the
-	/// unnameable publisher rather than posing as it.
+	/// resolve to one recognizable route, and a reconnect splices rather than
+	/// replacing.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1520,7 +1520,7 @@ mod tests {
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Origin::UNKNOWN, assigned]);
+		assert_eq!(hops, vec![assigned]);
 	}
 
 	/// Both directions of a sync target point at one relay, which has no way to tell
@@ -1539,6 +1539,11 @@ mod tests {
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
 
+		// The publish direction: an origin handle scoped to the peer, which is what
+		// `Client::with_peer_origin` hands the publisher. Holding its announce stream
+		// is what records that the peer has been offered these paths.
+		let mut publishing = consumer.clone().excluding(peer).announced();
+
 		// What we are publishing to the peer: a real upstream, announced.
 		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let _source = origin
@@ -1551,6 +1556,9 @@ mod tests {
 			.unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		announced.assert_next_some("room/host");
+		// Held for as long as the path is advertised, exactly as the publisher holds
+		// it in its `Watched` entry. The exclusion lives on this handle.
+		let _advertised = publishing.assert_next_some("room/host");
 
 		// The peer reflects it back over the subscribe direction, which carries no
 		// hop chain of its own.
@@ -1579,6 +1587,56 @@ mod tests {
 		let routes = broadcast.routes();
 		assert_eq!(routes.len(), 1, "the reflection must park, not attach");
 		assert_eq!(routes[0].hops, upstream);
+	}
+
+	/// The assigned identity is a content identity too, so a second session dialing
+	/// the same relay produces the same first hop and splices into the front its
+	/// predecessor is serving. That is what makes a reconnect immediate instead of
+	/// waiting for the transport to retire the dead session, and the reflection guard
+	/// must not cost us it.
+	#[tokio::test]
+	async fn reconnecting_peer_joins_the_front_it_replaces() {
+		let peer = crate::Origin::new(777).unwrap();
+		let self_origin = crate::Origin::new(1).unwrap();
+
+		let origin = crate::origin::Info::new(self_origin).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let connect = || {
+			let (tasks, task_set) = crate::util::TaskSet::new();
+			std::mem::forget(task_set);
+			let mut subscriber = Subscriber::new(
+				crate::lite::test_transport::SinkSession::new(Default::default()),
+				origin.clone(),
+				Control::new(None, false),
+				Some(peer),
+				cluster::PeerSetup::default(),
+				self_origin,
+				None,
+				Version::Draft14,
+				tasks,
+			);
+			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
+			let producer = subscriber
+				.start_announce(crate::Path::new("room/host").to_owned(), advert)
+				.unwrap();
+			(subscriber, producer)
+		};
+
+		let _first = connect();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		announced.assert_next_some("room/host");
+
+		// The peer reconnects before the old session is retired.
+		let _second = connect();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		// It joined: no announce churn, and both routes are in the table so the front
+		// can fail over the moment the stale one dies.
+		announced.assert_next_wait();
+		let routes = consumer.get_broadcast("room/host").unwrap().routes();
+		assert_eq!(routes.len(), 2, "a reconnect must join, not park or replace");
 	}
 
 	fn cluster_subscriber(
