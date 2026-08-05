@@ -1111,6 +1111,66 @@ mod tests {
 			"a known publisher restart keeps the broadcast live"
 		);
 	}
+
+	/// An announce stream that dies without an explicit `ended` must detach ABRUPTLY,
+	/// leaving the origin's linger window open so a source reconnecting into it resumes
+	/// the broadcast rather than viewers seeing it end here.
+	///
+	/// This already falls out of `routes` being a local whose `AnnouncedRoute` guards
+	/// drop, which is exactly what makes it worth pinning: a refactor that finished them
+	/// on the way out, or hoisted the map to the session, would be a silent behavior
+	/// change. `ietf::Subscriber` names the same distinction explicitly as `Detach`.
+	/// A zero-linger origin cannot tell the two apart, so this sets one.
+	#[tokio::test]
+	async fn a_lost_announce_stream_leaves_the_linger_window_open() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+		let (tasks, task_set) = TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			session: SinkSession::new(Default::default()),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: None,
+			peer_origin: None,
+			tasks,
+		});
+
+		let path = Path::new("room/host").to_owned();
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let mut routes = HashMap::new();
+		subscriber
+			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.unwrap();
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		assert!(consumer.get_broadcast("room/host").is_some());
+
+		// The stream ends without retracting anything: the map dies with it.
+		drop(routes);
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"an abnormal stream loss closed the broadcast instead of lingering for a reconnect",
+		);
+
+		// An explicit retraction still closes it now, linger or not.
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let mut routes = HashMap::new();
+		subscriber
+			.start_announce(path.clone(), hops, RouteCost(0), 1, None, &mut routes)
+			.unwrap();
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		routes.remove(&path).expect("announced").finish();
+		tokio::time::sleep(Duration::from_millis(1)).await;
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit retraction lingered instead of closing",
+		);
+	}
 }
 
 /// The at-most-one live upstream subscription: its control stream plus the params

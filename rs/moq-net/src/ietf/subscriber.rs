@@ -82,6 +82,19 @@ struct TrackState {
 	timescale: Option<Timescale>,
 }
 
+/// How the last source for a path detaches, which decides whether the origin closes
+/// the broadcast now or holds it open for a replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Detach {
+	/// The peer retracted the path, or we are rolling back an announce we just made.
+	/// Nothing is coming back, so close it now.
+	Graceful,
+	/// The stream carrying the path went away without retracting it. Leave the
+	/// origin's linger window open so a source reconnecting into it resumes the
+	/// broadcast instead of viewers seeing it end here.
+	Abrupt,
+}
+
 struct BroadcastState {
 	// The source feeding this broadcast into our origin: finish() on a
 	// deliberate unannounce, dropping (a dying session) aborts it. Either way
@@ -354,9 +367,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// The stream owns every advertisement it carried, so release them however it
 		// ends: a clean close, a decode error, or the peer resetting it. Without this
 		// each namespace keeps its refcount and the source never detaches.
+		//
+		// Abruptly, including on a clean FIN: closing the stream retracts nothing, since
+		// the protocol has NAMESPACE_DONE for that. Whatever is still live here outlived
+		// its channel without being withdrawn, so hold the front open for a reconnect.
+		// This is what moq-lite already does, where the equivalent map is a local whose
+		// guards drop.
 		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
-			let _ = self.stop_announce(path, false);
+			let _ = self.stop_announce(path, Detach::Abrupt);
 		}
 		res
 	}
@@ -400,7 +419,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// leave subscriptions on a path the peer no longer offers.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if live.remove(&path) {
-							let _ = self.stop_announce(path, false);
+							let _ = self.stop_announce(path, Detach::Graceful);
 						}
 						continue;
 					};
@@ -420,7 +439,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
 					if live.remove(&path) {
-						let _ = self.stop_announce(path, true);
+						let _ = self.stop_announce(path, Detach::Graceful);
 					}
 				}
 				_ => {
@@ -515,7 +534,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Ok(_) => {
 				if let Err(err) = self.write_ok(&mut stream, request_id).await {
 					// Local rollback, not a peer unannounce: don't count announce bytes.
-					let _ = self.stop_announce(path, false);
+					let _ = self.stop_announce(path, Detach::Graceful);
 					return Err(err);
 				}
 			}
@@ -539,7 +558,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await;
 
 		if attached {
-			self.stop_announce(path, true)?;
+			self.stop_announce(path, Detach::Graceful)?;
 		}
 
 		res
@@ -589,7 +608,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let Some(advert) = self.route(msg.cluster.as_ref(), &peer) else {
 				if std::mem::take(attached) {
 					tracing::debug!(%path, "publish_namespace now loops back; detaching");
-					let _ = self.stop_announce(path.clone(), true);
+					let _ = self.stop_announce(path.clone(), Detach::Graceful);
 				}
 				continue;
 			};
@@ -854,19 +873,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// `_count_bytes` is retained for call-site clarity (a real unannounce vs a local
-	/// rollback), but the ingress announce stats are now driven in the model by the
-	/// source's route transitions and last-route detach, not here.
-	fn stop_announce(&mut self, path: PathOwned, _count_bytes: bool) -> Result<(), Error> {
+	fn stop_announce(&mut self, path: PathOwned, detach: Detach) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
 				if entry.get().count == 0 {
-					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounced");
-					// A deliberate unannounce, so finish() rather than drop.
-					entry.remove().producer.finish();
+					tracing::debug!(broadcast = %self.origin.absolute(&path), ?detach, "unannounced");
+					let producer = entry.remove().producer;
+					match detach {
+						Detach::Graceful => producer.finish(),
+						// Dropping the guard aborts the source, which is what leaves the
+						// origin's linger window open for a replacement.
+						Detach::Abrupt => drop(producer),
+					}
 				}
 			}
 			Entry::Vacant(_) => return Err(Error::NotFound),
@@ -1561,6 +1582,100 @@ mod tests {
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost, 2);
 	}
 
+	/// A namespace stream that ends with advertisements still live must detach them
+	/// ABRUPTLY, leaving the origin's linger window open so a source reconnecting into
+	/// it resumes the broadcast. Finishing instead closes it synchronously, which
+	/// viewers see as an end and which promises that a later create at the path is new
+	/// content rather than a resumption: the wrong promise for a transient blip.
+	///
+	/// True even of a clean FIN, since closing the stream retracts nothing: the protocol
+	/// has NAMESPACE_DONE for that. moq-lite already behaves this way (its route map is
+	/// a local whose guards drop), which `lite::subscriber` pins separately.
+	///
+	/// Driven through the real exit path rather than by calling `stop_announce`: a test
+	/// that picked the detach itself would still pass if the stream stopped using it.
+	/// A zero-linger origin cannot tell the two detaches apart, which is why this sets one.
+	#[tokio::test]
+	async fn a_lost_namespace_stream_leaves_the_linger_window_open() {
+		const VERSION: Version = Version::Draft18;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+
+		// The peer answers, advertises one namespace, then the stream ends without ever
+		// retracting it.
+		let session = crate::lite::test_transport::ScriptedSession::eof(namespace_response(VERSION, "x.hang").await);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		// Draft-18 can negotiate the extension, so the read loop waits for the peer's
+		// SETUP before parsing a NAMESPACE; settle it as extension-off.
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer::default());
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		subscriber
+			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.await
+			.expect("a clean FIN is not an error");
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("x.hang").is_some(),
+			"an ended stream closed the broadcast instead of lingering for a reconnect",
+		);
+	}
+
+	/// The peer explicitly retracting a namespace still ends the broadcast NOW, linger
+	/// or not: it said the namespace is gone, so holding the front open would stall a
+	/// replacement and promise a resumption that is not coming.
+	#[tokio::test]
+	async fn an_explicit_namespace_done_closes_despite_the_linger_window() {
+		let self_origin = crate::Origin::new(1).unwrap();
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let origin = crate::origin::Info::new(self_origin)
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			self_origin,
+			None,
+			Version::Draft19,
+			tasks,
+		);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
+		subscriber.start_announce(path.clone(), advert).unwrap();
+		settle().await;
+
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		settle().await;
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit NAMESPACE_DONE lingered instead of closing",
+		);
+	}
+
 	/// An advertisement with no path of its own (a peer that did not negotiate the
 	/// extension) still pays for the link it arrived over. Forwarding it as free would
 	/// advertise a paid upstream as the cheapest route in the mesh.
@@ -1626,7 +1741,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the source stranded.
-		subscriber.stop_announce(path, true).unwrap();
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
@@ -1667,7 +1782,7 @@ mod tests {
 		assert_eq!(hops, vec![8, 9]);
 
 		// Still one advertisement, so one unannounce is all it takes.
-		subscriber.stop_announce(path, true).unwrap();
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
@@ -1700,10 +1815,10 @@ mod tests {
 		assert!(consumer.get_broadcast("room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to detach.
-		subscriber.stop_announce(path.clone(), true).unwrap();
+		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
-		subscriber.stop_announce(path, true).unwrap();
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
@@ -1742,7 +1857,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
@@ -1957,7 +2072,7 @@ mod tests {
 
 		// What the stream's exit path does with whatever it still holds.
 		for path in live {
-			subscriber.stop_announce(path, false).unwrap();
+			subscriber.stop_announce(path, Detach::Graceful).unwrap();
 		}
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 

@@ -207,6 +207,9 @@ impl web_transport_trait::Stats for SinkStats {
 /// EOF would exit, and a test usually wants to assert against the loop still running.
 pub struct ScriptedRecv {
 	script: Arc<Mutex<Vec<u8>>>,
+	/// Report EOF once the script is exhausted rather than parking, so a test can drive
+	/// a read loop all the way through its exit path. See [`ScriptedSession::eof`].
+	eof: bool,
 }
 
 impl web_transport_trait::RecvStream for ScriptedRecv {
@@ -226,6 +229,7 @@ impl web_transport_trait::RecvStream for ScriptedRecv {
 		};
 
 		match take {
+			0 if self.eof => Ok(None),
 			0 => std::future::pending().await,
 			take => Ok(Some(take)),
 		}
@@ -247,6 +251,8 @@ impl web_transport_trait::RecvStream for ScriptedRecv {
 #[derive(Clone)]
 pub struct ScriptedSession {
 	pub log: Log,
+	/// Whether an exhausted script reports EOF instead of parking.
+	eof: bool,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// Per-stream scripts popped by `open_bi` in order; `None` shares `script`
 	/// across every stream.
@@ -257,8 +263,20 @@ impl ScriptedSession {
 	pub fn new(script: Vec<u8>) -> Self {
 		Self {
 			log: Log::default(),
+			eof: false,
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
+		}
+	}
+
+	/// Replay `script`, then close the stream instead of parking.
+	///
+	/// Parking is the right default for asserting that a loop is still running, but a
+	/// test for what a loop does on the way *out* needs the read to actually end.
+	pub fn eof(script: Vec<u8>) -> Self {
+		Self {
+			eof: true,
+			..Self::new(script)
 		}
 	}
 
@@ -267,6 +285,7 @@ impl ScriptedSession {
 	pub fn per_stream(scripts: Vec<Vec<u8>>) -> Self {
 		Self {
 			log: Log::default(),
+			eof: false,
 			script: Arc::new(Mutex::new(Vec::new())),
 			queue: Some(Arc::new(Mutex::new(scripts.into_iter().collect()))),
 		}
@@ -292,7 +311,7 @@ impl web_transport_trait::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		Ok((SinkSend::new(self.log.clone()), ScriptedRecv { script }))
+		Ok((SinkSend::new(self.log.clone()), ScriptedRecv { script, eof: self.eof }))
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
