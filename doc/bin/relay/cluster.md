@@ -120,9 +120,8 @@ See [Authentication](/bin/relay/auth) for the full setup.
 Peers are redialed indefinitely, with exponential backoff and jitter so a restarting cluster doesn't
 reconnect in lockstep. That includes a peer that rejects us: a bad token logs `cluster peer error;
 will retry` on every attempt rather than giving up, so watch for a peer that never reaches
-`cluster peer session closed`. The delay escalates to five minutes, which is what keeps a
-permanently-rejected peer cheap rather than noisy. A session that stays up for ten seconds is
-treated as healthy and clears the escalation, so a peer that comes back redials promptly.
+`cluster peer session closed`. The delay escalates to ten seconds at most, so a dead or rejecting
+peer stays loudly visible in the logs and a returning one is picked up within seconds.
 
 ## Migration from older configs
 

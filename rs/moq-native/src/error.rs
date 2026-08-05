@@ -1,14 +1,5 @@
 use std::sync::Arc;
 
-/// Whether an HTTP response status means "ask again later".
-///
-/// A response that arrived is the server's answer, and only this narrow set invites another
-/// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
-/// `404` and `403` included, is settled.
-pub(crate) fn status_retryable(status: u16) -> bool {
-	matches!(status, 408 | 429 | 502 | 503 | 504)
-}
-
 /// Errors produced while configuring or establishing native MoQ connections.
 ///
 /// Backend-specific failures live in per-backend error types ([`crate::tls::Error`],
@@ -153,37 +144,6 @@ impl Error {
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	pub fn is_auth(&self) -> bool {
 		self.connect_error().is_some_and(|err| err.is_auth())
-	}
-
-	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
-	///
-	/// `None` covers everything else: a dial that never got a response, a QUIC handshake that
-	/// failed, a URL we couldn't parse. Only a status the peer actually sent shows up here, and
-	/// whether it invites another attempt is the caller's call (`408`, `429`, `502`, `503`, and
-	/// `504` are the ones worth repeating). This deliberately does not try to say whether some
-	/// *other* kind of failure is worth retrying; that's a guess, and a backoff budget bounds it
-	/// instead.
-	pub fn status(&self) -> Option<u16> {
-		match self {
-			// A race is only settled when both halves were answered, and answered with something not
-			// worth repeating: one transport being refused says nothing about the other, so a `404`
-			// over QUIC alongside a dead WebSocket is still just a failed dial.
-			#[cfg(feature = "websocket")]
-			Self::TransportRace { quic, websocket } => match (quic.status(), websocket.status()) {
-				(Some(quic), Some(websocket)) if !status_retryable(quic) && !status_retryable(websocket) => Some(quic),
-				_ => None,
-			},
-
-			#[cfg(feature = "quinn")]
-			Self::Quinn(err) => err.status(),
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.status(),
-			#[cfg(feature = "quiche")]
-			Self::Quiche(err) => err.status(),
-			#[cfg(feature = "websocket")]
-			Self::WebSocket(err) => err.status(),
-			_ => None,
-		}
 	}
 }
 

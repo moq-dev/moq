@@ -14,10 +14,11 @@ use crate::{Client, Error};
 /// This decides how long to wait between reconnect attempts and when to give up. The delays carry
 /// jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
 ///
-/// [`timeout`](Self::timeout) is what ends a hopeless loop, not a judgment about the error: the only
-/// failures short-circuited are the ones a server states outright (an auth rejection, or a CONNECT
-/// status that isn't an invitation to retry). A zero timeout removes that backstop, so it belongs
-/// only where an unattended process must outlive an outage of any length.
+/// [`timeout`](Self::timeout) is what ends a hopeless loop, not a judgment about the error: every
+/// failure is retried the same way (except an auth rejection, which a redial cannot change), and
+/// the short default budget is what surfaces a broken target instead of hiding it. A zero timeout
+/// removes that backstop, so it belongs only where an unattended process must outlive an outage of
+/// any length.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -41,7 +42,7 @@ pub struct Backoff {
 	#[arg(
 		id = "backoff-max",
 		long,
-		default_value = "30s",
+		default_value = "5s",
 		env = "MOQ_BACKOFF_MAX",
 		value_parser = humantime::parse_duration,
 	)]
@@ -55,7 +56,7 @@ pub struct Backoff {
 	#[arg(
 		id = "backoff-timeout",
 		long,
-		default_value = "5m",
+		default_value = "10s",
 		env = "MOQ_BACKOFF_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
@@ -68,8 +69,8 @@ impl Default for Backoff {
 		Self {
 			initial: Duration::from_secs(1),
 			multiplier: 2,
-			max: Duration::from_secs(30),
-			timeout: Duration::from_secs(300),
+			max: Duration::from_secs(5),
+			timeout: Duration::from_secs(10),
 		}
 	}
 }
@@ -117,8 +118,8 @@ struct State {
 	status: Option<Status>,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
-	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or a server
-	/// answer that redialing cannot change.
+	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or an auth
+	/// rejection that redialing cannot change.
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
@@ -257,16 +258,11 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					// The two answers a server can give that redialing cannot change: it rejected our
-					// credentials, or it answered the CONNECT with a status that isn't an invitation
-					// to come back. Everything else falls through to the backoff, whose budget is
-					// what eventually stops the loop.
+					// An auth rejection is the one answer redialing cannot change. Everything else
+					// falls through to the backoff, whose budget is what stops the loop: a failure
+					// that clears within the budget was transient, and one that doesn't surfaces as
+					// the last real error rather than being guessed at up front.
 					if err.is_auth() {
-						return Err(err);
-					}
-					if let Some(status) = err.status()
-						&& !crate::error::status_retryable(status)
-					{
 						return Err(err);
 					}
 					last_error = Some(err);
@@ -459,8 +455,8 @@ mod tests {
 		let backoff = Backoff::default();
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Duration::from_secs(30));
-		assert_eq!(backoff.timeout, Duration::from_secs(300));
+		assert_eq!(backoff.max, Duration::from_secs(5));
+		assert_eq!(backoff.timeout, Duration::from_secs(10));
 	}
 
 	/// The linger outlives the give-up timeout (so the reconnect error surfaces

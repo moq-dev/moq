@@ -919,10 +919,11 @@ impl Cluster {
 		}
 
 		// A peer is supervised for the life of the relay, so there is no give-up deadline: one that is
-		// unreachable for an hour still has to be redialed when it comes back. Nothing ends this
-		// loop; the escalating delay is what keeps a permanently-dead peer cheap.
+		// unreachable for an hour still has to be redialed when it comes back. The ceiling stays low
+		// so a returning peer is picked up within seconds, and the warn below fires at least that
+		// often, so a dead peer is loudly broken rather than silently parked.
 		let base_delay = tokio::time::Duration::from_secs(1);
-		let max_delay = tokio::time::Duration::from_secs(300);
+		let max_delay = tokio::time::Duration::from_secs(10);
 		let mut delay = base_delay;
 
 		// Sessions shorter than this are treated as churn: we keep backing off

@@ -20,13 +20,12 @@ export type ReloadDelay = {
 	/** The multiplier for the delay (default: 2). */
 	multiplier: number;
 
-	/** The maximum delay in milliseconds (default: 30000). */
+	/** The maximum delay in milliseconds (default: 5000). */
 	max: DOMHighResTimeStamp;
 
 	/**
 	 * Maximum total time in milliseconds to spend retrying before giving up (default:
-	 * 300000, 5 minutes). Resets after each successful connection. Set to 0 for
-	 * unlimited retries.
+	 * 10000). Resets after each successful connection. Set to 0 for unlimited retries.
 	 */
 	timeout?: DOMHighResTimeStamp;
 };
@@ -43,8 +42,13 @@ export type ReloadProps = Omit<ConnectProps, "signal"> & {
 	delay?: ReloadDelay;
 };
 
-/** How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset. */
-const DEFAULT_TIMEOUT = 300000;
+/**
+ * How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset.
+ *
+ * Short on purpose: a failure that clears within it was transient, and one that doesn't should
+ * surface as an error rather than leave the page silently reconnecting for minutes.
+ */
+const DEFAULT_TIMEOUT = 10000;
 
 /** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -116,7 +120,7 @@ export class Reload {
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 30000 };
+		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 5000 };
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;

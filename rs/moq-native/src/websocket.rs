@@ -223,17 +223,6 @@ impl Error {
 			_ => None,
 		}
 	}
-
-	/// The HTTP status the server answered the upgrade with, if it answered with one at all.
-	///
-	/// qmux surfaces a non-101 WebSocket upgrade response as `Http(status)`. See
-	/// [`crate::Error::status`].
-	pub(crate) fn status(&self) -> Option<u16> {
-		match self {
-			Self::Connect(qmux::Error::Http(status)) => Some(*status),
-			_ => None,
-		}
-	}
 }
 
 /// Listens for incoming WebSocket connections on a TCP port.

@@ -33,13 +33,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff bounds for retrying a failed import step, so a transient upstream error (a 503, a
 /// dropped connection) doesn't tear down the whole import.
 ///
-/// Bounded by a give-up budget: an origin that has been unreachable for minutes is an outage the
-/// caller should hear about, not one the import should paper over indefinitely while publishing
-/// nothing. The ceiling is low because a live playlist window is measured in seconds and a longer
-/// wait would blow past it anyway.
+/// The budget is short on purpose: a failure that clears within it was transient, and one that
+/// doesn't is an outage the caller should hear about rather than one the import papers over while
+/// publishing nothing. No error is classified; the budget is the filter.
 const STEP_RETRY_MIN: Duration = Duration::from_secs(1);
-const STEP_RETRY_MAX: Duration = Duration::from_secs(10);
-const STEP_RETRY_BUDGET: Duration = Duration::from_secs(300);
+const STEP_RETRY_MAX: Duration = Duration::from_secs(5);
+const STEP_RETRY_BUDGET: Duration = Duration::from_secs(10);
 
 /// How far back from the live edge to start when (re-)anchoring to a playlist window.
 ///
@@ -100,14 +99,11 @@ struct StepOutcome {
 	/// nothing to add this pass, not a failure. Counting segments instead would read a quiet
 	/// playlist as a dead one.
 	ok: usize,
-	/// A rendition failure from this step, if any.
+	/// The first rendition failure from this step, if any.
 	///
 	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
 	/// `Ok` having imported nothing at all. The loop needs to tell that apart from a quiet playlist
 	/// with no new segments, or it treats a permanently broken source as steady progress.
-	///
-	/// When several renditions fail, this is the one whose failure another pass could still clear,
-	/// so a single permanently-dead variant doesn't end an import the others could still serve.
 	failed: Option<Error>,
 }
 
@@ -612,10 +608,9 @@ impl Import {
 
 	/// Run the import loop until cancelled.
 	///
-	/// A failed step is logged and retried with escalating backoff, and the import ends once the
-	/// backoff budget is spent, so a broken source surfaces instead of looping forever. The one
-	/// shortcut is an HTTP status the origin actually sent: a `404` playlist ends the import
-	/// immediately, since no amount of waiting turns it into a `200`.
+	/// A failed step is logged and retried with escalating backoff, and the import ends with the
+	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
+	/// instead of looping forever.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
@@ -644,11 +639,6 @@ impl Import {
 					delay = STEP_RETRY_MIN;
 					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
 					outcome
-				}
-				// A status the origin actually sent is its answer: a 404 playlist is not going to
-				// become a 200 on the next pass. Everything else rides the backoff budget.
-				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
-					return Err(err);
 				}
 				Err(err) => {
 					let now = tokio::time::Instant::now();
@@ -725,15 +715,8 @@ impl Import {
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
 						warn!(label = %track.label, %err, "rendition import step failed, will retry");
-						// Prefer a failure another pass could still clear. The import is worth
-						// continuing as long as *any* rendition might come back, even when another is
-						// permanently gone, so one dead variant must not end an import the rest could
-						// still serve. Keeping whichever error came last instead would make the
-						// outcome depend on rendition order.
-						let recoverable = err.status().is_none_or(crate::status_retryable);
-						if recoverable || failed.is_none() {
-							failed = Some(err);
-						}
+						// Keep the first failure so the outcome doesn't depend on rendition order.
+						failed.get_or_insert(err);
 					}
 				},
 			}

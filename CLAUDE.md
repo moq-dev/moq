@@ -99,19 +99,7 @@ The rename/removal rationale lives in the commit message and PR description, not
 
 ## Retries
 
-Retrying is the reflex that hides bugs, so a new retry loop has to answer three questions in the code, not in the reviewer's head.
-
-- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Three lines at the call site: draw the wait from the top half of the current window (`delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)`), sleep it, then `delay = (delay * 2).min(MAX)`. There is deliberately no shared `Backoff` type. Each loop wants a different subset (most want no budget at all), the escalation is smaller than the abstraction over it, and a general one has to accept an arbitrary `max` it then has to defend against.
-- **When does it stop?** A deadline or an attempt budget, and that budget is what ends the loop. Unlimited retries belong only to a supervisor whose job is to outlive an outage (a reconnecting publisher, a cluster peer, a listener), where the escalating delay is what keeps a permanently-dead target cheap.
-- **Who owns the budget?** Exactly one layer. An outer supervisor that rebuilds an inner retry loop resets its backoff to the initial delay, so the escalation never happens and a fixed-interval hammer wears an exponential costume. Watch the inner loop's terminal signal instead of restarting it.
-
-**Don't classify errors as retryable.** It is tempting to give an error type an `is_retryable()` and skip the wait when the answer is no. Resist it: deciding whether a failure is permanent means guessing, the guess has to stay correct as every wrapped error type evolves, and getting it wrong either strands a connection a retry would have recovered or hammers a dead one. The budget already bounds the damage; the only thing classification buys is surfacing a config error sooner.
-
-The exception is an answer a peer actually gave, where the protocol defines the meaning. An HTTP status is the one we have: `moq_native::Error::status` and `moq_hls::Error::status` report the status a server sent, and each crate decides what to do with it (`408`, `429`, `502`, `503`, and `504` are worth another try). That is reading a response, not inferring intent from a failure.
-
-Resetting a backoff is its own claim: only after an outcome that says the earlier failures no longer describe reality (a session that stayed healthy, a request that succeeded, a changed destination). Resetting on an attempt that failed immediately turns escalation into a tight loop.
-
-Not every wait is a retry. Periodic refreshes, readiness probes, stream reads, alternate-address races, and test synchronization don't repeat a failed operation, so none of this applies to them.
+Fail fast; retry only what a few seconds can fix. Every retry loop uses capped exponential backoff with jitter, inlined at the call site (no shared `Backoff` type), and is bounded by *time*, not by error type: a short budget (~10s), then surface the last real error. Never classify errors as retryable (`is_retryable()`, HTTP status lists); an ephemeral failure is one that clears within the budget, so the budget is the classifier. The only unbounded loops are process-lifetime supervisors with nobody to return an error to (cluster peers, device reopen, accept loops); they retry forever but cap the delay at seconds and warn per attempt, loudly broken rather than silently parked. Exactly one layer owns a retry: an outer loop that rebuilds an inner one resets its escalation, so watch the inner loop's terminal signal instead.
 
 ## Root Cause First
 

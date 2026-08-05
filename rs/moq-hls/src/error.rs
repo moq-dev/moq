@@ -18,15 +18,6 @@ impl std::fmt::Display for SequenceKind {
 	}
 }
 
-/// Whether an HTTP response status means "ask again later".
-///
-/// A response that arrived is the server's answer, and only this narrow set invites another
-/// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
-/// `404` and `403` included, is settled.
-pub(crate) fn status_retryable(status: u16) -> bool {
-	matches!(status, 408 | 429 | 502 | 503 | 504)
-}
-
 /// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -133,20 +124,6 @@ pub enum Error {
 	Other(std::sync::Arc<anyhow::Error>),
 }
 
-impl Error {
-	/// The HTTP status the origin answered with, if it answered with one at all.
-	///
-	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
-	/// the origin's settled answer. Nothing else here is classified; a failure with no status falls
-	/// through to the backoff budget.
-	pub fn status(&self) -> Option<u16> {
-		match self {
-			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
-			_ => None,
-		}
-	}
-}
-
 impl From<reqwest::Error> for Error {
 	fn from(err: reqwest::Error) -> Self {
 		Error::Reqwest(std::sync::Arc::new(err))
@@ -167,17 +144,3 @@ impl From<anyhow::Error> for Error {
 
 /// Convenience alias for results from the HLS gateway.
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// The import loop consults this, so an origin's settled answer has to reach it intact.
-	#[test]
-	fn an_http_failure_reports_its_status() {
-		// A failure the origin never answered carries no status, so the budget decides instead.
-		assert_eq!(Error::NoVariants.status(), None);
-		assert_eq!(Error::ParsePlaylist("not a playlist".to_string()).status(), None);
-		assert_eq!(Error::Moq(moq_net::Error::Transport("lost".to_string())).status(), None);
-	}
-}
