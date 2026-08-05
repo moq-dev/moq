@@ -139,11 +139,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// The origin stamped into the hop chain of every broadcast from this session,
-	// when the peer declares none of its own. Base moq-transport carries no hop ids,
-	// so a peer only has an identity if it negotiated the MoQ Cluster extension or
-	// the caller assigned it one (`Client::with_peer_origin`), which also makes the
-	// route recognizable across sessions dialing the same relay.
+	// The origin naming this link, appended to the hop chain of every broadcast from
+	// this session when the peer declares none of its own (see `session_route`). Base
+	// moq-transport carries no hop ids, so a peer only has an identity if it negotiated
+	// the MoQ Cluster extension or the caller assigned it one
+	// (`Client::with_peer_origin`), which also makes the route recognizable across
+	// sessions dialing the same relay.
 	//
 	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
 	// Inventing a random id here would look like a real identity without being
@@ -220,9 +221,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// The route for an advertisement that carries no path of its own.
 	///
-	/// Base moq-transport has no hops on the wire, so the chain is a single entry
-	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
-	/// supplied an identity).
+	/// Base moq-transport has no hops on the wire, so the chain is reconstructed here,
+	/// as the MoQ Cluster draft requires of an advertisement from an upstream that did
+	/// not negotiate the extension: a single `Origin::UNKNOWN` for that upstream. The
+	/// first entry is the original publisher and `UNKNOWN` is how the draft spells "we
+	/// cannot name it", which is the truth here: whoever produced this is somewhere
+	/// behind the peer and the wire never said who.
+	///
+	/// An identity the caller assigned the peer (`Client::with_peer_origin`) names the
+	/// *link* we received it over, not that publisher, so it follows as a second hop
+	/// exactly where a relay appends its own. Collapsing the two would let a peer
+	/// reflecting our own broadcast back at us look like a rival publisher claiming the
+	/// path, which evicts the source we are publishing from.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
@@ -230,8 +240,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// cluster-aware peers as free and pull subscriptions onto the wrong relay.
 	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
 		let mut hops = crate::OriginList::new();
-		hops.push(self.session_origin)
+		hops.push(crate::Origin::UNKNOWN)
 			.expect("an empty hop chain has room for one entry");
+		if self.session_origin != crate::Origin::UNKNOWN {
+			hops.push(self.session_origin)
+				.expect("a one-entry hop chain has room for another");
+		}
 		broadcast::Route::new()
 			.with_hops(hops)
 			.with_cost(cluster::link_cost(self.cost, peer))
@@ -1474,7 +1488,8 @@ mod tests {
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
 	/// attributed to a random per-connection origin. An identity assigned via
 	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
-	/// resolve to one recognizable route.
+	/// resolve to one recognizable route. It names the link, so it follows the
+	/// unnameable publisher rather than posing as it.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1505,7 +1520,65 @@ mod tests {
 
 		let broadcast = consumer.get_broadcast("room/host").unwrap();
 		let hops: Vec<_> = broadcast.routes()[0].hops.iter().copied().collect();
-		assert_eq!(hops, vec![assigned]);
+		assert_eq!(hops, vec![crate::Origin::UNKNOWN, assigned]);
+	}
+
+	/// Both directions of a sync target point at one relay, which has no way to tell
+	/// our two connections apart on a wire with no hop ids and so offers our own
+	/// broadcast back to us. That reflection must not look like a rival publisher
+	/// claiming the path: taking it over would leave only a route we refuse to
+	/// advertise back to the peer, and the publish direction would withdraw the
+	/// announce it just made.
+	#[tokio::test]
+	async fn reflected_announce_does_not_evict_the_source_we_publish() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let peer = crate::Origin::new(777).unwrap();
+		let self_origin = crate::Origin::new(1).unwrap();
+
+		let origin = crate::origin::Info::new(self_origin).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		// What we are publishing to the peer: a real upstream, announced.
+		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let _source = origin
+			.create_broadcast(
+				"room/host",
+				crate::broadcast::Route::new()
+					.with_hops(upstream.clone())
+					.with_announce(true),
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		announced.assert_next_some("room/host");
+
+		// The peer reflects it back over the subscribe direction, which carries no
+		// hop chain of its own.
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			Some(peer),
+			cluster::PeerSetup::default(),
+			self_origin,
+			None,
+			Version::Draft14,
+			tasks,
+		);
+		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let _reflected = subscriber
+			.start_announce(crate::Path::new("room/host").to_owned(), advert)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		// No announce churn, and the path still resolves to the upstream route, which
+		// is the one the publish direction can advertise back to the peer.
+		announced.assert_next_wait();
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let routes = broadcast.routes();
+		assert_eq!(routes.len(), 1, "the reflection must park, not attach");
+		assert_eq!(routes[0].hops, upstream);
 	}
 
 	fn cluster_subscriber(

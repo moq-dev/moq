@@ -1551,9 +1551,9 @@ async fn run_source(
 		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone()) {
 			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
 			Attach::Parked(incumbent) => {
-				tracing::warn!(
+				tracing::debug!(
 					broadcast = %full,
-					"path already live with a different publisher; parking an offline source until it ends",
+					"path already live with a different publisher; parking this source until it ends",
 				);
 				// Wait for the incumbent front to close, or for our own route to
 				// change: announcing ourselves is what earns the takeover, and our
@@ -1639,9 +1639,10 @@ enum Attach {
 	/// source table, the spliced broadcast, and the source's table id.
 	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
 	/// The path's live front belongs to a different original publisher and this
-	/// source is offline, so it would rank below every route the front holds and
-	/// must not take the path from it. The caller parks on the returned table
-	/// until the front closes.
+	/// source may not take it: either the source is offline (so it would rank below
+	/// every route the front holds) or its chain does not prove it carries different
+	/// content (see [`proves_distinct_content`]). The caller parks on the returned
+	/// table until the front closes.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -1653,6 +1654,40 @@ struct AttachContext<'a> {
 	full: &'a PathOwned,
 	/// Path relative to `node`, for locating (and later pruning) the leaf.
 	rest: &'a PathOwned,
+}
+
+/// Whether two sources carry the same content and may therefore splice.
+///
+/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
+/// identity, or that does not speak the hops extension at all, contributes as a
+/// first hop. Two such sources are not interchangeable even though their first
+/// hops compare equal, so splicing them would cut one publisher's subscribers
+/// over to an unrelated publisher's content. Every other id compares normally,
+/// including `None` for a locally produced broadcast with no hops.
+fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
+	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
+		return false;
+	}
+	a == b
+}
+
+/// Whether a source's chain proves it carries content distinct from the front it
+/// landed on, which is what taking the path over requires.
+///
+/// A real first hop names the original publisher, so it is proof by itself.
+/// [`Origin::UNKNOWN`] names nobody, and what that means depends on where it sits.
+/// A one-hop chain is the peer claiming to be the publisher: that is a publisher on
+/// a wire carrying no identity, and its reconnect must displace the session it
+/// replaced immediately instead of waiting for the transport to retire it. A longer
+/// chain is a forwarder relaying content it cannot name, which is indistinguishable
+/// from our own broadcast arriving back through a peer that does no loop detection
+/// of its own. Evicting a live front on that is how a publish direction cancels
+/// itself, so such a source waits for the front instead.
+fn proves_distinct_content(route: &broadcast::Route) -> bool {
+	match route.hops.iter().next() {
+		Some(first) if *first == Origin::UNKNOWN => route.hops.len() == 1,
+		_ => true,
+	}
 }
 
 /// Attach a source to the broadcast at `leaf`, creating (and publishing) the
@@ -1670,22 +1705,9 @@ struct AttachContext<'a> {
 /// Taking over requires announcing, which keeps the rule consistent with
 /// [`route_order`]: an offline source ranks below every announced route, so it
 /// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
-/// cutting its subscribers for content nobody has advertised.
-/// Whether two sources carry the same content and may therefore splice.
-///
-/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
-/// identity, or that does not speak the hops extension at all, contributes as a
-/// first hop. Two such sources are not interchangeable even though their first
-/// hops compare equal, so splicing them would cut one publisher's subscribers
-/// over to an unrelated publisher's content. Every other id compares normally,
-/// including `None` for a locally produced broadcast with no hops.
-fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
-	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
-		return false;
-	}
-	a == b
-}
-
+/// cutting its subscribers for content nobody has advertised. It also requires a
+/// chain that proves the content really is different (see
+/// [`proves_distinct_content`]); a source that cannot show that waits too.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -1713,7 +1735,7 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
-			} else if !route.announce {
+			} else if !route.announce || !proves_distinct_content(&route) {
 				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
@@ -3228,6 +3250,72 @@ mod tests {
 			Some(1),
 			"an unannounced incumbent must always be displaced"
 		);
+	}
+
+	/// A forwarder that cannot name the publisher it relays for (an `UNKNOWN` first
+	/// hop behind at least one link) never evicts a live front. That shape is what a
+	/// peer reflecting our own broadcast back at us produces on a wire with no hop
+	/// ids, and evicting on it leaves only a route we refuse to advertise to that
+	/// peer.
+	#[tokio::test]
+	async fn test_unnamed_forwarder_parks_instead_of_taking_over() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
+		let peer = Origin::new(42).unwrap();
+		let reflected = OriginList::try_from(vec![Origin::UNKNOWN, peer]).unwrap();
+
+		let _source = origin
+			.create_broadcast("test", announce().with_hops(upstream.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_some("test");
+
+		let _reflection = origin
+			.create_broadcast("test", announce().with_hops(reflected))
+			.unwrap();
+		settle().await;
+		settle().await;
+
+		announced.assert_next_wait();
+		let broadcast = consumer.get_broadcast("test").unwrap();
+		let routes = broadcast.routes();
+		assert_eq!(routes.len(), 1, "the reflection must park, not attach");
+		assert_eq!(routes[0].hops, upstream);
+	}
+
+	/// A peer that claims to be the publisher itself (a one-hop chain) still takes
+	/// the path over even with no identity on the wire, so a publisher reconnecting
+	/// displaces the session it replaced instead of waiting for the transport.
+	#[tokio::test]
+	async fn test_unnamed_publisher_still_takes_over() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let direct = OriginList::try_from(vec![Origin::UNKNOWN]).unwrap();
+
+		let _first = origin
+			.create_broadcast("test", announce().with_hops(direct.clone()))
+			.unwrap();
+		settle().await;
+		settle().await;
+		announced.assert_next_some("test");
+
+		let _reconnect = origin.create_broadcast("test", announce().with_hops(direct)).unwrap();
+		settle().await;
+		settle().await;
+
+		// The takeover is an unannounce followed by a fresh announce.
+		announced.assert_next_none("test");
+		announced.assert_next_some("test");
 	}
 
 	/// Let the spawned origin tasks (source watchers, front dispatch) run. The
