@@ -159,9 +159,10 @@ impl Error {
 	///
 	/// `None` covers everything else: a dial that never got a response, a QUIC handshake that
 	/// failed, a URL we couldn't parse. Only a status the peer actually sent shows up here, and
-	/// [`status_retryable`] is what decides whether it invites another attempt. This
-	/// deliberately does not try to say whether some *other* kind of failure is worth retrying;
-	/// that's a guess, and the caller's backoff budget bounds it instead.
+	/// whether it invites another attempt is the caller's call (`408`, `429`, `502`, `503`, and
+	/// `504` are the ones worth repeating). This deliberately does not try to say whether some
+	/// *other* kind of failure is worth retrying; that's a guess, and a backoff budget bounds it
+	/// instead.
 	pub fn status(&self) -> Option<u16> {
 		match self {
 			// A race is only settled when both halves were answered, and answered with something not

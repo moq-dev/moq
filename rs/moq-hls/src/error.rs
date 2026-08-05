@@ -136,9 +136,9 @@ pub enum Error {
 impl Error {
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
-	/// The import loop reads this through [`status_retryable`]: a `503` on a playlist
-	/// fetch is worth another pass, a `404` is the origin's settled answer. Nothing else here is
-	/// classified; a failure with no status falls through to the backoff budget.
+	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is
+	/// the origin's settled answer. Nothing else here is classified; a failure with no status falls
+	/// through to the backoff budget.
 	pub fn status(&self) -> Option<u16> {
 		match self {
 			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
