@@ -176,6 +176,7 @@ void MoQOutput::Reset()
 		// Retire the attempt so an in-flight terminal callback stays out of the way.
 		session_attempt++;
 		session_connected = false;
+		connect_time_ms = 0;
 		stale = session;
 		session = 0;
 	}
@@ -224,17 +225,21 @@ void MoQOutput::SessionStatus(void *user_data, int code)
 
 void MoQOutput::SessionConnected(const SessionRef &ref, int epoch)
 {
+	auto elapsed = std::chrono::steady_clock::now() - ref.started;
+	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
 		if (session_attempt != ref.attempt)
 			return;
 		session_connected = true;
+		// The dock reads this as the live connected indicator, so publish it under
+		// the same lock as the stamp check: a restart must not be able to clear it
+		// between the two and leave the old attempt's time showing.
+		connect_time_ms = ms;
 	}
 
-	auto elapsed = std::chrono::steady_clock::now() - ref.started;
-	connect_time_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-
-	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", connect_time_ms.load(), epoch, ref.url.c_str());
+	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", ms, epoch, ref.url.c_str());
 }
 
 void MoQOutput::SessionClosed(const SessionRef &ref, int code)
@@ -259,6 +264,7 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 			session = 0;
 			session_attempt++;
 			session_connected = false;
+			connect_time_ms = 0;
 		}
 	}
 
