@@ -75,10 +75,15 @@ rust-version = "1.91"
 [workspace.dependencies]
 flate2 = "1.1"
 hang = { version = "0.20", path = "rs/hang" }
+# HMAC-SHA256 for the mDNS membership proofs (moq-native's `mdns` feature).
+hmac = "0.13"
 kio = { version = "0.5", path = "rs/kio" }
 # Permutation testing for the kio primitives (and everything built on them).
 # Only compiled under `--cfg loom`; see `just rs loom`.
 loom = { version = "0.7.2", features = ["futures"] }
+# DNS-SD advertisement and browsing for LAN peer discovery (moq-native's `mdns` feature).
+# `async` awaits the event channel instead of blocking a thread on it.
+mdns-sd = { version = "0.20", features = ["async"] }
 moq-audio = { version = "0.0.15", path = "rs/moq-audio" }
 moq-flate = { version = "0.1.1", path = "rs/moq-flate" }
 moq-hls = { version = "0.4.3", path = "rs/moq-hls", default-features = false }
@@ -110,6 +115,9 @@ moq-video = { version = "0.0.11", path = "rs/moq-video", default-features = fals
 percent-encoding = "2"
 qmux = { version = "0.4.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+subtle = "2.6"
+tempfile = "3"
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.6"

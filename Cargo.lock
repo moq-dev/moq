@@ -3515,6 +3515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "igd-next"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4256,6 +4266,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "mdns-sd"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86dbb9f00c8c367f75ed3a775d3eb31d0375a72f58275ef64a1bc53c255a2ce2"
+dependencies = [
+ "fastrand",
+ "flume",
+ "if-addrs",
+ "log",
+ "mio",
+ "socket-pktinfo",
+ "socket2 0.6.5",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4422,6 +4447,7 @@ dependencies = [
  "moq-video",
  "rustls",
  "sd-notify",
+ "tempfile",
  "tokio",
  "tower-http 0.7.0",
  "tracing",
@@ -4573,9 +4599,11 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "hmac 0.13.0",
  "humantime",
  "humantime-serde",
  "jni 0.22.4",
+ "mdns-sd",
  "moq-net",
  "noq-proto",
  "notify",
@@ -4591,7 +4619,9 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_with",
+ "sha2",
  "socket2 0.6.5",
+ "subtle",
  "tempfile",
  "thiserror 2.0.19",
  "tikv-jemalloc-ctl",
@@ -7959,6 +7989,17 @@ name = "smawk"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
+
+[[package]]
+name = "socket-pktinfo"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "612942246d0cc239cfd83af1dfd39be47f649208a3524e5e9da651910128e0ac"
+dependencies = [
+ "libc",
+ "socket2 0.6.5",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "socket2"
