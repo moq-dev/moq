@@ -18,8 +18,10 @@ name = "moq"
 path = "src/main.rs"
 
 [features]
-default = ["iroh", "quinn", "websocket", "nvenc", "vaapi", "nvdec", "pipewire"]
+default = ["iroh", "cluster-lan", "quinn", "websocket", "nvenc", "vaapi", "nvdec", "pipewire"]
 iroh = ["moq-native/iroh"]
+# LAN discovery and meshing (`--cluster-lan`).
+cluster-lan = ["moq-native/mdns"]
 jemalloc = ["moq-native/jemalloc"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
@@ -81,6 +83,7 @@ url = "2"
 sd-notify = "0.5"
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # `test-util` enables `tokio::time::pause` so the TS round-trip test simulates the
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }

@@ -5,6 +5,8 @@
 //! selected endpoint.
 
 mod args;
+#[cfg(feature = "cluster-lan")]
+mod cluster;
 #[cfg(feature = "capture")]
 mod devices;
 mod hls;
@@ -59,6 +61,84 @@ impl Net {
 		};
 		Ok(server)
 	}
+}
+
+/// Which way media flows, which is what an inbound session is offered.
+#[derive(Clone, Copy)]
+pub enum Direction {
+	/// `import`: clients subscribe to what this process publishes.
+	Import,
+	/// `export`: clients publish into this process's origin.
+	Export,
+}
+
+/// Bind the MoQ listener and spawn everything that serves on it: ordinary
+/// clients, the LAN mesh when `--cluster-lan` is on, and the certificate
+/// endpoint for an explicit `--server-bind`. A no-op with no listener configured.
+///
+/// Readiness is signaled once every attachment is live, so a bind, mDNS, or key
+/// failure surfaces before the process claims to be up.
+fn spawn_server(
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	moq: &MoqSide,
+	origin: &moq_net::origin::Producer,
+	net: &Net,
+	direction: Direction,
+) -> anyhow::Result<()> {
+	if !moq.serves() {
+		return Ok(());
+	}
+
+	let server = net.server(moq.server_config())?;
+	let certificates = server.certificates();
+
+	#[cfg(feature = "cluster-lan")]
+	let lan = match moq.lan() {
+		true => Some(cluster::Lan::start(
+			&moq.cluster,
+			origin.clone(),
+			&server,
+			moq.client.clone(),
+		)?),
+		false => None,
+	};
+	moq::notify_ready();
+
+	#[cfg(feature = "cluster-lan")]
+	match lan {
+		Some((lan, discovery)) => {
+			tasks.spawn(cluster::serve(server, lan.clone(), origin.clone(), direction));
+			tasks.spawn(lan.run(discovery));
+		}
+		None => spawn_serve(tasks, server, origin, direction),
+	}
+	#[cfg(not(feature = "cluster-lan"))]
+	spawn_serve(tasks, server, origin, direction);
+
+	// The certificate endpoint is for clients dialing a URL, so it follows the
+	// explicit listener rather than the mesh's ephemeral one.
+	if let Some(web_bind) = moq.server.bind.clone() {
+		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
+	}
+
+	Ok(())
+}
+
+/// Serve ordinary clients with moq-native's own accept loop.
+fn spawn_serve(
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+	server: moq_native::Server,
+	origin: &moq_net::origin::Producer,
+	direction: Direction,
+) {
+	let origin = origin.clone();
+	tasks.spawn(async move {
+		match direction {
+			Direction::Import => server.serve_publish(origin.consume()).await?,
+			Direction::Export => server.serve_consume(origin).await?,
+		}
+		Ok(())
+	});
 }
 
 #[tokio::main]
@@ -157,14 +237,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		}
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
-		let certificates = server.certificates();
-		moq::notify_ready();
-		let origin = origin.consume();
-		tasks.spawn(async move { Ok(server.serve_publish(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
-	}
+	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Import)?;
 
 	// Foreign side: the single source.
 	if let Some(format) = import.source.stdin_format() {
@@ -253,14 +326,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 		moq::notify_ready();
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
-	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
-		let certificates = server.certificates();
-		moq::notify_ready();
-		let origin = origin.clone();
-		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
-	}
+	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Export)?;
 
 	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {
