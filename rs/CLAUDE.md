@@ -170,7 +170,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
   - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
 
   What still compiles these automatically, and when:
 

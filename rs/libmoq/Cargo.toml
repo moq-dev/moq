@@ -25,8 +25,8 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
 moq-net = { workspace = true }
-# Enable the NVENC / VAAPI / NVDEC hardware codecs (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvenc", "vaapi", "nvdec"] }
+# Enable the NVIDIA hardware codecs (default-off at the workspace level).
+moq-video = { workspace = true, features = ["nvenc", "nvdec"] }
 # Blocking on `encode::Sink` from the synchronous C entry points; see
 # `video::block_on` for why not a tokio helper.
 pollster = "1.0"

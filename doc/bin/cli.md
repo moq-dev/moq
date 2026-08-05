@@ -240,10 +240,11 @@ moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
-screen capture are compiled in by default and link the CUDA / libva / libpipewire
-system libraries. To build `capture` without them (software openh264 + V4L2
-camera capture only, no system library dependency), drop the default features:
+On Linux the NVENC (NVIDIA) encoder and the PipeWire screen capture are compiled
+in by default. VAAPI (Intel/AMD) is behind the off-by-default `vaapi` feature,
+since that backend has never been validated on real hardware. To build `capture`
+without any of them (software openh264 + V4L2 camera capture only, no system
+library dependency), drop the default features:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -260,15 +261,15 @@ On macOS these capture at the logical resolution, i.e. what the screen looks lik
 to its owner rather than its native pixels: a 2x retina display shares as
 1710x1106, not 3420x2214, which keeps the derived bitrate sane. Pass
 `--width`/`--height` to capture native pixels instead.
-The Linux screen backend links libpipewire and
-is behind the default-on `pipewire` feature; drop it (like the codecs above) for
-a build without the dependency. The codec is chosen with `--codec`
-(`h264` default, or `h265`). For H.264 it picks a hardware encoder
-(VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
-is present, falling back to the built-in software encoder (openh264); force either
+The Linux screen backend links libpipewire and is behind the default-on
+`pipewire` feature; drop it (like the codecs above) for a build without the
+dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
+H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
+or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
+present, falling back to the built-in software encoder (openh264); force either
 with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
-Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
-device path (Linux) or name (a friendly-name substring on Windows, the
+Media Foundation on Windows). `--camera` takes a bare integer as a device index,
+otherwise a device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /
 WASAPI / ALSA) and encodes Opus. `--system-audio` is macOS-only: there is no
 loopback input device, so it goes through ScreenCaptureKit (the same API as

@@ -127,8 +127,8 @@ fix-changed $FILES:
 # someone runs this by hand on a Windows host.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
-# backend don't build on MSVC, while moq-video's Linux-only nvenc/vaapi/nvdec
-# defaults are already no-ops off Linux. moq-gst is excluded because it links
+# backend don't build on MSVC, while moq-video's Linux-only nvenc/nvdec defaults
+# are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.

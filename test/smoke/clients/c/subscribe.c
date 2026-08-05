@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
     if (got) {
         fprintf(stderr, "received a frame from %s\n", broadcast);
         // The data path succeeded, which is all this smoke client verifies.
-        // libmoq statically bundles moq-video (openh264/vaapi/cuda), whose
+        // libmoq statically bundles moq-video (openh264/cuda), whose
         // worker threads use priority-protected mutexes; tearing them down at
         // normal exit can trip a glibc pthread priority assertion and abort.
         // Skip that atexit teardown with _exit now that we have our result.
