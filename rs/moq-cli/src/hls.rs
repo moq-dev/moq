@@ -52,7 +52,8 @@ pub async fn import(
 
 	// Create catalog tracks before the broadcast becomes visible so a subscriber
 	// can consume the catalog as soon as it observes the announcement.
-	let catalog = crate::publish::apply_latency_max(moq_mux::catalog::Producer::new(&mut producer)?, latency_max);
+	let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+	let catalog = moq_mux::catalog::Producer::with_config(&mut producer, config)?;
 
 	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
 

@@ -11,5 +11,5 @@ export { Consumer, type ConsumerProps } from "./consumer";
 export type { Format } from "./format";
 export * as Legacy from "./legacy";
 export * as Timeline from "./timeline";
-export { trackInfo } from "./track";
+export { type TrackInfoOptions, trackInfo } from "./track";
 export * from "./types";

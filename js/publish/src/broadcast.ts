@@ -231,7 +231,7 @@ export class Broadcast {
 			// Media, so declare the retention a FETCH-based consumer needs (the catalog above
 			// keeps the bare defaults: it is read at the live edge, which is always retained).
 			// Matches what a Rust publisher declares via `hang::container::track_info`.
-			const track = request.accept(Container.trackInfo(this.in.latencyMax.peek()));
+			const track = request.accept(Container.trackInfo({ latencyMax: this.in.latencyMax.peek() }));
 
 			// A second subscription for the same name supersedes the first: close the old producer.
 			signal.peek()?.close();

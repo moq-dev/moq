@@ -204,18 +204,6 @@ enum Source {
 	},
 }
 
-/// Apply `--latency-max` to a freshly built catalog, leaving hang's own default in place when the
-/// flag is unset. Shared with the HLS import, which builds its catalog the same way.
-pub fn apply_latency_max<E: moq_mux::catalog::hang::CatalogExt>(
-	catalog: moq_mux::catalog::Producer<E>,
-	latency_max: Option<std::time::Duration>,
-) -> moq_mux::catalog::Producer<E> {
-	match latency_max {
-		Some(latency_max) => catalog.with_latency_max(latency_max),
-		None => catalog,
-	}
-}
-
 /// A single-broadcast publisher: decodes stdin (or captures local devices) into
 /// a broadcast that the MoQ side announces.
 pub struct Publish {
@@ -238,12 +226,11 @@ impl Publish {
 		// verbatim, so it uses the `mpegts` catalog extension rather than the media-only
 		// `()`. The catalog producer owns the broadcast's catalog tracks, so each broadcast
 		// gets exactly one; TS builds its `Ext` catalog here instead of the shared `()` below.
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+
 		if let PublishFormat::Ts = format {
-			let catalog = moq_mux::catalog::Producer::with_catalog(
-				&mut broadcast,
-				moq_mux::catalog::hang::Catalog::<ts::Ext>::default(),
-			)?;
-			let catalog = apply_latency_max(catalog, latency_max);
+			let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
+			let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 			let ts = ts::Import::new(broadcast.clone(), catalog.reserve());
 			return Ok(Self {
 				source: Source::Stream(PublishDecoder::Ts(Box::new(ts))),
@@ -251,7 +238,7 @@ impl Publish {
 			});
 		}
 
-		let catalog = apply_latency_max(moq_mux::catalog::Producer::new(&mut broadcast)?, latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let source = match format {
 			PublishFormat::Avc3 => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
@@ -289,7 +276,8 @@ impl Publish {
 		bandwidth: Option<moq_net::bandwidth::Consumer>,
 		latency_max: Option<std::time::Duration>,
 	) -> anyhow::Result<Self> {
-		let catalog = apply_latency_max(moq_mux::catalog::Producer::new(&mut broadcast)?, latency_max);
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 
 		let video = (!args.no_video).then(|| (args.video_config(), args.video_encode(bandwidth)));
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode()));

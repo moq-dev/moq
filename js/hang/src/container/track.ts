@@ -24,10 +24,20 @@ const LATENCY_MAX_MS = 30_000;
  * read at the live edge, which is retained unconditionally, so neither pays for history it never
  * serves.
  *
- * `latencyMax` (milliseconds) overrides that retention. It is a RETENTION budget, not a delivery
- * one, so it never makes anyone play further behind live and lowering it does not reduce latency:
- * it only shortens how far back a fetch can reach.
+ * Options override that retention; see {@link TrackInfoOptions.latencyMax}.
  */
-export function trackInfo(latencyMax: number = LATENCY_MAX_MS): Partial<Track.Info> {
-	return { timescale: Time.Timescale.MICRO, latencyMax };
+export function trackInfo(options?: TrackInfoOptions): Partial<Track.Info> {
+	return { timescale: Time.Timescale.MICRO, latencyMax: options?.latencyMax ?? LATENCY_MAX_MS };
 }
+
+/** Overrides for {@link trackInfo}. */
+export type TrackInfoOptions = {
+	/**
+	 * How long a relay keeps a non-latest group fetchable, in milliseconds, replacing the
+	 * retention {@link trackInfo} declares by default.
+	 *
+	 * A RETENTION budget, not a delivery one, so it never makes anyone play further behind live
+	 * and lowering it does not reduce latency: it only shortens how far back a fetch can reach.
+	 */
+	latencyMax?: number;
+};
