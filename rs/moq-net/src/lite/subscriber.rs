@@ -114,11 +114,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// What pulling content across this session's link costs, added to the route cost
 	/// of every announcement received over it.
 	///
-	/// The Cost Parameter is directional: each endpoint declares what subscribing from
-	/// it costs, so the peer's declaration prices this direction while ours prices the
-	/// other. A locally configured price overrides it, since what we charge our own
-	/// routing is local policy. Falls back to [`super::DEFAULT_COST`] when neither
-	/// priced it.
+	/// A locally configured price wins, since what we charge our own routing is local
+	/// policy. Otherwise we charge what the peer declared, which is how a server prices
+	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
+	/// the peer declares the price for both of them. Falls back to
+	/// [`super::DEFAULT_COST`] when neither priced it.
+	///
+	/// Our own price short-circuits the peer's, so a session that configured one never
+	/// blocks on a SETUP to start routing.
 	async fn resolve_cost(&self) -> u64 {
 		// Older versions carry no cost on the wire, so nothing is charged and their
 		// routes rank on hop count alone. Returning early also avoids blocking on a
