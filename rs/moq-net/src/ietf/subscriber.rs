@@ -84,6 +84,12 @@ struct TrackState {
 
 /// How the last source for a path detaches, which decides whether the origin closes
 /// the broadcast now or holds it open for a replacement.
+///
+/// Only the detach that drops the refcount to zero decides, matching the model's rule
+/// for several sources at one path (`detach_source`): an earlier owner that vanished
+/// does not outvote the last one still on the path. That keeps two advertisements on
+/// one session behaving like the same two on separate sessions, where the model sees
+/// two independent sources and the last one out decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Detach {
 	/// The peer retracted the path, or we are rolling back an announce we just made.
@@ -103,10 +109,6 @@ struct BroadcastState {
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
-
-	// Abrupt dominates once any owner disappears without retracting its advert. The
-	// source must still linger when a different owner releases the final ref cleanly.
-	detach: Detach,
 
 	// The first entry of the advertised path: the original publisher. `None` on an
 	// advertisement that carried no path at all, which is every one on a session
@@ -562,7 +564,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await;
 
 		if attached {
-			self.stop_announce(path, Detach::Graceful)?;
+			// A clean close IS the retraction here, unlike a NAMESPACE stream: this stream
+			// carries exactly one advertisement, and PUBLISH_NAMESPACE_DONE reaches us as
+			// that close (see the adapter). Anything else ended the stream while it still
+			// held the advertisement, so the peer never withdrew it and the origin's linger
+			// window stays open for the reconnect.
+			let detach = match res.is_ok() {
+				true => Detach::Graceful,
+				false => Detach::Abrupt,
+			};
+			self.stop_announce(path, detach)?;
 		}
 
 		res
@@ -856,7 +867,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(BroadcastState {
 					producer: crate::model::broadcast::SourceGuard::new(broadcast.clone()),
 					count: carried.unwrap_or(1),
-					detach: Detach::Graceful,
 					publisher,
 				});
 
@@ -883,19 +893,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
-				let broadcast = entry.get_mut();
-				broadcast.count -= 1;
-				if detach == Detach::Abrupt {
-					broadcast.detach = Detach::Abrupt;
-				}
-				if broadcast.count == 0 {
-					let broadcast = entry.remove();
-					tracing::debug!(broadcast = %self.origin.absolute(&path), detach = ?broadcast.detach, "unannounced");
-					match broadcast.detach {
-						Detach::Graceful => broadcast.producer.finish(),
+				entry.get_mut().count -= 1;
+				if entry.get().count == 0 {
+					tracing::debug!(broadcast = %self.origin.absolute(&path), ?detach, "unannounced");
+					let producer = entry.remove().producer;
+					match detach {
+						Detach::Graceful => producer.finish(),
 						// Dropping the guard aborts the source, which is what leaves the
 						// origin's linger window open for a replacement.
-						Detach::Abrupt => drop(broadcast.producer),
+						Detach::Abrupt => drop(producer),
 					}
 				}
 			}
@@ -1679,11 +1685,73 @@ mod tests {
 		);
 	}
 
-	/// An abrupt owner remains significant while another advert keeps the source alive.
-	/// When that final owner retracts cleanly, the lost owner still requires the source
-	/// to linger for a replacement rather than close immediately.
+	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches ABRUPTLY. Only a
+	/// clean close retracts here, since that is how PUBLISH_NAMESPACE_DONE reaches us
+	/// (the adapter turns it into one); a stream that ended any other way still held the
+	/// advertisement, so the origin keeps the linger window open for the reconnect.
+	///
+	/// Driven through the real exit path rather than by calling `stop_announce`: a test
+	/// that picked the detach itself would still pass if the stream stopped using it.
 	#[tokio::test(start_paused = true)]
-	async fn an_abrupt_detach_survives_another_owner() {
+	async fn a_broken_publish_namespace_stream_leaves_the_linger_window_open() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+
+		// The peer sends something that does not belong on this stream, ending it with an
+		// error while the advertisement is still live.
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		writer.encode(&ietf::NamespaceDone::ID).await.unwrap();
+		let script = log.writes.lock().unwrap().clone();
+
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::PublishNamespace {
+			request_id: RequestId(0),
+			track_namespace: path.borrow(),
+			cluster: None,
+		};
+		subscriber
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.await
+			.expect_err("an unexpected message ends the stream");
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"a broken stream closed the broadcast instead of lingering for a reconnect",
+		);
+	}
+
+	/// Several advertisements share one refcounted source, so the detach that empties it
+	/// is the one that counts: an earlier owner lost abruptly does not outvote the last
+	/// one's explicit retraction, and does not stall a replacement behind a linger.
+	///
+	/// That is the model's own rule for several sources at one path (`detach_source`),
+	/// which is what these advertisements would be had they arrived on two sessions. The
+	/// refcount is a detail of sharing one `SourceGuard` per session; it must not change
+	/// what the origin sees.
+	#[tokio::test(start_paused = true)]
+	async fn the_last_owner_out_decides_the_detach() {
 		let (mut subscriber, origin) =
 			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
 		let consumer = origin.consume();
@@ -1696,13 +1764,27 @@ mod tests {
 		}
 		settle().await;
 
+		// One advertisement's stream dies, the other is retracted explicitly.
 		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
-		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
 		settle().await;
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit retraction lingered because an earlier owner was lost abruptly",
+		);
 
+		// The reverse order still lingers: the path was never withdrawn on the way out.
+		for _ in 0..2 {
+			let advert = subscriber.route(None, &peer).expect("route");
+			subscriber.start_announce(path.clone(), advert).unwrap();
+		}
+		settle().await;
+		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path, Detach::Abrupt).unwrap();
+		settle().await;
 		assert!(
 			consumer.get_broadcast("room/host").is_some(),
-			"the final clean retraction forgot that another owner was lost abruptly",
+			"an abrupt last detach closed the broadcast instead of lingering for a reconnect",
 		);
 	}
 
