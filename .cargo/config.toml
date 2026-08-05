@@ -1,3 +1,10 @@
+# `cargo moq <args>` runs the moq-cli binary. Bare `cargo run` can't be pointed
+# at it: cargo has no workspace-level `default-run`, and an `[alias] run` is
+# ignored because it shadows a built-in. Narrowing `default-members` to moq-cli
+# would work, but that list is what scopes `just check` and `cargo semver-checks`.
+[alias]
+moq = ["run", "--bin", "moq", "--"]
+
 # Browser/WASM (moq-wasm). getrandom needs its wasm_js backend, and web-sys's
 # WebTransport bindings are behind the unstable cfg.
 [target.wasm32-unknown-unknown]
