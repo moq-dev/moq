@@ -52,8 +52,16 @@ test("equivalent URL instances do not restart a pending connection", async () =>
 });
 
 test("ReloadProps excludes signal", () => {
+	const withSignal = { signal: new AbortController().signal };
 	// @ts-expect-error signal is not part of ReloadProps
-	const props: ReloadProps = { signal: new AbortController().signal };
+	const props: ReloadProps = withSignal;
+	expect(props.enabled).toBeUndefined();
+});
+
+test("ReloadProps excludes transport", () => {
+	const withTransport = { transport: {} as WebTransport };
+	// @ts-expect-error transport is not part of ReloadProps
+	const props: ReloadProps = withTransport;
 	expect(props.enabled).toBeUndefined();
 });
 

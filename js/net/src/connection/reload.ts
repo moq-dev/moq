@@ -26,8 +26,20 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
-/** Connection and retry options for {@link Reload}. */
-export type ReloadProps = Omit<ConnectProps, "signal"> & {
+/**
+ * Connection and retry options for {@link Reload}.
+ *
+ * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
+ * connection, so the reconnect loop has nothing to reuse once that session drops. Call
+ * {@link connect} directly when you have a session to hand over.
+ */
+export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
+	/** A reload owns the abort signal for each connection attempt. */
+	signal?: never;
+
+	/** A one-shot transport cannot be reused by the reconnect loop. */
+	transport?: never;
+
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
