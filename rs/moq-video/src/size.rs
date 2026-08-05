@@ -37,6 +37,30 @@ impl Size {
 		Ok(())
 	}
 
+	/// Reject a size whose derived quantities cannot be computed at all.
+	///
+	/// Dimensions arrive as a pair of `u32`, so their product reaches ~1.8e19
+	/// before anything else looks at them. That overflows the two things every
+	/// encoder derives from a size: the default bitrate (pixels x framerate) and
+	/// a packed frame's byte count (up to 4 bytes per pixel for RGBA). Both would
+	/// panic, which for a binding is an aborted host process rather than an
+	/// error return, so refuse the config here instead.
+	///
+	/// This is arithmetic, not policy: it rejects only what cannot be represented,
+	/// leaving "no encoder handles a frame that large" to the backend.
+	pub(crate) fn validate_encodable(&self, what: &str, framerate: u32) -> Result<(), Error> {
+		let pixels = self.pixels();
+		let representable = pixels.checked_mul(framerate as u64).is_some()
+			&& usize::try_from(pixels).is_ok_and(|pixels| pixels.checked_mul(4).is_some());
+
+		if !representable {
+			return Err(Error::Codec(anyhow::anyhow!(
+				"{what} {self} at {framerate}fps: too large to encode"
+			)));
+		}
+		Ok(())
+	}
+
 	/// The half of [`Size::validate`] that is not about chroma, for the surfaces
 	/// that hold RGB and so tolerate odd dimensions (a render target sized to a
 	/// window).
@@ -73,6 +97,25 @@ mod tests {
 		assert!(Size::new(320, 0).validate("frame").is_err());
 		assert!(Size::new(321, 240).validate("frame").is_err());
 		assert!(Size::new(320, 241).validate("frame").is_err());
+	}
+
+	#[test]
+	/// Regression: `u32` dimensions can reach a pixel count whose derived
+	/// quantities overflow. A binding hands these straight through, and a panic
+	/// there aborts the host process, so the size has to be refused first.
+	fn validate_encodable_rejects_unrepresentable_sizes() {
+		// A frame nobody can encode, but whose arithmetic still fits: the backend
+		// decides, not us.
+		assert!(Size::new(65534, 65534).validate_encodable("frame", 30).is_ok());
+
+		// pixels x framerate overflows u64.
+		assert!(
+			Size::new(u32::MAX - 1, u32::MAX - 1)
+				.validate_encodable("frame", 30)
+				.is_err()
+		);
+		// ...and it is the product that matters, not either side alone.
+		assert!(Size::new(u32::MAX - 1, 2).validate_encodable("frame", 30).is_ok());
 	}
 
 	#[test]

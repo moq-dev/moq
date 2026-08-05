@@ -74,6 +74,10 @@ mod color;
 mod error;
 pub mod frame;
 mod size;
+// Only the threaded sinks use this, and both are compiled out on macOS, where
+// the codecs run inline (no COM apartment to confine). Ungated it is dead code
+// there, which `-D warnings` rejects.
+#[cfg(not(target_os = "macos"))]
 mod worker;
 
 #[cfg(target_os = "windows")]

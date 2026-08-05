@@ -28,9 +28,11 @@ static LOG: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not.
+#[cfg(not(target_os = "macos"))]
 static EXCLUSIVE: Mutex<()> = Mutex::new(());
 
 /// Take the probe for one test, clearing whatever a previous one left behind.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let guard = EXCLUSIVE.lock().unwrap_or_else(|err| err.into_inner());
 	let _ = take();
@@ -38,6 +40,7 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Empty the log and hand back what was in it.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn take() -> Vec<Event> {
 	std::mem::take(&mut LOG.lock().unwrap())
 }
