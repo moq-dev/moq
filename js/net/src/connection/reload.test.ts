@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from "bun:test";
+import { beforeEach, expect, spyOn, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, createPendingTransports } from "../mock.ts";
@@ -291,5 +291,21 @@ test("closing a live connection reports disconnected", async () => {
 		await reload.closed;
 	} finally {
 		globalThis.WebTransport = original;
+	}
+});
+
+test("a supplied transport is refused out loud", () => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+
+	// Silently dialing past it would hand back a session the caller never asked for.
+	const reload = new Reload({ enabled: false, transport: pair.client });
+
+	try {
+		expect(warn.mock.calls.length).toBe(1);
+	} finally {
+		reload.close();
+		warn.mockRestore();
+		pair.client.close();
 	}
 });

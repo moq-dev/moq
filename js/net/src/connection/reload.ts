@@ -13,13 +13,8 @@ import type { Established } from "./established.ts";
 import type { PoolProps } from "./pool.ts";
 import type { Probe, Stats } from "./stats.ts";
 
-/**
- * The {@link ConnectProps} a {@link Reload} accepts.
- *
- * Everything {@link connect} takes except `transport`: a supplied session is good for one
- * connection, and a loop that reconnects has nothing to reuse after the first drop.
- */
-export type ReloadProps = Omit<ConnectProps, "transport">;
+/** The {@link ConnectProps} a {@link Reload} accepts. */
+export type ReloadProps = ConnectProps;
 
 /** The backoff used when nothing else is asked for. */
 const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 30000 };
@@ -108,6 +103,13 @@ export class Reload {
 		this.discovery = props?.discovery;
 
 		this.#delay = this.delay.initial;
+
+		// A supplied session is good for one connection, so a loop that reconnects has nothing
+		// to reuse after the first drop and dials its own instead. Say so out loud rather than
+		// silently handing back a session the caller didn't ask for.
+		if (props?.transport) {
+			console.warn("transport is ignored when reconnecting; use connect() for a supplied session");
+		}
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
