@@ -29,6 +29,8 @@ qlog = ["quinn?/qlog", "web-transport-noq?/qlog"]
 # are off on each backend dep), so a backend without aws-lc-rs/ring has no initial cipher.
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs", "web-transport-noq?/aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
+# LAN peer discovery over mDNS (the `mdns` module).
+mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["dep:qmux"]
 # Plain-TCP qmux transport (`tcp://`), no TLS. Server-side and client-side.
@@ -43,8 +45,10 @@ android-logcat = ["dep:tracing-android"]
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hex = "0.4"
+hmac = { workspace = true, optional = true }
 humantime = "2.3"
 humantime-serde = "1.1"
+mdns-sd = { workspace = true, optional = true }
 
 moq-net = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
@@ -65,7 +69,9 @@ rustls-platform-verifier = "0.7"
 rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
+sha2 = { workspace = true, optional = true }
 socket2 = "0.6"
+subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
