@@ -173,12 +173,13 @@ export class Reload {
 				connected = performance.now();
 
 				// A cancelled effect resolves undefined, so the sentinel tells the session
-				// closing apart from this run being torn down.
-				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
-				if (!closed) return;
+				// closing (null for clean, an Error otherwise) apart from this run being
+				// torn down.
+				const closed = await Promise.race([effect.cancel, connection.closed]);
+				if (closed === undefined) return;
 
 				console.warn("connection closed, reconnecting");
-				this.#retry(effect, connected);
+				this.#retry(effect, connected, closed ?? undefined);
 			} catch (err) {
 				// Treat teardown as cancellation, not a connection failure.
 				if (signal.aborted) return;

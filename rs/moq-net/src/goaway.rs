@@ -21,7 +21,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Result};
+use crate::{Error, Result, SessionError};
 
 /// Maximum New Session URI length, in bytes. Both wires cap it here, and a
 /// receiver treats anything longer as a protocol violation.
@@ -291,7 +291,7 @@ pub(crate) async fn enforce<S: web_transport_trait::Session>(session: &S, timeou
 
 	if expired {
 		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
-		session.close(Error::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
+		session.close(SessionError::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
 	}
 }
 

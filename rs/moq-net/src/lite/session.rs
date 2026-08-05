@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, bandwidth,
+	Error, Origin, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
@@ -252,7 +252,7 @@ pub fn start<S: web_transport_trait::Session>(
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				session.close(err.to_code(), err.to_string().as_ref());
+				session.close(SessionError::from(err).to_code(), err.to_string().as_ref());
 			}
 			_ => {
 				tracing::info!("session closed");

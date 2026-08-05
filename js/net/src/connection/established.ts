@@ -63,6 +63,10 @@ export interface Established {
 	/** Close the session. */
 	close(): void;
 
-	/** Resolves when the session closes. */
-	closed: Promise<void>;
+	/**
+	 * Resolves when the session closes: `null` for a clean close, a `RemoteError` when the
+	 * peer closed with a code (e.g. `SessionCode.Unauthorized` for an auth rejection), or the
+	 * transport's own failure. Never rejects.
+	 */
+	closed: Promise<Error | null>;
 }

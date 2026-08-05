@@ -2663,3 +2663,65 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 		.expect("server task panicked")
 		.expect("server errored");
 }
+
+/// A rejection at the MoQ layer lands after the transport handshake, so the dial
+/// itself succeeds and the rejection arrives as the session's close. That close
+/// rides the specified UNAUTHORIZED session code, so it decodes back into a typed
+/// error rather than an opaque transport string.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn session_close_surfaces_a_rejection_code() {
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		while let Some(request) = server.accept().await {
+			request.close(403).await?;
+		}
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let session = tokio::time::timeout(TIMEOUT, test_client().connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let err = tokio::time::timeout(TIMEOUT, session.closed())
+		.await
+		.expect("close timed out");
+	// `Request::close` maps both 401 and 403 onto the wire's single UNAUTHORIZED.
+	assert!(
+		matches!(err, moq_net::Error::Unauthorized),
+		"unexpected close error: {err}"
+	);
+
+	server_handle.abort();
+}
+
+/// The same rejection under the reconnect loop: UNAUTHORIZED is specified, so
+/// the loop treats it as terminal instead of retrying the same credentials with
+/// backoff until the give-up timeout.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn reconnect_stops_on_a_session_level_rejection() {
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		while let Some(request) = server.accept().await {
+			request.close(401).await?;
+		}
+		Ok::<_, anyhow::Error>(())
+	});
+
+	// Without classification the loop would retry until the backoff give-up (5m by
+	// default), so `closed` resolving within TIMEOUT proves it stopped on the
+	// rejection itself.
+	let reconnect = test_client().reconnect(url);
+	let err = tokio::time::timeout(TIMEOUT, reconnect.closed())
+		.await
+		.expect("a rejected session must stop the reconnect loop promptly")
+		.expect_err("a rejected session must surface as an error");
+	assert_connect_error(&err, moq_native::ConnectError::Unauthorized);
+
+	server_handle.abort();
+}

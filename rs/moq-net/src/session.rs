@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	Error, Version, bandwidth, goaway,
+	Error, SessionError, Version, bandwidth, goaway,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -104,12 +104,18 @@ impl Session {
 	/// Close the transport with an explicit error, instead of waiting for the last
 	/// clone to drop. Idempotent: the first close wins.
 	pub fn abort(&self, err: Error) {
-		self.shared.close(err.to_code(), err.to_string().as_ref());
+		self.shared
+			.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 	}
 
 	/// Block until the transport session is closed, returning the reason.
+	///
+	/// A close code the peer sent is decoded through the session registry (so an auth
+	/// rejection arrives as [`Error::Unauthorized`]); an unregistered code is kept
+	/// verbatim as [`Error::Remote`], and a close carrying no application code surfaces
+	/// as [`Error::Transport`]. See [`Error::from_transport`].
 	pub async fn closed(&self) -> Error {
-		Error::Transport(self.shared.inner.closed().await)
+		self.shared.inner.closed().await
 	}
 
 	/// Drain the peer gracefully: the handle for sending this session's single
@@ -254,7 +260,7 @@ impl SessionShared {
 
 impl Drop for SessionShared {
 	fn drop(&mut self) {
-		self.close(Error::Cancel.to_code(), "dropped");
+		self.close(SessionError::Cancel.to_code(), "dropped");
 	}
 }
 
@@ -400,7 +406,7 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 // allowing the !Send browser WebTransport on wasm.
 trait SessionInner: web_transport_trait::MaybeSend + web_transport_trait::MaybeSync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> MaybeSendBox<'_, String>;
+	fn closed(&self) -> MaybeSendBox<'_, Error>;
 	fn stats(&self) -> ConnectionStats;
 }
 
@@ -409,19 +415,8 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> MaybeSendBox<'_, String> {
-		Box::pin(async move {
-			let err = S::closed(self).await;
-			// Surface the application close code and reason when the transport
-			// carries them: Display alone often drops both (e.g. quinn reports a
-			// bare "connection error: closed"), and the reason is how a peer
-			// distinguishes a GOAWAY-timeout force-close from a network failure.
-			match web_transport_trait::Error::session_error(&err) {
-				Some((code, reason)) if !reason.is_empty() => format!("code={code}: {reason}"),
-				Some((code, _)) => format!("code={code}: {err}"),
-				None => err.to_string(),
-			}
-		})
+	fn closed(&self) -> MaybeSendBox<'_, Error> {
+		Box::pin(async move { Error::from_transport(S::closed(self).await) })
 	}
 
 	fn stats(&self) -> ConnectionStats {

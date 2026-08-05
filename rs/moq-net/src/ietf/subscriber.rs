@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-	Error, Path, PathOwned, Timescale, broadcast,
+	Error, Path, PathOwned, SessionError, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
@@ -515,7 +515,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session.close(err.to_code(), err.to_string().as_ref());
+							this.session
+								.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -1084,7 +1085,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 
 				if let Err(err) = self.register_alias(request_id, alias) {
-					self.session.close(err.to_code(), err.to_string().as_ref());
+					self.session
+						.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 					self.remove_subscribe(request_id);
 					let _ = track.abort(err);
 					return;

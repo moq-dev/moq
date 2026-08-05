@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
+import { Effect } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { RemoteError, SessionCode } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -171,6 +173,53 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		reload.close();
 		for (const broadcast of published) broadcast.close();
 		for (const session of sessions) session.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a session closed with a code surfaces it to the app, and still reconnects", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const closes: (Error | null)[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		// Reject at the MoQ layer: accept the transport, then close with a code, the
+		// way a relay's Request::close does after it has already accepted the transport.
+		void accept(pair.server, url).then(() => {
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 2, max: 1, timeout: 0 },
+	});
+	const watch = new Effect();
+	watch.run((effect) => {
+		const conn = effect.get(reload.established);
+		if (conn) {
+			effect.spawn(async () => {
+				closes.push(await conn.closed);
+			});
+		}
+	});
+
+	try {
+		// The code reaches the app verbatim rather than being flattened away. What it
+		// means is between the app and its peer, so the loop keeps reconnecting: the
+		// library has no basis to call an arbitrary code terminal.
+		await Bun.sleep(50);
+		const err = closes.find((e) => e instanceof RemoteError);
+		expect(err).toBeInstanceOf(RemoteError);
+		expect((err as RemoteError).code).toBe(SessionCode.Unauthorized);
+		expect(closes.length).toBeGreaterThan(1);
+	} finally {
+		watch.close();
+		reload.close();
 		globalThis.WebTransport = original;
 	}
 });

@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, SessionError, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -537,7 +537,7 @@ impl<S: web_transport_trait::Session> RequestInner<S> {
 			Handshake::Legacy { session, .. } => session,
 			Handshake::LiteSetup { session, .. } => session,
 		};
-		session.close(err.to_code(), &err.to_string());
+		session.close(SessionError::from(&err).to_code(), &err.to_string());
 	}
 }
 

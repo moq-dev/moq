@@ -147,7 +147,7 @@ async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 		// The deadline still force-closes the session on schedule.
 		let err = pair.server.closed().await;
 		assert!(
-			err.to_string().contains("goaway timeout") || matches!(err, moq_net::Error::GoawayTimeout),
+			matches!(err, moq_net::Error::GoawayTimeout),
 			"expected a GoawayTimeout close, got {err}"
 		);
 	})
@@ -210,10 +210,11 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 			.expect("session closed before GOAWAY");
 		assert_eq!(goaway.timeout, Some(Duration::from_millis(100)));
 
-		// The deadline fires and the driver force-closes with GoawayTimeout (33).
+		// The deadline fires and the driver force-closes with GOAWAY_TIMEOUT (0x10),
+		// which the peer decodes back through the session registry.
 		let reason = pair.client.closed().await;
 		assert!(
-			reason.to_string().contains("goaway timeout"),
+			matches!(reason, moq_net::Error::GoawayTimeout),
 			"peer should observe the GoawayTimeout close: {reason}"
 		);
 	})

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError } from "@moq/qmux";
-import { fromTransport, RemoteError, reason } from "./error.ts";
+import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode } from "./error.ts";
 
 // Minimal stand-in for the DOM WebTransportError, which the test runtime may not define.
 class FakeWebTransportError extends Error {
@@ -95,6 +95,42 @@ test("reason: WebTransportError keeps a populated message and appends details", 
 
 test("reason: a decoded remote error names its code", () => {
 	expect(reason(new RemoteError(31))).toBe("remote error: 31");
+});
+
+test("fromClose: a clean close is null, a coded close keeps its code", () => {
+	expect(fromClose({ closeCode: SessionCode.Cancel, reason: "" })).toBeNull();
+	// A missing code is what a transport reports for a close with no code of its own.
+	expect(fromClose({})).toBeNull();
+
+	const err = fromClose({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+	expect(err).toBeInstanceOf(RemoteError);
+	expect(err?.code).toBe(0x2);
+	expect(err?.message).toBe("remote error: 2 (unauthorized)");
+
+	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
+});
+
+// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
+// the Rust tables, since the two implementations talk to each other.
+test("the code tables match the spec", () => {
+	// moq-transport's, reused unchanged.
+	expect(SessionCode.Cancel).toBe(0x0);
+	expect(SessionCode.Unauthorized).toBe(0x2);
+	expect(SessionCode.GoawayTimeout).toBe(0x10);
+	expect(SessionCode.Version).toBe(0x15);
+	expect(StreamCode.Cancel).toBe(0x1);
+	expect(StreamCode.SessionClosed).toBe(0x3);
+	expect(StreamCode.TooFarBehind).toBe(0x5);
+
+	// Ours sit in the moq-lite range, clear of both moq-transport and the app range.
+	for (const code of [SessionCode.RequiredExtension, StreamCode.Old, StreamCode.Evicted]) {
+		expect(code).toBeGreaterThanOrEqual(32);
+		expect(code).toBeLessThan(64);
+	}
+
+	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
+	expect(SessionCode.Cancel).not.toBe(StreamCode.Cancel);
+	expect(StreamCode.Internal).toBe(0x0);
 });
 
 test("fromTransport: decodes a real qmux stream reset", () => {

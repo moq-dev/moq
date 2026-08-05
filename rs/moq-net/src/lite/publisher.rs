@@ -1,4 +1,4 @@
-use crate::{announce, frame, group, origin, track};
+use crate::{SessionError, announce, frame, group, origin, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use bytes::Buf;
@@ -184,7 +184,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// logs per-stream errors, so close the session here rather than letting a
 			// peer silently replace a redirect an observer may already be acting on.
 			tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
-			self.session.close(err.to_code(), &err.to_string());
+			self.session.close(SessionError::from(&err).to_code(), &err.to_string());
 			return Err(err);
 		}
 		Ok(())
@@ -2641,7 +2641,7 @@ mod serve_group_test {
 		group.abort(Error::Old).unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
-		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 }
 

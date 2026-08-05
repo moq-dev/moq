@@ -77,7 +77,18 @@ try {
 }
 ```
 
-The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`. The codes themselves are not standardized: each number means whatever the peer's implementation decided, so `@moq/net` hands it over without interpreting it. Code 0 is the exception worth knowing, since that is what a transport sends for a stream dropped or aborted with no code of its own.
+The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`.
+
+There are two code registries, and which one applies depends on what failed. A stream reset carries a `Moq.StreamCode`; a session close carries a `Moq.SessionCode`. They are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`. Below 32 the codes are moq-transport's, with moq-transport's meaning; 32-63 are moq-lite's; 64 and up are yours.
+
+A session close surfaces through `connection.closed`, which resolves with `null` for a clean close or a `Moq.RemoteError` when the peer sent a code:
+
+```ts
+const err = await connection.closed;
+if (err instanceof Moq.RemoteError && err.code === Moq.SessionCode.Unauthorized) {
+	console.warn("server rejected the session:", err.message);
+}
+```
 
 Errors this side detects keep their own messages, like the `Group.Lagged` a read throws after frames were evicted before it got to them.
 
