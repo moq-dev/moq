@@ -226,8 +226,8 @@ impl Task {
 			ticker.tick().await;
 
 			if weak.upgrade().is_none() {
-				for (_, mut publisher) in groups.drain() {
-					publisher.broadcast.finish();
+				for (_, publisher) in groups.drain() {
+					publisher.finish();
 				}
 				return;
 			}
@@ -317,18 +317,8 @@ impl Task {
 					publisher.requested.remove(name);
 				}
 
-				flush_dynamic(
-					&mut publisher.broadcast,
-					&mut publisher.traffic_tracks,
-					&mut publisher.parked_traffic,
-					&frames,
-				);
-				flush_dynamic(
-					&mut publisher.broadcast,
-					&mut publisher.session_tracks,
-					&mut publisher.parked_sessions,
-					&session_frames,
-				);
+				publisher.traffic.flush(&mut publisher.broadcast, &frames);
+				publisher.sessions.flush(&mut publisher.broadcast, &session_frames);
 			}
 
 			// Serve consumer requests for tracks no drain has created yet: a
@@ -357,16 +347,17 @@ impl Task {
 				});
 			}
 
-			// Deliberate unpublish: finish evicted broadcasts rather than dropping
-			// them, so there is no dropped-without-finish warning.
+			// Deliberate unpublish: finish evicted publishers (tracks included)
+			// rather than dropping them, so there is no dropped-without-finish
+			// warning.
 			let evicted: Vec<PathOwned> = groups
 				.keys()
 				.filter(|group| !active.contains(*group))
 				.cloned()
 				.collect();
 			for group in evicted {
-				if let Some(mut publisher) = groups.remove(&group) {
-					publisher.broadcast.finish();
+				if let Some(publisher) = groups.remove(&group) {
+					publisher.finish();
 				}
 			}
 		}
@@ -390,9 +381,10 @@ impl<T: Serialize> TrackPair<T> {
 	}
 
 	/// Build a pair from consumer requests, creating whichever flavor was not
-	/// requested. `create_track` does not fulfill an already-queued request for
-	/// the same name, so the caller collects both flavors' requests first and
-	/// this serves each through its actual request where one exists.
+	/// requested. A popped request is no longer queued, so `create_track`'s
+	/// queued-request fulfillment cannot reach it; the caller collects both
+	/// flavors' popped requests and this serves each through its actual
+	/// request where one exists.
 	fn adopt(broadcast: &mut broadcast::Producer, name: &str, pending: PendingPair) -> Result<Self, moq_net::Error> {
 		let PendingPair { plain, compressed } = pending;
 		let plain_track = match plain {
@@ -430,40 +422,13 @@ impl<T: Serialize> TrackPair<T> {
 			tracing::debug!(?err, name, "stats: failed to write compressed frame");
 		}
 	}
-}
 
-/// Ensure a track pair exists for every frame this drain produced, then push
-/// each pair its frame (an empty one when the drain had nothing for it, so a
-/// track whose last entry closed transitions to `{}` exactly once).
-///
-/// A pair created here serves any parked requests for its name: a parked
-/// request was already popped off the broadcast queue, so `create_track`'s
-/// queued-request fulfillment cannot reach it, and creating the pair blind
-/// would strand its requesters on a name that now exists.
-fn flush_dynamic<T: Serialize + Default>(
-	broadcast: &mut broadcast::Producer,
-	tracks: &mut HashMap<String, TrackPair<T>>,
-	parked: &mut HashMap<String, PendingPair>,
-	frames: &HashMap<String, T>,
-) {
-	for name in frames.keys() {
-		if !tracks.contains_key(name) {
-			let result = match parked.remove(name) {
-				Some(pending) => TrackPair::adopt(broadcast, name, pending),
-				None => TrackPair::create(broadcast, name),
-			};
-			match result {
-				Ok(pair) => {
-					tracks.insert(name.clone(), pair);
-				}
-				Err(err) => tracing::warn!(?err, name, "stats: failed to create track"),
-			}
-		}
-	}
-
-	let empty = T::default();
-	for (name, pair) in tracks.iter_mut() {
-		pair.update(name, frames.get(name).unwrap_or(&empty));
+	/// Finish both flavors, so dropping the pair is a deliberate end instead of
+	/// a dropped-without-finish warning. An error means the track already
+	/// ended; there is nothing left to close.
+	fn finish(&mut self) {
+		let _ = self.plain.finish();
+		let _ = self.compressed.finish();
 	}
 }
 
@@ -497,6 +462,156 @@ impl PendingPair {
 	}
 }
 
+/// One frame type's live pairs and the requests parked for them; the traffic
+/// tracks and the sessions tracks each form one family.
+struct TrackFamily<T> {
+	tracks: HashMap<String, TrackPair<T>>,
+	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
+	/// [`MAX_PARKED_REQUESTS`] across both families. Adopted as the quota
+	/// frees, or dropped once every requester leaves.
+	parked: HashMap<String, PendingPair>,
+}
+
+impl<T: Serialize + Default> TrackFamily<T> {
+	fn new() -> Self {
+		Self {
+			tracks: HashMap::new(),
+			parked: HashMap::new(),
+		}
+	}
+
+	/// Ensure a track pair exists for every frame this drain produced, then push
+	/// each pair its frame (an empty one when the drain had nothing for it, so a
+	/// track whose last entry closed transitions to `{}` exactly once).
+	///
+	/// A pair created here serves any parked requests for its name: a parked
+	/// request was already popped off the broadcast queue, so `create_track`'s
+	/// queued-request fulfillment cannot reach it, and creating the pair blind
+	/// would strand its requesters on a name that now exists.
+	fn flush(&mut self, broadcast: &mut broadcast::Producer, frames: &HashMap<String, T>) {
+		for name in frames.keys() {
+			if !self.tracks.contains_key(name) {
+				let result = match self.parked.remove(name) {
+					Some(pending) => TrackPair::adopt(broadcast, name, pending),
+					None => TrackPair::create(broadcast, name),
+				};
+				match result {
+					Ok(pair) => {
+						self.tracks.insert(name.clone(), pair);
+					}
+					Err(err) => tracing::warn!(?err, name, "stats: failed to create track"),
+				}
+			}
+		}
+
+		let empty = T::default();
+		for (name, pair) in self.tracks.iter_mut() {
+			pair.update(name, frames.get(name).unwrap_or(&empty));
+		}
+	}
+
+	/// Reclaim requested pairs whose last consumer left before their tier ever
+	/// recorded: cached state nobody is watching. The pair is finished (a
+	/// deliberate end, not a warning) and dropped, so a returning subscriber
+	/// re-requests and is re-adopted; the quota refund means a disconnected
+	/// prober can never deny a later drain's legitimate requests.
+	fn reclaim(&mut self, requested: &mut HashSet<String>) {
+		self.tracks.retain(|name, pair| {
+			if !requested.contains(name) || pair.is_used() {
+				return true;
+			}
+			requested.remove(name);
+			pair.finish();
+			false
+		});
+	}
+
+	/// Park one popped request, merging the two flavors of a plain name. Only a
+	/// NEW name while the parked buffer is `full` is rejected.
+	fn park(&mut self, plain: String, compressed: bool, request: track::Request, full: bool) {
+		match self.parked.get_mut(&plain) {
+			Some(pending) => {
+				let slot = match compressed {
+					true => &mut pending.compressed,
+					false => &mut pending.plain,
+				};
+				// Keep the first requester for a flavor. A duplicate means
+				// the original was already popped off the broadcast queue;
+				// dropping the newcomer aborts it into a retry, which joins
+				// the live track once the parked pair is adopted.
+				if slot.is_none() {
+					*slot = Some(request);
+				}
+			}
+			None if full => request.reject(moq_net::Error::NotFound),
+			None => {
+				let mut pending = PendingPair::default();
+				match compressed {
+					true => pending.compressed = Some(request),
+					false => pending.plain = Some(request),
+				}
+				self.parked.insert(plain, pending);
+			}
+		}
+	}
+
+	/// Adopt parked requests as the quota allows; the rest stay parked for a
+	/// later drain, so a valid-shaped request is never terminally rejected
+	/// merely for arriving while the quota was full. Entries whose every
+	/// requester left are dropped instead of adopted.
+	fn adopt_parked(&mut self, broadcast: &mut broadcast::Producer, requested: &mut HashSet<String>) {
+		let noop = kio::Waiter::noop();
+		let mut parked = std::mem::take(&mut self.parked);
+		parked.retain(|plain, pending| {
+			if !pending.is_used(&noop) {
+				return false;
+			}
+			if requested.len() >= MAX_REQUESTED_TRACKS {
+				return true;
+			}
+			self.adopt_pair(broadcast, requested, plain.clone(), std::mem::take(pending));
+			false
+		});
+		self.parked = parked;
+	}
+
+	/// Adopt one plain name's pending requests into a live [`TrackPair`],
+	/// publishing a zero frame so the subscription resolves immediately. The
+	/// caller owns the quota decision; this only mints the pair.
+	fn adopt_pair(
+		&mut self,
+		broadcast: &mut broadcast::Producer,
+		requested: &mut HashSet<String>,
+		plain: String,
+		pending: PendingPair,
+	) {
+		// Defensive only: a request racing the pair's creation is fulfilled by
+		// `create_track` (queued) or adopted by [`Self::flush`] (parked), so it
+		// never reaches this with the pair already live. Rejecting is still
+		// safe there - the requester's retry resolves against the live track.
+		if self.tracks.contains_key(&plain) {
+			pending.reject(moq_net::Error::NotFound);
+			return;
+		}
+		match TrackPair::adopt(broadcast, &plain, pending) {
+			Ok(mut pair) => {
+				// Hold the subscription open with zeros until the tier records.
+				pair.update(&plain, &T::default());
+				self.tracks.insert(plain.clone(), pair);
+				requested.insert(plain);
+			}
+			Err(err) => tracing::warn!(?err, name = %plain, "stats: failed to adopt requested track"),
+		}
+	}
+
+	/// Finish every pair, making teardown a deliberate end.
+	fn finish(&mut self) {
+		for pair in self.tracks.values_mut() {
+			pair.finish();
+		}
+	}
+}
+
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
 	broadcast: broadcast::Producer,
@@ -509,13 +624,8 @@ struct GroupPublisher {
 	/// recording real traffic (now an ordinary tier pair, kept forever) or by
 	/// losing its last consumer (reclaimed, quota refunded).
 	requested: HashSet<String>,
-	/// Valid-shaped requests awaiting quota, keyed by plain name and bounded by
-	/// [`MAX_PARKED_REQUESTS`] across both maps. Adopted as the quota frees, or
-	/// dropped once every requester leaves.
-	parked_traffic: HashMap<String, PendingPair>,
-	parked_sessions: HashMap<String, PendingPair>,
-	traffic_tracks: HashMap<String, TrackPair<TrafficFrame>>,
-	session_tracks: HashMap<String, TrackPair<SessionsFrame>>,
+	traffic: TrackFamily<TrafficFrame>,
+	sessions: TrackFamily<SessionsFrame>,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
 	session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>>,
 }
@@ -532,8 +642,8 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
-		let mut traffic_tracks = HashMap::new();
-		let mut session_tracks = HashMap::new();
+		let mut traffic = TrackFamily::new();
+		let mut sessions = TrackFamily::new();
 
 		// The default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
@@ -541,7 +651,7 @@ impl GroupPublisher {
 			let name = traffic_track(&tier, role, false);
 			match TrackPair::create(&mut broadcast, &name) {
 				Ok(pair) => {
-					traffic_tracks.insert(name, pair);
+					traffic.tracks.insert(name, pair);
 				}
 				Err(err) => {
 					tracing::warn!(?err, name, "stats: failed to create track");
@@ -552,7 +662,7 @@ impl GroupPublisher {
 		let name = sessions_track(&tier, false);
 		match TrackPair::create(&mut broadcast, &name) {
 			Ok(pair) => {
-				session_tracks.insert(name, pair);
+				sessions.tracks.insert(name, pair);
 			}
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to create track");
@@ -566,10 +676,8 @@ impl GroupPublisher {
 			broadcast,
 			dynamic,
 			requested: HashSet::new(),
-			parked_traffic: HashMap::new(),
-			parked_sessions: HashMap::new(),
-			traffic_tracks,
-			session_tracks,
+			traffic,
+			sessions,
 			local: HashMap::new(),
 			session_local: HashMap::new(),
 		})
@@ -587,22 +695,10 @@ impl GroupPublisher {
 	/// match the stats track shape are rejected as before, and valid names over
 	/// the quota park (bounded) until it frees rather than being rejected.
 	fn serve_requests(&mut self) {
-		// Reclaim requested pairs whose last consumer left before their tier
-		// ever recorded: cached state nobody is watching. Dropping the pair
-		// closes its tracks, so a returning subscriber re-requests and is
-		// re-adopted. Refunding the quota first means a disconnected prober
-		// can never deny this drain's legitimate requests.
-		self.requested.retain(|name| {
-			let used = match self.traffic_tracks.get(name) {
-				Some(pair) => pair.is_used(),
-				None => self.session_tracks.get(name).is_some_and(TrackPair::is_used),
-			};
-			if !used {
-				self.traffic_tracks.remove(name);
-				self.session_tracks.remove(name);
-			}
-			used
-		});
+		// Reclaim before parking and adopting, so a freed quota slot is usable
+		// by this very drain.
+		self.traffic.reclaim(&mut self.requested);
+		self.sessions.reclaim(&mut self.requested);
 
 		// Pop everything queued into the parked maps, grouping the two flavors
 		// of one plain name so the pair is built from the actual requests where
@@ -613,107 +709,23 @@ impl GroupPublisher {
 				request.reject(moq_net::Error::NotFound);
 				continue;
 			};
-			let full = self.parked_traffic.len() + self.parked_sessions.len() >= MAX_PARKED_REQUESTS;
-			let parked = match shape.sessions {
-				true => &mut self.parked_sessions,
-				false => &mut self.parked_traffic,
-			};
-			match parked.get_mut(&shape.plain) {
-				Some(pending) => {
-					let slot = match shape.compressed {
-						true => &mut pending.compressed,
-						false => &mut pending.plain,
-					};
-					// Keep the first requester for a flavor. A duplicate means
-					// the original was already popped off the broadcast queue;
-					// dropping the newcomer aborts it into a retry, which joins
-					// the live track once the parked pair is adopted.
-					if slot.is_none() {
-						*slot = Some(request);
-					}
-				}
-				None if full => request.reject(moq_net::Error::NotFound),
-				None => {
-					let mut pending = PendingPair::default();
-					match shape.compressed {
-						true => pending.compressed = Some(request),
-						false => pending.plain = Some(request),
-					}
-					parked.insert(shape.plain, pending);
-				}
+			let full = self.traffic.parked.len() + self.sessions.parked.len() >= MAX_PARKED_REQUESTS;
+			match shape.sessions {
+				true => self.sessions.park(shape.plain, shape.compressed, request, full),
+				false => self.traffic.park(shape.plain, shape.compressed, request, full),
 			}
 		}
 
-		// Adopt parked requests as the quota allows; the rest stay parked for a
-		// later drain, so a valid-shaped request is never terminally rejected
-		// merely for arriving while the quota was full. Entries whose every
-		// requester left are dropped instead of adopted.
-		let mut parked = std::mem::take(&mut self.parked_traffic);
-		parked.retain(|plain, pending| {
-			if !pending.is_used(&noop) {
-				return false;
-			}
-			if self.requested.len() >= MAX_REQUESTED_TRACKS {
-				return true;
-			}
-			Self::adopt_pair(
-				&mut self.broadcast,
-				&mut self.traffic_tracks,
-				&mut self.requested,
-				plain.clone(),
-				std::mem::take(pending),
-			);
-			false
-		});
-		self.parked_traffic = parked;
-
-		let mut parked = std::mem::take(&mut self.parked_sessions);
-		parked.retain(|plain, pending| {
-			if !pending.is_used(&noop) {
-				return false;
-			}
-			if self.requested.len() >= MAX_REQUESTED_TRACKS {
-				return true;
-			}
-			Self::adopt_pair(
-				&mut self.broadcast,
-				&mut self.session_tracks,
-				&mut self.requested,
-				plain.clone(),
-				std::mem::take(pending),
-			);
-			false
-		});
-		self.parked_sessions = parked;
+		self.traffic.adopt_parked(&mut self.broadcast, &mut self.requested);
+		self.sessions.adopt_parked(&mut self.broadcast, &mut self.requested);
 	}
 
-	/// Adopt one plain name's pending requests into a live [`TrackPair`],
-	/// publishing a zero frame so the subscription resolves immediately. The
-	/// caller owns the quota decision; this only mints the pair.
-	fn adopt_pair<T: Serialize + Default>(
-		broadcast: &mut broadcast::Producer,
-		tracks: &mut HashMap<String, TrackPair<T>>,
-		requested: &mut HashSet<String>,
-		plain: String,
-		pending: PendingPair,
-	) {
-		// Defensive only: a request racing the pair's creation is fulfilled by
-		// `create_track` (queued) or adopted by `flush_dynamic` (parked), so it
-		// never reaches this with the pair already live. Rejecting is still
-		// safe there - the requester's retry resolves against the live track.
-		if tracks.contains_key(&plain) {
-			pending.reject(moq_net::Error::NotFound);
-			return;
-		}
-		match TrackPair::adopt(broadcast, &plain, pending) {
-			Ok(mut pair) => {
-				// Hold the subscription open with zeros until the tier records.
-				pair.update(&plain, &T::default());
-				tracks.insert(plain.clone(), pair);
-				requested.insert(plain);
-			}
-			Err(err) => tracing::warn!(?err, name = %plain, "stats: failed to adopt requested track"),
-		}
+	/// Deliberately end the broadcast: finish every pair, then the broadcast
+	/// itself, so teardown emits no dropped-without-finish warnings.
+	fn finish(mut self) {
+		self.traffic.finish();
+		self.sessions.finish();
+		self.broadcast.finish();
 	}
 }
 
