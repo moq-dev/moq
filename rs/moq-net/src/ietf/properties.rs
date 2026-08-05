@@ -53,7 +53,10 @@ impl Properties {
 	///
 	/// Properties are serialized in ascending order by type, delta-encoded.
 	pub fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		// Track Properties only exist in draft-17+; older drafts have nowhere to put these.
+		// Draft-16 carries the same block under the name Track Extensions, but we only write it
+		// from draft-17 on: a draft-16 peer running an older build of this crate rejects any
+		// trailing bytes it doesn't parse, and draft-16 never registered TIMESCALE (0x08). We
+		// still read the block on draft-16, so a peer that sends one is understood.
 		match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(()),
 			_ => {}
@@ -84,13 +87,14 @@ impl Properties {
 	/// Unlike an unknown message parameter, an unknown property is skipped rather than
 	/// fatal, which is what lets a relay forward properties it does not implement.
 	///
-	/// Only call this for draft-17+; older drafts don't have Track Properties.
+	/// Drafts before 16 have no such block, so this reads nothing and leaves the buffer alone.
 	pub fn decode<R: Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let mut properties = Self::default();
 
-		// Track Properties only exist in draft-17+
+		// Draft-16 calls the block Track Extensions, draft-17+ Track Properties. Same encoding,
+		// so read either rather than faulting the message for trailing bytes.
 		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(properties),
+			Version::Draft14 | Version::Draft15 => return Ok(properties),
 			_ => {}
 		}
 
@@ -121,9 +125,13 @@ impl Properties {
 						properties.timescale = Timescale::new(value).ok();
 					}
 					DEFAULT_PUBLISHER_GROUP_ORDER => {
-						let value = u8::try_from(value).map_err(|_| DecodeError::InvalidValue)?;
-						let order = GroupOrder::try_from(value).map_err(|_| DecodeError::InvalidValue)?;
-						properties.group_order = Some(order.any_to_descending());
+						// Only Ascending and Descending are defined here. Unlike the draft-14
+						// fields, 0x0 has no "publisher decides" meaning to fall back on.
+						properties.group_order = match value {
+							1 => Some(GroupOrder::Ascending),
+							2 => Some(GroupOrder::Descending),
+							_ => return Err(DecodeError::InvalidValue),
+						};
 					}
 					_ => {}
 				}
@@ -213,6 +221,32 @@ mod tests {
 
 		let mut bytes = buf.freeze();
 		assert_eq!(Properties::decode(&mut bytes, Version::Draft18).unwrap(), properties);
+		assert!(!bytes.has_remaining());
+	}
+
+	/// Only Ascending and Descending are defined, so 0x0 is a malformed message rather than
+	/// the "publisher decides" it means in the draft-14 fields.
+	#[test]
+	fn test_rejects_zero_group_order() {
+		let mut buf = BytesMut::new();
+		0x22u64.encode(&mut buf, Version::Draft18).unwrap();
+		0u64.encode(&mut buf, Version::Draft18).unwrap();
+
+		let mut bytes = buf.freeze();
+		assert!(Properties::decode(&mut bytes, Version::Draft18).is_err());
+	}
+
+	/// Draft-16 carries the same block under the name Track Extensions. We don't write one
+	/// there, but a peer that does must be understood rather than faulted.
+	#[test]
+	fn test_decodes_draft16_track_extensions() {
+		let mut buf = BytesMut::new();
+		0x22u64.encode(&mut buf, Version::Draft16).unwrap();
+		2u64.encode(&mut buf, Version::Draft16).unwrap();
+
+		let mut bytes = buf.freeze();
+		let properties = Properties::decode(&mut bytes, Version::Draft16).unwrap();
+		assert_eq!(properties.group_order, Some(GroupOrder::Descending));
 		assert!(!bytes.has_remaining());
 	}
 

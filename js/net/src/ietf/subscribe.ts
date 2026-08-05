@@ -168,9 +168,10 @@ export class SubscribeOk {
 		} else {
 			// v15+: just parameters after track_alias
 			const params = new Parameters();
-			// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15. Draft-16 moved
-			// the publisher's preference to the DEFAULT_PUBLISHER_GROUP_ORDER track property, so
-			// sending the parameter here is a PROTOCOL_VIOLATION.
+			// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15; a later peer
+			// closes the session with PROTOCOL_VIOLATION when it sees one. The publisher's
+			// preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property instead, which we
+			// write from draft-17 on. Draft-16 gets neither form; see Properties.encode.
 			if (version === Version.DRAFT_15) {
 				params.groupOrder = GROUP_ORDER;
 			}

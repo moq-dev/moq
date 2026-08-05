@@ -32,7 +32,10 @@ export interface Properties {
 ///
 /// Properties are serialized in ascending order by type, delta-encoded.
 export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
-	// Track Properties only exist in draft-17+; older drafts have nowhere to put these.
+	// Draft-16 carries the same block under the name Track Extensions, but we only write it
+	// from draft-17 on: a draft-16 peer running an older build rejects any trailing bytes it
+	// doesn't parse, and draft-16 never registered TIMESCALE (0x08). We still read the block
+	// on draft-16, so a peer that sends one is understood.
 	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 		return;
 	}
@@ -54,16 +57,17 @@ export async function encode(w: Writer, properties: Properties, version: IetfVer
 /// Parse Track Properties from the remaining bytes of a message.
 ///
 /// Track Properties are delta-encoded Key-Value-Pairs (same format as
-/// Message Parameters) but with NO count prefix — they extend to the
+/// Message Parameters) but with NO count prefix: they extend to the
 /// end of the message payload.
 ///
 /// Unlike an unknown message parameter, an unknown property is skipped rather than fatal,
 /// which is what lets a relay forward properties it does not implement.
 ///
-/// Only present in draft-17+; older drafts don't have Track Properties.
+/// Drafts before 16 have no such block, so this reads nothing and leaves the reader alone.
 export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
-	// Track Properties only exist in draft-17+
-	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+	// Draft-16 calls the block Track Extensions, draft-17+ Track Properties. Same encoding, so
+	// read either rather than faulting the message for trailing bytes.
+	if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 		return {};
 	}
 
@@ -85,7 +89,9 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Propertie
 				// failing the whole message over one property we could have ignored.
 				properties.timescale = Timescale(Number(value));
 			} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
-				if (value > 2n) {
+				// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
+				// fields, 0x0 has no "publisher decides" meaning to fall back on.
+				if (value < 1n || value > 2n) {
 					throw new Error(`unknown group order: ${value}`);
 				}
 				properties.groupOrder = Number(value);

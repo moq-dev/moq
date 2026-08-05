@@ -192,9 +192,11 @@ impl Message for SubscribeOk {
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
-				// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15. Draft-16
-				// moved the publisher's preference to the DEFAULT_PUBLISHER_GROUP_ORDER track
-				// property, so sending the parameter here is a PROTOCOL_VIOLATION.
+				// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15; a later
+				// peer closes the session with PROTOCOL_VIOLATION when it sees one. The
+				// publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property
+				// instead, which we write from draft-17 on. Draft-16 gets neither form; see
+				// Properties::encode.
 				let group_order = match version {
 					Version::Draft15 => self.properties.group_order,
 					_ => None,
@@ -783,6 +785,30 @@ mod tests {
 		assert_eq!(encode_message(&msg, Version::Draft15), expected);
 
 		let decoded: SubscribeOk = decode_message(&expected, Version::Draft15).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-16 has the block too, under the name Track Extensions. We don't write one there,
+	/// but a peer that does used to fail the whole message as `Long`.
+	#[test]
+	fn test_subscribe_ok_v16_reads_track_extensions() {
+		#[rustfmt::skip]
+		let body = vec![
+			7,    // request id
+			42,   // track alias
+			0,    // zero message parameters
+			0x22, // DEFAULT_PUBLISHER_GROUP_ORDER
+			0x02, // descending
+		];
+
+		// Go through the size-prefixed path: that's what rejects unread trailing bytes.
+		let mut buf = BytesMut::new();
+		(body.len() as u16).encode(&mut buf, Version::Draft16).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut bytes = buf.freeze();
+		let decoded = SubscribeOk::decode(&mut bytes, Version::Draft16).unwrap();
+		assert_eq!(decoded.track_alias, 42);
 		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
 	}
 
