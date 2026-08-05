@@ -601,4 +601,29 @@ mod tests {
 		assert_eq!(params[1].as_ref(), sps);
 		assert_eq!(params[2].as_ref(), pps);
 	}
+
+	/// The bitstream path and the catalog-string path must agree on what
+	/// `profile_compatibility_flags` means. The SPS parser hands us the raw
+	/// big-endian flags; rendering them per RFC 6381 and parsing that string back
+	/// has to land on the same bytes. These were two different encodings, and
+	/// because they were wrong in mirror-image ways the round-trip inside `hang`
+	/// still passed.
+	#[test]
+	fn bitstream_and_catalog_paths_agree() {
+		use std::str::FromStr;
+
+		let config = config_from_hvcc(&fixtures::hvcc()).unwrap();
+		let hang::catalog::VideoCodec::H265(h265) = &config.codec else {
+			panic!("expected H.265 codec")
+		};
+
+		// x265 Main profile: general_profile_compatibility_flag[1] and [2] set.
+		assert_eq!(h265.profile_compatibility_flags, [0x60, 0, 0, 0]);
+
+		let encoded = h265.to_string();
+		assert_eq!(encoded, "hvc1.1.6.L93.90");
+
+		let parsed = hang::catalog::H265::from_str(&encoded).unwrap();
+		assert_eq!(parsed.profile_compatibility_flags, h265.profile_compatibility_flags);
+	}
 }
