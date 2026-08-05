@@ -562,12 +562,12 @@ fn encode_fragment(track: &mut Fmp4Track, frames: Vec<Frame>) -> Result<Bytes> {
 	let seq = track.sequence_number;
 	track.sequence_number += 1;
 	let timescale = moq_net::Timescale::new(track.timescale)?;
-	Ok(crate::container::fmp4::encode_fragment(
-		track.track_id,
+	let info = crate::container::fmp4::FragmentInfo {
+		track_id: track.track_id,
 		timescale,
-		seq,
-		&frames,
-	)?)
+		sequence_number: seq,
+	};
+	Ok(crate::container::fmp4::encode_fragment(info, &frames)?)
 }
 
 /// Encode a buffered run and wrap it with the metadata a segmenting consumer needs.
@@ -593,7 +593,7 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 /// tile the timeline, so their sum is exact. Legacy / LOC sources carry none, so
 /// fall back to the presentation span plus one `default_frame` for the trailing
 /// sample (which has no successor to bound it).
-fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
+pub(crate) fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 	if frames.is_empty() {
 		return 0.0;
 	}
