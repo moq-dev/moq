@@ -134,10 +134,31 @@ export class Consumer {
 // several handles can share one connection.
 const warnedNoDiscovery = new Set<string>();
 
-// Never the full href: the query carries the auth token, so keying on it would pin every token
-// an app ever used in memory and mint an entry per rotation. Origin plus path is the relay.
-function relayKey(url: URL): string {
-	return `${url.origin}${url.pathname}`;
+// Enough that a real deployment never evicts, small enough that the cache can't grow into a
+// leak. Past it the oldest relay is forgotten and may warn a second time, which is the right
+// thing to give up: this exists to keep the log readable, not to guarantee exactly-once.
+const WARNED_MAX = 64;
+
+/** Warn that `url`'s relay lacks discovery, at most once per relay. */
+function warnNoDiscovery(url: URL): void {
+	// Never the full href: the query carries the auth token, so keying on it would pin every
+	// token an app ever used and mint an entry per rotation. Origin plus path is the relay.
+	const key = `${url.origin}${url.pathname}`;
+	if (warnedNoDiscovery.has(key)) return;
+
+	// A Set iterates in insertion order, so the first entry is the oldest.
+	if (warnedNoDiscovery.size >= WARNED_MAX) {
+		const oldest = warnedNoDiscovery.values().next().value;
+		if (oldest !== undefined) warnedNoDiscovery.delete(oldest);
+	}
+
+	warnedNoDiscovery.add(key);
+	console.warn("relay does not support broadcast discovery; consuming without waiting.");
+}
+
+/** @internal Forget every warned relay, so a test starts from a clean cache. */
+export function resetNoDiscoveryWarnings(): void {
+	warnedNoDiscovery.clear();
 }
 
 /**
@@ -225,11 +246,7 @@ export class Broadcast {
 
 			// Without discovery no announcement ever arrives, so waiting would hang forever.
 			if (!conn.discovery) {
-				const key = relayKey(conn.url);
-				if (!warnedNoDiscovery.has(key)) {
-					warnedNoDiscovery.add(key);
-					console.warn("relay does not support broadcast discovery; consuming without waiting.");
-				}
+				warnNoDiscovery(conn.url);
 
 				const blind = conn.consume(path);
 				effect.cleanup(() => blind.close());
