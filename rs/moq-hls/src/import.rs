@@ -96,6 +96,12 @@ struct StepOutcome {
 	wrote_segments: usize,
 	/// Target segment duration (in seconds) from the playlist, if known.
 	target_duration: Option<u64>,
+	/// Renditions that ingested without error, however many segments each wrote.
+	///
+	/// A live playlist with no new segments yet still counts: that's a healthy rendition with
+	/// nothing to add this pass, not a failure. Counting segments instead would read a quiet
+	/// playlist as a dead one.
+	ok: usize,
 	/// A rendition failure from this step, if any.
 	///
 	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
@@ -616,13 +622,17 @@ impl Import {
 		let mut backoff = error_backoff();
 
 		loop {
-			// A step that imported nothing while a rendition was failing is a failed pass wearing an
-			// `Ok`: `step` swallows per-rendition errors so one bad variant doesn't drop the rest.
+			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
+			// an `Ok`: `step` swallows per-rendition errors so one bad variant doesn't drop the rest.
 			// Letting it through would reset the backoff every pass, so a source that returns 404
 			// forever would spin at the refresh cadence while publishing nothing.
+			//
+			// Keyed on renditions that ingested, not on segments written: a healthy live playlist
+			// with nothing new this pass writes no segments, and reading that as a failure would end
+			// a multi-rendition import over one dead variant the others were covering for.
 			let stepped = match self.step(OnError::Warn).await {
 				Ok(StepOutcome {
-					wrote_segments: 0,
+					ok: 0,
 					failed: Some(err),
 					..
 				}) => Err(err),
@@ -691,10 +701,14 @@ impl Import {
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
 		let mut failed = None;
+		let mut ok = 0;
 
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			match track.ingest(&self.fetcher, &mut target_duration).await {
-				Ok(count) => wrote_segments += count,
+				Ok(count) => {
+					wrote_segments += count;
+					ok += 1;
+				}
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
@@ -719,6 +733,7 @@ impl Import {
 			wrote_segments,
 			target_duration,
 			failed,
+			ok,
 		})
 	}
 
