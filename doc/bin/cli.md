@@ -84,10 +84,12 @@ moq <MoQ side>  <import|export>  <endpoint> [endpoint options]
     broadcast.
   - `--server-bind <addr>` hosts MoQ sessions directly (with `--tls-generate` /
     `--tls-cert` + `--tls-key`).
+  - `--cluster-lan` meshes with every other participating process on the LAN via
+    mDNS, no relay or internet needed. See [LAN Cluster](#lan-cluster-mdns).
 
-  Both may be given at once (dial a relay *and* accept incoming sessions).
-  `--origin <id>` pins the process's origin id (default: fresh and random per
-  run); see [Redundant Publishers](#redundant-publishers-11).
+  Any combination may be given at once (e.g. dial a relay *and* accept incoming
+  sessions). `--origin <id>` pins the process's origin id (default: fresh and
+  random per run); see [Redundant Publishers](#redundant-publishers-11).
 - **`import`** routes media INTO MoQ (a source fills the Origin); **`export`**
   routes it OUT (a sink drains the Origin). The verb fixes the data direction.
 - **endpoint** is one subcommand: a container format (`avc3`, `fmp4`, `ts`, `flv`
@@ -124,6 +126,57 @@ Subtitles ride in the source container. The current `moq import` path does not p
 tracks in fragmented MP4, so captions arrive over the GStreamer path instead: `moqsink` accepts a
 decoded text pad and publishes it as a caption track. See
 [GStreamer](gstreamer.md).
+
+### LAN Cluster (mDNS)
+
+`--cluster-lan` advertises this process over mDNS (DNS-SD, `_moq._udp.local`)
+and connects to every other participating MoQ process on the LAN, with no relay,
+internet, or certificate setup needed. Each pair opens one bidirectional session
+and shares one set of broadcasts, like a miniature relay cluster:
+
+```bash
+# On one machine: publish a stream to the LAN.
+ffmpeg -i video.mp4 -c copy -f mpegts - | \
+    moq --cluster-lan --broadcast lan-demo.hang import ts
+
+# On another: discover it and play it.
+moq --cluster-lan --broadcast lan-demo.hang export ts | mpv -
+```
+
+Peers connect to the `--server-bind` listener, which `--cluster-lan` fills in
+when you haven't: an ephemeral port with a generated certificate, whose SHA-256
+fingerprint rides along in the advertisement. Dialers pin that fingerprint, so
+sessions are encrypted without a CA. Pass `--server-bind` yourself to put the
+mesh on a fixed port and your own certificate, shared with ordinary viewers.
+
+It composes with the other MoQ sides. The common pairing is a LAN mesh plus a
+CDN for everyone else: `--cluster-lan --client-connect
+https://relay.example.com/anon` serves viewers on the same network directly
+while the relay serves external ones, all from one process and one set of
+broadcasts. With `--cluster-lan` alone nothing leaves the local network.
+
+By default anyone who can reach the listener joins, exactly like a bare
+`--server-bind`, so use it on networks you trust. On a network you don't
+control, generate a key and give the same one to every peer:
+
+```bash
+openssl rand -hex 32 > cluster.key
+moq --cluster-lan --cluster-lan-secret cluster.key --broadcast lan-demo.hang export ts
+```
+
+Peers then prove they hold the key before anything else happens. Each
+advertisement carries an HMAC-SHA256 proof bound to the record it travels in
+(the advertiser's service instance, port, nonce, certificate fingerprint, and
+node identity), and a peer whose proof doesn't verify is never dialed at all.
+Copying another member's proof into your own advertisement therefore gets you
+nowhere, even though the record is public. The proof a dialer presents in return is bound to the one
+listener it was derived from, so an impostor that advertises a fingerprint it
+controls gets nothing it can reuse anywhere else. The key itself never crosses
+the network, and peers with different keys (or none) are mutually invisible.
+
+Because the proofs are HMACs over a public nonce, a weak key can be brute-forced
+offline by anyone watching the network. Generate 32 random bytes as above rather
+than choosing something memorable.
 
 ### Redundant Publishers (1+1)
 
