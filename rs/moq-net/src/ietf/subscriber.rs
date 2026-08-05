@@ -553,8 +553,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// An endpoint updates an advertisement by re-sending it on the stream that
-		// already carries it, so keep reading until the stream closes (which is also how
-		// v14-16's PublishNamespaceDone arrives, via the adapter).
+		// already carries it, so keep reading until the stream ends: a close on
+		// draft-17+, or v14-16's PublishNamespaceDone (see `terminal_publish_namespace`).
 		//
 		// `attached` survives the call so a stream that detached mid-flight (a reflected
 		// update) is not released twice here.
@@ -564,11 +564,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await;
 
 		if attached {
-			// A clean close IS the retraction here, unlike a NAMESPACE stream: this stream
-			// carries exactly one advertisement, and PUBLISH_NAMESPACE_DONE reaches us as
-			// that close (see the adapter). Anything else ended the stream while it still
-			// held the advertisement, so the peer never withdrew it and the origin's linger
-			// window stays open for the reconnect.
+			// Ending cleanly IS the retraction here, unlike a NAMESPACE stream: this stream
+			// carries exactly one advertisement, and withdrawing it is what ends the stream.
+			// Any other ending left the advertisement standing, so the peer never withdrew
+			// it and the origin's linger window stays open for the reconnect.
 			let detach = match res.is_ok() {
 				true => Detach::Graceful,
 				false => Detach::Abrupt,
@@ -577,6 +576,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		res
+	}
+
+	/// Whether `type_id` retracts a PUBLISH_NAMESPACE rather than updating it.
+	///
+	/// v14-16 carry the stream over the control stream, and the adapter delivers the
+	/// terminal message *before* it FINs (`Route::CloseStream`), so the withdrawal
+	/// arrives here as a message and only then as a close. Draft-17+ has a real stream,
+	/// where the close alone retracts and a terminal message on it is a violation.
+	///
+	/// Only PUBLISH_NAMESPACE_DONE: the publisher sends that one. PUBLISH_NAMESPACE_CANCEL
+	/// travels the other way, so receiving it on an advertisement *we* were offered is a
+	/// violation, not a withdrawal.
+	fn terminal_publish_namespace(&self, type_id: u64) -> bool {
+		match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => type_id == ietf::PublishNamespaceDone::ID,
+			_ => false,
+		}
 	}
 
 	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes.
@@ -593,13 +609,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Some(id) => id,
 				None => return Ok(()),
 			};
-			if type_id != ietf::PublishNamespace::ID {
+			let terminal = self.terminal_publish_namespace(type_id);
+			if type_id != ietf::PublishNamespace::ID && !terminal {
 				tracing::warn!(type_id, "unexpected message on publish_namespace stream");
 				return Err(Error::UnexpectedMessage);
 			}
 
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
+
+			if terminal {
+				ietf::PublishNamespaceDone::decode_msg(&mut data, self.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(%path, "publish_namespace_done");
+				return Ok(());
+			}
+
 			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated())?;
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
@@ -1682,6 +1709,63 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"an explicit NAMESPACE_DONE lingered instead of closing",
+		);
+	}
+
+	/// v14-16 withdraw a PUBLISH_NAMESPACE with PUBLISH_NAMESPACE_DONE, which the adapter
+	/// delivers as a message before it FINs the virtual stream. Reading it as a stray
+	/// message closes the whole session over a routine unannounce, and strands the
+	/// broadcast for the linger window on the way out.
+	#[tokio::test(start_paused = true)]
+	async fn a_publish_namespace_done_retracts_without_faulting_the_session() {
+		const VERSION: Version = Version::Draft14;
+
+		let path = crate::Path::new("room/host").to_owned();
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		writer
+			.encode_message(&ietf::PublishNamespaceDone {
+				track_namespace: path.borrow(),
+				request_id: RequestId(0),
+			})
+			.await
+			.unwrap();
+		let script = log.writes.lock().unwrap().clone();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::PublishNamespace {
+			request_id: RequestId(0),
+			track_namespace: path.borrow(),
+			cluster: None,
+		};
+		subscriber
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.await
+			.expect("a withdrawal is not a protocol violation");
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit withdrawal lingered instead of closing",
 		);
 	}
 
