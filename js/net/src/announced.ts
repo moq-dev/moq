@@ -129,9 +129,10 @@ export class Consumer {
 	}
 }
 
-// Connections already warned about missing broadcast discovery, so the fallback logs at most
-// once per connection instead of once per watched path.
-const warnedNoDiscovery = new WeakSet<Established>();
+// Relays already warned about missing broadcast discovery, so the fallback logs at most once
+// per relay instead of once per watched path. Keyed by URL rather than by session, since
+// several handles can share one connection.
+const warnedNoDiscovery = new Set<string>();
 
 /**
  * What to watch, for {@link Broadcast}.
@@ -218,8 +219,8 @@ export class Broadcast {
 
 			// Without discovery no announcement ever arrives, so waiting would hang forever.
 			if (!conn.discovery) {
-				if (!warnedNoDiscovery.has(conn)) {
-					warnedNoDiscovery.add(conn);
+				if (!warnedNoDiscovery.has(conn.url.href)) {
+					warnedNoDiscovery.add(conn.url.href);
 					console.warn("relay does not support broadcast discovery; consuming without waiting.");
 				}
 

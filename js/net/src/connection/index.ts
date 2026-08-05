@@ -1,5 +1,5 @@
 /**
- * Connection helpers: connect to or accept a MoQ session and reconnect on failure.
+ * Connection helpers: connect to or accept a MoQ session, share it by URL, and reconnect on failure.
  *
  * @module
  */
@@ -7,6 +7,7 @@ export * from "./accept.ts";
 export { isWebTransportSupported } from "./browser.ts";
 export * from "./connect.ts";
 export * from "./established.ts";
+export type { PoolProps } from "./pool.ts";
 export * from "./reload.ts";
 export type { Probe, Stats } from "./stats.ts";
 export type { Transport } from "./transport.ts";

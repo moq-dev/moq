@@ -1,4 +1,5 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
+import type { Signal } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
@@ -6,9 +7,29 @@ import * as Hex from "../util/hex.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import { exchangeSetup } from "./handshake.ts";
+import { type PoolProps, poolKey, sessionPool } from "./pool.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
+
+/** Exponential backoff settings for the reconnect loop; see `reload` on the connect options. */
+export type ReloadDelay = {
+	/** The delay in milliseconds before reconnecting (default: 1000). */
+	initial: DOMHighResTimeStamp;
+
+	/** The multiplier for the delay (default: 2). */
+	multiplier: number;
+
+	/** The maximum delay in milliseconds (default: 30000). */
+	max: DOMHighResTimeStamp;
+
+	/**
+	 * Maximum total time in milliseconds to spend retrying before giving up (default:
+	 * 300000, 5 minutes). Resets after each successful connection. Set to 0 for
+	 * unlimited retries.
+	 */
+	timeout?: DOMHighResTimeStamp;
+};
 
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketOptions {
@@ -53,13 +74,33 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 	serverCertificate?: string | BufferSource;
 }
 
-/** Options for {@link connect}. */
+/**
+ * Options for {@link connect} and {@link Reload}.
+ *
+ * The last three are about staying connected, so only {@link Reload} honors them; {@link connect}
+ * takes the URL as an argument and connects exactly once.
+ */
 export interface ConnectProps {
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;
 
 	/** WebSocket (fallback) options. */
 	websocket?: WebSocketOptions;
+
+	/**
+	 * Share one session with every other connection to the same URL and options (default: true).
+	 *
+	 * A page showing a dozen broadcasts from one relay then dials it once, and the session
+	 * outlives a component being torn down and rebuilt (see {@link PoolProps.grace}). The
+	 * returned session is a reference-counted handle: `close()` releases yours, and the last one
+	 * out closes the connection.
+	 *
+	 * A shared session is one peer, so it never sees its own announcements: publish and consume
+	 * the same broadcast over one session and the consumer waits forever. Pass `false` there, or
+	 * whenever the session needs to be yours alone. Sharing is also skipped whenever it can't be
+	 * done safely: with {@link ConnectProps.transport}, or with a pinned server certificate.
+	 */
+	pool?: boolean | PoolProps;
 
 	/**
 	 * Use a pre-existing WebTransport session instead of connecting; skips the
@@ -80,8 +121,24 @@ export interface ConnectProps {
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
 	 * signal rejects before anything opens, and aborting after the connection is
 	 * established has no effect. Use `AbortSignal.timeout(ms)` for a deadline.
+	 *
+	 * On a shared session ({@link ConnectProps.pool}) this abandons your attempt but leaves the
+	 * connection alone, since somebody else may be waiting on it.
 	 */
 	signal?: AbortSignal;
+
+	/** The relay to connect to; pass a {@link Signal} to reconnect when it changes. */
+	url?: URL | Signal<URL | undefined>;
+
+	/** Whether to connect at all (default: true); pass a {@link Signal} to disconnect and reconnect live. */
+	enabled?: boolean | Signal<boolean>;
+
+	/**
+	 * Reconnect with exponential backoff when the session drops (default: true).
+	 *
+	 * `false` connects once and gives up when that session ends. An object tunes the backoff.
+	 */
+	reload?: boolean | ReloadDelay;
 }
 
 // Relays that don't implement broadcast discovery (SUBSCRIBE_NAMESPACE), so `announced()` would
@@ -103,12 +160,40 @@ const NEVER_ABORTED = new AbortController().signal;
 /**
  * Establishes a connection to a MOQ server.
  *
+ * Shared with every other connection to the same URL by default, so `close()` releases your
+ * handle rather than terminating the session. See {@link ConnectProps.pool}.
+ *
  * @param url - The URL of the server to connect to
  * @param props - Connection options
  * @returns A promise that resolves to a Connection instance
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
-	const signal = props?.signal ?? NEVER_ABORTED;
+	// Before anything opens, so an already-aborted caller can't leave a session behind.
+	props?.signal?.throwIfAborted();
+
+	const discovery = props?.discovery ?? defaultDiscovery(url);
+
+	const key = poolKey(url, props, discovery);
+	if (key === undefined) return await dial(url, props, discovery, props?.signal);
+
+	const pool = sessionPool();
+
+	const cached = pool.get(key);
+	if (cached) return await cached.acquire(props?.signal);
+
+	// The entry owns the attempt, so one caller walking away doesn't abandon the others.
+	const entry = pool.insert(key, typeof props?.pool === "object" ? props.pool.grace : undefined);
+	entry.settle(dial(url, props, discovery, entry.signal));
+	return await entry.acquire(props?.signal);
+}
+
+/** Connect without sharing, aborting the attempt when `signal` fires. */
+async function dial(
+	url: URL,
+	props: ConnectProps | undefined,
+	discovery: boolean,
+	signal: AbortSignal = NEVER_ABORTED,
+): Promise<Established> {
 	signal.throwIfAborted();
 
 	// Resolves on abort so every in-flight transport tears itself down.
@@ -116,7 +201,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
 
-	const pending = connectInner(url, props, abort);
+	const pending = connectInner(url, props, discovery, abort);
 	try {
 		// A `pending` rejection propagates unless the abort beat it to the finish line.
 		const connection = await Promise.race([pending, abort.then(() => undefined)]);
@@ -130,9 +215,12 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 }
 
-async function connectInner(url: URL, props: ConnectProps | undefined, abort: Promise<void>): Promise<Established> {
-	const discovery = props?.discovery ?? defaultDiscovery(url);
-
+async function connectInner(
+	url: URL,
+	props: ConnectProps | undefined,
+	discovery: boolean,
+	abort: Promise<void>,
+): Promise<Established> {
 	if (props?.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());

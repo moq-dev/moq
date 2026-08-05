@@ -1,14 +1,20 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { accept } from "./index.ts";
-import { Reload, type ReloadProps } from "./reload.ts";
+import { resetPool } from "./pool.ts";
+import { Reload } from "./reload.ts";
 
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// Sessions are shared by URL, so a leftover one would answer the next case.
+beforeEach(() => {
+	resetPool();
+});
 
 test("equivalent URL instances do not restart a pending connection", async () => {
 	const original = globalThis.WebTransport;
@@ -49,10 +55,133 @@ test("equivalent URL instances do not restart a pending connection", async () =>
 	}
 });
 
-test("ReloadProps excludes signal", () => {
-	// @ts-expect-error signal is not part of ReloadProps
-	const props: ReloadProps = { signal: new AbortController().signal };
-	expect(props.enabled).toBeUndefined();
+test("aborting the signal stops the loop", async () => {
+	const original = globalThis.WebTransport;
+	let closes = 0;
+
+	class PendingWebTransport {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+
+		close() {
+			closes++;
+		}
+	}
+
+	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const controller = new AbortController();
+	const reload = new Reload({
+		url: new URL("https://example.com/signal"),
+		websocket: { enabled: false },
+		signal: controller.signal,
+	});
+
+	try {
+		await settle();
+		expect(reload.status.peek()).toBe("connecting");
+
+		controller.abort();
+		await settle();
+		expect(closes).toBe(1);
+		await reload.closed;
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("connecting is the default", async () => {
+	const original = globalThis.WebTransport;
+	let connects = 0;
+
+	class PendingWebTransport {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+
+		constructor() {
+			connects++;
+		}
+
+		close() {}
+	}
+
+	globalThis.WebTransport = PendingWebTransport as unknown as typeof WebTransport;
+	const reload = new Reload({ url: new URL("https://example.com/default"), websocket: { enabled: false } });
+
+	try {
+		await settle();
+		expect(connects).toBe(1);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("two connections to one URL share a session", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/shared");
+	let connects = 0;
+
+	const stub = function StubWebTransport() {
+		connects++;
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const first = new Reload({ url, websocket: { enabled: false } });
+	const second = new Reload({ url, websocket: { enabled: false } });
+
+	try {
+		await waitUntil(() => first.established.peek() !== undefined && second.established.peek() !== undefined);
+		expect(connects).toBe(1);
+
+		// One going away leaves the other connected: the session belongs to both.
+		first.close();
+		await settle();
+		expect(second.established.peek()).not.toBeUndefined();
+		expect(second.status.peek()).toBe("connected");
+	} finally {
+		first.close();
+		second.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("reload: false gives up after one session", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/once");
+	let connects = 0;
+
+	const sessions: { close: () => void }[] = [];
+	const stub = function StubWebTransport() {
+		connects++;
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		void accept(pair.server, url).then((server) => sessions.push(server));
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({ url, websocket: { enabled: false }, reload: false });
+
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined && sessions.length > 0);
+
+		// A clean drop is the end of the line rather than the start of a backoff.
+		sessions[0]?.close();
+		await reload.closed;
+		expect(connects).toBe(1);
+		expect(reload.established.peek()).toBeUndefined();
+		expect(reload.status.peek()).toBe("disconnected");
+
+		// Nothing is scheduled, so it stays down.
+		await settle();
+		expect(connects).toBe(1);
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
 });
 
 test("closing mid-connect aborts the pending attempt", async () => {

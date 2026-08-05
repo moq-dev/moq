@@ -1,13 +1,19 @@
-import { expect, test } from "bun:test";
+import { beforeEach, expect, test } from "bun:test";
 import { ALPN_05 } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { connect } from "./connect.ts";
+import { resetPool } from "./pool.ts";
 
 const url = new URL("https://example.com/test");
 
 async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// Sessions are shared by URL, so a leftover one would answer the next case.
+beforeEach(() => {
+	resetPool();
+});
 
 test("already-aborted signal rejects without connecting", async () => {
 	const original = globalThis.WebTransport;

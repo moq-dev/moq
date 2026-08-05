@@ -68,3 +68,39 @@ test("lite draft-05: subscribe end clears the max sequence when groups arrive ou
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
 	expect(await subscribeEnd([])).toBe(0);
 });
+
+// A shared session lets two components publish the same path, so the registration has to
+// belong to whoever holds it now. Without the identity check the stale producer's close
+// deletes the live one's entry, and the path stops answering subscribes.
+test("a stale producer closing does not unpublish a republished path", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const path = Path.from("test");
+
+	const stale = new BroadcastProducer();
+	publisher.publish(path, stale);
+
+	const live = new BroadcastProducer();
+	publisher.publish(path, live);
+
+	stale.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: path, track: "video", priority: 0 });
+	void publisher.runSubscribe(msg, server);
+
+	try {
+		// An unpublished path is reset rather than served, so the request never arrives;
+		// race a deadline so the regression fails instead of hanging.
+		const deadline = new Promise((resolve) => setTimeout(() => resolve("not served"), 100));
+		const request = await Promise.race([live.requested(), deadline]);
+		expect(request).toHaveProperty("name", "video");
+	} finally {
+		live.close();
+		client.close();
+	}
+});
