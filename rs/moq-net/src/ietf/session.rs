@@ -32,10 +32,9 @@ pub struct Config<S: web_transport_trait::Session> {
 	/// declares its own, which wins.
 	pub peer_origin: Option<Origin>,
 
-	/// What subscribing from us costs, declared in our SETUP (see
-	/// [`cluster::RELAY_COST`]) for the peer to charge. Directional, so what we charge
-	/// in the other direction is whatever the peer declared. `None` leaves it unpriced,
-	/// which the peer reads as the default of 1.
+	/// Price both directions of the link. Declared in our SETUP (see
+	/// [`cluster::RELAY_COST`]) and used as local policy for subscriptions from the
+	/// peer. `None` advertises no price and accepts the peer's declared price.
 	pub cost: Option<u64>,
 
 	pub version: Version,
@@ -57,6 +56,24 @@ pub struct Config<S: web_transport_trait::Session> {
 pub fn start<S: web_transport_trait::Session>(
 	config: Config<S>,
 ) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+	let ingress_cost = config.cost;
+	start_inner(config, ingress_cost)
+}
+
+pub(crate) fn start_with_ingress_cost<S: web_transport_trait::Session>(
+	config: Config<S>,
+	ingress_cost: Option<u64>,
+) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
+	if ingress_cost == config.cost {
+		return start(config);
+	}
+	start_inner(config, ingress_cost)
+}
+
+fn start_inner<S: web_transport_trait::Session>(
+	config: Config<S>,
+	ingress_cost: Option<u64>,
+) -> Result<MaybeSendBox<'static, Result<(), Error>>, Error> {
 	let Config {
 		session,
 		setup,
@@ -65,7 +82,7 @@ pub fn start<S: web_transport_trait::Session>(
 		publish,
 		subscribe,
 		peer_origin,
-		cost,
+		cost: egress_cost,
 		version,
 		path,
 		peer_setup_stream,
@@ -123,7 +140,7 @@ pub fn start<S: web_transport_trait::Session>(
 					peer_origin,
 					peer_setup.clone(),
 					self_origin,
-					cost,
+					ingress_cost,
 					version,
 					tasks,
 				);
@@ -204,7 +221,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let setup = {
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, version, path, self_origin, cost).await {
+						if let Err(err) = run_setup(session, version, path, self_origin, egress_cost).await {
 							tracing::warn!(%err, "setup send error");
 						}
 						std::future::pending::<()>().await;
@@ -228,7 +245,7 @@ pub fn start<S: web_transport_trait::Session>(
 					peer_origin,
 					peer_setup.clone(),
 					self_origin,
-					cost,
+					ingress_cost,
 					version,
 					tasks,
 				);
@@ -410,14 +427,14 @@ fn decode_peer_cluster(parameters: bytes::Bytes, version: Version) -> Result<clu
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
 ///
 /// `path` is the request path we advertise (clients on URL-less transports); a
-/// server passes `None`. `self_origin` and `cost` are the MoQ Cluster options, which
-/// declare our identity and (client-only) what this link costs to cross.
+/// server passes `None`. `self_origin` and `egress_cost` are the MoQ Cluster options,
+/// which declare our identity and what subscribing from us costs.
 async fn run_setup<S: web_transport_trait::Session>(
 	session: S,
 	version: Version,
 	path: Option<String>,
 	self_origin: Origin,
-	cost: Option<u64>,
+	egress_cost: Option<u64>,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -429,7 +446,7 @@ async fn run_setup<S: web_transport_trait::Session>(
 	if let Some(path) = path {
 		parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 	}
-	cluster::peer_into_setup(&mut parameters, self_origin, cost, version);
+	cluster::peer_into_setup(&mut parameters, self_origin, egress_cost, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer.encode(&setup::Setup { parameters }).await?;

@@ -13,6 +13,8 @@ pub struct Server {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
+	egress_cost: Option<u64>,
+	ingress_cost: Option<u64>,
 }
 
 impl Server {
@@ -55,6 +57,30 @@ impl Server {
 	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Price both directions of every accepted link.
+	///
+	/// Equivalent to setting both [`with_egress_cost`](Self::with_egress_cost) and
+	/// [`with_ingress_cost`](Self::with_ingress_cost). An unpriced direction costs `1`.
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.egress_cost = Some(cost);
+		self.ingress_cost = Some(cost);
+		self
+	}
+
+	/// Price what connected clients pay to subscribe from this server.
+	pub fn with_egress_cost(mut self, cost: u64) -> Self {
+		self.egress_cost = Some(cost);
+		self
+	}
+
+	/// Price what this server pays to subscribe from connected clients.
+	///
+	/// This local routing policy overrides each client's declared egress price.
+	pub fn with_ingress_cost(mut self, cost: u64) -> Self {
+		self.ingress_cost = Some(cost);
 		self
 	}
 
@@ -364,6 +390,25 @@ impl<S: web_transport_trait::Session> Request<S> {
 		self
 	}
 
+	/// Price both directions of this accepted link, overriding the server default.
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.inner_mut().server.egress_cost = Some(cost);
+		self.inner_mut().server.ingress_cost = Some(cost);
+		self
+	}
+
+	/// Price what this client pays to subscribe from us, overriding the server default.
+	pub fn with_egress_cost(mut self, cost: u64) -> Self {
+		self.inner_mut().server.egress_cost = Some(cost);
+		self
+	}
+
+	/// Price what we pay to subscribe from this client, overriding the server default.
+	pub fn with_ingress_cost(mut self, cost: u64) -> Self {
+		self.inner_mut().server.ingress_cost = Some(cost);
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner<S> {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -387,21 +432,23 @@ impl<S: web_transport_trait::Session> Request<S> {
 			} => {
 				// The client's SETUP was read in `accept_request`; hand the stream back
 				// for GOAWAY. A server never advertises a path, hence `None`.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: None,
-					request_id_max: None,
-					client: false,
-					publish,
-					subscribe,
-					peer_origin: None,
-					// Only the dialing side prices a link.
-					cost: None,
-					version,
-					path: None,
-					peer_setup_stream: Some(peer_setup.stream),
-					peer_cluster: Some(peer_setup.cluster),
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: None,
+						request_id_max: None,
+						client: false,
+						publish,
+						subscribe,
+						peer_origin: None,
+						cost: server.egress_cost,
+						version,
+						path: None,
+						peer_setup_stream: Some(peer_setup.stream),
+						peer_cluster: Some(peer_setup.cluster),
+					},
+					server.ingress_cost,
+				)?;
 				tracing::debug!(?version, "connected");
 				return Ok(Session::new(session, version.into(), None, protocol));
 			}
@@ -412,6 +459,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					publish,
 					subscribe,
 					None,
+					server.ingress_cost,
 					version,
 					lite::Setup::default(),
 					None,
@@ -433,8 +481,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					probe: lite::ProbeLevel::Report,
 					path: None,
 					role: None,
-					// The dialing side prices the link; we charge what its SETUP declared.
-					cost: None,
+					cost: server.egress_cost,
 					// Filled by `lite::start` from the attached origin handles.
 					origin: None,
 				};
@@ -444,6 +491,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					publish,
 					subscribe,
 					None,
+					server.ingress_cost,
 					version,
 					our_setup,
 					Some(client_setup),
@@ -490,6 +538,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					publish,
 					subscribe,
 					None,
+					server.ingress_cost,
 					v,
 					lite::Setup::default(),
 					None,
@@ -499,20 +548,23 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: Some(stream),
-					request_id_max,
-					client: false,
-					publish,
-					subscribe,
-					peer_origin: None,
-					cost: None,
-					version: v,
-					path: None,
-					peer_setup_stream: None,
-					peer_cluster: None,
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: Some(stream),
+						request_id_max,
+						client: false,
+						publish,
+						subscribe,
+						peer_origin: None,
+						cost: server.egress_cost,
+						version: v,
+						path: None,
+						peer_setup_stream: None,
+						peer_cluster: None,
+					},
+					server.ingress_cost,
+				)?;
 				(None, protocol)
 			}
 		};

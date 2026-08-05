@@ -32,12 +32,18 @@ impl web_transport_trait::Error for SinkError {
 pub struct Log {
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
+	pub closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 }
 
 impl Log {
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
+	}
+
+	/// Session close calls, including the application error code and reason.
+	pub fn closes(&self) -> Vec<(u32, String)> {
+		self.closes.lock().unwrap().clone()
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -181,7 +187,9 @@ impl web_transport_trait::Session for SinkSession {
 		None
 	}
 
-	fn close(&self, _code: u32, _reason: &str) {}
+	fn close(&self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
 
 	async fn closed(&self) -> Self::Error {
 		std::future::pending().await
@@ -334,7 +342,9 @@ impl web_transport_trait::Session for ScriptedSession {
 		None
 	}
 
-	fn close(&self, _code: u32, _reason: &str) {}
+	fn close(&self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
 
 	async fn closed(&self) -> Self::Error {
 		std::future::pending().await

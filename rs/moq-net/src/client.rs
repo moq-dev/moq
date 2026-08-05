@@ -14,7 +14,8 @@ pub struct Client {
 	stats: stats::Session,
 	versions: Versions,
 	setup_path: Option<String>,
-	cost: Option<u64>,
+	egress_cost: Option<u64>,
+	ingress_cost: Option<u64>,
 	peer_origin: Option<crate::Origin>,
 }
 
@@ -79,21 +80,34 @@ impl Client {
 		self
 	}
 
-	/// Price what subscribing from us costs, in the units the rest of the mesh uses
-	/// (moq-lite-06+, and `moqt-17`+ via the MoQ Cluster extension).
+	/// Price both directions of this link in the units the rest of the mesh uses.
 	///
-	/// Declared in our SETUP; the peer adds it to the route cost of every announcement
-	/// we forward it, so routing prefers cheap paths over short ones. Use `0` for a
-	/// direction that should look free (a sibling in the same datacenter), and
-	/// something large for one that should be a last resort (metered egress). When we
-	/// declare nothing the peer charges `1`, which makes the cost track the hop count
-	/// and so reproduces plain shortest-path routing.
+	/// Equivalent to setting both [`with_egress_cost`](Self::with_egress_cost) and
+	/// [`with_ingress_cost`](Self::with_ingress_cost). Use `0` for a free link and a
+	/// large value for a last resort. An unpriced direction costs `1`.
 	///
-	/// This prices one direction only. What *we* pay to pull from the peer is whatever
-	/// the peer declares, so an asymmetric link is described by each side setting its
-	/// own value, and a symmetric one by both setting the same.
+	/// Supported by moq-lite-06+ and `moqt-17`+ via the MoQ Cluster extension.
 	pub fn with_cost(mut self, cost: u64) -> Self {
-		self.cost = Some(cost);
+		self.egress_cost = Some(cost);
+		self.ingress_cost = Some(cost);
+		self
+	}
+
+	/// Price what the peer pays to subscribe from us.
+	///
+	/// Declared in our SETUP and added by the peer to announcements we forward. Use
+	/// this with [`with_ingress_cost`](Self::with_ingress_cost) for an asymmetric link.
+	pub fn with_egress_cost(mut self, cost: u64) -> Self {
+		self.egress_cost = Some(cost);
+		self
+	}
+
+	/// Price what we pay to subscribe from the peer.
+	///
+	/// This local routing policy overrides the peer's declared egress price. Use this
+	/// with [`with_egress_cost`](Self::with_egress_cost) for an asymmetric link.
+	pub fn with_ingress_cost(mut self, cost: u64) -> Self {
+		self.ingress_cost = Some(cost);
 		self
 	}
 
@@ -158,20 +172,23 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: None,
-					request_id_max: None,
-					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					cost: self.cost,
-					version: ietf::Version::Draft19,
-					path: self.setup_path.clone(),
-					peer_setup_stream: None,
-					peer_cluster: None,
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: None,
+						request_id_max: None,
+						client: true,
+						publish: publish.clone(),
+						subscribe: subscribe.clone(),
+						peer_origin: self.peer_origin,
+						cost: self.egress_cost,
+						version: ietf::Version::Draft19,
+						path: self.setup_path.clone(),
+						peer_setup_stream: None,
+						peer_cluster: None,
+					},
+					self.ingress_cost,
+				)?;
 
 				tracing::debug!(version = ?v, "connected");
 				return Ok(Session::new(session, v, None, protocol));
@@ -184,20 +201,23 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: None,
-					request_id_max: None,
-					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					cost: self.cost,
-					version: ietf::Version::Draft18,
-					path: self.setup_path.clone(),
-					peer_setup_stream: None,
-					peer_cluster: None,
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: None,
+						request_id_max: None,
+						client: true,
+						publish: publish.clone(),
+						subscribe: subscribe.clone(),
+						peer_origin: self.peer_origin,
+						cost: self.egress_cost,
+						version: ietf::Version::Draft18,
+						path: self.setup_path.clone(),
+						peer_setup_stream: None,
+						peer_cluster: None,
+					},
+					self.ingress_cost,
+				)?;
 
 				tracing::debug!(version = ?v, "connected");
 				return Ok(Session::new(session, v, None, protocol));
@@ -210,20 +230,23 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: None,
-					request_id_max: None,
-					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					cost: self.cost,
-					version: ietf::Version::Draft17,
-					path: self.setup_path.clone(),
-					peer_setup_stream: None,
-					peer_cluster: None,
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: None,
+						request_id_max: None,
+						client: true,
+						publish: publish.clone(),
+						subscribe: subscribe.clone(),
+						peer_origin: self.peer_origin,
+						cost: self.egress_cost,
+						version: ietf::Version::Draft17,
+						path: self.setup_path.clone(),
+						peer_setup_stream: None,
+						peer_cluster: None,
+					},
+					self.ingress_cost,
+				)?;
 
 				tracing::debug!(version = ?v, "connected");
 				return Ok(Session::new(session, v, None, protocol));
@@ -264,7 +287,7 @@ impl Client {
 					probe: lite::ProbeLevel::Report,
 					path: self.setup_path.clone(),
 					role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
-					cost: self.cost,
+					cost: self.egress_cost,
 					// Filled by `lite::start` from the attached origin handles.
 					origin: None,
 				};
@@ -275,6 +298,7 @@ impl Client {
 					publish.clone(),
 					subscribe.clone(),
 					self.peer_origin,
+					self.ingress_cost,
 					version,
 					our_setup,
 					None,
@@ -299,6 +323,7 @@ impl Client {
 					publish.clone(),
 					subscribe.clone(),
 					self.peer_origin,
+					self.ingress_cost,
 					lite::Version::Lite04,
 					lite::Setup::default(),
 					None,
@@ -327,6 +352,7 @@ impl Client {
 					publish.clone(),
 					subscribe.clone(),
 					self.peer_origin,
+					self.ingress_cost,
 					lite::Version::Lite03,
 					lite::Setup::default(),
 					None,
@@ -388,6 +414,7 @@ impl Client {
 					publish.clone(),
 					subscribe.clone(),
 					self.peer_origin,
+					self.ingress_cost,
 					v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
@@ -406,20 +433,23 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let protocol = ietf::start(ietf::Config {
-					session: session.clone(),
-					setup: Some(stream),
-					request_id_max,
-					client: true,
-					publish: publish.clone(),
-					subscribe: subscribe.clone(),
-					peer_origin: self.peer_origin,
-					cost: self.cost,
-					version: v,
-					path: None,
-					peer_setup_stream: None,
-					peer_cluster: None,
-				})?;
+				let protocol = ietf::start_with_ingress_cost(
+					ietf::Config {
+						session: session.clone(),
+						setup: Some(stream),
+						request_id_max,
+						client: true,
+						publish: publish.clone(),
+						subscribe: subscribe.clone(),
+						peer_origin: self.peer_origin,
+						cost: self.egress_cost,
+						version: v,
+						path: None,
+						peer_setup_stream: None,
+						peer_cluster: None,
+					},
+					self.ingress_cost,
+				)?;
 				(None, protocol, None)
 			}
 		};
@@ -445,6 +475,17 @@ mod tests {
 
 	use crate::coding::{Decode, Encode};
 	use bytes::{BufMut, Bytes};
+
+	#[test]
+	fn link_costs_can_be_symmetric_or_directional() {
+		let symmetric = Client::new().with_cost(7);
+		assert_eq!(symmetric.egress_cost, Some(7));
+		assert_eq!(symmetric.ingress_cost, Some(7));
+
+		let asymmetric = Client::new().with_egress_cost(3).with_ingress_cost(11);
+		assert_eq!(asymmetric.egress_cost, Some(3));
+		assert_eq!(asymmetric.ingress_cost, Some(11));
+	}
 
 	#[derive(Debug, Clone, Default)]
 	struct FakeError;

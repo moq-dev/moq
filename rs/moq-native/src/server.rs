@@ -263,6 +263,24 @@ impl Server {
 		self
 	}
 
+	/// Price both directions of every accepted link.
+	pub fn with_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_cost(cost);
+		self
+	}
+
+	/// Price what clients pay to subscribe from this server.
+	pub fn with_egress_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_egress_cost(cost);
+		self
+	}
+
+	/// Price what this server pays to subscribe from clients.
+	pub fn with_ingress_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_ingress_cost(cost);
+		self
+	}
+
 	/// Accept sessions until the listener stops, serving `origin` to each subscriber.
 	///
 	/// Spawns a task per session and logs (rather than propagates) per-session
@@ -946,6 +964,57 @@ impl Request {
 			kind,
 		} = self;
 		let kind = request_map!(kind, request => request.with_stats(stats));
+		Request {
+			transport,
+			url,
+			identity,
+			kind,
+		}
+	}
+
+	/// Price both directions of this accepted link.
+	pub fn with_cost(self, cost: u64) -> Self {
+		let Request {
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_cost(cost));
+		Request {
+			transport,
+			url,
+			identity,
+			kind,
+		}
+	}
+
+	/// Price what this client pays to subscribe from us.
+	pub fn with_egress_cost(self, cost: u64) -> Self {
+		let Request {
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_egress_cost(cost));
+		Request {
+			transport,
+			url,
+			identity,
+			kind,
+		}
+	}
+
+	/// Price what we pay to subscribe from this client.
+	pub fn with_ingress_cost(self, cost: u64) -> Self {
+		let Request {
+			transport,
+			url,
+			identity,
+			kind,
+		} = self;
+		let kind = request_map!(kind, request => request.with_ingress_cost(cost));
 		Request {
 			transport,
 			url,

@@ -67,6 +67,9 @@ pub fn start<S: web_transport_trait::Session>(
 	// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	// declare one itself. See `Client::with_peer_origin`.
 	peer_origin: Option<Origin>,
+	// Local policy for what subscribing from the peer costs. Distinct from
+	// `our_setup.cost`, which declares what subscribing from us costs.
+	ingress_cost: Option<u64>,
 	// The version of the protocol to use.
 	version: Version,
 	// The capabilities (and optional request path) we advertise in our SETUP message.
@@ -141,9 +144,6 @@ pub fn start<S: web_transport_trait::Session>(
 	let peer_setup = peer_setup_slot;
 	let (tasks, task_set) = TaskSet::new();
 
-	// Read out before the setup task takes ownership below.
-	let our_cost = our_setup.cost;
-
 	// Advertise our own capabilities on a uni Setup Stream, then FIN. Best-effort:
 	// a failure here just means the peer falls back to "no capabilities" for us.
 	if version.has_setup_stream() {
@@ -169,10 +169,9 @@ pub fn start<S: web_transport_trait::Session>(
 		version,
 		peer_setup,
 		peer_origin,
-		// Local policy for what pulling from this peer costs. Set only when we
-		// configured a price; otherwise the subscriber charges what the peer declared
-		// for its own egress.
-		cost: our_cost,
+		// Local policy for what pulling from this peer costs. Otherwise the subscriber
+		// charges what the peer declared for its own egress.
+		cost: ingress_cost,
 		tasks,
 	});
 

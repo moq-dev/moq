@@ -310,9 +310,21 @@ impl Client {
 		self
 	}
 
-	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
+	/// Price both directions of the links this client dials.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.moq = self.moq.with_cost(cost);
+		self
+	}
+
+	/// Price what peers pay to subscribe from this client.
+	pub fn with_egress_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_egress_cost(cost);
+		self
+	}
+
+	/// Price what this client pays to subscribe from peers.
+	pub fn with_ingress_cost(mut self, cost: u64) -> Self {
+		self.moq = self.moq.with_ingress_cost(cost);
 		self
 	}
 

@@ -41,7 +41,6 @@ fn is_protocol_violation(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Decode(_)
-			| Error::Encode(_)
 			| Error::BoundsExceeded(_)
 			| Error::WrongSize
 			| Error::TooManyParameters
@@ -304,6 +303,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
 	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
 		&mut self,
+		stream: Stream<T, Version>,
+		prefix: PathOwned,
+	) -> Result<(), Error> {
+		let res = self.run_subscribe_namespace_inner(stream, prefix).await;
+		if let Err(err) = &res
+			&& is_protocol_violation(err)
+		{
+			self.session
+				.close(Error::ProtocolViolation.to_code(), err.to_string().as_ref());
+		}
+		res
+	}
+
+	/// Run one namespace subscription, leaving session-level error policy to the wrapper.
+	async fn run_subscribe_namespace_inner<T: web_transport_trait::Session>(
+		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
@@ -498,7 +513,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session.close(err.to_code(), err.to_string().as_ref());
+							this.session
+								.close(Error::ProtocolViolation.to_code(), err.to_string().as_ref());
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -1422,6 +1438,49 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("rootns/rootns/cam/x.hang").is_none(),
 			"the root was applied twice",
+		);
+	}
+
+	/// A negotiated cluster session requires HOP_PATH on every NAMESPACE. The error is
+	/// session-wide because the stream can no longer be decoded unambiguously.
+	#[tokio::test]
+	async fn a_malformed_cluster_namespace_closes_the_session() {
+		const VERSION: Version = Version::Draft19;
+
+		let session = crate::lite::test_transport::ScriptedSession::new(namespace_response(VERSION, "bad").await);
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer {
+			origin: Some(crate::Origin::new(2).unwrap()),
+			cost: None,
+		});
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
+		for _ in 0..20 {
+			let _ = futures::poll!(run.as_mut());
+			if !session.log.closes().is_empty() {
+				break;
+			}
+			settle().await;
+		}
+
+		assert_eq!(
+			session.log.closes().first().map(|(code, _)| *code),
+			Some(Error::ProtocolViolation.to_code()),
+			"a missing HOP_PATH must close the session",
 		);
 	}
 
