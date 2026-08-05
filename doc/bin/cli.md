@@ -243,8 +243,9 @@ moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
 On Linux the NVENC (NVIDIA) encoder and the PipeWire screen capture are compiled
 in by default. VAAPI (Intel/AMD) is behind the off-by-default `vaapi` feature,
 since that backend has never been validated on real hardware. To build `capture`
-without any of them (software openh264 + V4L2 camera capture only, no system
-library dependency), drop the default features:
+without any of them (software openh264 + V4L2 camera capture only), drop the
+default features. `capture` itself still needs libclang and the V4L2 headers for
+the camera, and ALSA for the microphone:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
