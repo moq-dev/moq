@@ -519,7 +519,20 @@ impl kio::Pollable for Fetching {
 			let (latched, track, fetch) = inner.as_ref().expect("latched above");
 			let err = match kio::Pollable::poll(&**fetch, waiter) {
 				Poll::Ready(Err(err)) => err,
-				other => return other,
+				Poll::Ready(Ok(group)) => return Poll::Ready(Ok(group)),
+				// Park on the resume state too: the front aborting must end an
+				// in-flight fetch even when the latched copy never answers it.
+				Poll::Pending => {
+					return match self.state.poll(waiter, |s| match &s.abort {
+						Some(err) => Poll::Ready(err.clone()),
+						None => Poll::Pending,
+					}) {
+						Poll::Ready(Ok(err)) => Poll::Ready(Err(err)),
+						// The producer froze without aborting; only the copy can
+						// answer now.
+						_ => Poll::Pending,
+					};
+				}
 			};
 
 			// The latched copy failed the fetch. Fail over to a segment spliced in
@@ -1666,6 +1679,27 @@ mod test {
 		// The logical track aborting ends the wait with its error.
 		producer.abort(Error::Cancel).unwrap();
 		assert!(matches!(fetch.await, Err(Error::Cancel)));
+	}
+
+	#[tokio::test]
+	async fn fetch_pending_ends_when_the_track_aborts() {
+		let (track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let consumer = producer.consume();
+
+		// A fetch handler exists but never answers: the latched fetch parks.
+		let handler = track_a.dynamic();
+		let fetch = consumer.fetch_group(0, None);
+		let mut fetch = std::pin::pin!(fetch);
+		assert!(futures::poll!(fetch.as_mut()).is_pending(), "unanswered fetch should park");
+
+		// The front aborting must end the in-flight fetch, not strand it on the
+		// copy that will never answer.
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(fetch.await, Err(Error::Cancel)));
+		drop(handler);
 	}
 
 	#[tokio::test]
