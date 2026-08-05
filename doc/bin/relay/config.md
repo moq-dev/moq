@@ -196,6 +196,17 @@ token = "cluster.jwt"
 # never notice. A clean unannounce always takes effect immediately. "0"
 # unannounces abrupt losses immediately too. Default: 5s.
 linger = "5s"
+
+[cluster.lan]
+# Optional. Discover peers on the local network with mDNS instead of (or as well
+# as) gossip and connect_api. Requires `node` and `secret`.
+enabled = true
+
+# The shared key admitting a peer to the LAN mesh: 64 hexadecimal characters, or
+# a path to a file containing them. Every peer needs the same value. Required,
+# because mDNS is unauthenticated and the relay attaches `token` to any peer it
+# dials.
+secret = "/etc/moq/cluster.key"
 ```
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
