@@ -134,10 +134,16 @@ export class Consumer {
 // several handles can share one connection.
 const warnedNoDiscovery = new Set<string>();
 
-// Enough that a real deployment never evicts, small enough that the cache can't grow into a
-// leak. Past it the oldest relay is forgotten and may warn a second time, which is the right
-// thing to give up: this exists to keep the log readable, not to guarantee exactly-once.
-const WARNED_MAX = 64;
+/**
+ * How many relays the no-discovery warning remembers.
+ *
+ * Enough that a real deployment never evicts, small enough that the cache can't grow into a
+ * leak. Past it the oldest relay is forgotten and may warn a second time, which is the right
+ * thing to give up: this exists to keep the log readable, not to guarantee exactly-once.
+ *
+ * @internal
+ */
+export const WARNED_MAX = 64;
 
 /** Warn that `url`'s relay lacks discovery, at most once per relay. */
 function warnNoDiscovery(url: URL): void {

@@ -290,22 +290,38 @@ test("closing a live connection reports disconnected", async () => {
 		expect(reload.status.peek()).toBe("disconnected");
 		await reload.closed;
 	} finally {
+		// Also in `finally`, so a failed assertion doesn't leave the session leased.
+		reload.close();
 		globalThis.WebTransport = original;
 	}
 });
 
-test("a supplied transport is refused out loud", () => {
+test("a supplied transport is refused out loud, and not used", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/supplied");
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
-	const pair = createMockTransportPair(Lite.ALPN_06_WIP);
 
-	// Silently dialing past it would hand back a session the caller never asked for.
-	const reload = new Reload({ enabled: false, transport: pair.client });
+	// Counts the dials, so "warned but used it anyway" and "warned and dialed nothing" are
+	// both distinguishable from the documented behavior.
+	const pending = createPendingTransports();
+	globalThis.WebTransport = pending.transport;
+
+	const supplied = createMockTransportPair(Lite.ALPN_06_WIP);
+	let reload: Reload | undefined;
 
 	try {
+		reload = new Reload({ url, websocket: { enabled: false }, transport: supplied.client });
+
 		expect(warn.mock.calls.length).toBe(1);
+		expect(String(warn.mock.calls[0]?.[0])).toContain("transport is ignored");
+
+		// It dials its own rather than silently handing back the supplied session.
+		await settle();
+		expect(pending.connects()).toBe(1);
 	} finally {
-		reload.close();
+		reload?.close();
 		warn.mockRestore();
-		pair.client.close();
+		supplied.client.close();
+		globalThis.WebTransport = original;
 	}
 });

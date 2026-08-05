@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as Announce from "./announced.ts";
-import { resetNoDiscoveryWarnings } from "./announced.ts";
+import { resetNoDiscoveryWarnings, WARNED_MAX } from "./announced.ts";
 import * as Path from "./path.ts";
 
 const p = (s: string) => Path.from(s);
@@ -75,14 +75,16 @@ async function countWarnings(fn: () => Announce.Broadcast[]): Promise<number> {
 test("the no-discovery warning is once per relay, ignoring the auth token", async () => {
 	resetNoDiscoveryWarnings();
 
-	// Same relay, different tokens and different watched paths: still one relay.
+	// One relay is an origin and a path. The first two differ only by token and by what they
+	// watch, so they share a warning; the last two are each a relay of their own.
 	const warnings = await countWarnings(() => [
 		new Announce.Broadcast({ connection: noDiscovery("https://relay.example/anon?jwt=a"), path: p("one") }),
 		new Announce.Broadcast({ connection: noDiscovery("https://relay.example/anon?jwt=b"), path: p("two") }),
+		new Announce.Broadcast({ connection: noDiscovery("https://relay.example/other"), path: p("one") }),
 		new Announce.Broadcast({ connection: noDiscovery("https://other.example/anon"), path: p("one") }),
 	]);
 
-	expect(warnings).toBe(2);
+	expect(warnings).toBe(3);
 });
 
 test("the no-discovery warning cache is bounded", async () => {
@@ -93,7 +95,8 @@ test("the no-discovery warning cache is bounded", async () => {
 	const first = "https://relay0.example/anon";
 	await countWarnings(() =>
 		Array.from(
-			{ length: 200 },
+			// One past the cap is all it takes to push the first entry out.
+			{ length: WARNED_MAX + 1 },
 			(_, i) =>
 				new Announce.Broadcast({ connection: noDiscovery(`https://relay${i}.example/anon`), path: p("x") }),
 		),
