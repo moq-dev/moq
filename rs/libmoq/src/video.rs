@@ -3,7 +3,7 @@
 //! The video counterpart to [`audio`](crate::audio): publish raw pictures as an
 //! encoded video track, and subscribe to one and hand back decoded raw frames,
 //! with the codec running inside the FFI boundary (VideoToolbox on macOS, Media
-//! Foundation on Windows, NVENC/VAAPI/NVDEC on Linux, openh264 as the software
+//! Foundation on Windows, NVENC/NVDEC on Linux, openh264 as the software
 //! fallback; no ffmpeg). Siblings to `moq_publish_media_*` /
 //! `moq_consume_video`, which carry already-encoded frames for a caller that
 //! brings its own codec.
