@@ -1145,7 +1145,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			ietf::SubscribeOk::ID => {
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Some((msg.track_alias, msg.timescale)))
+				Ok(Some((msg.track_alias, msg.properties.timescale)))
 			}
 			ietf::SubscribeError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeError::decode_msg(&mut data, self.version)?;
@@ -2307,10 +2307,9 @@ mod tests {
 			track_namespace: crate::Path::new("room/host"),
 			track_name: "video".into(),
 			track_alias: 7,
-			group_order: ietf::GroupOrder::Ascending,
 			largest_location: None,
 			forward: true,
-			timescale: None,
+			properties: ietf::Properties::default(),
 		};
 
 		// Errors are surfaced to the peer on the stream, not raised as a session error.

@@ -427,9 +427,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => None,
 				},
 				track_alias: request_id.0,
-				// Declaring the timescale is what opts the track into timestamps; every
-				// object Timestamp below is in these units.
-				timescale: Some(track.info().timescale),
+				properties: ietf::Properties {
+					// Declaring the timescale is what opts the track into timestamps; every
+					// object Timestamp below is in these units.
+					timescale: Some(track.info().timescale),
+					// We serve the newest group first, matching moq-lite.
+					group_order: Some(GroupOrder::Descending),
+				},
 			})
 			.await?;
 

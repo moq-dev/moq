@@ -76,12 +76,20 @@ export class Publish {
 				throw new Error("contentExists and largest must both be true or false");
 			}
 			const params = new Parameters();
-			params.groupOrder = this.groupOrder;
+			// GROUP_ORDER is a legal PUBLISH parameter only through draft-15. Draft-16 moved the
+			// publisher's preference to the DEFAULT_PUBLISHER_GROUP_ORDER track property, so
+			// sending the parameter here is a PROTOCOL_VIOLATION.
+			if (version === Version.DRAFT_15) {
+				params.groupOrder = this.groupOrder;
+			}
 			params.forward = this.forward;
 			if (this.largest) {
 				params.largest = this.largest;
 			}
 			await params.encode(w, version);
+
+			// Track Properties are the final field, so nothing may follow.
+			await Properties.encode(w, { groupOrder: this.groupOrder }, version);
 		}
 	}
 
@@ -121,8 +129,10 @@ export class Publish {
 		}
 		// v15+: parameters followed by Track Properties (draft-17+)
 		const params = await Parameters.decode(r, version);
-		await Properties.decode(r, version);
-		const groupOrder = params.groupOrder ?? 0x02;
+		const properties = await Properties.decode(r, version);
+		// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a peer that
+		// still sends it doesn't have its session torn down over a hint.
+		const groupOrder = properties.groupOrder ?? params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;
 		return new Publish({

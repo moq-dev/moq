@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path, Timescale,
+	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Parameters, RequestId},
+	ietf::{GroupOrder, Location, Parameters, Properties, RequestId},
 };
 
 use super::Message;
@@ -164,10 +164,8 @@ pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
 
-	/// The track's Timescale, sent as a Track Property (draft-17+).
-	///
-	/// `None` declares no timeline, so the subscriber times objects by arrival.
-	pub timescale: Option<Timescale>,
+	/// Metadata about the track, sent as Track Properties (draft-17+).
+	pub properties: Properties,
 }
 
 impl Message for SubscribeOk {
@@ -186,19 +184,28 @@ impl Message for SubscribeOk {
 		match version {
 			Version::Draft14 => {
 				0u64.encode(w, version)?; // expires = 0
-				GroupOrder::Descending.encode(w, version)?;
+				self.properties
+					.group_order
+					.unwrap_or(GroupOrder::Ascending)
+					.encode(w, version)?;
 				false.encode(w, version)?; // no content
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
+				// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15. Draft-16
+				// moved the publisher's preference to the DEFAULT_PUBLISHER_GROUP_ORDER track
+				// property, so sending the parameter here is a PROTOCOL_VIOLATION.
+				let group_order = match version {
+					Version::Draft15 => self.properties.group_order,
+					_ => None,
+				};
+
 				encode_params!(w, version,
-					0x22 => GroupOrder::Descending,
+					0x22 => group_order,
 				);
 
 				// Track Properties are the final field, so nothing may follow.
-				if let Some(timescale) = self.timescale {
-					super::properties::encode(w, timescale, version)?;
-				}
+				self.properties.encode(w, version)?;
 			}
 		}
 
@@ -212,7 +219,7 @@ impl Message for SubscribeOk {
 			None
 		};
 		let track_alias = u64::decode(r, version)?;
-		let mut timescale = None;
+		let mut properties = Properties::default();
 
 		match version {
 			Version::Draft14 => {
@@ -221,7 +228,7 @@ impl Message for SubscribeOk {
 					return Err(DecodeError::Unsupported);
 				}
 
-				let _group_order = u8::decode(r, version)?;
+				properties.group_order = Some(GroupOrder::decode(r, version)?.any_to_descending());
 
 				if bool::decode(r, version)? {
 					let _group = u64::decode(r, version)?;
@@ -231,17 +238,20 @@ impl Message for SubscribeOk {
 				let _params = Parameters::decode(r, version)?;
 			}
 			_ => {
+				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
+				// peer that still sends it doesn't have its session torn down over a hint.
 				decode_params!(r, version,
-					0x22 => _group_order: Option<GroupOrder>,
+					0x22 => group_order: Option<GroupOrder>,
 				);
-				timescale = super::properties::decode(r, version)?;
+				properties = Properties::decode(r, version)?;
+				properties.group_order = properties.group_order.or(group_order);
 			}
 		}
 
 		Ok(Self {
 			request_id,
 			track_alias,
-			timescale,
+			properties,
 		})
 	}
 }
@@ -503,7 +513,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -517,7 +527,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -656,7 +666,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -711,7 +721,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -719,6 +729,78 @@ mod tests {
 
 		assert_eq!(decoded.request_id, None);
 		assert_eq!(decoded.track_alias, 42);
+	}
+
+	/// GROUP_ORDER (0x22) is only a legal SUBSCRIBE_OK *message parameter* through draft-15;
+	/// a draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
+	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
+	/// which shares the number 0x22 in the separate property registry.
+	#[test]
+	fn test_subscribe_ok_v18_group_order_is_a_property() {
+		let msg = SubscribeOk {
+			request_id: None,
+			track_alias: 42,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			42,   // track alias
+			0,    // zero message parameters
+			0x22, // DEFAULT_PUBLISHER_GROUP_ORDER, the first (and only) track property
+			0x02, // descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+
+		let decoded: SubscribeOk = decode_message(&expected, Version::Draft18).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-15 is the one version that takes it as a message parameter, and has no track
+	/// properties to put it in.
+	#[test]
+	fn test_subscribe_ok_v15_group_order_is_a_parameter() {
+		let msg = SubscribeOk {
+			request_id: Some(RequestId(7)),
+			track_alias: 42,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			7,    // request id
+			42,   // track alias
+			1,    // one message parameter
+			0x22, // GROUP_ORDER
+			0x02, // descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft15), expected);
+
+		let decoded: SubscribeOk = decode_message(&expected, Version::Draft15).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// We stopped sending the parameter, but a peer still sending it shouldn't lose its
+	/// session over a hint we ignore anyway.
+	#[test]
+	fn test_subscribe_ok_v18_accepts_group_order_parameter() {
+		#[rustfmt::skip]
+		let bytes = vec![
+			42,   // track alias
+			1,    // one message parameter
+			0x22, // GROUP_ORDER
+			0x02, // descending
+		];
+
+		let decoded: SubscribeOk = decode_message(&bytes, Version::Draft18).unwrap();
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
 	}
 
 	/// Draft-18 removes the `required_request_id_delta` field (#1615), so the

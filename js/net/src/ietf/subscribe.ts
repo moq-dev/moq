@@ -168,13 +168,16 @@ export class SubscribeOk {
 		} else {
 			// v15+: just parameters after track_alias
 			const params = new Parameters();
-			params.groupOrder = GROUP_ORDER;
+			// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15. Draft-16 moved
+			// the publisher's preference to the DEFAULT_PUBLISHER_GROUP_ORDER track property, so
+			// sending the parameter here is a PROTOCOL_VIOLATION.
+			if (version === Version.DRAFT_15) {
+				params.groupOrder = GROUP_ORDER;
+			}
 			await params.encode(w, version);
 
 			// Track Properties are the final field, so nothing may follow.
-			if (this.timescale !== undefined) {
-				await Properties.encode(w, this.timescale, version);
-			}
+			await Properties.encode(w, { timescale: this.timescale, groupOrder: GROUP_ORDER }, version);
 		}
 	}
 
@@ -213,7 +216,7 @@ export class SubscribeOk {
 		} else {
 			// v15+: parameters followed by Track Properties (draft-17+)
 			await Parameters.decode(r, version);
-			timescale = await Properties.decode(r, version);
+			timescale = (await Properties.decode(r, version)).timescale;
 		}
 
 		return new SubscribeOk({ requestId, trackAlias, timescale });

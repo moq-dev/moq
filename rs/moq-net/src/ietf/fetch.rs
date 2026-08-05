@@ -207,11 +207,11 @@ impl Message for FetchOk {
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
+				// GROUP_ORDER is not a legal FETCH_OK parameter in any draft after 14; the order
+				// of the response is whatever the FETCH asked for.
 				self.end_of_track.encode(w, version)?;
 				self.end_location.encode(w, version)?;
-				encode_params!(w, version,
-					0x22 => self.group_order,
-				);
+				encode_params!(w, version,);
 			}
 		}
 		Ok(())
@@ -240,12 +240,14 @@ impl Message for FetchOk {
 			_ => {
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
+				// GROUP_ORDER isn't legal here, but keep accepting it so a peer that still sends
+				// it doesn't have its session torn down over a hint.
 				decode_params!(buf, version,
 					0x22 => group_order: Option<GroupOrder>,
 				);
 				// FETCH_OK may declare a timescale; we don't surface it yet, and a fetched
 				// object without an interpretable timestamp is stamped on arrival.
-				let _ = super::properties::decode(buf, version)?;
+				let _ = super::Properties::decode(buf, version)?;
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 
@@ -534,5 +536,27 @@ mod tests {
 		assert_eq!(decoded.request_id, None);
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
+	}
+
+	/// GROUP_ORDER (0x22) has never been a legal FETCH_OK parameter outside draft-14, where
+	/// it was a plain field. A draft-15+ peer closes the session with PROTOCOL_VIOLATION when
+	/// it sees one, so the response carries no parameters at all.
+	#[test]
+	fn test_fetch_ok_v18_omits_group_order() {
+		let msg = FetchOk {
+			request_id: None,
+			group_order: GroupOrder::Descending,
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			0, // end of track
+			5, // end group
+			3, // end object
+			0, // zero message parameters
+		];
+		assert_eq!(encode_message(&msg, Version::Draft18), expected);
 	}
 }

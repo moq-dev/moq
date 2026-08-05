@@ -920,6 +920,41 @@ test("SubscribeOk v18: no requestId", async () => {
 	expect(decoded.trackAlias).toBe(42n);
 });
 
+// GROUP_ORDER (0x22) is only a legal SUBSCRIBE_OK *message parameter* through draft-15; a
+// draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The publisher's
+// preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property, which shares the
+// number 0x22 in the separate property registry.
+test("SubscribeOk v18: group order is a track property, not a parameter", async () => {
+	const msg = new Subscribe.SubscribeOk({ trackAlias: 42n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	expect(Array.from(encoded)).toEqual([
+		0x00,
+		0x04, // u16 message length
+		42, // track alias
+		0x00, // zero message parameters
+		0x22, // DEFAULT_PUBLISHER_GROUP_ORDER, the first (and only) track property
+		0x02, // descending
+	]);
+});
+
+// Draft-15 is the one version that takes it as a message parameter, and has no track
+// properties to put it in.
+test("SubscribeOk v15: group order is a message parameter", async () => {
+	const msg = new Subscribe.SubscribeOk({ requestId: 7n, trackAlias: 42n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	expect(Array.from(encoded)).toEqual([
+		0x00,
+		0x05, // u16 message length
+		7, // request id
+		42, // track alias
+		0x01, // one message parameter
+		0x22, // GROUP_ORDER
+		0x02, // descending
+	]);
+});
+
 test("SubscribeUpdate v18: 1 byte shorter than v17 (no required_request_id_delta)", async () => {
 	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
 	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
