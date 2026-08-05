@@ -531,8 +531,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
 			self.write_error(&mut stream, request_id, 400, "route loops through this relay")
 				.await?;
-			let _ = stream.writer.finish();
-			let _ = stream.writer.closed().await;
+			let _ = stream.writer.close().await;
 			return Ok(());
 		};
 
@@ -546,8 +545,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
-				let _ = stream.writer.finish();
-				let _ = stream.writer.closed().await;
+				let _ = stream.writer.close().await;
 				return Ok(());
 			}
 		}
@@ -687,9 +685,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		self.write_publish_error(&mut stream, msg.request_id, 400, "PUBLISH is not supported")
 			.await?;
-		// Finish rather than awaiting the peer's close: the rejection is the whole
-		// exchange, and dropping `stream` on return tears down the rest.
-		let _ = stream.writer.finish();
+		// The rejection is the whole exchange, but it still has to arrive: a finish alone
+		// leaves the drop-time reset free to discard it before the peer acknowledges it.
+		let _ = stream.writer.close().await;
 
 		Ok(())
 	}

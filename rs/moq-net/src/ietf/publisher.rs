@@ -702,8 +702,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				request_id: msg.request_id,
 			})
 			.await?;
-		writer.finish()?;
-		writer.closed().await?;
+		writer.close().await?;
 
 		Ok(())
 	}
@@ -980,7 +979,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							request_id: request.request_id,
 						})
 						.await;
-					request.stream.writer.finish().ok();
+
+					// The withdrawal rides this request's own stream, which drops with it, so
+					// it needs the acknowledgement before the drop-time reset can discard it.
+					let _ = request.stream.writer.close().await;
 				}
 			}
 			_ => {
