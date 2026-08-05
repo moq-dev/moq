@@ -138,10 +138,11 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	// Refuse a retention this source can't apply rather than accepting the flag and quietly
 	// publishing at the default: the gateways build their catalogs inside their own crates.
 	anyhow::ensure!(
-		import.latency_max == hang::container::LATENCY_MAX || import.source.honors_latency_max(),
+		import.latency_max.is_none() || import.source.honors_latency_max(),
 		"--latency-max is not supported for this source yet; it applies to the stdin container \
 		 formats, hls, and capture"
 	);
+	let latency_max = import.latency_max.unwrap_or(hang::container::LATENCY_MAX);
 
 	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
 	// an outbound client has one: a `--server-bind` publisher's sessions are
@@ -180,13 +181,12 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		let broadcast = origin
 			.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 			.context("failed to create broadcast")?;
-		local = Some(Publish::new(broadcast, &format, import.latency_max)?);
+		local = Some(Publish::new(broadcast, &format, latency_max)?);
 	} else {
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
 				let origin = origin.clone();
-				let latency_max = import.latency_max;
 				tasks.spawn(async move { hls::import(&origin, name, hls.playlist, latency_max).await });
 			}
 			ImportSource::Rtmp(rtmp) => {
@@ -226,12 +226,7 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 				let broadcast = origin
 					.create_broadcast(&name, moq_net::broadcast::Route::new().with_announce(true))
 					.context("failed to create broadcast")?;
-				local = Some(Publish::capture(
-					broadcast,
-					&capture,
-					send_bandwidth,
-					import.latency_max,
-				)?);
+				local = Some(Publish::capture(broadcast, &capture, send_bandwidth, latency_max)?);
 			}
 			_ => unreachable!("container formats are handled by stdin_format above"),
 		}

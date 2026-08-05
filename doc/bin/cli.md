@@ -362,6 +362,16 @@ Import formats:
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
+`import --latency-max <duration>` (default `30s`) declares how long relays keep a
+non-latest group of the published media tracks fetchable. It is a retention
+budget, so raising it never makes a subscriber play further behind live: it caps
+how far back a fetch can still reach. The default is sized for a segmented
+egress (HLS/DASH), which may only advertise segments that are still fetchable;
+lower it when nothing reads history and the memory matters. It applies to the
+media tracks only, and to the sources whose catalog this binary builds (the
+stdin containers, `hls`, and `capture`) - the other gateways reject the flag
+rather than accepting it and publishing at the default.
+
 Export formats:
 
 - `fmp4` - fragmented MP4 / CMAF
@@ -403,7 +413,10 @@ stdout containers and `rtmp` take `--latency-max` (default `500ms`), and `srt`
 reuses its `--latency` (the receive buffer doubles as the skip threshold).
 WebRTC (`rtc`) is real-time and doesn't buffer, so it has no such knob. HLS
 export doesn't subscribe to media at all (segments are fetched on demand), so
-it has no latency knob either.
+it has no latency knob either. This is the subscriber half of the pair the
+protocol names: the export knob is how long *this* consumer waits, while
+[`import --latency-max`](#container-formats) is how long the publisher keeps a
+group around for anyone to fetch.
 
 ### MPEG-TS
 
