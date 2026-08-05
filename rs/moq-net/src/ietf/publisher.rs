@@ -1554,10 +1554,10 @@ mod tests {
 		(writes, h.log.resets())
 	}
 
-	/// A SUBSCRIBE for a path with no publisher must be answered, and the answer must survive
-	/// the trip. `Writer` resets the stream on drop, so returning straight after writing the
-	/// error threw the bytes away and left every interop client waiting on a request we had
-	/// already refused. Finishing first makes the drop-time reset a no-op.
+	/// A SUBSCRIBE for a path with no publisher is refused with REQUEST_ERROR, and the refusal
+	/// has to survive the trip. `Writer` resets the stream on drop, and a reset that races the
+	/// write discards the bytes the peer has not read yet, which leaves the subscriber waiting
+	/// on a request we already refused. Finishing first makes the drop-time reset a no-op.
 	#[tokio::test]
 	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
@@ -1573,8 +1573,8 @@ mod tests {
 		}
 	}
 
-	/// Every FETCH we refuse takes the same path, through its own error encoder. A reset there
-	/// loses the rejection exactly like the SUBSCRIBE one did.
+	/// Every FETCH we refuse goes out through its own error encoder, so it needs the same
+	/// finish: a reset there loses the rejection the same way.
 	#[tokio::test]
 	async fn unsupported_fetch_is_refused_without_resetting_the_stream() {
 		let unsupported = || {

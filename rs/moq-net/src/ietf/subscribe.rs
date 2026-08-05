@@ -515,8 +515,8 @@ mod tests {
 
 	/// A subscriber may send RENDEZVOUS_TIMEOUT (draft-17+). We do not honor the wait, but an
 	/// unknown message parameter is a session-killing protocol violation, so it still has to
-	/// parse: a client that sent one used to take the whole session down instead of getting an
-	/// answer to its SUBSCRIBE.
+	/// parse: failing to decode it takes the whole session down instead of answering the
+	/// SUBSCRIBE.
 	#[test]
 	fn rendezvous_timeout_is_accepted_and_ignored() {
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
