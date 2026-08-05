@@ -37,7 +37,7 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 /// transport failing on its own.
 ///
 /// Only the former justifies taking the whole session down. An encode error is ours,
-/// so it stays out: we cannot ask the peer to answer for a message we failed to write.
+/// not the peer's: we cannot ask it to answer for a message we failed to write.
 pub(super) fn is_protocol_violation(err: &Error) -> bool {
 	matches!(
 		err,

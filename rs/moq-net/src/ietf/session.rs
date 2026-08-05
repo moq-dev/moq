@@ -665,9 +665,9 @@ mod tests {
 	/// A session that negotiated the MoQ Cluster extension requires HOP_PATH on every
 	/// NAMESPACE, and the draft answers a missing one by closing the session.
 	///
-	/// Driven through `start` rather than `run_subscribe_namespace` directly: that
-	/// stream always surfaced the error, and the bug was this loop logging it and
-	/// carrying on, so a test below the loop would pass either way.
+	/// Driven through `start` rather than `run_subscribe_namespace` directly: the
+	/// stream surfaces the error either way, so only this loop's handling of it decides
+	/// between a close and a warning, and a test below the loop would pass regardless.
 	#[tokio::test]
 	async fn a_namespace_without_a_hop_path_closes_the_session() {
 		const VERSION: Version = Version::Draft19;
