@@ -71,6 +71,13 @@ pub enum Error {
 	#[error("{0}")]
 	Reconnect(String),
 
+	/// The connection was stopped locally, by closing it or dropping the last handle.
+	///
+	/// Not a failure: it is what a caller asked for. Distinct from [`Self::Reconnect`]
+	/// so a status watcher can tell an expected teardown from a connection that gave up.
+	#[error("connection stopped")]
+	Stopped,
+
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),

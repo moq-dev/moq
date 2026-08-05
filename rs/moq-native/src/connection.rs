@@ -911,10 +911,15 @@ impl Drop for Connection {
 }
 
 /// The terminal error read from a closed channel's final state.
+///
+/// No recorded error means the loop was stopped locally rather than giving up, so
+/// this reports [`Error::Stopped`]: [`Connection::closed`] treats that as the `Ok`
+/// it is, and a watcher that only has an error to go on can still tell it apart
+/// from a connection that failed.
 fn terminal(state: &State) -> Error {
 	match &state.error {
 		Some(err) => err.clone(),
-		None => Error::Reconnect("connection stopped".to_string()),
+		None => Error::Stopped,
 	}
 }
 
