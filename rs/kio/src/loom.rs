@@ -26,7 +26,7 @@ use loom::{
 	thread,
 };
 
-use crate::{Closed, Fan, Producer, Queue, Ref, Shared, wait};
+use crate::{Closed, Fan, Lock, Producer, Queue, Ref, Shared, Waiter, WaiterList, wait};
 
 /// Ready once the value equals `n`.
 fn equals(n: u32) -> impl FnMut(&Ref<'_, u32>) -> Poll<()> + Unpin {
@@ -271,5 +271,47 @@ fn a_held_wake_is_never_lost() {
 		}));
 
 		waker.join().unwrap();
+	});
+}
+
+/// A wake blocked on the projected list must recheck the hold after it acquires the
+/// list lock. Otherwise it can pass the deferral check, stall on the list, and deliver
+/// while a hold created in that window is still live.
+#[test]
+fn a_hold_covers_a_wake_waiting_for_the_list() {
+	loom::model(|| {
+		use std::sync::Arc as StdArc;
+
+		struct Flag(AtomicBool);
+
+		impl std::task::Wake for Flag {
+			fn wake(self: StdArc<Self>) {
+				self.wake_by_ref();
+			}
+
+			fn wake_by_ref(self: &StdArc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let state = Lock::new(WaiterList::new());
+		let fan = Fan::project(&state, |waiters| waiters);
+		let flag = StdArc::new(Flag(AtomicBool::new(false)));
+		let waiter = Waiter::new(std::task::Waker::from(flag.clone()));
+		waiter.register(&mut state.lock());
+
+		let state_guard = state.lock();
+		let waking = thread::spawn({
+			let fan = fan.clone();
+			move || fan.wake()
+		});
+
+		let hold = fan.hold();
+		drop(state_guard);
+		waking.join().unwrap();
+		assert!(!flag.0.load(Ordering::SeqCst), "wake escaped a live hold");
+
+		drop(hold);
+		assert!(flag.0.load(Ordering::SeqCst), "deferred wake never arrived");
 	});
 }

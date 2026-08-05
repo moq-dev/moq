@@ -19,8 +19,8 @@ poll-native FIFO queue (bounded or unbounded) built in the same style. `Park` ho
 waiter for as long as a poll stays pending, bridging a `std::task::Context` to kio's
 waiter-based polls when implementing `Future` or `poll_*` on top of kio channels, and
 `Fan` hands out a waker that wakes a whole waiter list, for driving a foreign future on
-behalf of everyone parked on it — either over a list it owns, or over one already inside
-a `Lock`.
+behalf of everyone parked on it. It either owns the list or reaches one already inside a
+`Lock`.
 
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 

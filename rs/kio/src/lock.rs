@@ -13,7 +13,7 @@ use crate::sync::{Mutex, MutexGuard};
 ///
 /// Every kio channel keeps its state in one of these, with its [`WaiterList`]s inside,
 /// so a state change and the wake it owes are decided under a single lock. [`Fan`] can
-/// hand out a [`Waker`](std::task::Waker) for one of those lists — see
+/// hand out a [`Waker`](std::task::Waker) for one of those lists. See
 /// [`Fan::project`](crate::Fan::project).
 ///
 /// Poisoning is not part of the contract: a panic while the lock is held poisons it, and

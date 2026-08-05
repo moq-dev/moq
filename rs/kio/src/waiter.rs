@@ -274,7 +274,7 @@ enum Target<T> {
 	Owned(Lock<T>),
 
 	/// It belongs to state someone else owns. Weak on purpose: that state routinely
-	/// holds the fan's waker — the future being polled with it usually lives there —
+	/// holds the fan's waker (the future being polled with it usually lives there),
 	/// and a strong handle would make that a cycle.
 	Projected(WeakLock<T>),
 }
@@ -311,21 +311,20 @@ struct Defer {
 
 impl<T> FanInner<T> {
 	fn notify(&self) {
-		{
-			let mut defer = self.defer.lock().expect("mutex poisoned");
-			if defer.held > 0 {
-				defer.owed = true;
-				return;
-			}
-		}
-
 		// Gone already: whatever was parked went with it.
 		let Some(lock) = self.target.upgrade() else {
 			return;
 		};
 
 		let mut waiters = {
+			// Check the hold only after taking the target lock. A wake blocked on that
+			// lock must observe any hold created while it was waiting.
 			let mut state = lock.lock();
+			let mut defer = self.defer.lock().expect("mutex poisoned");
+			if defer.held > 0 {
+				defer.owed = true;
+				return;
+			}
 			(self.project)(&mut state).take()
 		};
 
@@ -360,7 +359,7 @@ impl<T: Send + 'static> Fan<T> {
 	/// A fan over a [`WaiterList`] that lives inside `state`.
 	///
 	/// One lock and one list: parking stays a plain `&mut` call on that list wherever
-	/// the state is already locked, and this supplies only what a `WaiterList` cannot —
+	/// the state is already locked, and this supplies only what a `WaiterList` cannot:
 	/// a [`Waker`] of its own, and [`hold`](Self::hold).
 	///
 	/// The reference is weak, so `state` may hold this fan (or its waker) without
@@ -385,7 +384,7 @@ impl<T: Send + 'static> Fan<T> {
 	/// caller that gives up releases its slot by dropping.
 	///
 	/// This takes the lock the list lives under, so a *projected* fan cannot use it from
-	/// inside that lock — park on the list directly there, which is the point of
+	/// inside that lock. Park on the list directly there, which is the point of
 	/// [`project`](Self::project).
 	pub fn register(&self, waiter: &Waiter) {
 		if let Some(lock) = self.inner.target.upgrade() {
@@ -415,7 +414,7 @@ impl<T: Send + 'static> Fan<T> {
 	///
 	/// For polling a foreign future with [`waker`](Self::waker) while holding a lock that
 	/// the parked waiters will take when they resume. Such a future can wake its waker
-	/// *inline* — `FuturesUnordered`, for one, notifies its parent from a child's `wake` —
+	/// *inline* (`FuturesUnordered`, for one, notifies its parent from a child's `wake`),
 	/// and delivering that would resume a waiter straight into the lock the waker fired
 	/// under.
 	///

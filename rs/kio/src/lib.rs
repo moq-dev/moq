@@ -14,9 +14,8 @@
 //! push and pop sides.
 //!
 //! [`Fan`] hands out a [`Waker`](std::task::Waker) that wakes a whole [`WaiterList`], for
-//! driving a foreign future — one that keeps a single waker — on behalf of everyone parked
-//! on it. It either owns the list or, via [`Fan::project`], wakes one already inside a
-//! [`Lock`].
+//! driving a foreign future that keeps a single waker on behalf of everyone parked on it.
+//! It either owns the list or, via [`Fan::project`], wakes one already inside a [`Lock`].
 
 use std::{
 	fmt,
