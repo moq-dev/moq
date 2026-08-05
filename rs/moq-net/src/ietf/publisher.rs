@@ -1470,15 +1470,21 @@ mod tests {
 		assert_eq!(log.bi_opens(), 3, "no extra stream for the withdrawal");
 	}
 
-	/// Subscribe to a path nothing publishes, returning what the peer would read off the
-	/// request stream plus the reset codes the stream recorded.
-	async fn subscribe_missing(version: Version) -> (Vec<u8>, Vec<u32>) {
+	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
+	struct Harness {
+		publisher: Publisher<crate::lite::test_transport::ScriptedSession>,
+		session: crate::lite::test_transport::ScriptedSession,
+		log: crate::lite::test_transport::Log,
+		/// Keeps the origin alive; the publisher only holds a consumer.
+		_origin: origin::Producer,
+	}
+
+	fn harness(version: Version) -> Harness {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
-		// One bidi stream, with a peer that says nothing back.
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
 
-		// Serving a subscription blocks on the peer's SETUP, which no scripted peer sends here.
+		// Serving a request blocks on the peer's SETUP, which no scripted peer sends here.
 		let peer_setup = cluster::PeerSetup::default();
 		peer_setup.set(cluster::Peer::default());
 
@@ -1491,8 +1497,22 @@ mod tests {
 			version,
 		);
 
-		let stream = Stream::open(&session, version).await.unwrap();
-		publisher
+		Harness {
+			publisher,
+			session,
+			log,
+			_origin: origin,
+		}
+	}
+
+	/// Subscribe to a path nothing publishes, returning what the peer would read off the
+	/// request stream plus the reset codes the stream recorded.
+	async fn subscribe_missing(version: Version) -> (Vec<u8>, Vec<u32>) {
+		let h = harness(version);
+
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		h.publisher
+			.clone()
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
@@ -1507,8 +1527,31 @@ mod tests {
 			.await
 			.unwrap();
 
-		let writes = log.writes.lock().unwrap().clone();
-		(writes, log.resets())
+		let writes = h.log.writes.lock().unwrap().clone();
+		(writes, h.log.resets())
+	}
+
+	/// Send a FETCH we don't implement, returning the same pair.
+	async fn fetch_unsupported(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
+		let h = harness(version);
+
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: RequestId(1),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					fetch_type,
+				},
+			)
+			.await
+			.unwrap();
+
+		let writes = h.log.writes.lock().unwrap().clone();
+		(writes, h.log.resets())
 	}
 
 	/// A SUBSCRIBE for a path with no publisher must be answered, and the answer must survive
@@ -1527,6 +1570,56 @@ mod tests {
 				"{version}: not a REQUEST_ERROR"
 			);
 			assert!(resets.is_empty(), "{version}: stream reset, discarding the error");
+		}
+	}
+
+	/// Every FETCH we refuse takes the same path, through its own error encoder. A reset there
+	/// loses the rejection exactly like the SUBSCRIBE one did.
+	#[tokio::test]
+	async fn unsupported_fetch_is_refused_without_resetting_the_stream() {
+		let unsupported = || {
+			[
+				(
+					"standalone",
+					FetchType::Standalone {
+						namespace: crate::Path::new("nothing/here"),
+						track: "video".into(),
+						start: Location { group: 0, object: 0 },
+						end: Location { group: 1, object: 0 },
+					},
+				),
+				(
+					"relative joining with an offset",
+					FetchType::RelativeJoining {
+						subscriber_request_id: RequestId(3),
+						group_offset: 1,
+					},
+				),
+				(
+					"absolute joining",
+					FetchType::AbsoluteJoining {
+						subscriber_request_id: RequestId(3),
+						group_id: 7,
+					},
+				),
+			]
+		};
+
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			for (label, fetch_type) in unsupported() {
+				let (writes, resets) = fetch_unsupported(version, fetch_type).await;
+
+				assert!(!writes.is_empty(), "{version} {label}: nothing was sent");
+				assert_eq!(
+					writes[0],
+					ietf::RequestError::ID as u8,
+					"{version} {label}: not a REQUEST_ERROR"
+				);
+				assert!(
+					resets.is_empty(),
+					"{version} {label}: stream reset, discarding the error"
+				);
+			}
 		}
 	}
 }

@@ -539,6 +539,28 @@ mod tests {
 		}
 	}
 
+	/// The first message parameter key on an encoded SUBSCRIBE, or `None` when it carries no
+	/// parameters.
+	///
+	/// Only the first key is needed, and only the first is readable. `encode_params!` enforces
+	/// ascending keys at compile time and RENDEZVOUS_TIMEOUT (0x04) sorts below every parameter
+	/// we do send, so it can only appear here. Walking further is not possible anyway: message
+	/// parameter values are typed per key with no generic skip rule, which is exactly why the
+	/// draft makes an unknown one a protocol violation.
+	fn first_param_key(encoded: &[u8], version: Version) -> Option<u64> {
+		let mut buf = bytes::Bytes::copy_from_slice(encoded);
+		RequestId::decode(&mut buf, version).unwrap();
+		if version == Version::Draft17 {
+			u64::decode(&mut buf, version).unwrap();
+		}
+		decode_namespace(&mut buf, version).unwrap();
+		Cow::<str>::decode(&mut buf, version).unwrap();
+
+		// draft-14/15 write absolute keys, draft-16+ deltas, but the first is absolute either way.
+		let count = u64::decode(&mut buf, version).unwrap();
+		(count > 0).then(|| u64::decode(&mut buf, version).unwrap())
+	}
+
 	/// We never ask a peer to hold a subscription open, so the parameter stays off our wire.
 	#[test]
 	fn rendezvous_timeout_is_never_sent() {
@@ -551,9 +573,20 @@ mod tests {
 			filter_type: FilterType::LargestObject,
 		};
 
-		let encoded = encode_message(&msg, Version::Draft18);
-		let plain = subscribe_with_rendezvous(0, Version::Draft18);
-		assert_ne!(encoded, plain, "RENDEZVOUS_TIMEOUT must not be advertised");
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			// The reader has to be able to see a 0x04, or its absence below proves nothing.
+			assert_eq!(
+				first_param_key(&subscribe_with_rendezvous(5000, version), version),
+				Some(0x04),
+				"{version}: reader missed a planted RENDEZVOUS_TIMEOUT"
+			);
+
+			assert_eq!(
+				first_param_key(&encode_message(&msg, version), version),
+				Some(0x10),
+				"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
+			);
+		}
 	}
 
 	#[test]
