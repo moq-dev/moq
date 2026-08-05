@@ -931,30 +931,29 @@ impl Cluster {
 		let stable_threshold = tokio::time::Duration::from_secs(10);
 
 		loop {
-			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url, cost).await;
-			let elapsed = started.elapsed();
+			let attempt = self.run_remote_once(&url, cost).await;
 
-			// A session that lasted is a healthy peer, however it ended: clear the escalation so a
-			// one-off drop redials promptly. Keyed on how long it ran rather than on the outcome,
-			// because `run_remote_session` reports even a clean close as an error (it hands back the
-			// session's close reason). An outcome-keyed reset would therefore never fire, and a peer
-			// that had been up for hours would redial on a stale five-minute window.
-			if elapsed >= stable_threshold {
+			// A session that came up and lasted is a healthy peer: clear the escalation so a one-off
+			// drop redials promptly. Keyed on the session's own lifetime, not on how long the call
+			// took, because a peer that blackholes until the connect timeout would otherwise look
+			// stable and reset the backoff on every attempt, so the escalation would never happen.
+			let stable = attempt.connected.is_some_and(|at| at.elapsed() >= stable_threshold);
+			if stable {
 				backoff.reset();
 			}
 
-			match result {
-				Ok(()) if elapsed >= stable_threshold => {}
-				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
-				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
+			if let Err(err) = attempt.result {
+				match stable {
+					true => tracing::warn!(%err, "cluster peer session closed; reconnecting"),
+					false => tracing::warn!(%err, "cluster peer error; will retry"),
+				}
 			}
 
 			backoff.sleep().await;
 		}
 	}
 
-	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> Attempt {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
@@ -963,16 +962,20 @@ impl Cluster {
 			.await
 	}
 
-	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> Attempt {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
 		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
-		let client = self
+		let client = match self
 			.client
 			.clone()
-			.context("internal: cluster peer dial without an attached QUIC client")?;
+			.context("internal: cluster peer dial without an attached QUIC client")
+		{
+			Ok(client) => client,
+			Err(err) => return Attempt::failed(err),
+		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -983,13 +986,44 @@ impl Cluster {
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
 		}
-		let cs = client
+		let cs = match client
 			.connect(url.clone())
 			.await
-			.context("failed to connect to cluster peer")?;
+			.context("failed to connect to cluster peer")
+		{
+			Ok(cs) => cs,
+			Err(err) => return Attempt::failed(err),
+		};
+
+		let connected = tokio::time::Instant::now();
 		let _connection = self.nodes.connect_outbound(id, log_url.to_string());
 
-		Err(cs.closed().await.into())
+		Attempt {
+			connected: Some(connected),
+			result: Err(cs.closed().await.into()),
+		}
+	}
+}
+
+/// One peer dial: when its session came up, and how it ended.
+///
+/// The instant is what the backoff reset keys on, which is why the dial and the session are timed
+/// separately. A session always ends in an `Err` (it hands back its own close reason), so the
+/// outcome alone can't tell a healthy peer from a dead one.
+struct Attempt {
+	/// When `connect` handed back a live session, or `None` if the dial never got that far.
+	connected: Option<tokio::time::Instant>,
+	/// How the attempt ended.
+	result: anyhow::Result<()>,
+}
+
+impl Attempt {
+	/// An attempt that never established a session.
+	fn failed(err: anyhow::Error) -> Self {
+		Self {
+			connected: None,
+			result: Err(err),
+		}
 	}
 }
 

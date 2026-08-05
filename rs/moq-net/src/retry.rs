@@ -109,16 +109,26 @@ impl Backoff {
 	pub fn delay(&mut self) -> Option<Duration> {
 		// An unlimited budget never reads the clock, which is what lets a blocking thread with its
 		// own [`std::time::Instant`] bookkeeping drive this too.
+		let mut remaining = None;
 		if !self.config.timeout.is_zero() {
 			let now = Instant::now();
-			match self.deadline {
+			// The first delay of a sequence starts the clock. Deferred to here rather than to
+			// `new`/`reset` so a loop that runs healthy for hours still gets its full budget when it
+			// finally does fail. An unrepresentable deadline is treated as no deadline.
+			let deadline = match self.deadline {
+				Some(deadline) => Some(deadline),
+				None => {
+					self.deadline = now.checked_add(self.config.timeout);
+					self.deadline
+				}
+			};
+
+			if let Some(deadline) = deadline {
 				// Started already: stop once the budget is gone.
-				Some(deadline) if now >= deadline => return None,
-				Some(_) => {}
-				// The first delay of a sequence starts the clock. Deferred to here rather than to
-				// `new`/`reset` so a loop that runs healthy for hours still gets its full budget
-				// when it finally does fail.
-				None => self.deadline = now.checked_add(self.config.timeout),
+				if now >= deadline {
+					return None;
+				}
+				remaining = Some(deadline - now);
 			}
 		}
 
@@ -128,7 +138,13 @@ impl Backoff {
 			.saturating_mul(self.config.multiplier.max(1))
 			.min(self.config.max);
 
-		Some(delay)
+		// Never sleep past the deadline: the budget says how long to keep retrying, so overshooting
+		// it by a whole window would spend more than the caller asked for and skip the attempt that
+		// still fit. A truncated final delay is the point, not a rounding error.
+		Some(match remaining {
+			Some(remaining) => delay.min(remaining),
+			None => delay,
+		})
 	}
 
 	/// Wait out the next delay, returning `false` once the budget is spent.
@@ -242,22 +258,44 @@ mod tests {
 		assert!(delay <= Duration::from_secs(1), "{delay:?} did not return to initial");
 	}
 
-	/// The budget is a wall-clock deadline over the whole sequence, not a per-attempt one.
+	/// An initial delay longer than the whole budget must not sleep past it: the budget is the
+	/// promise, and one oversized window would blow through it before a single retry lands.
 	#[tokio::test(start_paused = true)]
-	async fn gives_up_once_the_budget_is_spent() {
+	async fn a_delay_never_outlives_the_budget() {
 		let mut backoff = Backoff::new(Config {
-			timeout: Duration::from_secs(10),
+			initial: Duration::from_secs(60),
+			timeout: Duration::from_millis(50),
 			..config()
 		});
 
-		let mut slept = Duration::ZERO;
+		let delay = backoff.delay().expect("budget available");
+		assert!(delay <= Duration::from_millis(50), "{delay:?} outlived the budget");
+	}
+
+	/// The budget is a wall-clock deadline over the whole sequence, not a per-attempt one, and the
+	/// sequence lands on it rather than overshooting by a whole window.
+	#[tokio::test(start_paused = true)]
+	async fn gives_up_once_the_budget_is_spent() {
+		let timeout = Duration::from_secs(10);
+		let mut backoff = Backoff::new(Config { timeout, ..config() });
+
+		let started = tokio::time::Instant::now();
 		while let Some(delay) = backoff.delay() {
-			slept += delay;
 			tokio::time::sleep(delay).await;
-			assert!(slept < Duration::from_secs(60), "budget never ran out");
+			assert!(started.elapsed() < Duration::from_secs(60), "budget never ran out");
 		}
 
-		assert!(slept >= Duration::from_secs(10), "gave up after only {slept:?}");
+		// Tokio's paused clock rounds each sleep to its timer granularity, so the sequence can land a
+		// hair either side of the deadline it aimed for.
+		let elapsed = started.elapsed();
+		assert!(
+			elapsed >= timeout - Duration::from_millis(10),
+			"gave up after only {elapsed:?}"
+		);
+		assert!(
+			elapsed < timeout + config().max,
+			"overshot the budget by a whole window: {elapsed:?}"
+		);
 	}
 
 	/// A zero timeout is the supervisor case: keep retrying however long the outage lasts.

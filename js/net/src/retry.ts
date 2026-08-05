@@ -79,22 +79,26 @@ export class Backoff {
 
 	/** How long to wait before the next attempt, or undefined once the budget is spent. */
 	delay(): DOMHighResTimeStamp | undefined {
+		let remaining = Number.POSITIVE_INFINITY;
+
 		if (this.#timeout > 0) {
 			const now = performance.now();
-			if (this.#deadline === undefined) {
-				// The first delay of a sequence starts the clock, so a loop that ran healthy for
-				// hours still gets its full budget when it finally does fail.
-				this.#deadline = now + this.#timeout;
-			} else if (now >= this.#deadline) {
-				return undefined;
-			}
+			// The first delay of a sequence starts the clock, so a loop that ran healthy for hours
+			// still gets its full budget when it finally does fail.
+			this.#deadline ??= now + this.#timeout;
+
+			remaining = this.#deadline - now;
+			if (remaining <= 0) return undefined;
 		}
 
 		// Equal jitter: at least half the window, never more than all of it.
 		const delay = this.#window / 2 + Math.random() * (this.#window / 2);
 		this.#window = Math.min(this.#window * this.#multiplier, this.#max);
 
-		return delay;
+		// Never sleep past the deadline: the budget says how long to keep retrying, so overshooting
+		// it by a whole window would spend more than the caller asked for and skip the attempt that
+		// still fit. A truncated final delay is the point, not a rounding error.
+		return Math.min(delay, remaining);
 	}
 
 	/**

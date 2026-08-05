@@ -34,6 +34,16 @@ test("a zero timeout never gives up", () => {
 	for (let i = 0; i < 64; i++) expect(backoff.delay()).toBeDefined();
 });
 
+test("a delay never outlives the budget", () => {
+	// An initial delay longer than the whole budget must not sleep past it: the budget is the
+	// promise, and one oversized window would blow through it before a single retry lands.
+	const backoff = new Backoff({ initial: 60000, multiplier: 2, max: 60000, timeout: 50 });
+
+	const delay = backoff.delay();
+	expect(delay).toBeDefined();
+	expect(delay).toBeLessThanOrEqual(50);
+});
+
 test("the budget is a deadline over the whole sequence", async () => {
 	const backoff = new Backoff({ initial: 1, multiplier: 2, max: 8, timeout: 5 });
 

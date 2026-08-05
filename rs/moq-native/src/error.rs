@@ -155,6 +155,19 @@ impl Error {
 	/// that's a guess, and the caller's backoff budget bounds it instead.
 	pub fn status(&self) -> Option<u16> {
 		match self {
+			// A race is only settled when both halves were answered, and answered with something not
+			// worth repeating: one transport being refused says nothing about the other, so a `404`
+			// over QUIC alongside a dead WebSocket is still just a failed dial.
+			#[cfg(feature = "websocket")]
+			Self::TransportRace { quic, websocket } => match (quic.status(), websocket.status()) {
+				(Some(quic), Some(websocket))
+					if !moq_net::retry::status_retryable(quic) && !moq_net::retry::status_retryable(websocket) =>
+				{
+					Some(quic)
+				}
+				_ => None,
+			},
+
 			#[cfg(feature = "quinn")]
 			Self::Quinn(err) => err.status(),
 			#[cfg(feature = "noq")]

@@ -96,6 +96,12 @@ struct StepOutcome {
 	wrote_segments: usize,
 	/// Target segment duration (in seconds) from the playlist, if known.
 	target_duration: Option<u64>,
+	/// The last rendition failure of this step, if any.
+	///
+	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
+	/// `Ok` having imported nothing at all. The loop needs to tell that apart from a quiet playlist
+	/// with no new segments, or it treats a permanently broken source as steady progress.
+	failed: Option<Error>,
 }
 
 /// What a step does when a rendition fails.
@@ -607,7 +613,20 @@ impl Import {
 		let mut backoff = error_backoff();
 
 		loop {
-			let outcome = match self.step(OnError::Warn).await {
+			// A step that imported nothing while a rendition was failing is a failed pass wearing an
+			// `Ok`: `step` swallows per-rendition errors so one bad variant doesn't drop the rest.
+			// Letting it through would reset the backoff every pass, so a source that returns 404
+			// forever would spin at the refresh cadence while publishing nothing.
+			let stepped = match self.step(OnError::Warn).await {
+				Ok(StepOutcome {
+					wrote_segments: 0,
+					failed: Some(err),
+					..
+				}) => Err(err),
+				stepped => stepped,
+			};
+
+			let outcome = match stepped {
 				Ok(outcome) => {
 					backoff.reset();
 					outcome
@@ -672,6 +691,7 @@ impl Import {
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
+		let mut failed = None;
 
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			match track.ingest(&self.fetcher, &mut target_duration).await {
@@ -680,7 +700,10 @@ impl Import {
 					OnError::Fail => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
-					OnError::Warn => warn!(label = %track.label, %err, "rendition import step failed, will retry"),
+					OnError::Warn => {
+						warn!(label = %track.label, %err, "rendition import step failed, will retry");
+						failed = Some(err);
+					}
 				},
 			}
 		}
@@ -688,6 +711,7 @@ impl Import {
 		Ok(StepOutcome {
 			wrote_segments,
 			target_duration,
+			failed,
 		})
 	}
 
