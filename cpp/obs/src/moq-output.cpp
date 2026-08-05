@@ -15,22 +15,26 @@ MoQOutput::MoQOutput(obs_data_t *, obs_output_t *output)
 	  total_bytes_sent(0),
 	  connect_time_ms(0),
 	  origin(moq_origin_create()),
-	  session(0),
 	  broadcast(0),
-	  outstanding_sessions(0)
+	  outstanding_sessions(0),
+	  session(0),
+	  session_attempt(0),
+	  session_connected(false)
 {
 }
 
 MoQOutput::~MoQOutput()
 {
 	// Finish the broadcast before closing the origin, matching the libmoq
-	// teardown order (broadcast first). Stop() skips it once zeroed.
+	// teardown order (broadcast first). Reset() skips it once zeroed.
 	if (broadcast > 0) {
 		moq_publish_finish(broadcast);
 		broadcast = 0;
 	}
 	moq_origin_close(origin);
 
+	// Retires the attempt, so a terminal callback that is still in flight won't
+	// signal a stop on an output that is going away.
 	Stop();
 
 	// Wait for any outstanding session terminal callback to fire before `this`
@@ -44,6 +48,10 @@ MoQOutput::~MoQOutput()
 
 bool MoQOutput::Start()
 {
+	// OBS restarts a reconnecting output by calling start again with no stop in
+	// between, so drop whatever the previous attempt left behind.
+	Reset();
+
 	obs_service_t *service = obs_output_get_service(output);
 	if (!service) {
 		LOG_ERROR("Failed to get service from output");
@@ -90,47 +98,41 @@ bool MoQOutput::Start()
 
 	connect_start = std::chrono::steady_clock::now();
 
-	// Create a callback to log when the session is connected or closed.
-	// libmoq status codes (>= 0.3.0): > 0 = (re)connected (epoch), 0 = closed
-	// cleanly (terminal), < 0 = fatal/reconnect-gave-up (terminal).
-	auto session_connect_callback = [](void *user_data, int code) {
-		auto self = static_cast<MoQOutput *>(user_data);
-
-		if (code > 0) {
-			auto elapsed = std::chrono::steady_clock::now() - self->connect_start;
-			self->connect_time_ms = static_cast<int>(
-				std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-			LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", self->connect_time_ms.load(), code,
-				 self->server_url.c_str());
-		} else {
-			// Terminal callback (0 = clean close, < 0 = fatal): the session task
-			// has ended and will not touch `self` again. Release the lifetime
-			// reference the destructor waits on. This is the last access to `self`.
-			LOG_INFO("MoQ session closed (%d): %s", code, self->server_url.c_str());
-			std::lock_guard<std::mutex> lock(self->session_mutex);
-			if (--self->outstanding_sessions == 0)
-				self->session_cv.notify_all();
-		}
-	};
-
-	// Pre-account for the session subscription before handing `this` to libmoq:
-	// the connection can fail and fire its terminal callback before connect
-	// returns, and the destructor must wait for that callback.
+	uint64_t attempt;
 	{
 		std::lock_guard<std::mutex> lock(session_mutex);
+		attempt = session_attempt;
+
+		// Pre-account for the session subscription before handing the reference to
+		// libmoq: the connection can fail and fire its terminal callback before
+		// connect returns, and the destructor must wait for that callback.
 		outstanding_sessions++;
 	}
 
+	// Freed by the terminal status callback, so it outlives this scope.
+	auto ref = new SessionRef{this, attempt};
+
 	// Start establishing a session with the MoQ server
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
-	session = moq_session_connect(server_url.data(), server_url.size(), origin, 0, session_connect_callback, this);
-	if (session < 0) {
-		LOG_ERROR("Failed to initialize MoQ server: %d", session);
+	int handle =
+		moq_session_connect(server_url.data(), server_url.size(), origin, 0, MoQOutput::SessionStatus, ref);
+	if (handle < 0) {
+		const char *reason = moq_error();
+		LOG_ERROR("Failed to initialize MoQ server: %d: %s", handle, reason ? reason : "unknown error");
+		delete ref;
 		// No subscription was created, so no terminal will fire; undo the ref.
 		std::lock_guard<std::mutex> lock(session_mutex);
 		if (--outstanding_sessions == 0)
 			session_cv.notify_all();
 		return false;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(session_mutex);
+		// The terminal callback can beat this assignment; if it already retired the
+		// attempt then the handle is dead and must not be recorded, let alone closed.
+		if (session_attempt == attempt)
+			session = handle;
 	}
 
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
@@ -155,11 +157,29 @@ bool MoQOutput::Start()
 
 void MoQOutput::Stop(bool signal)
 {
-	// Close the session
-	if (session > 0) {
-		moq_session_close(session);
+	Reset();
+
+	if (signal) {
+		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
+	}
+}
+
+void MoQOutput::Reset()
+{
+	int stale;
+	{
+		std::lock_guard<std::mutex> lock(session_mutex);
+		// Retire the attempt so an in-flight terminal callback stays out of the way.
+		session_attempt++;
+		session_connected = false;
+		stale = session;
 		session = 0;
 	}
+
+	// Outside the lock: the status callback takes session_mutex, and libmoq is
+	// free to run it on its own thread while we're here.
+	if (stale > 0)
+		moq_session_close(stale);
 
 	for (auto &[encoder, handle] : video_tracks) {
 		if (handle > 0)
@@ -179,12 +199,91 @@ void MoQOutput::Stop(bool signal)
 		moq_publish_finish(broadcast);
 		broadcast = 0;
 	}
+}
 
-	if (signal) {
-		obs_output_signal_stop(output, OBS_OUTPUT_SUCCESS);
+// libmoq status codes (>= 0.3.0): > 0 = (re)connected, carrying the connection
+// epoch; 0 = closed cleanly (terminal); < 0 = fatal, reconnection gave up (terminal).
+void MoQOutput::SessionStatus(void *user_data, int code)
+{
+	auto ref = static_cast<SessionRef *>(user_data);
+	auto self = ref->output;
+	auto attempt = ref->attempt;
+
+	if (code > 0) {
+		self->SessionConnected(attempt, code);
+		return;
 	}
 
-	return;
+	// Terminal: libmoq never touches user_data again, and SessionClosed is the
+	// last access to `self`, so free the reference first.
+	delete ref;
+	self->SessionClosed(attempt, code);
+}
+
+void MoQOutput::SessionConnected(uint64_t attempt, int epoch)
+{
+	{
+		std::lock_guard<std::mutex> lock(session_mutex);
+		if (session_attempt != attempt)
+			return;
+		session_connected = true;
+	}
+
+	auto elapsed = std::chrono::steady_clock::now() - connect_start;
+	connect_time_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+
+	LOG_INFO("MoQ session connected (%d ms, epoch %d): %s", connect_time_ms.load(), epoch, server_url.c_str());
+}
+
+void MoQOutput::SessionClosed(uint64_t attempt, int code)
+{
+	// moq_error() only describes the most recent call on this thread, so copy the
+	// reason out before anything below can overwrite it.
+	std::string reason;
+	if (code < 0) {
+		const char *message = moq_error();
+		reason = message ? message : "unknown error";
+	}
+
+	bool current;
+	bool connected = false;
+	{
+		std::lock_guard<std::mutex> lock(session_mutex);
+		current = session_attempt == attempt;
+		if (current) {
+			connected = session_connected;
+			// The session task has ended, so libmoq has already freed the handle and
+			// may hand the same id to the next connect. Retire rather than close it.
+			session = 0;
+			session_attempt++;
+			session_connected = false;
+		}
+	}
+
+	if (code == 0) {
+		LOG_INFO("MoQ session closed: %s", server_url.c_str());
+	} else {
+		LOG_ERROR("MoQ session failed (%d): %s: %s", code, server_url.c_str(), reason.c_str());
+	}
+
+	// Reconnection gave up, so nothing is reaching the server any more. Without
+	// this OBS keeps encoding and reporting the stream as live forever. Only the
+	// current attempt signals, which is what keeps it to one signal per Start().
+	// `this` and `output` are still alive here because the destructor is blocked
+	// on the reference released below.
+	if (code < 0 && current) {
+		obs_output_set_last_error(output, reason.c_str());
+		// CONNECT_FAILED is terminal for OBS. DISCONNECTED lets its own reconnect
+		// logic retry, which is only worth offering once we know the server works.
+		obs_output_signal_stop(output, connected ? OBS_OUTPUT_DISCONNECTED : OBS_OUTPUT_CONNECT_FAILED);
+	}
+
+	// Terminal callback: the session task has ended and will not touch `this`
+	// again. Release the lifetime reference the destructor waits on. This is the
+	// last access to `this`.
+	std::lock_guard<std::mutex> lock(session_mutex);
+	if (--outstanding_sessions == 0)
+		session_cv.notify_all();
 }
 
 void MoQOutput::Data(struct encoder_packet *packet)
