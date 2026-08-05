@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.42](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.41...moq-token-cli-v0.5.42) - 2026-08-05
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.5.41](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.40...moq-token-cli-v0.5.41) - 2026-08-03
 
 ### Added

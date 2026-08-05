@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.6...moq-relay-v0.14.7) - 2026-08-05
+
+### Added
+
+- *(relay)* assemble the relay in `Relay::load` instead of `main` ([#2639](https://github.com/moq-dev/moq/pull/2639))
+
+### Fixed
+
+- *(relay)* fail the WebSocket handshake when no subprotocol matches ([#2625](https://github.com/moq-dev/moq/pull/2625))
+- *(native)* bound Client::connect so a silent peer can't wedge reconnect ([#2622](https://github.com/moq-dev/moq/pull/2622))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.14.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.5...moq-relay-v0.14.6) - 2026-08-03
 
 ### Fixed

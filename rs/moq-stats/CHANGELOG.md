@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/moq-dev/moq/compare/moq-stats-v0.1.3...moq-stats-v0.1.4) - 2026-08-05
+
+### Fixed
+
+- *(moq-stats)* hold subscriptions for uncreated tier tracks open with zeros ([#2642](https://github.com/moq-dev/moq/pull/2642))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.1.3](https://github.com/moq-dev/moq/compare/moq-stats-v0.1.2...moq-stats-v0.1.3) - 2026-07-27
 
 ### Other
