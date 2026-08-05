@@ -123,8 +123,8 @@ export class Encoder {
 	// The output dimensions of the video in pixels.
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
-	// The codec the browser will actually encode with, probed against the hardware.
-	#codec = new Signal<{ codec: string; hardwareAcceleration: HardwareAcceleration } | undefined>(undefined);
+	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
+	#codec = new Signal<Detected | undefined>(undefined);
 
 	// Only the codec prefix the user asked for, narrowed out of `config` so tuning any other knob
 	// doesn't re-probe the hardware.
@@ -285,7 +285,7 @@ export class Encoder {
 			const detected = await this.#bestCodec(required, dimensions);
 			if (!detected) return;
 
-			effect.set(this.#codec, detected);
+			effect.set(this.#codec, { ...detected, required, ...dimensions });
 		});
 	}
 
@@ -307,6 +307,15 @@ export class Encoder {
 
 		const detected = effect.get(this.#codec);
 		if (!detected) return;
+
+		// A probe only speaks for the inputs it ran against. Changing them reruns the probe, which
+		// clears the stale result, but a bandwidth sample landing in the same batch schedules this
+		// effect independently: it then runs against dimensions that are already written while the
+		// probe hasn't been torn down yet. Wait for a probe that matches rather than publishing a
+		// pairing the hardware never accepted.
+		const required = effect.get(this.#codecFilter) ?? "";
+		if (detected.required !== required) return;
+		if (detected.width !== dimensions.width || detected.height !== dimensions.height) return;
 
 		const { codec, hardwareAcceleration } = detected;
 
@@ -528,6 +537,17 @@ export class Encoder {
 		this.#signals.close();
 	}
 }
+
+// A hardware probe result, carrying the inputs it ran against so a consumer can tell whether it
+// still applies.
+type Detected = {
+	codec: string;
+	hardwareAcceleration: HardwareAcceleration;
+	// The codec prefix the user required at probe time.
+	required: string;
+	width: number;
+	height: number;
+};
 
 // Scale the bitrate for more efficient codecs, relative to H.264.
 // TODO This shouldn't be linear, as the efficiency is very similar at low bitrates.

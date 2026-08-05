@@ -7,13 +7,19 @@ class FakeVideoEncoder {
 	// How many times the hardware has been probed, so a test can assert it isn't re-probed.
 	static probes = 0;
 
+	// Every accepted probe, so a test can assert a published config was actually validated.
+	static accepted: string[] = [];
+
 	state: CodecState = "unconfigured";
 
 	static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
 		FakeVideoEncoder.probes++;
 		// Pretend the GPU takes a while, like a real probe under load.
 		await new Promise((resolve) => setTimeout(resolve, 5));
-		return { supported: config.codec.startsWith("avc1") };
+
+		const supported = config.codec.startsWith("avc1");
+		if (supported) FakeVideoEncoder.accepted.push(probeKey(config));
+		return { supported };
 	}
 
 	configure(): void {
@@ -152,4 +158,75 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 async function settle(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 200));
+}
+
+// The codec probe only speaks for the dimensions and codec filter it ran against. Those live in
+// separate effects, which observe a change in whatever order they happen to be subscribed in, so
+// the resolved config must never pair a fresh dimension with a stale probe.
+// https://github.com/moq-dev/moq/issues/2635
+test("every published config was probed for its own codec and dimensions", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	FakeVideoEncoder.accepted = [];
+
+	const track = new Moq.Track.Producer("video").accept();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: {
+			source: new Signal({
+				getSettings: () => ({ frameRate: 30 }),
+				getConstraints: () => ({}),
+			} as never),
+		},
+		out: {
+			frame: new Signal<VideoFrame | undefined>({ codedWidth: 1280, codedHeight: 720 } as never),
+		},
+	};
+	const bandwidth = new Signal<number | undefined>(10_000_000);
+
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition } as never,
+		capture: capture as never,
+		bandwidth,
+	});
+
+	// Check at emission time, not afterwards: a probe that lands later would otherwise excuse a
+	// config that was already handed to a subscriber against a stale one.
+	const published: string[] = [];
+	const violations: string[] = [];
+	const unsubscribe = encoder.out.resolved.subscribe((config) => {
+		if (!config) return;
+
+		const key = probeKey(config);
+		published.push(key);
+		if (!FakeVideoEncoder.accepted.includes(key)) violations.push(key);
+	});
+
+	try {
+		encoder.config.set({ maxScale: 0.25 });
+		await settle();
+		expect(published.length).toBeGreaterThan(0);
+
+		// A resize landing in the same batch as a bandwidth sample, which is likely given the
+		// element polls the estimate every 100ms. The resize schedules the dimensions effect and
+		// the sample schedules the resolve effect, so the resolve effect runs with the new
+		// dimensions already written while the probe still holds the result for the old ones.
+		capture.out.frame.set({ codedWidth: 640, codedHeight: 480 } as never);
+		bandwidth.set(3_000_000);
+		await settle();
+
+		expect(published.length).toBeGreaterThan(1);
+		expect(violations).toEqual([]);
+	} finally {
+		unsubscribe();
+		encoder.close();
+	}
+});
+
+function probeKey(config: { codec: string; width: number; height: number }): string {
+	return `${config.codec}@${config.width}x${config.height}`;
 }
