@@ -56,11 +56,18 @@ fn map_connect_error(err: moq_native::Error) -> MoqError {
 /// a [`moq_net::Error`], and stringifying that into `Connect` would both lose the
 /// variant a caller can match on and claim the dial failed when it had succeeded.
 /// A server-accepted session reports its close the same way.
+///
+/// A local stop is not a failure at all, so it maps to `Closed`, which is what the
+/// bindings' `is_shutdown` recognizes. `status()` reaches this path whenever
+/// another handle shuts the connection down underneath it, and reporting that as a
+/// connect error would make every status watcher treat an expected teardown as a
+/// broken connection.
 fn map_closed_error(err: moq_native::Error) -> MoqError {
 	match err.connect_error() {
 		Some(moq_native::ConnectError::Unauthorized) => MoqError::Unauthorized,
 		Some(moq_native::ConnectError::Forbidden) => MoqError::Forbidden,
 		_ => match err {
+			moq_native::Error::Stopped => MoqError::Closed,
 			moq_native::Error::MoqNet(err) => err.into(),
 			err => MoqError::Connect(format!("{err}")),
 		},
@@ -97,6 +104,10 @@ mod tests {
 			map_closed_error(moq_net::Error::Cancel.into()),
 			MoqError::Protocol(moq_net::Error::Cancel)
 		));
+
+		// A local stop is an expected teardown, not a failed connection: the bindings'
+		// `is_shutdown` reads `Closed`, and `Connect` would read as a broken dial.
+		assert!(matches!(map_closed_error(moq_native::Error::Stopped), MoqError::Closed));
 
 		// Auth still wins, so `is_auth` keeps working on a rejection delivered as a close.
 		assert!(matches!(
