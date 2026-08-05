@@ -328,6 +328,41 @@ mod test {
 		assert!(matches!(producer.update(&json!({ "a": 3 })), Err(crate::Error::Net(_))));
 	}
 
+	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
+	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
+	fn rejecting_track() -> moq_net::track::Producer {
+		let mut info = moq_net::track::Info::default();
+		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+
+		moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap()
+	}
+
+	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
+	/// close the track. Dropping the handle does not close the group either, so without an explicit
+	/// close a subscriber that advanced into it waits there forever.
+	#[test]
+	fn a_rejected_snapshot_does_not_strand_an_empty_group() {
+		let track = rejecting_track();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, cfg(0));
+
+		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the group was published, so a subscriber sees it");
+		};
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the empty group must be closed, not left open for a subscriber to wait in"
+		);
+	}
+
 	#[test]
 	fn commit_publishes_once() {
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]

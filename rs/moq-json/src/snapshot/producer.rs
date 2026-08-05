@@ -229,7 +229,13 @@ impl Track {
 		}
 
 		let mut group = self.inner.append_group()?;
-		group.write_frame(moq_net::Timestamp::now(), payload)?;
+		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) {
+			// `append_group` already published this group, and a rejected frame (too large) doesn't
+			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
+			// any subscriber that advanced into it with nothing to read and no end.
+			let _ = group.finish();
+			return Err(err.into());
+		}
 
 		match self.deltas {
 			// Keep the group open so future deltas can be appended to it.

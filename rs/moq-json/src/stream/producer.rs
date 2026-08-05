@@ -115,11 +115,18 @@ impl Track {
 
 	/// Append one encoded record to the log's group.
 	fn write(&mut self, payload: &bytes::Bytes) -> Result<()> {
-		self.group
-			.as_mut()
-			.expect("a group is open")
-			.write_frame(moq_net::Timestamp::now(), payload.clone())?;
-		Ok(())
+		let group = self.group.as_mut().expect("a group is open");
+		let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload.clone()) else {
+			return Ok(());
+		};
+
+		// The group is already published and dropping the handle does not close it, so a subscriber
+		// that advanced into it would wait there with nothing to read. Close it and let a later append
+		// open a fresh one, which is what a caller recovering from the desync has to do anyway.
+		if let Some(mut group) = self.group.take() {
+			let _ = group.finish();
+		}
+		Err(err.into())
 	}
 
 	fn finish(&mut self) -> Result<()> {

@@ -33,7 +33,16 @@ export class Producer<T> {
 		// to resynchronize on, so a compressed encoder refuses to continue rather than emit frames the
 		// consumer cannot decode.
 		this.#group ??= this.#track.appendGroup();
-		this.#group.writeFrame({ payload: record.payload, timestamp: Time.Timestamp.now() });
+		const group = this.#group;
+		try {
+			group.writeFrame({ payload: record.payload, timestamp: Time.Timestamp.now() });
+		} catch (err) {
+			// The group is already visible on the track, so leaving it open would strand a subscriber
+			// that advanced into it. Close it and let a later append open a fresh one.
+			group.close();
+			this.#group = undefined;
+			throw err;
+		}
 		record.commit();
 	}
 

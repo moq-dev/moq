@@ -169,6 +169,40 @@ mod test {
 		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
 	}
 
+	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
+	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
+	fn rejecting_track() -> moq_net::track::Producer {
+		let mut info = moq_net::track::Info::default();
+		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+
+		moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap()
+	}
+
+	/// Same as the snapshot case: the log's group is published by `open`, so a record the track
+	/// rejects must not leave it open with nothing in it.
+	#[test]
+	fn a_rejected_record_does_not_strand_an_empty_group() {
+		let track = rejecting_track();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
+
+		assert!(producer.append(&json!({ "n": 1 })).is_err());
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the group was published, so a subscriber sees it");
+		};
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the empty group must be closed, not left open for a subscriber to wait in"
+		);
+	}
+
 	#[test]
 	fn embedded_newlines_survive() {
 		// Each record is its own frame (one JSON object), and JSON escapes control characters, so a
