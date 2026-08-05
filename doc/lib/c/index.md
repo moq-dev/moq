@@ -103,6 +103,12 @@ The matching `*_close` function only *requests* shutdown: it returns immediately
 
 Because the terminal callback runs on libmoq's thread, bindings that own thread-affine objects (e.g. a Qt `QObject`) should hop to the owning thread to perform the actual destruction; the `user_data` lifetime contract holds regardless of which thread tears the object down.
 
+## Threading
+
+Every function may be called from any thread, and a handle is not tied to the thread that created it.
+
+The raw publish functions (`moq_publish_video_raw_frame`, `moq_publish_audio_raw_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Only other calls on that same producer wait behind it, served in arrival order: a second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
+
 ## Error handling
 
 Functions return a negative code on failure (`0` or a positive handle on success). The code identifies the kind of failure, but the human-readable reason is available separately via `moq_error()`:

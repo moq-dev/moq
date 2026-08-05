@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, ffi};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
 
@@ -164,7 +164,7 @@ pub struct moq_video_frame {
 /// buffered decoded frames.
 #[derive(Default)]
 pub struct Video {
-	producers: NonZeroSlab<VideoEncoder>,
+	producers: NonZeroSlab<Shared<VideoEncoder>>,
 	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
 	frames: NonZeroSlab<VideoFrame>,
 }
@@ -187,12 +187,11 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 /// a timestamp).
 ///
 /// The encoder is a [`Sink`](moq_video::encode::Sink) rather than a bare
-/// `Encoder` because [`ffi::enter`] serializes calls without confining them:
-/// each one runs on whichever thread the C caller used, so a bare `Encoder`
-/// would be built on one thread and dropped on another, unbalancing the
-/// per-thread COM apartment the Windows backend opens. The sink owns the thread
-/// instead, so every caller is welcome.
-struct VideoEncoder {
+/// `Encoder` because a C caller drives a handle from whichever thread it likes,
+/// so a bare `Encoder` would be built on one thread and dropped on another,
+/// unbalancing the per-thread COM apartment the Windows backend opens. The sink
+/// owns the thread instead, so every caller is welcome.
+pub(crate) struct VideoEncoder {
 	encoder: moq_video::encode::Sink,
 	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	format: moq_video_pixel_format,
@@ -241,33 +240,12 @@ struct VideoTaskEntry {
 	callback: OnStatus,
 }
 
-impl Video {
-	pub fn publish(
-		&mut self,
-		broadcast: &moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
-		format: moq_video_pixel_format,
-		config: moq_video::encode::Config,
-	) -> Result<Id, Error> {
-		// Open the encoder first: a config this machine can't encode should fail
-		// without leaving a track advertised that will never carry frames.
-		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config.codec)?;
-		self.producers.insert(VideoEncoder {
-			encoder,
-			producer,
-			format,
-			size: config.size(),
-		})
-	}
-
-	pub fn publish_frame(&mut self, id: Id, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
-		let entry = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
-
+impl VideoEncoder {
+	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
 		// A buffer that isn't one picture at the configured size is rejected here,
 		// by the surface constructors, rather than reinterpreted.
-		let size = entry.size;
-		let surface = match entry.format {
+		let size = self.size;
+		let surface = match self.format {
 			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
 				moq_video::Surface::I420(moq_video::I420::new(size.width, size.height, data.to_vec())?)
 			}
@@ -277,34 +255,69 @@ impl Video {
 		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
-		let encoded = block_on(entry.encoder.encode(frame))?;
-		entry.producer.publish(&encoded)?;
+		let encoded = block_on(self.encoder.encode(frame))?;
+		self.producer.publish(&encoded)?;
 		Ok(())
 	}
 
-	pub fn publish_cut(&mut self, id: Id) -> Result<(), Error> {
-		let entry = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
+	fn publish_cut(&mut self) {
 		// A keyframe is what a cut is on the wire: the importer closes the open
 		// group and starts a new one at it.
-		entry.encoder.keyframe();
+		self.encoder.keyframe();
+	}
+
+	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		block_on(self.encoder.set_bitrate(bitrate))?;
 		Ok(())
 	}
 
-	pub fn publish_bitrate(&mut self, id: Id, bitrate: u64) -> Result<(), Error> {
-		let entry = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
-		block_on(entry.encoder.set_bitrate(bitrate))?;
-		Ok(())
-	}
-
-	pub fn publish_finish(&mut self, id: Id) -> Result<(), Error> {
-		let entry = self.producers.remove(id).ok_or(Error::MediaNotFound)?;
+	fn publish_finish(self) -> Result<(), Error> {
 		let VideoEncoder {
 			encoder, mut producer, ..
-		} = entry;
+		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
 		finalize(producer, drained)
+	}
+}
+
+impl Video {
+	/// Advertise a track for an already-opened encoder.
+	///
+	/// The encoder is opened by the caller, and before this, so a config this
+	/// machine can't encode fails without leaving a track advertised that will
+	/// never carry frames.
+	pub fn publish(
+		&mut self,
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
+		format: moq_video_pixel_format,
+		config: &moq_video::encode::Config,
+		encoder: moq_video::encode::Sink,
+	) -> Result<Id, Error> {
+		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config.codec)?;
+		self.producers.insert(Shared::new(VideoEncoder {
+			encoder,
+			producer,
+			format,
+			size: config.size(),
+		}))
+	}
+
+	/// Resolve a producer handle, so the caller can encode with the global lock
+	/// released.
+	///
+	/// Bind the result before locking it: a temporary [`State`] guard lives to the
+	/// end of the statement that created it, so resolving and locking in one
+	/// expression would put the encode back under the global lock.
+	pub(crate) fn producer(&self, id: Id) -> Result<Shared<VideoEncoder>, Error> {
+		self.producers.get(id).cloned().ok_or(Error::MediaNotFound)
+	}
+
+	/// Resolve a producer and drop its id, so nothing can be published to it after.
+	pub(crate) fn remove(&mut self, id: Id) -> Result<Shared<VideoEncoder>, Error> {
+		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
 	pub fn consume(
@@ -483,11 +496,15 @@ pub unsafe extern "C" fn moq_publish_video_raw(
 			config.gop = raw_output.gop;
 		}
 
+		// Opened before the global lock is taken: bringing up a hardware encoder is
+		// slow enough that every other call would wait behind it.
+		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
+
 		let mut state = State::lock();
 		let State { publish, video, .. } = &mut *state;
 		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
 
-		video.publish(broadcast_producer, catalog.clone(), format, config)
+		video.publish(broadcast_producer, catalog.clone(), format, &config, encoder)
 	})
 }
 
@@ -509,7 +526,12 @@ pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *cons
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		State::lock().video.publish_frame(producer, frame.timestamp_us, data)
+		let producer = State::lock().video.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.publish_frame(frame.timestamp_us, data)
 	})
 }
 
@@ -528,7 +550,9 @@ pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *cons
 pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		State::lock().video.publish_cut(producer)
+		let producer = State::lock().video.producer(producer)?;
+		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.publish_cut();
+		Ok(())
 	})
 }
 
@@ -547,7 +571,12 @@ pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
 pub extern "C" fn moq_publish_video_raw_bitrate(producer: u32, bitrate: u64) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		State::lock().video.publish_bitrate(producer, bitrate)
+		let producer = State::lock().video.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.publish_bitrate(bitrate)
 	})
 }
 
@@ -558,7 +587,10 @@ pub extern "C" fn moq_publish_video_raw_bitrate(producer: u32, bitrate: u64) -> 
 pub extern "C" fn moq_publish_video_raw_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		State::lock().video.publish_finish(producer)
+		// The id is dropped first, so nothing new queues behind the drain; whatever
+		// is mid-encode still finishes before this takes the encoder.
+		let producer = State::lock().video.remove(producer)?;
+		producer.take().ok_or(Error::MediaNotFound)?.publish_finish()
 	})
 }
 

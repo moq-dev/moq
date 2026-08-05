@@ -1,14 +1,14 @@
 use std::{
 	cell::RefCell,
 	ffi::{CString, c_char, c_void},
-	sync::{LazyLock, Mutex},
+	sync::LazyLock,
 };
 
 use url::Url;
 
 use crate::{Error, Id};
 
-pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
+pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
@@ -22,19 +22,18 @@ pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
 		})
 		.expect("failed to spawn runtime thread");
 
-	Mutex::new(handle)
+	handle
 });
 
 /// Runs the provided function in the runtime context.
 /// Additionally, we convert the return code to a C-compatible return value.
 ///
-/// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
-/// as required by tokio to avoid panics in multi-threaded FFI contexts.
+/// Callers run concurrently: entering a handle only sets a thread-local, so
+/// nothing here is shared between threads. Tokio's requirement that the guards
+/// be dropped in LIFO order is per-thread too, and this one lives and dies in
+/// this frame, so a nested call nests rather than crosses.
 pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
-	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
-	// If this starts to become a bottleneck, we might have to rethink our runtime model.
-	let handle = RUNTIME.lock().unwrap();
-	let _guard = handle.enter();
+	let _guard = RUNTIME.enter();
 
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
 		Ok(ret) => {

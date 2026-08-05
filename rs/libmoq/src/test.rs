@@ -1516,6 +1516,53 @@ fn video_publish_consume() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// The raw audio publish path: PCM in, an Opus track out. The decode half has
+/// its own coverage in moq-audio; this pins the producer lifecycle the C surface
+/// owns, including that a finished handle is gone.
+#[test]
+fn audio_raw_publish() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-raw-publish-test");
+
+	let name = b"audio";
+	let input = moq_audio_encoder_input {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 2,
+	};
+	let codec = b"opus";
+	let output = moq_audio_encoder_output {
+		codec: codec.as_ptr() as *const c_char,
+		codec_len: codec.len(),
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_ms: 20,
+	};
+	let producer =
+		id(unsafe { moq_publish_audio_raw(broadcast, name.as_ptr() as *const c_char, name.len(), &input, &output) });
+
+	// 20 ms of silence: interleaved stereo f32 at 48 kHz, one encoded frame's worth.
+	let samples = vec![0.0f32; 960 * 2];
+	let pcm = unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), std::mem::size_of_val(&samples[..])) };
+	let frame = moq_audio_frame {
+		timestamp_us: 0,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_publish_audio_raw_frame(producer, &frame) }, 0);
+
+	assert_eq!(moq_publish_audio_raw_finish(producer), 0);
+	assert!(moq_publish_audio_raw_finish(producer) < 0, "double-finish should fail");
+	assert!(
+		unsafe { moq_publish_audio_raw_frame(producer, &frame) } < 0,
+		"a finished producer should take no more frames"
+	);
+
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A mid-gray RGBA frame, encodable without a camera.
 fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 	vec![0x80u8; width as usize * height as usize * 4]
@@ -1615,12 +1662,12 @@ fn video_raw_publish_consume() {
 }
 
 /// Regression: a producer handle is just an integer, so a C caller may drive it
-/// from any thread. `ffi::enter` serializes those calls but runs each on the
-/// calling thread, so holding a bare `Encoder` was unsound on Windows, where the
-/// codec's COM apartment is per-thread: it was opened on the publishing thread
-/// and closed on whichever thread called finish. The confinement itself is
-/// asserted in moq-video (`encode::sink`); this pins that the C surface supports
-/// the usage, including the drain on finish.
+/// from any thread, and each call runs on the thread that made it. Holding a bare
+/// `Encoder` was therefore unsound on Windows, where the codec's COM apartment is
+/// per-thread: it was opened on the publishing thread and closed on whichever
+/// thread called finish. The confinement itself is asserted in moq-video
+/// (`encode::sink`); this pins that the C surface supports the usage, including
+/// the drain on finish.
 #[test]
 fn video_raw_publish_from_many_threads() {
 	let origin = id(moq_origin_create());
@@ -1669,6 +1716,99 @@ fn video_raw_publish_from_many_threads() {
 		.join()
 		.unwrap();
 
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Publish one mid-gray frame to a raw video producer, returning the status code.
+fn publish_gray(producer: u32, rgba: &[u8]) -> i32 {
+	let frame = moq_video_encoder_frame {
+		timestamp_us: 0,
+		data: rgba.as_ptr(),
+		data_size: rgba.len(),
+	};
+	unsafe { moq_publish_video_raw_frame(producer, &frame) }
+}
+
+/// Regression: an encode is a round trip to the codec thread, and a wedged codec
+/// never comes back from it. It used to run under both of libmoq's process-wide
+/// locks, the `State` mutex and one wrapping the runtime handle, so a single
+/// stalled producer parked every unrelated call in the process behind it: another
+/// broadcast's publish, a consumer's frame free, a session close.
+///
+/// Stalling the codec itself would take a test-only backend, so this holds the
+/// per-producer lock an in-flight encode holds instead. From every other caller's
+/// point of view that is the same wait.
+#[test]
+fn a_stalled_encode_does_not_block_unrelated_calls() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-raw-stall-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: 30,
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let stalled = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+	let other = id(unsafe { moq_publish_video_raw(broadcast, &input, &output) });
+
+	// Hold the lock a publish takes for the duration of its encode.
+	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
+	let held = handle.lock();
+
+	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
+	let stalling = {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || publish_gray(stalled, &rgba))
+	};
+
+	// Wait until it has resolved the handle, so it is genuinely inside the stalled
+	// call rather than still on its way in: the slab holds one reference, this test
+	// a second, and the parked publish is the third.
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	while handle.holders() < 3 {
+		assert!(
+			std::time::Instant::now() < deadline,
+			"the publish never reached the encoder"
+		);
+		std::thread::yield_now();
+	}
+
+	// Unrelated work must not be queued behind it. On its own thread so a
+	// regression fails this assertion rather than hanging the test.
+	let (tx, rx) = mpsc::channel();
+	let unrelated = {
+		let rgba = rgba.clone();
+		std::thread::spawn(move || {
+			let _ = tx.send((moq_origin_create(), publish_gray(other, &rgba)));
+		})
+	};
+	let (created, published) = rx
+		.recv_timeout(TIMEOUT)
+		.expect("an unrelated call was waiting on the stalled encode");
+	assert!(created > 0, "creating an origin failed while a producer was stalled");
+	assert_eq!(published, 0, "a second producer could not encode while the first stalled");
+	unrelated.join().unwrap();
+
+	// ...and the stalled publish was still in flight the whole time, so the calls
+	// above really did overlap it.
+	assert_eq!(handle.holders(), 3, "the stalled publish finished early");
+
+	drop(held);
+	assert_eq!(stalling.join().unwrap(), 0);
+
+	assert_eq!(moq_origin_close(id(created)), 0);
+	assert_eq!(moq_publish_video_raw_finish(stalled), 0);
+	assert_eq!(moq_publish_video_raw_finish(other), 0);
 	assert_eq!(moq_publish_finish(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
