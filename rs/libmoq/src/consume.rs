@@ -362,7 +362,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -411,7 +411,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;

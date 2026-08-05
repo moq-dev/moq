@@ -436,7 +436,8 @@ async fn reconcile(
 		.fetch_add(1, Ordering::Relaxed);
 
 		let track_subscriber = broadcast.track(&name)?.subscribe(None).await?;
-		let track = moq_mux::container::Consumer::new(track_subscriber, container).with_latency(Duration::from_secs(1));
+		let track =
+			moq_mux::container::Consumer::new(track_subscriber, container).with_latency_max(Duration::from_secs(1));
 
 		let descriptor = TrackDescriptor {
 			kind: d.kind,

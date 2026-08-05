@@ -79,7 +79,7 @@ async fn run_subscribe(consumer: moq_net::origin::Consumer) -> anyhow::Result<()
 		.subscribe(moq_net::track::Subscription::default().with_priority(1))
 		.await?;
 	let mut ordered = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
-		.with_latency(Duration::from_millis(500));
+		.with_latency_max(Duration::from_millis(500));
 
 	// Read frames in latency-bounded presentation order.
 	while let Some(frame) = ordered.read().await? {

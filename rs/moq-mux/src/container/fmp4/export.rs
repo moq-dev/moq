@@ -123,7 +123,7 @@ impl<S: Stream> Export<S> {
 
 	/// Set the maximum buffering latency for each per-track source.
 	///
-	/// See [`crate::container::Consumer::with_latency`] for the per-track skip behavior.
+	/// See [`crate::container::Consumer::with_latency_max`] for the per-track skip behavior.
 	/// Default is zero (skip aggressively).
 	pub fn with_latency(mut self, latency: Duration) -> Self {
 		self.latency = latency;

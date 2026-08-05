@@ -46,7 +46,7 @@ pub struct Config {
 	pub kind: Kind,
 	/// Upper bound on buffering before a stalled group is skipped. `None` uses
 	/// the moq-mux default (skip aggressively); set it to your playout buffer for
-	/// a softer skip. Forwarded to the container consumer's `with_latency`.
+	/// a softer skip. Forwarded to the container consumer's `with_latency_max`.
 	pub latency_max: Option<Duration>,
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a

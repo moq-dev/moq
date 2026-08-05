@@ -268,7 +268,7 @@ impl MoqBroadcastConsumer {
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let latency = subscription.latency_max;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
+		let consumer = moq_mux::container::Consumer::new(track, media).with_latency_max(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

@@ -65,7 +65,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
-	latency: Duration,
+	latency_max: Duration,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -79,7 +79,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let transform = build_video_transform(config);
@@ -88,7 +88,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform,
 			description,
 		})
@@ -102,7 +102,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -110,7 +110,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform: None,
 			description,
 		})
@@ -122,7 +122,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -130,7 +130,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform: None,
 			description,
 		})
@@ -139,11 +139,11 @@ impl ExportSource {
 	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
 	/// No codec-shape transform and no description: the frames are Legacy-framed
 	/// verbatim bytes the muxer writes back out as PES or private sections.
-	pub fn for_stream(source: &crate::Source, name: &str, latency: Duration) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, latency_max: Duration) -> Result<Self, crate::Error> {
 		Ok(Self {
 			state: SourceState::Requesting(source.request(None), name.to_string()),
 			media: Some(HangContainer::Legacy),
-			latency,
+			latency_max,
 			transform: None,
 			description: None,
 		})
@@ -198,7 +198,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency_max(self.latency_max)));
 		}
 
 		loop {

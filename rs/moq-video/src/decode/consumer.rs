@@ -44,7 +44,7 @@ impl Consumer {
 			.await?;
 		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
 		if let Some(latency) = config.latency_max {
-			track = track.with_latency(latency);
+			track = track.with_latency_max(latency);
 		}
 
 		Ok(Self {
