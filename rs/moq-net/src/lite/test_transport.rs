@@ -52,11 +52,20 @@ pub struct SinkSend {
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
+	/// Set by [`finish`](web_transport_trait::SendStream::finish), so a later reset is
+	/// dropped the way quinn drops one on an already-finished stream (`ClosedStream`).
+	/// `Writer`'s drop fallback resets unconditionally, so without this every cleanly
+	/// finished stream would log a reset and `resets()` would say nothing.
+	finished: bool,
 }
 
 impl SinkSend {
 	pub fn new(log: Log) -> Self {
-		Self { log, gate: None }
+		Self {
+			log,
+			gate: None,
+			finished: false,
+		}
 	}
 }
 
@@ -78,10 +87,14 @@ impl web_transport_trait::SendStream for SinkSend {
 	fn set_priority(&mut self, _order: u8) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		self.finished = true;
 		Ok(())
 	}
 
 	fn reset(&mut self, code: u32) {
+		if self.finished {
+			return;
+		}
 		self.log.resets.lock().unwrap().push(code);
 	}
 
@@ -157,6 +170,7 @@ impl web_transport_trait::Session for SinkSession {
 		let send = SinkSend {
 			log: self.log.clone(),
 			gate: Some(gate),
+			finished: false,
 		};
 		Ok((send, PendingRecv))
 	}

@@ -397,9 +397,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		{
 			Ok(broadcast) => broadcast,
 			Err(_) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
-					.await?;
-				return Ok(());
+				return self
+					.reject_subscribe(stream, request_id, 404, "Broadcast not found")
+					.await;
 			}
 		};
 
@@ -411,9 +411,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
 			Ok(track) => track,
 			Err(err) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
-					.await?;
-				return Ok(());
+				return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
 			}
 		};
 
@@ -474,6 +472,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.writer.finish().ok();
 
 		res
+	}
+
+	/// Reject a SUBSCRIBE, ending the request stream.
+	///
+	/// Takes the whole stream because the finish is the half that makes the error arrive:
+	/// [`Writer`] resets on drop, and a reset that races the write discards the bytes the peer
+	/// has not read yet, so the subscriber sees no response and waits forever. Finishing first
+	/// leaves that reset a no-op. The rejection is the whole exchange, so don't wait on the
+	/// peer's close.
+	async fn reject_subscribe(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		self.write_subscribe_error(&mut stream.writer, request_id, error_code, reason)
+			.await?;
+		let _ = stream.writer.finish();
+		Ok(())
 	}
 
 	/// Write a subscribe error on the bidi stream writer.
@@ -654,25 +672,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch_stream(self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let _subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
-				self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-					.await?;
-				return Ok(());
+				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id,
 				group_offset,
 			} => {
 				if group_offset != 0 {
-					self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-						.await?;
-					return Ok(());
+					return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 				}
 				subscriber_request_id
 			}
 			FetchType::AbsoluteJoining { .. } => {
-				self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-					.await?;
-				return Ok(());
+				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 			}
 		};
 
@@ -724,6 +736,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
 		}
+		Ok(())
+	}
+
+	/// Reject a FETCH, ending the request stream. See [`Self::reject_subscribe`] for why the
+	/// finish is not optional.
+	async fn reject_fetch(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		self.write_fetch_error(&mut stream.writer, request_id, error_code, reason)
+			.await?;
+		let _ = stream.writer.finish();
 		Ok(())
 	}
 
@@ -1441,5 +1468,65 @@ mod tests {
 		// One stream for the subscription itself, one per PUBLISH_NAMESPACE: the
 		// withdrawal rode the announce's own request, not a new stream.
 		assert_eq!(log.bi_opens(), 3, "no extra stream for the withdrawal");
+	}
+
+	/// Subscribe to a path nothing publishes, returning what the peer would read off the
+	/// request stream plus the reset codes the stream recorded.
+	async fn subscribe_missing(version: Version) -> (Vec<u8>, Vec<u32>) {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		// One bidi stream, with a peer that says nothing back.
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+		let log = session.log.clone();
+
+		// Serving a subscription blocks on the peer's SETUP, which no scripted peer sends here.
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer::default());
+
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			version,
+		);
+
+		let stream = Stream::open(&session, version).await.unwrap();
+		publisher
+			.run_subscribe_stream(
+				stream,
+				ietf::Subscribe {
+					request_id: RequestId(1),
+					track_namespace: crate::Path::new("nothing/here"),
+					track_name: "video".into(),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					filter_type: FilterType::LargestObject,
+				},
+			)
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap().clone();
+		(writes, log.resets())
+	}
+
+	/// A SUBSCRIBE for a path with no publisher must be answered, and the answer must survive
+	/// the trip. `Writer` resets the stream on drop, so returning straight after writing the
+	/// error threw the bytes away and left every interop client waiting on a request we had
+	/// already refused. Finishing first makes the drop-time reset a no-op.
+	#[tokio::test]
+	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			let (writes, resets) = subscribe_missing(version).await;
+
+			assert!(!writes.is_empty(), "{version}: nothing was sent");
+			assert_eq!(
+				writes[0],
+				ietf::RequestError::ID as u8,
+				"{version}: not a REQUEST_ERROR"
+			);
+			assert!(resets.is_empty(), "{version}: stream reset, discarding the error");
+		}
 	}
 }
