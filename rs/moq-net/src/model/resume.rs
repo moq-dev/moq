@@ -1693,7 +1693,10 @@ mod test {
 		let handler = track_a.dynamic();
 		let fetch = consumer.fetch_group(0, None);
 		let mut fetch = std::pin::pin!(fetch);
-		assert!(futures::poll!(fetch.as_mut()).is_pending(), "unanswered fetch should park");
+		assert!(
+			futures::poll!(fetch.as_mut()).is_pending(),
+			"unanswered fetch should park"
+		);
 
 		// The front aborting must end the in-flight fetch, not strand it on the
 		// copy that will never answer.
