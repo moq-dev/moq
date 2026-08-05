@@ -8,5 +8,9 @@ default:
 # The vite config opens the watch, publish, and stats demos in separate tabs;
 
 # set MOQ_NO_OPEN=1 to skip opening a browser.
-serve url='http://localhost:4443':
+serve url='http://localhost:4443': install
     VITE_RELAY_URL="{{ url }}" bun --bun vite
+
+# Install the workspace deps that vite and the demo's imports need.
+install:
+    bun install
