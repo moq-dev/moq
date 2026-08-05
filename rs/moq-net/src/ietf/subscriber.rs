@@ -104,6 +104,10 @@ struct BroadcastState {
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
 
+	// Abrupt dominates once any owner disappears without retracting its advert. The
+	// source must still linger when a different owner releases the final ref cleanly.
+	detach: Detach,
+
 	// The first entry of the advertised path: the original publisher. `None` on an
 	// advertisement that carried no path at all, which is every one on a session
 	// without the MoQ Cluster extension. See [`Advertised::publisher`].
@@ -852,6 +856,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(BroadcastState {
 					producer: crate::model::broadcast::SourceGuard::new(broadcast.clone()),
 					count: carried.unwrap_or(1),
+					detach: Detach::Graceful,
 					publisher,
 				});
 
@@ -878,15 +883,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
-				entry.get_mut().count -= 1;
-				if entry.get().count == 0 {
-					tracing::debug!(broadcast = %self.origin.absolute(&path), ?detach, "unannounced");
-					let producer = entry.remove().producer;
-					match detach {
-						Detach::Graceful => producer.finish(),
+				let broadcast = entry.get_mut();
+				broadcast.count -= 1;
+				if detach == Detach::Abrupt {
+					broadcast.detach = Detach::Abrupt;
+				}
+				if broadcast.count == 0 {
+					let broadcast = entry.remove();
+					tracing::debug!(broadcast = %self.origin.absolute(&path), detach = ?broadcast.detach, "unannounced");
+					match broadcast.detach {
+						Detach::Graceful => broadcast.producer.finish(),
 						// Dropping the guard aborts the source, which is what leaves the
 						// origin's linger window open for a replacement.
-						Detach::Abrupt => drop(producer),
+						Detach::Abrupt => drop(broadcast.producer),
 					}
 				}
 			}
@@ -1468,8 +1477,18 @@ mod tests {
 		Subscriber<crate::lite::test_transport::SinkSession>,
 		crate::origin::Producer,
 	) {
+		cluster_subscriber_with_linger(self_origin, std::time::Duration::ZERO)
+	}
+
+	fn cluster_subscriber_with_linger(
+		self_origin: crate::Origin,
+		linger: std::time::Duration,
+	) -> (
+		Subscriber<crate::lite::test_transport::SinkSession>,
+		crate::origin::Producer,
+	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_origin).with_linger(linger).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -1595,7 +1614,7 @@ mod tests {
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
 	/// A zero-linger origin cannot tell the two detaches apart, which is why this sets one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lost_namespace_stream_leaves_the_linger_window_open() {
 		const VERSION: Version = Version::Draft18;
 
@@ -1641,27 +1660,11 @@ mod tests {
 	/// The peer explicitly retracting a namespace still ends the broadcast NOW, linger
 	/// or not: it said the namespace is gone, so holding the front open would stall a
 	/// replacement and promise a resumption that is not coming.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_explicit_namespace_done_closes_despite_the_linger_window() {
-		let self_origin = crate::Origin::new(1).unwrap();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin)
-			.with_linger(std::time::Duration::from_secs(30))
-			.produce();
+		let (mut subscriber, origin) =
+			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
 		let consumer = origin.consume();
-		let (tasks, task_set) = crate::util::TaskSet::new();
-		std::mem::forget(task_set);
-		let mut subscriber = Subscriber::new(
-			session,
-			origin,
-			Control::new(None, false),
-			None,
-			cluster::PeerSetup::default(),
-			self_origin,
-			None,
-			Version::Draft19,
-			tasks,
-		);
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
@@ -1673,6 +1676,33 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"an explicit NAMESPACE_DONE lingered instead of closing",
+		);
+	}
+
+	/// An abrupt owner remains significant while another advert keeps the source alive.
+	/// When that final owner retracts cleanly, the lost owner still requires the source
+	/// to linger for a replacement rather than close immediately.
+	#[tokio::test(start_paused = true)]
+	async fn an_abrupt_detach_survives_another_owner() {
+		let (mut subscriber, origin) =
+			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
+		let consumer = origin.consume();
+		let path = crate::Path::new("room/host").to_owned();
+		let peer = cluster::Peer::default();
+
+		for _ in 0..2 {
+			let advert = subscriber.route(None, &peer).expect("route");
+			subscriber.start_announce(path.clone(), advert).unwrap();
+		}
+		settle().await;
+
+		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"the final clean retraction forgot that another owner was lost abruptly",
 		);
 	}
 

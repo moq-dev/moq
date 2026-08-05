@@ -1121,7 +1121,7 @@ mod tests {
 	/// on the way out, or hoisted the map to the session, would be a silent behavior
 	/// change. `ietf::Subscriber` names the same distinction explicitly as `Detach`.
 	/// A zero-linger origin cannot tell the two apart, so this sets one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lost_announce_stream_leaves_the_linger_window_open() {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
 			.with_linger(Duration::from_secs(30))
