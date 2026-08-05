@@ -13,25 +13,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
+use rand::RngExt;
 
 use super::mixer::{self, Mixer};
 use super::sink::{Registration, Sink};
 use crate::Error;
 
-/// Backoff for reopening a device that failed. The first retry is quick because the common case is
-/// a device that came right back (a USB re-enumerate, a sample-rate change); the ceiling keeps a
-/// permanently gone device from spinning.
+/// Backoff bounds for reopening a device that failed. The first retry is quick because the common
+/// case is a device that came right back (a USB re-enumerate, a sample-rate change); the ceiling
+/// keeps a permanently gone device from spinning.
 ///
-/// No give-up budget: the engine outlives any one device, and the user plugging a headset back in is
-/// exactly the external change a retry is waiting for. Unlimited retries are also what keeps this
-/// clock-free, so the driver thread can stay on [`std::time::Instant`].
-fn retry_backoff() -> kio::time::Backoff {
-	let mut config = kio::time::Config::default();
-	config.initial = Duration::from_millis(500);
-	config.max = Duration::from_secs(4);
-	config.timeout = Duration::ZERO;
-	kio::time::Backoff::new(config)
-}
+/// No give-up budget: the engine outlives any one device, and the user plugging a headset back in
+/// is exactly the external change a retry is waiting for.
+const RETRY_MIN: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(4);
 
 /// Problems tolerated in [`ERROR_WINDOW`] before the stream is rebuilt.
 ///
@@ -363,7 +358,7 @@ pub(super) fn run(
 		stream: None,
 		retired: None,
 		generation: 0,
-		retry: retry_backoff(),
+		retry: RETRY_MIN,
 		retry_at: None,
 		underruns: 0,
 		unclassified: 0,
@@ -425,8 +420,8 @@ struct Driver {
 	/// Bumped on every stream, so an error from a retired one can be told apart
 	/// from one the live stream raised.
 	generation: u64,
-	/// Escalating delay before reopening a device that would not start.
-	retry: kio::time::Backoff,
+	/// Delay before reopening a device that would not start, doubling per failure.
+	retry: Duration,
 	/// When a failed start may be retried, and what the command wait times out
 	/// against. `None` while the stream is healthy.
 	retry_at: Option<Instant>,
@@ -484,7 +479,7 @@ impl Driver {
 		// Replaces the previous receiver, dropping anything the old stream
 		// retired and never got drained.
 		self.retired = Some(retired_rx);
-		self.retry.reset();
+		self.retry = RETRY_MIN;
 
 		tracing::info!(rate, channels, ?format, "opened audio output");
 		Ok(())
@@ -601,11 +596,14 @@ impl Driver {
 		tracing::warn!("audio output is not keeping up with sink changes");
 	}
 
-	/// When the next restart may be attempted, escalating the backoff.
+	/// When the next restart may be attempted, doubling the backoff.
 	///
-	/// The backoff never gives up, so this always yields a deadline.
+	/// Jittered so a host running many streams doesn't reopen the device in lockstep after a
+	/// suspend or a driver reload.
 	fn schedule(&mut self) -> Instant {
-		Instant::now() + self.retry.delay().expect("unlimited retry budget")
+		let wait = self.retry.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+		self.retry = (self.retry * 2).min(RETRY_MAX);
+		Instant::now() + wait
 	}
 
 	/// Whether a failure reported by stream `generation` should rebuild the
@@ -807,7 +805,7 @@ mod tests {
 			stream: None,
 			retired: None,
 			generation: 7,
-			retry: retry_backoff(),
+			retry: RETRY_MIN,
 			retry_at: None,
 			underruns: 0,
 			unclassified: 0,

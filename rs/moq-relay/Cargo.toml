@@ -51,12 +51,12 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "u
 humantime = "2.3"
 humantime-serde = "1.1"
 jsonwebtoken = "11"
-kio = { workspace = true, features = ["time"] }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 moq-net = { workspace = true }
 moq-stats = { workspace = true }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }

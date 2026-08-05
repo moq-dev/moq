@@ -1,4 +1,3 @@
-import { Retry as NetRetry } from "@moq/net";
 import { type Effect, Signal } from "@moq/signals";
 
 /**
@@ -26,14 +25,14 @@ export class Retry {
 	 * No give-up deadline: {@link LIMIT} is this budget, counted in attempts. Counting time instead
 	 * would make the outcome depend on how long the OS takes to say no.
 	 */
-	static readonly DELAY: NetRetry.BackoffProps = { initial: 250, multiplier: 2, max: 1000, timeout: 0 };
+	static readonly DELAY = { initial: 250, multiplier: 2, max: 1000 };
 
 	readonly #rerun = new Signal(0);
 
 	// Deliberately plain fields: effect reruns must not unwind them, or the budget never runs out.
 	#failures = 0;
 	#settings: unknown[] | undefined;
-	#backoff = new NetRetry.Backoff(Retry.DELAY);
+	#delay = Retry.DELAY.initial;
 
 	// How long the next attempt still owes the backoff, set by `failed` and paid by `begin`.
 	#wait: DOMHighResTimeStamp | undefined;
@@ -74,7 +73,9 @@ export class Retry {
 	failed(): void {
 		this.#failures += 1;
 		// Unlimited budget, so there is always a next delay.
-		this.#wait = this.#backoff.delay();
+		// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
+		this.#wait = this.#delay * (0.5 + Math.random() / 2);
+		this.#delay = Math.min(this.#delay * Retry.DELAY.multiplier, Retry.DELAY.max);
 		this.#rerun.update((rerun) => rerun + 1);
 	}
 
@@ -99,6 +100,6 @@ export class Retry {
 	#clear(): void {
 		this.#failures = 0;
 		this.#wait = undefined;
-		this.#backoff.reset();
+		this.#delay = Retry.DELAY.initial;
 	}
 }

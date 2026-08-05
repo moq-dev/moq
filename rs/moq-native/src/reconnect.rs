@@ -4,6 +4,7 @@ use std::time::Duration;
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
 use moq_net::kio;
+use rand::RngExt;
 use url::Url;
 
 use crate::{Client, Error};
@@ -73,17 +74,6 @@ impl Default for Backoff {
 	}
 }
 
-impl From<&Backoff> for kio::time::Config {
-	fn from(backoff: &Backoff) -> Self {
-		let mut config = Self::default();
-		config.initial = backoff.initial;
-		config.multiplier = backoff.multiplier;
-		config.max = backoff.max;
-		config.timeout = backoff.timeout;
-		config
-	}
-}
-
 impl Backoff {
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
@@ -95,6 +85,15 @@ impl Backoff {
 			true => Duration::MAX,
 			false => self.timeout.saturating_add(Duration::from_secs(1)),
 		}
+	}
+}
+
+/// When a reconnect sequence gives up, or `None` when [`Backoff::timeout`] is zero and it never
+/// does. Measured from now, so it covers the connect attempts as well as the waits between them.
+fn deadline_from(backoff: &Backoff) -> Option<tokio::time::Instant> {
+	match backoff.timeout.is_zero() {
+		true => None,
+		false => Some(tokio::time::Instant::now() + backoff.timeout),
 	}
 }
 
@@ -204,7 +203,11 @@ impl Reconnect {
 		url: Url,
 		backoff: Backoff,
 	) -> crate::Result<()> {
-		let mut retry = kio::time::Backoff::new((&backoff).into());
+		// The escalating wait between attempts, and the instant the give-up budget expires. Both
+		// restart after a session that stayed healthy, so a one-off drop reconnects promptly. A zero
+		// timeout means no deadline at all: retry for as long as the process lives.
+		let mut delay = backoff.initial;
+		let mut deadline = deadline_from(&backoff);
 		let mut last_error: Option<Error> = None;
 
 		loop {
@@ -236,7 +239,8 @@ impl Reconnect {
 						// Stayed up past the initial backoff: a healthy session. Reset the backoff
 						// window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
-						retry.reset();
+						delay = backoff.initial;
+						deadline = deadline_from(&backoff);
 						last_error = None;
 					} else {
 						// Connected then dropped almost immediately (e.g. the server accepts then
@@ -269,8 +273,8 @@ impl Reconnect {
 				}
 			}
 
-			tracing::warn!(%url, "reconnecting after backoff");
-			if !retry.sleep().await {
+			let now = tokio::time::Instant::now();
+			if deadline.is_some_and(|deadline| now >= deadline) {
 				let timeout = backoff.timeout;
 				let msg = match last_error {
 					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
@@ -278,6 +282,17 @@ impl Reconnect {
 				};
 				return Err(Error::Reconnect(msg));
 			}
+
+			// Jittered so a fleet knocked offline together doesn't reconnect on the same tick, and
+			// never past the deadline the budget promised.
+			let mut wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+			if let Some(deadline) = deadline {
+				wait = wait.min(deadline - now);
+			}
+			delay = (delay * backoff.multiplier.max(1)).min(backoff.max);
+
+			tracing::warn!(%url, ?wait, "reconnecting after backoff");
+			tokio::time::sleep(wait).await;
 		}
 	}
 

@@ -17,6 +17,7 @@ use tracing::Instrument as _;
 use url::Url;
 
 use crate::{AuthToken, nodes::MESH_PREFIX};
+use rand::RngExt;
 
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -920,10 +921,9 @@ impl Cluster {
 		// A peer is supervised for the life of the relay, so there is no give-up deadline: one that is
 		// unreachable for an hour still has to be redialed when it comes back. Nothing ends this
 		// loop; the escalating delay is what keeps a permanently-dead peer cheap.
-		let mut config = kio::time::Config::default();
-		config.max = tokio::time::Duration::from_secs(300);
-		config.timeout = tokio::time::Duration::ZERO;
-		let mut backoff = kio::time::Backoff::new(config);
+		let base_delay = tokio::time::Duration::from_secs(1);
+		let max_delay = tokio::time::Duration::from_secs(300);
+		let mut delay = base_delay;
 
 		// Sessions shorter than this are treated as churn: we keep backing off
 		// instead of resetting, otherwise a peer that rejects us instantly would
@@ -939,7 +939,7 @@ impl Cluster {
 			// stable and reset the backoff on every attempt, so the escalation would never happen.
 			let stable = attempt.connected.is_some_and(|at| at.elapsed() >= stable_threshold);
 			if stable {
-				backoff.reset();
+				delay = base_delay;
 			}
 
 			if let Err(err) = attempt.result {
@@ -949,7 +949,10 @@ impl Cluster {
 				}
 			}
 
-			backoff.sleep().await;
+			// Jittered so a restarting cluster doesn't have every peer redial on the same tick.
+			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+			delay = (delay * 2).min(max_delay);
+			tokio::time::sleep(wait).await;
 		}
 	}
 

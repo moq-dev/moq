@@ -13,15 +13,12 @@ keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
 [features]
-# Opt-in poll-driven wall-clock deadlines and retry schedules, backed by `web-async`
-# (tokio on native, wasmtimer in the browser). Off by default so kio stays runtime-free.
-# `rand` is here for `Backoff`'s jitter; a wasm consumer picks its own getrandom
-# backend in the leaf binary, same as moq-net.
-time = ["dep:web-async", "dep:rand"]
+# Opt-in poll-driven wall-clock deadlines, backed by `web-async` (tokio on native,
+# wasmtimer in the browser). Off by default so kio stays runtime-free.
+time = ["dep:web-async"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-rand = { version = "0.10.1", optional = true }
 smallvec = "1.15"
 tokio = { workspace = true, features = ["time"], optional = true }
 web-async = { workspace = true, optional = true }

@@ -3,7 +3,6 @@ import * as Announce from "../announced.ts";
 import { error } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
-import { Backoff } from "../retry.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
 import type { Probe, Stats } from "./stats.ts";
@@ -43,6 +42,9 @@ export type ReloadProps = Omit<ConnectProps, "signal"> & {
 	/** Backoff settings for the reconnect loop. */
 	delay?: ReloadDelay;
 };
+
+/** How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset. */
+const DEFAULT_TIMEOUT = 300000;
 
 /** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -97,9 +99,10 @@ export class Reload {
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
 
-	// The current retry sequence's schedule, built from `delay` when the sequence starts. Undefined
-	// between sequences, so a later edit to `delay` applies to the next one.
-	#backoff: Backoff | undefined;
+	// The current wait between attempts, doubling per failure, and when the retry window expires.
+	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
+	#delay: DOMHighResTimeStamp | undefined;
+	#deadline: DOMHighResTimeStamp | undefined;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -219,18 +222,26 @@ export class Reload {
 		// shorter is a peer that accepts and immediately severs, which has to keep
 		// escalating or we hammer it forever at the initial delay.
 		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
-			this.#backoff = undefined;
+			this.#delay = undefined;
+			this.#deadline = undefined;
 		}
 
-		this.#backoff ??= new Backoff(this.delay);
+		const now = performance.now();
+		const timeout = this.delay.timeout ?? DEFAULT_TIMEOUT;
+		this.#delay ??= this.delay.initial;
+		this.#deadline ??= timeout > 0 ? now + timeout : Number.POSITIVE_INFINITY;
 
-		const wait = this.#backoff.delay();
-		if (wait === undefined) {
+		if (now >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
 			this.#closedReject(cause === undefined ? new Error("reconnect timed out") : error(cause));
 			return;
 		}
+
+		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
+		// tick, and never past the deadline the retry window promised.
+		const wait = Math.min(this.#delay * (0.5 + Math.random() / 2), this.#deadline - now);
+		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
 
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);

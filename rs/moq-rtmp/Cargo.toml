@@ -35,7 +35,6 @@ bytes = "1"
 futures = "0.3"
 hang = { workspace = true }
 hmac = "0.13"
-kio = { workspace = true, features = ["time"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = "0.10"

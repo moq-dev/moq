@@ -101,7 +101,7 @@ The rename/removal rationale lives in the commit message and PR description, not
 
 Retrying is the reflex that hides bugs, so a new retry loop has to answer three questions in the code, not in the reviewer's head.
 
-- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Use the shared primitive rather than a hand-rolled `sleep`: `kio::time::Backoff` in Rust, `Retry.Backoff` from `@moq/net` in TypeScript.
+- **How long between attempts?** Capped exponential backoff with jitter, never a fixed delay. Three lines at the call site: draw the wait from the top half of the current window (`delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)`), sleep it, then `delay = (delay * 2).min(MAX)`. There is deliberately no shared `Backoff` type. Each loop wants a different subset (most want no budget at all), the escalation is smaller than the abstraction over it, and a general one has to accept an arbitrary `max` it then has to defend against.
 - **When does it stop?** A deadline or an attempt budget, and that budget is what ends the loop. Unlimited retries belong only to a supervisor whose job is to outlive an outage (a reconnecting publisher, a cluster peer, a listener), where the escalating delay is what keeps a permanently-dead target cheap.
 - **Who owns the budget?** Exactly one layer. An outer supervisor that rebuilds an inner retry loop resets its backoff to the initial delay, so the escalation never happens and a fixed-interval hammer wears an exponential costume. Watch the inner loop's terminal signal instead of restarting it.
 

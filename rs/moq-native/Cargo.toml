@@ -46,7 +46,6 @@ hex = "0.4"
 humantime = "2.3"
 humantime-serde = "1.1"
 
-kio = { workspace = true, features = ["time"] }
 moq-net = { workspace = true }
 # iroh runs on noq but re-exports only the ControllerFactory trait, not the concrete
 # congestion configs. Version matched to the copy iroh pulls in.

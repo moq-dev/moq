@@ -50,6 +50,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::Result;
 use crate::flv;
+use rand::RngExt;
 
 /// Read buffer size for pulling RTMP chunk-stream bytes off the socket.
 const READ_BUFFER: usize = 16 * 1024;
@@ -216,6 +217,12 @@ impl AsyncWrite for Conn {
 	}
 }
 
+/// Backoff bounds after a failed `accept`. The listener is supervised for the process's lifetime,
+/// so there is no give-up budget: the descriptor pressure or firewall rule behind a failed accept
+/// clears on its own, and the next connection resets the escalation.
+const ACCEPT_RETRY_MIN: Duration = Duration::from_millis(100);
+const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
+
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
 /// Build it with [`bind`](Self::bind), optionally enable RTMPS with
@@ -234,10 +241,10 @@ pub struct Server {
 	/// the connection closed or errored before issuing a publish or play.
 	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
 
-	/// Escalating delay after a failed `accept`. Lives on the server rather than inside
-	/// [`accept`](Self::accept) so consecutive failures keep escalating across calls, and resets on
+	/// Delay after a failed `accept`, doubling per consecutive failure. Lives on the server rather
+	/// than inside [`accept`](Self::accept) so the escalation survives across calls, and resets on
 	/// the next connection that does come in.
-	accept_backoff: kio::time::Backoff,
+	accept_delay: Duration,
 
 	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
 	/// being polled meanwhile: a connection that already got through must not wait out a backoff
@@ -250,20 +257,12 @@ impl Server {
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
 		let listener = TcpListener::bind(addr).await?;
 
-		// The listener is supervised for the process's lifetime, so there is no give-up budget: the
-		// descriptor pressure or firewall rule behind a failed accept clears on its own, and the
-		// next connection resets the escalation.
-		let mut backoff = kio::time::Config::default();
-		backoff.initial = Duration::from_millis(100);
-		backoff.max = Duration::from_secs(5);
-		backoff.timeout = Duration::ZERO;
-
 		Ok(Self {
 			listener,
 			#[cfg(feature = "tls")]
 			tls: None,
 			pending: FuturesUnordered::new(),
-			accept_backoff: kio::time::Backoff::new(backoff),
+			accept_delay: ACCEPT_RETRY_MIN,
 			accept_retry: None,
 		})
 	}
@@ -309,7 +308,7 @@ impl Server {
 				res = self.listener.accept(), if retry.is_none() && self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
 						// A connection got through, so whatever the last failure was has cleared.
-						self.accept_backoff.reset();
+						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
 						let tls = self.tls.clone();
@@ -357,8 +356,9 @@ impl Server {
 						// rather than slept on here, so the loop keeps serving in-flight handshakes
 						// through the pause.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						let delay = self.accept_backoff.delay().expect("unlimited accept budget");
-						self.accept_retry = Some(tokio::time::Instant::now() + delay);
+						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
+						self.accept_retry = Some(tokio::time::Instant::now() + wait);
 					}
 				},
 			}

@@ -19,6 +19,7 @@ use m3u8_rs::{
 use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
 use moq_mux::select;
+use rand::RngExt;
 use reqwest::Client;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
@@ -29,19 +30,16 @@ use crate::{Error, Result, SequenceKind};
 /// Per-request timeout for the default HTTP client (playlist + segment fetches).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Backoff for retrying a failed import step, so a transient upstream error (a 503, a dropped
-/// connection) doesn't tear down the whole import.
+/// Backoff bounds for retrying a failed import step, so a transient upstream error (a 503, a
+/// dropped connection) doesn't tear down the whole import.
 ///
-/// Bounded by the default give-up budget: an origin that has been unreachable for minutes is an
-/// outage the caller should hear about, not one the import should paper over indefinitely while
-/// publishing nothing. The ceiling is lower than the default, since a live playlist window is
-/// measured in seconds and a longer wait would blow past it anyway.
-fn error_backoff() -> kio::time::Backoff {
-	let mut config = kio::time::Config::default();
-	config.initial = Duration::from_secs(1);
-	config.max = Duration::from_secs(10);
-	kio::time::Backoff::new(config)
-}
+/// Bounded by a give-up budget: an origin that has been unreachable for minutes is an outage the
+/// caller should hear about, not one the import should paper over indefinitely while publishing
+/// nothing. The ceiling is low because a live playlist window is measured in seconds and a longer
+/// wait would blow past it anyway.
+const STEP_RETRY_MIN: Duration = Duration::from_secs(1);
+const STEP_RETRY_MAX: Duration = Duration::from_secs(10);
+const STEP_RETRY_BUDGET: Duration = Duration::from_secs(300);
 
 /// How far back from the live edge to start when (re-)anchoring to a playlist window.
 ///
@@ -619,7 +617,8 @@ impl Import {
 	/// shortcut is an HTTP status the origin actually sent: a `404` playlist ends the import
 	/// immediately, since no amount of waiting turns it into a `200`.
 	pub async fn run(&mut self) -> Result<()> {
-		let mut backoff = error_backoff();
+		let mut delay = STEP_RETRY_MIN;
+		let mut deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -641,7 +640,9 @@ impl Import {
 
 			let outcome = match stepped {
 				Ok(outcome) => {
-					backoff.reset();
+					// The source is alive, so the earlier failures no longer describe it.
+					delay = STEP_RETRY_MIN;
+					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				// A status the origin actually sent is its answer: a 404 playlist is not going to
@@ -650,10 +651,19 @@ impl Import {
 					return Err(err);
 				}
 				Err(err) => {
-					warn!(%err, "HLS import step failed, retrying");
-					if !backoff.sleep().await {
+					let now = tokio::time::Instant::now();
+					if now >= deadline {
 						return Err(err);
 					}
+
+					warn!(%err, "HLS import step failed, retrying");
+					// Jittered so a fleet of importers pointed at one origin doesn't retry in
+					// lockstep, and never past the deadline the budget promised.
+					let wait = delay
+						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.min(deadline - now);
+					delay = (delay * 2).min(STEP_RETRY_MAX);
+					tokio::time::sleep(wait).await;
 					continue;
 				}
 			};
