@@ -398,6 +398,9 @@ pub struct Discovery {
 	credential: Option<String>,
 	/// Service instance -> peer id, so a `Lost` event can name what a `Found` did.
 	peers: HashMap<String, String>,
+	/// Events produced ahead of the caller asking, since one resolve can retire a
+	/// previous identity and report a new one.
+	pending: std::collections::VecDeque<Event>,
 	daemon: ServiceDaemon,
 	events: mdns_sd::Receiver<ServiceEvent>,
 }
@@ -476,6 +479,7 @@ impl Discovery {
 			secret: config.secret,
 			credential,
 			peers: HashMap::new(),
+			pending: std::collections::VecDeque::new(),
 			daemon,
 			events,
 		})
@@ -512,6 +516,12 @@ impl Discovery {
 	/// changes or is periodically re-resolved, so compare against what you have
 	/// rather than assuming each [`Event::Found`] is new.
 	pub async fn recv(&mut self) -> Option<Event> {
+		// Drained before reading the socket, so a retired identity is reported
+		// before the replacement that displaced it.
+		if let Some(event) = self.pending.pop_front() {
+			return Some(event);
+		}
+
 		while let Ok(event) = self.events.recv_async().await {
 			match event {
 				ServiceEvent::ServiceResolved(info) => {
@@ -560,14 +570,22 @@ impl Discovery {
 					// Deterministic order, preferring IPv4 when both families are advertised.
 					addrs.sort_by_key(|addr| (addr.is_ipv6(), *addr));
 
-					self.peers.insert(instance.to_string(), id.clone());
-					return Some(Event::Found(Peer {
-						id,
+					let peer = Peer {
+						id: id.clone(),
 						addrs,
 						fingerprint: fingerprint.map(str::to_string),
 						node,
 						credential,
-					}));
+					};
+
+					// Retire a displaced identity before reporting the replacement, so the
+					// caller drops that dial rather than stranding it.
+					if let Some(old) = retire_previous(&mut self.peers, instance, &id) {
+						self.pending.push_back(Event::Found(peer));
+						return Some(Event::Lost(old));
+					}
+
+					return Some(Event::Found(peer));
 				}
 				ServiceEvent::ServiceRemoved(_ty, fullname) => {
 					let Some(instance) = instance_id(&fullname) else {
@@ -683,6 +701,26 @@ async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<
 			_ => continue,
 		}
 	}
+}
+
+/// Point `instance` at `id`, returning a previous identity that nothing else
+/// still refers to and which therefore has to be retired.
+///
+/// A service instance is not its identity: the identity is the advertised node
+/// URL when there is one, so an instance that restarts with a different node URL
+/// comes back under a new id. Callers key their dials by id, and the removal
+/// that eventually arrives names only the new one, so overwriting silently would
+/// leave the old dial running forever against an address nobody advertises.
+///
+/// `None` when the identity is unchanged, or when another instance still
+/// advertises the old one, which is the ordinary case of a peer restarting under
+/// a fresh instance while keeping its node URL.
+fn retire_previous(peers: &mut HashMap<String, String>, instance: &str, id: &str) -> Option<String> {
+	let previous = peers.insert(instance.to_string(), id.to_string())?;
+	if previous == id || peers.values().any(|other| other == &previous) {
+		return None;
+	}
+	Some(previous)
 }
 
 /// The instance portion of a DNS-SD fullname like `<instance>._moq._udp.local.`.
@@ -1007,6 +1045,39 @@ mod tests {
 			thief.node = Some("moqt://thief.example".to_string());
 			assert!(verify(Some(&ours), thief.advert()).is_err(), "another node");
 		}
+	}
+
+	/// An instance that changes identity retires the old one.
+	///
+	/// Without this the caller strands a dial: it keys by peer id, and the removal
+	/// that eventually arrives names only the new id, so the dial opened against
+	/// the old node URL runs forever against an address nobody advertises.
+	#[test]
+	fn a_changed_identity_retires_the_old_one() {
+		let mut peers = HashMap::new();
+
+		// First sighting: nothing to retire.
+		assert_eq!(retire_previous(&mut peers, "aaa", "https://relay.example/"), None);
+		// A periodic re-resolve of the same thing is not a change.
+		assert_eq!(retire_previous(&mut peers, "aaa", "https://relay.example/"), None);
+
+		// The node URL changed across a restart, so the old identity is stranded
+		// unless it comes back out here.
+		assert_eq!(
+			retire_previous(&mut peers, "aaa", "https://relay.example/?cost=5"),
+			Some("https://relay.example/".to_string())
+		);
+
+		// A peer restarting under a fresh instance keeps its node URL, and the old
+		// instance is still advertising it, so nothing is retired yet.
+		peers.clear();
+		retire_previous(&mut peers, "aaa", "https://relay.example/");
+		retire_previous(&mut peers, "bbb", "https://relay.example/");
+		assert_eq!(
+			retire_previous(&mut peers, "bbb", "https://other.example/"),
+			None,
+			"instance aaa still advertises the old identity"
+		);
 	}
 
 	/// Advertise on a port nothing listens on, purely to exercise the record.

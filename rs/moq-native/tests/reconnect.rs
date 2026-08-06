@@ -25,7 +25,7 @@ async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	backoff.timeout = Some(Duration::from_millis(200));
 
 	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
-	let url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
+	let url: url::Url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
 	let started = tokio::time::Instant::now();
 	let reconnect = client(backoff).connect(url);
 
