@@ -44,40 +44,58 @@ pub async fn accept_setup<S: web_transport_trait::Session>(session: &S, version:
 	}
 }
 
+/// Everything one moq-lite session needs to start.
+pub struct Config<S: web_transport_trait::Session> {
+	pub session: S,
+
+	/// The stream used to set up the session, after exchanging setup messages.
+	/// NOTE: No longer used in draft-03.
+	pub setup_stream: Option<Stream<S, Version>>,
+
+	/// We will publish any local broadcasts from this origin, when set.
+	pub publish: Option<origin::Consumer>,
+
+	/// We will consume any remote broadcasts, inserting them into this origin, when
+	/// set. Traffic stats are attributed through these origin handles: tag them with
+	/// `origin::{Consumer, Producer}::with_stats` before calling [`start`].
+	pub subscribe: Option<origin::Producer>,
+
+	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	/// declare one itself. See `Client::with_peer_origin`.
+	pub peer_origin: Option<Origin>,
+
+	/// The version of the protocol to use.
+	pub version: Version,
+
+	/// The capabilities (and optional request path) we advertise in our SETUP message.
+	/// Only sent on versions with a Setup Stream (lite-05+); ignored otherwise.
+	/// Its `origin` is filled in here from the attached origin handles.
+	pub our_setup: Setup,
+
+	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
+	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
+	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
+	pub peer_setup: Option<Setup>,
+}
+
 /// Start a lite session.
 ///
 /// Returns the receive-bandwidth consumer (if any) and a [`Connecting`] handle that
 /// becomes ready once the initial announce set has been inserted into the subscribe
 /// origin, letting `connect()` block past the startup race. It is ready immediately
 /// when there is nothing to wait on (a version without an initial-set boundary).
-// Internal entry point wiring a session together; the knobs are all distinct and
-// positional clarity beats a one-off config struct here.
-#[allow(clippy::too_many_arguments)]
-pub fn start<S: web_transport_trait::Session>(
-	session: S,
-	// The stream used to set up the session, after exchanging setup messages.
-	// NOTE: No longer used in draft-03.
-	setup_stream: Option<Stream<S, Version>>,
-	// We will publish any local broadcasts from this origin, when set.
-	publish: Option<origin::Consumer>,
-	// We will consume any remote broadcasts, inserting them into this origin, when set.
-	// Traffic stats are attributed through these origin handles: tag them with
-	// `origin::{Consumer, Producer}::with_stats` before calling `start`.
-	subscribe: Option<origin::Producer>,
-	// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	// declare one itself. See `Client::with_peer_origin`.
-	peer_origin: Option<Origin>,
-	// The version of the protocol to use.
-	version: Version,
-	// The capabilities (and optional request path) we advertise in our SETUP message.
-	// Only sent on versions with a Setup Stream (lite-05+); ignored otherwise.
-	// Its `origin` is filled in here from the attached origin handles.
-	mut our_setup: Setup,
-	// The peer's SETUP, when it was already read before `start` (e.g. a server that
-	// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
-	// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	peer_setup: Option<Setup>,
-) -> Result<SessionStart, Error> {
+pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<SessionStart, Error> {
+	let Config {
+		session,
+		setup_stream,
+		publish,
+		subscribe,
+		peer_origin,
+		version,
+		mut our_setup,
+		peer_setup,
+	} = config;
+
 	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {

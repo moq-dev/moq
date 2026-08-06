@@ -269,16 +269,16 @@ impl Client {
 					origin: None,
 				};
 
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
 					version,
 					our_setup,
-					None,
-				)?;
+					peer_setup: None,
+				})?;
 
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
@@ -293,16 +293,16 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					lite::Version::Lite04,
-					lite::Setup::default(),
-					None,
-				)?;
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: lite::Version::Lite04,
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
 				let (session, mut driver) = Session::new(
@@ -321,16 +321,16 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					lite::Version::Lite03,
-					lite::Setup::default(),
-					None,
-				)?;
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: lite::Version::Lite03,
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
 				let (session, mut driver) = Session::new(
@@ -382,18 +382,18 @@ impl Client {
 		let (recv_bw, protocol, connecting) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let start = lite::start(
-					session.clone(),
-					Some(stream),
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					v,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: Some(stream),
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
-					lite::Setup::default(),
-					None,
-				)?;
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				(start.recv_bandwidth, start.driver, Some(start.connecting))
 			}
