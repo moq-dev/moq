@@ -467,7 +467,7 @@ async fn spawn_accept_relay(
 ) -> (Option<std::net::SocketAddr>, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let mut server = config.init().expect("server init");
+	let server = config.init().expect("server init");
 	let addr = server.local_addr().ok();
 
 	let auth = auth_config
@@ -476,6 +476,7 @@ async fn spawn_accept_relay(
 		.expect("auth init");
 
 	let cluster = Cluster::new(ClusterConfig::default()).expect("cluster init");
+	let mut server = server.listen().await.expect("listen");
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;

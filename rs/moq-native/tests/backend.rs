@@ -130,7 +130,8 @@ async fn connect_test(config: ConnectTest<'_>) {
 	server_config.backend = Some(backend.clone());
 	server_config.quic.qlog = qlog.map(Into::into);
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -293,7 +294,8 @@ async fn mtls_test(scheme: &str, backend: moq_native::QuicBackend, reject: bool)
 	server_config.quic.gso = Some(false);
 	server_config.quic.keep_alive = Some(Duration::from_secs(1));
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let mut client_config = moq_native::ClientConfig::default();
@@ -501,10 +503,11 @@ async fn iroh_connect() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let mut server = server_config
+	let server = server_config
 		.init()
 		.expect("failed to init server")
 		.with_iroh(server_endpoint);
+	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();

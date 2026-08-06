@@ -10,7 +10,7 @@ struct ServerState {
 	config: moq_native::ServerConfig,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
-	server: Option<moq_native::Server>,
+	server: Option<moq_native::Listener>,
 }
 
 impl ServerState {
@@ -22,6 +22,9 @@ impl ServerState {
 			.config
 			.clone()
 			.init()
+			.map_err(|err| MoqError::Bind(format!("{err}")))?
+			.listen()
+			.await
 			.map_err(|err| MoqError::Bind(format!("{err}")))?;
 		let addr = server
 			.local_addr()

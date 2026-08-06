@@ -19,7 +19,8 @@ async fn connect_with_version(version: &str) {
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// Provide a dummy origin so the MoQ handshake has something to negotiate.
@@ -70,7 +71,8 @@ async fn connect_with_webtransport(version: Option<&str>) {
 		server_config.version = vec![v];
 	}
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let origin = moq_native::moq_net::Origin::random().produce();

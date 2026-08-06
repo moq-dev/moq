@@ -49,7 +49,7 @@ pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, ConnectionStatsReader, GoawayConfig, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::Log;
-pub use server::{Request, Server, ServerConfig, Transport};
+pub use server::{Listener, Request, Server, ServerConfig, Transport};
 
 /// Spawn the session's protocol driver on the current tokio runtime, handing back
 /// the session it drives.
