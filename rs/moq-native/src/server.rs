@@ -135,8 +135,8 @@ pub struct Server {
 impl Server {
 	/// Build a server from its config, binding the QUIC socket up front.
 	///
-	/// The stream (`tcp`/`unix`) listeners bind lazily on the first
-	/// [`accept`](Self::accept), since they need a runtime.
+	/// The stream (`tcp`/`unix`) listeners need a runtime, so they wait for
+	/// [`listen`](Self::listen).
 	pub fn new(config: ServerConfig) -> crate::Result<Self> {
 		let backend = config.backend.clone().unwrap_or_else(crate::default_quic_backend);
 
@@ -268,7 +268,8 @@ impl Server {
 	/// Spawns a task per session and logs (rather than propagates) per-session
 	/// errors, so one bad peer never tears down the listener. Returns when
 	/// interrupted (Ctrl-C) or on a fatal bind failure. For per-session auth or
-	/// routing, drive [`accept`](Self::accept) yourself instead.
+	/// routing, [`listen`](Self::listen) and drive [`Listener::accept`] yourself
+	/// instead.
 	pub async fn serve_publish(self, origin: moq_net::origin::Consumer) -> crate::Result<()> {
 		self.with_publisher(origin).serve().await
 	}
@@ -282,11 +283,12 @@ impl Server {
 
 	/// Shared accept loop for [`serve_publish`](Self::serve_publish) /
 	/// [`serve_consume`](Self::serve_consume); the origin is already attached.
-	async fn serve(mut self) -> crate::Result<()> {
-		if let Ok(addr) = self.local_addr() {
+	async fn serve(self) -> crate::Result<()> {
+		let mut listener = self.listen().await?;
+		if let Ok(addr) = listener.local_addr() {
 			tracing::info!(%addr, "listening");
 		}
-		while let Some(request) = self.accept().await {
+		while let Some(request) = listener.accept().await {
 			tokio::spawn(async move {
 				if let Err(err) = serve_session(request).await {
 					tracing::warn!(%err, "session ended with error");
@@ -332,7 +334,7 @@ impl Server {
 	/// Returns the next partially established session.
 	///
 	/// Panics: no transport feature is compiled in, so nothing can be accepted.
-	pub async fn accept(&mut self) -> Option<Request> {
+	async fn accept_next(&mut self) -> Option<Request> {
 		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 	}
 
@@ -346,7 +348,7 @@ impl Server {
 	/// a zero for it would read as a watch that is passing when it can never fire.
 	///
 	/// Available before [`listen`](Self::listen), so an owner can register these with
-	/// a metrics endpoint at startup even though the sockets bind later.
+	/// a metrics endpoint at startup even though the sockets bind there.
 	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
 		#[allow(unused_mut)]
 		let mut health = Vec::new();
@@ -357,35 +359,32 @@ impl Server {
 		health
 	}
 
-	/// Bind the listeners that bind lazily, so a bind failure surfaces here.
+	/// Start serving: bind whatever is still unbound and hand back the
+	/// [`Listener`] to accept sessions from.
 	///
-	/// The QUIC socket is bound by [`ServerConfig::init`], but the stream
-	/// (`tcp`/`unix`) listeners need a runtime, so they wait for the first
-	/// [`accept`](Self::accept) instead. That makes a bind failure arrive as a `None`
-	/// from `accept`, which a caller cannot tell apart from an ordinary shutdown.
-	/// Call this first and the two are distinct: the error is yours to handle, and a
-	/// later `None` means the server stopped.
+	/// Terminal, and that is the point: it consumes the `Server`, so the builders
+	/// above cannot run afterwards and every session is served the configuration
+	/// this call captured. The QUIC socket is bound by [`ServerConfig::init`], but
+	/// the stream (`tcp`/`unix`) listeners need a runtime, so they bind here.
 	///
-	/// Idempotent: a call that fails binds nothing at all (any listener it did bind
-	/// is torn down again), so a retry starts from the same place. Optional, too:
-	/// `accept` still binds them itself, logging the failure, for a caller that
-	/// doesn't call this.
-	pub async fn listen(&mut self) -> crate::Result<()> {
+	/// A bind failure is the error, not a silent `None` from a later accept. It
+	/// leaves nothing bound: the partially built `Listener` drops here, closing
+	/// whatever it opened. Build a fresh `Server` from the (cloneable) config to try
+	/// again.
+	// `mut` is only needed to bind the stream listeners, which a QUIC-only build has none of.
+	#[allow(unused_mut)]
+	pub async fn listen(mut self) -> crate::Result<Listener> {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		self.streams.ensure_started().await?;
-		Ok(())
+		{
+			// The stream listeners offer a wider version set than the server's own
+			// (see `stream_versions`), against the same configuration.
+			let server = self.moq.clone().with_versions(self.streams.versions.clone());
+			self.streams.start(&server).await?;
+		}
+		Ok(Listener { server: self })
 	}
 
-	/// Returns the next partially established session, across every configured
-	/// transport (QUIC, WebSocket, and plaintext qmux over TCP/Unix).
-	///
-	/// This returns a [Request] instead of a session so the connection can be
-	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
-	/// [Request::close] to complete the handshake.
-	///
-	/// `None` means the server stopped: it was interrupted (Ctrl-C), or a lazy
-	/// listener failed to bind. Call [`listen`](Self::listen) up front to tell those
-	/// two apart.
+	/// The body of [`Listener::accept`]; the listeners are already running.
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -394,15 +393,7 @@ impl Server {
 		feature = "tcp",
 		all(feature = "uds", unix)
 	))]
-	pub async fn accept(&mut self) -> Option<Request> {
-		// Bind the stream (tcp/unix) listeners on first poll; a bind failure is
-		// fatal, mirroring how a QUIC bind failure aborts startup.
-		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		if let Err(err) = self.streams.ensure_started().await {
-			tracing::error!(%err, "failed to bind stream listener");
-			return None;
-		}
-
+	async fn accept_next(&mut self) -> Option<Request> {
 		loop {
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			#[cfg(feature = "noq")]
@@ -544,7 +535,7 @@ impl Server {
 					}
 				}
 				_ = tokio::signal::ctrl_c() => {
-					self.close().await;
+					self.shutdown().await;
 					return None;
 				}
 			}
@@ -586,11 +577,11 @@ impl Server {
 		self.websocket.as_ref().and_then(|ws| ws.local_addr().ok())
 	}
 
-	/// Close every listener, giving in-flight connections a moment to see the
-	/// shutdown.
-	///
-	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
-	pub async fn close(&mut self) {
+	/// The body of [`Listener::close`].
+	async fn shutdown(&mut self) {
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		self.streams.shutdown().await;
+
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_mut() {
 			noq.close();
@@ -614,8 +605,75 @@ impl Server {
 		{
 			let _ = self.websocket.take();
 		}
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
-		unreachable!("no QUIC backend compiled");
+	}
+}
+
+/// A [`Server`] that is listening: the only thing sessions can be accepted from.
+///
+/// Returned by [`Server::listen`], which consumes the `Server`, so the
+/// configuration a session is served with is fixed before any listener runs.
+pub struct Listener {
+	server: Server,
+}
+
+impl Listener {
+	/// Returns the next partially established session, across every configured
+	/// transport (QUIC, WebSocket, and plaintext qmux over TCP/Unix).
+	///
+	/// This returns a [Request] instead of a session so the connection can be
+	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
+	/// [Request::close] to complete the handshake.
+	///
+	/// `None` means the server stopped, which at this point means it was interrupted
+	/// (Ctrl-C): everything is already bound, so a bind failure cannot arrive here.
+	pub async fn accept(&mut self) -> Option<Request> {
+		self.server.accept_next().await
+	}
+
+	/// Close every listener, giving in-flight connections a moment to see the
+	/// shutdown.
+	///
+	/// Consumes the listener so its bound sockets are released before this returns.
+	///
+	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
+	pub async fn close(mut self) {
+		self.server.shutdown().await;
+	}
+
+	/// The address the QUIC listener bound to, useful when the config asked for
+	/// port 0.
+	///
+	/// Errors with [`Error::NoBackend`] on a stream-only server, which has no
+	/// QUIC listener.
+	pub fn local_addr(&self) -> crate::Result<net::SocketAddr> {
+		self.server.local_addr()
+	}
+
+	/// The address the WebSocket listener from
+	/// [`Server::with_websocket`] bound to, if one was set.
+	#[cfg(feature = "websocket")]
+	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
+		self.server.websocket_local_addr()
+	}
+
+	/// A live handle to the certificates this server is serving.
+	///
+	/// See [`Server::certificates`], which is also readable before listening.
+	pub fn certificates(&self) -> crate::tls::Certificates {
+		self.server.certificates()
+	}
+
+	/// The accept-loop health of every listener that performs a real `accept(2)`.
+	///
+	/// See [`Server::accept_health`], which is also readable before listening.
+	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
+		self.server.accept_health()
+	}
+
+	/// The Iroh endpoint from [`Server::with_iroh`], if one was set.
+	#[cfg(feature = "iroh")]
+	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
+		self.server.iroh_endpoint()
 	}
 }
 
@@ -643,12 +701,20 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 
 /// A configured stream listener (`--server-tcp-bind` / `--server-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-#[derive(Clone)]
 enum StreamBind {
 	#[cfg(feature = "tcp")]
 	Tcp(net::SocketAddr),
 	#[cfg(all(feature = "uds", unix))]
 	Unix(PathBuf),
+}
+
+/// A bound stream listener, before its accept loop is spawned.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+enum BoundListener {
+	#[cfg(feature = "tcp")]
+	Tcp(crate::tcp::Listener),
+	#[cfg(all(feature = "uds", unix))]
+	Unix(crate::unix::Listener),
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
@@ -666,10 +732,10 @@ impl StreamBind {
 
 /// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
-/// Bound lazily on the first [`Server::accept`] (they need a runtime), after
-/// which each runs an accept loop in its own task and feeds completed [`Request`]s
-/// back over a channel. The tasks own their listeners and are aborted when the
-/// `Server` (and thus this) is dropped, so bound sockets don't linger.
+/// Bound by [`Server::listen`] (they need a runtime), after which each runs an
+/// accept loop in its own task and feeds completed [`Request`]s back over a channel.
+/// The tasks own their listeners and are aborted when the [`Listener`] (and thus
+/// this) is dropped, so bound sockets don't linger.
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
@@ -706,37 +772,23 @@ impl StreamListeners {
 		}
 	}
 
-	/// Bind the configured listeners and spawn their accept loops, once.
-	async fn ensure_started(&mut self) -> crate::Result<()> {
-		if self.rx.is_some() || self.binds.is_empty() {
+	/// Bind every configured listener and spawn its accept loop.
+	///
+	/// Called once, from [`Server::listen`]. Everything binds before anything is
+	/// spawned, so a failure part-way drops the listeners already opened and frees
+	/// their sockets there and then, rather than leaving accept loops to be aborted
+	/// at some later point.
+	///
+	/// `server` is the configuration each accepted session handshakes against,
+	/// already fixed by the time this runs.
+	async fn start(&mut self, server: &moq_net::Server) -> crate::Result<()> {
+		if self.binds.is_empty() {
 			return Ok(());
 		}
 
-		let (tx, rx) = tokio::sync::mpsc::channel(16);
-		if let Err(err) = self.start(&tx).await {
-			// All or nothing. A half-bound set would leave the loops we did spawn
-			// feeding the channel this call is about to drop, so a retry would find
-			// listeners that can never deliver a request while `binds` looked done.
-			// Abort them instead and leave the binds untouched, so a retry starts over
-			// and a second `listen` cannot report success over a dead listener.
-			for task in self.tasks.drain(..) {
-				task.abort();
-			}
-			return Err(err);
-		}
-
-		self.rx = Some(rx);
-		Ok(())
-	}
-
-	/// Bind and spawn every configured listener, or return the first failure.
-	async fn start(&mut self, tx: &tokio::sync::mpsc::Sender<Request>) -> crate::Result<()> {
-		// Cloned so the loop can push into `self.tasks` while iterating; there are at
-		// most two entries, each an address or a path.
-		let binds = self.binds.clone();
-		let health = self.health.clone();
-		for (bind, health) in binds.into_iter().zip(health) {
-			let versions = self.versions.clone();
+		let mut bound = Vec::with_capacity(self.binds.len());
+		for (bind, health) in self.binds.drain(..).zip(self.health.iter().cloned()) {
+			let alpns = self.versions.alpns();
 			match bind {
 				#[cfg(feature = "tcp")]
 				StreamBind::Tcp(addr) => {
@@ -745,27 +797,38 @@ impl StreamListeners {
 					}
 					let listener = crate::tcp::Listener::bind(addr)
 						.await?
-						.with_protocols(versions.alpns())
+						.with_protocols(alpns)
 						.with_accept_health(health);
 					tracing::info!(%addr, "listening (tcp)");
-					self.tasks.push(spawn_tcp_loop(listener, versions, tx.clone()));
+					bound.push(BoundListener::Tcp(listener));
 				}
 				#[cfg(all(feature = "uds", unix))]
 				StreamBind::Unix(path) => {
 					let listener = crate::unix::Listener::bind(&path)
 						.await?
-						.with_protocols(versions.alpns())
+						.with_protocols(alpns)
 						.with_accept_health(health);
 					// Loose file perms: the uid/gid/pid allow list is the real gate,
 					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
 					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
-					self.tasks
-						.push(spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone()));
+					bound.push(BoundListener::Unix(listener));
 				}
 			}
 		}
 
+		let (tx, rx) = tokio::sync::mpsc::channel(16);
+		for listener in bound {
+			let task = match listener {
+				#[cfg(feature = "tcp")]
+				BoundListener::Tcp(listener) => spawn_tcp_loop(listener, server.clone(), tx.clone()),
+				#[cfg(all(feature = "uds", unix))]
+				BoundListener::Unix(listener) => spawn_unix_loop(listener, server.clone(), self.unix_allow.clone(), tx.clone()),
+			};
+			self.tasks.push(task);
+		}
+
+		self.rx = Some(rx);
 		Ok(())
 	}
 
@@ -774,6 +837,15 @@ impl StreamListeners {
 		match self.rx.as_mut() {
 			Some(rx) => rx.recv().await,
 			None => std::future::pending().await,
+		}
+	}
+
+	/// Stop every accept task and wait until it has released its listener.
+	async fn shutdown(&mut self) {
+		self.rx = None;
+		for task in self.tasks.drain(..) {
+			task.abort();
+			let _ = task.await;
 		}
 	}
 }
@@ -791,13 +863,13 @@ impl Drop for StreamListeners {
 #[cfg(feature = "tcp")]
 fn spawn_tcp_loop(
 	listener: crate::tcp::Listener,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
-				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, versions.clone(), tx.clone()),
+				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, server.clone(), tx.clone()),
 				// Per-connection: a failed `accept(2)` is the listener's own to
 				// classify and pace, and never surfaces here.
 				Some(Err(err)) => tracing::warn!(%err, "tcp qmux handshake failed"),
@@ -810,7 +882,7 @@ fn spawn_tcp_loop(
 #[cfg(all(feature = "uds", unix))]
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	allow: Option<crate::unix::Allow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
@@ -825,7 +897,7 @@ fn spawn_unix_loop(
 						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
 						continue;
 					}
-					spawn_stream_request(session, Transport::Unix, versions.clone(), tx.clone());
+					spawn_stream_request(session, Transport::Unix, server.clone(), tx.clone());
 				}
 				// Per-connection, as in `spawn_tcp_loop`.
 				Some(Err(err)) => tracing::warn!(%err, "unix qmux handshake failed"),
@@ -841,11 +913,10 @@ fn spawn_unix_loop(
 fn spawn_stream_request(
 	session: qmux::Session,
 	transport: Transport,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
 	tokio::spawn(async move {
-		let server = moq_net::Server::new().with_versions(versions);
 		match server.accept_request(session).await {
 			Ok(request) => {
 				let request = Request {
@@ -1132,10 +1203,10 @@ mod tests {
 	/// The handles have to exist before anything binds, and cover the stream
 	/// listeners rather than just the ones an owner happens to construct itself.
 	///
-	/// `tcp`/`unix` bind lazily on the first `accept`, so a naive implementation
-	/// hands out nothing at startup, which is exactly when a metrics endpoint is
-	/// assembled. A stream-only node would then publish no accept counters for the
-	/// only sockets on it that can fail.
+	/// `tcp`/`unix` bind in `listen`, so a naive implementation hands out nothing at
+	/// startup, which is exactly when a metrics endpoint is assembled. A stream-only
+	/// node would then publish no accept counters for the only sockets on it that can
+	/// fail.
 	#[cfg(feature = "tcp")]
 	#[test]
 	fn accept_health_covers_stream_listeners_before_they_bind() {
@@ -1147,29 +1218,149 @@ mod tests {
 		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
 	}
 
-	/// A failed `listen` must leave nothing bound, so a retry starts over.
+	/// A failed `listen` must leave nothing bound.
 	///
-	/// The trap is `binds.drain(..)`: consume the list up front and a partial failure
-	/// leaves it empty, so the *second* `listen` sees nothing left to do and reports
-	/// success while no stream listener exists and `accept` parks forever.
+	/// The tcp listener binds before the unix one fails, so a partial bind is the
+	/// case to get right: its socket has to be released on the way out, or the port
+	/// stays held by a server that never serves. Binding everything before spawning
+	/// anything is what makes that release immediate rather than whenever an aborted
+	/// task happens to be dropped.
 	#[cfg(all(feature = "tcp", feature = "uds", unix))]
 	#[tokio::test]
-	async fn a_failed_listen_binds_nothing_and_can_be_retried() {
+	async fn a_failed_listen_binds_nothing() {
 		// A path that cannot be a socket, so the unix bind fails after the tcp one
 		// has already succeeded.
 		let dir = tempfile::TempDir::new().unwrap();
 		let occupied = dir.path().join("not-a-socket");
 		std::fs::write(&occupied, b"in the way").unwrap();
 
+		// A concrete port, so the release is observable.
+		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
+		let port = probe.local_addr().expect("probe addr").port();
+		drop(probe);
+
 		let mut config = ServerConfig::default();
-		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
 		config.unix.bind = Some(occupied);
-		let mut server = Server::new(config).expect("stream-only server");
+		let server = Server::new(config).expect("stream-only server");
 
 		assert!(server.listen().await.is_err(), "the unix bind must fail");
-		// Same error the second time, rather than a success over a listener that the
-		// first call already tore down.
-		assert!(server.listen().await.is_err(), "a retry must not report success");
+		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
+	}
+
+	/// Closing consumes the listener and immediately releases its stream sockets.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn close_releases_stream_listeners() {
+		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
+		let addr = probe.local_addr().expect("probe addr");
+		drop(probe);
+
+		let mut config = ServerConfig::default();
+		config.tcp.bind = Some(addr);
+		let listener = Server::new(config)
+			.expect("stream-only server")
+			.listen()
+			.await
+			.expect("listen");
+
+		listener.close().await;
+		std::net::TcpListener::bind(addr).expect("close must release the tcp port");
+	}
+
+	/// The stream listeners must hand accepted sessions to the *configured*
+	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
+	/// rather than on the request, so a session that handshakes against any other
+	/// server accepts and then serves nothing.
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_listener_serves_the_configured_publisher() {
+		use rand::RngExt;
+
+		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,
+		// so bind under /tmp with a name unique to this process.
+		let path = PathBuf::from(format!("/tmp/moq-native-publish-{}.sock", std::process::id()));
+		let _ = std::fs::remove_file(&path);
+
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("create broadcast");
+		let mut track = broadcast.create_track("video", None).expect("create track");
+		let mut group = track.append_group().expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.expect("write frame");
+		group.finish().expect("finish group");
+
+		let mut config = ServerConfig::default();
+		config.unix.bind = Some(path.clone());
+		let server = config.init().expect("server init");
+
+		// The publisher lives on the server, never on the accepted request.
+		let serve = tokio::spawn(server.serve_publish(origin.consume()));
+
+		// `serve` binds the socket; wait for it. Keep the last error, since a bind
+		// failure is the only clue to why it never showed up.
+		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+		let mut delay = std::time::Duration::from_millis(1);
+		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"unix listener never bound: {err}"
+			);
+			// Bound to its own statement so the (non-Send) rng doesn't live across the
+			// await, which would make this future unspawnable.
+			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+			tokio::time::sleep(wait).await;
+			delay = (delay * 2).min(MAX_DELAY);
+		}
+
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
+		let subscriber = moq_net::Origin::random().produce();
+		let mut announced = subscriber.consume().announced();
+		let client = crate::ClientConfig::default()
+			.init()
+			.expect("client init")
+			.with_subscriber(subscriber);
+		let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+			.await
+			.expect("connect timeout")
+			.expect("connect");
+
+		// Without the server's publisher the session announces nothing, so this is
+		// where the regression shows up.
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("announce timeout")
+			.expect("origin closed");
+		assert_eq!(update.path.as_str(), "test");
+		let broadcast = update.broadcast.expect("expected an announce");
+
+		let mut track = broadcast
+			.track("video")
+			.expect("track name")
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("recv group timeout")
+			.expect("recv group")
+			.expect("track closed early");
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read frame timeout")
+			.expect("read frame")
+			.expect("group closed early");
+		assert_eq!(&frame.payload[..], b"hello");
+
+		drop(session);
+		serve.abort();
+		let _ = std::fs::remove_file(&path);
 	}
 
 	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and

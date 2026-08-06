@@ -483,6 +483,9 @@ pub struct Publish<S = Conn> {
 	app: String,
 	stream_key: String,
 	peer: SocketAddr,
+	/// Retention declared on the media tracks this publish mints, or `None` for hang's
+	/// own default. Override with [`with_latency_max`](Self::with_latency_max).
+	latency_max: Option<Duration>,
 }
 
 impl<S: Stream> Publish<S> {
@@ -504,6 +507,19 @@ impl<S: Stream> Publish<S> {
 		self.peer
 	}
 
+	/// Set how long relays keep a non-latest group of this publish's media tracks
+	/// fetchable. `None` keeps hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters.
+	pub fn with_latency_max(mut self, latency_max: impl Into<Option<Duration>>) -> Self {
+		self.latency_max = latency_max.into();
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// RTMP media into it until the client disconnects.
 	///
@@ -516,7 +532,7 @@ impl<S: Stream> Publish<S> {
 		// Reserve the broadcast path before telling the client the publish succeeded:
 		// if the origin refuses `path`, reject cleanly instead of accepting and then
 		// dropping the connection a moment later.
-		let mut publisher = match Publisher::new(origin, path.as_str()) {
+		let mut publisher = match Publisher::new(origin, path.as_str(), self.latency_max) {
 			Ok(publisher) => publisher,
 			Err(err) => {
 				tracing::warn!(peer = %self.peer, %path, %err, "rejecting RTMP publish: broadcast unavailable");
@@ -924,6 +940,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							app: app_name,
 							stream_key,
 							peer,
+							latency_max: None,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1232,9 +1249,10 @@ struct Publisher {
 impl Publisher {
 	/// Open a broadcast at `path` and prime the importer with the FLV file
 	/// header, so subsequent tags decode against an initialized demuxer.
-	fn new(origin: &origin::Producer, path: &str) -> anyhow::Result<Self> {
+	fn new(origin: &origin::Producer, path: &str, latency_max: Option<Duration>) -> anyhow::Result<Self> {
 		let mut broadcast = origin.create_broadcast(path, broadcast::Route::new().with_announce(true))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
+		let config = moq_mux::catalog::Config::default().with_latency_max(latency_max);
+		let catalog = moq_mux::catalog::Producer::with_config(&mut broadcast, config)?;
 		let handle = broadcast.clone();
 		let mut importer = FlvImport::new(broadcast, catalog.reserve());
 
@@ -1560,9 +1578,26 @@ mod tests {
 		}
 	}
 
-	/// End-to-end play: publish a real broadcast into an origin (via the FLV
-	/// importer, so it carries a catalog + frames), then drive an RTMP play client
-	/// and assert it receives the muxed AVC sequence header and keyframe back.
+	/// The retention a publish declares has to reach the media tracks the FLV importer
+	/// mints, not stop at the catalog producer it was set on.
+	#[tokio::test]
+	async fn publisher_declares_the_configured_retention() {
+		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+
+		let origin = moq_net::Origin::random().produce();
+		let mut publisher = Publisher::new(&origin, "live/cam0", Some(Duration::from_secs(3))).unwrap();
+		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
+
+		let broadcast = origin.consume().announced_broadcast("live/cam0").await.unwrap();
+		let info = broadcast.track("0.flv-v").unwrap().info().await.unwrap();
+		assert_eq!(info.latency_max, Duration::from_secs(3));
+	}
+
+	/// End-to-end play: publish a real broadcast into an origin (via the FLV importer, so it
+	/// carries a catalog + frames), then drive an RTMP play client and assert it receives the
+	/// muxed AVC sequence header and keyframe back.
 	#[tokio::test]
 	async fn play_streams_broadcast_to_client() {
 		// An AVC sequence-header tag body: keyframe + AVC CodecID, AVCPacketType 0,

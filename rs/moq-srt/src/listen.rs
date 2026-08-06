@@ -54,6 +54,16 @@ pub struct Config {
 	/// SRT receive latency: the negotiated buffer that trades delay for loss
 	/// recovery.
 	pub latency: Duration,
+
+	/// How long relays keep a non-latest group of an ingested media track fetchable, or
+	/// `None` for hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters. Only affects ingest (`m=publish`); egress ignores it.
+	pub latency_max: Option<Duration>,
 }
 
 impl Default for Config {
@@ -62,6 +72,7 @@ impl Default for Config {
 			listen: None,
 			prefix: String::new(),
 			latency: crate::server::DEFAULT_LATENCY,
+			latency_max: None,
 		}
 	}
 }
@@ -98,6 +109,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 	// take over the path when the first publisher drops.
 	let active = ActivePaths::default();
 	let prefix = Arc::new(config.prefix);
+	let latency_max = config.latency_max;
 
 	while let Some(request) = server.accept().await {
 		let prefix = prefix.clone();
@@ -118,7 +130,7 @@ pub async fn run(origin: origin::Producer, config: Config) -> Result<()> {
 						let _ = publish.reject().await;
 						return;
 					};
-					if let Err(err) = publish.accept(&origin, &path).await {
+					if let Err(err) = publish.with_latency_max(latency_max).accept(&origin, &path).await {
 						tracing::warn!(%peer, %path, %err, "SRT ingest ended with error");
 					} else {
 						tracing::info!(%peer, %path, "SRT ingest ended");

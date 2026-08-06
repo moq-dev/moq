@@ -427,10 +427,16 @@ non-latest group of the published media tracks fetchable. It is a retention
 budget, so raising it never makes a subscriber play further behind live: it caps
 how far back a fetch can still reach. The default is sized for a segmented
 egress (HLS/DASH), which may only advertise segments that are still fetchable;
-lower it when nothing reads history and the memory matters. It applies to the
-media tracks only, and to the sources whose catalog this binary builds (the
-stdin containers, `hls`, and `capture`) - the other gateways reject the flag
-rather than accepting it and publishing at the default.
+lower it when nothing reads history and the memory matters:
+
+```bash
+moq --client-connect https://relay.example.com --broadcast my-stream.hang import --latency-max 5s ts
+```
+
+It sits on `import` itself rather than the endpoint, so it applies to every
+source: the stdin containers, `hls`, `capture`, and the `rtmp` / `srt` / `rtc`
+gateways alike. Media tracks only, since the catalog and timeline are read at
+the live edge, which is retained unconditionally.
 
 Export formats:
 

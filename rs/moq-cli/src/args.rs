@@ -265,23 +265,6 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
-
-	/// Whether this source threads [`Import::latency_max`] into the catalog it publishes.
-	///
-	/// The stdin containers, HLS, and capture build their catalog in this crate, so they honor
-	/// it. The remaining gateways build theirs inside moq-rtmp / moq-srt / moq-rtc, which take
-	/// no retention yet -- so the flag is REFUSED there rather than silently ignored.
-	pub fn honors_latency_max(&self) -> bool {
-		if self.stdin_format().is_some() {
-			return true;
-		}
-		match self {
-			Self::Hls(_) => true,
-			#[cfg(feature = "capture")]
-			Self::Capture(_) => true,
-			_ => false,
-		}
-	}
 }
 
 // ------------------------------------------------------------------ export
@@ -387,30 +370,36 @@ mod tests {
 
 	#[test]
 	fn latency_max_is_unset_unless_asked_for() {
-		// Unset rather than defaulted to hang's constant, so a source that cannot apply the
-		// retention can tell "the user asked for one" from "nobody asked", and refuse only the
-		// former. A `default_value` here would make an explicit `--latency-max 30s` on such a
-		// source indistinguishable from the default, which is the silent no-op the guard exists
-		// to stop.
+		// Unset rather than defaulted to hang's constant, so the publisher's own default is
+		// what every source falls back to. A `default_value` here would put the number in the
+		// CLI as well, and the two would drift.
 		let cli = Cli::try_parse_from(["moq", "import", "ts"]).unwrap();
 		let Command::Import(import) = cli.command else {
 			panic!("expected import")
 		};
 		assert_eq!(import.latency_max, None);
-		assert!(import.source.honors_latency_max());
 
+		// It sits on the parent `import`, so it parses ahead of any source, gateway or not.
 		let cli = Cli::try_parse_from(["moq", "import", "--latency-max", "5s", "ts"]).unwrap();
 		let Command::Import(import) = cli.command else {
 			panic!("expected import")
 		};
 		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
 
-		// The gateways build their catalogs in their own crates, so they cannot apply it.
-		let cli = Cli::try_parse_from(["moq", "import", "rtmp", "--listen", "127.0.0.1:1935"]).unwrap();
+		let cli = Cli::try_parse_from([
+			"moq",
+			"import",
+			"--latency-max",
+			"5s",
+			"rtmp",
+			"--listen",
+			"127.0.0.1:1935",
+		])
+		.unwrap();
 		let Command::Import(import) = cli.command else {
 			panic!("expected import")
 		};
-		assert!(!import.source.honors_latency_max());
+		assert_eq!(import.latency_max, Some(std::time::Duration::from_secs(5)));
 	}
 
 	#[test]

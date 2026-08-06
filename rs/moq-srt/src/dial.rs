@@ -26,63 +26,91 @@ use srt_tokio::SrtSocket;
 use crate::Result;
 use crate::server::{DEFAULT_LATENCY, configure_buffers, serve_publish, serve_subscribe};
 
-/// Dial `addr` and push a MoQ broadcast out to the remote: connect as an SRT caller
-/// requesting the remote receive on `resource` (`m=publish`), re-mux `path` from
-/// `origin` to MPEG-TS, and send it until the broadcast ends.
+/// Where to dial and how, shared by [`publish`] and [`pull`].
 ///
-/// `latency` is the SRT receive latency negotiated at handshake time; pass `None`
-/// for the default (500ms). This future resolves when the broadcast ends, so
-/// callers usually run it on its own task.
-pub async fn publish(
-	addr: SocketAddr,
-	resource: &str,
-	latency: impl Into<Option<Duration>>,
-	origin: &origin::Consumer,
-	path: impl moq_net::AsPath,
-) -> Result<()> {
-	let path = path.as_path();
-	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
-	let socket = call(addr, resource, Mode::Publish, latency).await?;
-	serve_subscribe(origin, path.as_str(), socket, latency).await
+/// Construct via [`Config::new`] and set the fields you need, so new options stay
+/// additive.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Config {
+	/// The remote SRT listener to call.
+	pub addr: SocketAddr,
+
+	/// The resource to request, sent as the stream id's `r=` value. Must not contain
+	/// `,` or `=`, which delimit the stream id.
+	pub resource: String,
+
+	/// SRT receive latency, negotiated at handshake time: the buffer that trades delay
+	/// for loss recovery. It doubles as [`publish`]'s egress skip threshold.
+	pub latency: Duration,
+
+	/// How long relays keep a non-latest group of an ingested media track fetchable, or
+	/// `None` for hang's own default.
+	///
+	/// A retention budget, not a delivery one: it never makes a subscriber play further
+	/// behind live, it caps how far back a FETCH can still reach. The default suits a
+	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
+	/// advertise segments that are still fetchable. Lower it when nothing reads history
+	/// and the memory matters. [`pull`] only; [`publish`] reads a broadcast someone else
+	/// declared.
+	pub latency_max: Option<Duration>,
 }
 
-/// Dial `addr` and pull a remote stream into `origin`: connect as an SRT caller
-/// requesting the remote send on `resource` (`m=request`), demux its MPEG-TS, and
-/// publish the result at `path` until the remote ends.
-///
-/// `latency` is the SRT receive latency negotiated at handshake time; pass `None`
-/// for the default (500ms). This future resolves when the remote stream ends, so
-/// callers usually run it on its own task.
-pub async fn pull(
-	addr: SocketAddr,
-	resource: &str,
-	latency: impl Into<Option<Duration>>,
-	origin: &origin::Producer,
-	path: impl moq_net::AsPath,
-) -> Result<()> {
-	let path = path.as_path();
-	let socket = call(addr, resource, Mode::Request, latency).await?;
-	serve_publish(origin, path.as_str(), socket).await
+impl Config {
+	/// Dial `addr` for `resource`, with the default SRT latency (500ms) and the
+	/// publisher's own media retention.
+	pub fn new(addr: SocketAddr, resource: impl Into<String>) -> Self {
+		Self {
+			addr,
+			resource: resource.into(),
+			latency: DEFAULT_LATENCY,
+			latency_max: None,
+		}
+	}
 }
 
-/// Dial `addr` as an SRT caller for `resource`, sending the standard
-/// `#!::r=<resource>,m=<mode>` stream id and returning the connected socket.
+/// Push a MoQ broadcast out to the remote: connect as an SRT caller requesting the
+/// remote receive on [`Config::resource`] (`m=publish`), re-mux `path` from `origin`
+/// to MPEG-TS, and send it until the broadcast ends.
+///
+/// This future resolves when the broadcast ends, so callers usually run it on its own
+/// task.
+pub async fn publish(config: &Config, origin: &origin::Consumer, path: impl moq_net::AsPath) -> Result<()> {
+	let path = path.as_path();
+	let socket = call(config, Mode::Publish).await?;
+	serve_subscribe(origin, path.as_str(), socket, config.latency).await
+}
+
+/// Pull a remote stream into `origin`: connect as an SRT caller requesting the remote
+/// send on [`Config::resource`] (`m=request`), demux its MPEG-TS, and publish the
+/// result at `path` until the remote ends.
+///
+/// This future resolves when the remote stream ends, so callers usually run it on its
+/// own task.
+pub async fn pull(config: &Config, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
+	let path = path.as_path();
+	let socket = call(config, Mode::Request).await?;
+	serve_publish(origin, path.as_str(), socket, config.latency_max).await
+}
+
+/// Dial as an SRT caller, sending the standard `#!::r=<resource>,m=<mode>` stream id
+/// and returning the connected socket.
 ///
 /// `mode` is the *remote's* role, the inverse of the local direction (the remote
 /// receives on `m=publish`, sends on `m=request`).
-async fn call(addr: SocketAddr, resource: &str, mode: Mode, latency: impl Into<Option<Duration>>) -> Result<SrtSocket> {
+async fn call(config: &Config, mode: Mode) -> Result<SrtSocket> {
+	let Config { addr, resource, .. } = config;
 	// `,` and `=` delimit the `#!::r=<resource>,m=<mode>` stream id, so a resource
 	// carrying either would corrupt it and misroute at the listener. Reject rather
 	// than silently produce a broken id (MoQ paths never contain these).
 	if resource.contains([',', '=']) {
 		return Err(anyhow::anyhow!("srt resource must not contain ',' or '=': {resource:?}").into());
 	}
-	let latency = latency.into().unwrap_or(DEFAULT_LATENCY);
 	let stream_id = format!("#!::r={resource},m={}", mode.as_str());
 	let socket = SrtSocket::builder()
-		.latency(latency)
+		.latency(config.latency)
 		.set(configure_buffers)
-		.call(addr, Some(&stream_id))
+		.call(*addr, Some(&stream_id))
 		.await?;
 	tracing::info!(%addr, %resource, mode = mode.as_str(), "SRT caller connected");
 	Ok(socket)
@@ -148,7 +176,7 @@ mod tests {
 		});
 
 		// Caller: dial with m=publish, then drop (we only assert connect + routing).
-		let caller = tokio::spawn(async move { call(addr, "cam0", Mode::Publish, None).await });
+		let caller = tokio::spawn(async move { call(&Config::new(addr, "cam0"), Mode::Publish).await });
 
 		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
 			.await
@@ -187,7 +215,7 @@ mod tests {
 			(resource, is_subscribe)
 		});
 
-		let caller = tokio::spawn(async move { call(addr, "cam0", Mode::Request, None).await });
+		let caller = tokio::spawn(async move { call(&Config::new(addr, "cam0"), Mode::Request).await });
 
 		let socket = tokio::time::timeout(Duration::from_secs(10), caller)
 			.await

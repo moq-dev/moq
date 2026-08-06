@@ -212,14 +212,6 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		reject_listener_cors(&rtc.cors, "import rtc")?;
 	}
 
-	// Refuse a retention this source can't apply rather than accepting the flag and quietly
-	// publishing at the default: the gateways build their catalogs inside their own crates.
-	anyhow::ensure!(
-		import.latency_max.is_none() || import.source.honors_latency_max(),
-		"--latency-max is not supported for this source yet; it applies to the stdin container \
-		 formats, hls, and capture"
-	);
-
 	// The uplink's bandwidth estimate, for sources that can encode to fit it. Only
 	// an outbound client has one: a `--server-bind` publisher's sessions are
 	// inbound and never surfaced here, so it stays `None` and those sources encode
@@ -248,6 +240,15 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	moq::notify_ready();
 
 	// Foreign side: the single source.
+	let latency_max = import.latency_max;
+	// The MoQ side every gateway publishes into, minted per source since each takes it
+	// by value onto its own task.
+	let target = |name: String| crate::moq::ImportTarget {
+		origin: origin.clone(),
+		name,
+		latency_max,
+	};
+
 	if let Some(format) = import.source.stdin_format() {
 		warn_if_missing_format(&name);
 		let broadcast = origin
@@ -265,32 +266,33 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
 					let name = require_broadcast(name, "import rtmp --listen")?;
-					tasks.spawn(rtmp::listen_import(origin.clone(), addr, name));
+					tasks.spawn(rtmp::listen_import(target(name), addr));
 				} else if let Some(url) = rtmp.connect {
-					tasks.spawn(rtmp::connect_import(origin.clone(), url, name));
+					tasks.spawn(rtmp::connect_import(target(name), url));
 				}
 			}
 			ImportSource::Srt(srt) => {
 				if let Some(addr) = srt.listen {
 					let name = require_broadcast(name, "import srt --listen")?;
-					tasks.spawn(srt::listen_import(origin.clone(), addr, name, srt.latency));
+					tasks.spawn(srt::listen_import(target(name), addr, srt.latency));
 				} else if let Some(url) = srt.connect {
-					tasks.spawn(srt::connect_import(origin.clone(), url, name, srt.latency));
+					tasks.spawn(srt::connect_import(target(name), url, srt.latency));
 				}
 			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {
 					let name = require_broadcast(name, "import rtc --listen")?;
 					tasks.spawn(rtc::listen_import(
-						origin.clone(),
-						addr,
-						rtc.udp_bind,
-						rtc.public_addr,
-						rtc.cors,
-						name,
+						target(name),
+						rtc::Listen {
+							addr,
+							udp_bind: rtc.udp_bind,
+							public_addr: rtc.public_addr,
+							cors: rtc.cors,
+						},
 					));
 				} else if let Some(url) = rtc.connect {
-					tasks.spawn(rtc::connect_import(origin.clone(), url, name));
+					tasks.spawn(rtc::connect_import(target(name), url));
 				}
 			}
 			#[cfg(feature = "capture")]
@@ -384,11 +386,13 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 					let name = require_broadcast(name, "export rtc --listen")?;
 					tasks.spawn(rtc::listen_export(
 						origin.consume(),
-						addr,
-						rtc.udp_bind,
-						rtc.public_addr,
-						rtc.cors,
 						name,
+						rtc::Listen {
+							addr,
+							udp_bind: rtc.udp_bind,
+							public_addr: rtc.public_addr,
+							cors: rtc.cors,
+						},
 					));
 				} else if let Some(url) = rtc.connect {
 					tasks.spawn(rtc::connect_export(origin.consume(), url, name));

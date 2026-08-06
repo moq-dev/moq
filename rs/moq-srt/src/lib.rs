@@ -24,8 +24,8 @@
 //!   JWT and scoping the origin per token) plugs its policy in. It mirrors
 //!   `moq-native`'s `Server` / `Request`.
 //!
-//! Beyond the listener, the [`dial`] module is the *dial-out* (client) role:
-//! connect to a remote SRT listener as a caller and either [`dial::publish`] a MoQ
+//! Beyond the listener, the [`dial`] module is the *dial-out* (client) role: build a
+//! [`dial::Config`] naming a remote SRT listener and either [`dial::publish`] a MoQ
 //! broadcast to it (restream MoQ out to a remote SRT ingest) or [`dial::pull`] a
 //! remote stream into an origin (ingest a remote SRT source). It reuses the same
 //! MPEG-TS <-> moq bridge; only the SRT caller transport is new.
