@@ -6,7 +6,7 @@
 import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type * as broadcast from "./broadcast.js";
 import type { Established } from "./connection/established.js";
-import type { Table as OriginTable } from "./origin.js";
+import type { Request as OriginRequest, Table as OriginTable } from "./origin.js";
 import * as Path from "./path.js";
 
 /**
@@ -193,9 +193,10 @@ export type BroadcastProps = {
  * after a publisher finally appears succeeds.
  *
  * If discovery fails on a live session (the announcement stream is reset, or the relay
- * refuses it) the handle goes offline and stays there: nothing reopens the stream on that
- * connection. Build it from a `Connection.Reload` if you need it to recover, since a new
- * connection starts a new stream.
+ * refuses it) a connection-backed handle goes offline and stays there: nothing reopens the
+ * stream on that connection. Build it from a `Connection.Reload` if you need it to recover,
+ * since a new connection starts a new stream. An origin-backed handle recovers on its own:
+ * the session stops counting as discovering, so the handle falls back to a standing request.
  *
  * Close it to release the announcement stream and the current broadcast.
  *
@@ -334,9 +335,17 @@ export class Broadcast {
 		effect.cleanup(() => announced.close());
 
 		let current: broadcast.Consumer | undefined;
+
+		// Held open while the path is announced. A request resolves to the table's route when
+		// there is one, and a session skips answering a path the table routes, so within the
+		// announced window this can only ever produce the announced broadcast.
+		let request: OriginRequest | undefined;
+
 		const offline = () => {
 			current?.close();
 			current = undefined;
+			request?.close();
+			request = undefined;
 			table.set(undefined);
 		};
 		effect.cleanup(offline);
@@ -351,7 +360,10 @@ export class Broadcast {
 
 				if (event.active) {
 					current?.close();
-					current = origin.get(this.path);
+					request ??= origin.request(this.path);
+					// Cloned: the request borrows the table's front, and this handle owns what
+					// it hands out.
+					current = request.active.peek()?.clone();
 					table.set(current);
 				} else {
 					offline();

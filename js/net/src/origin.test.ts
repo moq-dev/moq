@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import type { Consumer } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 
@@ -7,17 +8,32 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * The table's route for `path` as a handle of the caller's own, or undefined when nothing
+ * routes it.
+ *
+ * A request is the only way to consume by path, and it resolves synchronously against the
+ * table, so this is the whole of the one-shot lookup the origin used to expose. Cloned
+ * because a request only borrows the table's front.
+ */
+function routed(consumer: Consumer, path: Path.Valid): BroadcastConsumer | undefined {
+	const request = consumer.request(path);
+	const front = request.active.peek()?.clone();
+	request.close();
+	return front;
+}
+
 test("a published broadcast resolves by path", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 
 	const path = Path.from("room");
-	expect(consumer.get(path)).toBeUndefined();
+	expect(consumer.routes(path)).toBe(false);
 
 	const broadcast = origin.publish(path);
 	broadcast.createTrack("video");
 
-	const handle = consumer.get(path);
+	const handle = routed(consumer, path);
 	expect(handle).toBeDefined();
 
 	// The handle reaches the published tracks.
@@ -36,11 +52,11 @@ test("closing the producer unpublishes the path", async () => {
 	const path = Path.from("room");
 
 	const broadcast = origin.publish(path);
-	expect(consumer.get(path)).toBeDefined();
+	expect(consumer.routes(path)).toBe(true);
 
 	broadcast.close();
 	await settle();
-	expect(consumer.get(path)).toBeUndefined();
+	expect(consumer.routes(path)).toBe(false);
 
 	origin.close();
 });
@@ -57,13 +73,13 @@ test("a stale broadcast closing does not unpublish a republished path", async ()
 	first.close();
 	await settle();
 
-	const handle = consumer.get(path);
+	const handle = routed(consumer, path);
 	expect(handle).toBeDefined();
 	handle?.close();
 
 	second.close();
 	await settle();
-	expect(consumer.get(path)).toBeUndefined();
+	expect(consumer.routes(path)).toBe(false);
 
 	origin.close();
 });
@@ -88,7 +104,7 @@ test("a consumer clone keeps a superseded broadcast alive", async () => {
 	const path = Path.from("room");
 
 	const first = origin.publish(path);
-	const mine = consumer.get(path);
+	const mine = routed(consumer, path);
 	expect(mine).toBeDefined();
 
 	origin.publish(path);
@@ -119,7 +135,7 @@ test("closing the origin closes every routed broadcast", async () => {
 	expect(a.closed.peek()).toBe(abort);
 	expect(b.closed.peek()).toBe(abort);
 
-	expect(consumer.get(Path.from("a"))).toBeUndefined();
+	expect(consumer.routes(Path.from("a"))).toBe(false);
 	expect(() => origin.publish(Path.from("late"))).toThrow();
 
 	// Idempotent: the first close wins.
@@ -178,7 +194,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 	const upstream = new BroadcastProducer();
 	const dispose = origin.insertRemote(path, upstream.consume());
 
-	const handle = consumer.get(path);
+	const handle = routed(consumer, path);
 	expect(handle).toBeDefined();
 	handle?.close();
 
@@ -188,7 +204,7 @@ test("a remote entry resolves by path and retracts on dispose", async () => {
 
 	dispose();
 	expect(await announced.next()).toEqual({ path, active: false });
-	expect(consumer.get(path)).toBeUndefined();
+	expect(consumer.routes(path)).toBe(false);
 
 	announced.close();
 	upstream.close();
@@ -208,7 +224,7 @@ test("a local publish shadows a remote entry", async () => {
 	local.createTrack("local-track");
 
 	// Local wins: the handle reaches the local track, not the remote one.
-	const handle = consumer.get(path);
+	const handle = routed(consumer, path);
 	const track = handle?.subscribe("local-track");
 	expect(track).toBeDefined();
 	track?.close();
@@ -220,7 +236,7 @@ test("a local publish shadows a remote entry", async () => {
 
 	// Dropping the local publish falls back to the remote entry without a retraction.
 	local.close();
-	const back = consumer.get(path);
+	const back = routed(consumer, path);
 	expect(back).toBeDefined();
 	back?.close();
 
@@ -341,7 +357,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	expect(await announced.next()).toEqual({ path, active: false });
 	expect(await announced.next()).toEqual({ path, active: true });
 
-	const handle = consumer.get(path);
+	const handle = routed(consumer, path);
 	const track = handle?.subscribe("chat");
 	expect(track).toBeDefined();
 	track?.close();
@@ -352,7 +368,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 
 	disposeOlder();
 	await settle();
-	expect(consumer.get(path)).toBeUndefined();
+	expect(consumer.routes(path)).toBe(false);
 
 	announced.close();
 	origin.close();
@@ -388,7 +404,7 @@ test("withdrawing an answer wakes the requests table", async () => {
 	origin.close();
 });
 
-test("requests never appear in announced or consume", async () => {
+test("requests never appear in announced or the table", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("assumed");
@@ -397,8 +413,12 @@ test("requests never appear in announced or consume", async () => {
 	const upstream = new BroadcastProducer();
 	origin.requests.peek()?.get(path)?.front.set(upstream.consume());
 
-	// An answered request is assumed present, not known live, so it is not availability.
-	expect(consumer.get(path)).toBeUndefined();
+	// An answered request is assumed present, not known live, so it is not availability: it
+	// stays out of the table, and out of the announcements the table drives.
+	expect(request.active.peek()).toBeDefined();
+	expect(origin.routes(path)).toBe(false);
+	expect(consumer.broadcasts.peek()?.has(path)).toBe(false);
+
 	const announced = consumer.announced();
 	origin.publish(Path.from("real"));
 	expect(await announced.next()).toEqual({ path: Path.from("real"), active: true });
@@ -423,6 +443,46 @@ test("a republish retracts then re-announces the path", async () => {
 	expect(await announced.next()).toEqual({ path, active: true });
 
 	announced.close();
+	origin.close();
+});
+
+test("the one-shot lookup is off the published surface", () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+
+	// `get` was a snapshot that raced a republish, and `request` replaced it. Neither handle
+	// may still carry it: an @internal tag would keep it in the emitted declarations, so the
+	// method has to be gone rather than merely undocumented.
+	expect("get" in consumer).toBe(false);
+	expect("get" in origin).toBe(false);
+
+	origin.close();
+});
+
+test("a routed path needs no blind answer", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("announced");
+
+	// What a serving session scans: a request on a path the table routes resolves to that
+	// route, so answering it blind would park a handle nothing reads.
+	const upstream = new BroadcastProducer();
+	const dispose = origin.insertRemote(path, upstream.consume());
+
+	const request = consumer.request(path);
+	expect(origin.routes(path)).toBe(true);
+	expect(request.active.peek()).toBeDefined();
+
+	// The route going away is what makes the request need an answer, so the serving loop has
+	// to wake on the table, not just on the requests map.
+	const woken = origin.changed();
+	dispose();
+	await woken;
+	expect(origin.routes(path)).toBe(false);
+	expect(request.active.peek()).toBeUndefined();
+
+	request.close();
+	upstream.close();
 	origin.close();
 });
 

@@ -12,12 +12,14 @@ async function settle() {
 }
 
 // Polls until `pred` holds, so a regression fails the test instead of hanging it.
-async function waitUntil(pred: () => boolean): Promise<void> {
-	for (let i = 0; i < 500; i++) {
+async function waitUntil(pred: () => boolean, ms = 1000): Promise<void> {
+	// Date, not performance: the retry test accelerates the latter.
+	const deadline = Date.now() + ms;
+	for (;;) {
 		if (pred()) return;
+		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
 		await settle();
 	}
-	throw new Error("timed out waiting for condition");
 }
 
 // A tiny window keeps the linger tests quick without mocking timers. The wait is a wide
@@ -141,6 +143,41 @@ test("switching URLs switches origins", async () => {
 	handle.close();
 });
 
+test("a shared connection outlasts an outage longer than the default retry window", async () => {
+	let offline = true;
+	const stub = function StubWebTransport() {
+		if (offline) throw new Error("relay is down");
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// The loop measures its retry window with performance.now, so speeding that clock up makes
+	// a couple of real backoff waits look like minutes to it. A pooled connection has nobody
+	// watching `closed` to redial it, so giving up would leave every handle on this URL dark
+	// until the page reloads, however long the relay has been back.
+	const real = performance.now.bind(performance);
+	const start = real();
+	performance.now = () => start + (real() - start) * 1000;
+
+	try {
+		const handle = new Shared({ url, linger });
+		await waitUntil(() => handle.status.peek() === "disconnected");
+
+		// Two backoff waits, which is many times over the default window on this clock.
+		await new Promise((resolve) => setTimeout(resolve, 2000));
+		expect(handle.status.peek()).not.toBe("connected");
+
+		offline = false;
+		await waitUntil(() => handle.status.peek() === "connected", 15_000);
+
+		handle.close();
+	} finally {
+		performance.now = real;
+	}
+}, 30_000);
+
 test("a publish through one handle resolves locally for another", async () => {
 	stubTransports();
 
@@ -153,10 +190,11 @@ test("a publish through one handle resolves locally for another", async () => {
 	const broadcast = origin.publish(Path.from("mine"));
 	broadcast.createTrack("chat");
 
-	// Loopback: the shared origin serves the page's own publish with no round trip.
-	const handle = watcher.origin.peek()?.get(Path.from("mine"));
-	expect(handle).toBeDefined();
-	handle?.close();
+	// Loopback: the shared origin serves the page's own publish with no round trip, so the
+	// request resolves synchronously instead of waiting on the relay to announce it back.
+	const request = watcher.origin.peek()?.request(Path.from("mine"));
+	expect(request?.active.peek()).toBeDefined();
+	request?.close();
 
 	broadcast.close();
 	publisher.close();

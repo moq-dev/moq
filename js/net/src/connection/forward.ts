@@ -25,8 +25,16 @@ import type { Established } from "./established.ts";
  * @internal
  */
 export function forwardAnnounced(conn: Established, origin: OriginProducer): void {
-	const detach = origin.attach(conn.discovery);
-	void conn.closed.then(detach);
+	// Reassigned if discovery dies under a live session, so the origin stops counting this
+	// one as a discovering session. Called through a closure so the session's death always
+	// detaches whichever attachment is current.
+	let detach = origin.attach(conn.discovery);
+
+	let dead = false;
+	void conn.closed.then(() => {
+		dead = true;
+		detach();
+	});
 
 	void serveRequests(conn, origin);
 
@@ -43,6 +51,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	void conn.closed.then(() => announced.close());
 
 	void (async () => {
+		let failure: unknown;
 		try {
 			for (;;) {
 				const event = await announced.next();
@@ -58,12 +67,25 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 					dispose?.();
 				}
 			}
-		} catch {
-			// The session died mid-stream; the cleanup below retracts everything it fed.
+		} catch (err) {
+			// The session died mid-stream, or the relay refused or reset the stream. The
+			// cleanup below retracts everything this stream fed either way.
+			failure = err;
 		} finally {
 			for (const dispose of inserted.values()) dispose();
 			inserted.clear();
 			announced.close();
+
+			// Discovery ended while the session lives, and nothing reopens the stream on this
+			// connection. Downgrade the attachment rather than leaving the origin claiming a
+			// discovery that no longer works: announcement-gated consumers would wait forever
+			// on a table this session can no longer fill. Now they fall back to standing
+			// requests, which this session still answers.
+			if (!dead) {
+				console.warn("broadcast discovery failed; broadcasts resolve on request only.", failure);
+				detach();
+				detach = origin.attach(false);
+			}
 		}
 	})();
 }
@@ -75,6 +97,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * legal, and a missing broadcast surfaces as a reset on the first track. The first session
  * to answer wins; when this session dies its answers are withdrawn so a later session
  * answers again, which is what makes a request span reconnects.
+ *
+ * A path the table already routes is left alone. A request resolves to the table's route over
+ * any blind answer, so answering one would only park a handle nothing reads.
  */
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
 	// The withdraws for the answers this session provided, so a dead session only takes
@@ -86,13 +111,13 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		dead = true;
 	});
 
-	const requests = origin.requests;
 	for (;;) {
-		const map = requests.peek();
+		const map = origin.requests.peek();
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
 			if (answered.has(path) || slot.front.peek() !== undefined) continue;
+			if (origin.routes(path)) continue;
 			const withdraw = origin.answer(path, conn.consume(path));
 			if (withdraw) answered.set(path, withdraw);
 		}
@@ -104,7 +129,9 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 			withdraw();
 		}
 
-		await Promise.race([requests.changed(), closed]);
+		// Woken by the table too, not just the requests: a path that stops being routed needs
+		// the blind answer this loop skipped while it was.
+		await Promise.race([origin.changed(), closed]);
 	}
 
 	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.
