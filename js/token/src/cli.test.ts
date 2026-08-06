@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const CLI = join(import.meta.dir, "cli.ts");
+const CLI = join(import.meta.dir, `cli${extname(fileURLToPath(import.meta.url))}`);
 
 function run(...args: string[]) {
 	const result = Bun.spawnSync(["bun", CLI, ...args]);
