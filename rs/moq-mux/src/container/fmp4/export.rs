@@ -348,12 +348,7 @@ impl<S: Stream> Export<S> {
 			}
 			let source = ExportSource::for_video(&self.source, name, config, self.latency)?;
 			let timescale = catalog_timescale_video(config)?;
-			// A zero / NaN / infinite framerate would divide the timescale into a non-finite
-			// tick count; fall back to the default in that case.
-			let framerate = config
-				.framerate
-				.filter(|fps| fps.is_finite() && *fps > 0.0)
-				.unwrap_or(30.0);
+			let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
 			self.tracks.insert(
 				name.clone(),
 				Fmp4Track {
@@ -589,12 +584,9 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 
 /// The duration to give a sample that carries none, exact at the track's own timescale.
 ///
-/// A frame period is the rational `timescale / rate`, and deriving the video timescale as
-/// `framerate * 1000` exists precisely so that division comes out whole. Carrying the period as a
-/// [`Duration`] threw that away: 1/30 s is 33333333 ns, which is 999.99999 ticks at 30 kHz and
-/// truncates to 999. That hit most real framerates (23.976, 29.97, 30, 48, 59.94, 90, 120), with
-/// 24/25/50/60 escaping only on where the nanosecond conversion happened to round. Divide at the
-/// target scale instead, so the common case is exact and the rest is off by at most half a tick.
+/// A frame period is the rational `timescale / rate`. A derived video timescale of
+/// `framerate * 1000` makes that division exact; another scale rounds to the nearest tick, with
+/// at most half a tick of error.
 ///
 /// `rate` is frames per second: the catalog framerate for video, `sample_rate / 1024` for audio.
 pub(crate) fn fallback_duration(timescale: u64, rate: f64) -> Result<Timestamp> {
@@ -678,10 +670,9 @@ pub(crate) fn infer_missing_durations(
 	default_frame: Timestamp,
 ) -> Vec<Frame> {
 	let infer_from_pts = pts_monotonic(&frames, successor);
-	// The fallback stays at the track's own scale rather than being converted to the frames'.
-	// Each duration is rescaled independently when it reaches the `trun`, so a mixed-scale slice
-	// encodes the same; converting here is what loses the tick, since the frames' scale is
-	// usually microseconds and a frame period like 1/30 s isn't representable there.
+	// Each duration is rescaled independently when it reaches the `trun`, so mixed-scale
+	// timestamps remain valid. Keep the fallback at the track scale where its nominal period is
+	// represented most accurately.
 	let fallback = Some(default_frame);
 
 	for i in 0..frames.len() {
@@ -780,10 +771,7 @@ mod tests {
 		}
 	}
 
-	// A frame period is the rational timescale/rate, and the video timescale is `framerate * 1000`
-	// precisely so that division comes out whole. Carrying it as a Duration threw that away: 1/30 s
-	// is 33333333 ns, which is 999.99999 ticks at 30 kHz and truncated to 999. Most real framerates
-	// were short; 24/25/50/60 escaped only on where the nanosecond conversion happened to round.
+	// A derived video timescale expresses each listed frame period as exactly 1,000 ticks.
 	#[test]
 	fn fallback_duration_is_exact_at_the_derived_timescale() {
 		for fps in [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0, 90.0, 120.0] {

@@ -27,14 +27,10 @@ enum Kind {
 
 /// The rendition's nominal frame period, exact at `timescale`.
 ///
-/// A zero / NaN / infinite catalog framerate would divide the timescale into a non-finite tick
-/// count, so it takes the same 30 fps default the rest of the muxer does.
+/// An unusable catalog framerate takes the same 30 fps default as the exporter.
 fn default_frame(kind: &Kind, timescale: moq_net::Timescale) -> crate::Result<moq_net::Timestamp> {
 	let rate = match kind {
-		Kind::Video(config) => config
-			.framerate
-			.filter(|fps| fps.is_finite() && *fps > 0.0)
-			.unwrap_or(30.0),
+		Kind::Video(config) => super::usable_video_framerate(config).unwrap_or(30.0),
 		// ~1024 samples per packet is the AAC frame; Opus states its own duration anyway.
 		Kind::Audio(config) => config.sample_rate.max(1) as f64 / 1024.0,
 	};
@@ -329,15 +325,31 @@ mod tests {
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
 	}
 
-	// The fallback duration is a tick count at the muxer's own scale, so an override has to
-	// recompute it rather than carry the old one: one 30 fps frame period is 1000 ticks at
-	// 30 kHz and 3000 at 90 kHz.
+	// A timescale override recomputes the fallback tick count at the new scale.
 	#[test]
 	fn with_timescale_recomputes_the_fallback_frame_duration() {
 		let timescale = moq_net::Timescale::new(90_000).unwrap();
 		let muxer = video_muxer().with_timescale(timescale).unwrap();
 
 		// One duration-less frame has no successor to be timed by, so it takes the fallback.
+		let frame = Frame {
+			timestamp: Timestamp::from_scale(0, 90_000).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+	}
+
+	#[test]
+	fn unusable_framerate_uses_the_standard_fallback_rate() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(0.0005);
+		let muxer = Muxer::video(&config).unwrap();
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		assert_eq!(muxer.timescale(), timescale);
+
 		let frame = Frame {
 			timestamp: Timestamp::from_scale(0, 90_000).unwrap(),
 			payload: Bytes::from_static(&[0xDE, 0xAD]),

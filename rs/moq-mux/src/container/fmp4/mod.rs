@@ -727,7 +727,7 @@ fn mdhd_timescale(timescale: u64) -> Result<u32> {
 /// Narrow a sample duration to the 32-bit `trun` field, rejecting what would truncate.
 ///
 /// The same number advances the decode time, both inside a fragment and across the run
-/// [`Muxer::fragments`] cuts, so a silent narrowing would leave the fragment claiming less time
+/// [`Muxer::fragment`] encodes, so a silent narrowing would leave the fragment claiming less time
 /// than the next `tfdt` starts at. `u32::MAX` is an accepted timescale, which puts a one-second
 /// sample right at the edge of the field.
 fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
@@ -777,14 +777,16 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// 30.0005 fps gives 30000; the common broadcast rates (29.97, 59.94, 23.976) all land on a whole
 /// tick already.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	let ticks = config
+	usable_video_framerate(config)
+		.map(|fps| (fps * 1000.0) as u64)
+		.unwrap_or(90_000)
+}
+
+/// A finite catalog framerate that produces at least one tick at the derived scale.
+fn usable_video_framerate(config: &VideoConfig) -> Option<f64> {
+	config
 		.framerate
-		.filter(|fps| fps.is_finite())
-		.map(|fps| (fps * 1000.0) as u64);
-	match ticks {
-		Some(ticks) if ticks > 0 => ticks,
-		_ => 90000,
-	}
+		.filter(|fps| fps.is_finite() && (fps * 1000.0) as u64 > 0)
 }
 
 #[cfg(test)]
