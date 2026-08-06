@@ -99,7 +99,9 @@ The rename/removal rationale lives in the commit message and PR description, not
 
 ## Retries
 
-Fail fast; retry only what a few seconds can fix. Every retry loop uses capped exponential backoff with jitter, inlined at the call site (no shared `Backoff` type), and is bounded by *time*, not by error type: a short budget (~10s), then surface the last real error. Don't classify errors as retryable (`is_retryable()`); an ephemeral failure is one that clears within the budget, so the budget is the classifier. The one exception is an answer a peer actually sent, where the protocol defines the meaning: an HTTP status short-circuits (a `404` fails immediately; `408`/`429`/gateway statuses ride the backoff) via the `status()` accessors on `moq_native::Error` / `moq_hls::Error`. The only unbounded loops are process-lifetime supervisors with nobody to return an error to (cluster peers, device reopen, accept loops); they retry forever but cap the delay at seconds and warn per attempt, loudly broken rather than silently parked. Exactly one layer owns a retry: an outer loop that rebuilds an inner one resets its escalation, so watch the inner loop's terminal signal instead.
+Retry only operations that are safe to repeat and whose failure may clear without caller action. Use capped exponential backoff with jitter and normally stop after a short time or attempt budget, returning the last real error. Retry indefinitely only in process-lifetime supervisors waiting for external state; cap the delay and report failures.
+
+Use explicit protocol semantics to fail early when available, such as authentication rejection or a non-retryable HTTP status. Avoid broad `is_retryable()` classifications for opaque failures. Exactly one layer owns each retry sequence: callers must observe its terminal result rather than recreate it and reset its budget.
 
 ## Root Cause First
 
