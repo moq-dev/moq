@@ -115,12 +115,51 @@ check-all *args:
 # `bun install` because remark-cli lives in node_modules and `just js check` is
 # where it would otherwise be installed, which a Rust-only diff skips.
 
+# Run shell checks or formatting over tracked files that exist in the worktree.
+[private]
+_shell $ACTION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! command -v shfmt >/dev/null 2>&1; then
+        exit 0
+    fi
+    if [[ "$ACTION" == "check" ]] && ! command -v shellcheck >/dev/null 2>&1; then
+        exit 0
+    fi
+
+    scripts_file=$(mktemp)
+    trap 'rm -f "$scripts_file"' EXIT
+    shfmt -f=0 . > "$scripts_file"
+
+    scripts=()
+    while IFS= read -r -d '' file; do
+        if git --literal-pathspecs ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
+            scripts+=("$file")
+        fi
+    done < "$scripts_file"
+    ((${#scripts[@]})) || exit 0
+
+    case "$ACTION" in
+        check)
+            shfmt --diff "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+            ;;
+        fix)
+            shfmt --write "${scripts[@]}"
+            ;;
+        *)
+            echo "invalid shell action: $ACTION" >&2
+            exit 2
+            ;;
+    esac
+
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then files=$(git ls-files -z | xargs -0 shfmt -f); shfmt --diff $files && shellcheck $files; fi
+    just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
@@ -229,8 +268,7 @@ fix-all:
 _fix-common:
     bun install
     bun remark . --quiet --output
-    # Ignored dependency trees can contain shell syntax unsupported by our formatter.
-    @if command -v shfmt >/dev/null 2>&1; then files=$(git ls-files -z | xargs -0 shfmt -f); shfmt --write $files; fi
+    just _shell fix
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --justfile "$f"; done
