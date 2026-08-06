@@ -17,7 +17,14 @@ use winit::window::{Window, WindowId};
 
 use crate::subscribe::{CatalogFormatArg, SelectArgs};
 
+/// Decoded frames held for presentation. About a second at 30fps, which absorbs
+/// a burst without letting a decoder that outruns the clock grow unbounded. The
+/// oldest go first, since the render loop would skip past them anyway.
 const MAX_VIDEO_FRAMES: usize = 30;
+
+/// How early a frame may be shown rather than waiting another wakeup for it.
+/// Under a display's frame interval, so it can't be seen, but enough that timer
+/// slop doesn't push every frame a whole refresh late.
 const VIDEO_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
 
 /// Play one MoQ broadcast through a native window and speaker.
@@ -64,6 +71,10 @@ enum Event {
 }
 
 /// Run native playback on the calling thread until the window closes.
+///
+/// Blocking is deliberate: winit only builds an event loop on the process main
+/// thread, so this has to stay on the `#[tokio::main]` future rather than being
+/// spawned. Media and transport run on tasks and talk to it through the proxy.
 pub fn run(
 	source: moq_mux::Source,
 	broadcast: String,
@@ -161,16 +172,26 @@ async fn media(
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut video_started = false;
 	let mut audio_started = false;
+	// Set once the catalog track ends, which disarms the branch below: a stream
+	// that has returned `None` returns it forever, so polling it again spins.
+	let mut catalog_ended = false;
 
 	loop {
+		// Audio and video end independently, so one track finishing is not the end
+		// of playback. Stop once every track that started has ended.
+		if tasks.is_empty() && (video_started || audio_started) {
+			return Ok(());
+		}
+
 		tokio::select! {
 			result = tasks.join_next(), if !tasks.is_empty() => {
-				return joined(result.expect("guarded by is_empty"));
+				joined(result.expect("guarded by is_empty"))?;
 			}
-			snapshot = catalogs.next(), if !video_started || !audio_started => {
+			snapshot = catalogs.next(), if !catalog_ended && (!video_started || !audio_started) => {
 				let Some(snapshot) = snapshot.context("failed to read the catalog")? else {
 					anyhow::ensure!(video_started || audio_started, "the catalog contains no playable audio or video renditions");
-					break;
+					catalog_ended = true;
+					continue;
 				};
 
 				if !video_started {
@@ -195,6 +216,9 @@ async fn media(
 						let rendition = source.resolve(config.broadcast.as_ref()).await?;
 						let mut decode = moq_audio::decode::Config::new();
 						decode.latency_max = Some(args.latency_max);
+						// The sink and the frame-duration math below both assume f32,
+						// so ask for it rather than inheriting the decoder default.
+						decode.format = moq_audio::Format::F32;
 						match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
 							Ok(consumer) => {
 								tracing::info!(track = name, "playing audio rendition");
@@ -206,16 +230,9 @@ async fn media(
 						}
 					}
 				}
-
-				if video_started && audio_started {
-					break;
-				}
 			}
 		}
 	}
-
-	let result = tasks.join_next().await;
-	joined(result.context("all playback tracks stopped")?)
 }
 
 fn joined(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> anyhow::Result<()> {
@@ -262,11 +279,16 @@ async fn play_audio(
 		let end =
 			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
 		sink.write(&frame.data)?;
-		*clock.lock().unwrap() = Some(Clock {
+		let previous = clock.lock().unwrap().replace(Clock {
 			media: end.saturating_sub(sink.buffered()),
 			wall: Instant::now(),
 		});
-		let _ = proxy.send_event(Event::Wake);
+		// Only the very first sample needs a wake, to hand the render loop a clock
+		// to schedule against. After that the clock extrapolates from its wall
+		// anchor, so waking per 20 ms frame would just redraw the same picture.
+		if previous.is_none() {
+			let _ = proxy.send_event(Event::Wake);
+		}
 	}
 	Ok(())
 }
@@ -353,7 +375,12 @@ impl ApplicationHandler<Event> for App {
 			return;
 		}
 		match Display::new(event_loop, &self.title) {
-			Ok(display) => self.display = Some(display),
+			// Draw once up front so the window is black while the broadcast is
+			// still resolving, rather than showing whatever was in the surface.
+			Ok(display) => {
+				display.window.request_redraw();
+				self.display = Some(display);
+			}
 			Err(err) => self.fail(event_loop, err),
 		}
 	}

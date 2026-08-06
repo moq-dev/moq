@@ -106,12 +106,15 @@ pub struct SelectArgs {
 
 impl SelectArgs {
 	/// Build the rendition selection shared by stdout exports and native playback.
-	pub(crate) fn selection(&self, video_codec: Option<VideoCodecKind>) -> select::Broadcast {
+	///
+	/// `force` takes the place of `--video-codec`, for a sink whose format implies
+	/// one. Pass `None` to use the flag as given.
+	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
 		let mut video = select::Video::default();
 		if let Some(name) = &self.video_name {
 			video = video.name(name);
 		}
-		if let Some(codec) = video_codec.or_else(|| self.video_codec.map(Into::into)) {
+		if let Some(codec) = force.or_else(|| self.video_codec.map(Into::into)) {
 			video = video.codec(codec);
 		}
 

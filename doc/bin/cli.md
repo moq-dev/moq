@@ -131,10 +131,13 @@ Once built, play a broadcast with:
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
-`play` follows catalog updates and starts the first supported audio and video
-renditions. Audio drives the video clock when both are present; audio-only and
-video-only broadcasts also work. The window preserves the video's aspect ratio
-and can be closed with Escape, the close button, or Ctrl-C.
+`play` watches the catalog until it has a playable audio and video rendition,
+then stays on them. "First" means the alphabetically first track name, so pass
+`--video-name` / `--audio-name` to pick a specific rung of a ladder. Audio
+drives the video clock when both are present; audio-only and video-only
+broadcasts also work, and playback ends once every track it started has ended.
+The window preserves the video's aspect ratio and can be closed with Escape, the
+close button, or Ctrl-C.
 
 Use `--video-name`, `--audio-name`, `--video-codec`, or `--audio-codec` to select
 a rendition. `--latency-max` controls how far a stalled media group may lag
@@ -430,8 +433,8 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
 
-Stdout exports can also select one rendition per media role before the sink
-subcommand:
+Stdout exports and `play` can also select one rendition per media role, before
+the sink subcommand:
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
@@ -441,7 +444,7 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 - `--video-name <name>` picks the video rendition with that exact catalog name.
 - `--video-codec <h264|h265|vp8|vp9|av1>` keeps only matching video renditions.
 - `--audio-name <name>` picks the audio rendition with that exact catalog name.
-- `--audio-codec <aac|opus>` keeps only matching audio renditions.
+- `--audio-codec <aac|opus|pcm>` keeps only matching audio renditions.
 
 With no selection flags, every matching rendition is kept. The `h264` and `h265`
 export sinks force the matching video codec, so use `export h264` / `export h265`

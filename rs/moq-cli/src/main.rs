@@ -122,13 +122,14 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-/// Fill the shared Origin from MoQ, then play one broadcast locally.
-#[cfg(feature = "play")]
-async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
-	let origin = moq.origin()?;
-	let name = moq.broadcast.clone().unwrap_or_default();
-	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
-
+/// Attach the MoQ side so it fills the shared Origin: dial a relay, accept
+/// inbound sessions, or both. Shared by every verb that consumes.
+fn spawn_moq_consume(
+	moq: &MoqSide,
+	net: &Net,
+	origin: &moq_net::origin::Producer,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
 	if moq.client.connect.is_some()
 		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
 	{
@@ -143,6 +144,21 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
 		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
 	}
+	Ok(())
+}
+
+/// Fill the shared Origin from MoQ, then play one broadcast locally.
+///
+/// The playback event loop runs on this task's thread rather than a spawned one:
+/// winit can only build an event loop on the process main thread, which is where
+/// `#[tokio::main]` polls this future.
+#[cfg(feature = "play")]
+async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
+	let origin = moq.origin()?;
+	let name = moq.broadcast.clone().unwrap_or_default();
+	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
 
 	let source = moq_mux::Source::new(origin.consume(), &name);
 	play::run(source, name, args, tasks)
@@ -291,20 +307,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: fill the Origin.
-	if moq.client.connect.is_some()
-		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
-	{
-		moq::notify_ready();
-		tasks.spawn(async move { Ok(reconnect.closed().await?) });
-	}
-	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
-		let certificates = server.certificates();
-		moq::notify_ready();
-		let origin = origin.clone();
-		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
-	}
+	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
 
 	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {
