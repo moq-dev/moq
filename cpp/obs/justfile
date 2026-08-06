@@ -71,9 +71,9 @@ test:
     # success without running anything is worse than no gate, and nothing else
     # covers this code.
     cxx="${CXX:-c++}"
-    unsupported="'$cxx' cannot build with -fsanitize=thread. These tests need a clang or gcc style
-    driver with ThreadSanitizer: set CXX, or on Windows run them from WSL, since neither MSVC
-    nor clang on Windows implements ThreadSanitizer."
+    unsupported="'$cxx' cannot build with -fsanitize=thread. These tests need a Clang or GCC
+    compiler that supports ThreadSanitizer: set CXX, or on Windows run them from WSL, since
+    neither MSVC nor Clang on Windows implements ThreadSanitizer."
     if ! command -v "$cxx" >/dev/null; then
         echo "no C++ compiler at '$cxx'." >&2
         echo "$unsupported" >&2

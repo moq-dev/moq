@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.5...moq-hls-v0.4.6) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+
 ## [0.4.5](https://github.com/moq-dev/moq/compare/moq-hls-v0.4.4...moq-hls-v0.4.5) - 2026-08-05
 
 ### Other
