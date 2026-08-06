@@ -44,6 +44,22 @@ See [`js/net/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js
 
 ## Core Concepts
 
+### Origins
+
+A routing table of broadcasts by path, independent of any connection. Publishing goes through an origin, not a session: create one, publish broadcasts into it, and hand it to a connection via the `publish` option. The connection announces and serves the table for as long as the session lasts, and a reconnect re-announces whatever is still published.
+
+```ts
+const origin = new Moq.Origin.Producer();
+await Moq.Connection.connect(url, { publish: origin.consume() });
+
+const broadcast = origin.publish(Moq.Path.from("my-broadcast"));
+broadcast.createTrack("chat");
+```
+
+Closing the connection unannounces the broadcasts but does not close them; they stay in the origin for the next session. Closing a broadcast's producer unpublishes just that path.
+
+The other direction works the same way: pass an origin as the `subscribe` option and everything the peer announces appears in its table, consumable by path and gone when the session dies. `origin.consume(path)` resolves local publishes first, so a page that publishes and watches the same broadcast reads its own copy with no round trip. For a path nothing announces (a relay without discovery, or subscribing before the publisher exists on purpose), `origin.request(path)` asks the attached sessions to resolve it blind; the request stands across reconnects.
+
 ### Broadcasts
 
 A collection of related tracks.

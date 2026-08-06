@@ -17,6 +17,8 @@ export * as Connection from "./connection/index.ts";
 export { RemoteError, SessionCode, StreamCode } from "./error.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
+/** Broadcast routing tables, independent of any connection. */
+export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. */
 export * as Path from "./path.ts";
 /** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */

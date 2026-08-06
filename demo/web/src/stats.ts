@@ -84,7 +84,7 @@ const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
 // The relay URL, editable at runtime (see the input binding below).
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
-const connection = new Net.Connection.Reload({ url: relayUrl, enabled: true });
+const connection = new Net.Connection.Shared({ url: relayUrl });
 
 // ---- Discover nodes + subscribe to each -----------------------------------
 

@@ -1,7 +1,8 @@
-import { type Dispose, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -150,9 +151,10 @@ export class Publisher {
 	// subscriptions share it, since a second getWriter on the same stream would throw.
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
-	// Our published broadcasts.
-	// It's a signal so we can live update any announce streams.
-	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
+	// The published broadcasts, borrowed from the origin this session serves. The origin
+	// outlives the session, so this is read-only here: announce streams watch it for
+	// changes, and closing the session leaves the broadcasts alone.
+	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
@@ -165,37 +167,21 @@ export class Publisher {
 	 * @param quic - The WebTransport session to use
 	 * @param version - Negotiated protocol version
 	 * @param origin - Origin id shared with the Subscriber
+	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, origin: Origin) {
+	constructor(quic: WebTransport, version: Version, origin: Origin, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.version = version;
 		this.origin = origin;
+		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
 		if (hasDatagrams(version)) {
 			this.#datagramWriter = DatagramStream.datagramWriter(quic);
 		}
-	}
-
-	/**
-	 * Publishes a broadcast with any associated tracks.
-	 * @param name - The broadcast to publish
-	 */
-	publish(path: Path.Valid, broadcast: broadcast.Producer) {
-		this.#broadcasts.mutate((broadcasts) => {
-			if (!broadcasts) throw new Error("closed");
-			broadcasts.set(path, broadcast);
-		});
-
-		// Remove the broadcast from the lookup when it's closed.
-		void broadcast.closed.then(() => {
-			this.#broadcasts.mutate((broadcasts) => {
-				broadcasts?.delete(path);
-			});
-		});
 	}
 
 	/**
@@ -208,17 +194,19 @@ export class Publisher {
 	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Send initial announcements
-		let active = new Set<Path.Valid>();
+		// Send initial announcements. Keyed by suffix, valued by the routing front, so a
+		// republish (a new broadcast taking the path) diffs as ended-then-active rather
+		// than nothing; the subscriber treats that as a restart and re-consumes.
+		let active = new Map<Path.Valid, broadcast.Consumer>();
 
 		const broadcasts = this.#broadcasts.peek();
 		if (!broadcasts) return; // closed
 
-		for (const name of broadcasts.keys()) {
+		for (const [name, front] of broadcasts) {
 			const suffix = Path.stripPrefix(msg.prefix, name);
 			if (suffix === null) continue;
 			console.debug(`announce: broadcast=${name} active=true`);
-			active.add(suffix);
+			active.set(suffix, front);
 		}
 
 		// Lite06+: announce ids. Every active we send implicitly assigns the next
@@ -229,14 +217,14 @@ export class Publisher {
 		switch (this.version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
-				const init = new AnnounceInit([...active]);
+				const init = new AnnounceInit([...active.keys()]);
 				await init.encode(stream.writer, this.version);
 				break;
 			}
 			default: {
 				if (!hasAnnounceOk(this.version)) {
 					// Draft03/04: send individual Announce messages, stamping our origin as a hop.
-					for (const suffix of active) {
+					for (const suffix of active.keys()) {
 						await encodeAnnounceBroadcast(
 							stream.writer,
 							{ status: "active", suffix, hops: [this.origin] },
@@ -250,7 +238,7 @@ export class Publisher {
 				// that follow; the subscriber stamps our origin onto each hop chain, so we omit it.
 				const ok = new AnnounceOk(this.origin, active.size);
 				await ok.encode(stream.writer, this.version);
-				for (const suffix of active) {
+				for (const suffix of active.keys()) {
 					if (hasAnnounceId(this.version)) {
 						announceIds.set(suffix, nextAnnounceId++);
 					}
@@ -264,7 +252,7 @@ export class Publisher {
 		for (;;) {
 			// TODO Make a better helper within Signals.
 			let dispose!: Dispose;
-			const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+			const changed = new Promise<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>((resolve) => {
 				dispose = this.#broadcasts.changed(resolve);
 			});
 
@@ -273,29 +261,20 @@ export class Publisher {
 			dispose();
 			if (!broadcasts) break;
 
-			// Create a new set of active broadcasts.
+			// Create a new map of active broadcasts.
 			// This is SLOW, but it's not worth optimizing because we often have just 1 broadcast anyway.
-			const newActive = new Set<Path.Valid>();
-			for (const name of broadcasts.keys()) {
+			const newActive = new Map<Path.Valid, broadcast.Consumer>();
+			for (const [name, front] of broadcasts) {
 				const suffix = Path.stripPrefix(msg.prefix, name);
 				if (suffix === null) continue; // Not our prefix.
-				newActive.add(suffix);
+				newActive.set(suffix, front);
 			}
 
-			// Announce any new broadcasts. Lite05+ reports our origin once via AnnounceOk, so
-			// the subscriber stamps it onto each hop chain; older versions stamp it here.
-			for (const added of newActive.difference(active)) {
-				console.debug(`announce: broadcast=${added} active=true`);
-				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
-				if (hasAnnounceId(this.version)) {
-					announceIds.set(added, nextAnnounceId++);
-				}
-				await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix: added, hops }, this.version);
-			}
-
-			// Announce any removed broadcasts. Lite06+ retracts by announce id;
+			// Retract removed and superseded broadcasts first, so a republish reads as
+			// ended-then-active (a restart) on the wire. Lite06+ retracts by announce id;
 			// older versions repeat the path (ended announces don't need hops).
-			for (const removed of active.difference(newActive)) {
+			for (const [removed, front] of active) {
+				if (newActive.get(removed) === front) continue;
 				console.debug(`announce: broadcast=${removed} active=false`);
 				if (hasAnnounceId(this.version)) {
 					const id = announceIds.get(removed);
@@ -307,8 +286,18 @@ export class Publisher {
 				}
 			}
 
-			// NOTE: This is kind of a hack that won't work with a rapid UNANNOUNCE/ANNOUNCE cycle.
-			// However, our client doesn't do that anyway.
+			// Announce new and superseding broadcasts. Lite05+ reports our origin once via
+			// AnnounceOk, so the subscriber stamps it onto each hop chain; older versions
+			// stamp it here.
+			for (const [added, front] of newActive) {
+				if (active.get(added) === front) continue;
+				console.debug(`announce: broadcast=${added} active=true`);
+				const hops = hasAnnounceOk(this.version) ? [] : [this.origin];
+				if (hasAnnounceId(this.version)) {
+					announceIds.set(added, nextAnnounceId++);
+				}
+				await encodeAnnounceBroadcast(stream.writer, { status: "active", suffix: added, hops }, this.version);
+			}
 
 			active = newActive;
 		}
@@ -903,12 +892,8 @@ export class Publisher {
 	}
 
 	close() {
-		this.#broadcasts.update((broadcasts) => {
-			for (const broadcast of broadcasts?.values() ?? []) {
-				broadcast.close();
-			}
-			return undefined;
-		});
+		// The broadcasts belong to the origin, which outlives this session; closing here
+		// only drops the borrow. The peer sees the unannounce when the streams die.
 
 		// Release the datagram writer's lock so the stream can be torn down.
 		this.#datagramWriter?.releaseLock();
