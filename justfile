@@ -229,6 +229,7 @@ fix-all:
 _fix-common:
     bun install
     bun remark . --quiet --output
+    # Ignored dependency trees can contain shell syntax unsupported by our formatter.
     @if command -v shfmt >/dev/null 2>&1; then files=$(git ls-files -z | xargs -0 shfmt -f); shfmt --write $files; fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
