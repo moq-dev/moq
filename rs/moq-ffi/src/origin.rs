@@ -237,8 +237,8 @@ impl MoqOriginProducer {
 	/// path for subscribes and fetches without being announced.
 	///
 	/// [`MoqBroadcastProducer::finish`] unpublishes immediately. Dropping the producer
-	/// without finishing is treated as a failure: the path lingers briefly so a
-	/// replacement publisher can take over without subscribers noticing.
+	/// without finishing also unpublishes, but subscribers observe the end as a
+	/// failure rather than a deliberate one.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.

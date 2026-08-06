@@ -30,8 +30,8 @@ public final class OriginProducer: Sendable {
     /// The broadcast starts live: the origin announces the path so subscribers can
     /// discover it, becoming visible shortly after this returns. Toggle
     /// discoverability with `BroadcastProducer.setAnnounce(_:)`; `finish()` unpublishes
-    /// immediately, while releasing the producer without finishing lingers briefly
-    /// so a replacement publisher can take over.
+    /// immediately, while releasing the producer without finishing also unpublishes
+    /// but reads to subscribers as a failure rather than a deliberate end.
     public func createBroadcast(path: String) throws -> BroadcastProducer {
         BroadcastProducer(try ffi.createBroadcast(path: path))
     }

@@ -95,9 +95,8 @@ enum Detach {
 	/// The peer retracted the path, or we are rolling back an announce we just made.
 	/// Nothing is coming back, so close it now.
 	Graceful,
-	/// The stream carrying the path went away without retracting it. Leave the
-	/// origin's linger window open so a source reconnecting into it resumes the
-	/// broadcast instead of viewers seeing it end here.
+	/// The stream carrying the path went away without retracting it. Abort the
+	/// source so viewers observe the loss as an error rather than a clean end.
 	Abrupt,
 }
 
@@ -595,7 +594,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// Ending cleanly IS the retraction here, unlike a NAMESPACE stream: this stream
 			// carries exactly one advertisement, and withdrawing it is what ends the stream.
 			// Any other ending left the advertisement standing, so the peer never withdrew
-			// it and the origin's linger window stays open for the reconnect.
+			// it and the loss reads as abrupt (an error, not a clean end).
 			let detach = match res.is_ok() {
 				true => Detach::Graceful,
 				false => Detach::Abrupt,
@@ -960,8 +959,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let producer = entry.remove().producer;
 					match detach {
 						Detach::Graceful => producer.finish(),
-						// Dropping the guard aborts the source, which is what leaves the
-						// origin's linger window open for a replacement.
+						// Dropping the guard aborts the source, so the loss reads as an
+						// error rather than a clean end.
 						Detach::Abrupt => drop(producer),
 					}
 				}
@@ -1686,18 +1685,8 @@ mod tests {
 		Subscriber<crate::lite::test_transport::SinkSession>,
 		crate::origin::Producer,
 	) {
-		cluster_subscriber_with_linger(self_origin, std::time::Duration::ZERO)
-	}
-
-	fn cluster_subscriber_with_linger(
-		self_origin: crate::Origin,
-		linger: std::time::Duration,
-	) -> (
-		Subscriber<crate::lite::test_transport::SinkSession>,
-		crate::origin::Producer,
-	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).with_linger(linger).produce();
+		let origin = crate::origin::Info::new(self_origin).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -1811,26 +1800,19 @@ mod tests {
 		assert_eq!(subscriber.route(Some(&advert), &free).unwrap().route.cost, 2);
 	}
 
-	/// A namespace stream that ends with advertisements still live must detach them
-	/// ABRUPTLY, leaving the origin's linger window open so a source reconnecting into
-	/// it resumes the broadcast. Finishing instead closes it synchronously, which
-	/// viewers see as an end and which promises that a later create at the path is new
-	/// content rather than a resumption: the wrong promise for a transient blip.
-	///
-	/// True even of a clean FIN, since closing the stream retracts nothing: the protocol
-	/// has NAMESPACE_DONE for that. moq-lite already behaves this way (its route map is
-	/// a local whose guards drop), which `lite::subscriber` pins separately.
+	/// A namespace stream that ends with advertisements still live detaches them, so
+	/// the broadcast closes rather than staying announced over a dead stream. True
+	/// even of a clean FIN, since closing the stream retracts nothing: the protocol
+	/// has NAMESPACE_DONE for that. moq-lite already behaves this way (its route map
+	/// is a local whose guards drop), which `lite::subscriber` pins separately.
 	///
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
-	/// A zero-linger origin cannot tell the two detaches apart, which is why this sets one.
 	#[tokio::test(start_paused = true)]
-	async fn a_lost_namespace_stream_leaves_the_linger_window_open() {
+	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
-			.with_linger(std::time::Duration::from_secs(30))
-			.produce();
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer answers, advertises one namespace, then the stream ends without ever
@@ -1863,18 +1845,16 @@ mod tests {
 		settle().await;
 
 		assert!(
-			consumer.get_broadcast("x.hang").is_some(),
-			"an ended stream closed the broadcast instead of lingering for a reconnect",
+			consumer.get_broadcast("x.hang").is_none(),
+			"an ended stream must close the broadcast, not leave a stale route",
 		);
 	}
 
-	/// The peer explicitly retracting a namespace still ends the broadcast NOW, linger
-	/// or not: it said the namespace is gone, so holding the front open would stall a
-	/// replacement and promise a resumption that is not coming.
+	/// The peer explicitly retracting a namespace ends the broadcast immediately: it
+	/// said the namespace is gone, so a later create at the path is new content.
 	#[tokio::test(start_paused = true)]
-	async fn an_explicit_namespace_done_closes_despite_the_linger_window() {
-		let (mut subscriber, origin) =
-			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
+	async fn an_explicit_namespace_done_closes_the_broadcast() {
+		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let consumer = origin.consume();
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -1886,14 +1866,13 @@ mod tests {
 		settle().await;
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
-			"an explicit NAMESPACE_DONE lingered instead of closing",
+			"an explicit NAMESPACE_DONE must close the broadcast",
 		);
 	}
 
 	/// v14-16 withdraw a PUBLISH_NAMESPACE with PUBLISH_NAMESPACE_DONE, which the adapter
 	/// delivers as a message before it FINs the virtual stream. Reading it as a stray
-	/// message closes the whole session over a routine unannounce, and strands the
-	/// broadcast for the linger window on the way out.
+	/// message closes the whole session over a routine unannounce.
 	#[tokio::test(start_paused = true)]
 	async fn a_publish_namespace_done_retracts_without_faulting_the_session() {
 		const VERSION: Version = Version::Draft14;
@@ -1910,9 +1889,7 @@ mod tests {
 			.unwrap();
 		let script = log.writes.lock().unwrap().clone();
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
-			.with_linger(std::time::Duration::from_secs(30))
-			.produce();
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
 		let (tasks, task_set) = crate::util::TaskSet::new();
@@ -1944,24 +1921,21 @@ mod tests {
 
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
-			"an explicit withdrawal lingered instead of closing",
+			"an explicit withdrawal must close the broadcast",
 		);
 	}
 
-	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches ABRUPTLY. Only a
-	/// clean close retracts here, since that is how PUBLISH_NAMESPACE_DONE reaches us
-	/// (the adapter turns it into one); a stream that ended any other way still held the
-	/// advertisement, so the origin keeps the linger window open for the reconnect.
+	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches it, closing the
+	/// broadcast: the advertisement was never withdrawn, but the stream carrying it is
+	/// gone, and a route into a dead stream must not stay announced.
 	///
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
 	#[tokio::test(start_paused = true)]
-	async fn a_broken_publish_namespace_stream_leaves_the_linger_window_open() {
+	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft19;
 
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
-			.with_linger(std::time::Duration::from_secs(30))
-			.produce();
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 
 		// The peer sends something that does not belong on this stream, ending it with an
@@ -2001,14 +1975,14 @@ mod tests {
 		settle().await;
 
 		assert!(
-			consumer.get_broadcast("room/host").is_some(),
-			"a broken stream closed the broadcast instead of lingering for a reconnect",
+			consumer.get_broadcast("room/host").is_none(),
+			"a broken stream must close the broadcast, not leave a stale route",
 		);
 	}
 
 	/// Several advertisements share one refcounted source, so the detach that empties it
-	/// is the one that counts: an earlier owner lost abruptly does not outvote the last
-	/// one's explicit retraction, and does not stall a replacement behind a linger.
+	/// is the one that counts: the broadcast survives the first stop and closes on the
+	/// last, whatever kind each detach is.
 	///
 	/// That is the model's own rule for several sources at one path (`detach_source`),
 	/// which is what these advertisements would be had they arrived on two sessions. The
@@ -2016,8 +1990,7 @@ mod tests {
 	/// what the origin sees.
 	#[tokio::test(start_paused = true)]
 	async fn the_last_owner_out_decides_the_detach() {
-		let (mut subscriber, origin) =
-			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
+		let (mut subscriber, origin) = cluster_subscriber(crate::Origin::new(1).unwrap());
 		let consumer = origin.consume();
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
@@ -2028,27 +2001,20 @@ mod tests {
 		}
 		settle().await;
 
-		// One advertisement's stream dies, the other is retracted explicitly.
+		// One advertisement's stream dies: the other still holds the source.
 		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
-		settle().await;
-		assert!(
-			consumer.get_broadcast("room/host").is_none(),
-			"an explicit retraction lingered because an earlier owner was lost abruptly",
-		);
-
-		// The reverse order still lingers: the path was never withdrawn on the way out.
-		for _ in 0..2 {
-			let advert = subscriber.route(None, &peer).expect("route");
-			subscriber.start_announce(path.clone(), advert).unwrap();
-		}
-		settle().await;
-		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
-		subscriber.stop_announce(path, Detach::Abrupt).unwrap();
 		settle().await;
 		assert!(
 			consumer.get_broadcast("room/host").is_some(),
-			"an abrupt last detach closed the broadcast instead of lingering for a reconnect",
+			"the broadcast must survive while an owner remains",
+		);
+
+		// The last owner retracts: the broadcast closes with it.
+		subscriber.stop_announce(path, Detach::Graceful).unwrap();
+		settle().await;
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"the last owner out must close the broadcast",
 		);
 	}
 

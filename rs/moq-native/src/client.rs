@@ -384,20 +384,13 @@ impl Client {
 	/// Connect to the configured [`ClientConfig::connect`] URL, consuming its
 	/// broadcasts into `origin`.
 	///
-	/// Broadcasts fed by these sessions linger across a session drop for as long
-	/// as the reconnect loop keeps retrying ([`Backoff::linger`]): a relay restart
-	/// is a bounded gap the reconnect splices over, not a teardown. When the loop
-	/// gives up, its error surfaces (via [`Connection::closed`]) just before the
-	/// broadcasts abort. With reconnecting disabled there is no gap to splice, so
-	/// the broadcasts don't linger.
+	/// A session drop closes and unannounces the broadcasts it fed; the reconnect
+	/// loop re-announces them once a replacement session attaches. Applications
+	/// observe the outage rather than reading from a stale route.
 	///
 	/// Returns `None` when no `--client-connect` URL was configured.
 	pub fn consume(self, origin: moq_net::origin::Producer) -> Option<Connection> {
 		let url = self.connect.clone()?;
-		let origin = match self.reconnect {
-			true => origin.with_linger(self.backoff.linger()),
-			false => origin,
-		};
 		Some(self.with_subscriber(origin).connect(url))
 	}
 

@@ -189,13 +189,6 @@ connect_api = "https://api.example.com/cluster/connect"
 # whose URL has no inline ?jwt=. Required to authenticate gossip / connect_api
 # discovered peers; for static `connect` peers, prefer an inline ?jwt=.
 token = "cluster.jwt"
-
-# Optional. How long a broadcast stays alive and announced after abruptly
-# losing its last publisher (a session dying without unannouncing). A publisher
-# reconnecting within the window resumes the same broadcast and subscribers
-# never notice. A clean unannounce always takes effect immediately. "0"
-# unannounces abrupt losses immediately too. Default: 5s.
-linger = "5s"
 ```
 
 See [Clustering](/bin/relay/cluster) for topology choices and the trade-off between hand-listed peers and gossip.
@@ -514,7 +507,7 @@ All eviction happens as tracks write (there is no background reaper), so both
 up. A publisher that stops writing but stays connected keeps what it had cached
 until it resumes or the broadcast closes; under memory pressure the byte budget
 is repaid by the tracks that are still writing. A publisher that disconnects has
-its groups released once the broadcast closes (see `cluster.linger`).
+its groups released as soon as the broadcast closes with it.
 
 `duration` only ever lowers retention. `latency_default` is the one knob that
 raises it, and only for peers whose protocol never told us what to keep.

@@ -289,8 +289,7 @@ struct BroadcastState {
 	closing: bool,
 
 	// Set only by `Producer::finish()`: the broadcast ended deliberately, as
-	// opposed to aborting or losing its producer. The origin reads this to decide
-	// whether a detached source may linger for a replacement.
+	// opposed to aborting or losing its producer.
 	finished: bool,
 
 	// The error passed to `Producer::abort()`, reported by `Consumer::closed`.
@@ -642,9 +641,8 @@ impl Producer {
 	/// producer clones are still alive, and existing tracks stay readable so
 	/// consumers can drain what they already have (an abort does not cascade into
 	/// the tracks). Unlike a finish, consumers observe `err` from
-	/// [`Consumer::closed`], and an origin treats the source as ungracefully lost,
-	/// so the path may linger for a replacement (see
-	/// [`origin::Info::linger`](crate::origin::Info::linger)).
+	/// [`Consumer::closed`], so the end reads as a failure rather than a
+	/// deliberate one.
 	///
 	/// Consumes the producer: an abort is terminal. Errors if the broadcast was
 	/// already finished or aborted.
@@ -714,8 +712,8 @@ impl Producer {
 /// A session-owned handle to a source broadcast created via
 /// [`crate::origin::Producer::create_broadcast`]: [`Self::finish`] ends it
 /// deliberately, while dropping the guard aborts it as [`Error::Dropped`] (a dead
-/// session), letting the origin linger the path for a reconnect. Shared by the
-/// lite and IETF subscribers so the drop-vs-finish contract lives in one place.
+/// session), so consumers observe the loss as an error. Shared by the lite and
+/// IETF subscribers so the drop-vs-finish contract lives in one place.
 pub(crate) struct SourceGuard {
 	// `Option` so `finish` can consume the producer while `Drop` aborts it.
 	producer: Option<Producer>,
@@ -1187,9 +1185,7 @@ impl Consumer {
 	}
 
 	/// Whether the broadcast ended via a deliberate [`Producer::finish`], as opposed
-	/// to aborting or losing its producer. `false` while the broadcast is still live;
-	/// an origin uses this to close a front immediately on a deliberate end instead
-	/// of lingering for a replacement.
+	/// to aborting or losing its producer. `false` while the broadcast is still live.
 	pub fn is_finished(&self) -> bool {
 		self.state.read().finished
 	}

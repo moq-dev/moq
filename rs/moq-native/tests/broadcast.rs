@@ -638,7 +638,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	assert!(broadcast.is_some(), "expected live announce");
 
 	// Unannounce: retracted by announce id on the wire. A deliberate finish
-	// unannounces immediately (a bare drop would linger for a reconnect).
+	// unannounces cleanly (a bare drop would read as a failure and log a warning).
 	second.finish();
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
 	assert_eq!(path.as_str(), "second");
@@ -2349,6 +2349,70 @@ async fn one_shot_connect_surfaces_the_session_close() {
 		1,
 		"one-shot mode must dial exactly once"
 	);
+
+	drop(connection);
+	server_handle.abort();
+}
+
+/// The #2695 regression: a dead session unannounces the broadcasts it fed
+/// immediately, even while the reconnect loop keeps retrying (`timeout = 0`
+/// retries forever, which used to keep them announced forever). The reconnect
+/// exists to restore service, not to hide the outage: the application observes
+/// the loss, and a successful redial re-announces.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn a_dead_session_unannounces_while_the_reconnect_retries() {
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let pub_origin = Origin::random().produce();
+	let _broadcast = pub_origin
+		.create_broadcast("live", moq_net::broadcast::Route::new().with_announce(true))
+		.expect("create broadcast");
+
+	// Accept the first session and hand it back so the test can kill it. Later
+	// redials are left hanging (the server stops accepting), so the subscriber is
+	// observed mid-outage with the retry loop still running.
+	let server_pub = pub_origin.clone();
+	let (session_tx, session_rx) = tokio::sync::oneshot::channel();
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("accept");
+		let session = request.with_publisher(&server_pub).ok().await?;
+		let _ = session_tx.send(session);
+		std::future::pending::<()>().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let sub_origin = Origin::random().produce();
+	let mut announcements = sub_origin.consume().announced();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	// Retry forever with a fast cadence: the worst case for a stale announce.
+	client_config.backoff.initial = Some(Duration::from_millis(10));
+	client_config.backoff.timeout = Some(Duration::ZERO);
+	let client = client_config.init().expect("failed to init client");
+
+	let connection = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "live");
+	assert!(broadcast.is_some(), "expected the initial announce");
+
+	// The server kills the session; the loop starts redialing into the void.
+	let session = tokio::time::timeout(TIMEOUT, session_rx)
+		.await
+		.expect("server session timed out")
+		.expect("server task gone");
+	session.abort(moq_net::Error::Cancel);
+
+	// The unannounce lands promptly, while the connection is still retrying.
+	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;
+	assert_eq!(path.as_str(), "live");
+	assert!(broadcast.is_none(), "a dead session must unannounce, not linger");
 
 	drop(connection);
 	server_handle.abort();

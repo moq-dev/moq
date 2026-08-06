@@ -205,6 +205,7 @@ class OriginProducer:
         discover it, becoming visible shortly after this returns. Toggle
         discoverability with :meth:`BroadcastProducer.set_announce`; ``finish()``
         unpublishes immediately, while dropping the producer without finishing
-        lingers briefly so a replacement publisher can take over.
+        also unpublishes but reads to subscribers as a failure rather than a
+        deliberate end.
         """
         return BroadcastProducer._from_inner(self._inner.create_broadcast(path))

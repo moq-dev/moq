@@ -926,7 +926,7 @@ mod tests {
 		// Tear down the publisher mid-group. The track ends abruptly (the cursor drains the
 		// segments it already saw and ends; the still-open live-edge group is NOT finalized,
 		// since a reset can't vouch that its media is complete), while finishing the broadcast
-		// ends it promptly instead of lingering for a reconnect. (Clean-end finalization of the
+		// ends it cleanly rather than as a failure. (Clean-end finalization of the
 		// live edge is covered by segments::tests::next_after_walks_finalized_segments.)
 		drop((catalog, media, registration));
 		broadcast.finish();

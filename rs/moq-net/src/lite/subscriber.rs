@@ -1517,20 +1517,16 @@ mod tests {
 		);
 	}
 
-	/// An announce stream that dies without an explicit `ended` must detach ABRUPTLY,
-	/// leaving the origin's linger window open so a source reconnecting into it resumes
-	/// the broadcast rather than viewers seeing it end here.
+	/// An announce stream that dies without an explicit `ended` closes the broadcast
+	/// as promptly as an explicit retraction: a route into a dead session must not
+	/// stay announced, so viewers observe the loss instead of a stale route.
 	///
-	/// This already falls out of `routes` being a local whose `AnnouncedRoute` guards
-	/// drop, which is exactly what makes it worth pinning: a refactor that finished them
-	/// on the way out, or hoisted the map to the session, would be a silent behavior
-	/// change. `ietf::Subscriber` names the same distinction explicitly as `Detach`.
-	/// A zero-linger origin cannot tell the two apart, so this sets one.
+	/// This falls out of `routes` being a local whose `AnnouncedRoute` guards drop,
+	/// which is exactly what makes it worth pinning: a refactor that hoisted the map
+	/// to the session (outliving the stream) would leak the announcement instead.
 	#[tokio::test(start_paused = true)]
-	async fn a_lost_announce_stream_leaves_the_linger_window_open() {
-		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
-			.with_linger(Duration::from_secs(30))
-			.produce();
+	async fn a_lost_announce_stream_closes_the_broadcast() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
 		let consumer = origin.consume();
 		let (tasks, task_set) = TaskSet::new();
 		std::mem::forget(task_set);
@@ -1555,15 +1551,16 @@ mod tests {
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(consumer.get_broadcast("room/host").is_some());
 
-		// The stream ends without retracting anything: the map dies with it.
+		// The stream ends without retracting anything: the map dies with it and the
+		// broadcast closes.
 		drop(routes);
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
-			consumer.get_broadcast("room/host").is_some(),
-			"an abnormal stream loss closed the broadcast instead of lingering for a reconnect",
+			consumer.get_broadcast("room/host").is_none(),
+			"an abnormal stream loss must close the broadcast",
 		);
 
-		// An explicit retraction still closes it now, linger or not.
+		// An explicit retraction closes it the same way.
 		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
 		let mut routes = HashMap::new();
 		subscriber
@@ -1574,7 +1571,7 @@ mod tests {
 		tokio::time::sleep(Duration::from_millis(1)).await;
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
-			"an explicit retraction lingered instead of closing",
+			"an explicit retraction must close the broadcast",
 		);
 	}
 }

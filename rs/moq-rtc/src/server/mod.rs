@@ -62,7 +62,7 @@ struct AcceptedSession {
 	cancel: Option<oneshot::Receiver<()>>,
 	role: &'static str,
 	// WHIP only: a clone of the ingest broadcast, so a deliberate DELETE can
-	// finish() it (prompt unannounce) instead of lingering for a reconnect.
+	// finish() it: a clean end instead of an abort error.
 	broadcast: Option<moq_net::broadcast::Producer>,
 }
 

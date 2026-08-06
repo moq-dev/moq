@@ -21,12 +21,6 @@ use crate::{AuthToken, nodes::MESH_PREFIX};
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Default for [`ClusterConfig::linger`]: how long a broadcast survives abruptly
-/// losing its last publisher before unannouncing. Long enough for a publisher
-/// restart or a brief network blip to resume seamlessly, short enough that a
-/// genuinely-gone broadcast unannounces promptly.
-const DEFAULT_LINGER: Duration = Duration::from_secs(5);
-
 /// How long a peer must stay unannounced before we abort the dial. Must clear the
 /// "prefer shorter hop" re-announce flap (which arrives as
 /// unannounce-then-announce within sub-milliseconds) plus reasonable churn from
@@ -333,17 +327,15 @@ pub struct ClusterConfig {
 	/// stats under. Defaults to the unprefixed tier.
 	#[arg(id = "cluster-tier", long = "cluster-tier", env = "MOQ_CLUSTER_TIER")]
 	pub tier: Option<String>,
-	/// How long a broadcast stays alive and announced after abruptly losing its
-	/// last publisher (a session dying without unannouncing), e.g. "5s" or "500ms".
-	/// A publisher reconnecting within the window resumes the same broadcast and
-	/// subscribers never notice; the window expiring unannounces it. A clean
-	/// unannounce always takes effect immediately. Set "0" to unannounce abrupt
-	/// losses immediately too. Defaults to 5s.
+	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
+	// ignored: a broadcast now closes as soon as its last publisher is lost.
+	#[doc(hidden)]
 	#[arg(
 		id = "cluster-linger",
 		long = "cluster-linger",
 		env = "MOQ_CLUSTER_LINGER",
 		value_parser = humantime::parse_duration,
+		hide = true,
 	)]
 	#[serde(default, with = "humantime_serde")]
 	pub linger: Option<Duration>,
@@ -370,8 +362,8 @@ pub struct Cluster {
 	/// view always points at the same session in the logs.
 	connection_ids: Arc<AtomicU64>,
 
-	/// The origin's construction config (identity, cache pool, linger). Kept so
-	/// the `with_*` builders can rebuild the origin without losing each other's
+	/// The origin's construction config (identity, cache pool). Kept so the
+	/// `with_*` builders can rebuild the origin without losing each other's
 	/// settings.
 	info: origin::Info,
 
@@ -417,7 +409,12 @@ impl Cluster {
 			Some(id) => Origin::new(id).expect("cluster id already validated"),
 			None => Origin::random(),
 		};
-		let info = origin::Info::new(id).with_linger(config.linger.unwrap_or(DEFAULT_LINGER));
+		if config.linger.is_some() {
+			tracing::warn!(
+				"cluster linger is deprecated and ignored; a broadcast closes as soon as its last publisher is lost"
+			);
+		}
+		let info = origin::Info::new(id);
 		let origin = info.clone().produce();
 		let nodes = crate::nodes::Nodes::new(origin.clone());
 		tracing::info!(origin_id = %origin.id(), configured = config.id.is_some(), "cluster initialized");

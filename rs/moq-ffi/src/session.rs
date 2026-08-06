@@ -14,24 +14,16 @@ struct Client {
 
 impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let reconnect = self.config.reconnect.unwrap_or(true);
-		let linger = self.config.backoff.linger();
 		let client = self.config.clone().init().map_err(map_connect_error)?;
 
 		// Materialize both origin sides so the session can publish/subscribe and the FFI can
 		// always hand back a publisher/consumer.
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
-		// Mirror moq_native::Client::consume: broadcasts fed by a reconnecting session
-		// linger across a drop for as long as the loop keeps retrying, so consumers ride
-		// out a relay restart instead of tearing down. The linger rides the clone handed
-		// to the session; the caller-facing handle keeps the origin's own window.
-		let ingest = match reconnect {
-			true => subscribe.clone().with_linger(linger),
-			false => subscribe.clone(),
-		};
-
-		let connection = client.with_publisher(&publish).with_subscriber(ingest).connect(url);
+		let connection = client
+			.with_publisher(&publish)
+			.with_subscriber(subscribe.clone())
+			.connect(url);
 
 		// Wait for the first session so auth errors surface here; later drops are the
 		// connection's to ride out. `MoqClient::cancel` unblocks a dial stuck retrying.
