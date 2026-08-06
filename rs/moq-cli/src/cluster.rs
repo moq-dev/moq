@@ -51,9 +51,9 @@ pub struct Lan {
 	/// Published to and ingested from every peer, so all of them converge.
 	origin: moq_net::origin::Producer,
 
-	/// The proof an inbound peer must present, mirroring what we advertised.
-	/// `None` trusts everyone who can reach the port, like a bare `--server-bind`.
-	credential: Option<String>,
+	/// The per-advertisement credential an inbound peer must present.
+	/// Without a secret this is public and prevents path collisions, not access.
+	credential: String,
 
 	/// The dial template, per-peer fingerprint applied on top.
 	client: moq_native::ClientConfig,
@@ -64,7 +64,7 @@ struct DialTarget {
 	urls: Vec<Url>,
 	has_node: bool,
 	fingerprint: Option<String>,
-	credential: Option<String>,
+	credential: String,
 }
 
 impl From<&mdns::Peer> for DialTarget {
@@ -130,7 +130,7 @@ impl Lan {
 			.collect();
 
 		let discovery = config.advertise().await?;
-		let credential = discovery.credential().map(str::to_string);
+		let credential = discovery.credential().to_string();
 		Ok((
 			Self {
 				origin,
@@ -143,7 +143,7 @@ impl Lan {
 
 	/// Whether `request` is a mesh dial rather than an ordinary client.
 	pub fn is_peer(&self, request: &moq_native::Request) -> bool {
-		split_credential(request.path()).0 == MESH_PATH
+		self.authorized(request.path())
 	}
 
 	/// Authorize an inbound mesh dial and attach it to the origin in both
@@ -163,14 +163,11 @@ impl Lan {
 		Err(session.closed().await.into())
 	}
 
-	/// Whether an inbound dial proved membership, if there is anything to prove.
+	/// Whether an inbound dial presented this advertisement's credential.
 	fn authorized(&self, path: &str) -> bool {
-		match &self.credential {
-			None => true,
-			Some(expected) => match split_credential(path) {
-				(MESH_PATH, Some(presented)) => mdns::ct_eq(expected, presented),
-				_ => false,
-			},
+		match split_credential(path) {
+			(MESH_PATH, Some(presented)) => mdns::ct_eq(&self.credential, presented),
+			_ => false,
 		}
 	}
 
@@ -258,9 +255,9 @@ impl Lan {
 
 	/// Every URL worth trying for `peer`, each carrying the membership proof.
 	///
-	/// The proof is [`mdns::Peer::credential`], which discovery derived from that
-	/// peer's own advertisement. It authenticates to that listener and nowhere
-	/// else, so an impostor that got itself dialed learns nothing it can reuse.
+	/// The credential is [`mdns::Peer::credential`], which discovery derived from
+	/// that peer's own advertisement. With a secret it authenticates to that
+	/// listener and nowhere else; without one it is only a collision-proof marker.
 	fn dial_urls(&self, peer: &DialTarget) -> Vec<Url> {
 		peer.urls
 			.iter()
@@ -269,10 +266,7 @@ impl Lan {
 				// A peer that advertised a canonical node URL is reachable by name
 				// and brings its own path; only a bare LAN socket gets the marker.
 				if !peer.has_node {
-					url.set_path(&match &peer.credential {
-						Some(credential) => format!("{MESH_PATH}/{credential}"),
-						None => MESH_PATH.to_string(),
-					});
+					url.set_path(&format!("{MESH_PATH}/{}", peer.credential));
 				}
 				url
 			})
@@ -442,22 +436,18 @@ mod tests {
 		assert_eq!(split_credential("/.clusterish/abc"), ("/.clusterish/abc", None));
 	}
 
-	fn lan(credential: Option<&str>) -> Lan {
+	fn lan(credential: &str) -> Lan {
 		Lan {
 			origin: moq_net::Origin::random().produce(),
-			credential: credential.map(str::to_string),
+			credential: credential.to_string(),
 			client: moq_native::ClientConfig::default(),
 		}
 	}
 
-	/// Without a secret the mesh is open, matching a bare `--server-bind`. With
-	/// one, only this listener's own proof gets in.
+	/// Only this listener's per-advertisement credential gets in.
 	#[test]
-	fn authorized_requires_the_proof_only_when_a_secret_is_set() {
-		assert!(lan(None).authorized(MESH_PATH));
-		assert!(lan(None).authorized("/.cluster/anything"));
-
-		let closed = lan(Some("expected-proof"));
+	fn authorized_requires_the_advertised_credential() {
+		let closed = lan("expected-proof");
 		assert!(closed.authorized("/.cluster/expected-proof"));
 		assert!(!closed.authorized(MESH_PATH), "a missing proof must be rejected");
 		assert!(!closed.authorized("/.cluster/other-proof"));
@@ -469,7 +459,7 @@ mod tests {
 	/// advertisement, at every address the peer offered.
 	#[test]
 	fn dial_urls_carry_the_proof_to_every_address() {
-		let lan = lan(Some("ours"));
+		let lan = lan("ours");
 
 		let socket = DialTarget {
 			urls: ["moqt://192.168.1.5:4443", "moqt://127.0.0.1:4443"]
@@ -478,7 +468,7 @@ mod tests {
 				.collect(),
 			has_node: false,
 			fingerprint: Some("abcd".into()),
-			credential: Some("theirs".into()),
+			credential: "theirs".into(),
 		};
 		let urls: Vec<String> = lan.dial_urls(&socket).into_iter().map(String::from).collect();
 		assert_eq!(
@@ -495,7 +485,7 @@ mod tests {
 			urls: vec!["https://relay.example.com/anon".parse().expect("valid url")],
 			has_node: true,
 			fingerprint: None,
-			credential: Some("theirs".into()),
+			credential: "theirs".into(),
 		};
 		assert_eq!(lan.dial_urls(&node)[0].path(), "/anon");
 	}
@@ -507,14 +497,14 @@ mod tests {
 	async fn pinning_a_peer_drops_the_relay_roots() {
 		let mut client = moq_native::ClientConfig::default();
 		client.tls.root = vec!["ca.pem".into()];
-		let mut lan = lan(None);
+		let mut lan = lan("ours");
 		lan.client = client;
 
 		let peer = DialTarget {
 			urls: vec!["moqt://127.0.0.1:4443".parse().expect("valid url")],
 			has_node: false,
 			fingerprint: Some("00".repeat(32)),
-			credential: None,
+			credential: "theirs".into(),
 		};
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		// Held rather than dropped: the dial is what's under test, and dropping the
@@ -580,7 +570,7 @@ mod tests {
 			urls: vec![format!("moqt://127.0.0.1:{port}").parse().expect("valid url")],
 			has_node: false,
 			fingerprint: Some(fingerprint),
-			credential: None,
+			credential: "listener-proof".into(),
 		};
 		(server, peer)
 	}
@@ -599,13 +589,13 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
-		let mut accept = lan(None);
+		let mut accept = lan("listener-proof");
 		accept.origin = origin_b.clone();
 		// The mesh shares the listener with ordinary clients, so go through the
 		// same dispatch `--cluster-lan` installs rather than calling `accept`.
 		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import, false));
 
-		let mut dialer = lan(None);
+		let mut dialer = lan("dialer-proof");
 		dialer.origin = origin_a.clone();
 		let _dial = dialer.dial_target(&peer).expect("dial");
 
@@ -644,12 +634,12 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
-		let mut accept = lan(Some("the-real-proof"));
+		let mut accept = lan("the-real-proof");
 		accept.origin = origin_b.clone();
 		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import, false));
 
 		// A peer that reached the port but never saw a verifiable advertisement.
-		let mut dialer = lan(None);
+		let mut dialer = lan("dialer-proof");
 		dialer.origin = origin_a.clone();
 		let _dial = dialer.dial_target(&peer).expect("dial");
 
@@ -674,7 +664,7 @@ mod tests {
 			.expect("failed to create broadcast");
 
 		let (server, peer) = listener();
-		let mut accept = lan(Some("the-real-proof"));
+		let mut accept = lan("the-real-proof");
 		accept.origin = origin.clone();
 		// `public: false` is what `--cluster-lan` passes with no `--server-bind`.
 		tokio::spawn(serve(server, accept, origin.clone(), crate::Direction::Import, false));

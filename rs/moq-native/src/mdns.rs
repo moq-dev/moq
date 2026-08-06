@@ -205,18 +205,19 @@ struct Advert<'a> {
 	proof: Option<&'a str>,
 }
 
-/// Check an advertisement's proof, returning the credential to present when
-/// dialing that peer back.
+/// Check an advertisement's group, returning the credential to present when
+/// dialing that peer back. Open discovery uses the public nonce as its marker;
+/// secret discovery verifies the proof and derives a private dial proof.
 ///
 /// `Err(())` means the peer belongs to a different group: it advertised no proof
 /// while we require one, its proof doesn't verify, or it advertised one while we
 /// run without a secret. Those cases are mutually invisible on purpose, so two
 /// groups can share a network without half-connecting.
-fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<Option<String>, ()> {
+fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<String, ()> {
 	let Some(secret) = secret else {
 		return match advert.proof {
 			Some(_) => Err(()),
-			None => Ok(None),
+			None => advert.nonce.map(str::to_string).ok_or(()),
 		};
 	};
 
@@ -231,7 +232,7 @@ fn verify(secret: Option<&Secret>, advert: Advert<'_>) -> std::result::Result<Op
 	if !ct_eq(presented, &proof(secret, CONTEXT_ADVERT, &id)) {
 		return Err(());
 	}
-	Ok(Some(proof(secret, CONTEXT_DIAL, &id)))
+	Ok(proof(secret, CONTEXT_DIAL, &id))
 }
 
 /// What to advertise about this process.
@@ -335,12 +336,14 @@ pub struct Peer {
 	/// The peer's canonical node URL, when it advertised one.
 	pub node: Option<Url>,
 
-	/// The proof of shared-secret membership to present when dialing this peer,
-	/// or `None` when discovery runs without a secret.
+	/// The per-advertisement credential to present when dialing this peer.
 	///
-	/// Bound to this peer's advertisement, so it authenticates nowhere else. The
-	/// peer expects it as its listener's [`Discovery::credential`].
-	pub credential: Option<String>,
+	/// With a shared secret this proves membership and is bound to this peer's
+	/// advertisement. Without one it is a public random marker that prevents an
+	/// ordinary request path from being mistaken for a peer, but provides no
+	/// authentication. The peer expects it as its listener's
+	/// [`Discovery::credential`].
+	pub credential: String,
 }
 
 impl Peer {
@@ -395,8 +398,8 @@ pub struct Discovery {
 	id: String,
 	/// The shared secret, when membership is restricted.
 	secret: Option<Secret>,
-	/// The proof an inbound peer must present, mirroring what we advertised.
-	credential: Option<String>,
+	/// The per-advertisement credential an inbound peer must present.
+	credential: String,
 	/// Service instance -> peer id, so a `Lost` event can name what a `Found` did.
 	peers: HashMap<String, String>,
 	/// Events produced ahead of the caller asking, since one resolve can retire a
@@ -433,25 +436,29 @@ impl Discovery {
 			txt.insert(TXT_NODE.to_string(), node.to_string());
 		}
 
-		// Publish a proof that we hold the secret, and keep the matching dial proof
-		// as what an inbound peer has to present. Both are bound to this nonce and
-		// this listener, so neither authenticates anywhere else.
-		let credential = config.secret.as_ref().map(|secret| {
-			let nonce = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
-			let node = config.node.as_ref().map(Url::to_string);
-			let id = Identity {
-				instance: &instance,
-				port: config.port,
-				nonce: &nonce,
-				fingerprint: config.fingerprint.as_deref(),
-				node: node.as_deref(),
-			};
-			let advert = proof(secret, CONTEXT_ADVERT, &id);
-			let dial = proof(secret, CONTEXT_DIAL, &id);
-			txt.insert(TXT_PROOF.to_string(), advert);
-			txt.insert(TXT_NONCE.to_string(), nonce);
-			dial
-		});
+		// Every peer presents this advertisement's nonce when dialing, so the mesh
+		// marker cannot collide with an ordinary request path. With a secret, replace
+		// the public nonce with a proof bound to this listener; the advertisement
+		// carries the matching proof so peers outside the group never report it.
+		let nonce = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+		txt.insert(TXT_NONCE.to_string(), nonce.clone());
+		let credential = match config.secret.as_ref() {
+			Some(secret) => {
+				let node = config.node.as_ref().map(Url::to_string);
+				let id = Identity {
+					instance: &instance,
+					port: config.port,
+					nonce: &nonce,
+					fingerprint: config.fingerprint.as_deref(),
+					node: node.as_deref(),
+				};
+				let advert = proof(secret, CONTEXT_ADVERT, &id);
+				let dial = proof(secret, CONTEXT_DIAL, &id);
+				txt.insert(TXT_PROOF.to_string(), advert);
+				dial
+			}
+			None => nonce,
+		};
 
 		let daemon = ServiceDaemon::new()?;
 		// Subscribe before registering. The daemon opens its multicast sockets
@@ -491,24 +498,22 @@ impl Discovery {
 		&self.id
 	}
 
-	/// The proof an inbound peer must present to prove it saw this advertisement
-	/// and holds the secret, or `None` when discovery runs without one.
+	/// The per-advertisement credential an inbound peer must present.
 	///
+	/// With a shared secret this proves membership. Without one it is a public
+	/// random marker that distinguishes peer dials from ordinary request paths.
 	/// Compare an inbound session's credential against this with
 	/// [`verify_credential`](Self::verify_credential).
-	pub fn credential(&self) -> Option<&str> {
-		self.credential.as_deref()
+	pub fn credential(&self) -> &str {
+		&self.credential
 	}
 
 	/// Whether `presented` is the credential this listener expects.
 	///
-	/// Always true without a secret, since there is then nothing to prove.
-	pub fn verify_credential(&self, presented: Option<&str>) -> bool {
-		match (&self.credential, presented) {
-			(None, _) => true,
-			(Some(expected), Some(presented)) => ct_eq(expected, presented),
-			(Some(_), None) => false,
-		}
+	/// Without a secret this verifies only the public collision-avoidance marker,
+	/// not membership.
+	pub fn verify_credential(&self, presented: &str) -> bool {
+		ct_eq(&self.credential, presented)
 	}
 
 	/// The next discovery event, or `None` once discovery shuts down.
@@ -872,7 +877,7 @@ mod tests {
 			.collect(),
 			fingerprint: None,
 			node: None,
-			credential: None,
+			credential: "marker".into(),
 		};
 
 		let urls: Vec<String> = peer.urls().into_iter().map(String::from).collect();
@@ -896,7 +901,7 @@ mod tests {
 			addrs: vec!["192.168.1.5:4443".parse().expect("valid address")],
 			fingerprint: None,
 			node: Some("https://peer.example.com".parse().expect("valid url")),
-			credential: None,
+			credential: "marker".into(),
 		};
 		assert_eq!(peer.urls(), ["https://peer.example.com/".parse().expect("valid url")]);
 
@@ -966,7 +971,7 @@ mod tests {
 		let honest = Advertised::new(&ours, "honest", Some("fp"), None);
 		assert_eq!(
 			verify(Some(&ours), honest.advert()).expect("admitted"),
-			Some(proof(&ours, CONTEXT_DIAL, &identity("honest", 443, Some("fp"), None)))
+			proof(&ours, CONTEXT_DIAL, &identity("honest", 443, Some("fp"), None))
 		);
 
 		// A peer proving a different secret is invisible.
@@ -986,17 +991,18 @@ mod tests {
 		stripped.nonce = None;
 		assert!(verify(Some(&ours), stripped).is_err(), "no nonce");
 
-		// Without a secret, an unproven peer is fine and a proven one is not ours,
-		// so the two groups stay mutually invisible instead of half-connecting.
+		// Without a secret, an unproven peer gets its public nonce as the dial
+		// marker. A proven one is not ours, so the two groups stay mutually
+		// invisible instead of half-connecting.
 		let bare = Advert {
 			instance: "bare",
 			port: 443,
 			fingerprint: Some("fp"),
 			node: None,
-			nonce: None,
+			nonce: Some("public-marker"),
 			proof: None,
 		};
-		assert_eq!(verify(None, bare), Ok(None));
+		assert_eq!(verify(None, bare), Ok("public-marker".to_string()));
 		assert!(verify(None, honest.advert()).is_err());
 	}
 
@@ -1177,10 +1183,10 @@ mod tests {
 
 		// Each side computed the credential the other will check, and neither the
 		// secret nor the credential ever crossed the network.
-		assert!(theirs.verify_credential(on_ours.credential.as_deref()));
-		assert!(ours.verify_credential(on_theirs.credential.as_deref()));
-		assert!(!ours.verify_credential(on_ours.credential.as_deref()), "not its own");
-		assert!(!ours.verify_credential(None));
+		assert!(theirs.verify_credential(&on_ours.credential));
+		assert!(ours.verify_credential(&on_theirs.credential));
+		assert!(!ours.verify_credential(&on_ours.credential), "not its own");
+		assert!(!ours.verify_credential(""));
 
 		assert_ne!(
 			ours.should_dial(&on_ours.id),
