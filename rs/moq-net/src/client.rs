@@ -159,7 +159,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -175,7 +175,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+				return Ok(Session::new(session, v, None, protocol, goaway));
 			}
 			Some(ALPN_18) => {
 				let v = self
@@ -185,7 +185,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -201,7 +201,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+				return Ok(Session::new(session, v, None, protocol, goaway));
 			}
 			Some(ALPN_17) => {
 				let v = self
@@ -211,7 +211,7 @@ impl Client {
 
 				// Draft-17+: SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -227,7 +227,7 @@ impl Client {
 				})?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, None, protocol));
+				return Ok(Session::new(session, v, None, protocol, goaway));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -284,7 +284,13 @@ impl Client {
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
 				// immediately instead of racing announcement gossip.
-				let (session, mut driver) = Session::new(session, version.into(), start.recv_bandwidth, start.driver);
+				let (session, mut driver) = Session::new(
+					session,
+					version.into(),
+					start.recv_bandwidth,
+					start.driver,
+					start.goaway,
+				);
 				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
 				return Ok((session, driver));
@@ -311,6 +317,7 @@ impl Client {
 					lite::Version::Lite04.into(),
 					start.recv_bandwidth,
 					start.driver,
+					start.goaway,
 				);
 				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
@@ -339,6 +346,7 @@ impl Client {
 					lite::Version::Lite03.into(),
 					start.recv_bandwidth,
 					start.driver,
+					start.goaway,
 				);
 				driver.wait_ready(|waiter| start.connecting.poll_ready(waiter)).await;
 
@@ -380,7 +388,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, connecting) = match version {
+		let (recv_bw, protocol, connecting, goaway) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -396,7 +404,7 @@ impl Client {
 					peer_setup: None,
 				})?;
 
-				(start.recv_bandwidth, start.driver, Some(start.connecting))
+				(start.recv_bandwidth, start.driver, Some(start.connecting), start.goaway)
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.
@@ -407,7 +415,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,
@@ -421,11 +429,11 @@ impl Client {
 					peer_setup_stream: None,
 					peer_cluster: None,
 				})?;
-				(None, protocol, None)
+				(None, protocol, None, goaway)
 			}
 		};
 
-		let (session, mut driver) = Session::new(session, version, recv_bw, protocol);
+		let (session, mut driver) = Session::new(session, version, recv_bw, protocol, goaway);
 		if let Some(connecting) = connecting {
 			// Block until the initial announce set has landed (for versions that
 			// report one); resolves immediately otherwise.
@@ -444,6 +452,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
+	use crate::SessionError;
 	use crate::coding::{Decode, Encode};
 	use bytes::{BufMut, Bytes};
 
@@ -689,7 +698,9 @@ mod tests {
 		// with no origin; RequiredExtension (or similar) is what an
 		// auto-created origin's first interaction with a Lite01 peer trips.
 		let (code, _) = fake.wait_for_first_close().await;
-		assert_ne!(code, Error::Version.to_code(), "SessionInfo failed to decode");
+		// Session closes encode through the session registry, so compare against that one:
+		// `Error::Version.to_code()` is the local table's value and would never match.
+		assert_ne!(code, SessionError::Version.to_code(), "SessionInfo failed to decode");
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
+import type * as Audio from "../audio";
+import type * as Video from "../video";
 import { Camera } from "./camera";
 import { Microphone } from "./microphone";
 import { Retry } from "./retry";
@@ -157,7 +159,7 @@ const QUIET_MARGIN = 100;
 const SPENT_TIMEOUT = 30_000;
 
 /** The track a source published, or undefined. */
-function published(source: { track: MediaStreamTrack } | MediaStreamTrack | undefined): unknown {
+function published(source: Audio.Source | Video.Source | undefined): unknown {
 	if (!source) return undefined;
 	return "track" in source ? source.track : source;
 }

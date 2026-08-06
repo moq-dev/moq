@@ -1,7 +1,13 @@
-import { fromTransport } from "./error.ts";
+import { fromTransport, RemoteError, StreamCode, toTransport } from "./error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import * as Varint from "./varint.ts";
+
+// Forwarding a peer's reset must keep its code, or a relay flattens it to 0 (INTERNAL_ERROR).
+// Anything else is a local failure, which 0 already describes, so leave it alone.
+function withCode(reason: unknown): unknown {
+	return reason instanceof RemoteError ? toTransport(reason.code, reason.message) : reason;
+}
 
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
@@ -50,7 +56,10 @@ export class Stream {
 
 	close() {
 		this.writer.close();
-		this.reader.stop(new Error("cancel"));
+		// A routine unsubscribe, so send CANCELLED. A bare Error would put 0 on the wire,
+		// which the stream registry reads as INTERNAL_ERROR: the peer would log a failure
+		// for every subscription we walk away from.
+		this.reader.stop(toTransport(StreamCode.Cancel, "cancel"));
 	}
 
 	abort(reason: Error) {
@@ -263,7 +272,7 @@ export class Reader {
 	}
 
 	stop(reason: unknown) {
-		this.#reader?.cancel(reason).catch(() => void 0);
+		this.#reader?.cancel(withCode(reason)).catch(() => void 0);
 	}
 
 	// Decoded like #fill: a caller racing this against a read must not get a different error
@@ -368,7 +377,7 @@ export class Writer {
 	}
 
 	reset(reason: unknown) {
-		this.#writer.abort(reason).catch(() => void 0);
+		this.#writer.abort(withCode(reason)).catch(() => void 0);
 	}
 
 	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {

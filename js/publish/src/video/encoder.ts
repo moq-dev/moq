@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type { Capture } from "./capture";
-import type { Source } from "./types";
+import { isStreamTrack, type Source } from "./types";
 
 /** Cumulative encoder output totals, measured from the chunks the encoder produces. */
 export interface Stats {
@@ -111,6 +111,16 @@ export class Encoder {
 
 	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
 	config: Signal<Config | undefined>;
+
+	/**
+	 * The capture supplying this rendition, or undefined while none is wired.
+	 *
+	 * A snapshot. Read {@link in}.capture through an effect instead when you need to react to it
+	 * being swapped.
+	 */
+	get capture(): Capture | undefined {
+		return this.in.capture.peek();
+	}
 
 	readonly #out: EncoderOutput = {
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
@@ -215,33 +225,54 @@ export class Encoder {
 			});
 
 			effect.run((effect) => {
-				const frame = effect.get(capture.out.frame);
-				if (!frame) return;
+				const fanout = effect.get(capture.out.frames);
+				if (!fanout) return;
 
-				if (encoder.state !== "configured") return;
+				// Our own stream off the shared capture, so the preview or another rendition reading
+				// slowly can't take frames from this one.
+				const reader = fanout.subscribe(effect).getReader();
+				effect.cleanup(() => {
+					reader.cancel().catch(() => {});
+				});
 
-				// This doesn't need to be reactive.
-				const config = this.config.peek();
+				effect.spawn(async () => {
+					for (;;) {
+						const next = await Promise.race([reader.read(), effect.cancel]);
+						if (!next?.value) break;
 
-				// Pace to the target frame rate by dropping frames that arrive too soon.
-				// Allow half an interval of slack so jittery capture timestamps don't drop a frame we meant to keep.
-				// The shared frame Signal owner closes frames, so we just skip encoding here.
-				const targetFrameRate = config?.frameRate;
-				if (targetFrameRate && lastEncoded !== undefined) {
-					const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
-					if (frame.timestamp - lastEncoded < minGap - minGap / 2) return;
-				}
-				lastEncoded = frame.timestamp as Time.Micro;
+						// Ours now: every path below has to close it.
+						const frame = next.value;
+						try {
+							if (encoder.state !== "configured") continue;
 
-				const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+							// This doesn't need to be reactive.
+							const config = this.config.peek();
 
-				// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
-				const keyFrame = !lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
-				if (keyFrame) {
-					lastKeyframe = frame.timestamp as Time.Micro;
-				}
+							// Pace to the target frame rate by dropping frames that arrive too soon.
+							// Allow half an interval of slack so jittery capture timestamps don't drop
+							// a frame we meant to keep.
+							const targetFrameRate = config?.frameRate;
+							if (targetFrameRate && lastEncoded !== undefined) {
+								const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
+							}
+							lastEncoded = frame.timestamp as Time.Micro;
 
-				encoder.encode(frame, { keyFrame });
+							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+
+							// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
+							const keyFrame =
+								!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
+							if (keyFrame) {
+								lastKeyframe = frame.timestamp as Time.Micro;
+							}
+
+							encoder.encode(frame, { keyFrame });
+						} finally {
+							frame.close();
+						}
+					}
+				});
 			});
 		});
 	}
@@ -318,14 +349,11 @@ export class Encoder {
 		if (detected.width !== dimensions.width || detected.height !== dimensions.height) return;
 
 		const { codec, hardwareAcceleration } = detected;
-
-		const settings = source.getSettings();
-
 		// Get the user provided config.
 		const user = effect.get(this.config) ?? {};
 
 		// Prefer the explicitly requested rate; the encode loop drops frames to enforce it.
-		const framerate = user.frameRate ?? settings.frameRate ?? 30;
+		const framerate = user.frameRate ?? sourceFrameRate(source) ?? 30;
 
 		const maxPixels = user.maxPixels ?? dimensions.width * dimensions.height;
 		const bitrateScale = user.bitrateScale ?? 0.07;
@@ -384,15 +412,17 @@ export class Encoder {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
-		const frame = effect.get(capture.out.frame);
-		if (!frame) return;
+		// The captured size, rather than a frame: this only needs the dimensions, and holding a frame
+		// here would mean owning and closing it.
+		const display = effect.get(capture.out.display);
+		if (!display) return;
 
 		const source = effect.get(capture.in.source);
 		if (!source) return;
 
 		const user = effect.get(this.config);
 
-		const sourcePixels = frame.codedWidth * frame.codedHeight;
+		const sourcePixels = display.width * display.height;
 
 		// maxPixels caps absolutely; maxScale caps relative to the source. The smaller cap wins.
 		let maxPixels = user?.maxPixels ?? sourceConstraintPixels(source) ?? sourcePixels;
@@ -407,8 +437,8 @@ export class Encoder {
 
 		// Make sure width/height is a power of 16
 		// TODO should this be on a per-codec basis?
-		const width = 16 * Math.floor((frame.codedWidth * ratio) / 16);
-		const height = 16 * Math.floor((frame.codedHeight * ratio) / 16);
+		const width = 16 * Math.floor((display.width * ratio) / 16);
+		const height = 16 * Math.floor((display.height * ratio) / 16);
 
 		effect.set(this.#dimensions, { width, height });
 	}
@@ -538,6 +568,12 @@ export class Encoder {
 	}
 }
 
+// The source's nominal frame rate: what the capture device settled on, or what a frame stream
+// declared. Undefined when nothing reports one.
+function sourceFrameRate(source: Source): number | undefined {
+	return isStreamTrack(source) ? source.getSettings().frameRate : source.frameRate;
+}
+
 // A hardware probe result, carrying the inputs it ran against so a consumer can tell whether it
 // still applies.
 type Detected = {
@@ -563,6 +599,9 @@ function codecBitrateScale(codec: string): number {
 }
 
 function sourceConstraintPixels(source: Source): number | undefined {
+	// Only a capture track has constraints; a frame stream is whatever size it produces.
+	if (!isStreamTrack(source)) return undefined;
+
 	const constraints = source.getConstraints();
 	const width = constraintMax(constraints.width);
 	const height = constraintMax(constraints.height);

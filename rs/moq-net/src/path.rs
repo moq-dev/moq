@@ -325,8 +325,13 @@ impl<'a> Path<'a> {
 	/// Resolve a [`PathRelative`] against this path.
 	///
 	/// `..` segments in `rel` pop the last segment of the base; other segments are appended.
-	/// Excess `..` is a no-op once the base is empty (subsequent named segments still append).
 	/// An empty `rel` returns this path as an owned copy.
+	///
+	/// Returns `None` when a `..` has nothing left to pop, i.e. the reference walks above the
+	/// root and names nothing. Popping to exactly the root is fine and yields the empty path,
+	/// which still names a broadcast. The alternative, clamping, would silently land
+	/// `../../../../x` on an unrelated `x`, so the caller decides what an out-of-range
+	/// reference means (the hang catalog rejects such a catalog outright).
 	///
 	/// [`PathRelative::new`] strips `.` and empty segments, so they are not handled here.
 	///
@@ -335,20 +340,22 @@ impl<'a> Path<'a> {
 	/// use moq_net::{Path, PathRelative};
 	///
 	/// let base = Path::new("a/b/c");
-	/// assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/b/d");
-	/// assert_eq!(base.resolve(&PathRelative::new("d")).as_str(), "a/b/c/d");
-	/// assert_eq!(base.resolve(&PathRelative::new("../../../../x")).as_str(), "x");
+	/// assert_eq!(base.resolve(&PathRelative::new("../d")).unwrap().as_str(), "a/b/d");
+	/// assert_eq!(base.resolve(&PathRelative::new("d")).unwrap().as_str(), "a/b/c/d");
+	/// assert_eq!(base.resolve(&PathRelative::new("../../..")).unwrap().as_str(), "");
+	/// assert_eq!(base.resolve(&PathRelative::new("../../../../x")), None);
 	/// ```
-	pub fn resolve(&self, rel: &PathRelative<'_>) -> PathOwned {
+	pub fn resolve(&self, rel: &PathRelative<'_>) -> Option<PathOwned> {
 		if rel.is_empty() {
-			return self.to_owned();
+			return Some(self.to_owned());
 		}
 
 		let mut segments: Vec<&str> = self.parts().collect();
 
 		for seg in rel.as_str().split('/') {
 			if seg == ".." {
-				segments.pop();
+				// Nothing left to pop: the reference walks above the root.
+				segments.pop()?;
 			} else {
 				segments.push(seg);
 			}
@@ -356,13 +363,13 @@ impl<'a> Path<'a> {
 
 		let path = segments.join("/");
 		if path.is_empty() {
-			Path::empty()
-		} else {
-			Path(Repr::Shared {
-				buf: path.into(),
-				start: 0,
-			})
+			return Some(Path::empty());
 		}
+
+		Some(Path(Repr::Shared {
+			buf: path.into(),
+			start: 0,
+		}))
 	}
 }
 
@@ -492,7 +499,10 @@ pub type PathRelativeOwned = PathRelative<'static>;
 /// use moq_net::{Path, PathRelative};
 ///
 /// let rel = PathRelative::new("../source");
-/// assert_eq!(Path::new("a/b").resolve(&rel).as_str(), "a/source");
+/// assert_eq!(Path::new("a/b").resolve(&rel).unwrap().as_str(), "a/source");
+///
+/// // A reference that walks above the root names nothing.
+/// assert_eq!(Path::new("a").resolve(&PathRelative::new("../../b")), None);
 ///
 /// // `.` segments are stripped on creation.
 /// assert_eq!(PathRelative::new("./a/./b").as_str(), "a/b");
@@ -1371,54 +1381,62 @@ mod tests {
 	}
 
 	#[test]
-	fn test_resolve_no_dotdot() {
-		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("c")).as_str(), "a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("c/d")).as_str(), "a/b/c/d");
+	fn test_resolve_appends_and_pops() {
+		let base = Path::new("a/b/c");
+		assert_eq!(base.resolve(&PathRelative::new("d")).unwrap().as_str(), "a/b/c/d");
+		assert_eq!(base.resolve(&PathRelative::new("d/e")).unwrap().as_str(), "a/b/c/d/e");
+		assert_eq!(base.resolve(&PathRelative::new("../d")).unwrap().as_str(), "a/b/d");
+		assert_eq!(base.resolve(&PathRelative::new("..")).unwrap().as_str(), "a/b");
+		assert_eq!(base.resolve(&PathRelative::new("../../x/y")).unwrap().as_str(), "a/x/y");
 	}
 
 	#[test]
 	fn test_resolve_empty_rel_returns_base() {
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("")).as_str(), "a/b");
+		assert_eq!(base.resolve(&PathRelative::empty()).unwrap().as_str(), "a/b");
+		assert_eq!(Path::empty().resolve(&PathRelative::empty()).unwrap(), Path::empty());
 	}
 
 	#[test]
-	fn test_resolve_single_dotdot() {
+	fn test_resolve_rejects_escape() {
 		let base = Path::new("a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/b/d");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "a/b");
+		// One more `..` than the base has segments. Clamping would land this on "x".
+		assert_eq!(base.resolve(&PathRelative::new("../../../../x")), None);
+		assert_eq!(base.resolve(&PathRelative::new("../../../..")), None);
+		// A `..` that escapes mid-way is rejected even if later segments walk back down.
+		assert_eq!(base.resolve(&PathRelative::new("../../../../a/b/c")), None);
+		assert_eq!(Path::empty().resolve(&PathRelative::new("../x")), None);
 	}
 
 	#[test]
-	fn test_resolve_multiple_dotdot() {
-		let base = Path::new("a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("../../x")).as_str(), "a/x");
-		assert_eq!(base.resolve(&PathRelative::new("../../../x")).as_str(), "x");
-	}
-
-	#[test]
-	fn test_resolve_dotdot_clamps_at_root() {
-		let base = Path::new("a");
-		// Excess `..` clamps at the root instead of escaping it.
-		assert_eq!(base.resolve(&PathRelative::new("../../../foo")).as_str(), "foo");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
-	}
-
-	#[test]
-	fn test_resolve_empty_base() {
-		let base = Path::empty();
-		assert_eq!(base.resolve(&PathRelative::new("foo")).as_str(), "foo");
-		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
+	fn test_resolve_allows_root() {
+		// Popping to exactly the root stops at it rather than walking above it, and the
+		// root still names a broadcast.
+		assert_eq!(Path::new("a").resolve(&PathRelative::new("..")).unwrap(), Path::empty());
+		assert_eq!(
+			Path::new("a/b").resolve(&PathRelative::new("../..")).unwrap(),
+			Path::empty()
+		);
+		assert_eq!(
+			Path::new("a/b")
+				.resolve(&PathRelative::new("../../x"))
+				.unwrap()
+				.as_str(),
+			"x"
+		);
+		assert_eq!(
+			Path::empty().resolve(&PathRelative::new("foo")).unwrap().as_str(),
+			"foo"
+		);
 	}
 
 	#[test]
 	fn test_resolve_dot_is_noop() {
 		let base = Path::new("a/b");
 		// `.` is normalized away by PathRelative::new, so resolve ignores it.
-		assert_eq!(base.resolve(&PathRelative::new(".")).as_str(), "a/b");
-		assert_eq!(base.resolve(&PathRelative::new("./c")).as_str(), "a/b/c");
-		assert_eq!(base.resolve(&PathRelative::new("./../c")).as_str(), "a/c");
+		assert_eq!(base.resolve(&PathRelative::new(".")).unwrap().as_str(), "a/b");
+		assert_eq!(base.resolve(&PathRelative::new("./c")).unwrap().as_str(), "a/b/c");
+		assert_eq!(base.resolve(&PathRelative::new("./../c")).unwrap().as_str(), "a/c");
 	}
 
 	#[test]
@@ -1426,6 +1444,6 @@ mod tests {
 		// Walking `..` back to the same path yields the base unchanged, which lets the
 		// caller compare resolved == base to detect a self-reference.
 		let base = Path::new("a/b");
-		assert_eq!(base.resolve(&PathRelative::new("../b")).as_str(), "a/b");
+		assert_eq!(base.resolve(&PathRelative::new("../b")).unwrap().as_str(), "a/b");
 	}
 }

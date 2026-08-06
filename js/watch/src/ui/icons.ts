@@ -1,5 +1,6 @@
 import audio from "./icons/audio.svg?raw";
 import buffer from "./icons/buffer.svg?raw";
+import captions from "./icons/captions.svg?raw";
 import check from "./icons/check.svg?raw";
 import close from "./icons/close.svg?raw";
 import fullscreenEnter from "./icons/fullscreen-enter.svg?raw";
@@ -19,6 +20,7 @@ import volumeMedium from "./icons/volume-medium.svg?raw";
 export {
 	audio,
 	buffer,
+	captions,
 	check,
 	close,
 	fullscreenEnter,

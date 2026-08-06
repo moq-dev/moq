@@ -33,6 +33,21 @@ pub struct Info {
 	/// broadcast. Defaults to an unknown origin with an unbounded pool (a standalone
 	/// broadcast with no relay origin).
 	pub origin: super::origin::Info,
+
+	/// The path this broadcast is named by, which relative references in a catalog it
+	/// serves (hang's `broadcast` field) resolve against.
+	///
+	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// the path the broadcast was created at, relative to the origin root (including through a
+	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
+	/// *that handle* was requested or announced at, relative to its cursor's root, since the
+	/// same broadcast can be reached under more than one name: a dynamic handler may serve a
+	/// standalone broadcast at any path, and a rooted cursor names a broadcast more tightly
+	/// than the origin does.
+	///
+	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
+	/// root: any `..` reference escapes.
+	pub path: crate::PathOwned,
 }
 
 impl Info {
@@ -49,6 +64,26 @@ impl Info {
 		Producer::new(self)
 	}
 }
+
+/// The highest value [`Route::cost`] can take, and where cost accumulation
+/// saturates.
+///
+/// The ceiling is the wire's, not the model's: lite-06 carries the cost as a QUIC
+/// varint, which tops out at 2^62-1, so a larger value could be selected on but
+/// never forwarded.
+pub const MAX_COST: u64 = (1 << 62) - 1;
+
+/// The cost given to a route whose session is draining, so every other candidate
+/// outranks it while it stays selectable as the last path to the content.
+///
+/// A session sets this on its routes when its peer sends a GOAWAY. Draining is
+/// deliberately not a distinct state: cost is the whole mechanism, so a route
+/// whose accumulated cost saturates the wire ceiling ranks (and is treated)
+/// identically, as a path of last resort.
+///
+/// It is [`MAX_COST`] rather than a value beyond it for the reason above: a
+/// draining route is still announced downstream, so its cost has to fit the wire.
+pub const DRAIN_COST: u64 = MAX_COST;
 
 /// The path a broadcast takes to reach this origin, and how preferable it is.
 ///
@@ -68,6 +103,10 @@ pub struct Route {
 	/// The cost of pulling the broadcast via this route, accumulated per link:
 	/// lower wins, with ties broken by hop length, then a deterministic hash, and
 	/// finally the most recently attached route.
+	///
+	/// Selection accepts any value, but only [`MAX_COST`] of it survives a hop:
+	/// forwarding clamps to what a varint can carry, so a cost set beyond the
+	/// ceiling ranks last locally and is advertised as the ceiling.
 	///
 	/// The original publisher seeds it with its production cost (zero for a live
 	/// publish, something large for a standby that would have to start working,
@@ -197,12 +236,18 @@ pub(crate) fn advertisable_routes(
 /// chain flows through keeps its own accumulated cost, since serving that peer means
 /// opening a fresh ingest. Otherwise we forward the accumulated cost unchanged.
 ///
+/// A ceiling-cost route pierces the carrying discount. For a drain (the ceiling's
+/// primary producer), advertising zero would keep pulling subscribers onto a path
+/// about to vanish. The rule keys on the value because the reason does not travel on
+/// the wire, and a cost that saturated through charges is a last-resort path too.
+///
 /// The receiving side adds its own link price on top, so this never accounts for the
-/// link we are sending over.
+/// link we are sending over. The result is clamped to the largest wire varint because
+/// locally created routes can name an arbitrary `u64`.
 pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> u64 {
-	match serving && demand.is_used() {
+	match serving && demand.is_used() && route.cost < DRAIN_COST {
 		true => 0,
-		false => route.cost,
+		false => route.cost.min(MAX_COST),
 	}
 }
 
@@ -762,6 +807,35 @@ impl Dynamic {
 		&self.info
 	}
 
+	/// Bump this source's route to [`DRAIN_COST`], keeping its hop chain and
+	/// announce flag.
+	///
+	/// Called when the session feeding the source receives a GOAWAY, so the origin
+	/// hands live subscriptions to any other route at the next group boundary
+	/// rather than riding a connection that is about to close and losing the group
+	/// in flight. The draining route stays selectable, so a broadcast with no
+	/// alternative keeps being served until the session actually ends.
+	///
+	/// It lives here rather than on [`Producer`] because the handler is what each
+	/// wire's per-source task already holds, so nothing has to keep a second
+	/// producer clone alive just to reach the route.
+	///
+	/// Idempotent: the signal stays set, so a task may call this on every wakeup.
+	pub(crate) fn drain(&mut self) {
+		let mut state = self.state.lock();
+		if state.route.cost == DRAIN_COST {
+			return;
+		}
+
+		state.route.cost = DRAIN_COST;
+		state.route_epoch += 1;
+
+		// An ordinary source's table is just its own route, and the origin reads the
+		// table rather than the route when ranking, so both have to move together.
+		state.routes = vec![state.route.clone()];
+		state.routes_epoch += 1;
+	}
+
 	/// Poll for the next consumer-requested track, without blocking.
 	///
 	/// Returns [`Error::Closed`] once the broadcast was deliberately ended
@@ -916,7 +990,23 @@ impl Consumer {
 		self
 	}
 
-	/// The broadcast's static metadata, fixed when it was created.
+	/// Stamp the path this handle was handed out at, overriding [`Info::path`].
+	///
+	/// The origin applies it to every broadcast it resolves, because the name belongs to
+	/// the (broadcast, cursor) pair rather than to the broadcast: what a catalog's relative
+	/// references resolve against is where the *reader* found the broadcast, not where its
+	/// producer happened to create it. Free when the two already agree, which is the case
+	/// for a broadcast created at the path an unrooted cursor asks for.
+	pub(crate) fn with_path(mut self, path: crate::PathOwned) -> Self {
+		if self.info.path != path {
+			let mut info = (*self.info).clone();
+			info.path = path;
+			self.info = Arc::new(info);
+		}
+		self
+	}
+
+	/// The broadcast's metadata, as reached through this handle.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -983,9 +1073,12 @@ impl Consumer {
 
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
-		// Tag the resolved track with this broadcast's egress scope so its
-		// subscriptions, fetches, and groups are attributed to the same broadcast.
-		self.track_inner(name).map(|track| track.with_stats(self.stats.clone()))
+		// Rebind the track to *this* handle's view of the broadcast, so a catalog track
+		// resolves its relative references against the path we were handed out at rather
+		// than the one the producer was created at, and tag it with this broadcast's egress
+		// scope so its subscriptions, fetches, and groups are attributed to the same broadcast.
+		self.track_inner(name)
+			.map(|track| track.with_broadcast(self.info.clone()).with_stats(self.stats.clone()))
 	}
 
 	fn track_inner(&self, name: &str) -> Result<track::Consumer, Error> {
@@ -1009,7 +1102,11 @@ impl Consumer {
 				spliced.tracks.remove(name);
 			}
 			if let Some(producer) = spliced.tracks.get(name) {
-				return Ok(track::Consumer::spliced(name.into(), producer.consume()));
+				return Ok(track::Consumer::spliced(
+					name.into(),
+					self.info.clone(),
+					producer.consume(),
+				));
 			}
 			// A deliberately-ended broadcast serves nothing new; nothing drains the
 			// pending queue once the front is torn down.
@@ -1021,7 +1118,7 @@ impl Consumer {
 			let consumer = producer.consume();
 			spliced.tracks.insert(name.clone(), producer);
 			spliced.pending.push_back(name.clone());
-			return Ok(track::Consumer::spliced(name, consumer));
+			return Ok(track::Consumer::spliced(name, self.info.clone(), consumer));
 		}
 
 		// Reuse a live producer if one is already publishing the track. `get` drops a
@@ -1605,5 +1702,64 @@ mod test {
 		// Original handle is still live, so the request registers (stays pending)
 		// instead of failing with NotFound.
 		let _fut = subscribe_pending!(consumer, "track1");
+	}
+
+	/// Draining moves only the cost: the hop chain and announce flag have to
+	/// survive, or the origin would treat the source as a different path (or stop
+	/// advertising it) rather than as the same one on its way out.
+	#[tokio::test]
+	async fn drain_costs_the_route_without_disturbing_it() {
+		let mut producer = Info::new().produce();
+		let mut consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		producer
+			.set_route(Route::new().with_hops(hops.clone()).with_cost(42).with_announce(true))
+			.unwrap();
+
+		let before = consumer.route_changed().await.unwrap();
+		assert_eq!(before.cost, 42);
+
+		dynamic.drain();
+
+		let after = consumer.route_changed().await.unwrap();
+		assert_eq!(after.cost, DRAIN_COST);
+		assert_eq!(after.hops, hops, "draining must not change the path");
+		assert!(after.announce, "a draining route stays advertised");
+
+		// The origin ranks off the route table, so it has to move with the route.
+		assert_eq!(consumer.routes(), vec![after]);
+	}
+
+	/// The signal stays set, so the per-source task calls this on every wakeup. A
+	/// repeat must not bump the epoch, or each wakeup would look like a route
+	/// change and churn the origin.
+	#[tokio::test]
+	async fn drain_is_idempotent() {
+		let producer = Info::new().produce();
+		let mut consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		dynamic.drain();
+		assert_eq!(consumer.route_changed().await.unwrap().cost, DRAIN_COST);
+
+		dynamic.drain();
+		assert!(
+			consumer.route_changed().now_or_never().is_none(),
+			"a redundant drain must not look like a route change"
+		);
+	}
+
+	/// A draining cost still has to fit the wire, since the route keeps being
+	/// announced downstream while it drains.
+	#[test]
+	fn drain_cost_is_encodable() {
+		use crate::coding::Encode;
+
+		let mut buf = Vec::new();
+		DRAIN_COST
+			.encode(&mut buf, crate::lite::Version::Lite06Wip)
+			.expect("a draining route is still forwarded, so its cost must encode");
 	}
 }

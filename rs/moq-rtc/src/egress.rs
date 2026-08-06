@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodecKind};
+use moq_mux::catalog::Stream;
 use moq_mux::catalog::hang::Catalog;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaTime, Mid, Pt};
@@ -105,13 +106,7 @@ impl EgressSource {
 	/// caller hands `EgressSource` to [`Session::egress`](crate::session::Session::egress)
 	/// which takes the receiver via [`Self::take_writes`].
 	pub async fn new(source: moq_mux::Source) -> Result<Self> {
-		let catalog_track = source
-			.broadcast()
-			.await?
-			.track(hang::Catalog::DEFAULT_NAME)?
-			.subscribe(hang::Catalog::default_subscription())
-			.await?;
-		let mut consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let catalog = consumer
 			.next()
 			.await

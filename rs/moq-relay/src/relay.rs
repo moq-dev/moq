@@ -24,7 +24,10 @@
 
 use anyhow::Context;
 
-use crate::{Auth, Cluster, Config, Connection, DEFAULT_MAX_STREAMS, Internal, Web};
+use crate::{
+	Auth, Cluster, Config, Connection, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_STREAMS, Internal, Shutdown, ShutdownTrigger,
+	Web,
+};
 
 /// A fully assembled relay: the listeners and the shared cluster behind them.
 ///
@@ -67,6 +70,12 @@ pub struct Relay {
 
 	/// The QUIC bind address, or `None` for a stream-only server (no QUIC).
 	pub addr: Option<std::net::SocketAddr>,
+
+	/// Graceful-shutdown signal shared by every accepted session and web handler.
+	pub shutdown: Shutdown,
+
+	/// Starts graceful shutdown for [`Self::shutdown`].
+	pub shutdown_trigger: ShutdownTrigger,
 }
 
 impl Relay {
@@ -129,8 +138,13 @@ impl Relay {
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
 
+		// Graceful shutdown: the first signal drains every accepted session with a
+		// GOAWAY; a second signal (or the drain window elapsing) exits.
+		let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
+		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
-		let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
+		let web =
+			Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web).with_shutdown(shutdown.clone());
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
@@ -156,6 +170,8 @@ impl Relay {
 			internal,
 			web,
 			addr,
+			shutdown,
+			shutdown_trigger,
 		})
 	}
 
@@ -171,6 +187,8 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			shutdown,
+			shutdown_trigger,
 			..
 		} = self;
 
@@ -187,10 +205,54 @@ impl Relay {
 			Err(err) = cluster.clone().run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
-			Err(err) = serve(server, cluster, auth) => Err(err).context("server failed"),
+			Err(err) = serve(server, cluster, auth, shutdown.clone()) => Err(err).context("server failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
+			res = drain_on_signal(shutdown_trigger, shutdown.drain_timeout) => res,
 			else => Ok(()),
 		}
+	}
+}
+
+/// Two-stage shutdown: the first signal fires the drain broadcast (every session
+/// sends GOAWAY and waits for its peer to leave); the second signal, or the
+/// drain window elapsing, exits the process.
+async fn drain_on_signal(trigger: ShutdownTrigger, window: std::time::Duration) -> anyhow::Result<()> {
+	shutdown_signal().await?;
+	tracing::info!(
+		?window,
+		"shutdown signal received; draining sessions (signal again to exit immediately)"
+	);
+	trigger.start();
+
+	// One extra second past the window so per-session force-closes fire first,
+	// giving every peer a proper GoawayTimeout instead of a dropped transport.
+	let grace = window + std::time::Duration::from_secs(1);
+	tokio::select! {
+		res = shutdown_signal() => {
+			res?;
+			tracing::warn!("second shutdown signal; exiting immediately");
+		}
+		_ = tokio::time::sleep(grace) => tracing::info!("drain window elapsed; exiting"),
+	}
+	Ok(())
+}
+
+/// Resolve on a shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what
+/// systemd and most process supervisors send on stop).
+async fn shutdown_signal() -> anyhow::Result<()> {
+	#[cfg(unix)]
+	{
+		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+			.context("failed to listen for SIGTERM")?;
+		tokio::select! {
+			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
+			_ = term.recv() => {}
+		}
+		Ok(())
+	}
+	#[cfg(not(unix))]
+	{
+		tokio::signal::ctrl_c().await.context("failed to listen for shutdown")
 	}
 }
 
@@ -200,15 +262,16 @@ impl Relay {
 /// Public because an embedder running its own `select!` still needs the accept
 /// loop, and reimplementing it means re-deriving details like where a `conn` id
 /// comes from.
-pub async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
+pub async fn serve(
+	mut server: moq_native::Server,
+	cluster: Cluster,
+	auth: Auth,
+	shutdown: Shutdown,
+) -> anyhow::Result<()> {
 	while let Some(request) = server.accept().await {
-		let conn = Connection {
-			// Shared with outbound cluster dials so one id space covers every session.
-			id: cluster.next_connection_id(),
-			request,
-			cluster: cluster.clone(),
-			auth: auth.clone(),
-		};
+		let conn = Connection::new(request, cluster.clone(), auth.clone())
+			.with_id(cluster.next_connection_id())
+			.with_shutdown(shutdown.clone());
 
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {

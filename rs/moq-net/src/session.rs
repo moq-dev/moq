@@ -9,7 +9,7 @@ use std::{
 use web_transport_trait::Stats;
 
 use crate::{
-	Error, Version, bandwidth,
+	Error, SessionError, Version, bandwidth, goaway,
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
@@ -68,6 +68,7 @@ pub struct Session {
 	version: Version,
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
+	goaway: Arc<goaway::Handle>,
 }
 
 impl Session {
@@ -103,12 +104,48 @@ impl Session {
 	/// Close the transport with an explicit error, instead of waiting for the last
 	/// clone to drop. Idempotent: the first close wins.
 	pub fn abort(&self, err: Error) {
-		self.shared.close(err.to_code(), err.to_string().as_ref());
+		self.shared
+			.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 	}
 
 	/// Block until the transport session is closed, returning the reason.
+	///
+	/// A close code the peer sent is decoded through the session registry (so an auth
+	/// rejection arrives as [`Error::Unauthorized`]); an unregistered code is kept
+	/// verbatim as [`Error::Remote`], and a close carrying no application code surfaces
+	/// as [`Error::Transport`]. See [`Error::from_transport`].
 	pub async fn closed(&self) -> Error {
-		Error::Transport(self.shared.inner.closed().await)
+		self.shared.inner.closed().await
+	}
+
+	/// Drain the peer gracefully: the handle for sending this session's single
+	/// GOAWAY.
+	///
+	/// The graceful counterpart to [`abort`](Self::abort). Send the message with
+	/// [`goaway::Producer::send`], then await [`closed`](Self::closed) to observe
+	/// the peer leaving.
+	///
+	/// Only a [`Goaway`](goaway::Goaway) carrying a [`timeout`](goaway::Goaway::timeout)
+	/// schedules a close of our own, so without one this waits for a peer that may
+	/// never leave. Set a deadline when the drain has to finish.
+	///
+	/// Available on every version. A version with no GOAWAY message (moq-lite-03
+	/// and earlier) simply carries no explanation to the peer; the deadline is the
+	/// sender's own timer either way, so the session still closes on schedule and
+	/// the caller does not branch on the negotiated version.
+	pub fn drain(&self) -> goaway::Producer {
+		self.goaway.producer()
+	}
+
+	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
+	///
+	/// [`peek`](goaway::Consumer::peek) is the cheap synchronous check;
+	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, new
+	/// subscribe and announce-interest requests on this session are refused (both
+	/// drafts forbid opening new streams afterward); existing subscriptions keep
+	/// flowing until the session closes.
+	pub fn draining(&self) -> goaway::Consumer {
+		self.goaway.consumer()
 	}
 }
 
@@ -223,7 +260,7 @@ impl SessionShared {
 
 impl Drop for SessionShared {
 	fn drop(&mut self) {
-		self.close(Error::Cancel.to_code(), "dropped");
+		self.close(SessionError::Cancel.to_code(), "dropped");
 	}
 }
 
@@ -233,6 +270,7 @@ impl Session {
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: MaybeSendBox<'static, Result<(), Error>>,
+		goaway: goaway::Handle,
 	) -> (Self, Driver) {
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
 		let (send_bandwidth, maintenance) = if session.stats().estimated_send_rate().is_some() {
@@ -255,6 +293,7 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
+			goaway: Arc::new(goaway),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -367,7 +406,7 @@ impl<S: web_transport_trait::Session> SendBandwidth<S> {
 // allowing the !Send browser WebTransport on wasm.
 trait SessionInner: web_transport_trait::MaybeSend + web_transport_trait::MaybeSync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> MaybeSendBox<'_, String>;
+	fn closed(&self) -> MaybeSendBox<'_, Error>;
 	fn stats(&self) -> ConnectionStats;
 }
 
@@ -376,8 +415,8 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> MaybeSendBox<'_, String> {
-		Box::pin(async move { S::closed(self).await.to_string() })
+	fn closed(&self) -> MaybeSendBox<'_, Error> {
+		Box::pin(async move { Error::from_transport(S::closed(self).await) })
 	}
 
 	fn stats(&self) -> ConnectionStats {

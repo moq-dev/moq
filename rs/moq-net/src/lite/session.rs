@@ -1,6 +1,6 @@
 use crate::origin;
 use crate::{
-	Error, Origin, bandwidth,
+	Error, Origin, SessionError, bandwidth,
 	coding::{Reader, Stream, Writer},
 	lite::SessionInfo,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
@@ -16,6 +16,8 @@ pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Consumer>,
 	pub connecting: Connecting,
 	pub driver: MaybeSendBox<'static, Result<(), Error>>,
+	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
+	pub goaway: crate::goaway::Handle,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -161,6 +163,11 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 	let peer_setup = peer_setup_slot;
 	let (tasks, task_set) = TaskSet::new();
 
+	// GOAWAY wiring: the public Session holds one half (send trigger, received
+	// signal), the protocol tasks below hold the other. moq-lite lets either side
+	// name a redirect URI, unlike moq-transport.
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(true);
+
 	// Read out before the setup task takes ownership below.
 	let our_cost = our_setup.cost;
 
@@ -175,11 +182,50 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 		});
 	}
 
+	// GOAWAY send task: parked on the send trigger; fires at most once (the trigger
+	// only accepts one payload). Races the transport close so a parked trigger
+	// never blocks the task set draining.
+	//
+	// Spawned on every version, including those with no GOAWAY message. The
+	// deadline is the sender's own timer, so a caller draining a lite-03 peer still
+	// gets the session closed on schedule; the peer just never learns why.
+	{
+		let session = session.clone();
+		let goaway = goaway.clone();
+		tasks.push(async move {
+			let payload = {
+				let mut closed = std::pin::pin!(session.closed());
+				let mut triggered = std::pin::pin!(goaway.triggered());
+				kio::wait(|waiter| {
+					if waiter.poll_future(closed.as_mut()).is_ready() {
+						return std::task::Poll::Ready(None);
+					}
+					waiter.poll_future(triggered.as_mut())
+				})
+				.await
+			};
+			let Some(payload) = payload else {
+				return;
+			};
+			// moq-lite has no timeout field on the wire; only the URI is sent. The
+			// deadline is still ours to honor, enforced locally below.
+			if version.has_goaway()
+				&& let Err(err) = send_goaway(&session, &payload.uri, version).await
+			{
+				// Still enforce the deadline: the drain was requested, and failing to
+				// explain it to the peer is no reason to hold the session open.
+				tracing::warn!(%err, "failed to send goaway");
+			}
+			crate::goaway::enforce(&session, payload.timeout).await;
+		});
+	}
+
 	let publisher = Publisher::new(PublisherConfig {
 		session: session.clone(),
 		origin: publish,
 		version,
 		peer_setup: peer_setup.clone(),
+		goaway: goaway.clone(),
 		peer_origin,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
@@ -194,6 +240,7 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 		// for its own egress.
 		cost: our_cost,
 		tasks,
+		going_away: goaway.going_away,
 	});
 
 	let driver = async move {
@@ -221,15 +268,15 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 		match &res {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
-				session.close(1, "");
+				session.close(SessionError::Internal.to_code(), "");
 			}
 			Err(err) => {
 				tracing::warn!(%err, "session error");
-				session.close(err.to_code(), err.to_string().as_ref());
+				session.close(SessionError::from(err).to_code(), err.to_string().as_ref());
 			}
 			_ => {
 				tracing::info!("session closed");
-				session.close(0, "");
+				session.close(SessionError::Cancel.to_code(), "");
 			}
 		}
 
@@ -241,6 +288,7 @@ pub fn start<S: web_transport_trait::Session>(config: Config<S>) -> Result<Sessi
 		recv_bandwidth: recv_bw_consumer,
 		connecting,
 		driver,
+		goaway: goaway_handle,
 	})
 }
 
@@ -252,6 +300,24 @@ async fn send_setup<S: web_transport_trait::Session>(session: &S, setup: Setup, 
 	writer.encode(&setup).await?;
 	writer.finish()?;
 	writer.closed().await
+}
+
+/// Open a Goaway control stream (0x5), send the single GOAWAY message, and FIN.
+/// Lite04+ only; the version gate is the caller's.
+async fn send_goaway<S: web_transport_trait::Session>(session: &S, uri: &str, version: Version) -> Result<(), Error> {
+	let mut stream = Stream::open(session, version).await?;
+	stream.writer.encode(&super::ControlType::Goaway).await?;
+	stream
+		.writer
+		.encode(&super::Goaway {
+			uri: std::borrow::Cow::Borrowed(uri),
+		})
+		.await?;
+	stream.writer.finish()?;
+	// Wait for the FIN to be acknowledged before dropping: Writer's Drop resets
+	// the stream, and on real QUIC a reset racing the FIN discards the unacked
+	// GOAWAY frame (the same dance as send_setup).
+	stream.writer.closed().await
 }
 
 // TODO do something useful with this

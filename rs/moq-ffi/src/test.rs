@@ -8,6 +8,7 @@ use crate::consumer::MoqSubscription;
 use crate::error::MoqError;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqFrame, MoqInit};
+use crate::session::{MoqBackoff, MoqConnectionStatus};
 
 use std::time::Duration;
 
@@ -717,6 +718,33 @@ async fn create_broadcast_announces() {
 		.expect("a created broadcast should be announced");
 
 	_broadcast.finish().unwrap();
+}
+
+/// Waiting for an exact path must hand the broadcast back named by that path, the base a
+/// catalog's relative `broadcast` references resolve against. Implementing the wait by
+/// rooting the cursor *at* the path would name it "", making the broadcast its own root, so
+/// a legal `../sibling` reference would read as escaping for every binding built on this.
+#[tokio::test]
+async fn announced_broadcast_keeps_the_requested_path() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let broadcast = origin.create_broadcast("a/pub".into()).unwrap();
+
+	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
+	let waited = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+	assert_eq!(waited.inner().info().path.as_str(), "a/pub");
+
+	// The same broadcast reached by request names itself identically.
+	let requested = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("a/pub".into()))
+		.await
+		.expect("timed out requesting the broadcast")
+		.unwrap();
+	assert_eq!(requested.inner().info().path.as_str(), "a/pub");
+
+	broadcast.finish().unwrap();
 }
 
 #[tokio::test]
@@ -1698,5 +1726,314 @@ async fn request_per_session_publish_override() {
 	broadcast.finish().unwrap();
 	cs.cancel(0);
 	server_session.cancel(0);
+	server.cancel();
+}
+
+/// The #2609 regression: a client session must ride out a transport drop on its
+/// own. The server kills the first session; after the automatic redial, a
+/// broadcast published on the server still reaches the client's consume origin.
+/// With the old one-shot dial this stalled silently forever.
+#[tokio::test]
+async fn client_reconnects_and_resumes_announcements() {
+	let server_origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_publish(Some(server_origin.clone()));
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	// Hand the first session back to the test body (so the kill happens only after
+	// the client observed the connect), and gate the second accept so the
+	// disconnected state is observable: until the gate opens, the client's redial
+	// has no session to complete against.
+	let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+	let (regate_tx, regate_rx) = tokio::sync::oneshot::channel::<()>();
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let first = accept_server
+			.accept()
+			.await
+			.expect("first accept errored")
+			.expect("first accept returned None");
+		let first = first.accept().await.expect("first handshake failed");
+		if first_tx.send(first).is_err() {
+			panic!("test body gone");
+		}
+		regate_rx.await.expect("regate dropped");
+
+		let second = accept_server
+			.accept()
+			.await
+			.expect("second accept errored")
+			.expect("second accept returned None");
+		second.accept().await.expect("second handshake failed")
+	});
+
+	let client_origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_consume(Some(client_origin.clone()));
+	// Fast retries so the test doesn't wait out the default 1s backoff.
+	client.set_backoff(MoqBackoff {
+		initial_ms: 50,
+		multiplier: 2,
+		max_ms: 200,
+		timeout_ms: 0,
+	});
+
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	// The first status is the connect this session was built from.
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("status timed out")
+		.expect("status errored");
+	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	// Kill the transport under the client, simulating a relay restart.
+	// Nothing accepts the redial until the gate opens.
+	let first = tokio::time::timeout(TIMEOUT, first_rx)
+		.await
+		.expect("first session timed out")
+		.expect("accept task gone");
+	first.cancel(0);
+
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("disconnect status timed out")
+		.expect("disconnect status errored");
+	assert_eq!(status, MoqConnectionStatus::Disconnected);
+
+	// Open the gate; the redial completes.
+	regate_tx.send(()).expect("accept task gone");
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("reconnect status timed out")
+		.expect("reconnect status errored");
+	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	// A broadcast published only after the reconnect must reach the client.
+	let broadcast = server_origin.create_broadcast("after-reconnect".into()).unwrap();
+
+	let consumer = client_origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for the post-reconnect announcement")
+		.unwrap()
+		.expect("expected an announcement");
+	assert_eq!(announcement.path(), "after-reconnect");
+
+	broadcast.finish().unwrap();
+	cs.cancel(0);
+	server_session.cancel(0);
+	server.cancel();
+}
+
+/// With reconnecting disabled the old contract holds: the transport's close ends
+/// the session, surfacing through `closed()` instead of a redial.
+#[tokio::test]
+async fn one_shot_client_close_surfaces_through_closed() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false);
+
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	server_session.cancel(7);
+	tokio::time::timeout(TIMEOUT, cs.closed())
+		.await
+		.expect("closed timed out")
+		.expect_err("a severed one-shot session must surface as an error");
+
+	server.cancel();
+}
+
+/// A rejection at the MoQ layer reaches the client as an untyped transport
+/// close, which the reconnect loop retries like any other drop. One-shot mode
+/// is how a caller observes the rejection directly; mirrors py
+/// test_server_request_close, which drives the same path through the bindings.
+#[tokio::test]
+async fn rejected_session_surfaces_through_closed() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let reject = tokio::spawn(async move {
+		loop {
+			let Ok(Some(request)) = accept_server.accept().await else {
+				return;
+			};
+			request.reject(403).await.expect("reject failed");
+		}
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_reconnect(false);
+
+	// Either the dial fails outright, or the optimistic connect resolves and the
+	// rejection lands as the session's terminal close. Both must surface within
+	// the timeout.
+	if let Ok(cs) = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect neither resolved nor failed")
+	{
+		tokio::time::timeout(TIMEOUT, cs.closed())
+			.await
+			.expect("closed timed out")
+			.expect_err("a rejected session must surface as an error");
+	}
+
+	reject.abort();
+	server.cancel();
+}
+
+/// `MoqClient::cancel` must abort connects even when called first, reconnect
+/// loop or not; the kt BindingsSmokeTest relies on this to fail fast.
+#[tokio::test]
+async fn cancel_before_connect_fails_fast() {
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.cancel();
+	let result = tokio::time::timeout(
+		Duration::from_secs(5),
+		client.connect("https://localhost:0/test".into()),
+	)
+	.await
+	.expect("connect did not fail fast");
+	let Err(err) = result else {
+		panic!("connect must fail after cancel");
+	};
+	assert!(matches!(err, MoqError::Cancelled), "unexpected error: {err}");
+}
+
+/// A caller that stops waiting must not swallow the event it gave up on.
+/// Dropping the future returned by a `Task::run` call used to leave the spawned
+/// closure detached and still holding the state lock, so it consumed the next
+/// transition into its own cursor and the retry blocked behind it, missing the
+/// edge. Every repeatable read on the bindings (`status`, `next`, `read_frame`,
+/// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
+#[tokio::test]
+async fn cancelled_status_does_not_swallow_the_next_transition() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]);
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	// Accept exactly once. Nothing serves the redial, so `Disconnected` is the
+	// only transition left after the kill: if it gets eaten, nothing replaces it.
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept().await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_backoff(MoqBackoff {
+		initial_ms: 50,
+		multiplier: 2,
+		max_ms: 200,
+		timeout_ms: 0,
+	});
+
+	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("status timed out")
+		.expect("status errored");
+	assert_eq!(status, MoqConnectionStatus::Connected);
+
+	// Give up on a status that isn't coming. The window is generous on purpose:
+	// the abandoned call has to actually reach its await for this to prove
+	// anything, and a spawn that never got there would pass either way.
+	assert!(
+		tokio::time::timeout(Duration::from_millis(200), cs.status())
+			.await
+			.is_err(),
+		"no transition was pending, so this must be the caller giving up",
+	);
+
+	// The transition the abandoned call would have eaten.
+	server_session.cancel(0);
+
+	let status = tokio::time::timeout(TIMEOUT, cs.status())
+		.await
+		.expect("the cancelled waiter swallowed the disconnect")
+		.expect("status errored");
+	assert_eq!(status, MoqConnectionStatus::Disconnected);
+
+	cs.cancel(0);
 	server.cancel();
 }

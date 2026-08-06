@@ -162,11 +162,14 @@ ui.run((effect) => {
 	effect.set(source.constraints, cameraConstraints(readVideoTarget(effect)));
 });
 
-// Audio general settings (volume gain, output sample rate, channel mix).
+// Audio general settings. Volume is per-rendition; the capture format is shared by all of them,
+// so rate and channel mix live on the capture rather than the encoder.
 ui.run((effect) => {
 	publish.audio.volume.set(effect.get(volume));
-	publish.audio.sampleRate.set(effect.get(sampleRate));
-	publish.audio.channelCount.set(effect.get(channelCount));
+
+	const capture = publish.audio.capture;
+	capture?.sampleRate.set(effect.get(sampleRate));
+	capture?.channelCount.set(effect.get(channelCount));
 });
 
 // Mic processing constraints go to the capture itself (getUserMedia re-acquires the track on
@@ -449,10 +452,27 @@ const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${
 $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 
 // Count captured frames; the publish API has no encoded-frame counter, so this
-// is the capture rate feeding the encoder (a good proxy for output fps).
+// is the capture rate feeding the encoder (a good proxy for output fps). Read off our own stream:
+// a signal coalesces a burst into one notification, which undercounts the rate.
 let frames = 0;
 viz.run((effect) => {
-	if (effect.get(publish.capture.out.frame)) frames++;
+	const fanout = effect.get(publish.capture.out.frames);
+	if (!fanout) return;
+
+	const reader = fanout.subscribe(effect).getReader();
+	effect.cleanup(() => {
+		reader.cancel().catch(() => {});
+	});
+
+	effect.spawn(async () => {
+		for (;;) {
+			const next = await Promise.race([reader.read(), effect.cancel]);
+			if (!next?.value) break;
+
+			frames++;
+			next.value.close();
+		}
+	});
 });
 
 let prevFrames = 0;

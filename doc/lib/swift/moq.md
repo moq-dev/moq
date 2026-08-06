@@ -14,7 +14,7 @@ Full API reference: [Swift Package Index](https://swiftpackageindex.com/moq-dev/
 ## Install
 
 ```swift
-.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.1"),
+.package(url: "https://github.com/moq-dev/moq-swift", from: "0.4.2"),
 ```
 
 Add `Moq` to your target's dependencies:
@@ -68,6 +68,21 @@ do {
 }
 ```
 
+### Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Call `client.setReconnect(false)` before connecting for a one-shot dial,
+or `client.setBackoff(...)` to tune the pacing. `session.status()` reports each
+transition, and `session.closed()` resolves only once the connection stops for
+good:
+
+```swift
+while let status = try? await session.status() {
+    print("status: \(status)")  // .connected / .disconnected / .migrating
+}
+```
+
 ## Subscribe
 
 Every consumer is an `AsyncSequence`, so iterate directly:
@@ -101,8 +116,12 @@ track.update(subscription: Subscription(priority: 20, ordered: false))
 let broadcast = try session.publisher.createBroadcast(path: "my-stream")
 let audio = try broadcast.publishMedia(format: "opus", initData: opusInitBytes)
 
+// Audio has no keyframes, so `cut` is what gives it group boundaries. Once per
+// frame is the lowest latency; a segment cadence suits HLS/DASH.
 try audio.writeFrame(payload, timestampUs: 0)
+try audio.cut()
 try audio.writeFrame(payload, timestampUs: 20_000)
+try audio.cut()
 try audio.finish()
 try broadcast.finish()
 ```

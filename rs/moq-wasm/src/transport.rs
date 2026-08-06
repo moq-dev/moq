@@ -38,12 +38,21 @@ pub struct RecvStream(web_transport_wasm::RecvStream);
 pub struct Error(web_transport_wasm::Error);
 
 impl wtt::Error for Error {
+	// The browser reports one code either way, so the variant is the only thing saying
+	// which registry it belongs to. Answering both would have a stream reset decoded
+	// against the session table, since callers ask about the session first.
 	fn session_error(&self) -> Option<(u32, String)> {
-		self.0.code().map(|code| (code as u32, self.0.to_string()))
+		match self.0 {
+			web_transport_wasm::Error::Session(_) => self.0.code().map(|code| (code as u32, self.0.to_string())),
+			_ => None,
+		}
 	}
 
 	fn stream_error(&self) -> Option<u32> {
-		self.0.code().map(|c| c as u32)
+		match self.0 {
+			web_transport_wasm::Error::Stream(_) => self.0.code().map(|c| c as u32),
+			_ => None,
+		}
 	}
 }
 

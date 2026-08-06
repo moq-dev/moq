@@ -86,7 +86,11 @@ Conceptually, these are join points, and new subscriptions will always start at 
 Groups are delivered independently and potentially out of order, so you should have some logic to reorder or skip during congestion.
 A group is closed when finished or aborted with an error (ex. during congestion).
 
-Each group consists of one or more **frames**.
+A subscription starts at the latest group by default, but can name any (group, frame) position instead.
+That is how a subscriber follows a track to a different publisher partway through a group, which matters when the current group may stay open indefinitely (a JSON append log, or a catalog that keeps appending deltas).
+A group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
+
+Each group consists of one or more **frames**, numbered from 0 in the order they were produced.
 Frames within a group are delivered reliably and in order.
 You can and should take advantage of this, for example using delta encoding.
 If frames within a group are actually independent, you should probably split them into individual groups!
@@ -139,6 +143,33 @@ When combined with a local jitter buffer, this should result in different user e
 There's no optimal solution for this, but we think these subscription properties provide a GOOD ENOUGH user experience for most use-cases.
 They're simple to implement and easy enough to understand.
 
+### GOAWAY (Graceful Shutdown)
+
+Either endpoint can gracefully drain a session by sending a `GOAWAY` message.
+It tells the peer to reconnect, either to a different endpoint (a URI in the message) or to the same endpoint (empty URI), instead of being cut off when the sender shuts down.
+
+The lifecycle on the sending side (Rust `moq-net`):
+
+1. `session.drain()` yields the session's one GOAWAY handle, the graceful counterpart to `session.abort()`. It works on every version: one without a GOAWAY message (moq-lite-03 and earlier) simply carries no explanation to the peer.
+2. `producer.send(Goaway::new())` tells the peer to reconnect to the same endpoint; `Goaway::redirect(uri)` names a different one, and `.with_timeout(duration)` adds a deadline. Sending a second is refused, so the peer never sees a URI replaced behind its back.
+3. `session.closed()` resolves once the peer leaves, or once the deadline force-closes it. Only a `Goaway` carrying a timeout schedules a close of our own, so set one when the drain has to finish.
+
+On the receiving side:
+
+1. `session.draining()` returns a consumer: `peek()` is a cheap synchronous check, `recv()` waits for the URI and optional deadline.
+2. New requests (subscribes, fetches, announce interests) on the session are then rejected; existing subscriptions keep flowing until the session closes.
+3. Connect a replacement session sharing the same origin. Its announcements attach as additional routes to the broadcasts the old session serves, and when the old session closes, live subscriptions resume on the new route at a group boundary. Applications reading through `moq-net` never observe the swap.
+
+A moq-transport client sends an empty URI: only a server can tell a peer where to reconnect. The URI is capped at 8,192 bytes on both wires, and a second GOAWAY on a session is a protocol violation that closes it.
+
+Native clients get step 3 for free from `moq_native::Client::connect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
+
+`moq-relay` uses this in both directions: on shutdown it drains its own downstream sessions (see [`--drain-timeout`](/bin/relay/config#drain-timeout)), and on a GOAWAY from a cluster peer the reconnect loop migrates transparently.
+
+GOAWAY is supported on moq-lite-04+ and IETF moq-transport draft-14+. The deadline is carried on the wire only for IETF draft-17+ (moq-lite carries no timeout, but the sender's local force-close timer still applies).
+
+The JS `@moq/net` package decodes GOAWAY on the wire but does not yet expose this lifecycle.
+
 ## Compatibility
 
 `moq-lite` is forward compatible with `moq-transport`.
@@ -167,8 +198,8 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 
 - **No Request IDs**: A bidirectional stream for each request to avoid HoLB. (NOTE: likely to be upstreamed into moq-transport)
 - **No Push**: A subscriber must explicitly subscribe to each track.
-- **Single-group FETCH only (lite-05+)**: Fetch one complete group by sequence. Ranges and joining fetches are not supported.
-- **No Joining Fetch**: Subscriptions start at the latest group, not the latest frame.
+- **Single-group FETCH only (lite-05+)**: Fetch one group by sequence, optionally bounded to a range of frames within it. Fetching across groups is not supported.
+- **No Joining Fetch**: A subscription resumes by asking for the missing range directly, rather than by pairing a fetch with a subscribe.
 - **No sub-groups**: SVC layers should be separate tracks.
 - **No gaps**: Makes life much easier for the relay and every application.
 - **No object properties**: Encode your metadata into the frame payload.

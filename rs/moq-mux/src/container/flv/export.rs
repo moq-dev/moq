@@ -176,8 +176,7 @@ impl Export {
 		source: crate::Source,
 		catalog_format: CatalogFormat,
 	) -> Result<Self, crate::Error> {
-		let broadcast = source.broadcast().await?;
-		let catalog = crate::catalog::Consumer::new(&broadcast, catalog_format).await?;
+		let catalog = source.catalog(catalog_format).await?;
 		Ok(Self {
 			source,
 			catalog: Some(catalog),

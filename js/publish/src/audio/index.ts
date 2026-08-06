@@ -1,6 +1,7 @@
 import type * as Catalog from "@moq/hang/catalog";
 import type { Rendition as BaseRendition } from "../rendition";
 
+export * from "./capture";
 export * from "./encoder";
 export * from "./types";
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-	Error, Path, PathOwned, Timescale, broadcast,
+	Error, Path, PathOwned, SessionError, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
@@ -163,6 +163,9 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	state: Lock<State>,
 	tasks: Tasks,
 	version: Version,
+	// Set once the peer sends a GOAWAY; new SUBSCRIBEs are then rejected with
+	// Error::GoingAway (the peer told us to stop opening streams).
+	going_away: crate::goaway::GoingAway,
 }
 
 async fn resolve_track_alias(aliases: kio::Consumer<HashMap<u64, RequestId>>, alias: u64) -> Result<RequestId, Error> {
@@ -195,6 +198,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		cost: Option<u64>,
 		version: Version,
 		tasks: Tasks,
+		going_away: crate::goaway::GoingAway,
 	) -> Self {
 		Self {
 			session,
@@ -207,6 +211,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			state: Default::default(),
 			tasks,
 			version,
+			going_away,
 		}
 	}
 
@@ -327,6 +332,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
 	) -> Result<(), Error> {
+		// A peer that sent GOAWAY told us to stop opening requests on this session,
+		// announce-interest included (draft-19 sect 10.4).
+		if self.going_away.is_set() {
+			return Err(Error::GoingAway);
+		}
+
 		let request_id = self.control.next_request_id().await?;
 
 		// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the legacy
@@ -518,7 +529,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						// cluster draft requires closing the session on those; a stream
 						// the peer simply reset is not the peer's fault.
 						if is_protocol_violation(&err) {
-							this.session.close(err.to_code(), err.to_string().as_ref());
+							this.session
+								.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 						}
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -866,7 +878,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// The ingress announce stats (announced / announced_bytes) are driven in the model
 	/// by `create_broadcast`'s route transitions below.
 	fn attach(&self, state: &mut State, path: PathOwned, advert: Advertised) -> Result<broadcast::Producer, Error> {
-		let publisher = advert.publisher;
+		let Advertised { mut route, publisher } = advert;
+
+		// A namespace published after the peer's GOAWAY starts out draining, so
+		// a late arrival on a dying connection can't take over as primary. The
+		// per-source task only ever moves a route in this direction, so there is
+		// no race between the two.
+		if self.going_away.is_set() {
+			route.cost = broadcast::DRAIN_COST;
+		}
 
 		// A different original publisher, or one that identifies nothing, means a
 		// distinct broadcast may have taken over this namespace. Its content is not
@@ -892,12 +912,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
 				let mut producer = entry.get().producer.producer();
-				producer.set_route(advert.route)?;
+				producer.set_route(route)?;
 				Ok(producer)
 			}
 			Entry::Vacant(entry) => {
-				let route = advert.route;
-
 				// Propagates Error::Unauthorized if the path is out of scope.
 				let broadcast = self.origin.create_broadcast(&path, route)?;
 
@@ -964,6 +982,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						if waiter.poll_future(closed.as_mut()).is_ready() {
 							return Poll::Ready(None);
 						}
+						// A draining peer usually stops publishing namespaces, so react to
+						// the signal itself; waiting for another message would leave the
+						// route primary until the session finally closed. Idempotent, since
+						// the signal stays set and this task wakes for other reasons too.
+						if self.going_away.poll(waiter).is_ready() {
+							broadcast.drain();
+						}
 						broadcast.poll_requested_track(waiter).map(Some)
 					})
 					.await
@@ -1013,6 +1038,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.with_timescale(crate::Timescale::MICRO)
 			.with_latency_max(self.origin.latency_default());
 		let mut track = request.accept(info);
+
+		// A peer that sent GOAWAY told us to stop opening streams on this session.
+		if self.going_away.is_set() {
+			let _ = track.abort(Error::GoingAway);
+			return;
+		}
 
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
@@ -1068,7 +1099,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 
 				if let Err(err) = self.register_alias(request_id, alias) {
-					self.session.close(err.to_code(), err.to_string().as_ref());
+					self.session
+						.close(SessionError::from(&err).to_code(), err.to_string().as_ref());
 					self.remove_subscribe(request_id);
 					let _ = track.abort(err);
 					return;
@@ -1381,6 +1413,7 @@ mod tests {
 			None,
 			Version::Draft16,
 			tasks,
+			Default::default(),
 		);
 
 		assert_eq!(
@@ -1453,6 +1486,7 @@ mod tests {
 			None,
 			VERSION,
 			tasks,
+			Default::default(),
 		);
 
 		let prefix = subscriber.subscribe_prefixes().pop().expect("one prefix");
@@ -1512,6 +1546,7 @@ mod tests {
 			None,
 			Version::Draft14,
 			tasks,
+			Default::default(),
 		);
 
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
@@ -1577,6 +1612,7 @@ mod tests {
 			None,
 			Version::Draft14,
 			tasks,
+			Default::default(),
 		);
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 		let _reflected = subscriber
@@ -1620,6 +1656,7 @@ mod tests {
 				None,
 				Version::Draft14,
 				tasks,
+				Default::default(),
 			);
 			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
 			let producer = subscriber
@@ -1676,6 +1713,7 @@ mod tests {
 			None,
 			Version::Draft19,
 			tasks,
+			Default::default(),
 		);
 		(subscriber, origin)
 	}
@@ -1814,6 +1852,7 @@ mod tests {
 			None,
 			VERSION,
 			tasks,
+			Default::default(),
 		);
 
 		let stream = Stream::open(&session, VERSION).await.unwrap();
@@ -1888,6 +1927,7 @@ mod tests {
 			None,
 			VERSION,
 			tasks,
+			Default::default(),
 		);
 
 		let stream = Stream::open(&session, VERSION).await.unwrap();
@@ -1944,6 +1984,7 @@ mod tests {
 			None,
 			VERSION,
 			tasks,
+			Default::default(),
 		);
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -2260,6 +2301,7 @@ mod tests {
 			None,
 			VERSION,
 			tasks,
+			Default::default(),
 		);
 
 		let path = crate::Path::new("room/host").to_owned();
@@ -2438,6 +2480,7 @@ mod tests {
 			None,
 			Version::Draft19,
 			tasks,
+			Default::default(),
 		);
 
 		let stream = Stream::open(&session, Version::Draft19).await.unwrap();

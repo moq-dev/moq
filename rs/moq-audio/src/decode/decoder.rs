@@ -35,7 +35,7 @@ pub struct Config {
 	pub channels: Option<u32>,
 	/// Upper bound on buffering before skipping a stalled group.
 	///
-	/// Forwarded to [`moq_mux::container::Consumer::with_latency`]: if a group is
+	/// Forwarded to [`moq_mux::container::Consumer::with_latency_max`]: if a group is
 	/// stuck and a newer group is more than this far ahead, the consumer skips.
 	/// `None` keeps the moq-mux default of zero, which skips aggressively. Set it
 	/// to the playout buffer you can tolerate (typically tens to a few hundred ms)

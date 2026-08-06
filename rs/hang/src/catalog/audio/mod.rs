@@ -71,6 +71,9 @@ pub struct AudioConfig {
 	/// Optional reference to another broadcast that publishes this track, expressed
 	/// relative to the broadcast that served this catalog (e.g. `../source`). If unset,
 	/// the track lives in the same broadcast as the catalog.
+	///
+	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
+	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
@@ -112,11 +115,6 @@ pub struct AudioConfig {
 	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
-
-	/// The companion timeline track indexing this rendition's groups, if the publisher
-	/// offers one. See [`Timeline`](crate::catalog::Timeline).
-	#[serde(default)]
-	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl AudioConfig {
@@ -136,7 +134,6 @@ impl AudioConfig {
 			description: None,
 			container: Container::default(),
 			jitter: None,
-			timeline: None,
 		}
 	}
 }

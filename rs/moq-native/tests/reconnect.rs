@@ -20,14 +20,14 @@ fn client(backoff: moq_native::Backoff) -> moq_native::Client {
 #[tokio::test]
 async fn a_transient_failure_retries_until_the_budget_runs_out() {
 	let mut backoff = moq_native::Backoff::default();
-	backoff.initial = Duration::from_millis(20);
-	backoff.max = Duration::from_millis(40);
-	backoff.timeout = Duration::from_millis(200);
+	backoff.initial = Some(Duration::from_millis(20));
+	backoff.max = Some(Duration::from_millis(40));
+	backoff.timeout = Some(Duration::from_millis(200));
 
 	// Nothing listens on port 1, so every attempt is refused: transient as far as this layer knows.
 	let url = "tcp://127.0.0.1:1".parse().expect("failed to parse url");
 	let started = tokio::time::Instant::now();
-	let reconnect = client(backoff).reconnect(url);
+	let reconnect = client(backoff).connect(url);
 
 	let err = tokio::time::timeout(Duration::from_secs(10), reconnect.closed())
 		.await

@@ -65,7 +65,10 @@ test("encoding tracks encoder config in its child effect", async () => {
 	const broadcast = { video: () => rendition };
 	const capture = {
 		in: { source: new Signal(undefined) },
-		out: { frame: new Signal<VideoFrame | undefined>(undefined) },
+		out: {
+			display: new Signal<{ width: number; height: number } | undefined>(undefined),
+			frames: new Signal(undefined),
+		},
 	};
 	const encoder = new Encoder("video/hd", {
 		enabled: true,
@@ -107,7 +110,8 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 			} as never),
 		},
 		out: {
-			frame: new Signal<VideoFrame | undefined>({ codedWidth: 640, codedHeight: 480 } as never),
+			display: new Signal({ width: 640, height: 480 }),
+			frames: new Signal(undefined),
 		},
 	};
 	const bandwidth = new Signal<number | undefined>(10_000_000);
@@ -182,7 +186,8 @@ test("every published config was probed for its own codec and dimensions", async
 			} as never),
 		},
 		out: {
-			frame: new Signal<VideoFrame | undefined>({ codedWidth: 1280, codedHeight: 720 } as never),
+			display: new Signal({ width: 1280, height: 720 }),
+			frames: new Signal(undefined),
 		},
 	};
 	const bandwidth = new Signal<number | undefined>(10_000_000);
@@ -215,7 +220,7 @@ test("every published config was probed for its own codec and dimensions", async
 		// element polls the estimate every 100ms. The resize schedules the dimensions effect and
 		// the sample schedules the resolve effect, so the resolve effect runs with the new
 		// dimensions already written while the probe still holds the result for the old ones.
-		capture.out.frame.set({ codedWidth: 640, codedHeight: 480 } as never);
+		capture.out.display.set({ width: 640, height: 480 });
 		bandwidth.set(3_000_000);
 		await settle();
 

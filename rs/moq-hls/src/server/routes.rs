@@ -15,6 +15,7 @@ use super::Server;
 use crate::export::{Kind, Rendition};
 
 const M3U8: &str = "application/vnd.apple.mpegurl";
+const MPD: &str = "application/dash+xml";
 const MP4: &str = "video/mp4";
 
 /// How long a rendition lookup waits for the catalog (and its first timeline records) to
@@ -27,6 +28,9 @@ pub fn router(server: Server) -> Router {
 
 enum Route {
 	Master {
+		broadcast: String,
+	},
+	Manifest {
 		broadcast: String,
 	},
 	Media {
@@ -70,6 +74,9 @@ fn parse_route(path: &str) -> Option<Route> {
 		[broadcast @ .., file] if file == "master.m3u8" => Some(Route::Master {
 			broadcast: broadcast_path(broadcast)?,
 		}),
+		[broadcast @ .., file] if file == "manifest.mpd" => Some(Route::Manifest {
+			broadcast: broadcast_path(broadcast)?,
+		}),
 		[broadcast @ .., kind, rendition, file] if file == "media.m3u8" => Some(Route::Media {
 			broadcast: broadcast_path(broadcast)?,
 			kind: kind.clone(),
@@ -93,6 +100,7 @@ fn parse_route(path: &str) -> Option<Route> {
 async fn request(State(server): State<Server>, uri: Uri, RawQuery(query): RawQuery) -> Response {
 	match parse_route(uri.path()) {
 		Some(Route::Master { broadcast }) => master(&server, &broadcast, query.as_deref()).await,
+		Some(Route::Manifest { broadcast }) => manifest(&server, &broadcast, query.as_deref()).await,
 		Some(Route::Media {
 			broadcast,
 			kind,
@@ -126,6 +134,23 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	m3u8(broadcaster.master_playlist(query))
 }
 
+async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Response {
+	let Some(broadcaster) = server.broadcaster(broadcast).await else {
+		return not_found();
+	};
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	if broadcaster.is_empty() {
+		return not_found();
+	}
+	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
+	// to index its first complete segment before answering.
+	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	match broadcaster.manifest(query) {
+		Some(manifest) => mpd(manifest),
+		None => not_found(),
+	}
+}
+
 async fn media(server: &Server, broadcast: &str, kind: &str, rendition: &str, query: Option<&str>) -> Response {
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
@@ -155,21 +180,33 @@ async fn init(server: &Server, broadcast: &str, kind: &str, rendition: &str) -> 
 		return not_found();
 	};
 	match rendition.init().await {
-		Ok(Some(bytes)) => media_bytes(bytes),
+		Ok(Some(bytes)) => media_bytes(bytes, server),
 		Ok(None) => not_found(),
 		Err(err) => server_error(err),
 	}
 }
 
 async fn segment(server: &Server, broadcast: &str, kind: &str, rendition: &str, file: &str) -> Response {
-	let Some(sequence) = file.strip_suffix(".m4s").and_then(|s| s.parse::<u64>().ok()) else {
+	let Some(stem) = file.strip_suffix(".m4s") else {
 		return not_found();
 	};
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match rendition.segment(sequence).await {
-		Ok(Some(bytes)) => media_bytes(bytes),
+	// HLS addresses a segment by its aligned number (`seg/0.m4s`); DASH by its timeline pts
+	// (`seg/t2000.m4s`, the SegmentTemplate's `$Time$`). Same bytes either way.
+	let result = match stem.strip_prefix('t') {
+		Some(time) => match time.parse::<u64>() {
+			Ok(time) => rendition.segment_at(time).await,
+			Err(_) => return not_found(),
+		},
+		None => match stem.parse::<u64>() {
+			Ok(sequence) => rendition.segment(sequence).await,
+			Err(_) => return not_found(),
+		},
+	};
+	match result {
+		Ok(Some(bytes)) => media_bytes(bytes, server),
 		Ok(None) => not_found(),
 		Err(err) => server_error(err),
 	}
@@ -192,12 +229,23 @@ fn m3u8(body: String) -> Response {
 		.into_response()
 }
 
-fn media_bytes(body: Bytes) -> Response {
-	// Init/segment bytes are content-addressed and immutable once produced.
+fn mpd(body: String) -> Response {
+	// Like the playlists: the manifest mutates as the live edge advances.
+	([(header::CONTENT_TYPE, MPD), (header::CACHE_CONTROL, "no-cache")], body).into_response()
+}
+
+fn media_bytes(body: Bytes, server: &Server) -> Response {
+	// Init/segment bytes never change while their URL is listed, but the URL itself is not
+	// globally unique: a restarted publisher starts a new timeline whose segment numbers and
+	// pts can repeat the old ones with different media (and a reconfigured rendition rebuilds
+	// its init under the same init.mp4). Cap shared caching at the playlist window - every
+	// concurrent viewer of the live window still hits the cache, while a stale generation's
+	// bytes age out as fast as the window that stopped listing them.
+	let max_age = server.inner.config.window.as_secs().max(1);
 	(
 		[
-			(header::CONTENT_TYPE, MP4),
-			(header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+			(header::CONTENT_TYPE, MP4.to_string()),
+			(header::CACHE_CONTROL, format!("public, max-age={max_age}")),
 		],
 		body,
 	)
@@ -242,11 +290,19 @@ mod tests {
 			Some(Route::Master { .. })
 		));
 		assert!(matches!(
+			parse_route("/project/live/manifest.mpd"),
+			Some(Route::Manifest { .. })
+		));
+		assert!(matches!(
 			parse_route("/project/live/video/main/init.mp4"),
 			Some(Route::Init { .. })
 		));
 		assert!(matches!(
 			parse_route("/project/live/video/main/seg/42.m4s"),
+			Some(Route::Segment { .. })
+		));
+		assert!(matches!(
+			parse_route("/project/live/video/main/seg/t2000.m4s"),
 			Some(Route::Segment { .. })
 		));
 		assert!(parse_route("/master.m3u8").is_none());

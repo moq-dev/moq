@@ -41,50 +41,83 @@ impl Source {
 
 	/// Resolve and subscribe to the catalog broadcast (the one at this source's path).
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
-		Ok(self.origin.request_broadcast(&self.path).await?)
+		Ok(self.request_catalog().await?)
 	}
 
-	/// Begin resolving the broadcast that serves rendition track `name`, honoring an
-	/// optional cross-broadcast reference.
+	/// Subscribe to this broadcast's catalog.
 	///
-	/// A missing/empty `rel`, or one that resolves back to the catalog's own path (or
-	/// walks past the origin root), targets the catalog broadcast; anything else targets
-	/// the resolved sibling broadcast. Either way the broadcast is fetched from the origin,
-	/// which deduplicates repeat requests for the same live path (announced or dynamically
-	/// served) so the catalog and every rendition share one upstream subscription.
-	pub(crate) fn request(&self, rel: Option<&moq_net::PathRelative<'_>>) -> kio::Pending<moq_net::origin::Requesting> {
-		let target = match rel.filter(|rel| !rel.is_empty()) {
-			// Excess `..` clamps to the (empty) origin root, which is not a broadcast; treat
-			// it as a self-reference and use the catalog broadcast instead.
-			Some(rel) => match self.path.resolve(rel) {
-				resolved if resolved.is_empty() => self.path.clone(),
-				resolved => resolved,
-			},
-			None => self.path.clone(),
+	/// The stream rejects a catalog carrying a `broadcast` reference that walks above the root
+	/// (see [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast)), so every snapshot a
+	/// consumer sees is one whose references all name a broadcast it may reach.
+	pub async fn catalog<E: crate::catalog::hang::CatalogExt>(
+		&self,
+		format: crate::catalog::CatalogFormat,
+	) -> crate::Result<crate::catalog::Consumer<E>> {
+		let broadcast = self.broadcast().await?;
+		crate::catalog::Consumer::new(&broadcast, format).await
+	}
+
+	/// Begin resolving the catalog broadcast (the one at this source's path).
+	pub(crate) fn request_catalog(&self) -> kio::Pending<moq_net::origin::Requesting> {
+		self.origin.request_broadcast(&self.path)
+	}
+
+	/// The path of the broadcast a rendition's `broadcast` reference names.
+	///
+	/// A missing or empty `rel` names the catalog broadcast; anything else names the
+	/// resolved broadcast, which may be the catalog's own path again (`../pub` from
+	/// `a/pub`).
+	fn target(&self, rel: Option<&moq_net::PathRelative<'_>>) -> crate::Result<moq_net::PathOwned> {
+		let Some(rel) = rel.filter(|rel| !rel.is_empty()) else {
+			return Ok(self.path.clone());
 		};
 
-		self.origin.request_broadcast(&target)
+		self.path.resolve(rel).ok_or_else(|| {
+			tracing::error!(%rel, catalog = %self.path, "broadcast reference escapes the root");
+			crate::Error::EscapingBroadcast(rel.to_string())
+		})
+	}
+
+	/// Begin resolving the broadcast that serves a rendition, honoring an optional
+	/// cross-broadcast reference.
+	///
+	/// The broadcast is fetched from the origin, which deduplicates repeat requests for the
+	/// same live path (announced or dynamically served) so the catalog and every rendition
+	/// share one upstream subscription.
+	///
+	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if `rel` walks
+	/// above the origin root, naming no broadcast.
+	pub(crate) fn request(
+		&self,
+		rel: Option<&moq_net::PathRelative<'_>>,
+	) -> crate::Result<kio::Pending<moq_net::origin::Requesting>> {
+		Ok(self.origin.request_broadcast(&self.target(rel)?))
 	}
 
 	/// Resolve an optional cross-broadcast reference to its broadcast.
 	///
-	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty / self
-	/// reference) resolves the catalog broadcast itself; anything else fetches the
-	/// referenced sibling broadcast from the origin. Use it when you need the broadcast
-	/// handle itself (e.g. to FETCH individual groups) rather than a subscription.
+	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty reference)
+	/// resolves the catalog broadcast itself; anything else fetches the referenced
+	/// broadcast from the origin. Use it when you need the broadcast handle itself
+	/// (e.g. to FETCH individual groups) rather than a subscription.
+	///
+	/// A reference that escapes above the origin root is
+	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast): the rendition names
+	/// no broadcast, so there is nothing to resolve.
 	pub async fn resolve(
 		&self,
 		rel: Option<&moq_net::PathRelative<'_>>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
-		Ok(self.request(rel).await?)
+		Ok(self.request(rel)?.await?)
 	}
 
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
 	/// awaiting SUBSCRIBE_OK.
 	///
-	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty / self
-	/// reference) subscribes on the catalog broadcast; anything else fetches the
-	/// referenced broadcast from the origin first.
+	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty reference)
+	/// subscribes on the catalog broadcast; anything else fetches the referenced broadcast
+	/// from the origin first. A reference that escapes above the origin root is
+	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast).
 	///
 	/// This is the async counterpart to the poll-driven container exporters: consumers
 	/// that wrap a raw [`moq_net::track::Subscriber`] themselves (e.g. the WebRTC egress)
@@ -94,7 +127,7 @@ impl Source {
 		rel: Option<&moq_net::PathRelative<'_>>,
 		name: &str,
 	) -> crate::Result<moq_net::track::Subscriber> {
-		let broadcast = self.request(rel).await?;
+		let broadcast = self.request(rel)?.await?;
 		Ok(broadcast.track(name)?.subscribe(None).await?)
 	}
 }
@@ -142,10 +175,15 @@ mod tests {
 		let source = Source::new(origin.consume(), "a/pub");
 
 		// No reference and an empty reference both resolve to the catalog broadcast.
-		source.request(None).await.expect("catalog broadcast should resolve");
+		source
+			.request(None)
+			.expect("no reference is always resolvable")
+			.await
+			.expect("catalog broadcast should resolve");
 		let empty = PathRelative::empty();
 		source
 			.request(Some(&empty))
+			.expect("empty reference is always resolvable")
 			.await
 			.expect("empty reference should resolve to the catalog broadcast");
 	}
@@ -184,13 +222,45 @@ mod tests {
 			.subscribe_track(Some(&rel), "video")
 			.await
 			.expect("self-reference should resolve to the catalog broadcast");
+	}
 
-		// Excess `..` walks past the (empty) origin root, treated as a self-reference.
-		let rel = PathRelative::new("../../..");
-		source
-			.subscribe_track(Some(&rel), "video")
-			.await
-			.expect("excess `..` should resolve to the catalog broadcast");
+	#[tokio::test]
+	async fn escaping_reference_is_rejected() {
+		let origin = Origin::random().produce();
+
+		let mut catalog = origin
+			.create_broadcast("a/pub", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _catalog_video = catalog.create_track("video", None).unwrap();
+
+		// The broadcast an escaping reference would land on if it clamped at the root.
+		let mut clamped = origin
+			.create_broadcast("elsewhere", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		let _clamped_video = clamped.create_track("video", None).unwrap();
+		settle().await;
+
+		let source = Source::new(origin.consume(), "a/pub");
+
+		// `a/pub` has two segments, so a third `..` walks above the root. `../..` stops at
+		// the root, which still names a broadcast, so it is not in this set.
+		for reference in ["../../../elsewhere", "../../..", "../../../.."] {
+			let rel = PathRelative::new(reference);
+			assert!(source.request(Some(&rel)).is_err(), "{reference} should be rejected");
+
+			// Neither `elsewhere` nor the catalog broadcast answers it: the rendition names
+			// no broadcast at all.
+			match source.resolve(Some(&rel)).await {
+				Err(crate::Error::EscapingBroadcast(_)) => {}
+				Err(err) => panic!("{reference} failed with the wrong error: {err:?}"),
+				Ok(_) => panic!("{reference} should not resolve to any broadcast"),
+			}
+			match source.subscribe_track(Some(&rel), "video").await {
+				Err(crate::Error::EscapingBroadcast(_)) => {}
+				Err(err) => panic!("{reference} failed with the wrong error: {err:?}"),
+				Ok(_) => panic!("{reference} should not resolve to any broadcast"),
+			}
+		}
 	}
 
 	#[tokio::test]

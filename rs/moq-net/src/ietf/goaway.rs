@@ -21,28 +21,43 @@ impl Message for GoAway<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.new_session_uri.encode(w, version)?;
-		// Draft-17+ adds a timeout field; draft-18 also adds an optional trailing Request ID
-		// (#1559) which we never emit.
+		// Draft-17+ adds a timeout field.
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			self.timeout.encode(w, version)?;
+		}
+		// Draft-18 (#1559) requires a Request ID when GOAWAY is sent on the
+		// control stream, which is the only place we send it. We don't track
+		// per-request completion, so advertise 0 ("no requests processed");
+		// omitting the field entirely would be a length mismatch that a
+		// conformant peer must treat as a PROTOCOL_VIOLATION. Draft-19
+		// removed the field again (#1623).
+		if matches!(version, Version::Draft18) {
+			0u64.encode(w, version)?;
 		}
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let new_session_uri = Cow::<str>::decode(r, version)?;
+		// All drafts cap the New Session URI at 8,192 bytes; a longer one is a
+		// protocol violation.
+		if new_session_uri.len() > 8192 {
+			return Err(DecodeError::InvalidValue);
+		}
 		let timeout = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => 0,
-			Version::Draft17 => u64::decode(r, version)?,
-			_ => {
+			Version::Draft18 => {
 				let timeout = u64::decode(r, version)?;
-				// Draft-18+: optional trailing Request ID (#1559). Drain if present;
-				// moq-lite doesn't act on per-request GOAWAY so the value is discarded.
+				// Draft-18 trailing Request ID (#1559): required on the control
+				// stream, but tolerate its absence from lenient peers. We don't
+				// act on per-request GOAWAY so the value is discarded. Draft-19
+				// removed this field again (#1623).
 				if r.has_remaining() {
 					let _ = u64::decode(r, version)?;
 				}
 				timeout
 			}
+			_ => u64::decode(r, version)?,
 		};
 		Ok(Self {
 			new_session_uri,
@@ -119,6 +134,12 @@ mod tests {
 
 		let mut buf = BytesMut::new();
 		msg.encode_msg(&mut buf, Version::Draft18).unwrap();
+
+		// Draft-18 requires a trailing Request ID on the control stream, so the
+		// v18 body must be exactly one varint longer than the v17 body.
+		let mut buf17 = BytesMut::new();
+		msg.encode_msg(&mut buf17, Version::Draft17).unwrap();
+		assert_eq!(buf.len(), buf17.len() + 1, "v18 must append the Request ID varint");
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
 		let decoded: GoAway = GoAway::decode_msg(&mut bytes, Version::Draft18).unwrap();

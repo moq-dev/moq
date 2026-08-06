@@ -32,7 +32,7 @@ async function roundtrip(version: Version, fetch: Fetch): Promise<Fetch> {
 }
 
 function sample(): Fetch {
-	return new Fetch(Path.from("room/1"), "video", 3, 42);
+	return new Fetch({ broadcast: Path.from("room/1"), track: "video", priority: 3, group: 42 });
 }
 
 test("Fetch round-trips on draft-03/04/05", async () => {

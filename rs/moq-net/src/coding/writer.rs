@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::{Error, coding::*, ietf};
+use crate::{Error, StreamError, coding::*, ietf};
 
 /// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
 pub struct Writer<S: web_transport_trait::SendStream, V> {
@@ -79,7 +79,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	/// reset a second time and overwrite the reason with a plain [`Error::Cancel`].
 	pub fn abort(mut self, err: &Error) {
 		if let Some(mut stream) = self.stream.take() {
-			stream.reset(err.to_code());
+			stream.reset(StreamError::from(err).to_code());
 		}
 	}
 
@@ -140,7 +140,7 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 	fn drop(&mut self) {
 		if let Some(mut stream) = self.stream.take() {
 			// Unlike the Quinn default, we abort the stream on drop.
-			stream.reset(Error::Cancel.to_code());
+			stream.reset(StreamError::Cancel.to_code());
 		}
 	}
 }

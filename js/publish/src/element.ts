@@ -87,6 +87,7 @@ export default class MoqPublish extends HTMLElement {
 	};
 
 	connection: Moq.Connection.Reload;
+	/** The video capture, shared by every video rendition. Also reachable as `video.capture`. */
 	capture: Video.Capture;
 	broadcast: Broadcast;
 
@@ -104,8 +105,8 @@ export default class MoqPublish extends HTMLElement {
 		file: new Signal<Source.File | undefined>(undefined),
 	};
 
-	// The captured media tracks, written by #runSource. Fed to `capture` (video) and the `audio` encoder,
-	// so consumers read them back via `capture.in.source` and `audio.in.source` rather than here.
+	// The captured media tracks, written by #runSource. Fed to the video and audio captures, so
+	// consumers read them back via `capture.in.source` / `audio.capture.in.source` rather than here.
 	#videoSource = new Signal<Video.Source | undefined>(undefined);
 	#audioSource = new Signal<Audio.Source | undefined>(undefined);
 
@@ -206,6 +207,13 @@ export default class MoqPublish extends HTMLElement {
 		this.capture = new Video.Capture({ source: this.#videoSource });
 		this.signals.cleanup(() => this.capture.close());
 
+		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
+		const audioCapture = new Audio.Capture({
+			source: this.#audioSource,
+			enabled: this.#audioEnabled,
+		});
+		this.signals.cleanup(() => audioCapture.close());
+
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#publishEnabled,
@@ -226,7 +234,7 @@ export default class MoqPublish extends HTMLElement {
 		this.audio = new Audio.Encoder("audio", {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
-			source: this.#audioSource,
+			capture: audioCapture,
 		});
 		this.signals.cleanup(() => this.audio.close());
 
@@ -247,7 +255,7 @@ export default class MoqPublish extends HTMLElement {
 			if (preview instanceof HTMLCanvasElement) {
 				const renderer = new Preview.Renderer({
 					canvas: preview,
-					frame: this.capture.out.frame,
+					frames: this.capture.out.frames,
 					display: this.capture.out.display,
 					flip: this.#flip,
 					encoder: this.video,
@@ -267,6 +275,14 @@ export default class MoqPublish extends HTMLElement {
 			const source = effect.get(this.#videoSource);
 			if (!source) {
 				preview.style.display = "none";
+				return;
+			}
+
+			// srcObject only takes a MediaStream, so a source that hands us frames directly (a
+			// decoded file, an image) has nothing to show here. A <canvas> renders those.
+			if (!Video.isStreamTrack(source)) {
+				preview.style.display = "none";
+				console.warn("moq-publish: this source needs a <canvas> preview; a <video> can't show it.");
 				return;
 			}
 

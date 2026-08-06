@@ -118,6 +118,13 @@ ffmpeg -i video.mp4 -c copy -f mpegts - | \
     moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang import ts
 ```
 
+### Captions
+
+Subtitles ride in the source container. The current `moq import` path does not preserve subtitle
+tracks in fragmented MP4, so captions arrive over the GStreamer path instead: `moqsink` accepts a
+decoded text pad and publishes it as a caption track. See
+[GStreamer](gstreamer.md).
+
 ### Redundant Publishers (1+1)
 
 Relays key a broadcast's content identity on the publisher's origin id (the

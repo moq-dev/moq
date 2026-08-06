@@ -77,7 +77,22 @@ try {
 }
 ```
 
-The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`. The codes themselves are not standardized: each number means whatever the peer's implementation decided, so `@moq/net` hands it over without interpreting it. Code 0 is the exception worth knowing, since that is what a transport sends for a stream dropped or aborted with no code of its own.
+The code arrives the same way whether the session negotiated WebTransport or the WebSocket fallback, so nothing has to feature-detect `WebTransportError`.
+
+There are two code registries, and which one applies depends on what failed. A stream reset carries a `Moq.StreamCode`; a session close carries a `Moq.SessionCode`. They are disjoint, so the same number means different things in each: `0` ends a session cleanly but is an internal error on a stream, where a cancellation is `1`. Both tables reuse moq-transport's codes unchanged, and 64 and up are yours.
+
+Anything outside those tables is an unspecified error, so treat it as opaque rather than guessing. That includes 32-63, which the draft reserves: an implementation may send a code there for a condition the shared ones don't cover, but it carries no agreed meaning yet.
+
+A session close surfaces through `connection.closed`, which resolves with `null` for a clean close or a `Moq.RemoteError` when the peer sent a code:
+
+```ts
+const err = await connection.closed;
+if (err instanceof Moq.RemoteError && err.code === Moq.SessionCode.Unauthorized) {
+	console.warn("server rejected the session:", err.message);
+}
+```
+
+`Connection.closed` rejects with that same error when the reconnect loop gives up, and an `Unauthorized` close ends it immediately: the same credentials cannot start working, so retrying only burns the window. Every other close keeps retrying under the usual backoff.
 
 Errors this side detects keep their own messages, like the `Group.Lagged` a read throws after frames were evicted before it got to them.
 

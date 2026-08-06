@@ -1,14 +1,15 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, PRIORITY, Video};
+use crate::catalog::{Audio, PRIORITY, Text, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries only the media sections (`video`, `audio`). Applications extend it with
-/// their own root sections (e.g. `scte35`) by flattening this struct into their own with
-/// `#[serde(flatten)]`. The catalog does not deny unknown fields, so a base consumer ignores the
-/// extra sections and an extended catalog stays wire-compatible. See the `extension_roundtrip` test.
+/// The base catalog carries the media sections (`video`, `audio`, `text`) and the optional shared
+/// `timeline`. Applications extend it with their own root sections (e.g. `scte35`) by flattening
+/// this struct into their own with `#[serde(flatten)]`. The catalog does not deny unknown fields,
+/// so a base consumer ignores the extra sections and an extended catalog stays wire-compatible.
+/// See the `extension_roundtrip` test.
 ///
 /// Marked `#[non_exhaustive]` so a future base section can be added without bumping the major
 /// version. External callers start from [`Catalog::default`] and fill in the sections they
@@ -33,6 +34,26 @@ pub struct Catalog {
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
 	pub audio: Audio,
+
+	/// The broadcast's timeline track (its aligned segment index), if the publisher offers
+	/// one. See [`Timeline`](crate::catalog::Timeline) and the [`timeline`](crate::timeline)
+	/// module.
+	pub timeline: Option<crate::catalog::Timeline>,
+
+	/// Text (caption/subtitle) track information with multiple renditions.
+	///
+	/// Contains a map of text track renditions that the viewer can choose from
+	/// based on their preferences (language, role). Omitted from the wire when empty, so a
+	/// broadcast without captions stays byte-identical to before this section existed.
+	///
+	/// A `text` value that isn't a caption section decodes as empty rather than failing the
+	/// catalog, since applications could carry their own `text` key before this was reserved.
+	#[serde(
+		default,
+		skip_serializing_if = "Text::is_empty",
+		deserialize_with = "crate::catalog::deserialize_text"
+	)]
+	pub text: Text,
 }
 
 impl Catalog {
@@ -219,7 +240,6 @@ mod test {
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(100)),
-				timeline: None,
 			},
 		);
 
@@ -235,7 +255,6 @@ mod test {
 				description: None,
 				container: Container::Legacy,
 				jitter: Some(std::time::Duration::from_millis(40)),
-				timeline: None,
 			},
 		);
 
@@ -375,6 +394,69 @@ mod test {
 		let reparsed = Catalog::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
+	}
+
+	#[test]
+	fn empty_text_section_omitted() {
+		// A catalog without captions must stay byte-identical to before the text section existed:
+		// the empty section is skipped, unlike the always-present video/audio sections.
+		let catalog = Catalog::default();
+		let output = catalog.to_json().expect("failed to encode");
+		assert!(!output.contains("text"), "empty text section leaked: {output}");
+	}
+
+	#[test]
+	fn text_section_roundtrip() {
+		use crate::catalog::{Text, TextConfig, TextFormat, TextRole};
+
+		let mut config = TextConfig::new(TextFormat::Vtt);
+		config.role = TextRole::Caption;
+		config.lang = Some("en".to_string());
+
+		let mut text = Text::default();
+		text.insert("captions.en", config).expect("insert");
+
+		let catalog = Catalog {
+			text,
+			..Default::default()
+		};
+
+		let json = catalog.to_json().expect("failed to encode");
+		assert!(json.contains("\"text\""), "text section missing: {json}");
+
+		let decoded = Catalog::from_str(&json).expect("failed to decode");
+		assert_eq!(catalog, decoded, "text section did not round-trip");
+	}
+
+	#[test]
+	fn legacy_text_section_keeps_the_catalog() {
+		// `text` was an ordinary application section before captions reserved it, so a value with
+		// the wrong shape must cost its captions and nothing else. Audio and video keep playing.
+		for legacy in [
+			r#""a caption overlay""#,
+			r#"["a","b"]"#,
+			r#"{"overlay":{"x":1}}"#,
+			r#"{"renditions":42}"#,
+		] {
+			let json = format!(r#"{{"video":{{"renditions":{{}}}},"audio":{{"renditions":{{}}}},"text":{legacy}}}"#);
+			let catalog = Catalog::from_str(&json).unwrap_or_else(|e| panic!("legacy text {legacy} broke it: {e}"));
+			assert!(catalog.text.is_empty(), "legacy text {legacy} decoded as captions");
+		}
+	}
+
+	#[test]
+	fn unknown_text_role_keeps_the_catalog() {
+		// A future `role` value must not take down the whole catalog: audio and video have to keep
+		// playing even when a caption rendition is classified with a vocabulary we don't know yet.
+		let json = r#"{"video":{"renditions":{}},"audio":{"renditions":{}},"text":{"renditions":{"subs":{"format":"vtt","role":"commentary"}}}}"#;
+
+		let catalog = Catalog::from_str(json).expect("unknown role rejected the catalog");
+		assert_eq!(catalog.text.renditions.len(), 1);
+		let encoded = catalog.to_json().expect("failed to encode unknown role");
+		assert!(
+			encoded.contains(r#""role":"commentary""#),
+			"unknown role was not preserved: {encoded}"
+		);
 	}
 
 	#[test]

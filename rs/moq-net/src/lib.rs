@@ -78,6 +78,7 @@
 mod client;
 mod coding;
 mod error;
+pub mod goaway;
 mod ietf;
 mod lite;
 mod model;

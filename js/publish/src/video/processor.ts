@@ -13,8 +13,7 @@ import type { StreamTrack } from "./types";
 export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	// Chrome exposes MediaStreamTrackProcessor on the window, so use it directly.
 	if ("MediaStreamTrackProcessor" in self) {
-		// @ts-expect-error No typescript types yet.
-		const input: ReadableStream<VideoFrame> = new self.MediaStreamTrackProcessor({ track }).readable;
+		const input: ReadableStream<VideoFrame> = new MediaStreamTrackProcessor({ track }).readable;
 		return input.pipeThrough(rewrite());
 	}
 

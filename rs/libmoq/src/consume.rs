@@ -362,7 +362,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -411,7 +411,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -539,10 +539,14 @@ impl Consume {
 		subscription: Option<moq_net::track::Subscription>,
 	) {
 		let subscription = subscription.unwrap_or_default();
-		if let Some(start) = subscription.group_start.or_else(|| track.latest()) {
+		if let Some(start) = subscription.start.map(|start| start.group).or_else(|| track.latest()) {
 			track.start_at(start);
 		}
-		track.end_at(subscription.group_end);
+		// The read cursor is a group sequence, and its cap is inclusive. An end at the
+		// very first position is the empty range, which no inclusive group can express;
+		// leaving it uncapped would serve everything, so cap at the first group and let
+		// the empty demand stop delivery upstream.
+		track.end_at(subscription.end.map(|end| end.before().map_or(0, |end| end.group)));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}

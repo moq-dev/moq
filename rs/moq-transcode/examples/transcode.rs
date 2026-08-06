@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 	let mut session = client
 		.with_publisher(&publish)
 		.with_subscriber(remote.clone())
-		.reconnect(args.url.clone());
+		.connect(args.url.clone());
 
 	// Wait for the first session: the origin can't route a broadcast request
 	// until a connected session registers its handler.

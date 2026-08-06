@@ -1,6 +1,6 @@
 import type { Signal } from "@moq/signals";
 
-export type Tab = "quality" | "latency" | "stats";
+export type Tab = "quality" | "captions" | "latency" | "stats";
 
 /** Shared reactive UI chrome state, threaded through the control components. */
 export interface UiState {

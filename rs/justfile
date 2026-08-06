@@ -108,7 +108,7 @@ check-changed $FILES:
     # moq-wasm is a non-default member, so `_select` never reaches it and the
     # branch above would check nothing at all for a moq-wasm-only diff.
     if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
-    	just rs wasm
+        just rs wasm
     fi
 
 # Same as `fix`, but scoped the same way as `check-changed`.
@@ -125,7 +125,7 @@ fix-changed $FILES:
     # Mirrors `check-changed`: without this a moq-wasm-only diff is never
     # formatted, and `ci`'s `cargo fmt --all --check` fails on it later.
     if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
-    	just rs wasm-fix
+        just rs wasm-fix
     fi
 
 # Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's

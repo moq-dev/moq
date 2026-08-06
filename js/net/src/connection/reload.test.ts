@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
+import { Effect } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { RemoteError, SessionCode } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -50,8 +52,16 @@ test("equivalent URL instances do not restart a pending connection", async () =>
 });
 
 test("ReloadProps excludes signal", () => {
+	const withSignal = { signal: new AbortController().signal };
 	// @ts-expect-error signal is not part of ReloadProps
-	const props: ReloadProps = { signal: new AbortController().signal };
+	const props: ReloadProps = withSignal;
+	expect(props.enabled).toBeUndefined();
+});
+
+test("ReloadProps excludes transport", () => {
+	const withTransport = { transport: {} as WebTransport };
+	// @ts-expect-error transport is not part of ReloadProps
+	const props: ReloadProps = withTransport;
 	expect(props.enabled).toBeUndefined();
 });
 
@@ -171,6 +181,58 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 		reload.close();
 		for (const broadcast of published) broadcast.close();
 		for (const session of sessions) session.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a session rejected as unauthorized surfaces the code and stops retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const closes: (Error | null)[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
+		// Reject at the MoQ layer: accept the transport, then close with a code, the
+		// way a relay's Request::close does after it has already accepted the transport.
+		void accept(pair.server, url).then(() => {
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 1, multiplier: 2, max: 1, timeout: 0 },
+	});
+	const watch = new Effect();
+	watch.run((effect) => {
+		const conn = effect.get(reload.established);
+		if (conn) {
+			effect.spawn(async () => {
+				closes.push(await conn.closed);
+			});
+		}
+	});
+
+	try {
+		// The code reaches the app rather than being flattened away, and because
+		// UNAUTHORIZED is specified rather than guessed at, the loop treats it as terminal
+		// instead of retrying credentials that cannot work. `timeout: 0` means unlimited
+		// retries, so `closed` settling at all is what proves it stopped on the rejection.
+		const err = await reload.closed.then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(err).toBeInstanceOf(RemoteError);
+		expect((err as RemoteError).code).toBe(SessionCode.Unauthorized);
+
+		// It still surfaced through the established session before the loop gave up.
+		expect(closes.find((e) => e instanceof RemoteError)).toBeInstanceOf(RemoteError);
+	} finally {
+		watch.close();
+		reload.close();
 		globalThis.WebTransport = original;
 	}
 });

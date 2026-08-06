@@ -72,8 +72,8 @@ impl From<MoqSubscription> for moq_net::track::Subscription {
 			.with_priority(s.priority)
 			.with_ordered(s.ordered)
 			.with_latency_max(std::time::Duration::from_millis(s.latency_max_ms))
-			.with_group_start(s.group_start)
-			.with_group_end(s.group_end)
+			.with_start(s.group_start.map(moq_net::track::Position::group))
+			.with_end(s.group_end.and_then(moq_net::track::Position::after_group))
 	}
 }
 
@@ -268,7 +268,7 @@ impl MoqBroadcastConsumer {
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let latency = subscription.latency_max;
 		let track = self.inner.track(&name)?.subscribe(subscription).await?;
-		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
+		let consumer = moq_mux::container::Consumer::new(track, media).with_latency_max(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

@@ -65,7 +65,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
-	latency: Duration,
+	latency_max: Duration,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -75,20 +75,27 @@ pub(crate) struct ExportSource {
 
 impl ExportSource {
 	/// Subscribe to a video rendition and build an `ExportSource`.
+	///
+	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if the catalog
+	/// `broadcast` reference escapes above the root, naming no broadcast to subscribe on. The
+	/// catalog stream rejects such a reference first, so this is a backstop for a caller that
+	/// built the config itself.
 	pub fn for_video(
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let transform = build_video_transform(config);
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
+		let request = source.request(config.broadcast.as_ref())?;
+
 		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform,
 			description,
 		})
@@ -98,19 +105,23 @@ impl ExportSource {
 	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
 	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
+	///
+	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].
 	pub fn for_video_raw(
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
+		let request = source.request(config.broadcast.as_ref())?;
+
 		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform: None,
 			description,
 		})
@@ -118,19 +129,23 @@ impl ExportSource {
 
 	/// Subscribe to an audio rendition. Audio has no codec-shape transform;
 	/// `description` is taken straight from the catalog.
+	///
+	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].
 	pub fn for_audio(
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		latency: Duration,
+		latency_max: Duration,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
 
+		let request = source.request(config.broadcast.as_ref())?;
+
 		Ok(Self {
-			state: SourceState::Requesting(source.request(config.broadcast.as_ref()), name.to_string()),
+			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency,
+			latency_max,
 			transform: None,
 			description,
 		})
@@ -139,11 +154,14 @@ impl ExportSource {
 	/// Subscribe to a verbatim `mpegts` stream rendition (SCTE-35, private PES, ...).
 	/// No codec-shape transform and no description: the frames are Legacy-framed
 	/// verbatim bytes the muxer writes back out as PES or private sections.
-	pub fn for_stream(source: &crate::Source, name: &str, latency: Duration) -> Result<Self, crate::Error> {
+	///
+	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
+	/// catalog broadcast and can never carry an escaping reference.
+	pub fn for_stream(source: &crate::Source, name: &str, latency_max: Duration) -> Result<Self, crate::Error> {
 		Ok(Self {
-			state: SourceState::Requesting(source.request(None), name.to_string()),
+			state: SourceState::Requesting(source.request_catalog(), name.to_string()),
 			media: Some(HangContainer::Legacy),
-			latency,
+			latency_max,
 			transform: None,
 			description: None,
 		})
@@ -198,7 +216,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency_max(self.latency_max)));
 		}
 
 		loop {
@@ -261,5 +279,80 @@ pub(crate) fn build_video_transform(config: &VideoConfig) -> Option<VideoTransfo
 		VideoCodec::H264(_) => Some(VideoTransform::Avc1(Avc1::new())),
 		VideoCodec::H265(_) => Some(VideoTransform::Hvc1(Hvc1::new())),
 		_ => None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use hang::catalog::{AudioCodec, Container, H264};
+	use moq_net::PathRelative;
+
+	use super::*;
+	use crate::container::test_util::Live;
+
+	fn video(broadcast: Option<&str>) -> VideoConfig {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		config.container = Container::Legacy;
+		config.broadcast = broadcast.map(|b| PathRelative::new(b).into_owned());
+		config
+	}
+
+	fn audio(broadcast: Option<&str>) -> AudioConfig {
+		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		config.container = Container::Legacy;
+		config.broadcast = broadcast.map(|b| PathRelative::new(b).into_owned());
+		config
+	}
+
+	/// A rendition whose `broadcast` escapes the root fails, rather than resolving against
+	/// whatever broadcast the clamped path lands on. The test origin serves every path it
+	/// is asked for, so a clamped request would happily resolve.
+	#[tokio::test]
+	async fn escaping_reference_fails_the_rendition() {
+		let live = Live::avc3();
+		let source = live.source();
+		let latency = Duration::ZERO;
+
+		let escaping = |result: Result<ExportSource, crate::Error>, what: &str| match result {
+			Err(crate::Error::EscapingBroadcast(_)) => {}
+			Err(err) => panic!("{what} failed with the wrong error: {err:?}"),
+			Ok(_) => panic!("{what} should not resolve"),
+		};
+
+		// The source is rooted at a single-segment path, so two `..` walk above the root.
+		// A single `..` stops at the root, which still names a broadcast.
+		for reference in ["../../elsewhere", "../../.."] {
+			let config = video(Some(reference));
+			escaping(ExportSource::for_video(&source, "video", &config, latency), reference);
+			escaping(
+				ExportSource::for_video_raw(&source, "video", &config, latency),
+				reference,
+			);
+			escaping(
+				ExportSource::for_audio(&source, "audio", &audio(Some(reference)), latency),
+				reference,
+			);
+		}
+	}
+
+	/// A legal reference still resolves, as does an absent or empty one (the catalog's own
+	/// broadcast).
+	#[tokio::test]
+	async fn legal_reference_keeps_the_rendition() {
+		let live = Live::avc3();
+		let source = live.source();
+		let latency = Duration::ZERO;
+
+		for reference in [None, Some(""), Some("../source"), Some("sub"), Some("..")] {
+			ExportSource::for_video(&source, "video", &video(reference), latency)
+				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"));
+			ExportSource::for_audio(&source, "audio", &audio(reference), latency)
+				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"));
+		}
 	}
 }

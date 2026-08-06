@@ -150,14 +150,30 @@ enum TrackKind<E: CatalogExt = ()> {
 /// and reassembled network input). Each [`decode`](Self::decode) call takes one
 /// complete frame.
 ///
-/// Audio is independently decodable per frame, so this cuts a group after each audio frame (one
-/// group, one QUIC stream, forwarded without waiting); video groups by its own keyframes. For
-/// multi-frame audio groups (aligning to a segment cadence), drive a codec importer (e.g.
-/// [`codec::opus::Import`](crate::codec::opus::Import)) directly and bound groups with its `cut` /
-/// `seek` rather than going through this facade.
+/// Video groups by its own keyframes. Audio is independently decodable per frame, so it has no
+/// boundary of its own and accumulates into the current group until the caller draws one with
+/// [`cut`](Self::cut) or [`seek`](Self::seek). Cut per frame for the lowest latency (one group,
+/// one QUIC stream, forwarded without waiting), or at a segment cadence to align with video for
+/// HLS/DASH. An audio track that is never cut is one unbounded group, which strands late
+/// subscribers and the timeline alike, so this warns once when it sees that.
 pub struct Track<E: CatalogExt = ()> {
 	kind: TrackKind<E>,
+
+	/// The presentation time the current audio group started at, for the never-cut warning.
+	/// Only tracked for audio: video bounds its own groups at keyframes.
+	group_start: Option<moq_net::Timestamp>,
+
+	/// The never-cut warning has fired, so it doesn't repeat every frame.
+	warned: bool,
 }
+
+/// How long an audio group may run before [`Track`] warns that nobody is cutting it.
+///
+/// Not a bound: nothing is cut and no error is raised. A group this long means the caller never
+/// called [`cut`](Track::cut), which is always a bug (a late subscriber is served the group from
+/// its first frame, the newest group is never evicted, and the timeline can't close a segment).
+/// Generous enough that a deliberately coarse segment cadence stays quiet.
+const AUDIO_GROUP_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl<E: CatalogExt> Track<E> {
 	/// Create an importer that publishes a single codec onto a reserved track.
@@ -229,7 +245,44 @@ impl<E: CatalogExt> Track<E> {
 			_ => return Err(crate::Error::UnknownFormat(init.format)),
 		};
 
-		Ok(Self { kind })
+		Ok(Self::from_kind(kind))
+	}
+
+	/// Wrap a built codec importer, which is also how the `From` impls lift one in.
+	fn from_kind(kind: TrackKind<E>) -> Self {
+		Self {
+			kind,
+			group_start: None,
+			warned: false,
+		}
+	}
+
+	/// Note where the current audio group started and warn once if nobody ever cuts it.
+	///
+	/// Timing only, no boundary: the codec importer decides the keyframe bit. A frame with no
+	/// `pts` (the importer stamps a wall clock the facade never sees) is skipped rather than
+	/// guessed at.
+	fn observe_audio(&mut self, pts: Option<moq_net::Timestamp>) {
+		let Some(pts) = pts else { return };
+		let Some(start) = self.group_start else {
+			self.group_start = Some(pts);
+			return;
+		};
+
+		if self.warned {
+			return;
+		}
+		if pts
+			.checked_sub(start)
+			.is_ok_and(|span| std::time::Duration::from(span) >= AUDIO_GROUP_WARN_AFTER)
+		{
+			self.warned = true;
+			tracing::warn!(
+				name = self.name(),
+				after = ?AUDIO_GROUP_WARN_AFTER,
+				"audio group is still open; call cut() or seek() to bound it"
+			);
+		}
 	}
 
 	/// Decode one whole frame.
@@ -279,23 +332,25 @@ impl<E: CatalogExt> Track<E> {
 			}
 			TrackKind::Vp8(ref mut import) => import.decode(frame, pts)?,
 			TrackKind::Vp9(ref mut import) => import.decode(frame, pts)?,
-			// Audio: one group (one QUIC stream) per frame, so the relay forwards each without
-			// waiting. A caller wanting multi-frame audio groups drives a codec importer directly.
+			// Audio has no boundary of its own: every frame is independently decodable, so the
+			// group runs until the caller cuts it. Cutting per frame is one QUIC stream per
+			// packet, which the relay forwards without waiting; cutting at a segment cadence
+			// aligns with video. Either is the caller's call, not this facade's.
 			TrackKind::Aac(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				self.observe_audio(pts);
 			}
 			TrackKind::Opus(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				self.observe_audio(pts);
 			}
 			TrackKind::Mp3(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				self.observe_audio(pts);
 			}
 			TrackKind::Flac(ref mut import) => {
 				import.decode(frame, pts)?;
-				import.cut(None)?;
+				self.observe_audio(pts);
 			}
 		}
 
@@ -338,7 +393,11 @@ impl<E: CatalogExt> Track<E> {
 	}
 
 	/// Cut the current group at `end` without finishing the track.
+	///
+	/// This is how an audio track gets group boundaries at all: call it per frame for one group
+	/// per packet (the lowest latency), or at a segment cadence to align with video.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> Result<()> {
+		self.group_start = None;
 		match self.kind {
 			TrackKind::Avc3 { ref mut import, .. } => import.cut(end),
 			TrackKind::Avc1 { ref mut import, .. } => import.cut(end),
@@ -356,6 +415,7 @@ impl<E: CatalogExt> Track<E> {
 
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		self.group_start = None;
 		match self.kind {
 			TrackKind::Avc3 {
 				ref mut split,
@@ -417,17 +477,13 @@ impl<E: CatalogExt> Track<E> {
 // caps instead of an OpusHead buffer) can keep using `.into()`.
 impl<E: CatalogExt> From<crate::codec::opus::Import<E>> for Track<E> {
 	fn from(opus: crate::codec::opus::Import<E>) -> Self {
-		Self {
-			kind: TrackKind::Opus(opus),
-		}
+		Self::from_kind(TrackKind::Opus(opus))
 	}
 }
 
 impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
 	fn from(aac: crate::codec::aac::Import<E>) -> Self {
-		Self {
-			kind: TrackKind::Aac(aac),
-		}
+		Self::from_kind(TrackKind::Aac(aac))
 	}
 }
 
@@ -436,9 +492,7 @@ impl<E: CatalogExt> From<crate::codec::aac::Import<E>> for Track<E> {
 // rather than parsing a frame header) can keep using `.into()`.
 impl<E: CatalogExt> From<crate::codec::mp3::Import<E>> for Track<E> {
 	fn from(mp3: crate::codec::mp3::Import<E>) -> Self {
-		Self {
-			kind: TrackKind::Mp3(mp3),
-		}
+		Self::from_kind(TrackKind::Mp3(mp3))
 	}
 }
 
@@ -812,21 +866,39 @@ mod tests {
 		(import, subscriber)
 	}
 
-	/// The facade cuts a group after each audio frame: one group (one QUIC stream) per packet, so the
-	/// relay forwards it without waiting for the next.
+	/// The facade draws no audio boundaries of its own: frames accumulate into the open group until
+	/// the caller cuts. Regression guard for the per-frame cut this used to hardcode, which left a
+	/// caller wanting a segment cadence no way to ask for one.
 	#[tokio::test(start_paused = true)]
-	async fn audio_cuts_a_group_per_frame() {
+	async fn audio_accumulates_until_the_caller_cuts() {
 		let (mut broadcast, catalog) = new_broadcast();
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
 
-		import.decode(b"a", Some(Timestamp::from_micros(0).unwrap())).unwrap();
-		import
-			.decode(b"b", Some(Timestamp::from_micros(10_000).unwrap()))
-			.unwrap();
-		import
-			.decode(b"c", Some(Timestamp::from_micros(20_000).unwrap()))
-			.unwrap();
+		for ts in [0, 10_000, 20_000] {
+			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+		}
+		import.cut(None).unwrap();
+		for ts in [30_000, 40_000] {
+			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+		}
+		import.finish().unwrap();
+
+		assert_eq!(collect_groups(subscriber).await, vec![3, 2]);
+	}
+
+	/// Cutting after every frame is still available, and is what a caller wanting the lowest
+	/// latency does: one group (one QUIC stream) per packet, forwarded without waiting.
+	#[tokio::test(start_paused = true)]
+	async fn a_caller_can_still_cut_per_frame() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
+		let mut import: Track = import.into();
+
+		for ts in [0, 10_000, 20_000] {
+			import.decode(b"a", Some(Timestamp::from_micros(ts).unwrap())).unwrap();
+			import.cut(None).unwrap();
+		}
 		import.finish().unwrap();
 
 		assert_eq!(collect_groups(subscriber).await, vec![1, 1, 1]);

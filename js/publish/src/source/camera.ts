@@ -113,7 +113,7 @@ export class Camera {
 
 			if (!stream) return this.#retry.failed();
 
-			const source = stream.getVideoTracks()[0] as Video.Source | undefined;
+			const source = stream.getVideoTracks()[0] as Video.StreamTrack | undefined;
 
 			// getUserMedia resolved, so we have permission even if no track came back.
 			effect.cleanup(this.device.capture(source?.getSettings().deviceId));

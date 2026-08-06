@@ -100,9 +100,9 @@ impl Config {
 /// Every MP3 frame is independently decodable, so [`decode`](Self::decode) marks only the first frame
 /// of each group a keyframe (the rest extend it): frames accumulate into the current group until the
 /// caller [`cut`](Self::cut)s or [`seek`](Self::seek)s. The [`import::Track`](crate::import::Track)
-/// facade cuts after every frame by default (one group per frame); a caller driving its own
-/// boundaries cuts less often. MP3 carries its config in band, so the rendition has no out-of-band
-/// description.
+/// facade passes that through, so boundaries are the caller's either way: cut per frame for one
+/// group per frame, or at a segment cadence to align with video. MP3 carries its config in band, so
+/// the rendition has no out-of-band description.
 pub struct Import<E: CatalogExt = ()> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	rendition: crate::catalog::AudioTrack<E>,
@@ -116,11 +116,9 @@ impl<E: CatalogExt> Import<E> {
 	pub fn new(
 		track: moq_net::track::Producer,
 		reserved: crate::catalog::Reserved<E>,
-		mut config: hang::catalog::AudioConfig,
+		config: hang::catalog::AudioConfig,
 	) -> crate::Result<Self> {
 		tracing::debug!(name = ?track.name(), ?config, "starting track");
-		// Advertise this rendition's timeline before publishing (the generic set() no longer does).
-		config.timeline = Some(reserved.producer().timeline(track.name())?.section());
 		let mut rendition = reserved.audio(track.name());
 		rendition.set(config);
 		Ok(Self {

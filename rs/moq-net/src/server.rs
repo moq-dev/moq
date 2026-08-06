@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
-	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, Version, Versions,
+	ALPN_LITE_06_WIP, Consume, Driver, Error, NEGOTIATED, Role, Session, SessionError, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -387,7 +387,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 			} => {
 				// The client's SETUP was read in `accept_request`; hand the stream back
 				// for GOAWAY. A server never advertises a path, hence `None`.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: None,
 					request_id_max: None,
@@ -403,7 +403,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					peer_cluster: Some(peer_setup.cluster),
 				})?;
 				tracing::debug!(?version, "connected");
-				return Ok(Session::new(session, version.into(), None, protocol));
+				return Ok(Session::new(session, version.into(), None, protocol, goaway));
 			}
 			Handshake::LiteBare { session, version } => {
 				let start = lite::start(lite::Config {
@@ -421,6 +421,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					version.into(),
 					start.recv_bandwidth,
 					start.driver,
+					start.goaway,
 				));
 			}
 			Handshake::LiteSetup {
@@ -453,6 +454,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					version.into(),
 					start.recv_bandwidth,
 					start.driver,
+					start.goaway,
 				));
 			}
 			Handshake::Legacy {
@@ -480,7 +482,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 		};
 		stream.writer.encode(&server_setup).await?;
 
-		let (recv_bw, protocol) = match version {
+		let (recv_bw, protocol, goaway) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -494,12 +496,12 @@ impl<S: web_transport_trait::Session> Request<S> {
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 				})?;
-				(start.recv_bandwidth, start.driver)
+				(start.recv_bandwidth, start.driver, start.goaway)
 			}
 			Version::Ietf(v) => {
 				let stream = stream.with_version(v);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let protocol = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					session: session.clone(),
 					setup: Some(stream),
 					request_id_max,
@@ -513,11 +515,11 @@ impl<S: web_transport_trait::Session> Request<S> {
 					peer_setup_stream: None,
 					peer_cluster: None,
 				})?;
-				(None, protocol)
+				(None, protocol, goaway)
 			}
 		};
 
-		Ok(Session::new(session, version, recv_bw, protocol))
+		Ok(Session::new(session, version, recv_bw, protocol, goaway))
 	}
 
 	/// Reject the session, closing the transport with `err`'s wire code.
@@ -535,7 +537,7 @@ impl<S: web_transport_trait::Session> RequestInner<S> {
 			Handshake::Legacy { session, .. } => session,
 			Handshake::LiteSetup { session, .. } => session,
 		};
-		session.close(err.to_code(), &err.to_string());
+		session.close(SessionError::from(&err).to_code(), &err.to_string());
 	}
 }
 

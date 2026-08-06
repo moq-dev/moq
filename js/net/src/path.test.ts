@@ -190,33 +190,33 @@ test("from sanitizes multiple arguments with slashes", () => {
 	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });
 
-test("resolve appends named segments", () => {
+test("resolve appends and pops", () => {
 	expect(Path.resolve(Path.from("a/b"), "c")).toBe(Path.from("a/b/c"));
 	expect(Path.resolve(Path.from("a/b"), "c/d")).toBe(Path.from("a/b/c/d"));
+	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/b/d"));
+	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("a/x"));
 });
 
 test("resolve with empty rel returns base", () => {
 	expect(Path.resolve(Path.from("a/b"), "")).toBe(Path.from("a/b"));
+	expect(Path.resolve(Path.empty(), "")).toBe(Path.empty());
 });
 
-test("resolve single dotdot pops one segment", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../d")).toBe(Path.from("a/b/d"));
-	expect(Path.resolve(Path.from("a/b/c"), "..")).toBe(Path.from("a/b"));
+test("resolve rejects a reference that escapes the root", () => {
+	expect(Path.resolve(Path.from("a/b/c"), "../../../../x")).toBeUndefined();
+	expect(Path.resolve(Path.from("a/b/c"), "../../../..")).toBeUndefined();
+	// A `..` that escapes mid-way is rejected even if later segments walk back down.
+	expect(Path.resolve(Path.from("a/b/c"), "../../../../a/b/c")).toBeUndefined();
+	expect(Path.resolve(Path.empty(), "../x")).toBeUndefined();
 });
 
-test("resolve multiple dotdot pops multiple segments", () => {
-	expect(Path.resolve(Path.from("a/b/c"), "../../x")).toBe(Path.from("a/x"));
-	expect(Path.resolve(Path.from("a/b/c"), "../../../x")).toBe(Path.from("x"));
-});
-
-test("resolve excess dotdot clamps at empty", () => {
-	expect(Path.resolve(Path.from("a"), "../../../foo")).toBe(Path.from("foo"));
-	expect(Path.resolve(Path.from("a"), "..")).toBe(Path.from(""));
-});
-
-test("resolve with empty base", () => {
+test("resolve allows a reference landing on the root", () => {
+	// Popping to exactly the root stops at it rather than walking above it.
+	expect(Path.resolve(Path.from("a"), "..")).toBe(Path.empty());
+	expect(Path.resolve(Path.from("a/b"), "../..")).toBe(Path.empty());
+	expect(Path.resolve(Path.from("a/b"), "../../x")).toBe(Path.from("x"));
 	expect(Path.resolve(Path.empty(), "foo")).toBe(Path.from("foo"));
-	expect(Path.resolve(Path.empty(), "..")).toBe(Path.from(""));
 });
 
 test("resolve treats dot as a no-op", () => {

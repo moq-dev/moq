@@ -1,67 +1,88 @@
-//! Splice multiple per-session tracks into one logical track, switching at group
+//! Splice multiple per-session tracks into one logical track, switching at frame
 //! boundaries, so a subscription survives route and connection changes.
 //!
 //! A [`Producer`] holds an ordered list of segments, each a [`track::Consumer`]
-//! bounded to a half-open range of group sequences. [`Producer::switch`] appends a
-//! segment starting at group `N` and caps the previous one at `N - 1`, so the
-//! segments always partition the sequence space. A [`Subscriber`] reads across the
-//! segments as if they were one track: bounds are enforced on the read side (a
-//! route delivering outside its range is silently filtered), a segment dying
-//! stalls the subscriber instead of erroring (the next [`Producer::switch`]
-//! resumes it), and demand is forwarded to each underlying track intersected with
-//! its segment bounds, so a session serving a segment just sees an ordinary
-//! subscription that happens to start or end at a boundary.
+//! bounded to a half-open range of [`Position`]s. [`Producer::switch`] appends a
+//! segment starting at position `P` and caps the previous one there, so the segments
+//! always partition the track. A [`Subscriber`] reads across the segments as if they
+//! were one track: bounds are enforced on the read side (a route delivering outside
+//! its range is silently filtered), a segment dying stalls the subscriber instead of
+//! erroring (the next [`Producer::switch`] resumes it), and demand is forwarded to
+//! each underlying track intersected with its segment bounds, so a session serving a
+//! segment just sees an ordinary subscription that happens to start or end at a
+//! boundary.
+//!
+//! Boundaries are frame-precise, so a takeover does not have to wait for the next
+//! group. When one lands inside a group the subscriber has already handed out, the
+//! group itself is spliced: [`Group`] reads each route's copy in turn and the reader
+//! sees one continuous frame stream. This is what lets a track whose current group
+//! stays open indefinitely (a JSON append log, a catalog with deltas) survive a route
+//! change at all.
 
 use std::task::{Poll, ready};
 
 use crate::{Datagram, Error, Result, frame, group, track};
 
-use super::subscription::{Subscription, min_some};
+use super::subscription::{Position, Subscription, min_some};
 
-/// One spliced source: a track bounded to a range of group sequences.
+/// One spliced source: a track bounded to a half-open range of positions.
 #[derive(Clone)]
 struct Segment {
 	/// Monotonic id, used by subscribers to reconcile their cursor set.
 	id: u64,
-	/// First group this segment serves, or `None` for no lower bound (the
+	/// First position this segment serves, or `None` for no lower bound (the
 	/// initial segment, which may start at the live edge).
-	start: Option<u64>,
-	/// Last group this segment serves (inclusive), or `None` while it is the
-	/// newest segment.
-	end: Option<u64>,
+	start: Option<Position>,
+	/// First position this segment no longer serves, or `None` while it is the
+	/// newest segment. Exclusive, so it is exactly the next segment's `start`.
+	end: Option<Position>,
 	/// The underlying per-session track.
 	track: track::Consumer,
 }
 
 impl Segment {
-	/// The latest group this segment produced within its own range, or `None`
-	/// if nothing in range exists yet (out-of-range groups, e.g. a fetch into
+	/// Whether this segment serves `position`.
+	fn covers(&self, position: Position) -> bool {
+		self.start.is_none_or(|start| position >= start) && self.end.is_none_or(|end| position < end)
+	}
+
+	/// One past the last position this segment produced within its own range, or
+	/// `None` if nothing in range exists yet (out-of-range groups, e.g. a fetch into
 	/// the track below the segment's start, don't count).
-	fn produced(&self) -> Option<u64> {
-		let latest = self.track.latest()?;
-		if let Some(start) = self.start
-			&& latest < start
-		{
+	fn produced(&self) -> Option<Position> {
+		let produced = self.track.resume_position()?;
+		// Nothing in range yet. An unbounded segment starts at the very first frame, so
+		// a track holding only an empty group still counts as having produced nothing.
+		if produced <= self.start.unwrap_or_default() {
 			return None;
 		}
 		Some(match self.end {
-			Some(end) => latest.min(end),
-			None => latest,
+			Some(end) => produced.min(end),
+			None => produced,
 		})
 	}
 }
 
 /// The demand to register on an underlying track: the subscriber's own
 /// preferences intersected with a segment's bounds.
-fn slice(prefs: &Subscription, start: Option<u64>, end: Option<u64>) -> Subscription {
-	let mut sub = prefs.clone();
-	sub.group_start = match (prefs.group_start, start) {
+fn slice(prefs: &Subscription, start: Option<Position>, end: Option<Position>) -> Subscription {
+	// A segment's bounds and a subscription's are both half-open, so they intersect
+	// directly with no inclusive/exclusive conversion in between.
+	Subscription {
+		start: max_unbounded_start(prefs.start, start),
+		end: min_some(prefs.end, end),
+		..prefs.clone()
+	}
+}
+
+/// The later of two optional start bounds, treating `None` as "the live edge" for the
+/// preference and "no lower bound" for the segment. Either way the other one wins.
+fn max_unbounded_start(prefs: Option<Position>, segment: Option<Position>) -> Option<Position> {
+	match (prefs, segment) {
 		(Some(a), Some(b)) => Some(a.max(b)),
-		(Some(a), None) => Some(a),
-		(None, bound) => bound,
-	};
-	sub.group_end = min_some(prefs.group_end, end);
-	sub
+		(Some(a), None) | (None, Some(a)) => Some(a),
+		(None, None) => None,
+	}
 }
 
 /// How many segments a logical track keeps before pruning terminal ones from the
@@ -73,11 +94,11 @@ const MAX_SEGMENTS: usize = 3;
 struct ResumeState {
 	/// Segments in switch order; ranges are disjoint and ascending.
 	segments: Vec<Segment>,
-	/// The last group covered by segments that have since been pruned: no future
-	/// segment can serve at or below it (boundaries only move forward), so it
-	/// participates in the takeover boundary. `None` until the first prune; reset
-	/// by [`Producer::release`] along with the segments.
-	pruned: Option<u64>,
+	/// Everything below this position was covered by segments that have since been
+	/// pruned: no future segment can serve it (boundaries only move forward), so
+	/// readers below it give up rather than parking for a replacement. `None` until
+	/// the first prune; reset by [`Producer::release`] along with the segments.
+	pruned: Option<Position>,
 	/// Bumped on every mutation so subscribers know to reconcile.
 	epoch: u64,
 	/// No more switches will happen; the logical track ends with its last segment.
@@ -99,12 +120,13 @@ impl Default for ResumeState {
 }
 
 impl ResumeState {
-	/// The latest group sequence across the segments, clamped to their bounds.
+	/// One past the newest position across the segments, clamped to their bounds: where
+	/// a replacement segment should pick the track up.
 	///
 	/// The pruned floor participates: a pruned segment produced exactly through its
 	/// cap, so dropping it must not let the boundary collapse below what it served
 	/// (a takeover would re-splice under the delivered edge).
-	fn latest(&self) -> Option<u64> {
+	fn resume_position(&self) -> Option<Position> {
 		self.segments
 			.iter()
 			.filter_map(Segment::produced)
@@ -112,9 +134,20 @@ impl ResumeState {
 			.max()
 	}
 
-	/// Append a segment serving groups from `start` onward, capping (or replacing)
+	/// The latest group sequence across the segments, clamped to their bounds.
+	fn latest(&self) -> Option<u64> {
+		let position = self.resume_position()?;
+		match position.frame {
+			// The resume point sits at the head of a group, so the newest group actually
+			// produced is the one below it.
+			0 => position.group.checked_sub(1),
+			_ => Some(position.group),
+		}
+	}
+
+	/// Append a segment serving the track from `start` onward, capping (or replacing)
 	/// the previous segments so the ranges stay disjoint and ascending.
-	fn switch(&mut self, track: track::Consumer, start: Option<u64>) -> Result<()> {
+	fn switch(&mut self, track: track::Consumer, start: Option<Position>) -> Result<()> {
 		if !self.segments.is_empty() {
 			// A boundary is required once a segment exists.
 			let Some(start) = start else {
@@ -122,9 +155,9 @@ impl ResumeState {
 			};
 
 			// Segments the new range fully covers are replaced outright, provided
-			// they never produced a group in range (nothing to splice around).
+			// they never produced anything in range (nothing to splice around).
 			while let Some(prev) = self.segments.last() {
-				let prev_start = prev.start.unwrap_or(0);
+				let prev_start = prev.start.unwrap_or_default();
 				if start > prev_start {
 					break;
 				}
@@ -134,10 +167,13 @@ impl ResumeState {
 				self.segments.pop();
 			}
 
-			// Cap whatever remains at the boundary. The loop above guarantees
-			// `start > prev.start`, so `start - 1` cannot underflow.
+			// Cap whatever remains at the boundary. The bound is exclusive, so the new
+			// segment's start is exactly the previous segment's end. The cap may land
+			// below the produced edge (a manual boundary re-serving delivered
+			// positions from the replacement); readers reconcile on every frame, so a
+			// moved cap re-routes them, and the subscriber's floor dedups re-delivery.
 			if let Some(prev) = self.segments.last_mut() {
-				prev.end = Some(start - 1);
+				prev.end = Some(start);
 			}
 		}
 
@@ -154,16 +190,16 @@ impl ResumeState {
 	}
 
 	/// Drop retired segments from the front once the list outgrows
-	/// [`MAX_SEGMENTS`], recording the last group they covered in [`Self::pruned`].
+	/// [`MAX_SEGMENTS`], recording the range they covered in [`Self::pruned`].
 	///
 	/// A front segment is retired when it owes nothing more: it produced through
-	/// its cap (a takeover boundary is one past the delivered edge, so this is
-	/// every takeover-capped segment, alive or not) or its track is terminal. What
-	/// it holds is a cache for slow readers, and a reader mid-drain keeps its own
-	/// cursor until it drains (see [`SegmentSub::retired`]). Only a manually
-	/// spliced boundary can sit above the produced edge; that segment is still
-	/// expected to backfill, so it blocks the sweep (and the segments behind it)
-	/// until it does or dies.
+	/// its cap (a takeover boundary is the resume position, so this is every
+	/// takeover-capped segment, alive or not) or its track is terminal. What it
+	/// holds is a cache for slow readers, and a reader mid-drain keeps its own
+	/// positioned cursor (see [`Group::poll_current`]'s missing-segment
+	/// fallback). Only a manually spliced boundary can sit above the produced
+	/// edge; that segment is still expected to backfill, so it blocks the sweep
+	/// (and the segments behind it) until it does or dies.
 	fn prune(&mut self) {
 		while self.segments.len() > MAX_SEGMENTS {
 			let front = &self.segments[0];
@@ -197,20 +233,20 @@ impl Producer {
 		Self::default()
 	}
 
-	/// Splice in a track serving groups from `start` onward, capping the previous
-	/// segment at `start - 1`.
+	/// Splice in a track serving the track from `start` onward, capping the previous
+	/// segment there.
 	///
 	/// The first switch may pass `None` to leave the segment unbounded (it serves
 	/// whatever the subscriber asks for, typically the live edge). Every later
 	/// switch must pass `Some(start)`. A previous segment whose range the new one
-	/// fully covers is replaced outright, provided it never produced a group in
+	/// fully covers is replaced outright, provided it never produced anything in
 	/// range (there is nothing to splice around); otherwise the boundary must
 	/// advance past it, or this fails with [`Error::BoundsExceeded`] and the
 	/// segment list is unchanged.
 	///
 	/// Bounds are enforced when reading: a previous segment's session may keep
 	/// delivering past its new cap (the switch races the network) and those groups
-	/// are simply never surfaced.
+	/// and frames are simply never surfaced.
 	// Production callers go through `takeover`; this is the entry point an explicit
 	// wire-driven boundary (a future manual-splice surface) would use, and the
 	// boundary tests drive it directly.
@@ -218,7 +254,7 @@ impl Producer {
 	pub fn switch(
 		&mut self,
 		track: impl super::origin_impl::Consume<track::Consumer>,
-		start: impl Into<Option<u64>>,
+		start: impl Into<Option<Position>>,
 	) -> Result<()> {
 		let track = track.consume();
 		let start = start.into();
@@ -230,33 +266,33 @@ impl Producer {
 	}
 
 	/// Splice in a track that resumes wherever the current segments stop: one past
-	/// the newest spliced group.
+	/// the newest spliced frame.
 	///
 	/// This is [`Self::switch`] with the boundary computed from the current state,
-	/// for callers reacting to a route change rather than choosing a boundary. A
-	/// group that was mid-transfer when its route died is not re-delivered live
-	/// (subscribers may already have consumed it); it stays reachable via
-	/// [`Consumer::fetch_group`] like any other loss.
+	/// for callers reacting to a route change rather than choosing a boundary. The
+	/// boundary is frame-precise, so a group that was mid-transfer when its route
+	/// died is continued rather than abandoned: the replacement is asked for the
+	/// frames from the break onward, and subscribers read across the two copies as
+	/// one group. It rolls to the next group only once the current one is complete,
+	/// since nothing more can be appended to it.
 	pub fn takeover(&mut self, track: impl super::origin_impl::Consume<track::Consumer>) -> Result<()> {
 		let track = track.consume();
 		// Compute the boundary and apply it under one write guard: a boundary
 		// computed under a separate read lock could race the old route delivering
-		// more groups, splicing the new segment below the delivered edge.
+		// more frames, splicing the new segment below the delivered edge.
 		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
 		if state.finished || state.abort.is_some() {
 			return Err(Error::Closed);
 		}
-		let start = match state.latest() {
-			Some(latest) => latest.checked_add(1),
-			// No segment produced a group (or none exists): replace them outright
-			// and start unbounded, exactly like a first splice. A `Some(0)` boundary
-			// here would turn the subscriber's live-edge demand into a full backfill
-			// from group 0.
-			None => {
-				state.segments.clear();
-				None
-			}
-		};
+		// One past the newest delivered position. With nothing delivered (or no
+		// segments at all) the replacement outright replaces them and starts
+		// unbounded, exactly like a first splice: a `Position::default()` boundary
+		// here would turn the subscriber's live-edge demand into a full backfill
+		// from group 0.
+		let start = state.resume_position();
+		if start.is_none() {
+			state.segments.clear();
+		}
 		state.switch(track, start)
 	}
 
@@ -295,6 +331,12 @@ impl Producer {
 		!self.state.read().segments.is_empty()
 	}
 
+	/// One past the newest delivered position across the segments. The origin's
+	/// serve task reads this as its delivered-progress signal.
+	pub(crate) fn resume_position(&self) -> Option<Position> {
+		self.state.read().resume_position()
+	}
+
 	/// Mark the logical track as complete: no further switches. Subscribers see a
 	/// clean end once the final segment's track finishes.
 	pub fn finish(&mut self) -> Result<()> {
@@ -326,12 +368,6 @@ impl Producer {
 	/// servable or cleanly [`finish`](Self::finish)ed.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.state.read().abort.is_some()
-	}
-
-	/// The latest group sequence across the segments, clamped to their bounds.
-	/// The origin's serve task reads this as its delivered-progress signal.
-	pub(crate) fn latest(&self) -> Option<u64> {
-		self.state.read().latest()
 	}
 
 	/// Create a read handle for the logical track.
@@ -458,6 +494,12 @@ impl Consumer {
 	pub fn latest(&self) -> Option<u64> {
 		self.state.read().latest()
 	}
+
+	/// One past the newest position across the segments: where a route taking this
+	/// logical track over would resume.
+	pub(crate) fn resume_position(&self) -> Option<Position> {
+		self.state.read().resume_position()
+	}
 }
 
 /// The pollable state of a [`Consumer::fetch_group`]; awaited via the
@@ -572,27 +614,444 @@ impl kio::Pollable for Fetching {
 	}
 }
 
+/// The frames of `sequence` a `[start, end)` segment range serves, as a half-open index
+/// range. `None` when the group falls outside the range entirely.
+fn frames(start: Option<Position>, end: Option<Position>, sequence: u64) -> Option<(u64, Option<u64>)> {
+	let start = match start {
+		Some(start) if start.group > sequence => return None,
+		Some(start) if start.group == sequence => start.frame,
+		_ => 0,
+	};
+	let end = match end {
+		// A boundary at the head of a later group leaves this one whole.
+		Some(end) if end.group > sequence => None,
+		Some(end) if end.group == sequence => Some(end.frame),
+		Some(_) => return None,
+		None => None,
+	};
+	Some((start, end))
+}
+
+/// A group assembled from several routes' copies, joined at frame boundaries.
+///
+/// Rather than being fed, it pulls: on every frame it asks the segment list which route
+/// owns the next frame of this group and reads that route's copy. A boundary landing
+/// mid-group therefore reaches an already-handed-out group with no bookkeeping, and a
+/// reader that never touches the subscription again still picks the continuation up.
+///
+/// A copy that dies (or never arrives) stalls the group rather than erroring it, the
+/// same way a dead segment stalls the track; the loss is only surfaced once no
+/// replacement can arrive.
+pub(crate) struct Group {
+	state: kio::Consumer<ResumeState>,
+
+	/// The logical group being assembled.
+	sequence: u64,
+
+	/// The index of the next frame to return.
+	index: u64,
+
+	/// Inclusive cap from [`Self::end_at`].
+	end: Option<u64>,
+
+	/// The route being read: its segment, the exclusive frame bound the segment puts on
+	/// this group, and this reader's positioned copy.
+	current: Option<Current>,
+
+	/// The segment whose copy died under us, and why.
+	dead: Option<(u64, Error)>,
+}
+
+struct Current {
+	segment: u64,
+	cap: Option<u64>,
+	group: group::Consumer,
+}
+
+/// A route covering one position: the segment id, its track, and the segment's
+/// exclusive frame bound on the group (outer `None` when the group escapes the
+/// segment's range entirely, from [`frames`]).
+type Covering = (u64, track::Consumer, Option<Option<u64>>);
+
+impl Clone for Group {
+	fn clone(&self) -> Self {
+		// Cursors are per-reader, so the clone re-latches its own cursor over the
+		// same copy at this reader's position. Re-resolving from the segment list
+		// instead would break fanout for a pruned segment's group: the list has
+		// forgotten the route, but the latch still holds its frames.
+		let current = self.current.as_ref().and_then(|current| {
+			let mut group = current.group.clone();
+			group.start_at(self.index);
+			// The copy no longer holds this position (evicted); the clone
+			// re-resolves like any unlatched reader rather than misaligning.
+			(group.index() == self.index).then_some(Current {
+				segment: current.segment,
+				cap: current.cap,
+				group,
+			})
+		});
+		Self {
+			state: self.state.clone(),
+			sequence: self.sequence,
+			index: self.index,
+			end: self.end,
+			current,
+			dead: self.dead.clone(),
+		}
+	}
+}
+
+impl Group {
+	fn new(state: kio::Consumer<ResumeState>, sequence: u64, index: u64) -> Self {
+		Self {
+			state,
+			sequence,
+			index,
+			end: None,
+			current: None,
+			dead: None,
+		}
+	}
+
+	/// Pre-latch the delivering route's own copy, so the payload it already
+	/// delivered survives even if its segment is pruned before the reader drains
+	/// it. Costs nothing otherwise: the per-frame reuse check validates the latch
+	/// against the live segment list, so a moved cap still re-routes the reader.
+	///
+	/// The copy must actually hold this reader's position: a partial copy that
+	/// starts higher (a peer delivering a partial group nobody asked for) is not
+	/// latched, since the reuse path trusts the latch's alignment and would
+	/// misnumber its frames. The reader re-resolves instead, and the peek path's
+	/// own check buries the copy as lagged.
+	fn latched(mut self, segment: u64, cap: Option<u64>, mut group: group::Consumer) -> Self {
+		// The segment bound is exclusive; a group consumer's cap is inclusive.
+		group.end_at(cap.map(|cap| cap.saturating_sub(1)));
+		group.start_at(self.index);
+		if group.index() == self.index {
+			self.current = Some(Current { segment, cap, group });
+		}
+		self
+	}
+
+	pub fn index(&self) -> u64 {
+		self.index
+	}
+
+	pub fn start_at(&mut self, index: u64) {
+		if index <= self.index {
+			return;
+		}
+		self.index = index;
+		// Keep the latch when its copy still covers the new cursor: for a pruned
+		// segment it is the only copy left, and the per-read reuse check still
+		// re-routes if a different route owns the position. A copy that cannot
+		// land exactly there (or whose bound the cursor passed) is dropped, and
+		// the next read re-resolves.
+		if let Some(current) = &mut self.current {
+			current.group.start_at(index);
+			if current.group.index() != index || current.cap.is_some_and(|cap| index >= cap) {
+				self.current = None;
+			}
+		}
+	}
+
+	pub fn end_at(&mut self, index: Option<u64>) {
+		self.end = index;
+	}
+
+	/// Locate the route owning `position`: the shared resolve behind the read
+	/// cursor and the finish probe. `dead` is the segment already given up on
+	/// for these frames. `Ready(None)` once nothing can ever serve them.
+	fn poll_covering(&self, position: Position, dead: Option<u64>, waiter: &kio::Waiter) -> Poll<Option<Covering>> {
+		let sequence = self.sequence;
+		let located = self.state.poll(waiter, |state| {
+			// Waiting for a replacement route only makes sense while one can still
+			// arrive. A finished logical track has no more switches coming, and an
+			// aborted one is over outright, so a dead copy is the end of the group
+			// rather than a gap to park on.
+			//
+			// Nor can one arrive below the resume point. [`Producer::takeover`]
+			// derives every boundary from [`ResumeState::resume_position`], which
+			// only moves forward, so once it is past this position no future segment
+			// will ever cover it and nobody will be asked for these frames again.
+			//
+			// Only once a route has been given up on, though: a live route that has
+			// not delivered this group yet may still do so out of order, and its own
+			// progress is what moved the resume point past us.
+			let stranded = dead.is_some() && state.resume_position().is_some_and(|resume| resume > position);
+			// Below the pruned floor no segment exists and none can arrive:
+			// the coverage was dropped along with the segments that held it.
+			let lost = state.pruned.is_some_and(|floor| position < floor);
+			let terminal = state.finished || state.abort.is_some() || stranded || lost;
+			match state.segments.iter().find(|segment| segment.covers(position)) {
+				// The route that owns these frames was given up on. The verdict is
+				// reversible: a peek miss can come from the route's declared start,
+				// which demand moving backward lowers, so reconsider before the
+				// terminal checks. It has to come first because the arrival itself
+				// is what strands us (it moves the resume point past this
+				// position), which would otherwise condemn the very copy that
+				// resolves the wait. Watching the cache is also what wakes this
+				// poll when the copy lands.
+				Some(segment) if dead == Some(segment.id) => {
+					match segment.track.poll_serving_group(sequence, position.frame, waiter) {
+						Poll::Ready(()) => Poll::Ready(Some((
+							segment.id,
+							segment.track.clone(),
+							frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+						))),
+						Poll::Pending => match terminal {
+							true => Poll::Ready(None),
+							false => Poll::Pending,
+						},
+					}
+				}
+				Some(segment) => Poll::Ready(Some((
+					segment.id,
+					segment.track.clone(),
+					frames(segment.start, segment.end, sequence).map(|(_, end)| end),
+				))),
+				// No route owns them yet; park unless none is coming.
+				None if terminal => Poll::Ready(None),
+				None => Poll::Pending,
+			}
+		});
+
+		match located {
+			Poll::Ready(Ok(found)) => Poll::Ready(found),
+			// The producer is gone, so the segment list is frozen.
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Point `current` at the route owning frame `index` of this group.
+	///
+	/// `Ready(Ok(false))` once the group can produce nothing more, and `Ready(Err(_))`
+	/// only when the route that died is the last word on those frames.
+	fn poll_current(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		loop {
+			let position = Position {
+				group: self.sequence,
+				frame: self.index,
+			};
+			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
+			let sequence = self.sequence;
+			let found = ready!(self.poll_covering(position, dead, waiter));
+
+			let Some((segment, track, Some(cap))) = found else {
+				// No segment covers the position, but a latched copy still drains:
+				// a pruned segment's cursor holds exactly the frames it owned (its
+				// cap was its produced edge), so read it dry before giving up. Once
+				// it ends or dies, `current` clears and the next resolve settles it.
+				if self.current.is_some() {
+					return Poll::Ready(Ok(true));
+				}
+				return Poll::Ready(self.give_up());
+			};
+
+			// Reuse the positioned handle while the route and its bound hold: it carries
+			// a frame prefetch that re-resolving would throw away.
+			if self
+				.current
+				.as_ref()
+				.is_some_and(|current| current.segment == segment && current.cap == cap)
+			{
+				return Poll::Ready(Ok(true));
+			}
+
+			// The route may not have delivered this group yet, so wait on its cache.
+			let Some(mut group) = ready!(track.poll_peek_group(sequence, waiter)) else {
+				// This route will never have it; fall back to whichever segment replaces it.
+				self.dead = Some((segment, Error::NotFound));
+				continue;
+			};
+
+			// `start_at` clamps up to the first frame the copy still holds, so landing
+			// higher than asked means this route can't cover the seam after all. Treat it
+			// like a dead copy and wait for one that can.
+			group.start_at(self.index);
+			if group.index() != self.index {
+				self.dead = Some((segment, Error::Lagged));
+				continue;
+			}
+
+			// The segment bound is exclusive; a group consumer's cap is inclusive.
+			group.end_at(cap.map(|cap| cap.saturating_sub(1)));
+			self.current = Some(Current { segment, cap, group });
+			self.dead = None;
+			return Poll::Ready(Ok(true));
+		}
+	}
+
+	/// No replacement can arrive: report the loss that stalled us, or a clean end.
+	fn give_up(&mut self) -> Result<bool> {
+		match self.dead.take() {
+			Some((_, err)) => {
+				// The only place a spliced group's loss becomes visible, so say which
+				// frames went missing rather than leaving a stuck group to explain itself.
+				tracing::warn!(
+					group = self.sequence,
+					frame = self.index,
+					%err,
+					"no route can serve the rest of this group"
+				);
+				Err(err)
+			}
+			None => Ok(false),
+		}
+	}
+
+	/// Advance past a copy that ran out at its boundary, or report the group's end.
+	/// `true` to keep reading from the next route.
+	fn roll(&mut self) -> bool {
+		let Some(current) = &self.current else {
+			return false;
+		};
+		match current.cap {
+			Some(cap) => {
+				// Reaching the bound is the only clean end a bounded copy has: the
+				// boundary was derived from what that route produced.
+				debug_assert_eq!(self.index, cap, "bounded copy ended below its boundary");
+				self.index = self.index.max(cap);
+				self.current = None;
+				true
+			}
+			// Unbounded: this route owns the rest of the group, so its end is the group's.
+			None => false,
+		}
+	}
+
+	/// Mark the current route dead so the reader waits for a replacement instead of
+	/// failing the group outright.
+	fn bury(&mut self, err: Error) {
+		self.dead = self.current.take().map(|current| (current.segment, err));
+	}
+
+	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		loop {
+			if self.end.is_some_and(|end| self.index > end) {
+				return Poll::Ready(Ok(None));
+			}
+			if !ready!(self.poll_current(waiter))? {
+				return Poll::Ready(Ok(None));
+			}
+			let current = self.current.as_mut().expect("resolved above");
+			match ready!(current.group.poll_read_frame(waiter)) {
+				Ok(Some(frame)) => {
+					self.index += 1;
+					return Poll::Ready(Ok(Some(frame)));
+				}
+				Ok(None) if self.roll() => continue,
+				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) => self.bury(err),
+			}
+		}
+	}
+
+	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
+		loop {
+			if self.end.is_some_and(|end| self.index > end) {
+				return Poll::Ready(Ok(None));
+			}
+			if !ready!(self.poll_current(waiter))? {
+				return Poll::Ready(Ok(None));
+			}
+			let current = self.current.as_mut().expect("resolved above");
+			match ready!(current.group.poll_next_frame(waiter)) {
+				Ok(Some(frame)) => {
+					self.index += 1;
+					return Poll::Ready(Ok(Some(frame)));
+				}
+				Ok(None) if self.roll() => continue,
+				Ok(None) => return Poll::Ready(Ok(None)),
+				Err(err) => self.bury(err),
+			}
+		}
+	}
+
+	/// The logical group's total frame count, which only the unbounded tail copy knows:
+	/// its own count already includes the frames it skipped.
+	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
+		if !ready!(self.poll_current(waiter))? {
+			return Poll::Ready(Ok(self.index));
+		}
+		let current = self.current.as_mut().expect("resolved above");
+		let Some(cap) = current.cap else {
+			return current.group.poll_finished(waiter);
+		};
+
+		// A bounded copy can't declare the end; the continuation does, unless it
+		// can never arrive: then the cap is the group's end. Probed here, not
+		// left to `poll_current`: a latched bounded copy resolves without
+		// consulting the segment list, so this is the poll that must park on the
+		// seam (or a caller that never drains to it would hang with no waiter
+		// registered). The covering route's own copy is consulted too, since a
+		// route that skip-declared this group (SUBSCRIBE_START above it) never
+		// delivers the seam even though its segment covers it.
+		let seam = Position {
+			group: self.sequence,
+			frame: cap,
+		};
+		loop {
+			let dead = self.dead.as_ref().map(|(segment, _)| *segment);
+			let Some((segment, track, _)) = ready!(self.poll_covering(seam, dead, waiter)) else {
+				return Poll::Ready(Ok(cap));
+			};
+			match ready!(track.poll_peek_group(self.sequence, waiter)) {
+				// The continuation's copy declares the count: its own count
+				// already includes the frames it skipped.
+				Some(mut continuation) => return continuation.poll_finished(waiter),
+				// This route will never have it; wait for whatever replaces it.
+				None => self.dead = Some((segment, Error::NotFound)),
+			}
+		}
+	}
+}
+
 /// A subscriber's cursor over one segment.
 struct SegmentSub {
 	id: u64,
-	start: Option<u64>,
-	end: Option<u64>,
+	start: Option<Position>,
+	end: Option<Position>,
 	sub: SubState,
+	/// The producer dropped this segment (pruned, or replaced before producing).
+	/// The cursor drains what it already holds, then retires; see
+	/// [`Self::retired`].
+	pruned: bool,
 	/// A received group held back by the subscriber's [`Subscriber::end_at`] cap,
 	/// re-offered once the cap rises (arrival-order reads consume the underlying
 	/// cursor, so the group is parked here instead of dropped).
 	parked: Option<group::Consumer>,
-	/// The producer dropped this segment (pruned from the window, or replaced
-	/// before producing). See [`Self::retired`].
-	pruned: bool,
 }
 
 impl SegmentSub {
-	/// Whether a pruned segment owes this reader nothing more, so its cursor can
-	/// be dropped: an uncapped one was replaced before producing (its cursor holds
-	/// nothing), and a capped one is kept until it drains through its cap and any
-	/// parked group is re-offered, so a slow reader still gets what the pruned
-	/// segment's track cached.
+	/// The first group this segment can serve, for the underlying read cursor.
+	fn first_group(&self) -> u64 {
+		self.start.map_or(0, |start| start.group)
+	}
+
+	/// The last group this segment can serve (inclusive), for the underlying read
+	/// cursor. `None` while it is the newest segment.
+	fn last_group(&self) -> Option<u64> {
+		let end = self.end?;
+		// An empty segment would serve nothing, and no switch produces one: every
+		// boundary comes from `resume_position`, which sits at or above the first frame.
+		// `None` here reads as "no cap", which is why it is asserted rather than relied
+		// on; the authoritative filter is `Segment::covers`, which uses the exclusive
+		// bound directly.
+		debug_assert!(
+			end != Position::default(),
+			"a segment cannot end at the start of the track"
+		);
+		Some(end.before()?.group)
+	}
+
+	/// Whether a producer-dropped segment is spent and can be removed. A capped
+	/// cursor is kept until it drains (it may hold delivered-but-unread groups,
+	/// including one parked at the subscriber's cap, whose re-offer latches the
+	/// delivering copy and so still reads out post-prune); an uncapped one was
+	/// replaced before producing, so it holds nothing. The straggler bound in
+	/// `reap` cuts what lingers too long, parked group and all.
 	fn retired(&self) -> bool {
 		self.pruned && (self.end.is_none() || (matches!(self.sub, SubState::Done(_)) && self.parked.is_none()))
 	}
@@ -748,10 +1207,13 @@ impl Subscriber {
 		self.finished = finished;
 		self.abort = abort;
 
-		// Segments the producer dropped: replaced before producing (uncapped) or
-		// pruned from the front of the window (capped). A capped one may still owe
-		// its cache to this reader, so it is only dropped once drained rather than
-		// outright (see [`SegmentSub::retired`]).
+		// Mark segments the producer dropped: replaced (never produced anything,
+		// so their cursor holds nothing and retires at once) or pruned (capped;
+		// the cursor may still hold delivered-but-unread groups, so it drains
+		// before retiring; see `poll_segment`). A parked group survives the
+		// prune: its re-offer latches the delivering copy (see `hand_out`), so it
+		// still reads out, and the straggler bound in `reap` is what keeps such
+		// entries from pinning their cursors forever.
 		for s in &mut self.segments {
 			s.pruned = !segments.iter().any(|n| n.id == s.id);
 		}
@@ -762,13 +1224,16 @@ impl Subscriber {
 				Some(existing) => {
 					if existing.end != segment.end {
 						existing.end = segment.end;
+						let cap = min_some(existing.last_group(), self.end_sequence);
 						if let SubState::Active(sub) = &mut existing.sub {
-							sub.end_at(min_some(segment.end, self.end_sequence));
+							sub.end_at(cap);
 							// Also shrink the demand so the session can cap upstream.
 							let _ = sub.update(slice(&self.last_prefs, segment.start, segment.end));
 						}
 						// A still-pending subscription picks the moved boundary up
-						// when it activates (see `poll_activate`).
+						// when it activates (see `poll_activate`). Groups already handed
+						// out need nothing: a [`Group`] re-reads the segment list on
+						// every frame, so it sees the new boundary by itself.
 					}
 				}
 				None => {
@@ -780,12 +1245,34 @@ impl Subscriber {
 						start: segment.start,
 						end: segment.end,
 						sub: SubState::Pending(sub),
-						parked: None,
 						pruned: false,
+						parked: None,
 					});
 				}
 			}
 		}
+	}
+
+	/// Wrap a group just received from a segment so the reader can follow it across
+	/// later route changes.
+	///
+	/// Returns `None` when the copy continues a group already handed out: its segment
+	/// starts partway into the group, which only happens after an earlier segment served
+	/// the head. Those frames reach the reader through the group it already holds, so
+	/// surfacing the copy again would duplicate them.
+	fn hand_out(&self, segment: usize, group: group::Consumer) -> Option<group::Consumer> {
+		let seg = &self.segments[segment];
+		let sequence = group.sequence;
+		let (start, end) = frames(seg.start, seg.end, sequence)?;
+		if start != 0 {
+			return None;
+		}
+		// Latch the delivering copy: the spliced reader otherwise re-resolves it
+		// through the segment list, which forgets this route the moment its
+		// segment is pruned, turning a group the cursor already delivered into an
+		// empty husk.
+		let spliced = Group::new(self.state.clone(), sequence, 0).latched(seg.id, end, group.clone());
+		Some(group.into_spliced(spliced))
 	}
 
 	/// Resolve a segment's pending subscription, if any. Ready once the segment is
@@ -803,8 +1290,8 @@ impl Subscriber {
 				Poll::Ready(Ok(mut sub)) => {
 					// Enforce the bounds on the read cursor, and re-slice demand in
 					// case a boundary moved while the subscription was pending.
-					sub.start_at(seg.start.unwrap_or(0).max(min_sequence));
-					sub.end_at(min_some(seg.end, end_sequence));
+					sub.start_at(seg.first_group().max(min_sequence));
+					sub.end_at(min_some(seg.last_group(), end_sequence));
 					let _ = sub.update(slice(prefs, seg.start, seg.end));
 					seg.sub = SubState::Active(sub);
 				}
@@ -834,7 +1321,7 @@ impl Subscriber {
 					Poll::Ready(Ok(Some(group))) => {
 						// `start_at` already floors the cursor; enforce the cap here since
 						// arrival-order reads don't honor `end_at`.
-						if let Some(end) = seg.end
+						if let Some(end) = seg.last_group()
 							&& group.sequence > end
 						{
 							continue;
@@ -856,6 +1343,11 @@ impl Subscriber {
 						seg.sub = SubState::Done(None);
 						return Poll::Ready(None);
 					}
+					// An empty cursor on a pruned segment is NOT proof it drained:
+					// groups below the cap may still arrive out of order, and this
+					// cursor's demand is what keeps the upstream serving them. The
+					// reap in `poll_recv_group` bounds how many such stragglers may
+					// linger instead.
 					Poll::Pending => return Poll::Pending,
 				},
 				SubState::Done(_) => return Poll::Ready(None),
@@ -864,6 +1356,10 @@ impl Subscriber {
 	}
 
 	/// Poll for the next group in arrival order across the segments.
+	///
+	/// A group that continues one already returned (a boundary landed inside it) is
+	/// spliced onto that group rather than surfaced again, so each sequence is handed
+	/// out exactly once no matter how many routes contributed to it.
 	///
 	/// Returns `Poll::Ready(Ok(None))` once the producer finished and every
 	/// segment completed, and `Poll::Ready(Err(_))` only if the producer aborted.
@@ -874,28 +1370,39 @@ impl Subscriber {
 		let beyond_cap = |sequence: u64| end_sequence.is_some_and(|end| sequence > end);
 
 		let mut all_done = true;
-		for seg in &mut self.segments {
+		for index in 0..self.segments.len() {
 			// Re-offer a group parked at the cap once the cap rises.
-			if let Some(group) = seg.parked.take_if(|group| !beyond_cap(group.sequence))
+			let parked = self.segments[index].parked.take_if(|group| !beyond_cap(group.sequence));
+			if let Some(group) = parked
 				&& group.sequence >= self.min_sequence
 			{
-				self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
-				return Poll::Ready(Ok(Some(group)));
+				let sequence = group.sequence;
+				if let Some(group) = self.hand_out(index, group) {
+					self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
+					return Poll::Ready(Ok(Some(group)));
+				}
 			}
 			// A `start_at` overtook the parked group; drop it and read on.
-			if seg.parked.is_some() {
+			if self.segments[index].parked.is_some() {
 				// Still capped: the segment isn't done, it's parked.
 				all_done = false;
 				continue;
 			}
 
 			loop {
-				match Self::poll_segment(seg, &self.last_prefs, self.min_sequence, end_sequence, waiter) {
+				let polled = Self::poll_segment(
+					&mut self.segments[index],
+					&self.last_prefs,
+					self.min_sequence,
+					end_sequence,
+					waiter,
+				);
+				match polled {
 					Poll::Ready(Some(group)) => {
 						if beyond_cap(group.sequence) {
 							// `end_at` parks the subscriber; hold the group until
 							// the cap rises rather than dropping it.
-							seg.parked = Some(group);
+							self.segments[index].parked = Some(group);
 							all_done = false;
 							break;
 						}
@@ -904,7 +1411,13 @@ impl Subscriber {
 							// and re-poll the same segment for what's behind it.
 							continue;
 						}
-						self.next_sequence = self.next_sequence.max(group.sequence.saturating_add(1));
+						let sequence = group.sequence;
+						// Folded into a group already handed out: keep reading this
+						// segment rather than surfacing the same sequence twice.
+						let Some(group) = self.hand_out(index, group) else {
+							continue;
+						};
+						self.next_sequence = self.next_sequence.max(sequence.saturating_add(1));
 						return Poll::Ready(Ok(Some(group)));
 					}
 					Poll::Ready(None) => break,
@@ -1068,8 +1581,9 @@ impl Subscriber {
 	pub fn start_at(&mut self, sequence: u64) {
 		self.min_sequence = sequence;
 		for seg in &mut self.segments {
+			let floor = seg.first_group().max(sequence);
 			if let SubState::Active(sub) = &mut seg.sub {
-				sub.start_at(seg.start.unwrap_or(0).max(sequence));
+				sub.start_at(floor);
 			}
 		}
 	}
@@ -1078,8 +1592,9 @@ impl Subscriber {
 	pub fn end_at(&mut self, sequence: impl Into<Option<u64>>) {
 		self.end_sequence = sequence.into();
 		for seg in &mut self.segments {
+			let cap = min_some(seg.last_group(), self.end_sequence);
 			if let SubState::Active(sub) = &mut seg.sub {
-				sub.end_at(min_some(seg.end, self.end_sequence));
+				sub.end_at(cap);
 			}
 		}
 	}
@@ -1136,6 +1651,17 @@ mod test {
 			.sequence
 	}
 
+	fn read(group: &mut group::Consumer) -> Vec<u8> {
+		group
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("should not error")
+			.expect("should not be finished")
+			.payload
+			.to_vec()
+	}
+
 	fn recv_pending(sub: &mut Subscriber) {
 		assert!(sub.recv_group().now_or_never().is_none(), "should have blocked");
 	}
@@ -1156,7 +1682,7 @@ mod test {
 		assert_eq!(recv(&mut sub), 1);
 
 		// Switch to B at group 2. A racing past its cap is filtered.
-		producer.switch(&consumer_b, 2).unwrap();
+		producer.switch(&consumer_b, Position::group(2)).unwrap();
 		write_group(&mut track_a, 2, "a2-over-cap");
 		write_group(&mut track_b, 2, "b2");
 		write_group(&mut track_b, 3, "b3");
@@ -1176,17 +1702,17 @@ mod test {
 
 		let mut sub = producer
 			.consume()
-			.subscribe(Subscription::default().with_group_start(0));
+			.subscribe(Subscription::default().with_start(Position::group(0)));
 		// Poll once so the subscriber registers on segment A.
 		recv_pending(&mut sub);
-		assert_eq!(track_a.subscription().unwrap().group_end, None);
+		assert_eq!(track_a.subscription().unwrap().end, None);
 
-		producer.switch(&consumer_b, 5).unwrap();
+		producer.switch(&consumer_b, Position::group(5)).unwrap();
 		recv_pending(&mut sub);
 
 		// The old session sees its demand capped; the new one starts at the boundary.
-		assert_eq!(track_a.subscription().unwrap().group_end, Some(4));
-		assert_eq!(track_b.subscription().unwrap().group_start, Some(5));
+		assert_eq!(track_a.subscription().unwrap().end, Some(Position::group(5)));
+		assert_eq!(track_b.subscription().unwrap().start, Some(Position::group(5)));
 	}
 
 	#[tokio::test]
@@ -1222,7 +1748,7 @@ mod test {
 		recv_pending(&mut sub);
 
 		// A replacement resumes exactly where the old route left off.
-		producer.switch(&consumer_b, 1).unwrap();
+		producer.switch(&consumer_b, Position::group(1)).unwrap();
 		write_group(&mut track_b, 1, "b1");
 		assert_eq!(recv(&mut sub), 1);
 	}
@@ -1307,7 +1833,7 @@ mod test {
 		let mut sub = producer.consume().subscribe(None);
 
 		write_group(&mut track_a, 0, "a0");
-		producer.switch(&consumer_b, 1).unwrap();
+		producer.switch(&consumer_b, Position::group(1)).unwrap();
 		write_group(&mut track_b, 1, "b1");
 
 		let frame = sub.read_frame().now_or_never().unwrap().unwrap().unwrap();
@@ -1338,7 +1864,7 @@ mod test {
 
 		let mut producer = Producer::new();
 		producer.switch(&consumer_a, None).unwrap();
-		producer.switch(&consumer_b, 10).unwrap();
+		producer.switch(&consumer_b, Position::group(10)).unwrap();
 
 		// A cached group on the newest segment resolves immediately, even below
 		// its subscribe boundary: bounds slice demand, not access.
@@ -1488,7 +2014,7 @@ mod test {
 
 		// A boundary at the delivered edge: B re-serves group 1, which was already
 		// returned and must not be delivered twice.
-		producer.switch(&consumer_b, 1).unwrap();
+		producer.switch(&consumer_b, Position::group(1)).unwrap();
 		write_group(&mut track_b, 1, "b1");
 		write_group(&mut track_b, 2, "b2");
 		assert_eq!(next(&mut sub), 2);
@@ -1533,111 +2059,346 @@ mod test {
 		assert_eq!(track_a.subscription().unwrap().priority, 2);
 	}
 
+	/// A route dying partway through a group is resumed at the frame it stopped on:
+	/// the reader keeps the same group handle, sees no duplicate frames, and never
+	/// learns a route changed. This is the whole point of frame-precise boundaries
+	/// (a JSON append log's group may never roll).
 	#[tokio::test]
-	async fn prune_bounds_segments_and_keeps_the_boundary() {
+	async fn takeover_splices_mid_group() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
 		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
 		let mut sub = producer.consume().subscribe(None);
 
-		// Each failover leaves a capped segment behind; the producer keeps only
-		// the newest few, recording the boundary the pruned ones covered.
-		let count = 2 * MAX_SEGMENTS as u64;
-		let mut tracks = Vec::new();
-		for sequence in 0..count {
-			let (mut track, consumer) = track_pair("t");
-			producer.takeover(&consumer).unwrap();
-			write_group(&mut track, sequence, "g");
-			assert_eq!(recv(&mut sub), sequence);
-			tracks.push(track);
-		}
-		assert!(producer.state.read().segments.len() <= MAX_SEGMENTS);
-		assert_eq!(producer.latest(), Some(count - 1));
+		// A opens group 0 and writes two frames, leaving it open.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
 
-		// The next takeover resumes above the pruned floor.
-		let (mut track, consumer) = track_pair("next");
-		producer.takeover(&consumer).unwrap();
-		write_group(&mut track, count, "g");
-		assert_eq!(recv(&mut sub), count);
-	}
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0);
+		assert_eq!(read(&mut reading), b"a0", "first");
+		assert_eq!(read(&mut reading), b"a1", "second");
+		assert!(reading.read_frame().now_or_never().is_none(), "group is still open");
 
-	#[tokio::test]
-	async fn reader_drains_a_pruned_segments_copy() {
-		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
-
-		// Register a cursor on every segment as it splices (the datagram poll
-		// syncs without consuming groups), while the producer prunes the front.
-		let count = 2 * MAX_SEGMENTS as u64;
-		let mut tracks = Vec::new();
-		for sequence in 0..count {
-			let (mut track, consumer) = track_pair("t");
-			producer.takeover(&consumer).unwrap();
-			assert!(
-				kio::wait(|waiter| sub.poll_recv_datagram(waiter))
-					.now_or_never()
-					.is_none(),
-				"no datagram expected"
-			);
-			write_group(&mut track, sequence, "g");
-			tracks.push(track);
-		}
-		assert!(producer.state.read().segments.len() <= MAX_SEGMENTS);
-
-		// The slow reader still drains every group: a pruned segment's cursor is
-		// kept until it empties.
-		for sequence in 0..count {
-			assert_eq!(recv(&mut sub), sequence);
-		}
-	}
-
-	/// A reader that misses more than [`MAX_SEGMENTS`] failovers loses the pruned
-	/// ranges: the segments are gone from its next snapshot, so it resumes at the
-	/// retained ones, exactly like any other live loss (the groups stay fetchable
-	/// upstream). Deliberate: the alternative pins every dead session's cache
-	/// until the slowest reader drains it.
-	#[tokio::test]
-	async fn unpolled_reader_skips_pruned_ranges() {
-		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
+		// The route dies mid-group and B takes over inside it.
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
 		recv_pending(&mut sub);
 
-		let count = 2 * MAX_SEGMENTS as u64;
-		let mut tracks = Vec::new();
-		for sequence in 0..count {
-			let (mut track, consumer) = track_pair("t");
-			producer.takeover(&consumer).unwrap();
-			write_group(&mut track, sequence, "g");
-			tracks.push(track);
-		}
-
-		// Never polled during the churn: only the retained segments deliver.
-		for sequence in count - MAX_SEGMENTS as u64..count {
-			assert_eq!(recv(&mut sub), sequence);
-		}
-		recv_pending(&mut sub);
-	}
-
-	#[tokio::test]
-	async fn datagram_poller_bounds_pruned_cursors() {
-		let mut producer = Producer::new();
-		let mut sub = producer.consume().subscribe(None);
-
-		for sequence in 0..(3 * MAX_SEGMENTS as u64) {
-			let (mut track, consumer) = track_pair("t");
-			producer.takeover(&consumer).unwrap();
-			write_group(&mut track, sequence, "payload");
-			assert!(
-				kio::wait(|waiter| sub.poll_recv_datagram(waiter))
-					.now_or_never()
-					.is_none(),
-				"no datagram expected"
-			);
-		}
-
+		let demand = track_b.subscription().unwrap();
 		assert_eq!(
-			sub.segments.len(),
-			2 * MAX_SEGMENTS,
-			"the reap must run on the datagram path too"
+			demand.start,
+			Some(Position { group: 0, frame: 2 }),
+			"resumes in the same group, at the frame the old route stopped on"
 		);
+
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(2).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
+		group.finish().unwrap();
+
+		// Same handle, no seam: the continuation is not surfaced as a second group.
+		assert_eq!(read(&mut reading), b"b2");
+		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
+		recv_pending(&mut sub);
+	}
+
+	/// A replacement that serves the whole group instead of the requested tail still
+	/// splices cleanly: the reader picks up at the seam and never sees the frames it
+	/// already has.
+	///
+	/// This is what a peer too old for frame bounds delivers. The lite subscriber widens
+	/// the request to the whole group for such a peer rather than failing to encode it
+	/// (see `TrackServe::widen_frame_bounds`), so the extra frames are filtered here.
+	#[tokio::test]
+	async fn takeover_splices_a_replacement_that_resends_the_head() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert_eq!(read(&mut reading), b"a1");
+
+		producer.takeover(&consumer_b).unwrap();
+		track_a.abort(Error::Dropped).unwrap();
+		recv_pending(&mut sub);
+
+		// B numbers the group from 0, as an older peer that cannot carry the offset does.
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"dup0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"dup1".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
+		group.finish().unwrap();
+
+		// The reader resumes at frame 2; the re-sent head is filtered, not replayed.
+		assert_eq!(read(&mut reading), b"b2");
+		assert!(reading.read_frame().now_or_never().unwrap().unwrap().is_none());
+
+		// And the group is not surfaced a second time just because B served it whole.
+		recv_pending(&mut sub);
+	}
+
+	/// A route dying midway through a chunked frame resumes *at* that frame, not after
+	/// it. Only the dead route ever saw its payload, and only part of it, so nothing
+	/// downstream can use it.
+	#[tokio::test]
+	async fn takeover_redelivers_an_incomplete_frame() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// Frame 1 is opened and half written when the route dies. Dropping the frame
+		// producer without finishing aborts the group, as a broken stream would.
+		{
+			let mut frame = group
+				.create_frame(frame::Info {
+					size: 6,
+					timestamp: Timestamp::ZERO,
+				})
+				.unwrap();
+			frame.write(b"foo".to_vec()).unwrap();
+		}
+		track_a.abort(Error::Dropped).unwrap();
+
+		producer.takeover(&consumer_b).unwrap();
+		recv_pending(&mut sub);
+
+		let demand = track_b.subscription().unwrap();
+		assert_eq!(
+			demand.start,
+			Some(Position { group: 0, frame: 1 }),
+			"the half-written frame must be redelivered, not skipped"
+		);
+
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+
+		// The reader was parked on frame 1 and picks it up from the replacement.
+		assert_eq!(read(&mut reading), b"b1");
+	}
+
+	/// The old route racing past its frame boundary is filtered, exactly as an
+	/// out-of-range group is.
+	#[tokio::test]
+	async fn mid_group_boundary_caps_the_old_route() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group_a = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group_a.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		producer.takeover(&consumer_b).unwrap();
+		recv_pending(&mut sub);
+		// The old copy's demand is capped just below the boundary.
+		let demand = track_a.subscription().unwrap();
+		// Exclusive: serve group 0 up to and including frame 0.
+		assert_eq!(demand.end, Some(Position { group: 0, frame: 1 }));
+
+		// A keeps writing anyway; those frames belong to B's range now.
+		group_a.write_frame(Timestamp::ZERO, b"a1-over-cap".to_vec()).unwrap();
+
+		let mut group_b = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group_b.start_at(1).unwrap();
+		group_b.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+
+		assert_eq!(read(&mut reading), b"b1");
+	}
+
+	/// A takeover only rolls to the next group once the current one is complete;
+	/// there is nothing left to append to it.
+	#[tokio::test]
+	async fn takeover_rolls_past_a_finished_group() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+
+		producer.takeover(&consumer_b).unwrap();
+		recv_pending(&mut sub);
+		let demand = track_b.subscription().unwrap();
+		assert_eq!(demand.start, Some(Position::group(1)));
+	}
+
+	/// A copy dying mid-group stalls its readers instead of erroring them, the same
+	/// way a dead segment stalls the track. The next takeover resumes them.
+	#[tokio::test]
+	async fn dead_copy_stalls_until_the_continuation() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// The copy fails outright; the reader must not see the error.
+		group.abort(Error::Dropped).unwrap();
+		assert!(reading.read_frame().now_or_never().is_none(), "should stall, not error");
+
+		producer.takeover(&consumer_b).unwrap();
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b1");
+	}
+
+	/// A dead copy stalls only while a replacement can still arrive. Once the logical
+	/// track aborts, no switch is coming, so the reader has to surface the loss rather
+	/// than park on it forever.
+	#[tokio::test]
+	async fn dead_copy_ends_once_the_track_aborts() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// The route dies. A switch could still replace it, so the reader parks.
+		group.abort(Error::Dropped).unwrap();
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"a switch could still come"
+		);
+
+		// The logical track aborts: nothing can replace it now.
+		producer.abort(Error::Cancel).unwrap();
+		assert!(
+			matches!(reading.read_frame().now_or_never(), Some(Err(_))),
+			"an aborted track must not leave the reader parked"
+		);
+	}
+
+	/// A route whose copy of the group is missing the frames the reader needs is treated
+	/// like a dead one. Reading the tail as if it were the head would silently renumber
+	/// every frame in the group.
+	///
+	/// The loss is reported rather than parked on, because the route already produced
+	/// past the missing frames. Boundaries come from `resume_position`, which only moves
+	/// forward, so no future takeover will ever ask anyone for frame 0 again.
+	#[tokio::test]
+	async fn copy_missing_the_head_is_lost() {
+		let (mut track_a, consumer_a) = track_pair("a");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// This route only ever held the tail: its copy starts at frame 2.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(2).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a2".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0);
+		assert_eq!(reading.index(), 0, "the reader still wants frame 0");
+		assert!(
+			matches!(reading.read_frame().now_or_never(), Some(Err(Error::Lagged))),
+			"must report the loss rather than serve the tail as the head"
+		);
+	}
+
+	/// A route that has run ahead of the seam but has not been given up on still parks.
+	///
+	/// It may yet deliver the missing frames out of order, and its own progress is what
+	/// moved the resume point past them, so its being ahead is not evidence the frames
+	/// are gone. Only a route already declared dead strands the reader.
+	#[tokio::test]
+	async fn live_route_ahead_of_the_seam_still_parks() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert_eq!(read(&mut reading), b"a1");
+
+		// B takes over inside group 0, then runs ahead to group 1 without ever serving
+		// the rest of group 0. That pushes the resume point past the seam.
+		producer.takeover(&consumer_b).unwrap();
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"a live route may still fill the seam out of order"
+		);
+
+		// Once it does, the reader picks up where it left off.
+		let mut group = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(2).unwrap();
+		group.write_frame(Timestamp::ZERO, b"b2".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b2");
+	}
+
+	#[tokio::test]
+	async fn takeover_after_empty_segment_keeps_live_edge() {
+		let (track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		recv_pending(&mut sub);
+		assert_eq!(track_a.subscription().unwrap().start, None);
+
+		// A dies before producing anything; B takes over.
+		drop(track_a);
+		producer.takeover(&consumer_b).unwrap();
+		recv_pending(&mut sub);
+
+		// The replacement must inherit live-edge demand, not a full backfill.
+		assert_eq!(track_b.subscription().unwrap().start, None);
 	}
 
 	#[tokio::test]
@@ -1723,26 +2484,6 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn takeover_after_empty_segment_keeps_live_edge() {
-		let (track_a, consumer_a) = track_pair("a");
-		let (track_b, consumer_b) = track_pair("b");
-
-		let mut producer = Producer::new();
-		producer.takeover(&consumer_a).unwrap();
-		let mut sub = producer.consume().subscribe(None);
-		recv_pending(&mut sub);
-		assert_eq!(track_a.subscription().unwrap().group_start, None);
-
-		// A dies before producing anything; B takes over.
-		drop(track_a);
-		producer.takeover(&consumer_b).unwrap();
-		recv_pending(&mut sub);
-
-		// The replacement must inherit live-edge demand, not a full backfill.
-		assert_eq!(track_b.subscription().unwrap().group_start, None);
-	}
-
-	#[tokio::test]
 	async fn switch_validates_boundaries() {
 		let (mut track_a, consumer_a) = track_pair("a");
 		let (_track_b, consumer_b) = track_pair("b");
@@ -1754,7 +2495,562 @@ mod test {
 		// when the previous segment never produced a group.
 		assert!(producer.switch(&consumer_b, None).is_err());
 		write_group(&mut track_a, 0, "a0");
-		assert!(producer.switch(&consumer_b, 0).is_err());
-		producer.switch(&consumer_b, 1).unwrap();
+		assert!(producer.switch(&consumer_b, Position::group(0)).is_err());
+		producer.switch(&consumer_b, Position::group(1)).unwrap();
+	}
+
+	/// Repeated failovers must not accumulate a segment per takeover: dead
+	/// predecessors are pruned once the list outgrows [`MAX_SEGMENTS`], and the
+	/// boundary stays where the pruned segments left it rather than collapsing.
+	#[tokio::test]
+	async fn prune_bounds_segments_and_keeps_the_boundary() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// Each route serves one group and dies; the next takeover resumes past it.
+		let rounds = 2 * MAX_SEGMENTS as u64;
+		for sequence in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			track.abort(Error::Dropped).unwrap();
+		}
+		assert_eq!(
+			producer.state.read().segments.len(),
+			MAX_SEGMENTS,
+			"dead predecessors should have been pruned"
+		);
+
+		// The floor carries what the pruned segments served: a replacement splices
+		// one past the newest group, never back at the start.
+		let (mut track, consumer) = track_pair("final");
+		producer.takeover(&consumer).unwrap();
+		write_group(&mut track, 0, "below-the-floor");
+		recv_pending(&mut sub);
+		write_group(&mut track, rounds, "resumed");
+		assert_eq!(recv(&mut sub), rounds);
+	}
+
+	/// Pruning must not depend on predecessors dying: a takeover boundary is the
+	/// resume position, so a capped segment already produced everything it owns
+	/// and is retired even while its track is alive. Route churn with long-lived
+	/// sessions would otherwise grow the list without bound, since nothing
+	/// re-prunes between switches.
+	#[tokio::test]
+	async fn prune_retires_live_predecessors() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// Every route stays alive: only the takeover cap retires them.
+		let mut tracks = Vec::new();
+		let rounds = 2 * MAX_SEGMENTS as u64;
+		for sequence in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			tracks.push(track);
+		}
+		assert_eq!(
+			producer.state.read().segments.len(),
+			MAX_SEGMENTS,
+			"live predecessors should still be pruned"
+		);
+	}
+
+	/// A route that skips a group for good (SUBSCRIBE_START names a later first
+	/// group) must fail the readers waiting on it over, not stall them: the route
+	/// is alive, so nothing else would ever mark the gap as permanent.
+	#[tokio::test]
+	async fn declared_start_fails_over_a_skipped_group() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves one frame of an open group, then dies mid-group.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert!(
+			reading.read_frame().now_or_never().is_none(),
+			"the seam parks for a continuation"
+		);
+		// The session dies mid-group: its group producers go with it.
+		drop(group);
+		track_a.abort(Error::Dropped).unwrap();
+
+		// B takes over but declares group 1 as its first: the seam is skipped for
+		// good, not merely late.
+		producer.takeover(&consumer_b).unwrap();
+		track_b.start_at(1).unwrap();
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+
+		// The reader waiting on group 0's continuation surfaces the loss instead
+		// of parking forever on a live route.
+		assert!(
+			reading
+				.read_frame()
+				.now_or_never()
+				.expect("the skipped seam must resolve")
+				.is_err(),
+			"the skipped frames are a loss, not a clean end"
+		);
+	}
+
+	/// A reader latched on a capped copy must follow a moved boundary: popping an
+	/// empty successor can re-cap its predecessor lower, and the frames past the
+	/// revised cap belong to the replacement route. Serving them from the stale
+	/// copy would substitute (or duplicate) the replacement's frames.
+	#[tokio::test]
+	async fn latched_reader_follows_a_moved_boundary() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (track_b, consumer_b) = track_pair("b");
+		let (mut track_c, consumer_c) = track_pair("c");
+
+		let mut producer = Producer::new();
+		producer.switch(&consumer_a, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves two frames of an open group; B splices at the produced edge, so
+		// the reader latches A's copy with a cap of (0, 2).
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a1".to_vec()).unwrap();
+		producer.switch(&consumer_b, Position { group: 0, frame: 2 }).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+
+		// B dies empty; C replaces it with an earlier boundary, moving A's cap down
+		// to (0, 1). Frame 1 now belongs to C, and the latched reader must fetch
+		// C's copy rather than serving A's past the revised cap.
+		drop(track_b);
+		producer.switch(&consumer_c, Position { group: 0, frame: 1 }).unwrap();
+		let mut group = track_c.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(Timestamp::ZERO, b"c1".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"c1");
+	}
+
+	/// A long-lived subscriber must not accumulate a cursor per takeover when the
+	/// old routes stay alive: their tracks never end, so nothing else would ever
+	/// cut them. A bounded number of pruned cursors linger to drain out-of-order
+	/// stragglers; beyond the bound the oldest are cut, subscription, demand,
+	/// and all.
+	#[tokio::test]
+	async fn pruned_cursors_stay_bounded() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut tracks = Vec::new();
+		let rounds = 3 * MAX_SEGMENTS as u64;
+		for sequence in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			tracks.push(track);
+		}
+
+		// The cut happens while polling and the next poll reaps the entries.
+		recv_pending(&mut sub);
+		recv_pending(&mut sub);
+		assert_eq!(
+			sub.segments.len(),
+			2 * MAX_SEGMENTS,
+			"pruned cursors beyond the bound must be cut"
+		);
+		assert!(tracks[0].subscription().is_none(), "a cut cursor releases its demand");
+		assert!(
+			tracks[rounds as usize - MAX_SEGMENTS - 1].subscription().is_some(),
+			"a pruned cursor within the bound keeps draining"
+		);
+	}
+
+	/// A capped subscriber riding out route churn keeps its parked groups across
+	/// prunes (their re-offer latches the delivering copy, so they still read
+	/// out) while the straggler bound cuts the oldest entries whole, parked group
+	/// and all, so nothing accumulates without bound.
+	#[tokio::test]
+	async fn capped_subscriber_bounds_parked_segments() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+		sub.end_at(0);
+
+		// Every round parks one group beyond the cap, then fails over to a live
+		// replacement route.
+		let mut tracks = Vec::new();
+		let rounds = 3 * MAX_SEGMENTS as u64;
+		for round in 0..rounds {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, round + 1, "beyond-the-cap");
+			recv_pending(&mut sub);
+			tracks.push(track);
+		}
+
+		recv_pending(&mut sub);
+		assert_eq!(
+			sub.segments.len(),
+			2 * MAX_SEGMENTS,
+			"parked entries must stay bounded, not accumulate"
+		);
+		assert!(tracks[0].subscription().is_none(), "a cut entry releases its demand");
+
+		// Raising the cap re-offers every retained parked group: the pruned ones
+		// within the bound deliver through their latched copies, and only the cut
+		// ranges are lost.
+		sub.end_at(None);
+		for sequence in (rounds - 2 * MAX_SEGMENTS as u64 + 1)..=rounds {
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		recv_pending(&mut sub);
+	}
+
+	/// A route given up on is not gone for good: the peek miss may have come from
+	/// its declared start (SUBSCRIBE_START), which demand moving backward lowers.
+	/// When the copy lands after all, the reader revives the route instead of
+	/// reporting the frames lost.
+	///
+	/// The seam is reached with no latched copy in hand (A's is capped at the
+	/// boundary and rolls clean), so the revival is the only way through: a stale
+	/// latch would otherwise error, re-point `dead` at its own segment, and
+	/// un-guard this route by accident.
+	#[tokio::test]
+	async fn buried_route_revives_when_the_copy_lands() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves one frame of a group and stops there.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+
+		// B takes over at the seam and declares it starts at group 1, so the peek
+		// for the continuation is a permanent miss and the route is buried.
+		producer.takeover(&consumer_b).unwrap();
+		track_b.start_at(1).unwrap();
+
+		// Handed out after the boundary exists, so the copy is capped at the seam.
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"a0");
+		assert!(reading.read_frame().now_or_never().is_none(), "the seam parks");
+
+		// Demand widens backward: the floor drops and B serves the continuation
+		// after all. Reviving has to beat the strand check, since B producing the
+		// frames is itself what moves the resume point past the seam.
+		track_b.start_at(None).unwrap();
+		let mut cont = track_b.create_group(group::Info { sequence: 0 }).unwrap();
+		cont.start_at(1).unwrap();
+		cont.write_frame(Timestamp::ZERO, b"b1".to_vec()).unwrap();
+		assert_eq!(read(&mut reading), b"b1");
+	}
+
+	/// A partial copy nobody asked for (its first frame above the reader's
+	/// position, from a protocol-violating peer) is never latched: the latch is
+	/// trusted for alignment, so a misaligned one would surface its frames under
+	/// the wrong indices. The reader buries the copy as lagged instead.
+	///
+	/// This is also the guard on the revival in [`Group::poll_covering`], which
+	/// reconsiders a buried route ahead of the terminal checks: revival keys on
+	/// [`track::Consumer::poll_serving_group`], and if that stopped requiring the
+	/// copy to serve the requested frame, the copy here would revive, re-bury on
+	/// the very next peek, and loop forever inside one poll. That regression
+	/// surfaces as a hang rather than a failed assertion, which nextest reports
+	/// as a TIMEOUT.
+	#[tokio::test]
+	async fn misaligned_copy_is_lost_without_spinning() {
+		let (mut track, consumer) = track_pair("t");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// The copy of group 0 starts at frame 5 while the segment owes the whole
+		// group.
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(5).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f5".to_vec()).unwrap();
+
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.index(), 0);
+
+		// The head is gone for good, so the group ends as a loss naming the copy
+		// that could not cover it, rather than surfacing misnumbered frames.
+		let err = reading
+			.read_frame()
+			.now_or_never()
+			.expect("the loss must resolve rather than park")
+			.expect_err("a misaligned copy is a loss, never misnumbered frames");
+		assert!(matches!(err, Error::Lagged), "expected a lagged copy, got {err:?}");
+	}
+
+	/// Seeking forward keeps a latched copy that still covers the new position:
+	/// for a pruned segment it is the only copy left, so clearing it would lose
+	/// frames the reader still holds.
+	#[tokio::test]
+	async fn seek_keeps_a_pruned_latch() {
+		let (mut track, consumer) = track_pair("t");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in [b"f0", b"f1", b"f2"] {
+			group.write_frame(Timestamp::ZERO, payload.to_vec()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"f0");
+		track.abort(Error::Dropped).unwrap();
+
+		// Failovers prune the segment; the latch is all that remains of group 0.
+		for sequence in 1..=MAX_SEGMENTS as u64 {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			track.abort(Error::Dropped).unwrap();
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// The seek lands inside the latch: the frame survives the prune.
+		reading.start_at(2);
+		assert_eq!(read(&mut reading), b"f2");
+	}
+
+	/// The straggler bound holds on every polling entry point: a subscriber
+	/// driven only through datagrams accumulates a cursor per takeover all the
+	/// same, so the reap must run from the shared sync, not just the group path.
+	#[tokio::test]
+	async fn datagram_poller_bounds_pruned_cursors() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		for sequence in 0..(3 * MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert!(
+				kio::wait(|waiter| sub.poll_recv_datagram(waiter))
+					.now_or_never()
+					.is_none(),
+				"no datagram expected"
+			);
+		}
+
+		assert_eq!(
+			sub.segments.len(),
+			2 * MAX_SEGMENTS,
+			"the reap must run on the datagram path too"
+		);
+	}
+
+	/// An out-of-order group that lands after its segment was pruned still drains:
+	/// the cursor lingers (within the straggler bound) exactly because an empty
+	/// poll is not proof of completeness, and its demand is what keeps the
+	/// upstream serving the stragglers.
+	#[tokio::test]
+	async fn late_group_drains_from_a_pruned_cursor() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A delivers group 1 first; group 0 is still in flight when A is outranked
+		// and enough failovers prune its segment.
+		let (mut track_a, consumer_a) = track_pair("a");
+		producer.takeover(&consumer_a).unwrap();
+		write_group(&mut track_a, 1, "a1");
+		assert_eq!(recv(&mut sub), 1);
+
+		for sequence in 2..=(1 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// The straggler finally lands and surfaces through the lingering cursor.
+		write_group(&mut track_a, 0, "a0");
+		assert_eq!(recv(&mut sub), 0);
+	}
+
+	/// `finished()` on a group bounded by a mid-group takeover resolves once no
+	/// segment can serve the seam: the continuation owns the count, and when the
+	/// covering segments are pruned away the cap is the group's end. Polled
+	/// without draining first, which is exactly the caller the seam check must
+	/// park (and wake) rather than hang.
+	#[tokio::test]
+	async fn finished_resolves_for_a_pruned_bounded_group() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves two frames of an open group; B splices at the seam, so the
+		// reader's copy is handed out bounded at (0, 2).
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f1".to_vec()).unwrap();
+		let (mut track_b, consumer_b) = track_pair("b");
+		producer.takeover(&consumer_b).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		drop(group);
+		track_a.abort(Error::Dropped).unwrap();
+
+		// While B covers the seam the count is still open: B may serve frame 2.
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+		assert!(
+			reading.finished().now_or_never().is_none(),
+			"the seam is still coverable"
+		);
+
+		// Enough failovers prune A and B: nothing can serve the seam anymore, so
+		// the cap is the end.
+		for sequence in 2..=(1 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert_eq!(
+			reading
+				.finished()
+				.now_or_never()
+				.expect("the lost seam must resolve the count")
+				.unwrap(),
+			2
+		);
+	}
+
+	/// A handed-out group survives its segment's prune, for every reader: the
+	/// delivering copy is latched at hand-out and a clone re-latches it at its
+	/// own position (fanout must not depend on the segment list remembering the
+	/// route), so both read the payload out and end cleanly instead of stalling.
+	#[tokio::test]
+	async fn group_reader_gives_up_below_the_pruned_floor() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// Group 0 is handed out but never read; its route dies and enough
+		// failovers follow to prune the segment that held it.
+		let (mut track, consumer) = track_pair("t0");
+		producer.takeover(&consumer).unwrap();
+		write_group(&mut track, 0, "kept");
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0);
+		let mut cloned = reading.clone();
+		track.abort(Error::Dropped).unwrap();
+
+		for sequence in 1..=MAX_SEGMENTS as u64 {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			track.abort(Error::Dropped).unwrap();
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// Both readers still deliver, then the group ends cleanly at what the
+		// pruned route produced.
+		for reader in [&mut reading, &mut cloned] {
+			assert_eq!(read(reader), b"kept");
+			assert!(
+				reader.read_frame().now_or_never().unwrap().unwrap().is_none(),
+				"the group ends at what the route produced"
+			);
+		}
+	}
+
+	/// `finished()` resolves when the seam's covering route skip-declared the
+	/// group: its segment geometrically covers the continuation, but its
+	/// SUBSCRIBE_START floor proves the group will never arrive, so the cap is
+	/// the end. Polled without draining, and woken by the successor's track (the
+	/// seam probe parks on the peek), not just the segment list.
+	#[tokio::test]
+	async fn finished_resolves_when_the_successor_skips_the_seam() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let (mut track_b, consumer_b) = track_pair("b");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+
+		// A serves two frames of an open group; B splices at the seam.
+		let mut group = track_a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f1".to_vec()).unwrap();
+		producer.takeover(&consumer_b).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		drop(group);
+		track_a.abort(Error::Dropped).unwrap();
+
+		// B covers the seam, so the count is still open.
+		assert!(reading.finished().now_or_never().is_none(), "the seam is coverable");
+
+		// B declares it starts at group 1 and produces it: group 0's continuation
+		// is skipped for good, so the cap is the end.
+		track_b.start_at(1).unwrap();
+		write_group(&mut track_b, 1, "b1");
+		assert_eq!(recv(&mut sub), 1);
+		assert_eq!(
+			reading
+				.finished()
+				.now_or_never()
+				.expect("a skip-declared seam must resolve the count")
+				.unwrap(),
+			2
+		);
+	}
+
+	/// A reader that already latched a pruned segment's copy keeps draining it: the
+	/// cursor holds the buffered frames, and a pruned segment produced everything it
+	/// owned, so the copy runs out exactly at the boundary.
+	#[tokio::test]
+	async fn reader_drains_a_pruned_segments_copy() {
+		let mut producer = Producer::new();
+		let mut sub = producer.consume().subscribe(None);
+
+		// Group 0 has two frames; the reader consumes one, latching the copy.
+		let (mut track, consumer) = track_pair("t0");
+		producer.takeover(&consumer).unwrap();
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f0".to_vec()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"f1".to_vec()).unwrap();
+		group.finish().unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"f0");
+		track.abort(Error::Dropped).unwrap();
+
+		// Failovers prune the segment out from under the latched cursor.
+		for sequence in 1..=MAX_SEGMENTS as u64 {
+			let (mut track, consumer) = track_pair("t");
+			producer.takeover(&consumer).unwrap();
+			write_group(&mut track, sequence, "payload");
+			assert_eq!(recv(&mut sub), sequence);
+			track.abort(Error::Dropped).unwrap();
+		}
+		assert!(
+			producer.state.read().pruned.is_some(),
+			"the first segment should be pruned"
+		);
+
+		// The second frame still arrives from the latched copy.
+		assert_eq!(read(&mut reading), b"f1");
 	}
 }

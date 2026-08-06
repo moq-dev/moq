@@ -115,7 +115,7 @@ pub async fn run(ctx: Connection) {
 	}
 
 	let client = client.with_publisher(&publish).with_subscriber(consume);
-	let mut reconnect = client.reconnect(url);
+	let mut reconnect = client.connect(url);
 
 	// Subscriber: drain up to `subscribe` peer broadcasts.
 	if rolled.subscribe > 0 {

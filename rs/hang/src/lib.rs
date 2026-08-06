@@ -6,7 +6,7 @@
 //!
 //! - **Catalog**: A JSON track containing codec info and track metadata, updated live as tracks change.
 //! - **Tracks**: Audio or video, supporting one or more renditions.
-//! - **Timeline**: A JSON track mapping each media group to its start timestamp, so a
+//! - **Timeline**: A JSON track indexing a media track's aligned segments (one or more groups each), so a
 //!   consumer can seek (or build indexes/playlists) without downloading media.
 //!
 //! Each track specifies a container format:
@@ -22,7 +22,7 @@ pub mod catalog;
 /// The container is the contents of each media track.
 pub mod container;
 
-/// The timeline maps each media group to its start timestamp.
+/// The timeline indexes the broadcast's aligned segments.
 pub mod timeline;
 
 /// Export the moq-net version we use.

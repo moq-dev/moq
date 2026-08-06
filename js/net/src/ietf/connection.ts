@@ -4,6 +4,7 @@ import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
+import { error, fromClose } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
@@ -306,11 +307,8 @@ export class Connection implements Established {
 		}
 	}
 
-	/**
-	 * Returns a promise that resolves when the connection is closed.
-	 * @returns A promise that resolves when closed
-	 */
-	get closed(): Promise<void> {
-		return this.#quic.closed.then(() => undefined);
+	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
+	get closed(): Promise<Error | null> {
+		return this.#quic.closed.then(fromClose, (err: unknown) => error(err));
 	}
 }

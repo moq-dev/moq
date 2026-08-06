@@ -113,6 +113,19 @@ pub enum Error {
 		composition_time_ms: i32,
 	},
 
+	/// A segment ran past the [`duration_max`](crate::timeline::Config::duration_max) the
+	/// catalog advertised, so the timeline stopped publishing rather than contradict it. The
+	/// publisher declared a bound its media can't honor.
+	#[error("timeline segment {segment} lasted {duration:?}, over the declared maximum {duration_max:?}")]
+	TimelineOverrun {
+		/// The segment that broke the bound.
+		segment: u64,
+		/// How long it actually ran.
+		duration: std::time::Duration,
+		/// The bound the catalog advertised.
+		duration_max: std::time::Duration,
+	},
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
@@ -132,6 +145,16 @@ pub enum Error {
 	/// frames cannot be parsed. Such a rendition must be ignored, not guessed at.
 	#[error("unsupported container: {0}")]
 	UnsupportedContainer(String),
+
+	/// A rendition's `broadcast` reference walks above the root, so it names no broadcast.
+	///
+	/// The root is the consumer's authorized subtree, so such a reference is an attempt to
+	/// name content the consumer cannot reach. It rejects the whole catalog
+	/// ([`catalog::hang::Consumer`](crate::catalog::hang::Consumer)) rather than the one
+	/// rendition, and is also what a direct [`Source::resolve`](crate::Source::resolve) /
+	/// [`Source::subscribe_track`](crate::Source::subscribe_track) reports.
+	#[error("broadcast reference escapes the root: {0}")]
+	EscapingBroadcast(String),
 }
 
 impl Error {

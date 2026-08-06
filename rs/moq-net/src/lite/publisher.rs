@@ -1,4 +1,4 @@
-use crate::{announce, frame, group, origin, track};
+use crate::{SessionError, announce, frame, group, origin, track};
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use bytes::Buf;
@@ -58,6 +58,8 @@ pub(super) struct PublisherConfig<S: web_transport_trait::Session> {
 	/// The peer's SETUP (lite-05+), shared with the subscriber half that reads
 	/// it. Carries the peer's declared origin id for split-horizon serving.
 	pub peer_setup: super::PeerSetup,
+	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
+	pub goaway: crate::goaway::Protocol,
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_origin`.
 	pub peer_origin: Option<Origin>,
@@ -81,6 +83,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	serving: std::sync::OnceLock<origin::Consumer>,
 	priority: PriorityQueue,
 	version: Version,
+	goaway: crate::goaway::Protocol,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
@@ -98,6 +101,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			serving: std::sync::OnceLock::new(),
 			priority: Default::default(),
 			version: config.version,
+			goaway: config.goaway,
 		}
 	}
 
@@ -155,12 +159,35 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				self.recv_probe(stream).await;
 				Ok(())
 			}
-			lite::ControlType::Goaway => {
-				tracing::info!("received goaway stream");
-				Ok(())
-			}
+			lite::ControlType::Goaway => self.recv_goaway(stream).await,
 			lite::ControlType::Session => Err(Error::UnexpectedStream),
 		}
+	}
+
+	/// Decode the peer's GOAWAY and surface it through [`crate::Session::recv_goaway`].
+	///
+	/// A decode error propagates to the caller, which logs and continues: a
+	/// malformed GOAWAY must not tear down the session it is trying to drain.
+	async fn recv_goaway(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let msg: lite::Goaway = stream.reader.decode().await?;
+		tracing::info!(uri = %msg.uri, "received goaway");
+
+		let uri = msg.uri.into_owned();
+		let goaway = crate::goaway::Goaway {
+			uri: uri.clone(),
+			// moq-lite has no timeout field on the wire.
+			timeout: None,
+		};
+
+		if let Err(err) = self.goaway.record(goaway) {
+			// A second Goaway stream is a protocol violation. The control loop only
+			// logs per-stream errors, so close the session here rather than letting a
+			// peer silently replace a redirect an observer may already be acting on.
+			tracing::warn!(%uri, "duplicate GOAWAY received; closing session");
+			self.session.close(SessionError::from(&err).to_code(), &err.to_string());
+			return Err(err);
+		}
+		Ok(())
 	}
 
 	async fn recv_probe(&self, mut stream: Stream<S, Version>) {
@@ -786,6 +813,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// production cost and for a pure forwarder is the price of the fetch a
 	/// subscription would trigger.
 	///
+	/// A ceiling-cost route pierces the carrying discount. For a drain (the
+	/// ceiling's primary producer) the paid-for ingress is going away, so
+	/// advertising zero would keep pulling subscribers onto a path about to
+	/// vanish when a peer with any other edge should move now, while the seam is
+	/// seamless. The rule keys on the value, not the reason: the reason does not
+	/// travel on the wire, and a cost that saturated through charges marks a
+	/// path of last resort all the same.
+	///
 	/// The receiving side adds its own link price on top, so we never account for
 	/// the link we are sending over. Pre-lite-06 peers get nothing (the field isn't
 	/// on their wire), leaving hop count as the metric exactly as before.
@@ -912,8 +947,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
 			latency_max: subscribe.max_latency,
-			group_start: subscribe.start_group,
-			group_end: subscribe.end_group,
+			..Bounds::from(subscribe).positions()
 		};
 
 		// Awaits the dynamic fallback if the broadcast wasn't announced; resolves
@@ -976,8 +1010,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// run_track serves groups and best-effort datagrams off the one subscriber.
 		sub.run_track(
 			track,
-			subscribe.start_group,
-			subscribe.end_group,
+			Bounds::from(subscribe),
 			&mut stream.reader,
 			&mut stream.writer,
 			&track_priority_tx,
@@ -1036,9 +1069,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				fetch.group,
 				group::Fetch {
 					priority: fetch.priority,
+					frame_start: fetch.start_frame,
+					..Default::default()
 				},
 			)
 			.await?;
+
+		// The response carries no header, so a short run is indistinguishable from one
+		// that started elsewhere: only serve a range we can cover exactly. `fetch_group`
+		// already positions the consumer, so this is a belt-and-braces check on a
+		// promise the wire can't restate.
+		if group.index() != fetch.start_frame {
+			return Err(Error::Lagged);
+		}
+		// The end is a serving cap only: the cached group runs to the end of the group
+		// so it stays usable for anyone else (see `group::Fetch::frame_start`).
+		group.end_at(fetch.end_frame);
 
 		// FETCH is gated to lite-05+, which learned the track timescale via TRACK_INFO.
 		let timescale = if version.has_track_stream() {
@@ -1067,6 +1113,44 @@ mod test {
 
 	fn track_producer(name: impl Into<Arc<str>>) -> track::Producer {
 		track::Producer::new(Arc::new(broadcast::Info::default()), name, None)
+	}
+
+	/// The run_track contract behind SUBSCRIBE_OK's implicit drop: once the first
+	/// served group resolves the start, the cursor floor rises to it, so a lower
+	/// group arriving late (unordered delivery) is never served after the range
+	/// was declared dropped.
+	#[tokio::test]
+	async fn start_floor_suppresses_late_lower_arrivals() {
+		use futures::FutureExt;
+
+		let mut producer = track_producer("test");
+		let mut subscriber = producer.subscribe(None);
+
+		let write = |producer: &mut track::Producer, sequence: u64| {
+			let mut group = producer.create_group(crate::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		};
+
+		// Group 7 arrives first: run_track resolves the start there and raises
+		// the floor.
+		write(&mut producer, 7);
+		match recv_next(&mut subscriber, false, false).await.unwrap() {
+			Recv::Group(group) => {
+				assert_eq!(group.sequence, 7);
+				subscriber.start_at(group.sequence);
+			}
+			_ => panic!("expected the first group"),
+		}
+
+		// Group 5 lands late: below the resolved start, it must not be served.
+		write(&mut producer, 5);
+		assert!(
+			recv_next(&mut subscriber, false, false).now_or_never().is_none(),
+			"a group below the resolved start must be suppressed"
+		);
 	}
 
 	#[tokio::test]
@@ -1685,6 +1769,95 @@ mod announce_test {
 		}
 		assert!(!task.is_finished(), "the announce loop ended unexpectedly");
 	}
+
+	/// A locally created route may set `Route::cost` past what a varint can carry,
+	/// since nothing validates the public field. The advertised cost has to clamp,
+	/// or forwarding the announce fails to encode and takes the announce stream
+	/// with it.
+	#[test]
+	fn outgoing_cost_clamps_to_the_wire_ceiling() {
+		use crate::broadcast;
+
+		let mut producer = broadcast::Info::new().produce();
+		producer
+			.set_route(broadcast::Route::announced().with_cost(u64::MAX))
+			.unwrap();
+		let consumer = producer.consume();
+		let route = consumer.route();
+		let demand = consumer.demand();
+
+		let cost = Publisher::<crate::lite::test_transport::SinkSession>::outgoing_cost(
+			Version::Lite06Wip,
+			&demand,
+			&route,
+			false,
+		);
+		assert_eq!(cost, lite::RouteCost(broadcast::MAX_COST));
+
+		let mut buf = Vec::new();
+		cost.encode(&mut buf, Version::Lite06Wip)
+			.expect("an advertised cost must always encode");
+	}
+
+	/// A draining serving route must advertise its drain cost even while the
+	/// broadcast has demand. The carrying discount exists because the ingress is
+	/// already paid for; a draining ingress is going away, and masking it with
+	/// zero would keep downstream peers glued to a path about to vanish instead
+	/// of migrating to another edge while the handover is seamless.
+	#[test]
+	fn outgoing_cost_advertises_a_drain_despite_demand() {
+		use crate::broadcast;
+
+		let mut producer = broadcast::Info::new().produce();
+		producer
+			.set_route(broadcast::Route::announced().with_cost(broadcast::DRAIN_COST))
+			.unwrap();
+		let consumer = producer.consume();
+		let route = consumer.route();
+		let demand = consumer.demand();
+
+		// A consumed track: demand.is_used() is true, which is exactly the case
+		// that used to collapse the cost to zero.
+		let track = producer.create_track("video", None).unwrap();
+		let _reader = track.consume();
+		assert!(demand.is_used(), "the consumed track should register demand");
+
+		let cost = Publisher::<crate::lite::test_transport::SinkSession>::outgoing_cost(
+			Version::Lite06Wip,
+			&demand,
+			&route,
+			true,
+		);
+		assert_eq!(cost, lite::RouteCost(broadcast::DRAIN_COST));
+
+		// A drain that arrived over the wire propagates through a carrying relay:
+		// the upstream's ceiling plus our link price saturates back to the
+		// ceiling, which pierces this hop's discount too. Without that, each
+		// carrying hop would re-mask the drain as cost 0.
+		let forwarded = lite::RouteCost(broadcast::DRAIN_COST).charged(5).0;
+		producer
+			.set_route(broadcast::Route::announced().with_cost(forwarded))
+			.unwrap();
+		let route = consumer.route();
+		let cost = Publisher::<crate::lite::test_transport::SinkSession>::outgoing_cost(
+			Version::Lite06Wip,
+			&demand,
+			&route,
+			true,
+		);
+		assert_eq!(cost, lite::RouteCost(broadcast::DRAIN_COST));
+
+		// A healthy serving route with demand still gets the carrying discount.
+		producer.set_route(broadcast::Route::announced().with_cost(7)).unwrap();
+		let route = consumer.route();
+		let cost = Publisher::<crate::lite::test_transport::SinkSession>::outgoing_cost(
+			Version::Lite06Wip,
+			&demand,
+			&route,
+			true,
+		);
+		assert_eq!(cost, lite::RouteCost(0));
+	}
 }
 
 /// Encode the per-frame timing prefix when the track advertises a timescale:
@@ -1812,6 +1985,106 @@ async fn recv_next(track: &mut track::Subscriber, datagrams: bool, emit_boundary
 	kio::wait(|waiter| poll_recv_next(track, datagrams, emit_boundary, waiter)).await
 }
 
+/// Bound `group` to what this subscription asked for, reporting whether it can be served
+/// at all.
+///
+/// Frame bounds qualify the start and end group only; everything in between is served
+/// whole. `false` means the group's head is missing and the subscriber never asked for a
+/// partial group, so it must be skipped: a group is the unit of decodability, and only
+/// the subscriber knows whether a partial one is any use to it.
+fn position_group(group: &mut group::Consumer, start: Option<(u64, u64)>, end: Option<(u64, u64)>) -> bool {
+	let expected = match start {
+		Some((sequence, frame)) if sequence == group.sequence => frame,
+		_ => 0,
+	};
+
+	// `start_at` clamps up to the first frame the group still holds, so landing higher
+	// than asked means the frames below it are gone.
+	group.start_at(expected);
+	if group.index() != expected {
+		return false;
+	}
+
+	if let Some((sequence, frame)) = end
+		&& sequence == group.sequence
+	{
+		group.end_at(frame);
+	}
+
+	true
+}
+
+/// A subscription's requested delivery range, exactly as it arrived on the wire.
+///
+/// The frame bounds qualify the start and end group, so they only mean anything paired
+/// with one; [`Self::start_frame`] / [`Self::end_frame`] hand back that pairing.
+struct Bounds {
+	start_group: Option<u64>,
+	start_frame: u64,
+	end_group: Option<u64>,
+	end_frame: Option<u64>,
+}
+
+impl Bounds {
+	/// The requested range as the model's half-open pair of [`track::Position`]s.
+	///
+	/// The wire carries the two halves of each bound separately and both ends
+	/// inclusive; the model carries whole positions with an exclusive end. The
+	/// [`Subscription`] builders own that conversion, so this goes through them
+	/// rather than repeating it.
+	fn positions(&self) -> crate::track::Subscription {
+		let mut sub = crate::track::Subscription::default();
+		if let Some(group) = self.start_group {
+			sub = sub.with_start(track::Position {
+				group,
+				frame: self.start_frame,
+			});
+		}
+		if let Some(group) = self.end_group {
+			sub = sub.with_end(match self.end_frame {
+				Some(frame) => track::Position::after(group, frame),
+				None => track::Position::after_group(group),
+			});
+		}
+		sub
+	}
+
+	/// The group to apply a frame offset to and the offset itself, or `None` when
+	/// delivery starts on a group boundary.
+	fn start_frame(&self) -> Option<(u64, u64)> {
+		self.start_group
+			.map(|group| (group, self.start_frame))
+			.filter(|(_, frame)| *frame != 0)
+	}
+
+	/// The group to cap and the last frame to serve within it (inclusive).
+	fn end_frame(&self) -> Option<(u64, u64)> {
+		self.end_group.zip(self.end_frame)
+	}
+}
+
+impl From<&lite::Subscribe<'_>> for Bounds {
+	fn from(msg: &lite::Subscribe<'_>) -> Self {
+		Self {
+			start_group: msg.start_group,
+			start_frame: msg.start_frame,
+			end_group: msg.end_group,
+			end_frame: msg.end_frame,
+		}
+	}
+}
+
+impl From<&lite::SubscribeUpdate> for Bounds {
+	fn from(msg: &lite::SubscribeUpdate) -> Self {
+		Self {
+			start_group: msg.start_group,
+			start_frame: msg.start_frame,
+			end_group: msg.end_group,
+			end_frame: msg.end_frame,
+		}
+	}
+}
+
 /// Shared per-subscription state for the publisher side. Cloned cheaply. Every
 /// field is either small or already Arc-backed for each in-flight serve_group task
 /// so each in-flight group reads the latest SUBSCRIBE_UPDATE priority via its own
@@ -1835,8 +2108,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	async fn run_track(
 		mut self,
 		mut track: track::Subscriber,
-		start_group: Option<u64>,
-		initial_end_group: Option<u64>,
+		bounds: Bounds,
 		reader: &mut crate::coding::Reader<S::RecvStream, Version>,
 		writer: &mut Writer<S::SendStream, Version>,
 		track_priority_tx: &kio::Producer<u8>,
@@ -1844,13 +2116,18 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		let mut tasks: FuturesUnordered<MaybeSendBox<'static, ()>> = FuturesUnordered::new();
 
 		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = start_group.or_else(|| track.latest()) {
+		if let Some(start_group) = bounds.start_group.or_else(|| track.latest()) {
 			track.start_at(start_group);
 		}
 
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SubscribeUpdate select arm below.
-		track.end_at(initial_end_group);
+		track.end_at(bounds.end_group);
+
+		// Frame bounds qualify the start and end group only; everything in between is
+		// served whole. Each is `(group, frame)`, or `None` for no offset at all.
+		let mut start_frame = bounds.start_frame();
+		let mut end_frame = bounds.end_frame();
 
 		// Lite05+ resolves the range on the Subscribe Stream itself: SUBSCRIBE_START
 		// once the first group is known, SUBSCRIBE_END as soon as the track declares its
@@ -1902,14 +2179,30 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 			match event {
 				Event::Recv(res) => match res? {
-					Recv::Group(group) => {
+					Recv::Group(mut group) => {
+						let sequence = group.sequence;
+						if !position_group(&mut group, start_frame, end_frame) {
+							// Its head is gone, and this subscriber didn't ask for a
+							// partial group. Skip it rather than open a stream that can
+							// only be reset; the next servable group resolves the start.
+							tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "skipping group with a missing head");
+							continue;
+						}
 						if emit_range && !start_sent {
 							start_sent = true;
+							// Only the group: the subscriber derives the start frame from
+							// its own request (see `lite::SubscribeStart`).
 							writer
 								.encode(&lite::SubscribeResponse::Start(lite::SubscribeStart {
-									group: group.sequence,
+									group: sequence,
 								}))
 								.await?;
+							// SUBSCRIBE_OK is an implicit drop of everything below the
+							// resolved start (the subscriber records it as a permanent
+							// miss), so a lower group arriving late must not be served
+							// after all. A widening SUBSCRIBE_UPDATE re-lowers the floor,
+							// renegotiating the resolved start along with the demand.
+							track.start_at(sequence);
 						}
 						self.queue_serve(group, &mut tasks);
 					}
@@ -1943,18 +2236,19 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					}
 					// Feed the full update into the model subscriber so the producer's
 					// aggregate reflects it (and a relay re-forwards it upstream).
+					let bounds = Bounds::from(&upd);
 					let _ = track.update(crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
 						latency_max: upd.max_latency,
-						group_start: upd.start_group,
-						group_end: upd.end_group,
-						..Default::default()
+						..bounds.positions()
 					});
 					if let Some(start_group) = upd.start_group {
 						track.start_at(start_group);
 					}
 					track.end_at(upd.end_group);
+					start_frame = bounds.start_frame();
+					end_frame = bounds.end_frame();
 				}
 			}
 		}
@@ -1962,24 +2256,27 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 
 	fn queue_serve(&mut self, group: group::Consumer, tasks: &mut FuturesUnordered<MaybeSendBox<'static, ()>>) {
 		let sequence = group.sequence;
+		let frame_start = group.index();
 		tracing::debug!(subscribe = self.id, track = %self.track_name, sequence, "serving group");
 
 		// Use the latest priority for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let current_priority = self.track_priority_current();
 		let handle = self.priority.insert(Priority::new(current_priority, sequence));
-		let fut = self.clone().serve_group(sequence, handle, group);
+		let fut = self.clone().serve_group(sequence, frame_start, handle, group);
 		tasks.push(fut.map(|_| ()).maybe_boxed());
 	}
 
 	async fn serve_group(
 		mut self,
 		sequence: u64,
+		frame_start: u64,
 		mut priority: PriorityHandle,
 		mut group: group::Consumer,
 	) -> Result<(), Error> {
 		let msg = lite::Group {
 			subscribe: self.id,
 			sequence,
+			frame_start,
 		};
 		let stream = self.session.open_uni().await.map_err(Error::from_transport)?;
 		let mut stream = Writer::new(stream, self.version);
@@ -2203,6 +2500,114 @@ mod serve_group_test {
 	use crate::lite::test_transport::*;
 	use crate::{Timestamp, broadcast};
 
+	/// The wire's inclusive pair maps to the model's exclusive end.
+	///
+	/// The inverse of the subscriber's `WireBounds`, and the same off-by-one risk: a
+	/// whole end group becomes the head of the next one, a capped frame becomes the head
+	/// of the frame above it.
+	#[test]
+	fn bounds_convert_to_positions() {
+		let whole = Bounds {
+			start_group: None,
+			start_frame: 0,
+			end_group: Some(5),
+			end_frame: None,
+		};
+		assert_eq!(whole.positions().end, Some(track::Position::group(6)));
+
+		let capped = Bounds {
+			end_frame: Some(2),
+			..whole
+		};
+		assert_eq!(capped.positions().end, Some(track::Position { group: 5, frame: 3 }));
+
+		let started = Bounds {
+			start_group: Some(5),
+			start_frame: 3,
+			end_group: None,
+			end_frame: None,
+		};
+		let positions = started.positions();
+		assert_eq!(positions.start, Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(positions.end, None);
+
+		// A frame bound the peer sent without its group has nothing to count from, so it
+		// cannot reach the model at all.
+		let orphan = Bounds {
+			start_group: None,
+			start_frame: 3,
+			end_group: None,
+			end_frame: Some(7),
+		};
+		assert_eq!((orphan.positions().start, orphan.positions().end), (None, None));
+	}
+
+	/// A group whose head the publisher no longer holds is skipped, not served short:
+	/// only a subscriber that asked for a partial group may receive one.
+	#[test]
+	fn position_group_skips_a_missing_head() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
+		group.start_at(5).unwrap();
+		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
+
+		// Asked for whole groups, so the missing frames 0..5 make this unservable.
+		let mut consumer = group.consume();
+		assert!(!position_group(&mut consumer, None, None));
+
+		// Asked for exactly where it starts: servable, and positioned there.
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		assert_eq!(consumer.index(), 5);
+
+		// Asked for an earlier frame than the group holds: still a hole, still skipped.
+		let mut consumer = group.consume();
+		assert!(!position_group(&mut consumer, Some((3, 2)), None));
+
+		// The offset belongs to the start group only; a later group is served whole.
+		let mut other = track.create_group(group::Info { sequence: 4 }).unwrap();
+		other.write_frame(Timestamp::ZERO, b"whole".to_vec()).unwrap();
+		let mut consumer = other.consume();
+		assert!(position_group(&mut consumer, Some((3, 5)), None));
+		assert_eq!(consumer.index(), 0);
+	}
+
+	/// The end bound caps the end group and leaves the others whole.
+	#[test]
+	fn position_group_caps_the_end_group() {
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "video", None);
+		let mut group = track.create_group(group::Info { sequence: 7 }).unwrap();
+		for i in 0..4u8 {
+			group.write_frame(Timestamp::ZERO, vec![i]).unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, None, Some((7, 1))));
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			0
+		);
+		assert_eq!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+			1
+		);
+		assert!(
+			consumer.read_frame().now_or_never().unwrap().unwrap().is_none(),
+			"capped"
+		);
+
+		// A cap naming another group leaves this one uncapped.
+		let mut consumer = group.consume();
+		assert!(position_group(&mut consumer, None, Some((8, 1))));
+		for i in 0..4u8 {
+			assert_eq!(
+				consumer.read_frame().now_or_never().unwrap().unwrap().unwrap().payload[0],
+				i
+			);
+		}
+	}
+
 	#[tokio::test]
 	async fn resets_with_the_abort_code() {
 		let log = Log::default();
@@ -2227,7 +2632,7 @@ mod serve_group_test {
 			.unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0));
-		let mut serve = std::pin::pin!(subscription.serve_group(0, handle, group.consume()));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group.consume()));
 
 		// Drain the frame, leaving the task parked awaiting the next one.
 		assert!(futures::poll!(serve.as_mut()).is_pending());
@@ -2236,7 +2641,7 @@ mod serve_group_test {
 		group.abort(Error::Old).unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
-		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
 	}
 }
 

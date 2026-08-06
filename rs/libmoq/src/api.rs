@@ -229,10 +229,10 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 			.with_ordered(subscription.ordered)
 			.with_latency_max(std::time::Duration::from_millis(subscription.latency_max_ms));
 		if subscription.group_start_valid {
-			out = out.with_group_start(subscription.group_start);
+			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
 		if subscription.group_end_valid {
-			out = out.with_group_end(subscription.group_end);
+			out = out.with_end(moq_net::track::Position::after_group(subscription.group_end));
 		}
 		out
 	}
@@ -784,6 +784,42 @@ pub unsafe extern "C" fn moq_publish_media(
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
 
 		State::lock().publish.media(broadcast, format, init)
+	})
+}
+
+/// Draw a group boundary on a media importer.
+///
+/// For a codec track this ends the open group; the next frame written starts a new one. Audio has
+/// no boundary of its own (every packet is independently decodable), so this is the only thing
+/// that gives it groups: call it after every frame for one group (one QUIC stream) the relay
+/// forwards without waiting, or at a segment cadence to align with video for HLS/DASH. Video
+/// groups at its own keyframes and needs this only to override that.
+///
+/// For a container importer ([moq_publish_media] with a container format) this declares the start
+/// of a new segment, rolling a group on every track the container publishes. An fMP4 source
+/// carrying `styp` atoms declares its own segments, so this is only needed when it doesn't.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_cut(media: u32) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_cut(media)
+	})
+}
+
+/// Draw a group boundary and number the next group `sequence`.
+///
+/// [moq_publish_media_cut] with an explicit sequence, for a caller whose group numbers have to be
+/// deterministic: two encoders publishing the same content align per GOP so a consumer can fail
+/// over between them.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		State::lock().publish.media_seek(media, sequence)
 	})
 }
 

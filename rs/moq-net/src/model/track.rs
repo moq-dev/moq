@@ -18,7 +18,7 @@ use crate::{broadcast, cache, frame, group, stats};
 
 use super::{Datagram, Requests};
 
-pub use super::subscription::Subscription;
+pub use super::subscription::{Position, Subscription};
 
 use std::{
 	collections::{HashMap, VecDeque},
@@ -202,6 +202,16 @@ pub(crate) struct TrackState {
 	// The sequence number at which the track was finalized.
 	final_sequence: Option<u64>,
 
+	// The first sequence the live feed serves, once the publisher declared one
+	// (the wire's SUBSCRIBE_START). Lower groups never arrive on their own; a
+	// fetch can still create them.
+	start_sequence: Option<u64>,
+
+	// Where production stopped, snapshotted when the cached groups are released (an
+	// abort, or the last producer dropping). Computed live from the cache otherwise;
+	// see [`Self::resume_position`].
+	resume: Option<Position>,
+
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
@@ -243,6 +253,11 @@ type FetchState = Requests<u64, PendingFetch>;
 struct PendingFetch {
 	// The most demanding delivery priority across the joined fetches.
 	priority: u8,
+
+	// The lowest start across the joined fetches, so serving the attempt once satisfies
+	// every one of them. Only widened while the request is still queued: once a handler
+	// has taken it, its range is already on the wire.
+	frame_start: u64,
 
 	// Result channel back to the joined fetches. Written only on rejection; a
 	// successful accept resolves them through the track cache instead. Dropping
@@ -455,6 +470,20 @@ impl TrackState {
 		Some(slot.group.consume())
 	}
 
+	/// The cached group for `sequence`, but only when it holds every frame from
+	/// `frame_start` onward.
+	///
+	/// A group cached from a frame-bounded subscription starts partway in, and serving
+	/// it to someone who asked for the whole group would silently hand back a tail. It
+	/// is a miss instead, so the fetch goes upstream for the frames that are missing.
+	fn covering_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Producer> {
+		let slot = self.lookup.get(&sequence)?;
+		if slot.group.is_aborted() || slot.group.first_frame() as u64 > frame_start {
+			return None;
+		}
+		Some(&slot.group)
+	}
+
 	/// The publisher's latency window, or `None` while the info is unknown (an
 	/// unaccepted [`Request`]). Bounds the aggregate subscription; see [`clamp_combined`].
 	fn latency_bound(&self) -> Option<Duration> {
@@ -465,15 +494,13 @@ impl TrackState {
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
 	/// end-of-stream. The handler side (a rejection, or no [`Dynamic`] at all) lives
 	/// in [`FetchState`]; [`Fetching`] polls both.
-	fn poll_fetch_cached(&self, sequence: u64) -> Poll<Result<group::Consumer>> {
-		if let Some(slot) = self.lookup.get(&sequence)
-			&& !slot.group.is_aborted()
-		{
+	fn poll_fetch_cached(&self, sequence: u64, frame_start: u64) -> Poll<Result<group::Consumer>> {
+		if let Some(group) = self.covering_group(sequence, frame_start) {
 			// A cache hit refreshes the group: it resets both its age (expiry keys
 			// off the last access) and its standing against the pool-wide average,
 			// so the eviction walk keeps it over never-read groups.
-			slot.group.cache_refresh();
-			return Poll::Ready(Ok(slot.group.consume()));
+			group.cache_refresh();
+			return Poll::Ready(Ok(group.consume()));
 		}
 
 		if let Some(err) = &self.abort {
@@ -598,9 +625,12 @@ impl TrackState {
 	///
 	/// Best effort: nothing remembers a sequence whose slot is already gone, so a
 	/// publisher re-sending a long-evicted sequence is accepted as new.
-	fn claim_sequence(&mut self, sequence: u64) -> Result<()> {
+	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
+	/// request from there, so the wider producer takes the slot. Readers already
+	/// draining the old one keep their own handle.
+	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
 		if let Some(slot) = self.lookup.get(&sequence) {
-			if !slot.group.is_aborted() {
+			if !slot.group.is_aborted() && slot.group.first_frame() as u64 <= frame_start {
 				return Err(Error::Duplicate);
 			}
 			self.lookup.remove(&sequence);
@@ -774,6 +804,14 @@ impl TrackState {
 		}
 	}
 
+	/// Record the declared first sequence of the live feed, replacing any earlier
+	/// declaration: the signal is scoped to the current subscription's demand,
+	/// which may legitimately move in either direction. `None` clears it (the
+	/// demand dropped to the live edge, whose floor is unknown until declared).
+	fn set_start(&mut self, start_sequence: Option<u64>) {
+		self.start_sequence = start_sequence;
+	}
+
 	/// Record the exclusive final sequence, rejecting a re-finish or a boundary that
 	/// would orphan already-produced groups.
 	fn set_final(&mut self, final_sequence: u64) -> Result<()> {
@@ -799,6 +837,41 @@ impl TrackState {
 			.is_some_and(|fin| self.max_sequence.map_or(0, |max| max.saturating_add(1)) >= fin)
 	}
 
+	/// Where a replacement route should pick this track up: one past the last frame
+	/// produced, rolling to the start of the next group once the latest group is
+	/// complete (nothing more can be appended to it).
+	///
+	/// `None` while the track has produced nothing, which is an unbounded takeover.
+	fn resume_position(&self) -> Option<Position> {
+		// A snapshot taken when the cache was released wins; the groups it was derived
+		// from are gone.
+		if self.resume.is_some() {
+			return self.resume;
+		}
+
+		let max = self.latest_group?;
+		match self.lookup.get(&max) {
+			// Still open *and* carrying frames, so the replacement continues it
+			// frame-by-frame. This holds even for an aborted group: readers that already
+			// consumed its head want the tail, and the count outlives the released cache.
+			//
+			// The *committed* count, not the written one: a route dying midway through a
+			// chunked frame leaves that frame unusable, so the replacement has to send it
+			// again rather than start after it.
+			Some(slot) if !slot.group.is_finished() && slot.group.committed_frames() > slot.group.first_frame() => {
+				Some(Position {
+					group: max,
+					frame: slot.group.committed_frames() as u64,
+				})
+			}
+			// A copy that wrote nothing has no frames to splice onto, and the reader
+			// already holds its (empty) handle. Pointing a replacement at frame 0 would
+			// hand the same sequence out twice, so roll to the next group exactly as a
+			// finished one does.
+			_ => Some(Position::group(max.saturating_add(1))),
+		}
+	}
+
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if let Some(fin) = self.final_sequence {
 			Poll::Ready(Ok(fin))
@@ -818,7 +891,7 @@ impl TrackState {
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
 	/// [`Fetching`] resolves via [`Self::poll_fetch`].
-	fn insert_group_request(&mut self, sequence: u64, info: Option<Info>) -> Result<group::Producer> {
+	fn insert_group_request(&mut self, sequence: u64, frame_start: u64, info: Option<Info>) -> Result<group::Producer> {
 		if let Some(err) = &self.abort {
 			return Err(err.clone());
 		}
@@ -837,7 +910,7 @@ impl TrackState {
 		let info = self.info.clone().unwrap();
 
 		// An evicted sequence can be re-fetched; a live one is a duplicate.
-		self.claim_sequence(sequence)?;
+		self.claim_sequence(sequence, frame_start)?;
 
 		let latency_max = info.latency_max;
 		let group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
@@ -931,7 +1004,7 @@ impl Producer {
 		let latency_max = track.latency_max;
 
 		// An evicted sequence can be re-created; a live one is a duplicate.
-		state.claim_sequence(group.sequence)?;
+		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
 		state.commit_group(&group, true, latency_max);
@@ -1073,6 +1146,27 @@ impl Producer {
 		self.modify()?.set_final(final_sequence)
 	}
 
+	/// Declare the first group the live feed serves (the wire's SUBSCRIBE_START,
+	/// or the start the subscription itself requested): groups below `sequence`
+	/// will never arrive on their own, so a reader waiting for one fails over
+	/// instead of stalling. A fetch can still retrieve them.
+	///
+	/// Scoped to the current subscription's demand, so a later declaration
+	/// replaces this one in either direction: a re-subscription may start
+	/// earlier, and a narrowed subscription skips groups an earlier declaration
+	/// still promised. Pass `None` to clear it, for demand at the live edge:
+	/// its floor is unknown until the feed declares one.
+	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
+		self.modify()?.set_start(sequence.into());
+		Ok(())
+	}
+
+	/// The declared first sequence of the live feed, once [`Self::start_at`]
+	/// declared one. `None` while nothing was declared.
+	pub fn start_sequence(&self) -> Option<u64> {
+		self.state.read().start_sequence
+	}
+
 	/// The exclusive final sequence, once [`Self::finish`] or [`Self::finish_at`] declared one.
 	///
 	/// `None` while the track is still open ended. Both methods reject a second boundary, so
@@ -1093,6 +1187,9 @@ impl Producer {
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
+		// Snapshot the frame boundary before the cache it's derived from goes away: an
+		// abort is exactly when a replacement route asks where to resume.
+		guard.resume = guard.resume_position();
 		guard.abort = Some(err);
 		guard.clear_cache();
 		guard.datagrams.clear();
@@ -1185,8 +1282,12 @@ impl Producer {
 		let subscription = kio::Producer::new(preferences);
 		register_subscription(self.state.read(), &subscription);
 
+		// Hoisted: an inline `read()` guard would live to the end of the struct literal,
+		// deadlocking against the `consume()` below.
+		let broadcast = self.state.read().broadcast.clone();
 		Subscriber {
 			name: self.name.clone(),
+			broadcast,
 			info,
 			inner: SubscriberKind::Plain(PlainSubscriber {
 				state: self.state.consume(),
@@ -1302,6 +1403,7 @@ fn poll_requested_group(
 		// `GroupRequest::{accept, reject, drop}` removes the entry.
 		let pending = guard.get(&sequence).expect("popped key must be pending");
 		let priority = pending.priority;
+		let frame_start = pending.frame_start;
 		let result = pending.result.clone();
 		drop(guard);
 		return Poll::Ready(Ok(GroupRequest {
@@ -1309,6 +1411,7 @@ fn poll_requested_group(
 			fetch: fetch.clone(),
 			sequence,
 			priority,
+			frame_start,
 			result,
 			done: false,
 		}));
@@ -1463,7 +1566,6 @@ impl Drop for Alive {
 		// release the cached groups so a stale consumer can't pin them (and their
 		// frame buffers) forever, the same as an explicit abort. A cleanly
 		// finished track keeps its cache so consumers can still drain it.
-		//
 		// `abort()` closes the channel, so `write()` returns `Err(Ref)`. `finish()`
 		// leaves it open with `final_sequence` set, so inspect both outcomes.
 		match self.state.write() {
@@ -1475,6 +1577,8 @@ impl Drop for Alive {
 					track = %self.name,
 					"track::Producer dropped without finish() or abort()"
 				);
+				// See `abort`: keep the frame boundary once its groups go away.
+				state.resume = state.resume_position();
 				state.clear_cache();
 				state.datagrams.clear();
 			}
@@ -1662,6 +1766,10 @@ impl Demand {
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
+	// The broadcast this track belongs to, so a catalog track can name the path its
+	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
+	// that handle's view, which may name the broadcast differently than its producer did.
+	broadcast: Arc<broadcast::Info>,
 	inner: ConsumerKind,
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
 	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
@@ -1676,17 +1784,20 @@ enum ConsumerKind {
 
 impl Consumer {
 	fn plain(name: Arc<str>, state: kio::Consumer<TrackState>) -> Self {
+		let broadcast = state.read().broadcast.clone();
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Plain(state),
 			stats: stats::Scope::default(),
 		}
 	}
 
 	/// A consumer over a spliced logical track (a route-fed broadcast's track).
-	pub(crate) fn spliced(name: Arc<str>, resume: super::resume::Consumer) -> Self {
+	pub(crate) fn spliced(name: Arc<str>, broadcast: Arc<broadcast::Info>, resume: super::resume::Consumer) -> Self {
 		Self {
 			name,
+			broadcast,
 			inner: ConsumerKind::Spliced(resume),
 			stats: stats::Scope::default(),
 		}
@@ -1699,9 +1810,24 @@ impl Consumer {
 		self
 	}
 
+	/// Rebind the track to the broadcast handle it was reached through, so
+	/// [`broadcast`](Self::broadcast) reports the path that handle was handed out at (see
+	/// [`broadcast::Info::path`]). Called by [`broadcast::Consumer::track`].
+	pub(crate) fn with_broadcast(mut self, broadcast: Arc<broadcast::Info>) -> Self {
+		self.broadcast = broadcast;
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
 	}
 
 	/// Open a live subscription.
@@ -1725,6 +1851,7 @@ impl Consumer {
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
 			inner,
 			subscription,
 			stats: self.stats.clone(),
@@ -1741,6 +1868,80 @@ impl Consumer {
 			// Spliced tracks have no cache of their own; peek the newest segment
 			// via `fetch_group` instead.
 			ConsumerKind::Spliced(_) => None,
+		}
+	}
+
+	/// Poll for a cached group by sequence, parking `waiter` until it lands.
+	///
+	/// `Ready(None)` once it can never arrive: the track ended below the sequence, or
+	/// closed. Unlike [`Self::fetch_group`] this never asks anyone to produce the group,
+	/// so it only resolves for one a live subscription is already pulling. That is what
+	/// the spliced reader in [`super::resume`] wants: it waits for the route serving a
+	/// group to deliver it, rather than opening a redundant fetch alongside.
+	pub(crate) fn poll_peek_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			// A segment's track is never itself spliced.
+			return Poll::Pending;
+		};
+
+		let res = state.poll(waiter, |state| {
+			match state.lookup.get(&sequence) {
+				Some(slot) if !slot.group.is_aborted() => Poll::Ready(Some(slot.group.consume())),
+				// An aborted slot is a hole this route can no longer fill.
+				Some(_) => Poll::Ready(None),
+				// Past the declared end, so it can never exist.
+				None if state.final_sequence.is_some_and(|fin| sequence >= fin) => Poll::Ready(None),
+				// Below the declared start, so the live feed skipped it for good.
+				None if state.start_sequence.is_some_and(|start| sequence < start) => Poll::Ready(None),
+				None => Poll::Pending,
+			}
+		});
+
+		match res {
+			Poll::Ready(Ok(res)) => Poll::Ready(res),
+			// The track died; whatever it cached went with it.
+			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Poll for a live cached copy of `sequence` that can serve frame `index`,
+	/// parking until one exists.
+	///
+	/// Unlike [`Self::poll_peek_group`] this never gives a verdict: a missing
+	/// group parks (registered for its arrival) even below the declared start,
+	/// since demand may move backward and revive it. The spliced reader uses it
+	/// to reconsider a route it gave up on, so it must be exact about what
+	/// "available" means: a copy that cannot start at `index` (its head is gone)
+	/// leaves the route buried rather than reviving it into a peek that would
+	/// bury it again. That exactness is load-bearing, since the reader consults
+	/// this ahead of its terminal checks: relaxing it to "the group exists" makes
+	/// revive and re-bury alternate forever inside one poll
+	/// (`resume::test::misaligned_copy_is_lost_without_spinning`, where the
+	/// regression surfaces as a hang).
+	pub(crate) fn poll_serving_group(&self, sequence: u64, index: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let ConsumerKind::Plain(state) = &self.inner else {
+			// A segment's track is never itself spliced.
+			return Poll::Pending;
+		};
+		let res = state.poll(waiter, |state| match state.lookup.get(&sequence) {
+			Some(slot) if !slot.group.is_aborted() => {
+				// `start_at` clamps up, so landing higher means the copy no longer
+				// holds this position.
+				let mut group = slot.group.consume();
+				group.start_at(index);
+				match group.index() == index {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}
+			}
+			_ => Poll::Pending,
+		});
+		match res {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			// The track died; whatever would arrive never will, and the caller's
+			// terminal checks settle the wait.
+			Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -1782,15 +1983,26 @@ impl Consumer {
 		// a queue entry).
 		let (fetch, unresolved) = {
 			let state = state.read();
-			(state.fetch.clone(), state.poll_fetch_cached(sequence).is_pending())
+			(
+				state.fetch.clone(),
+				state.poll_fetch_cached(sequence, options.frame_start).is_pending(),
+			)
 		};
 
 		if unresolved {
 			let mut fetch = fetch.lock();
 			if let Some(pending) = fetch.join(&sequence) {
 				// Join the in-flight attempt for this sequence (queued or already being
-				// served): share its result channel, raising its priority if ours is higher.
+				// served): share its result channel, raising its priority if ours is higher
+				// and widening its range if ours starts earlier.
+				//
+				// Widening only reaches the handler while the attempt is still queued;
+				// once popped, the `GroupRequest` holds an immutable copy and its range is
+				// already on the wire. What protects the late caller either way is the
+				// coverage check above: it refuses a group starting above what it asked
+				// for, so it fails cleanly and its retry queues a fresh attempt.
 				pending.priority = pending.priority.max(options.priority);
+				pending.frame_start = pending.frame_start.min(options.frame_start);
 				result = Some(pending.result.consume());
 			} else {
 				// Queue a new attempt. The handler gate is atomic with a handler
@@ -1800,6 +2012,7 @@ impl Consumer {
 				let consumer = producer.consume();
 				let attempt = PendingFetch {
 					priority: options.priority,
+					frame_start: options.frame_start,
 					result: producer,
 				};
 				if fetch.insert(sequence, attempt).is_ok() {
@@ -1813,6 +2026,7 @@ impl Consumer {
 				state: state.clone(),
 				fetch,
 				sequence,
+				frame_start: options.frame_start,
 				result,
 			},
 			stats: self.stats.clone(),
@@ -1839,6 +2053,17 @@ impl Consumer {
 		match &self.inner {
 			ConsumerKind::Plain(state) => state.read().max_sequence,
 			ConsumerKind::Spliced(resume) => resume.latest(),
+		}
+	}
+
+	/// The frame-precise point a replacement route should resume from: one past the
+	/// last frame this copy produced. `None` if it produced nothing.
+	///
+	/// Survives the track aborting, which is when a route change asks.
+	pub(crate) fn resume_position(&self) -> Option<Position> {
+		match &self.inner {
+			ConsumerKind::Plain(state) => state.read().resume_position(),
+			ConsumerKind::Spliced(resume) => resume.resume_position(),
 		}
 	}
 
@@ -1870,6 +2095,7 @@ impl Consumer {
 /// [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
 pub struct Subscribing {
 	name: Arc<str>,
+	broadcast: Arc<broadcast::Info>,
 	inner: SubscribingKind,
 	subscription: kio::Producer<Subscription>,
 	stats: stats::Scope,
@@ -1892,6 +2118,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Plain(PlainSubscriber {
 						state: state.clone(),
@@ -1913,6 +2140,7 @@ impl Subscribing {
 
 				Poll::Ready(Ok(Subscriber {
 					name: self.name.clone(),
+					broadcast: self.broadcast.clone(),
 					info,
 					inner: SubscriberKind::Spliced(Box::new(resume.subscribe_shared(self.subscription.clone()))),
 					stats: self.stats.clone(),
@@ -1989,6 +2217,7 @@ pub struct GroupRequest {
 	fetch: kio::Shared<FetchState>,
 	sequence: u64,
 	priority: u8,
+	frame_start: u64,
 	// Rejections route back to every joined `Fetching`.
 	result: kio::Producer<FetchOutcome>,
 	done: bool,
@@ -2005,6 +2234,17 @@ impl GroupRequest {
 		self.priority
 	}
 
+	/// The first frame of the group the consumer wants; 0 is the whole group.
+	///
+	/// A handler serving this must [`start_at`](group::Producer::start_at) it, so the frames
+	/// it writes carry the indices they have in the group rather than restarting at 0.
+	///
+	/// There is no end: the handler fetches through the end of the group so the result
+	/// is cacheable for anyone (see [`group::Fetch::frame_start`]).
+	pub fn frame_start(&self) -> u64 {
+		self.frame_start
+	}
+
 	/// Insert the fetched group into the track cache, resolving the waiting
 	/// [`Consumer::fetch_group`], and return a [`group::Producer`] to fill.
 	///
@@ -2018,7 +2258,7 @@ impl GroupRequest {
 		// through the cache, and removal closes their result channel (which alone
 		// would read as NotFound).
 		let res = TrackState::modify(&self.state)
-			.and_then(|mut state| state.insert_group_request(self.sequence, info.into()));
+			.and_then(|mut state| state.insert_group_request(self.sequence, self.frame_start, info.into()));
 		self.remove();
 		res
 	}
@@ -2072,6 +2312,9 @@ enum FetchingKind {
 		state: kio::Consumer<TrackState>,
 		fetch: kio::Shared<FetchState>,
 		sequence: u64,
+		// This caller's own start, so a cached group that begins above it is a miss
+		// rather than a short answer.
+		frame_start: u64,
 		// The joined attempt's result channel; `None` when no handler existed to queue on.
 		result: Option<kio::Consumer<FetchOutcome>>,
 	},
@@ -2083,13 +2326,14 @@ impl kio::Pollable for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		let (state, fetch, sequence, result) = match &self.inner {
+		let (state, fetch, sequence, frame_start, result) = match &self.inner {
 			FetchingKind::Plain {
 				state,
 				fetch,
 				sequence,
+				frame_start,
 				result,
-			} => (state, fetch, *sequence, result.as_ref()),
+			} => (state, fetch, *sequence, *frame_start, result.as_ref()),
 			FetchingKind::Spliced(spliced) => {
 				// A fetched group is metered here (once), at the tagged handle: the
 				// spliced source track it comes from is the origin's own, untagged.
@@ -2100,8 +2344,16 @@ impl kio::Pollable for Fetching {
 
 		// Track side: the cached group, the abort error, or past-final. The outer
 		// error is the channel closing without any of those.
-		match state.poll(waiter, |state| state.poll_fetch_cached(sequence)) {
-			Poll::Ready(Ok(res)) => return Poll::Ready(res.map(|group| group.with_meter(self.stats.meter()))),
+		match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frame_start)) {
+			Poll::Ready(Ok(res)) => {
+				return Poll::Ready(res.map(|mut group| {
+					// Hand back a consumer sitting where the caller asked rather than at
+					// the group's own start. Coverage was checked above, so this can only
+					// skip frames they excluded.
+					group.start_at(frame_start);
+					group.with_meter(self.stats.meter())
+				}));
+			}
 			Poll::Ready(Err(closed)) => {
 				return Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped)));
 			}
@@ -2146,7 +2398,7 @@ impl kio::Pollable for Fetching {
 ///
 /// - [`Self::start_at`] / [`Self::end_at`] move **this subscriber's read cursor**. They
 ///   filter exactly what this handle returns and are invisible to the publisher.
-/// - [`Subscription::group_start`] / [`Subscription::group_end`], set via [`Self::update`],
+/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
 ///   are a **request to the publisher**. They're aggregated across every live subscriber
 ///   (earliest start, widest end), so they say what the publisher should send, not what
 ///   this subscriber sees.
@@ -2158,6 +2410,8 @@ impl kio::Pollable for Fetching {
 /// for. Set both to skip them *and* avoid the transfer.
 pub struct Subscriber {
 	name: Arc<str>,
+	// The broadcast this track belongs to; see [`Self::broadcast`].
+	broadcast: Arc<broadcast::Info>,
 	info: Info,
 	inner: SubscriberKind,
 	// Egress stats scope, used to meter the groups this subscriber reads. Empty
@@ -2293,6 +2547,13 @@ impl Subscriber {
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
+	pub fn broadcast(&self) -> &broadcast::Info {
+		&self.broadcast
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences.
@@ -2452,7 +2713,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::group_start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
@@ -2466,7 +2727,7 @@ impl Subscriber {
 	///
 	/// Accepts a bare `u64` (cap), `Some(u64)`, or `None` (uncap).
 	///
-	/// A local filter, not a request; [`Subscription::group_end`] is the wire-level
+	/// A local filter, not a request; [`Subscription::end`] is the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
 	/// Affects [`Self::next_group`] only: groups beyond the cap stay in the producer's
@@ -2752,6 +3013,37 @@ mod test {
 			.expect("track was closed")
 	}
 
+	/// A declared start (SUBSCRIBE_START) resolves a peek below it as a permanent
+	/// miss, while a group that is already cached below the start stays readable
+	/// (a fetch can create one; the declaration only covers the live feed).
+	#[tokio::test]
+	async fn peek_resolves_below_the_declared_start() {
+		let mut producer = track_producer("test", None);
+		let consumer = producer.consume();
+
+		let mut cached = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		cached.write_frame(Timestamp::ZERO, b"backfill".to_vec()).unwrap();
+		cached.finish().unwrap();
+
+		// Nothing declared yet: a missing group parks.
+		let waiter = kio::Waiter::noop();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
+
+		// The declaration turns the missing group into a permanent miss, but the
+		// cached one below it still resolves.
+		producer.start_at(3).unwrap();
+		assert!(matches!(consumer.poll_peek_group(0, &waiter), Poll::Ready(None)));
+		assert!(matches!(consumer.poll_peek_group(1, &waiter), Poll::Ready(Some(_))));
+		assert!(consumer.poll_peek_group(3, &waiter).is_pending());
+
+		// The declaration follows the demand in either direction: forward retires
+		// the skipped range, backward reopens it.
+		producer.start_at(4).unwrap();
+		assert!(matches!(consumer.poll_peek_group(3, &waiter), Poll::Ready(None)));
+		producer.start_at(0).unwrap();
+		assert!(consumer.poll_peek_group(0, &waiter).is_pending());
+	}
+
 	#[tokio::test]
 	async fn append_datagram_shares_group_sequence() {
 		let mut producer = track_producer("test", None);
@@ -2797,6 +3089,46 @@ mod test {
 		assert_eq!(recv_datagram(&mut dg).sequence, 100);
 		// max_sequence advanced, so the next appended group/datagram continues past it.
 		assert_eq!(producer.append_group().unwrap().sequence, 101);
+	}
+
+	/// Datagram sequence advances do not move a route takeover past an open group.
+	#[test]
+	fn resume_position_uses_the_latest_group() {
+		let mut datagram_only = track_producer("datagram-only", None);
+		let datagram_only_consumer = datagram_only.consume();
+		datagram_only
+			.write_datagram(Datagram {
+				sequence: 8,
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+		assert_eq!(
+			datagram_only_consumer.resume_position(),
+			None,
+			"a datagram creates no group position to resume"
+		);
+
+		let mut producer = track_producer("mixed", None);
+		let consumer = producer.consume();
+		let mut group = producer.create_group(group::Info { sequence: 3 }).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		producer
+			.write_datagram(Datagram {
+				sequence: 8,
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(b"x"),
+			})
+			.unwrap();
+
+		assert_eq!(
+			consumer.resume_position(),
+			Some(Position { group: 3, frame: 1 }),
+			"the replacement must continue the open group"
+		);
+		group.abort(Error::Cancel).unwrap();
 	}
 
 	#[tokio::test]
@@ -3120,7 +3452,14 @@ mod test {
 	/// track's own window is clamped down to it on bind.
 	fn track_producer_capped(name: impl Into<Arc<str>>, info: Info, cap: Duration) -> Producer {
 		let origin = crate::origin::Info::default().with_cache_duration(cap);
-		Producer::new(Arc::new(broadcast::Info { origin }), name, info)
+		Producer::new(
+			Arc::new(broadcast::Info {
+				origin,
+				..Default::default()
+			}),
+			name,
+			info,
+		)
 	}
 
 	#[test]
@@ -4139,6 +4478,97 @@ mod test {
 
 		let mut group = retry.await.unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"retry");
+	}
+
+	/// A group cached from a frame-bounded subscription starts partway in. Serving it to
+	/// someone who asked for the whole group would silently hand back a tail, so it is a
+	/// miss and the fetch goes upstream instead.
+	#[tokio::test]
+	async fn fetch_ignores_a_group_that_starts_too_late() {
+		let mut producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		// The live subscription resumed mid-group, so only the tail is cached.
+		let mut group = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		group.start_at(3).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"tail"))
+			.unwrap();
+		group.finish().unwrap();
+
+		// A fetch for the tail is covered and resolves from the cache.
+		let fetch = consumer.fetch_group(0, group::Fetch::default().with_frame_start(3));
+		let cached = fetch.now_or_never().expect("covered by the cache").unwrap();
+		assert_eq!(cached.index(), 3);
+
+		// A fetch for the whole group is not, so it queues for a handler rather than
+		// resolving to the tail.
+		let mut fetch = std::pin::pin!(consumer.fetch_group(0, None));
+		assert!(
+			futures::poll!(fetch.as_mut()).is_pending(),
+			"must not answer from the tail"
+		);
+
+		let request = dynamic.requested_group().await.unwrap();
+		assert_eq!((request.sequence(), request.frame_start()), (0, 0));
+
+		// Serving it replaces the too-narrow entry rather than colliding with it.
+		let mut whole = request.accept(None).unwrap();
+		whole
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"head"))
+			.unwrap();
+		whole.finish().unwrap();
+
+		let mut served = fetch.await.unwrap();
+		assert_eq!(served.index(), 0);
+		assert_eq!(
+			served.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"head")
+		);
+	}
+
+	/// Joining a queued fetch widens its range, and a caller that arrives once the range
+	/// is already on the wire fails cleanly rather than being handed the narrower group.
+	#[tokio::test]
+	async fn fetch_widens_or_fails_cleanly() {
+		let producer = track_producer("test", None);
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let _narrow = consumer.fetch_group(0, group::Fetch::default().with_frame_start(5));
+		let mut narrow = std::pin::pin!(_narrow);
+		assert!(futures::poll!(narrow.as_mut()).is_pending());
+
+		// Still queued: widening is honored, because nothing has read the range yet.
+		let _wider = consumer.fetch_group(0, group::Fetch::default().with_frame_start(2));
+		let mut wider = std::pin::pin!(_wider);
+		assert!(futures::poll!(wider.as_mut()).is_pending());
+
+		let request = dynamic.requested_group().await.unwrap();
+		assert_eq!(request.frame_start(), 2, "widened while queued");
+
+		// Handed off now: the handler holds its own copy of the range, so a later wider
+		// caller cannot move what is already being served.
+		let _widest = consumer.fetch_group(0, group::Fetch::default().with_frame_start(0));
+		let mut widest = std::pin::pin!(_widest);
+		assert!(futures::poll!(widest.as_mut()).is_pending());
+		assert_eq!(request.frame_start(), 2, "the in-flight range is already on the wire");
+
+		let mut group = request.accept(None).unwrap();
+		// A handler numbers the frames from where it was asked to start, as `serve_fetch`
+		// does; that offset is what makes the cached group too narrow for `widest`.
+		group.start_at(2).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from2"))
+			.unwrap();
+		group.finish().unwrap();
+
+		// The two callers it covers resolve; the one it doesn't fails cleanly rather
+		// than being handed a group that starts above what it asked for.
+		assert_eq!(narrow.await.unwrap().index(), 5);
+		assert_eq!(wider.await.unwrap().index(), 2);
+		assert!(matches!(widest.await, Err(Error::NotFound)));
 	}
 
 	#[tokio::test]

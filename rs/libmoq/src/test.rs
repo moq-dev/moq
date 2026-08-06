@@ -1142,6 +1142,50 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
+/// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
+/// what a live publisher does, and `_seek` does the same with a chosen sequence number.
+#[test]
+fn media_cut_bounds_audio_groups() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-cut");
+	let init = opus_head();
+	let format = b"opus";
+	let media = id(unsafe {
+		moq_publish_media(
+			broadcast,
+			format.as_ptr() as *const c_char,
+			format.len(),
+			init.as_ptr(),
+			init.len(),
+		)
+	});
+
+	let payload = b"test";
+	for i in 0..3u64 {
+		assert_eq!(
+			unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), i * 20_000) },
+			0
+		);
+		assert_eq!(moq_publish_media_cut(media), 0, "each packet is its own group");
+	}
+
+	// The same boundary, with the next group explicitly numbered.
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 60_000) },
+		0
+	);
+	assert_eq!(moq_publish_media_seek(media, 42), 0);
+
+	// Both report a missing importer rather than panicking on an unknown id.
+	assert!(moq_publish_media_cut(9999) < 0);
+	assert!(moq_publish_media_seek(9999, 0) < 0);
+
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn unknown_format() {
 	let origin = id(moq_origin_create());

@@ -16,9 +16,10 @@
 //!   a format string. It picks the right concrete importer for you.
 //! - [`select`] picks which renditions of a broadcast to keep, on either
 //!   the import or the consume side.
-//! - [`timeline`](mod@timeline) publishes the broadcast's group index: one
-//!   record per media group mapping it to its start timestamp, so consumers
-//!   can seek or build playlists without downloading media.
+//! - [`timeline`](mod@timeline) publishes the broadcast's segment index: one
+//!   record per aligned segment, mapping a span of content time to the group
+//!   ranges that carry it on each track, so consumers can seek or build
+//!   HLS/DASH playlists without downloading media.
 
 pub mod catalog;
 mod clock;

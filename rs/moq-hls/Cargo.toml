@@ -1,6 +1,6 @@
 [package]
 name = "moq-hls"
-description = "HLS / LL-HLS gateway for Media over QUIC"
+description = "HLS / LL-HLS / DASH gateway for Media over QUIC"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

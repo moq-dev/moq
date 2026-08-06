@@ -147,6 +147,9 @@ pub struct VideoConfig {
 	///
 	/// This allows a transcoder to author a downstream catalog that points unchanged
 	/// renditions at the source broadcast without re-publishing the bytes.
+	///
+	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
+	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
 	pub broadcast: Option<moq_net::PathRelativeOwned>,
 
@@ -215,11 +218,6 @@ pub struct VideoConfig {
 	#[serde_as(as = "Option<DurationMilliSeconds<u64>>")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
-
-	/// The companion timeline track indexing this rendition's groups, if the publisher
-	/// offers one. See [`Timeline`](crate::catalog::Timeline).
-	#[serde(default)]
-	pub timeline: Option<crate::catalog::Timeline>,
 }
 
 impl VideoConfig {
@@ -243,7 +241,6 @@ impl VideoConfig {
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
-			timeline: None,
 		}
 	}
 }

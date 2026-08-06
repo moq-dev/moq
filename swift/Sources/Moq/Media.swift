@@ -91,6 +91,26 @@ public final class MediaProducer: Sendable {
         try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
     }
 
+    /// Draw a group boundary here.
+    ///
+    /// Audio has no boundary of its own (every packet is independently decodable), so this is the
+    /// only thing that gives it groups: call it after every frame for one group (one QUIC stream)
+    /// the relay forwards without waiting, or at a segment cadence to align with video. Video
+    /// groups at its own keyframes and needs this only to override that.
+    ///
+    /// On a container this declares a new segment, rolling a group on every track it publishes.
+    public func cut() throws {
+        try ffi.cut()
+    }
+
+    /// Draw a group boundary and number the next group `sequence`.
+    ///
+    /// ``cut()`` with an explicit sequence, for a publisher whose group numbers have to be
+    /// deterministic: two encoders aligning per GOP so a consumer can fail over between them.
+    public func seek(_ sequence: UInt64) throws {
+        try ffi.seek(sequence: sequence)
+    }
+
     /// Finish the track and finalize encoding.
     public func finish() throws {
         try ffi.finish()

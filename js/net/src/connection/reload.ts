@@ -1,6 +1,6 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
-import { error } from "../error.ts";
+import { error, RemoteError, SessionCode } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
@@ -30,8 +30,20 @@ export type ReloadDelay = {
 	timeout?: DOMHighResTimeStamp;
 };
 
-/** Connection and retry options for {@link Reload}. */
-export type ReloadProps = Omit<ConnectProps, "signal"> & {
+/**
+ * Connection and retry options for {@link Reload}.
+ *
+ * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
+ * connection, so the reconnect loop has nothing to reuse once that session drops. Call
+ * {@link connect} directly when you have a session to hand over.
+ */
+export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
+	/** A reload owns the abort signal for each connection attempt. */
+	signal?: never;
+
+	/** A one-shot transport cannot be reused by the reconnect loop. */
+	transport?: never;
+
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
 
@@ -194,12 +206,13 @@ export class Reload {
 				connected = performance.now();
 
 				// A cancelled effect resolves undefined, so the sentinel tells the session
-				// closing apart from this run being torn down.
-				const closed = await Promise.race([effect.cancel, connection.closed.then(() => true)]);
-				if (!closed) return;
+				// closing (null for clean, an Error otherwise) apart from this run being
+				// torn down.
+				const closed = await Promise.race([effect.cancel, connection.closed]);
+				if (closed === undefined) return;
 
 				console.warn("connection closed, reconnecting");
-				this.#retry(effect, connected);
+				this.#retry(effect, connected, closed ?? undefined);
 			} catch (err) {
 				// Treat teardown as cancellation, not a connection failure.
 				if (signal.aborted) return;
@@ -228,6 +241,16 @@ export class Reload {
 		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
+		}
+
+		// An auth rejection is terminal however long the session lived. UNAUTHORIZED is a
+		// specified code rather than one we guessed at, so this is the peer saying these
+		// credentials will never work; retrying them just burns the window. Matches
+		// moq-native's reconnect loop, which stops on the same close.
+		if (cause instanceof RemoteError && cause.code === SessionCode.Unauthorized) {
+			console.warn("session rejected as unauthorized, not retrying");
+			this.#closedReject(cause);
+			return;
 		}
 
 		const now = performance.now();

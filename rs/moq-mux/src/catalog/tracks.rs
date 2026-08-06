@@ -52,12 +52,12 @@ use super::hang::{Catalog, CatalogExt};
 /// ```
 ///
 /// Note that `insert` takes the whole [`Catalog`], not just the extension, so the built-in media
-/// configs use the same trait. Writing to `catalog.video` / `catalog.audio` from a custom config
-/// fights the media pipeline for those sections; stay in your own.
+/// configs use the same trait. Writing to `catalog.video` / `catalog.audio` / `catalog.text` from a
+/// custom config fights the media pipeline for those sections; stay in your own.
 ///
-/// To advertise a timeline for a custom track, set your config's timeline field from
-/// [`catalog::Producer::timeline`](crate::catalog::Producer::timeline) before [`set`](Rendition::set)
-/// (the same way an importer does), and record group opens through its recorder.
+/// To index a custom track in the broadcast's timeline, enroll it via
+/// [`catalog::Producer::enroll`](crate::catalog::Producer::enroll) (or build it through
+/// [`media_producer`](crate::catalog::Producer::media_producer), which does so for you).
 ///
 /// Opting into detection is only half of it: something has to measure. Write the track through a
 /// [`container::Producer`](crate::container::Producer) and hand its
@@ -193,6 +193,26 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::AudioConfig {
 	}
 }
 
+impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
+	fn insert(self, catalog: &mut Catalog<E>, name: &str) {
+		catalog.text.renditions.insert(name.to_string(), self);
+	}
+	fn get_mut<'a>(catalog: &'a mut Catalog<E>, name: &str) -> Option<&'a mut Self> {
+		catalog.text.renditions.get_mut(name)
+	}
+	fn remove(catalog: &mut Catalog<E>, name: &str) {
+		catalog.text.renditions.remove(name);
+	}
+
+	// Only jitter: a cue track has no bitrate field, so there is nothing to fill from a measurement.
+	fn estimate(&self) -> Estimate {
+		Estimate::default().with_jitter(self.jitter)
+	}
+	fn set_estimate(&mut self, estimate: Estimate) {
+		self.jitter = estimate.jitter;
+	}
+}
+
 /// A clonable reservation context handed to importers so they declare their tracks up front.
 ///
 /// Made via [`Producer::reserve`]. While any `Reserved` clone is alive the track set may still
@@ -233,6 +253,14 @@ impl<E: CatalogExt> Reserved<E> {
 
 	/// Reserve an audio rendition; shorthand for [`init`](Self::init).
 	pub fn audio(&self, name: impl Into<String>) -> AudioTrack<E> {
+		self.init(name)
+	}
+
+	/// Reserve a text (caption/subtitle) rendition; shorthand for [`init`](Self::init).
+	///
+	/// Nothing about a cue track is detected from its payload, so the caller [`set`](Rendition::set)s
+	/// a complete config up front rather than waiting on a bitstream.
+	pub fn text(&self, name: impl Into<String>) -> TextTrack<E> {
 		self.init(name)
 	}
 
@@ -296,6 +324,8 @@ pub struct Rendition<E: CatalogExt, C: RenditionConfig<E>> {
 pub type VideoTrack<E = ()> = Rendition<E, hang::catalog::VideoConfig>;
 /// A single audio track's catalog rendition. See [`Rendition`].
 pub type AudioTrack<E = ()> = Rendition<E, hang::catalog::AudioConfig>;
+/// A single text (caption/subtitle) track's catalog rendition. See [`Rendition`].
+pub type TextTrack<E = ()> = Rendition<E, hang::catalog::TextConfig>;
 
 impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	fn new(reserved: Reserved<E>, name: impl Into<String>) -> Self {
@@ -527,46 +557,20 @@ mod tests {
 		assert_eq!(config.bitrate, Some(789), "the re-set bitrate is now authoritative");
 	}
 
-	/// Two renditions can advertise one shared timeline: the same handle yields the same section, so
-	/// an aligned ladder (source + rung) indexes off a single `.timeline.z` track.
+	/// The broadcast has one timeline: every rendition's groups index into the same track, so
+	/// an aligned ladder (source + rung) shares it by construction.
 	#[test]
-	fn renditions_share_a_timeline() {
+	fn renditions_share_the_broadcast_timeline() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = super::super::Producer::new(&mut broadcast).unwrap();
-		let reserved = catalog.reserve();
+		let mut catalog = super::super::Producer::new(&mut broadcast).unwrap();
 
-		let shared = catalog.timeline("video").unwrap();
-		let mut source = reserved.video("video0");
-		let mut rung = reserved.video("video1");
-		drop(reserved);
-
-		for rendition in [&mut source, &mut rung] {
-			let mut config = config(None, None);
-			config.timeline = Some(shared.section());
-			rendition.set(config);
-		}
-
-		let snapshot = catalog.snapshot();
-		let source_tl = snapshot
-			.video
-			.renditions
-			.get("video0")
-			.unwrap()
-			.timeline
-			.as_ref()
-			.unwrap();
-		let rung_tl = snapshot
-			.video
-			.renditions
-			.get("video1")
-			.unwrap()
-			.timeline
-			.as_ref()
-			.unwrap();
-		assert_eq!(source_tl.track, "video.timeline.z");
+		let _recorder = catalog.enroll("video0").unwrap();
+		let timeline = catalog.timeline();
+		assert_eq!(timeline.section().track, hang::timeline::DEFAULT_NAME);
 		assert_eq!(
-			rung_tl.track, source_tl.track,
-			"both renditions index off one shared timeline track"
+			catalog.snapshot().timeline,
+			Some(timeline.section()),
+			"the one timeline is advertised at the catalog root"
 		);
 	}
 
@@ -590,8 +594,6 @@ mod tests {
 			schema: String,
 			#[serde(default, skip_serializing_if = "Option::is_none")]
 			bitrate: Option<u64>,
-			#[serde(default, skip_serializing_if = "Option::is_none")]
-			timeline: Option<hang::catalog::Timeline>,
 		}
 
 		impl RenditionConfig<TelemetryExt> for Telemetry {
@@ -618,7 +620,6 @@ mod tests {
 			Telemetry {
 				schema: "gps/v1".to_string(),
 				bitrate,
-				timeline: None,
 			}
 		}
 
@@ -628,8 +629,7 @@ mod tests {
 			(broadcast, catalog)
 		}
 
-		/// A custom kind gets the same detection and drop-removal as video/audio, and advertises a
-		/// timeline the same explicit way an importer does.
+		/// A custom kind gets the same detection and drop-removal as video/audio.
 		#[test]
 		fn detects_and_advertises() {
 			let (_broadcast, catalog) = produce();
@@ -637,20 +637,12 @@ mod tests {
 			let mut rendition = reserved.init::<Telemetry>("gps");
 			drop(reserved);
 
-			// The caller advertises the timeline explicitly, exactly as an importer does for video/audio.
-			let mut config = telemetry(None);
-			config.timeline = Some(catalog.timeline("gps").unwrap().section());
-			rendition.set(config);
+			rendition.set(telemetry(None));
 			feed(&mut rendition);
 
 			let snapshot = catalog.snapshot();
 			let config = snapshot.telemetry.get("gps").unwrap();
 			assert!(config.bitrate.is_some(), "absent bitrate should be auto-detected");
-			assert_eq!(
-				config.timeline.as_ref().map(|t| t.track.as_str()),
-				Some("gps.timeline.z"),
-				"the advertised timeline names the companion track"
-			);
 
 			drop(rendition);
 			assert!(
@@ -664,7 +656,7 @@ mod tests {
 		/// themselves current, with no per-frame bookkeeping in the caller.
 		#[test]
 		fn measures_a_custom_track() {
-			let (mut broadcast, catalog) = produce();
+			let (mut broadcast, mut catalog) = produce();
 			let reserved = catalog.reserve();
 			let mut rendition = reserved.init::<Telemetry>("gps");
 			drop(reserved);

@@ -175,6 +175,8 @@ mod test {
 		requests.add_handler();
 		assert!(requests.insert(1, "a").is_ok());
 
+		// Popping hands the request to a handler, which leaves it joinable: a later
+		// caller wanting the same key shares its result rather than queuing a second.
 		assert_eq!(requests.pop(), Some(1));
 		assert_eq!(requests.join(&1), Some(&mut "a"));
 		assert!(!requests.has_queued());
