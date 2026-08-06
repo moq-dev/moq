@@ -2380,7 +2380,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn a_dead_session_unannounces_while_the_reconnect_retries() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let pub_origin = Origin::random().produce();
