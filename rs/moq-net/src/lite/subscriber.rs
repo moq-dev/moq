@@ -118,7 +118,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// policy. Otherwise we charge what the peer declared, which is how a server prices
 	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
 	/// the peer declares the price for both of them. Falls back to
-	/// [`super::DEFAULT_COST`] when neither priced it.
+	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
+	/// carries no cost at all, whose routes rank on hop count alone.
 	///
 	/// Our own price short-circuits the peer's, so a session that configured one never
 	/// blocks on a SETUP to start routing.
