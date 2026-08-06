@@ -117,6 +117,12 @@ Cluster peers must authenticate to each other:
 
 See [Authentication](/bin/relay/auth) for the full setup.
 
+Peers are redialed indefinitely, with exponential backoff and jitter so a restarting cluster doesn't
+reconnect in lockstep. That includes a peer that rejects us: a bad token logs `cluster peer error;
+will retry` on every attempt rather than giving up, so watch for a peer that never reaches
+`cluster peer session closed`. The delay escalates to ten seconds at most, so a dead or rejecting
+peer stays loudly visible in the logs and a returning one is picked up within seconds.
+
 ## Migration from older configs
 
 `cluster.root` was removed. To dial cluster peers use `cluster.connect`; to advertise this relay's own address set `cluster.node` and enable `cluster.mesh`. `cluster.mesh` is now a boolean gossip toggle (it used to take this relay's URL); the URL moved to `cluster.node`. The old `mesh = "<url>"` form still works for backwards compatibility: it enables gossip and is treated as `cluster.node`, with a deprecation warning (or an error if it conflicts with an explicit `cluster.node`).

@@ -64,9 +64,10 @@ export class Microphone {
 		const constraints = effect.get(this.constraints);
 
 		if (!this.#retry.begin(effect, [device, constraints])) {
-			// Out of budget with the same settings. Only a change to what is plugged in is new
-			// information worth another attempt, so watch the device list here and not while
-			// healthy, where a rerun would restart a working capture for unrelated device churn.
+			// Waiting out a backoff, or out of budget entirely, with the same settings. Either way
+			// a change to what is plugged in is new information worth acting on now, so watch the
+			// device list here and not while healthy, where a rerun would restart a working capture
+			// for unrelated device churn.
 			const spent = this.device.out.available.peek();
 			effect.subscribe(this.device.out.available, (available) => {
 				if (available !== spent) this.#retry.refund();

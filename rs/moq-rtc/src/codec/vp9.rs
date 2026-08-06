@@ -16,7 +16,7 @@ pub struct Bridge {
 impl Bridge {
 	/// Publish a `.vp9` track on `broadcast`; the catalog rendition is added on the first frame.
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let track = broadcast.create_track(broadcast.unique_name(".vp9"), hang::container::track_info())?;
+		let track = broadcast.create_track(broadcast.unique_name(".vp9"), catalog.track_info())?;
 		let name = track.name().to_string();
 		let producer = catalog.media_producer(track, moq_mux::catalog::hang::Container::Legacy)?;
 		Ok(Self {

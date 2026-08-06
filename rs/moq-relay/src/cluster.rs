@@ -17,6 +17,7 @@ use tracing::Instrument as _;
 use url::Url;
 
 use crate::{AuthToken, nodes::MESH_PREFIX};
+use rand::RngExt;
 
 /// How often the discovery loop scans for stale entries.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -915,37 +916,46 @@ impl Cluster {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
-		let base_backoff = tokio::time::Duration::from_secs(1);
-		let max_backoff = tokio::time::Duration::from_secs(300);
+		// A peer is supervised for the life of the relay, so there is no give-up deadline: one that is
+		// unreachable for an hour still has to be redialed when it comes back. The ceiling stays low
+		// so a returning peer is picked up within seconds, and the warn below fires at least that
+		// often, so a dead peer is loudly broken rather than silently parked.
+		let base_delay = tokio::time::Duration::from_secs(1);
+		let max_delay = tokio::time::Duration::from_secs(10);
+		let mut delay = base_delay;
+
 		// Sessions shorter than this are treated as churn: we keep backing off
 		// instead of resetting, otherwise a peer that rejects us instantly would
 		// turn into a tight reconnect loop.
 		let stable_threshold = tokio::time::Duration::from_secs(10);
 
-		let mut backoff = base_backoff;
-
 		loop {
-			let started = tokio::time::Instant::now();
-			let result = self.run_remote_once(&url, cost).await;
-			let elapsed = started.elapsed();
+			let attempt = self.run_remote_once(&url, cost).await;
 
-			match result {
-				Ok(()) if elapsed >= stable_threshold => backoff = base_backoff,
-				Ok(()) => {
-					tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off");
-					backoff = (backoff * 2).min(max_backoff);
-				}
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					backoff = (backoff * 2).min(max_backoff);
+			// A session that came up and lasted is a healthy peer: clear the escalation so a one-off
+			// drop redials promptly. Keyed on the session's own lifetime, not on how long the call
+			// took, because a peer that blackholes until the connect timeout would otherwise look
+			// stable and reset the backoff on every attempt, so the escalation would never happen.
+			let stable = attempt.connected.is_some_and(|at| at.elapsed() >= stable_threshold);
+			if stable {
+				delay = base_delay;
+			}
+
+			if let Err(err) = attempt.result {
+				match stable {
+					true => tracing::warn!(%err, "cluster peer session closed; reconnecting"),
+					false => tracing::warn!(%err, "cluster peer error; will retry"),
 				}
 			}
 
-			tokio::time::sleep(backoff).await;
+			// Jittered so a restarting cluster doesn't have every peer redial on the same tick.
+			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+			delay = (delay * 2).min(max_delay);
+			tokio::time::sleep(wait).await;
 		}
 	}
 
-	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+	async fn run_remote_once(&self, url: &Url, cost: Option<u64>) -> Attempt {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
@@ -954,16 +964,20 @@ impl Cluster {
 			.await
 	}
 
-	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> anyhow::Result<()> {
+	async fn run_remote_session(&self, id: u64, url: &Url, cost: Option<u64>) -> Attempt {
 		let mut log_url = url.clone();
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
 		// Checked at the start of `run`; per-peer tasks inherit that guarantee.
-		let client = self
+		let client = match self
 			.client
 			.clone()
-			.context("internal: cluster peer dial without an attached QUIC client")?;
+			.context("internal: cluster peer dial without an attached QUIC client")
+		{
+			Ok(client) => client,
+			Err(err) => return Attempt::failed(err),
+		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -974,13 +988,44 @@ impl Cluster {
 		if let Some(cost) = cost {
 			client = client.with_cost(cost);
 		}
-		let cs = client
+		let cs = match client
 			.connect(url.clone())
 			.await
-			.context("failed to connect to cluster peer")?;
+			.context("failed to connect to cluster peer")
+		{
+			Ok(cs) => cs,
+			Err(err) => return Attempt::failed(err),
+		};
+
+		let connected = tokio::time::Instant::now();
 		let _connection = self.nodes.connect_outbound(id, log_url.to_string());
 
-		Err(cs.closed().await.into())
+		Attempt {
+			connected: Some(connected),
+			result: Err(cs.closed().await.into()),
+		}
+	}
+}
+
+/// One peer dial: when its session came up, and how it ended.
+///
+/// The instant is what the backoff reset keys on, which is why the dial and the session are timed
+/// separately. A session always ends in an `Err` (it hands back its own close reason), so the
+/// outcome alone can't tell a healthy peer from a dead one.
+struct Attempt {
+	/// When `connect` handed back a live session, or `None` if the dial never got that far.
+	connected: Option<tokio::time::Instant>,
+	/// How the attempt ended.
+	result: anyhow::Result<()>,
+}
+
+impl Attempt {
+	/// An attempt that never established a session.
+	fn failed(err: anyhow::Error) -> Self {
+		Self {
+			connected: None,
+			result: Err(err),
+		}
 	}
 }
 

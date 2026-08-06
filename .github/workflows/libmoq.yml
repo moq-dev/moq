@@ -130,7 +130,8 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            # The plugin preset uses the Visual Studio 17 2022 generator.
+            os: windows-2022
 
     steps:
       # Shallow: this job only compiles, it never reads git history or tags.

@@ -114,11 +114,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// What pulling content across this session's link costs, added to the route cost
 	/// of every announcement received over it.
 	///
-	/// The Cost Parameter is directional: each endpoint declares what subscribing from
-	/// it costs, so the peer's declaration prices this direction while ours prices the
-	/// other. A locally configured price overrides it, since what we charge our own
-	/// routing is local policy. Falls back to [`super::DEFAULT_COST`] when neither
-	/// priced it.
+	/// A locally configured price wins, since what we charge our own routing is local
+	/// policy. Otherwise we charge what the peer declared, which is how a server prices
+	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
+	/// the peer declares the price for both of them. Falls back to
+	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
+	/// carries no cost at all, whose routes rank on hop count alone.
+	///
+	/// Our own price short-circuits the peer's, so a session that configured one never
+	/// blocks on a SETUP to start routing.
 	async fn resolve_cost(&self) -> u64 {
 		// Older versions carry no cost on the wire, so nothing is charged and their
 		// routes rank on hop count alone. Returning early also avoids blocking on a
@@ -1121,7 +1125,7 @@ mod tests {
 	/// on the way out, or hoisted the map to the session, would be a silent behavior
 	/// change. `ietf::Subscriber` names the same distinction explicitly as `Detach`.
 	/// A zero-linger origin cannot tell the two apart, so this sets one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lost_announce_stream_leaves_the_linger_window_open() {
 		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
 			.with_linger(Duration::from_secs(30))
@@ -1291,7 +1295,10 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 				}
 			}
 		} else {
-			(track::Info::default(), None)
+			// No TRACK stream, so the publisher's retention window never reaches us: the
+			// accepting side picks it (see `origin::Info::latency_default`).
+			let info = track::Info::default().with_latency_max(self.subscriber.origin.latency_default());
+			(info, None)
 		};
 
 		// Accept with the resolved info. The origin splices this session's copy
@@ -1694,7 +1701,9 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		// live subscription); otherwise the group inherits the accepted timescale.
 		// Relay-served FETCH is lite-05+, so `timescale` is `Some`; fall back to the
 		// default scale defensively rather than panicking.
-		let group_info = track::Info::default().with_timescale(timescale.unwrap_or_default());
+		let group_info = track::Info::default()
+			.with_timescale(timescale.unwrap_or_default())
+			.with_latency_max(subscriber.origin.latency_default());
 		let mut producer = match request.accept(group_info) {
 			Ok(producer) => producer,
 			Err(err) => {

@@ -116,9 +116,9 @@ network.
 listen = "127.0.0.1:9101"
 ```
 
-It serves `/health`, Prometheus traffic counters at `/metrics`, and the local
-cluster topology view at `/nodes`. See [HTTP Endpoints](/bin/relay/http) for the
-response formats.
+It serves `/health`, Prometheus traffic and listener counters at `/metrics`, and
+the local cluster topology view at `/nodes`. See
+[HTTP Endpoints](/bin/relay/http) for the response formats.
 
 ### \[web.https]
 

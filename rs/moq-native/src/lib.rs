@@ -12,6 +12,7 @@
 
 #![warn(missing_docs)]
 
+pub mod accept;
 pub mod bind;
 mod client;
 mod connect;

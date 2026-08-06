@@ -32,12 +32,19 @@ impl web_transport_trait::Error for SinkError {
 pub struct Log {
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
+	closes: Arc<Mutex<Vec<(u32, String)>>>,
 	bi_opens: Arc<AtomicUsize>,
 }
 
 impl Log {
 	pub fn resets(&self) -> Vec<u32> {
 		self.resets.lock().unwrap().clone()
+	}
+
+	/// The session-level closes, as (code, reason). A list rather than a last-value so
+	/// a second close racing the first is visible.
+	pub fn closes(&self) -> Vec<(u32, String)> {
+		self.closes.lock().unwrap().clone()
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -52,11 +59,19 @@ pub struct SinkSend {
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
+	/// Set by [`finish`](web_transport_trait::SendStream::finish). A finished stream is what
+	/// [`closed`](web_transport_trait::SendStream::closed) waits on, mirroring a peer that
+	/// acknowledges the FIN; an unfinished one parks like a peer that never answers.
+	finished: bool,
 }
 
 impl SinkSend {
 	pub fn new(log: Log) -> Self {
-		Self { log, gate: None }
+		Self {
+			log,
+			gate: None,
+			finished: false,
+		}
 	}
 }
 
@@ -78,15 +93,22 @@ impl web_transport_trait::SendStream for SinkSend {
 	fn set_priority(&mut self, _order: u8) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		self.finished = true;
 		Ok(())
 	}
 
+	/// Always recorded, even after a finish: quinn resets a stream that has sent its FIN but
+	/// still has unacknowledged data, which is exactly the case that loses a final message.
 	fn reset(&mut self, code: u32) {
 		self.log.resets.lock().unwrap().push(code);
 	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
-		std::future::pending().await
+		match self.finished {
+			true => Ok(()),
+			// Nothing to acknowledge yet, so park like a peer that never answers.
+			false => std::future::pending().await,
+		}
 	}
 }
 
@@ -157,6 +179,7 @@ impl web_transport_trait::Session for SinkSession {
 		let send = SinkSend {
 			log: self.log.clone(),
 			gate: Some(gate),
+			finished: false,
 		};
 		Ok((send, PendingRecv))
 	}
@@ -181,7 +204,9 @@ impl web_transport_trait::Session for SinkSession {
 		None
 	}
 
-	fn close(&self, _code: u32, _reason: &str) {}
+	fn close(&self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
 
 	async fn closed(&self) -> Self::Error {
 		std::future::pending().await
@@ -334,7 +359,9 @@ impl web_transport_trait::Session for ScriptedSession {
 		None
 	}
 
-	fn close(&self, _code: u32, _reason: &str) {}
+	fn close(&self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
 
 	async fn closed(&self) -> Self::Error {
 		std::future::pending().await

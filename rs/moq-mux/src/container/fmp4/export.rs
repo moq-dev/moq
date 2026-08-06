@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, Catalog, Container, VideoConfig};
-use mp4_atom::{DecodeMaybe, Encode};
+use mp4_atom::DecodeMaybe;
 
 use crate::Result;
 use crate::catalog::Stream;
@@ -473,34 +473,7 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		let ftyp = ftyp_data.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf)?;
-		moov.encode(&mut buf)?;
-		Ok(Bytes::from(buf))
+		Ok(crate::container::fmp4::encode_init(ftyp_data, traks, trexs)?)
 	}
 }
 
@@ -535,6 +508,12 @@ pub(crate) fn extract_init(
 					// browser applying an empty-edit media_time would shift the track
 					// off the others (a black screen in Media Source Extensions).
 					trak.edts = None;
+					// tkhd.duration is in the *movie* timescale, and the merged moov
+					// picks its own (the first trak's media scale), so whatever the
+					// source stated is now read at a scale it wasn't written in. A
+					// merged multi-track moov can't hold one scale that suits every
+					// source anyway, so declare it unknown like the rest of the init.
+					trak.tkhd.duration = super::UNKNOWN_DURATION;
 					traks.push(trak);
 				}
 				if let Some(mvex) = moov.mvex {
@@ -948,5 +927,49 @@ mod tests {
 
 		assert_eq!(traks.len(), 1);
 		assert!(traks[0].edts.is_none(), "CMAF init must not carry an edit list");
+	}
+
+	// tkhd.duration is in the movie timescale, which the merged moov replaces with its own. A
+	// duration carried over from the source is then read at a scale it wasn't written in: a 30
+	// second track authored at a 1 kHz movie scale reads as 0.625s once the moov says 48 kHz.
+	#[test]
+	fn extract_init_clears_a_stale_track_duration() {
+		use mp4_atom::Encode;
+
+		let moov = mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale: 1_000,
+				..Default::default()
+			},
+			trak: vec![mp4_atom::Trak {
+				tkhd: mp4_atom::Tkhd {
+					duration: 30_000, // 30s at the source's 1 kHz movie scale
+					..Default::default()
+				},
+				mdia: mp4_atom::Mdia {
+					mdhd: mp4_atom::Mdhd {
+						timescale: 48_000,
+						..Default::default()
+					},
+					..Default::default()
+				},
+				..Default::default()
+			}],
+			..Default::default()
+		};
+		let mut init = Vec::new();
+		moov.encode(&mut init).unwrap();
+
+		let mut traks = Vec::new();
+		let mut trexs = Vec::new();
+		let mut ftyp = None;
+		extract_init(&Bytes::from(init), 1, &mut ftyp, &mut traks, &mut trexs).unwrap();
+
+		assert_eq!(traks.len(), 1);
+		assert_eq!(
+			traks[0].tkhd.duration,
+			u64::MAX,
+			"a live fragmented init declares an unknown duration"
+		);
 	}
 }

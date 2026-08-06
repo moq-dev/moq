@@ -36,12 +36,12 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 /// Whether an error means the peer broke the protocol, as opposed to a stream or
 /// transport failing on its own.
 ///
-/// Only the former justifies taking the whole session down.
-fn is_protocol_violation(err: &Error) -> bool {
+/// Only the former justifies taking the whole session down. An encode error is ours,
+/// not the peer's: we cannot ask it to answer for a message we failed to write.
+pub(super) fn is_protocol_violation(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Decode(_)
-			| Error::Encode(_)
 			| Error::BoundsExceeded(_)
 			| Error::WrongSize
 			| Error::TooManyParameters
@@ -84,6 +84,12 @@ struct TrackState {
 
 /// How the last source for a path detaches, which decides whether the origin closes
 /// the broadcast now or holds it open for a replacement.
+///
+/// Only the detach that drops the refcount to zero decides, matching the model's rule
+/// for several sources at one path (`detach_source`): an earlier owner that vanished
+/// does not outvote the last one still on the path. That keeps two advertisements on
+/// one session behaving like the same two on separate sessions, where the model sees
+/// two independent sources and the last one out decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Detach {
 	/// The peer retracted the path, or we are rolling back an announce we just made.
@@ -133,11 +139,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Producer,
 	control: Control,
-	// The origin stamped into the hop chain of every broadcast from this session,
-	// when the peer declares none of its own. Base moq-transport carries no hop ids,
-	// so a peer only has an identity if it negotiated the MoQ Cluster extension or
-	// the caller assigned it one (`Client::with_peer_origin`), which also makes the
-	// route recognizable across sessions dialing the same relay.
+	// The origin naming this link, appended to the hop chain of every broadcast from
+	// this session when the peer declares none of its own (see `session_route`). Base
+	// moq-transport carries no hop ids, so a peer only has an identity if it negotiated
+	// the MoQ Cluster extension or the caller assigned it one
+	// (`Client::with_peer_origin`), which also makes the route recognizable across
+	// sessions dialing the same relay.
 	//
 	// Otherwise this is `Origin::UNKNOWN` (0), the reserved "no identity" value.
 	// Inventing a random id here would look like a real identity without being
@@ -218,10 +225,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
 	/// supplied an identity).
 	///
+	/// That entry doubles as the content identity, which is what makes an assigned
+	/// identity worth having: every session dialing the same relay produces the same
+	/// first hop, so a reconnect splices into the front its predecessor was serving
+	/// instead of replacing it. The cost is that we cannot tell the peer's own content
+	/// apart from our own coming back through it, since neither carries a chain. Loop
+	/// detection for that case is `FrontState::excluded`, not the chain.
+	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
 	/// arrived over regardless. Skipping it would forward a paid upstream to
 	/// cluster-aware peers as free and pull subscriptions onto the wrong relay.
+	///
+	/// It is charged only one hop, though the chain it stands for may be arbitrarily
+	/// long: a peer that carries no hop ids hides its depth, so this route understates
+	/// its true length and can out-rank a longer-looking but genuinely shorter one.
+	/// Price such a link with [`crate::Client::with_cost`] rather than trusting the
+	/// default.
 	fn session_route(&self, peer: &cluster::Peer) -> broadcast::Route {
 		let mut hops = crate::OriginList::new();
 		hops.push(self.session_origin)
@@ -298,6 +318,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
+	///
+	/// A failure here is per-prefix, so the caller decides what it means for the
+	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
+	/// stream of ours that simply died (survivable).
 	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
@@ -525,8 +549,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
 			self.write_error(&mut stream, request_id, 400, "route loops through this relay")
 				.await?;
-			let _ = stream.writer.finish();
-			let _ = stream.writer.closed().await;
+			let _ = stream.writer.close().await;
 			return Ok(());
 		};
 
@@ -540,15 +563,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
-				let _ = stream.writer.finish();
-				let _ = stream.writer.closed().await;
+				let _ = stream.writer.close().await;
 				return Ok(());
 			}
 		}
 
 		// An endpoint updates an advertisement by re-sending it on the stream that
-		// already carries it, so keep reading until the stream closes (which is also how
-		// v14-16's PublishNamespaceDone arrives, via the adapter).
+		// already carries it, so keep reading until the stream ends: a close on
+		// draft-17+, or v14-16's PublishNamespaceDone (see `terminal_publish_namespace`).
 		//
 		// `attached` survives the call so a stream that detached mid-flight (a reflected
 		// update) is not released twice here.
@@ -558,10 +580,35 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.await;
 
 		if attached {
-			self.stop_announce(path, Detach::Graceful)?;
+			// Ending cleanly IS the retraction here, unlike a NAMESPACE stream: this stream
+			// carries exactly one advertisement, and withdrawing it is what ends the stream.
+			// Any other ending left the advertisement standing, so the peer never withdrew
+			// it and the origin's linger window stays open for the reconnect.
+			let detach = match res.is_ok() {
+				true => Detach::Graceful,
+				false => Detach::Abrupt,
+			};
+			self.stop_announce(path, detach)?;
 		}
 
 		res
+	}
+
+	/// Whether `type_id` retracts a PUBLISH_NAMESPACE rather than updating it.
+	///
+	/// v14-16 carry the stream over the control stream, and the adapter delivers the
+	/// terminal message *before* it FINs (`Route::CloseStream`), so the withdrawal
+	/// arrives here as a message and only then as a close. Draft-17+ has a real stream,
+	/// where the close alone retracts and a terminal message on it is a violation.
+	///
+	/// Only PUBLISH_NAMESPACE_DONE: the publisher sends that one. PUBLISH_NAMESPACE_CANCEL
+	/// travels the other way, so receiving it on an advertisement *we* were offered is a
+	/// violation, not a withdrawal.
+	fn terminal_publish_namespace(&self, type_id: u64) -> bool {
+		match self.version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => type_id == ietf::PublishNamespaceDone::ID,
+			_ => false,
+		}
 	}
 
 	/// Read advertisement updates off a live PUBLISH_NAMESPACE stream until it closes.
@@ -578,13 +625,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Some(id) => id,
 				None => return Ok(()),
 			};
-			if type_id != ietf::PublishNamespace::ID {
+			let terminal = self.terminal_publish_namespace(type_id);
+			if type_id != ietf::PublishNamespace::ID && !terminal {
 				tracing::warn!(type_id, "unexpected message on publish_namespace stream");
 				return Err(Error::UnexpectedMessage);
 			}
 
 			let size: u16 = stream.reader.decode().await?;
 			let mut data = stream.reader.read_exact(size as usize).await?;
+
+			if terminal {
+				ietf::PublishNamespaceDone::decode_msg(&mut data, self.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(%path, "publish_namespace_done");
+				return Ok(());
+			}
+
 			let msg = ietf::PublishNamespace::decode_body(&mut data, self.version, peer.negotiated())?;
 			// Junk inside the declared size would otherwise be applied silently, which
 			// is the one decode path that skipped the check the others make.
@@ -645,9 +703,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		self.write_publish_error(&mut stream, msg.request_id, 400, "PUBLISH is not supported")
 			.await?;
-		// Finish rather than awaiting the peer's close: the rejection is the whole
-		// exchange, and dropping `stream` on return tears down the rest.
-		let _ = stream.writer.finish();
+		// The rejection is the whole exchange, but it still has to arrive: a finish alone
+		// leaves the drop-time reset free to discard it before the peer acknowledges it.
+		let _ = stream.writer.close().await;
 
 		Ok(())
 	}
@@ -947,7 +1005,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Set the track timescale to microseconds: IETF object timestamps default to
 		// microseconds, and `create_frame` normalizes each frame into the track scale.
 		// Accepting at milliseconds (the default) would truncate microsecond precision.
-		let info = track::Info::default().with_timescale(crate::Timescale::MICRO);
+		//
+		// moq-transport carries no publisher retention property, so the window comes
+		// from the accepting side (see `origin::Info::latency_default`) rather than
+		// from the peer.
+		let info = track::Info::default()
+			.with_timescale(crate::Timescale::MICRO)
+			.with_latency_max(self.origin.latency_default());
 		let mut track = request.accept(info);
 
 		let request_id = match self.control.next_request_id().await {
@@ -1103,7 +1167,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			ietf::SubscribeOk::ID => {
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
-				Ok(Some((msg.track_alias, msg.timescale)))
+				Ok(Some((msg.track_alias, msg.properties.timescale)))
 			}
 			ietf::SubscribeError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::SubscribeError::decode_msg(&mut data, self.version)?;
@@ -1428,7 +1492,8 @@ mod tests {
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
 	/// attributed to a random per-connection origin. An identity assigned via
 	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
-	/// resolve to one recognizable route.
+	/// resolve to one recognizable route, and a reconnect splices rather than
+	/// replacing.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1462,14 +1527,140 @@ mod tests {
 		assert_eq!(hops, vec![assigned]);
 	}
 
+	/// Both directions of a sync target point at one relay, which has no way to tell
+	/// our two connections apart on a wire with no hop ids and so offers our own
+	/// broadcast back to us. That reflection must not look like a rival publisher
+	/// claiming the path: taking it over would leave only a route we refuse to
+	/// advertise back to the peer, and the publish direction would withdraw the
+	/// announce it just made.
+	#[tokio::test]
+	async fn reflected_announce_does_not_evict_the_source_we_publish() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let peer = crate::Origin::new(777).unwrap();
+		let self_origin = crate::Origin::new(1).unwrap();
+
+		let origin = crate::origin::Info::new(self_origin).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		// The publish direction: an origin handle scoped to the peer, which is what
+		// `Client::with_peer_origin` hands the publisher. Holding its announce stream
+		// is what records that the peer has been offered these paths.
+		let mut publishing = consumer.clone().excluding(peer).announced();
+
+		// What we are publishing to the peer: a real upstream, announced.
+		let upstream = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+		let _source = origin
+			.create_broadcast(
+				"room/host",
+				crate::broadcast::Route::new()
+					.with_hops(upstream.clone())
+					.with_announce(true),
+			)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		announced.assert_next_some("room/host");
+		// Held for as long as the path is advertised, exactly as the publisher holds
+		// it in its `Watched` entry. The exclusion lives on this handle.
+		let _advertised = publishing.assert_next_some("room/host");
+
+		// The peer reflects it back over the subscribe direction, which carries no
+		// hop chain of its own.
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			session,
+			origin,
+			Control::new(None, false),
+			Some(peer),
+			cluster::PeerSetup::default(),
+			self_origin,
+			None,
+			Version::Draft14,
+			tasks,
+		);
+		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let _reflected = subscriber
+			.start_announce(crate::Path::new("room/host").to_owned(), advert)
+			.unwrap();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		// No announce churn, and the path still resolves to the upstream route, which
+		// is the one the publish direction can advertise back to the peer.
+		announced.assert_next_wait();
+		let broadcast = consumer.get_broadcast("room/host").unwrap();
+		let routes = broadcast.routes();
+		assert_eq!(routes.len(), 1, "the reflection must park, not attach");
+		assert_eq!(routes[0].hops, upstream);
+	}
+
+	/// The assigned identity is a content identity too, so a second session dialing
+	/// the same relay produces the same first hop and splices into the front its
+	/// predecessor is serving. That is what makes a reconnect immediate instead of
+	/// waiting for the transport to retire the dead session, and the reflection guard
+	/// must not cost us it.
+	#[tokio::test]
+	async fn reconnecting_peer_joins_the_front_it_replaces() {
+		let peer = crate::Origin::new(777).unwrap();
+		let self_origin = crate::Origin::new(1).unwrap();
+
+		let origin = crate::origin::Info::new(self_origin).produce();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let connect = || {
+			let (tasks, task_set) = crate::util::TaskSet::new();
+			std::mem::forget(task_set);
+			let mut subscriber = Subscriber::new(
+				crate::lite::test_transport::SinkSession::new(Default::default()),
+				origin.clone(),
+				Control::new(None, false),
+				Some(peer),
+				cluster::PeerSetup::default(),
+				self_origin,
+				None,
+				Version::Draft14,
+				tasks,
+			);
+			let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
+			let producer = subscriber
+				.start_announce(crate::Path::new("room/host").to_owned(), advert)
+				.unwrap();
+			(subscriber, producer)
+		};
+
+		let _first = connect();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		announced.assert_next_some("room/host");
+
+		// The peer reconnects before the old session is retired.
+		let _second = connect();
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+		// It joined: no announce churn, and both routes are in the table so the front
+		// can fail over the moment the stale one dies.
+		announced.assert_next_wait();
+		let routes = consumer.get_broadcast("room/host").unwrap().routes();
+		assert_eq!(routes.len(), 2, "a reconnect must join, not park or replace");
+	}
+
 	fn cluster_subscriber(
 		self_origin: crate::Origin,
 	) -> (
 		Subscriber<crate::lite::test_transport::SinkSession>,
 		crate::origin::Producer,
 	) {
+		cluster_subscriber_with_linger(self_origin, std::time::Duration::ZERO)
+	}
+
+	fn cluster_subscriber_with_linger(
+		self_origin: crate::Origin,
+		linger: std::time::Duration,
+	) -> (
+		Subscriber<crate::lite::test_transport::SinkSession>,
+		crate::origin::Producer,
+	) {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin).produce();
+		let origin = crate::origin::Info::new(self_origin).with_linger(linger).produce();
 		let (tasks, task_set) = crate::util::TaskSet::new();
 		// The set only drains announce-serving tasks; the tests here drive the model
 		// directly, so leaking it keeps the handles alive without a spawner.
@@ -1595,7 +1786,7 @@ mod tests {
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
 	/// A zero-linger origin cannot tell the two detaches apart, which is why this sets one.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_lost_namespace_stream_leaves_the_linger_window_open() {
 		const VERSION: Version = Version::Draft18;
 
@@ -1641,27 +1832,11 @@ mod tests {
 	/// The peer explicitly retracting a namespace still ends the broadcast NOW, linger
 	/// or not: it said the namespace is gone, so holding the front open would stall a
 	/// replacement and promise a resumption that is not coming.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_explicit_namespace_done_closes_despite_the_linger_window() {
-		let self_origin = crate::Origin::new(1).unwrap();
-		let session = crate::lite::test_transport::SinkSession::new(Default::default());
-		let origin = crate::origin::Info::new(self_origin)
-			.with_linger(std::time::Duration::from_secs(30))
-			.produce();
+		let (mut subscriber, origin) =
+			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
 		let consumer = origin.consume();
-		let (tasks, task_set) = crate::util::TaskSet::new();
-		std::mem::forget(task_set);
-		let mut subscriber = Subscriber::new(
-			session,
-			origin,
-			Control::new(None, false),
-			None,
-			cluster::PeerSetup::default(),
-			self_origin,
-			None,
-			Version::Draft19,
-			tasks,
-		);
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
@@ -1673,6 +1848,166 @@ mod tests {
 		assert!(
 			consumer.get_broadcast("room/host").is_none(),
 			"an explicit NAMESPACE_DONE lingered instead of closing",
+		);
+	}
+
+	/// v14-16 withdraw a PUBLISH_NAMESPACE with PUBLISH_NAMESPACE_DONE, which the adapter
+	/// delivers as a message before it FINs the virtual stream. Reading it as a stray
+	/// message closes the whole session over a routine unannounce, and strands the
+	/// broadcast for the linger window on the way out.
+	#[tokio::test(start_paused = true)]
+	async fn a_publish_namespace_done_retracts_without_faulting_the_session() {
+		const VERSION: Version = Version::Draft14;
+
+		let path = crate::Path::new("room/host").to_owned();
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		writer
+			.encode_message(&ietf::PublishNamespaceDone {
+				track_namespace: path.borrow(),
+				request_id: RequestId(0),
+			})
+			.await
+			.unwrap();
+		let script = log.writes.lock().unwrap().clone();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::PublishNamespace {
+			request_id: RequestId(0),
+			track_namespace: path.borrow(),
+			cluster: None,
+		};
+		subscriber
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.await
+			.expect("a withdrawal is not a protocol violation");
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit withdrawal lingered instead of closing",
+		);
+	}
+
+	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches ABRUPTLY. Only a
+	/// clean close retracts here, since that is how PUBLISH_NAMESPACE_DONE reaches us
+	/// (the adapter turns it into one); a stream that ended any other way still held the
+	/// advertisement, so the origin keeps the linger window open for the reconnect.
+	///
+	/// Driven through the real exit path rather than by calling `stop_announce`: a test
+	/// that picked the detach itself would still pass if the stream stopped using it.
+	#[tokio::test(start_paused = true)]
+	async fn a_broken_publish_namespace_stream_leaves_the_linger_window_open() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap())
+			.with_linger(std::time::Duration::from_secs(30))
+			.produce();
+		let consumer = origin.consume();
+
+		// The peer sends something that does not belong on this stream, ending it with an
+		// error while the advertisement is still live.
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+		writer.encode(&ietf::NamespaceDone::ID).await.unwrap();
+		let script = log.writes.lock().unwrap().clone();
+
+		let session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		std::mem::forget(task_set);
+		let mut subscriber = Subscriber::new(
+			session.clone(),
+			origin,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			crate::Origin::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+		);
+
+		let path = crate::Path::new("room/host").to_owned();
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::PublishNamespace {
+			request_id: RequestId(0),
+			track_namespace: path.borrow(),
+			cluster: None,
+		};
+		subscriber
+			.run_publish_namespace_stream(stream, msg, cluster::Peer::default())
+			.await
+			.expect_err("an unexpected message ends the stream");
+		settle().await;
+
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"a broken stream closed the broadcast instead of lingering for a reconnect",
+		);
+	}
+
+	/// Several advertisements share one refcounted source, so the detach that empties it
+	/// is the one that counts: an earlier owner lost abruptly does not outvote the last
+	/// one's explicit retraction, and does not stall a replacement behind a linger.
+	///
+	/// That is the model's own rule for several sources at one path (`detach_source`),
+	/// which is what these advertisements would be had they arrived on two sessions. The
+	/// refcount is a detail of sharing one `SourceGuard` per session; it must not change
+	/// what the origin sees.
+	#[tokio::test(start_paused = true)]
+	async fn the_last_owner_out_decides_the_detach() {
+		let (mut subscriber, origin) =
+			cluster_subscriber_with_linger(crate::Origin::new(1).unwrap(), std::time::Duration::from_secs(30));
+		let consumer = origin.consume();
+		let path = crate::Path::new("room/host").to_owned();
+		let peer = cluster::Peer::default();
+
+		for _ in 0..2 {
+			let advert = subscriber.route(None, &peer).expect("route");
+			subscriber.start_announce(path.clone(), advert).unwrap();
+		}
+		settle().await;
+
+		// One advertisement's stream dies, the other is retracted explicitly.
+		subscriber.stop_announce(path.clone(), Detach::Abrupt).unwrap();
+		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		settle().await;
+		assert!(
+			consumer.get_broadcast("room/host").is_none(),
+			"an explicit retraction lingered because an earlier owner was lost abruptly",
+		);
+
+		// The reverse order still lingers: the path was never withdrawn on the way out.
+		for _ in 0..2 {
+			let advert = subscriber.route(None, &peer).expect("route");
+			subscriber.start_announce(path.clone(), advert).unwrap();
+		}
+		settle().await;
+		subscriber.stop_announce(path.clone(), Detach::Graceful).unwrap();
+		subscriber.stop_announce(path, Detach::Abrupt).unwrap();
+		settle().await;
+		assert!(
+			consumer.get_broadcast("room/host").is_some(),
+			"an abrupt last detach closed the broadcast instead of lingering for a reconnect",
 		);
 	}
 
@@ -2111,10 +2446,9 @@ mod tests {
 			track_namespace: crate::Path::new("room/host"),
 			track_name: "video".into(),
 			track_alias: 7,
-			group_order: ietf::GroupOrder::Ascending,
 			largest_location: None,
 			forward: true,
-			timescale: None,
+			properties: ietf::Properties::default(),
 		};
 
 		// Errors are surfaced to the peer on the stream, not raised as a session error.

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-net-v0.2.8...moq-net-v0.2.9) - 2026-08-06
+
+### Fixed
+
+- *(moq-net)* stop a reflected announce from evicting the source we publish ([#2684](https://github.com/moq-dev/moq/pull/2684))
+- *(moq-wasm)* repair the consume path and gate wasm32 in CI ([#2683](https://github.com/moq-dev/moq/pull/2683))
+- *(moq-net)* close the session on a malformed NAMESPACE ([#2667](https://github.com/moq-dev/moq/pull/2667))
+- *(moq-net)* move the publisher group order out of message parameters ([#2677](https://github.com/moq-dev/moq/pull/2677))
+- *(net)* let the accepting side pick the retention window when the wire carries none ([#2657](https://github.com/moq-dev/moq/pull/2657))
+- *(moq-net)* send IETF subscribe/fetch rejections without resetting the stream ([#2673](https://github.com/moq-dev/moq/pull/2673))
+
+### Other
+
+- *(moq-net)* describe what with_cost actually prices ([#2668](https://github.com/moq-dev/moq/pull/2668))
+- *(moq-net)* give lite::start a Config, like ietf::start ([#2686](https://github.com/moq-dev/moq/pull/2686))
+
+## [0.2.8](https://github.com/moq-dev/moq/compare/moq-net-v0.2.7...moq-net-v0.2.8) - 2026-08-05
+
+### Added
+
+- *(net)* implement the MoQ Cluster extension over moq-transport ([#2629](https://github.com/moq-dev/moq/pull/2629))
+- *(net)* solicited PUBLISH_NAMESPACE and rejected PUBLISH ([#2643](https://github.com/moq-dev/moq/pull/2643))
+
+### Fixed
+
+- *(moq-net)* harden origin resume/route serving ([#2666](https://github.com/moq-dev/moq/pull/2666))
+- *(moq-net)* key the v14/v15 namespace lookup by direction ([#2664](https://github.com/moq-dev/moq/pull/2664))
+- *(moq-net)* let the last owner out decide the detach ([#2659](https://github.com/moq-dev/moq/pull/2659))
+- *(moq-net)* preserve abrupt detach across owners ([#2654](https://github.com/moq-dev/moq/pull/2654))
+- *(moq-net)* detach an abnormally-lost namespace stream abruptly ([#2616](https://github.com/moq-dev/moq/pull/2616))
+- *(moq-stats)* hold subscriptions for uncreated tier tracks open with zeros ([#2642](https://github.com/moq-dev/moq/pull/2642))
+- *(net)* abort a refused track instantly instead of sweeping and retrying ([#2637](https://github.com/moq-dev/moq/pull/2637))
+- *(moq-net)* subscribe to the ietf peer's namespace, not our own root ([#2612](https://github.com/moq-dev/moq/pull/2612))
+
+### Other
+
+- *(moq-net)* drive the NAMESPACE response through the real read loop ([#2634](https://github.com/moq-dev/moq/pull/2634))
+- render gate, Hop ID 0, cluster rename, and a simplification pass ([#2607](https://github.com/moq-dev/moq/pull/2607))
+- Don't warn on Alive::drop if aborted ([#2580](https://github.com/moq-dev/moq/pull/2580))
+
 ## [0.2.7](https://github.com/moq-dev/moq/compare/moq-net-v0.2.6...moq-net-v0.2.7) - 2026-08-03
 
 ### Added

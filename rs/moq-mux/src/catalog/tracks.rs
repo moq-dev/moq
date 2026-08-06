@@ -211,6 +211,12 @@ impl<E: CatalogExt> Reserved<E> {
 		Self { catalog }
 	}
 
+	/// Track properties for a media track under this catalog, carrying any retention it declares.
+	/// See [`Producer::track_info`](super::Producer::track_info).
+	pub fn track_info(&self) -> moq_net::track::Info {
+		self.catalog.track_info()
+	}
+
 	/// Reserve a rendition of config type `C` under `name`, returning a guard to fill it in.
 	///
 	/// The guard holds its own `Reserved` clone, so the catalog stays withheld until the returned

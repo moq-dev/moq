@@ -14,7 +14,6 @@
         "ENABLE_QT": true,
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
         "BUILD_PLUGIN": true,
-        "MOQ_VERSION": "0.3.6",
         "MOQ_ARCHIVE": "tar.gz"
       }
     },

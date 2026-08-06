@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path, Timescale,
+	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Parameters, RequestId},
+	ietf::{GroupOrder, Location, Parameters, Properties, RequestId},
 };
 
 use super::Message;
@@ -96,11 +96,24 @@ impl Message for Subscribe<'_> {
 			}
 			_ => {
 				decode_params!(r, version,
+					0x04 => rendezvous_timeout: Option<u64>,
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter_type: Option<FilterType>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
+
+				// RENDEZVOUS_TIMEOUT arrived in draft-17; 0x04 means MAX_CACHE_DURATION in
+				// draft-15, which is a publisher parameter with no business in a SUBSCRIBE.
+				// An unknown message parameter is a protocol violation, so reject it there.
+				if rendezvous_timeout.is_some() && matches!(version, Version::Draft15 | Version::Draft16) {
+					return Err(DecodeError::InvalidValue);
+				}
+
+				// The value is deliberately dropped: we always answer a SUBSCRIBE with what is
+				// published right now, which is the shorter timeout the draft lets a relay pick.
+				// We still have to parse it, or the parameter alone would kill the session.
+				let _ = rendezvous_timeout;
 
 				if forward == Some(false) {
 					return Err(DecodeError::Unsupported);
@@ -164,10 +177,8 @@ pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
 
-	/// The track's Timescale, sent as a Track Property (draft-17+).
-	///
-	/// `None` declares no timeline, so the subscriber times objects by arrival.
-	pub timescale: Option<Timescale>,
+	/// Metadata about the track, sent as Track Properties (draft-17+).
+	pub properties: Properties,
 }
 
 impl Message for SubscribeOk {
@@ -186,19 +197,30 @@ impl Message for SubscribeOk {
 		match version {
 			Version::Draft14 => {
 				0u64.encode(w, version)?; // expires = 0
-				GroupOrder::Descending.encode(w, version)?;
+				self.properties
+					.group_order
+					.unwrap_or(GroupOrder::Ascending)
+					.encode(w, version)?;
 				false.encode(w, version)?; // no content
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
+				// GROUP_ORDER is a legal SUBSCRIBE_OK parameter only through draft-15; a later
+				// peer closes the session with PROTOCOL_VIOLATION when it sees one. The
+				// publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property
+				// instead, which we write from draft-17 on. Draft-16 gets neither form; see
+				// Properties::encode.
+				let group_order = match version {
+					Version::Draft15 => self.properties.group_order,
+					_ => None,
+				};
+
 				encode_params!(w, version,
-					0x22 => GroupOrder::Descending,
+					0x22 => group_order,
 				);
 
 				// Track Properties are the final field, so nothing may follow.
-				if let Some(timescale) = self.timescale {
-					super::properties::encode(w, timescale, version)?;
-				}
+				self.properties.encode(w, version)?;
 			}
 		}
 
@@ -212,7 +234,7 @@ impl Message for SubscribeOk {
 			None
 		};
 		let track_alias = u64::decode(r, version)?;
-		let mut timescale = None;
+		let mut properties = Properties::default();
 
 		match version {
 			Version::Draft14 => {
@@ -221,7 +243,7 @@ impl Message for SubscribeOk {
 					return Err(DecodeError::Unsupported);
 				}
 
-				let _group_order = u8::decode(r, version)?;
+				properties.group_order = Some(GroupOrder::decode(r, version)?.any_to_descending());
 
 				if bool::decode(r, version)? {
 					let _group = u64::decode(r, version)?;
@@ -231,17 +253,20 @@ impl Message for SubscribeOk {
 				let _params = Parameters::decode(r, version)?;
 			}
 			_ => {
+				// GROUP_ORDER is only legal here through draft-15, but keep accepting it so a
+				// peer that still sends it doesn't have its session torn down over a hint.
 				decode_params!(r, version,
-					0x22 => _group_order: Option<GroupOrder>,
+					0x22 => group_order: Option<GroupOrder>,
 				);
-				timescale = super::properties::decode(r, version)?;
+				properties = Properties::decode(r, version)?;
+				properties.group_order = properties.group_order.or(group_order);
 			}
 		}
 
 		Ok(Self {
 			request_id,
 			track_alias,
-			timescale,
+			properties,
 		})
 	}
 }
@@ -481,6 +506,101 @@ mod tests {
 		assert_eq!(decoded.subscriber_priority, 128);
 	}
 
+	/// Build a SUBSCRIBE body carrying a single RENDEZVOUS_TIMEOUT parameter.
+	fn subscribe_with_rendezvous(millis: u64, version: Version) -> Vec<u8> {
+		fn build(millis: u64, version: Version) -> Result<Vec<u8>, EncodeError> {
+			let mut buf = BytesMut::new();
+			RequestId(1).encode(&mut buf, version)?;
+			if version == Version::Draft17 {
+				0u64.encode(&mut buf, version)?; // required_request_id_delta
+			}
+			encode_namespace(&mut buf, &Path::new("test"), version)?;
+			Cow::Borrowed("video").encode(&mut buf, version)?;
+			encode_params!(&mut buf, version,
+				0x04 => millis,
+			);
+			Ok(buf.to_vec())
+		}
+
+		build(millis, version).unwrap()
+	}
+
+	/// A subscriber may send RENDEZVOUS_TIMEOUT (draft-17+). We do not honor the wait, but an
+	/// unknown message parameter is a session-killing protocol violation, so it still has to
+	/// parse: failing to decode it takes the whole session down instead of answering the
+	/// SUBSCRIBE.
+	#[test]
+	fn rendezvous_timeout_is_accepted_and_ignored() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			for millis in [0, 5000] {
+				let encoded = subscribe_with_rendezvous(millis, version);
+				let msg: Subscribe = decode_message(&encoded, version)
+					.unwrap_or_else(|err| panic!("{version} rendezvous {millis}ms: {err}"));
+				assert_eq!(msg.track_name, "video");
+			}
+		}
+	}
+
+	/// 0x04 only means RENDEZVOUS_TIMEOUT from draft-17 on; in draft-15 it is
+	/// MAX_CACHE_DURATION, a publisher parameter that has no business in a SUBSCRIBE.
+	#[test]
+	fn rendezvous_timeout_is_rejected_before_draft17() {
+		for version in [Version::Draft15, Version::Draft16] {
+			let encoded = subscribe_with_rendezvous(0, version);
+			decode_message::<Subscribe>(&encoded, version).expect_err(&format!("{version} must reject parameter 0x04"));
+		}
+	}
+
+	/// The first message parameter key on an encoded SUBSCRIBE, or `None` when it carries no
+	/// parameters.
+	///
+	/// Only the first key is needed, and only the first is readable. `encode_params!` enforces
+	/// ascending keys at compile time and RENDEZVOUS_TIMEOUT (0x04) sorts below every parameter
+	/// we do send, so it can only appear here. Walking further is not possible anyway: message
+	/// parameter values are typed per key with no generic skip rule, which is exactly why the
+	/// draft makes an unknown one a protocol violation.
+	fn first_param_key(encoded: &[u8], version: Version) -> Option<u64> {
+		let mut buf = bytes::Bytes::copy_from_slice(encoded);
+		RequestId::decode(&mut buf, version).unwrap();
+		if version == Version::Draft17 {
+			u64::decode(&mut buf, version).unwrap();
+		}
+		decode_namespace(&mut buf, version).unwrap();
+		Cow::<str>::decode(&mut buf, version).unwrap();
+
+		// draft-14/15 write absolute keys, draft-16+ deltas, but the first is absolute either way.
+		let count = u64::decode(&mut buf, version).unwrap();
+		(count > 0).then(|| u64::decode(&mut buf, version).unwrap())
+	}
+
+	/// We never ask a peer to hold a subscription open, so the parameter stays off our wire.
+	#[test]
+	fn rendezvous_timeout_is_never_sent() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			// The reader has to be able to see a 0x04, or its absence below proves nothing.
+			assert_eq!(
+				first_param_key(&subscribe_with_rendezvous(5000, version), version),
+				Some(0x04),
+				"{version}: reader missed a planted RENDEZVOUS_TIMEOUT"
+			);
+
+			assert_eq!(
+				first_param_key(&encode_message(&msg, version), version),
+				Some(0x10),
+				"{version}: RENDEZVOUS_TIMEOUT must not be advertised"
+			);
+		}
+	}
+
 	#[test]
 	fn test_subscribe_nested_namespace() {
 		let msg = Subscribe {
@@ -503,7 +623,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -517,7 +637,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -656,7 +776,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -711,7 +831,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
-			timescale: None,
+			properties: Properties::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -719,6 +839,102 @@ mod tests {
 
 		assert_eq!(decoded.request_id, None);
 		assert_eq!(decoded.track_alias, 42);
+	}
+
+	/// GROUP_ORDER (0x22) is only a legal SUBSCRIBE_OK *message parameter* through draft-15;
+	/// a draft-16+ peer closes the session with PROTOCOL_VIOLATION when it sees one. The
+	/// publisher's preference belongs in the DEFAULT_PUBLISHER_GROUP_ORDER track property,
+	/// which shares the number 0x22 in the separate property registry.
+	#[test]
+	fn test_subscribe_ok_v18_group_order_is_a_property() {
+		let msg = SubscribeOk {
+			request_id: None,
+			track_alias: 42,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			42,   // track alias
+			0,    // zero message parameters
+			0x22, // DEFAULT_PUBLISHER_GROUP_ORDER, the first (and only) track property
+			0x02, // descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft18), expected);
+
+		let decoded: SubscribeOk = decode_message(&expected, Version::Draft18).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-15 is the one version that takes it as a message parameter, and has no track
+	/// properties to put it in.
+	#[test]
+	fn test_subscribe_ok_v15_group_order_is_a_parameter() {
+		let msg = SubscribeOk {
+			request_id: Some(RequestId(7)),
+			track_alias: 42,
+			properties: Properties {
+				timescale: None,
+				group_order: Some(GroupOrder::Descending),
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			7,    // request id
+			42,   // track alias
+			1,    // one message parameter
+			0x22, // GROUP_ORDER
+			0x02, // descending
+		];
+		assert_eq!(encode_message(&msg, Version::Draft15), expected);
+
+		let decoded: SubscribeOk = decode_message(&expected, Version::Draft15).unwrap();
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-16 has the block too, under the name Track Extensions. We don't write one there,
+	/// but a peer that does used to fail the whole message as `Long`.
+	#[test]
+	fn test_subscribe_ok_v16_reads_track_extensions() {
+		#[rustfmt::skip]
+		let body = vec![
+			7,    // request id
+			42,   // track alias
+			0,    // zero message parameters
+			0x22, // DEFAULT_PUBLISHER_GROUP_ORDER
+			0x02, // descending
+		];
+
+		// Go through the size-prefixed path: that's what rejects unread trailing bytes.
+		let mut buf = BytesMut::new();
+		(body.len() as u16).encode(&mut buf, Version::Draft16).unwrap();
+		buf.extend_from_slice(&body);
+
+		let mut bytes = buf.freeze();
+		let decoded = SubscribeOk::decode(&mut bytes, Version::Draft16).unwrap();
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// We stopped sending the parameter, but a peer still sending it shouldn't lose its
+	/// session over a hint we ignore anyway.
+	#[test]
+	fn test_subscribe_ok_v18_accepts_group_order_parameter() {
+		#[rustfmt::skip]
+		let bytes = vec![
+			42,   // track alias
+			1,    // one message parameter
+			0x22, // GROUP_ORDER
+			0x02, // descending
+		];
+
+		let decoded: SubscribeOk = decode_message(&bytes, Version::Draft18).unwrap();
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
 	}
 
 	/// Draft-18 removes the `required_request_id_delta` field (#1615), so the
