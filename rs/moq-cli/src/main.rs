@@ -263,10 +263,10 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// Foreign side: the single sink.
-	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {
+	if let Some((format, latency, fragment_duration)) = export.sink.stdout() {
 		let args = SubscribeArgs {
 			format,
-			max_latency,
+			latency,
 			fragment_duration,
 			catalog: export.catalog_format,
 			select: export.select,
@@ -280,11 +280,12 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 				tasks.spawn(hls::export(origin.consume(), args, name));
 			}
 			ExportSink::Rtmp(rtmp) => {
+				let latency = rtmp.latency();
 				if let Some(addr) = rtmp.endpoint.listen {
 					let name = require_broadcast(name, "export rtmp --listen")?;
-					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, rtmp.latency_max));
+					tasks.spawn(rtmp::listen_export(origin.consume(), addr, name, latency));
 				} else if let Some(url) = rtmp.endpoint.connect {
-					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, rtmp.latency_max));
+					tasks.spawn(rtmp::connect_export(origin.consume(), url, name, latency));
 				}
 			}
 			ExportSink::Srt(srt) => {

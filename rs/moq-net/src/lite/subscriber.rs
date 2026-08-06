@@ -1621,7 +1621,7 @@ struct SubStream<S: web_transport_trait::Session> {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	ordered: bool,
-	max_latency: Duration,
+	latency_max: Duration,
 	start: Option<Position>,
 	priority: u8,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -2027,7 +2027,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
 						active.ordered = subscription.ordered;
-						active.max_latency = subscription.latency_max;
+						active.latency_max = subscription.latency.max;
 						active.start = subscription.start;
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -2101,7 +2101,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			track: self.name.as_str().into(),
 			priority: subscription.priority,
 			ordered: subscription.ordered,
-			max_latency: subscription.latency_max,
+			latency_max: subscription.latency.max,
 			start_group: bounds.start_group,
 			end_group: bounds.end_group,
 			start_frame: bounds.start_frame,
@@ -2164,7 +2164,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			stream,
 			id,
 			ordered: subscription.ordered,
-			max_latency: subscription.latency_max,
+			latency_max: subscription.latency.max,
 			start: subscription.start,
 			priority: subscription.priority,
 			requested: subscription.start,
@@ -2179,7 +2179,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let update = lite::SubscribeUpdate {
 			priority: active.priority,
 			ordered: active.ordered,
-			max_latency: active.max_latency,
+			latency_max: active.latency_max,
 			start_group: bounds.start_group,
 			end_group: bounds.end_group,
 			start_frame: bounds.start_frame,

@@ -1711,6 +1711,7 @@ mod test {
 	use mpeg2ts::es::StreamType;
 
 	use super::SectionReassembler;
+	use crate::Latency;
 	use moq_net::Timestamp;
 
 	// libklvanc public-sample cue: table_id 0xFC, section_length 0x1b (27), 30 bytes total.
@@ -2041,7 +2042,7 @@ mod test {
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		import.finish().unwrap();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency_max(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -2347,7 +2348,7 @@ mod test {
 
 		let name = catalog.snapshot().mpegts.tracks.keys().next().unwrap().clone();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency_max(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("cue read timed out")
@@ -2478,7 +2479,7 @@ mod test {
 		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
 
 		let track = consumer.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency_max(std::time::Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(Latency::REAL_TIME);
 		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")

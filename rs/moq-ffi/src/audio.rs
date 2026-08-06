@@ -266,7 +266,10 @@ impl MoqBroadcastConsumer {
 		config.format = output.format.into();
 		config.sample_rate = output.sample_rate;
 		config.channels = output.channels;
-		config.latency_max = output.latency_max_ms.map(Duration::from_millis);
+		config.latency = output
+			.latency_max_ms
+			.map(|ms| moq_mux::Latency::max(Duration::from_millis(ms)))
+			.unwrap_or_default();
 
 		let consumer = moq_audio::decode::Consumer::new(self.inner(), &cfg, name, config).await?;
 

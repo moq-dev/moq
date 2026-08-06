@@ -81,7 +81,7 @@ mod server;
 /// instant a newer one arrives, which is too aggressive for RTMP's typical jitter,
 /// so the default holds a couple of seconds. Override per request with
 /// [`Play::with_latency`] / [`Client::with_latency`] or via [`Config::latency`].
-pub const DEFAULT_LATENCY: Duration = Duration::from_secs(2);
+pub const DEFAULT_LATENCY: moq_mux::Latency = moq_mux::Latency::max(Duration::from_secs(2));
 
 pub use dial::Client;
 pub use error::{Error, Result};

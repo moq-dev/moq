@@ -52,10 +52,8 @@ impl Consumer {
 			.track(&name)?
 			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 			.await?;
-		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
-		if let Some(latency) = config.latency_max {
-			track = track.with_latency_max(latency);
-		}
+		let track =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire).with_latency(config.latency);
 
 		Ok(Self {
 			decoder,

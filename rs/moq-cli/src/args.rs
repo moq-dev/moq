@@ -246,18 +246,14 @@ impl ExportSink {
 	/// The stdout container format plus its latency and fragment cap, when this
 	/// sink writes to stdout (the container formats). The fragment cap is
 	/// fmp4/mkv-only.
-	pub fn stdout(&self) -> Option<(SubscribeFormat, Duration, Option<Duration>)> {
+	pub fn stdout(&self) -> Option<(SubscribeFormat, moq_mux::Latency, Option<Duration>)> {
 		Some(match self {
-			Self::Fmp4(args) => (
-				SubscribeFormat::Fmp4,
-				args.container.latency_max,
-				args.fragment_duration,
-			),
-			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.latency_max, args.fragment_duration),
-			Self::Ts(args) => (SubscribeFormat::Ts, args.latency_max, None),
-			Self::Flv(args) => (SubscribeFormat::Flv, args.latency_max, None),
-			Self::H264(args) => (SubscribeFormat::H264, args.latency_max, None),
-			Self::H265(args) => (SubscribeFormat::H265, args.latency_max, None),
+			Self::Fmp4(args) => (SubscribeFormat::Fmp4, args.container.latency(), args.fragment_duration),
+			Self::Mkv(args) => (SubscribeFormat::Mkv, args.container.latency(), args.fragment_duration),
+			Self::Ts(args) => (SubscribeFormat::Ts, args.latency(), None),
+			Self::Flv(args) => (SubscribeFormat::Flv, args.latency(), None),
+			Self::H264(args) => (SubscribeFormat::H264, args.latency(), None),
+			Self::H265(args) => (SubscribeFormat::H265, args.latency(), None),
 			_ => return None,
 		})
 	}
@@ -269,6 +265,13 @@ pub struct Container {
 	/// Maximum latency before skipping a stalled group (e.g. `500ms`, `1s`).
 	#[arg(long = "latency-max", default_value = "500ms", value_parser = humantime::parse_duration)]
 	pub latency_max: Duration,
+}
+
+impl Container {
+	/// The configured latency tolerance.
+	pub fn latency(&self) -> moq_mux::Latency {
+		moq_mux::Latency::max(self.latency_max)
+	}
 }
 
 /// The fmp4 / mkv stdout containers: [`Container`] plus a fragment cap.

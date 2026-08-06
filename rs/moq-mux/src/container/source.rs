@@ -14,7 +14,6 @@
 //! avcC/hvcC (for Annex-B sources).
 
 use std::task::Poll;
-use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, VideoCodec, VideoConfig};
@@ -65,7 +64,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
-	latency_max: Duration,
+	latency: crate::Latency,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -84,7 +83,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency_max: Duration,
+		latency: crate::Latency,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let transform = build_video_transform(config);
@@ -95,7 +94,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency_max,
+			latency,
 			transform,
 			description,
 		})
@@ -111,7 +110,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &VideoConfig,
-		latency_max: Duration,
+		latency: crate::Latency,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -121,7 +120,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency_max,
+			latency,
 			transform: None,
 			description,
 		})
@@ -135,7 +134,7 @@ impl ExportSource {
 		source: &crate::Source,
 		name: &str,
 		config: &AudioConfig,
-		latency_max: Duration,
+		latency: crate::Latency,
 	) -> Result<Self, crate::Error> {
 		let media: HangContainer = (&config.container).try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
@@ -145,7 +144,7 @@ impl ExportSource {
 		Ok(Self {
 			state: SourceState::Requesting(request, name.to_string()),
 			media: Some(media),
-			latency_max,
+			latency,
 			transform: None,
 			description,
 		})
@@ -157,11 +156,11 @@ impl ExportSource {
 	///
 	/// Such a rendition has no catalog `broadcast` field, so it always lives on the
 	/// catalog broadcast and can never carry an escaping reference.
-	pub fn for_stream(source: &crate::Source, name: &str, latency_max: Duration) -> Result<Self, crate::Error> {
+	pub fn for_stream(source: &crate::Source, name: &str, latency: crate::Latency) -> Result<Self, crate::Error> {
 		Ok(Self {
 			state: SourceState::Requesting(source.request_catalog(), name.to_string()),
 			media: Some(HangContainer::Legacy),
-			latency_max,
+			latency,
 			transform: None,
 			description: None,
 		})
@@ -216,7 +215,7 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency_max(self.latency_max)));
+			self.state = SourceState::Active(Box::new(Consumer::new(track, media).with_latency(self.latency)));
 		}
 
 		loop {
@@ -316,7 +315,7 @@ mod tests {
 	async fn escaping_reference_fails_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let latency = Duration::ZERO;
+		let latency = crate::Latency::REAL_TIME;
 
 		let escaping = |result: Result<ExportSource, crate::Error>, what: &str| match result {
 			Err(crate::Error::EscapingBroadcast(_)) => {}
@@ -346,7 +345,7 @@ mod tests {
 	async fn legal_reference_keeps_the_rendition() {
 		let live = Live::avc3();
 		let source = live.source();
-		let latency = Duration::ZERO;
+		let latency = crate::Latency::REAL_TIME;
 
 		for reference in [None, Some(""), Some("../source"), Some("sub"), Some("..")] {
 			ExportSource::for_video(&source, "video", &video(reference), latency)
