@@ -50,8 +50,15 @@ pub enum Failure {
 	///
 	/// Ordinary traffic, and never a fault of the listener. The queue entry is
 	/// consumed, so the very next `accept` makes progress and delaying it would only
-	/// punish the connections queued behind the dead one. A peer able to open and
-	/// reset connections in bulk would otherwise hold the listener at the retry cap.
+	/// punish the connections queued behind the dead one, at whatever rate a remote
+	/// peer chooses to supply them.
+	///
+	/// How reachable that is depends on the platform. Linux surfaces a new socket's
+	/// already-pending network errors through `accept` (which BSD does not, and which
+	/// is why the list is as long as it is), but drops a connection reset before
+	/// `accept` from the queue silently rather than reporting `ECONNABORTED`. So the
+	/// simplest flood is louder on BSD than on Linux; the handling is the same either
+	/// way.
 	Connection,
 	/// A resource `accept` needs is exhausted process-wide or host-wide: the process
 	/// fd table (`EMFILE`), the system-wide one (`ENFILE`), or kernel memory for the
