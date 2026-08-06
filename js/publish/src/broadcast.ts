@@ -23,11 +23,15 @@ export type BroadcastInput = {
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
 
-	// How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
-	// milliseconds. Declared on every media track we accept; see {@link Container.trackInfo},
-	// whose default is sized so a segmented egress (HLS/DASH) can serve a full playlist window.
-	// A retention budget, not a delivery one, so lowering it does not reduce latency -- it only
-	// shortens how far back a fetch can reach.
+	/**
+	 * How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
+	 * milliseconds. Declared on every media track we accept; see {@link Container.trackInfo},
+	 * whose default (`undefined` here) is sized so a segmented egress (HLS/DASH) can serve a
+	 * full playlist window.
+	 *
+	 * A retention budget, not a delivery one, so lowering it does not reduce latency: it only
+	 * shortens how far back a fetch can reach.
+	 */
 	latencyMax: Getter<number | undefined>;
 };
 
