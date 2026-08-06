@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type * as Catalog from "@moq/hang/catalog";
+import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { Broadcast } from "./broadcast";
@@ -171,5 +172,43 @@ describe("relativeBroadcast", () => {
 			source.close();
 			owner.close();
 		}
+	});
+});
+
+describe("blind resolution", () => {
+	it("holds a resolved request steady instead of flapping", async () => {
+		// reload: false with nothing routed stands a request; when a session answers, the
+		// effect that read `request.active` reruns. That rerun must re-acquire the same
+		// answer, not close the request and re-dial forever.
+		const owner = new Origin.Producer();
+		const source = new Broadcast({
+			origin: owner.consume(),
+			name: Path.from("blind.hang"),
+			enabled: true,
+			reload: false,
+			catalogFormat: "manual",
+		});
+
+		const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+		await settle();
+
+		// Stand in for a session's serving loop answering the request.
+		const upstream = new Moq.Broadcast.Producer();
+		const withdraw = owner.answer(Path.from("blind.hang"), upstream.consume());
+		expect(withdraw).toBeDefined();
+
+		await settle();
+		const active = source.out.active.peek();
+		expect(active).toBeDefined();
+
+		// Several tick boundaries later the same front is still held and the answer was
+		// never withdrawn; a flap would close the upstream and vacate the request.
+		for (let i = 0; i < 5; i++) await settle();
+		expect(source.out.active.peek()).toBe(active);
+		expect(upstream.closed.peek()).toBeUndefined();
+
+		source.close();
+		owner.close();
+		await settle();
 	});
 });

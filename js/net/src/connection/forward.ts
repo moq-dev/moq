@@ -4,7 +4,6 @@
  * @module
  */
 import type { Dispose } from "@moq/signals";
-import type * as broadcast from "../broadcast.ts";
 import type { Producer as OriginProducer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import type { Established } from "./established.ts";
@@ -78,8 +77,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * answers again, which is what makes a request span reconnects.
  */
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
-	// The fronts this session provided, so a dead session only withdraws its own.
-	const answered = new Map<Path.Valid, broadcast.Consumer>();
+	// The withdraws for the answers this session provided, so a dead session only takes
+	// back its own.
+	const answered = new Map<Path.Valid, Dispose>();
 
 	let dead = false;
 	const closed = conn.closed.then(() => {
@@ -93,24 +93,23 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 
 		for (const [path, slot] of map) {
 			if (answered.has(path) || slot.front.peek() !== undefined) continue;
-			const front = conn.consume(path);
-			answered.set(path, front);
-			slot.front.set(front);
+			const withdraw = origin.answer(path, conn.consume(path));
+			if (withdraw) answered.set(path, withdraw);
 		}
 
-		// A withdrawn request already closed the front; just forget our claim on the path.
-		for (const path of [...answered.keys()]) {
-			if (!map.has(path)) answered.delete(path);
+		// A withdrawn request already released the answer; just forget our claim on the path.
+		for (const [path, withdraw] of [...answered]) {
+			if (map.has(path)) continue;
+			answered.delete(path);
+			withdraw();
 		}
 
 		await Promise.race([requests.changed(), closed]);
 	}
 
-	// Session gone: withdraw our answers so the next session provides fresh ones.
-	for (const [path, front] of answered) {
-		const slot = requests.peek()?.get(path);
-		if (slot?.front.peek() === front) slot.front.set(undefined);
-		front.close();
+	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.
+	for (const withdraw of answered.values()) {
+		withdraw();
 	}
 	answered.clear();
 }
