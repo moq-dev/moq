@@ -85,7 +85,13 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.clone()
 		.context("`transcode` requires a relay: pass --client-connect <url>")?;
 	let publish = moq_net::Origin::random().produce();
-	let remote = moq_net::Origin::random().produce();
+	// The source has to outlive a session drop for the reconnect to be worth
+	// anything: without the linger it closes on the first drop and `run` exits
+	// while the redial is still in flight. This is what `Client::consume` applies
+	// for the same reason; the origin is wired by hand here, so it applies it too.
+	let remote = moq_net::Origin::random()
+		.produce()
+		.with_linger(moq.client.backoff.linger());
 	let mut session = net
 		.client(moq.client.clone())?
 		.with_publisher(&publish)
