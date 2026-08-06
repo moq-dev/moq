@@ -411,6 +411,11 @@ impl ConnectionStatsReader {
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
 /// and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
 /// waits for the loop to stop. Dropping the handle aborts the background task.
+///
+/// `#[must_use]` because that last part is a footgun otherwise: `client.connect(url);`
+/// starts the dial and cancels it at the end of the statement. The old `async fn
+/// connect` was caught by the future's own `#[must_use]`; this restores the warning.
+#[must_use = "dropping the Connection aborts the dial; hold it for as long as you want the session"]
 pub struct Connection {
 	abort: tokio::task::AbortHandle,
 	state: kio::Consumer<State>,
