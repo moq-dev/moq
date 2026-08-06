@@ -576,7 +576,7 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	// Audio has no keyframes, so every audio fragment is independent; video is
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
-	let frames = infer_missing_durations(frames, successor, track.default_frame);
+	infer_missing_durations(&mut frames, successor, track.default_frame);
 	let duration = fragment_seconds(&frames, track.default_frame);
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
@@ -657,12 +657,8 @@ pub(crate) fn apply_codec_durations(frames: &mut [Frame], opus: bool) {
 /// The publisher is the one that actually knows where its group's content ends, and
 /// [`Producer::cut`](crate::container::Producer::cut) is how it says so: the durations it
 /// writes arrive already set and are left alone here.
-pub(crate) fn infer_missing_durations(
-	mut frames: Vec<Frame>,
-	successor: Option<&Frame>,
-	default_frame: Duration,
-) -> Vec<Frame> {
-	let infer_from_pts = pts_monotonic(&frames, successor);
+pub(crate) fn infer_missing_durations(frames: &mut [Frame], successor: Option<&Frame>, default_frame: Duration) {
+	let infer_from_pts = pts_monotonic(frames, successor);
 	// Express the fallback at the frames' own timescale so it matches the durations derived from
 	// their timestamps (a `Timestamp` carries its scale, and `try_from(Duration)` is nanosecond-scale).
 	let fallback = frames.first().map(|f| f.timestamp.scale()).and_then(|scale| {
@@ -677,14 +673,12 @@ pub(crate) fn infer_missing_durations(
 		}
 
 		frames[i].duration = infer_from_pts
-			.then(|| duration_bound(&frames, successor, i))
+			.then(|| duration_bound(frames, successor, i))
 			.flatten()
 			.and_then(|next| next.timestamp.checked_sub(frames[i].timestamp).ok())
 			.filter(|duration| !duration.is_zero())
 			.or(fallback);
 	}
-
-	frames
 }
 
 fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {
@@ -769,11 +763,8 @@ mod tests {
 
 	#[test]
 	fn infer_missing_durations_uses_default_for_trailing_sample() {
-		let frames = infer_missing_durations(
-			vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)],
-			None,
-			Duration::from_millis(33),
-		);
+		let mut frames = vec![frame(0, Some(0)), frame(41_667, None), frame(83_334, None)];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
@@ -783,7 +774,8 @@ mod tests {
 
 	#[test]
 	fn infer_missing_duration_uses_default_for_single_frame() {
-		let frames = infer_missing_durations(vec![frame(83_333, Some(0))], None, Duration::from_millis(40));
+		let mut frames = vec![frame(83_333, Some(0))];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(40));
 
 		assert_eq!(frames[0].duration, Some(ts(40_000)));
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(40)), 0.04);
@@ -792,7 +784,8 @@ mod tests {
 	#[test]
 	fn infer_trailing_duration_from_successor_frame() {
 		let successor = frame(83_334, None);
-		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
+		let mut frames = vec![frame(41_667, None)];
+		infer_missing_durations(&mut frames, Some(&successor), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.041667);
@@ -805,7 +798,8 @@ mod tests {
 	#[test]
 	fn infer_stops_at_a_group_boundary() {
 		let next_group = group_start(2_405_070_000);
-		let frames = infer_missing_durations(vec![frame(63_244, None)], Some(&next_group), Duration::from_millis(33));
+		let mut frames = vec![frame(63_244, None)];
+		infer_missing_durations(&mut frames, Some(&next_group), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.033);
@@ -816,11 +810,8 @@ mod tests {
 	/// the same.
 	#[test]
 	fn infer_stops_at_an_interior_group_boundary() {
-		let frames = infer_missing_durations(
-			vec![frame(0, None), frame(21_333, None), group_start(600_000_000)],
-			None,
-			Duration::from_millis(21),
-		);
+		let mut frames = vec![frame(0, None), frame(21_333, None), group_start(600_000_000)];
+		infer_missing_durations(&mut frames, None, Duration::from_millis(21));
 
 		assert_eq!(frames[0].duration, Some(ts(21_333)), "same group, real delta");
 		assert_eq!(frames[1].duration, Some(ts(21_000)), "bounded by the next group");
@@ -832,7 +823,8 @@ mod tests {
 	#[test]
 	fn infer_crosses_a_mid_group_fragment_boundary() {
 		let successor = frame(83_334, None);
-		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
+		let mut frames = vec![frame(41_667, None)];
+		infer_missing_durations(&mut frames, Some(&successor), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 	}
@@ -853,7 +845,7 @@ mod tests {
 			.collect();
 
 		apply_codec_durations(&mut frames, true);
-		let frames = infer_missing_durations(frames, None, Duration::from_micros(21_333));
+		infer_missing_durations(&mut frames, None, Duration::from_micros(21_333));
 
 		for f in &frames {
 			assert_eq!(
@@ -869,11 +861,8 @@ mod tests {
 	#[test]
 	fn infer_ignores_a_rewound_group_boundary() {
 		let next_group = group_start(0);
-		let frames = infer_missing_durations(
-			vec![frame(1_000_000, None), frame(1_033_000, None)],
-			Some(&next_group),
-			Duration::from_millis(50),
-		);
+		let mut frames = vec![frame(1_000_000, None), frame(1_033_000, None)];
+		infer_missing_durations(&mut frames, Some(&next_group), Duration::from_millis(50));
 
 		assert_eq!(
 			frames[0].duration,
@@ -886,11 +875,8 @@ mod tests {
 	#[test]
 	fn infer_missing_durations_avoids_non_monotonic_pts() {
 		let successor = frame(66_000, None);
-		let frames = infer_missing_durations(
-			vec![frame(0, None), frame(99_000, None), frame(33_000, None)],
-			Some(&successor),
-			Duration::from_millis(33),
-		);
+		let mut frames = vec![frame(0, None), frame(99_000, None), frame(33_000, None)];
+		infer_missing_durations(&mut frames, Some(&successor), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
 		assert_eq!(frames[1].duration, Some(ts(33_000)));
