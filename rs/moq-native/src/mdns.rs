@@ -317,6 +317,7 @@ impl Config {
 
 /// A MoQ process discovered on the LAN.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Peer {
 	/// The advertised node URL when there is one, otherwise the per-run service
 	/// instance. Stable across a re-resolve, and what [`Discovery::should_dial`]

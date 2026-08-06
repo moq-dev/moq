@@ -59,6 +59,25 @@ pub struct Lan {
 	client: moq_native::ClientConfig,
 }
 
+/// The discovered details needed to open one LAN dial.
+struct DialTarget {
+	urls: Vec<Url>,
+	has_node: bool,
+	fingerprint: Option<String>,
+	credential: Option<String>,
+}
+
+impl From<&mdns::Peer> for DialTarget {
+	fn from(peer: &mdns::Peer) -> Self {
+		Self {
+			urls: peer.urls(),
+			has_node: peer.node.is_some(),
+			fingerprint: peer.fingerprint.clone(),
+			credential: peer.credential.clone(),
+		}
+	}
+}
+
 impl Lan {
 	/// Advertise `server` on the LAN and start browsing for peers.
 	///
@@ -209,6 +228,11 @@ impl Lan {
 
 	/// Start a reconnecting session to one peer.
 	fn dial(&self, peer: &mdns::Peer) -> anyhow::Result<moq_native::Connection> {
+		self.dial_target(&peer.into())
+	}
+
+	/// Start a reconnecting session from the discovered details needed by a dial.
+	fn dial_target(&self, peer: &DialTarget) -> anyhow::Result<moq_native::Connection> {
 		// Every advertised address is a candidate: only the peer's own routing table
 		// knows which of them reaches it from here. A peer that advertised nothing
 		// reachable has nothing to dial, which `Addrs` makes us handle here rather
@@ -237,13 +261,14 @@ impl Lan {
 	/// The proof is [`mdns::Peer::credential`], which discovery derived from that
 	/// peer's own advertisement. It authenticates to that listener and nowhere
 	/// else, so an impostor that got itself dialed learns nothing it can reuse.
-	fn dial_urls(&self, peer: &mdns::Peer) -> Vec<Url> {
-		peer.urls()
-			.into_iter()
+	fn dial_urls(&self, peer: &DialTarget) -> Vec<Url> {
+		peer.urls
+			.iter()
+			.cloned()
 			.map(|mut url| {
 				// A peer that advertised a canonical node URL is reachable by name
 				// and brings its own path; only a bare LAN socket gets the marker.
-				if peer.node.is_none() {
+				if !peer.has_node {
 					url.set_path(&match &peer.credential {
 						Some(credential) => format!("{MESH_PATH}/{credential}"),
 						None => MESH_PATH.to_string(),
@@ -446,14 +471,13 @@ mod tests {
 	fn dial_urls_carry_the_proof_to_every_address() {
 		let lan = lan(Some("ours"));
 
-		let socket = mdns::Peer {
-			id: "peer".into(),
-			addrs: ["192.168.1.5:4443", "127.0.0.1:4443"]
+		let socket = DialTarget {
+			urls: ["moqt://192.168.1.5:4443", "moqt://127.0.0.1:4443"]
 				.into_iter()
-				.map(|addr| addr.parse().expect("valid address"))
+				.map(|url| url.parse().expect("valid url"))
 				.collect(),
+			has_node: false,
 			fingerprint: Some("abcd".into()),
-			node: None,
 			credential: Some("theirs".into()),
 		};
 		let urls: Vec<String> = lan.dial_urls(&socket).into_iter().map(String::from).collect();
@@ -467,11 +491,10 @@ mod tests {
 		);
 
 		// A node URL is dialed exactly as advertised.
-		let node = mdns::Peer {
-			id: "peer".into(),
-			addrs: vec![],
+		let node = DialTarget {
+			urls: vec!["https://relay.example.com/anon".parse().expect("valid url")],
+			has_node: true,
 			fingerprint: None,
-			node: Some("https://relay.example.com/anon".parse().expect("valid url")),
 			credential: Some("theirs".into()),
 		};
 		assert_eq!(lan.dial_urls(&node)[0].path(), "/anon");
@@ -487,17 +510,18 @@ mod tests {
 		let mut lan = lan(None);
 		lan.client = client;
 
-		let peer = mdns::Peer {
-			id: "peer".into(),
-			addrs: vec!["127.0.0.1:4443".parse().expect("valid address")],
+		let peer = DialTarget {
+			urls: vec!["moqt://127.0.0.1:4443".parse().expect("valid url")],
+			has_node: false,
 			fingerprint: Some("00".repeat(32)),
-			node: None,
 			credential: None,
 		};
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		// Held rather than dropped: the dial is what's under test, and dropping the
 		// connection would abort it before the assertion means anything.
-		let _connection = lan.dial(&peer).expect("a pinned dial must not inherit the CA roots");
+		let _connection = lan
+			.dial_target(&peer)
+			.expect("a pinned dial must not inherit the CA roots");
 	}
 
 	#[test]
@@ -537,7 +561,7 @@ mod tests {
 
 	/// Bind a listener the way `--cluster-lan` does, returning it plus the peer
 	/// record mDNS would have produced for it.
-	fn listener() -> (moq_native::Server, mdns::Peer) {
+	fn listener() -> (moq_native::Server, DialTarget) {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 		let mut config = moq_native::ServerConfig::default();
@@ -552,11 +576,10 @@ mod tests {
 			.into_iter()
 			.next()
 			.expect("no fingerprint");
-		let peer = mdns::Peer {
-			id: "peer".into(),
-			addrs: vec![format!("127.0.0.1:{port}").parse().expect("valid address")],
+		let peer = DialTarget {
+			urls: vec![format!("moqt://127.0.0.1:{port}").parse().expect("valid url")],
+			has_node: false,
 			fingerprint: Some(fingerprint),
-			node: None,
 			credential: None,
 		};
 		(server, peer)
@@ -584,7 +607,7 @@ mod tests {
 
 		let mut dialer = lan(None);
 		dialer.origin = origin_a.clone();
-		let _dial = dialer.dial(&peer).expect("dial");
+		let _dial = dialer.dial_target(&peer).expect("dial");
 
 		let mut announced_on_b = origin_b.consume().announced();
 		let update = tokio::time::timeout(TIMEOUT, announced_on_b.next())
@@ -628,7 +651,7 @@ mod tests {
 		// A peer that reached the port but never saw a verifiable advertisement.
 		let mut dialer = lan(None);
 		dialer.origin = origin_a.clone();
-		let _dial = dialer.dial(&peer).expect("dial");
+		let _dial = dialer.dial_target(&peer).expect("dial");
 
 		// Nothing is ever announced, because the session is closed at authorization.
 		let mut announced_on_a = origin_a.consume().announced();
@@ -662,7 +685,7 @@ mod tests {
 		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
 		config.reconnect = Some(false);
 		let stolen = moq_net::Origin::random().produce();
-		let url = peer.urls().into_iter().next().expect("an address");
+		let url = peer.urls.into_iter().next().expect("an address");
 		let connection = config
 			.init()
 			.expect("client")
