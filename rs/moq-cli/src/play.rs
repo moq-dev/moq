@@ -162,6 +162,22 @@ pub fn run(
 	}
 }
 
+/// Wait for `broadcast` to be announced on `origin`, then subscribe to it.
+///
+/// The wait is the whole point. Subscribing goes through
+/// `origin::Consumer::request_broadcast`, which resolves `Unroutable` on the
+/// spot when no session has registered a handler yet rather than waiting for
+/// one, and the media task starts well before the first handshake lands. The
+/// window is already up, so this shows as a black frame rather than as a hang.
+async fn subscribe(origin: moq_net::origin::Consumer, broadcast: &str) -> anyhow::Result<moq_mux::Source> {
+	origin
+		.announced_broadcast(broadcast)
+		.await
+		.with_context(|| format!("origin closed before broadcast `{broadcast}` was announced"))?;
+
+	Ok(moq_mux::Source::new(origin, broadcast))
+}
+
 async fn watch_network(mut tasks: tokio::task::JoinSet<anyhow::Result<()>>, proxy: EventLoopProxy<Event>) {
 	while let Some(result) = tasks.join_next().await {
 		let event = match result {
@@ -196,16 +212,7 @@ impl Media {
 	}
 
 	async fn play(self) -> anyhow::Result<()> {
-		// Wait for the announcement before resolving anything. A request against an
-		// origin no session has reached yet fails `Unroutable` on the spot, and this
-		// task starts well before the first handshake lands. The window is already
-		// up, so the wait shows as black rather than as a hang.
-		self.origin
-			.announced_broadcast(&self.broadcast)
-			.await
-			.with_context(|| format!("origin closed before broadcast `{}` was announced", self.broadcast))?;
-
-		let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
+		let source = subscribe(self.origin.clone(), &self.broadcast).await?;
 		let broadcast = source
 			.broadcast()
 			.await
@@ -568,6 +575,8 @@ impl ApplicationHandler<Event> for App {
 
 struct Display {
 	window: Arc<Window>,
+	/// Kept past setup so a lost surface can be rebuilt from it.
+	instance: wgpu::Instance,
 	surface: wgpu::Surface<'static>,
 	device: wgpu::Device,
 	queue: wgpu::Queue,
@@ -610,6 +619,7 @@ impl Display {
 
 		Ok(Self {
 			window,
+			instance,
 			surface,
 			device,
 			queue,
@@ -645,7 +655,17 @@ impl Display {
 				self.surface.configure(&self.device, &self.config);
 				return Ok(());
 			}
-			CurrentSurfaceTexture::Lost => anyhow::bail!("the playback window's graphics surface was lost"),
+			// Not just a stale configuration like `Outdated`: the surface itself is
+			// gone and has to be rebuilt before it can be configured again. A
+			// display change or a resume can do this, so it isn't fatal.
+			CurrentSurfaceTexture::Lost => {
+				self.surface = self
+					.instance
+					.create_surface(self.window.clone())
+					.context("failed to rebuild the playback window's graphics surface")?;
+				self.surface.configure(&self.device, &self.config);
+				return Ok(());
+			}
 			CurrentSurfaceTexture::Validation => anyhow::bail!("failed to acquire the playback window's next frame"),
 		};
 		let target = output.texture.create_view(&Default::default());
@@ -831,6 +851,32 @@ fn fit(window: (u32, u32), video: (u32, u32)) -> (f32, f32, f32, f32) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Subscribing before the announcement lands doesn't wait, it fails: with no
+	/// session yet there is no handler registered on the origin, and
+	/// `request_broadcast` resolves `Unroutable` immediately. The media task is
+	/// spawned right after the reconnect loop starts, so it gets there first.
+	#[tokio::test]
+	async fn subscribe_waits_for_the_announcement() {
+		tokio::time::pause();
+
+		let origin = moq_net::Origin::random().produce();
+		let consumer = origin.consume();
+
+		// Resolving straight away, which is what the media task used to do.
+		let unannounced = moq_mux::Source::new(consumer.clone(), "room.hang").broadcast().await;
+		assert!(unannounced.is_err(), "expected an unroutable broadcast");
+
+		// Waiting first parks instead, for as long as it takes.
+		let mut waiting = std::pin::pin!(subscribe(consumer, "room.hang"));
+		let parked = tokio::time::timeout(Duration::from_secs(60), &mut waiting).await;
+		assert!(parked.is_err(), "expected to still be waiting on the announcement");
+
+		let _broadcast = origin
+			.create_broadcast("room.hang", moq_net::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		waiting.await.unwrap();
+	}
 
 	#[test]
 	fn letterboxes_without_changing_aspect_ratio() {
