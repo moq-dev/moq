@@ -28,6 +28,17 @@ const MAX_VIDEO_FRAMES: usize = 30;
 /// slop doesn't push every frame a whole refresh late.
 const VIDEO_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
 
+/// How far ahead of the speaker the decoder may run before we make it wait.
+/// `Sink::write` never blocks and drops whatever won't fit, so a burst (a
+/// completed group arriving all at once) would otherwise lose its tail. Well
+/// under the sink's own ceiling, and well over the ~50 ms it settles at.
+const AUDIO_BUFFER_MAX: Duration = Duration::from_secs(1);
+
+/// Give up waiting on the speaker to drain this long after the last sample.
+/// A device that never opens reports its queue as full forever, and a truncated
+/// tail beats hanging on the way out.
+const AUDIO_DRAIN_MAX: Duration = Duration::from_secs(4);
+
 /// Play one MoQ broadcast through a native window and speaker.
 #[derive(ClapArgs, Clone)]
 pub struct Args {
@@ -87,7 +98,10 @@ impl Clock {
 
 enum Event {
 	Wake,
+	/// Stop now: Ctrl-C, or the transport is gone and there is nothing more coming.
 	Finished,
+	/// Every track reached its end. Present what is still queued, then stop.
+	Ended,
 	Failed(String),
 }
 
@@ -109,14 +123,17 @@ pub fn run(
 	let video = Arc::new(Mutex::new(VecDeque::new()));
 	let audio_clock = Arc::new(Mutex::new(None));
 
-	let media = tokio::spawn(run_media(
-		origin,
-		broadcast.clone(),
-		args,
-		video.clone(),
-		audio_clock.clone(),
-		proxy.clone(),
-	));
+	let media = tokio::spawn(
+		Media {
+			origin,
+			broadcast: broadcast.clone(),
+			args,
+			video: video.clone(),
+			audio_clock: audio_clock.clone(),
+			proxy: proxy.clone(),
+		}
+		.run(),
+	);
 	let network = tokio::spawn(watch_network(network, proxy.clone()));
 	let signal = tokio::spawn({
 		let proxy = proxy.clone();
@@ -158,123 +175,143 @@ async fn watch_network(mut tasks: tokio::task::JoinSet<anyhow::Result<()>>, prox
 	}
 }
 
-async fn run_media(
+/// Everything the media task needs to fill the window and the speaker.
+struct Media {
 	origin: moq_net::origin::Consumer,
-	broadcast_name: String,
+	broadcast: String,
 	args: Args,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	audio_clock: Arc<Mutex<Option<Clock>>>,
 	proxy: EventLoopProxy<Event>,
-) {
-	let result = media(origin, broadcast_name, args, video, audio_clock, proxy.clone()).await;
-	let event = match result {
-		Ok(()) => Event::Finished,
-		Err(err) => Event::Failed(format!("{err:#}")),
-	};
-	let _ = proxy.send_event(event);
 }
 
-async fn media(
-	origin: moq_net::origin::Consumer,
-	broadcast_name: String,
-	args: Args,
-	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
-	audio_clock: Arc<Mutex<Option<Clock>>>,
-	proxy: EventLoopProxy<Event>,
-) -> anyhow::Result<()> {
-	// Wait for the announcement before resolving anything. A request against an
-	// origin no session has reached yet fails `Unroutable` on the spot, and this
-	// task starts well before the first handshake lands. The window is already
-	// up, so the wait shows as black rather than as a hang.
-	origin
-		.announced_broadcast(&broadcast_name)
-		.await
-		.with_context(|| format!("origin closed before broadcast `{broadcast_name}` was announced"))?;
+impl Media {
+	async fn run(self) {
+		let proxy = self.proxy.clone();
+		let event = match self.play().await {
+			Ok(()) => Event::Ended,
+			Err(err) => Event::Failed(format!("{err:#}")),
+		};
+		let _ = proxy.send_event(event);
+	}
 
-	let source = moq_mux::Source::new(origin, &broadcast_name);
-	let broadcast = source
-		.broadcast()
-		.await
-		.context("failed to subscribe to the broadcast")?;
-	let catalog = catalog::Consumer::<()>::new(&broadcast, args.catalog_format(&broadcast_name))
-		.await
-		.context("failed to subscribe to the catalog")?;
-	let mut catalogs = catalog.select(args.select.selection(None));
-	let mut tasks = tokio::task::JoinSet::new();
-	let mut video_started = false;
-	let mut audio_started = false;
-	// Set once the catalog track ends, which disarms the branch below: a stream
-	// that has returned `None` returns it forever, so polling it again spins.
-	let mut catalog_ended = false;
+	async fn play(self) -> anyhow::Result<()> {
+		// Wait for the announcement before resolving anything. A request against an
+		// origin no session has reached yet fails `Unroutable` on the spot, and this
+		// task starts well before the first handshake lands. The window is already
+		// up, so the wait shows as black rather than as a hang.
+		self.origin
+			.announced_broadcast(&self.broadcast)
+			.await
+			.with_context(|| format!("origin closed before broadcast `{}` was announced", self.broadcast))?;
 
-	loop {
-		// Audio and video end independently, so one track finishing is not the end
-		// of playback. Stop once every track that started has ended.
-		if tasks.is_empty() && (video_started || audio_started) {
-			return Ok(());
-		}
+		let source = moq_mux::Source::new(self.origin.clone(), &self.broadcast);
+		let broadcast = source
+			.broadcast()
+			.await
+			.context("failed to subscribe to the broadcast")?;
+		let catalog = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
+			.await
+			.context("failed to subscribe to the catalog")?;
+		let mut catalogs = catalog.select(self.args.select.selection(None));
+		let mut tasks = tokio::task::JoinSet::new();
+		let mut video_started = false;
+		let mut audio_started = false;
+		// Set once the catalog track ends, which disarms the branch below: a stream
+		// that has returned `None` returns it forever, so polling it again spins.
+		let mut catalog_ended = false;
 
-		tokio::select! {
-			result = tasks.join_next(), if !tasks.is_empty() => {
-				joined(result.expect("guarded by is_empty"))?;
+		loop {
+			// Audio and video end independently, so one track finishing is not the end
+			// of playback. Stop once every track that started has ended.
+			if tasks.is_empty() && (video_started || audio_started) {
+				return Ok(());
 			}
-			snapshot = catalogs.next(), if !catalog_ended && (!video_started || !audio_started) => {
-				let Some(snapshot) = snapshot.context("failed to read the catalog")? else {
-					anyhow::ensure!(video_started || audio_started, "the catalog contains no playable audio or video renditions");
-					catalog_ended = true;
-					continue;
-				};
 
-				if !video_started {
-					for (name, config) in snapshot.video.renditions {
-						// A rendition pointing at a broadcast we can't reach is that
-						// rendition's problem, not the catalog's: fall through to the
-						// next one like an unsupported codec does.
-						let rendition = match source.resolve(config.broadcast.as_ref()).await {
-							Ok(rendition) => rendition,
-							Err(err) => {
-								tracing::warn!(track = name, %err, "cannot resolve video rendition");
-								continue;
-							}
-						};
-						let mut decode = moq_video::decode::Config::new();
-						decode.latency_max = Some(args.latency_max);
-						match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
-							Ok(consumer) => {
-								tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
-								tasks.spawn(play_video(consumer, video.clone(), proxy.clone()));
-								video_started = true;
-								break;
-							}
-							Err(err) => tracing::warn!(track = name, %err, "cannot play video rendition"),
-						}
-					}
+			tokio::select! {
+				result = tasks.join_next(), if !tasks.is_empty() => {
+					joined(result.expect("guarded by is_empty"))?;
 				}
+				snapshot = catalogs.next(), if !catalog_ended && (!video_started || !audio_started) => {
+					let Some(snapshot) = snapshot.context("failed to read the catalog")? else {
+						anyhow::ensure!(video_started || audio_started, "the catalog contains no playable audio or video renditions");
+						catalog_ended = true;
+						continue;
+					};
 
-				if !audio_started {
-					for (name, config) in snapshot.audio.renditions {
-						let rendition = match source.resolve(config.broadcast.as_ref()).await {
-							Ok(rendition) => rendition,
-							Err(err) => {
-								tracing::warn!(track = name, %err, "cannot resolve audio rendition");
-								continue;
+					// Why nothing started, so a catalog this build can't play reports the
+					// reason instead of leaving a blank window up forever. The decoders are
+					// gated by platform and cargo feature (no AV1 without nvdec, say), so
+					// this covers gaps the codec flags can't be validated against up front.
+					let mut rejected = Vec::new();
+
+					if !video_started {
+						for (name, config) in snapshot.video.renditions {
+							// A rendition pointing at a broadcast we can't reach is that
+							// rendition's problem, not the catalog's: fall through to the
+							// next one like an unsupported codec does.
+							let rendition = match source.resolve(config.broadcast.as_ref()).await {
+								Ok(rendition) => rendition,
+								Err(err) => {
+									tracing::warn!(track = name, %err, "cannot resolve video rendition");
+									rejected.push(format!("video `{name}`: {err}"));
+									continue;
+								}
+							};
+							let mut decode = moq_video::decode::Config::new();
+							decode.latency_max = Some(self.args.latency_max);
+							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
+								Ok(consumer) => {
+									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
+									tasks.spawn(play_video(consumer, self.video.clone(), self.proxy.clone()));
+									video_started = true;
+									break;
+								}
+								Err(err) => {
+									tracing::warn!(track = name, %err, "cannot play video rendition");
+									rejected.push(format!("video `{name}`: {err}"));
+								}
 							}
-						};
-						let mut decode = moq_audio::decode::Config::new();
-						decode.latency_max = Some(args.latency_max);
-						// The sink and the frame-duration math below both assume f32,
-						// so ask for it rather than inheriting the decoder default.
-						decode.format = moq_audio::Format::F32;
-						match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
-							Ok(consumer) => {
-								tracing::info!(track = name, "playing audio rendition");
-								tasks.spawn(play_audio(consumer, audio_clock.clone(), proxy.clone()));
-								audio_started = true;
-								break;
-							}
-							Err(err) => tracing::warn!(track = name, %err, "cannot play audio rendition"),
 						}
 					}
+
+					if !audio_started {
+						for (name, config) in snapshot.audio.renditions {
+							let rendition = match source.resolve(config.broadcast.as_ref()).await {
+								Ok(rendition) => rendition,
+								Err(err) => {
+									tracing::warn!(track = name, %err, "cannot resolve audio rendition");
+									rejected.push(format!("audio `{name}`: {err}"));
+									continue;
+								}
+							};
+							let mut decode = moq_audio::decode::Config::new();
+							decode.latency_max = Some(self.args.latency_max);
+							// The sink and the frame-duration math below both assume f32,
+							// so ask for it rather than inheriting the decoder default.
+							decode.format = moq_audio::Format::F32;
+							match moq_audio::decode::Consumer::new(&rendition, &config, &name, decode).await {
+								Ok(consumer) => {
+									tracing::info!(track = name, "playing audio rendition");
+									tasks.spawn(play_audio(consumer, self.audio_clock.clone(), self.proxy.clone()));
+									audio_started = true;
+									break;
+								}
+								Err(err) => {
+									tracing::warn!(track = name, %err, "cannot play audio rendition");
+									rejected.push(format!("audio `{name}`: {err}"));
+								}
+							}
+						}
+					}
+
+					// Renditions on offer and not one of them playable, with nothing
+					// already running to fall back on.
+					anyhow::ensure!(
+						!tasks.is_empty() || rejected.is_empty(),
+						"no playable rendition in the catalog: {}",
+						rejected.join("; ")
+					);
 				}
 			}
 		}
@@ -321,6 +358,11 @@ async fn play_audio(
 	})?;
 
 	while let Some(frame) = consumer.read().await? {
+		// Let the speaker catch up before handing it more than it can hold.
+		if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
+			tokio::time::sleep(excess).await;
+		}
+
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
 		let end =
 			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
@@ -336,6 +378,18 @@ async fn play_audio(
 			let _ = proxy.send_event(Event::Wake);
 		}
 	}
+
+	// The track ended, but the speaker is still a buffer behind. Play it out
+	// instead of cutting the tail off by dropping the sink.
+	let drain = async {
+		// A partial period is left to the device: waiting on the last few
+		// milliseconds costs a wakeup per iteration and can never fully settle.
+		while let Some(remaining) = sink.buffered().checked_sub(Duration::from_millis(10)) {
+			tokio::time::sleep(remaining.max(Duration::from_millis(10))).await;
+		}
+	};
+	let _ = tokio::time::timeout(AUDIO_DRAIN_MAX, drain).await;
+
 	Ok(())
 }
 
@@ -350,6 +404,9 @@ struct App {
 	video_clock: Option<Clock>,
 	display: Option<Display>,
 	next_redraw: Option<Instant>,
+	/// The media tasks are done. Keep presenting whatever they left queued, then
+	/// stop; exiting the moment the decoder hits EOF would cut the tail off.
+	ending: bool,
 	error: Option<String>,
 }
 
@@ -366,6 +423,7 @@ impl App {
 			video_clock: None,
 			display: None,
 			next_redraw: None,
+			ending: false,
 			error: None,
 		}
 	}
@@ -442,6 +500,12 @@ impl ApplicationHandler<Event> for App {
 				}
 			}
 			Event::Finished => event_loop.exit(),
+			Event::Ended => {
+				self.ending = true;
+				if let Some(display) = &self.display {
+					display.window.request_redraw();
+				}
+			}
 			Event::Failed(err) => self.fail(event_loop, err),
 		}
 	}
@@ -481,6 +545,14 @@ impl ApplicationHandler<Event> for App {
 	}
 
 	fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+		// Nothing left to decode and nothing left to show. No window means nothing
+		// can drain the queue, so don't wait on it.
+		let drained = self.display.is_none() || self.video.lock().unwrap().is_empty();
+		if self.ending && self.next_redraw.is_none() && drained {
+			event_loop.exit();
+			return;
+		}
+
 		match self.next_redraw {
 			Some(deadline) if deadline <= Instant::now() => {
 				self.next_redraw = None;
