@@ -80,9 +80,6 @@ export interface Table {
 
 	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
 	announced(prefix?: Path.Valid): announce.Consumer;
-
-	/** A one-shot lookup; see {@link Consumer.get}. @internal */
-	get(path: Path.Valid): broadcast.Consumer | undefined;
 }
 
 /**
@@ -211,6 +208,16 @@ export class Producer implements Table {
 	}
 
 	/**
+	 * Resolves once anything a serving session scans changes: the open requests, or either
+	 * side of the routing table.
+	 *
+	 * @internal
+	 */
+	changed(): Promise<unknown> {
+		return Signal.race(this.#state.requests, this.#state.local, this.#state.remote);
+	}
+
+	/**
 	 * Provide `front` as the answer for the open request on `path`, taking ownership of it.
 	 *
 	 * Returns undefined (releasing the front) when the request is gone or already answered;
@@ -255,14 +262,14 @@ export class Producer implements Table {
 		return this.#reader.request(path);
 	}
 
+	/** Whether the table routes `path` itself; see {@link Consumer.routes}. @internal */
+	routes(path: Path.Valid): boolean {
+		return this.#reader.routes(path);
+	}
+
 	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
 	announced(prefix?: Path.Valid): announce.Consumer {
 		return this.#reader.announced(prefix);
-	}
-
-	/** A one-shot lookup; see {@link Consumer.get}. @internal */
-	get(path: Path.Valid): broadcast.Consumer | undefined {
-		return this.#reader.get(path);
 	}
 
 	// The reader backing the passthroughs, so holding a Producer never requires the
@@ -397,18 +404,17 @@ export class Consumer {
 	};
 
 	/**
-	 * A one-shot handle to the broadcast at `path`, or undefined when nothing routes it.
+	 * Whether the table routes `path` itself, by a local publish or a session's announcement.
 	 *
-	 * A snapshot: it neither waits for the path to appear nor follows a republish, which is
-	 * why it is not public. Use {@link request} for a resolution that cannot race. A local
-	 * publish wins over a remote broadcast. The handle is yours: close it when done.
+	 * Availability, not a handle: {@link request} is the only way to consume by path. A
+	 * request on a routed path resolves to that route and never to a blind answer, which is
+	 * why a serving session leaves it alone.
 	 *
 	 * @internal
 	 */
-	get(path: Path.Valid): broadcast.Consumer | undefined {
-		const local = this.#state.local.peek()?.get(path);
-		if (local) return local.clone();
-		return this.#state.remote.peek()?.get(path)?.[0]?.clone();
+	routes(path: Path.Valid): boolean {
+		if (this.#state.local.peek()?.has(path)) return true;
+		return (this.#state.remote.peek()?.get(path)?.length ?? 0) > 0;
 	}
 
 	/**

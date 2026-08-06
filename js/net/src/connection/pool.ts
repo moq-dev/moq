@@ -46,6 +46,10 @@ export interface SharedProps {
  * linger window (see {@link SharedProps.linger}), so a component torn down and rebuilt
  * reuses the warm connection instead of redialing.
  *
+ * The loop reconnects for as long as a handle holds it, so an outage of any length recovers
+ * on its own. An auth rejection is the one failure it stops on, and it retires the shared
+ * connection so the next handle dials fresh.
+ *
  * For a connection with options sharing can't honor (a certificate pin, a supplied
  * transport, origins of your own), construct a {@link Reload} directly instead.
  *
@@ -223,9 +227,24 @@ function acquire(key: string, linger?: DOMHighResTimeStamp): Entry & { release: 
 			enabled: true,
 			publish: origin.consume(),
 			subscribe: origin,
+			// Nobody observes a shared loop's `closed`, so giving up would strand every handle
+			// on this URL offline until the page reloads. Retry for as long as the entry lives
+			// instead; an auth rejection is still terminal, and evicts below.
+			delay: { timeout: 0 },
 		});
-		entry = { origin, connection, refs: 0, linger: linger ?? LINGER_MS };
-		pool.set(key, entry);
+
+		const created: Entry = { origin, connection, refs: 0, linger: linger ?? LINGER_MS };
+
+		// The loop only stops on a peer saying these credentials will never work. Drop the
+		// entry so a later handle dials fresh rather than joining a loop that has stopped;
+		// handles already on it keep it until they release, since a redial would be refused
+		// the same way.
+		void connection.closed.catch(() => {
+			if (pool.get(key) === created) pool.delete(key);
+		});
+
+		entry = created;
+		pool.set(key, created);
 	}
 
 	const taken = entry;
