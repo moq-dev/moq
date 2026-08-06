@@ -18,11 +18,13 @@ class SmokeTest {
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
      * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
+     * One-shot mode, since the default reconnect would retry the dial with
+     * backoff instead of failing.
      */
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", tlsVerify = false)
+            Moq.connect("https://localhost:0/test", tlsVerify = false, reconnect = false)
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -55,11 +57,20 @@ class SmokeTest {
         val snapshot: JsonSnapshotConfig = JsonSnapshotConfig(deltaRatio = 8u, compression = false)
         val stream: JsonStreamConfig = JsonStreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
+        val backoff: Backoff = Backoff(
+            initialMs = 500uL,
+            multiplier = 2u,
+            maxMs = 10_000uL,
+            timeoutMs = 0uL,
+        )
+        val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
+        assertEquals(500uL, backoff.initialMs)
+        assertEquals(ConnectionStatus.CONNECTED, status)
     }
 
     @Test

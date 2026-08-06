@@ -79,19 +79,20 @@ impl Client {
 		self
 	}
 
-	/// Price what subscribing from us costs, in the units the rest of the mesh uses
-	/// (moq-lite-06+, and `moqt-17`+ via the MoQ Cluster extension).
+	/// Price this link, in the units the rest of the mesh uses (moq-lite-06+, and
+	/// `moqt-17`+ via the MoQ Cluster extension).
 	///
-	/// Declared in our SETUP; the peer adds it to the route cost of every announcement
-	/// we forward it, so routing prefers cheap paths over short ones. Use `0` for a
-	/// direction that should look free (a sibling in the same datacenter), and
-	/// something large for one that should be a last resort (metered egress). When we
-	/// declare nothing the peer charges `1`, which makes the cost track the hop count
-	/// and so reproduces plain shortest-path routing.
+	/// The dialer is the side that knows what a link costs, because it chose the peer:
+	/// use `0` for a sibling in the same datacenter and something large for another
+	/// region across a metered backbone. So this prices both directions. We add it to
+	/// the route cost of every announcement the peer sends us, and declare it in our
+	/// SETUP so the peer adds it to every announcement we send, which is what a server
+	/// accepting an anonymous connection needs: it cannot tell a sibling from a
+	/// stranger, so it has no price of its own to apply.
 	///
-	/// This prices one direction only. What *we* pay to pull from the peer is whatever
-	/// the peer declares, so an asymmetric link is described by each side setting its
-	/// own value, and a symmetric one by both setting the same.
+	/// A price the peer declares applies only where we set none. An unpriced link costs
+	/// `1`, which makes the cost track the hop count and so reproduces plain
+	/// shortest-path routing.
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.cost = Some(cost);
 		self
@@ -269,16 +270,16 @@ impl Client {
 					origin: None,
 				};
 
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
 					version,
 					our_setup,
-					None,
-				)?;
+					peer_setup: None,
+				})?;
 
 				// Block until the initial announce set has landed (Lite05+ reports it
 				// via AnnounceOk + N), so a `request_broadcast()` for a live path resolves
@@ -299,16 +300,16 @@ impl Client {
 					.select(Version::Lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					lite::Version::Lite04,
-					lite::Setup::default(),
-					None,
-				)?;
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: lite::Version::Lite04,
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				// Lite04 has no initial-set boundary, so this resolves immediately.
 				let (session, mut driver) = Session::new(
@@ -328,16 +329,16 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let start = lite::start(
-					session.clone(),
-					None,
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					lite::Version::Lite03,
-					lite::Setup::default(),
-					None,
-				)?;
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: lite::Version::Lite03,
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				// Lite03 has no initial-set boundary, so this resolves immediately.
 				let (session, mut driver) = Session::new(
@@ -390,18 +391,18 @@ impl Client {
 		let (recv_bw, protocol, connecting, goaway) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				let start = lite::start(
-					session.clone(),
-					Some(stream),
-					publish.clone(),
-					subscribe.clone(),
-					self.peer_origin,
-					v,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: Some(stream),
+					publish: publish.clone(),
+					subscribe: subscribe.clone(),
+					peer_origin: self.peer_origin,
+					version: v,
 					// This path only handles versions negotiated via the bidi SETUP exchange
 					// (pre-lite-05), which have no Setup Stream.
-					lite::Setup::default(),
-					None,
-				)?;
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 
 				(start.recv_bandwidth, start.driver, Some(start.connecting), start.goaway)
 			}

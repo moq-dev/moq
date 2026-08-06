@@ -59,6 +59,41 @@ for ann, err := range announced.All(ctx) {
 }
 ```
 
+## Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Pass `moq.WithReconnect(false)` for a one-shot dial, or tune the pacing:
+
+```go
+client, err := moq.Dial(ctx, "https://relay.example.com",
+    moq.WithBackoff(moq.Backoff{
+        Initial:    500 * time.Millisecond,
+        Multiplier: 2,
+        Max:        10 * time.Second,
+        Timeout:    moq.RetryForever,
+    }),
+)
+```
+
+Every `Backoff` field is optional and its zero value means the default (1s / 2 /
+30s / 5m), so `moq.Backoff{Max: 5 * time.Second}` changes only the ceiling.
+`moq.RetryForever` as `Timeout` is how you ask for unlimited retries.
+
+`Session.Status` reports each transition (`StatusConnected`, `StatusDisconnected`,
+`StatusMigrating`), and `Session.Closed` returns only once the connection stops
+for good:
+
+```go
+for {
+    status, err := client.Session().Status(ctx)
+    if err != nil {
+        break // gave up for good (or ctx cancelled)
+    }
+    fmt.Println("status:", status)
+}
+```
+
 ## TLS and stats
 
 Use certificate roots or fingerprints when a client needs to trust a private or

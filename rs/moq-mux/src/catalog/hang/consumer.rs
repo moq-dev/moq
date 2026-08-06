@@ -189,6 +189,58 @@ mod test {
 		publish_catalog(published)
 	}
 
+	/// [`publish_catalog`] against a *standalone* broadcast (no origin, so its own path is
+	/// empty) that a dynamic handler serves at `a/pub`, read back through the requesting
+	/// origin cursor. That is the shape an FFI app takes when it answers an origin request
+	/// with a broadcast it built itself.
+	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.expect("catalog track should create");
+
+		let origin = moq_net::Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+		let requesting = origin.consume().request_broadcast("a/pub");
+		let served = broadcast.consume();
+		tokio::spawn(async move {
+			dynamic
+				.requested_broadcast()
+				.await
+				.expect("handler should be asked for the path")
+				.accept(&served);
+		});
+
+		let subscriber = requesting
+			.await
+			.expect("the handler served it")
+			.track(hang::Catalog::DEFAULT_NAME)
+			.expect("catalog track should resolve")
+			.subscribe(None)
+			.await
+			.expect("catalog track should subscribe");
+		let mut consumer = Consumer::new(subscriber);
+
+		let mut group = track.append_group().expect("catalog group should append");
+		let payload = serde_json::to_string(&published).expect("catalog should serialize");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, payload)
+			.expect("catalog frame should write");
+		group.finish().expect("catalog group should finish");
+
+		consumer.next().await
+	}
+
+	/// [`publish_catalog_served`] over one audio rendition carrying `reference`.
+	async fn publish_served(reference: &str) -> Result<Option<Catalog>> {
+		let mut published = Catalog::<()>::default();
+		published
+			.audio
+			.renditions
+			.insert("sibling".to_string(), referencing(reference));
+		publish_catalog_served(published).await
+	}
+
 	/// A reference that stops at or below the root names a broadcast, so the catalog stands.
 	#[tokio::test]
 	async fn accepts_references_within_the_root() {
@@ -225,6 +277,36 @@ mod test {
 				Err(err) => panic!("{reference} failed with the wrong error: {err:?}"),
 				Ok(_) => panic!("{reference} should reject the catalog"),
 			}
+		}
+	}
+
+	/// A broadcast is named by where its reader found it, not by where its producer created
+	/// it: a standalone broadcast served on demand at `a/pub` resolves `../source` against
+	/// `a/pub`. Naming it by the producer's own (empty) path would make its own root the
+	/// bound, rejecting a reference the requester can perfectly well reach.
+	#[tokio::test]
+	async fn accepts_references_within_the_served_path() {
+		let catalog = publish_served("../source")
+			.await
+			.expect("catalog should be accepted")
+			.expect("catalog should decode");
+
+		let rendition = catalog
+			.audio
+			.renditions
+			.get("sibling")
+			.expect("rendition should survive");
+		assert_eq!(rendition.broadcast.as_ref().unwrap().as_str(), "../source");
+	}
+
+	/// The bound moves with the served path rather than disappearing: a reference that
+	/// walks above `a/pub` still names nothing and still rejects the catalog.
+	#[tokio::test]
+	async fn rejects_references_escaping_the_served_path() {
+		match publish_served("../../../elsewhere").await {
+			Err(crate::Error::EscapingBroadcast(reported)) => assert_eq!(reported, "../../../elsewhere"),
+			Err(err) => panic!("wrong error: {err:?}"),
+			Ok(_) => panic!("an escaping reference should reject the catalog"),
 		}
 	}
 

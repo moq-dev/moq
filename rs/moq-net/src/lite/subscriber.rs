@@ -128,11 +128,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// What pulling content across this session's link costs, added to the route cost
 	/// of every announcement received over it.
 	///
-	/// The Cost Parameter is directional: each endpoint declares what subscribing from
-	/// it costs, so the peer's declaration prices this direction while ours prices the
-	/// other. A locally configured price overrides it, since what we charge our own
-	/// routing is local policy. Falls back to [`super::DEFAULT_COST`] when neither
-	/// priced it.
+	/// A locally configured price wins, since what we charge our own routing is local
+	/// policy. Otherwise we charge what the peer declared, which is how a server prices
+	/// a link at all: it cannot tell a sibling from a stranger, so the dialer that chose
+	/// the peer declares the price for both of them. Falls back to
+	/// [`super::DEFAULT_COST`] when neither priced it, and to `0` on a version that
+	/// carries no cost at all, whose routes rank on hop count alone.
+	///
+	/// Our own price short-circuits the peer's, so a session that configured one never
+	/// blocks on a SETUP to start routing.
 	async fn resolve_cost(&self) -> u64 {
 		// Older versions carry no cost on the wire, so nothing is charged and their
 		// routes rank on hop count alone. Returning early also avoids blocking on a
@@ -1621,7 +1625,7 @@ struct SubStream<S: web_transport_trait::Session> {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	ordered: bool,
-	max_latency: Duration,
+	latency_max: Duration,
 	start: Option<Position>,
 	priority: u8,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
@@ -2027,7 +2031,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 						let start_moved = active.start != subscription.start;
 						active.priority = subscription.priority;
 						active.ordered = subscription.ordered;
-						active.max_latency = subscription.latency_max;
+						active.latency_max = subscription.latency.max;
 						active.start = subscription.start;
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -2101,7 +2105,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			track: self.name.as_str().into(),
 			priority: subscription.priority,
 			ordered: subscription.ordered,
-			max_latency: subscription.latency_max,
+			latency_max: subscription.latency.max,
 			start_group: bounds.start_group,
 			end_group: bounds.end_group,
 			start_frame: bounds.start_frame,
@@ -2164,7 +2168,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 			stream,
 			id,
 			ordered: subscription.ordered,
-			max_latency: subscription.latency_max,
+			latency_max: subscription.latency.max,
 			start: subscription.start,
 			priority: subscription.priority,
 			requested: subscription.start,
@@ -2179,7 +2183,7 @@ impl<S: web_transport_trait::Session> TrackServe<S> {
 		let update = lite::SubscribeUpdate {
 			priority: active.priority,
 			ordered: active.ordered,
-			max_latency: active.max_latency,
+			latency_max: active.latency_max,
 			start_group: bounds.start_group,
 			end_group: bounds.end_group,
 			start_frame: bounds.start_frame,

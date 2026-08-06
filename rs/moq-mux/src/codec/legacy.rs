@@ -120,9 +120,9 @@ pub(crate) struct Import<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Import<E> {
-	/// Publish on an existing track, reserving the rendition from `reserved`. Mint the
-	/// track at the descriptor's suffix with [`hang::container::track_info`] (e.g. via
-	/// [`crate::import::unique_track`]).
+	/// Publish on an existing track, reserving the rendition from `reserved`. Mint the track at
+	/// the descriptor's suffix with the catalog's
+	/// [`track_info`](crate::catalog::Producer::track_info).
 	pub fn new(
 		descriptor: &'static Descriptor,
 		track: moq_net::track::Producer,

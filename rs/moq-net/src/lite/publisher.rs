@@ -946,7 +946,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscription = crate::track::Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
-			latency_max: subscribe.max_latency,
+			latency: crate::Latency::max(subscribe.latency_max),
 			..Bounds::from(subscribe).positions()
 		};
 
@@ -976,7 +976,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let info = lite::SubscribeOk {
 				priority: subscribe.priority,
 				ordered: false,
-				max_latency: std::time::Duration::ZERO,
+				latency_max: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
 			};
@@ -2240,7 +2240,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					let _ = track.update(crate::track::Subscription {
 						priority: upd.priority,
 						ordered: upd.ordered,
-						latency_max: upd.max_latency,
+						latency: crate::Latency::max(upd.latency_max),
 						..bounds.positions()
 					});
 					if let Some(start_group) = upd.start_group {

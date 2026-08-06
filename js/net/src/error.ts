@@ -129,6 +129,8 @@ export function fromTransport(err: unknown): Error {
 	return new RemoteError(code, { cause: err });
 }
 
+const legacyWebTransportErrors = new WeakSet<object>();
+
 /**
  * Build the `reason` to hand `abort()` / `cancel()` so the transport puts `code` on the wire.
  *
@@ -145,7 +147,19 @@ export function fromTransport(err: unknown): Error {
  */
 export function toTransport(code: number, message: string): Error {
 	const Native = (globalThis as { WebTransportError?: typeof WebTransportError }).WebTransportError;
-	if (Native) return new Native(message, { source: "stream", streamErrorCode: code });
+	if (Native) {
+		const Legacy = Native as unknown as new (init: { message: string; streamErrorCode: number }) => Error;
+		if (legacyWebTransportErrors.has(Native)) return new Legacy({ message, streamErrorCode: code });
+
+		try {
+			return new Native(message, { source: "stream", streamErrorCode: code });
+		} catch (err) {
+			// Chromium still implements the previous single-dictionary constructor.
+			if (!(err instanceof TypeError)) throw err;
+			legacyWebTransportErrors.add(Native);
+			return new Legacy({ message, streamErrorCode: code });
+		}
+	}
 
 	return Object.assign(new Error(message), { source: "stream" as const, streamErrorCode: code });
 }

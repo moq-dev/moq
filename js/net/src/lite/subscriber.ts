@@ -678,11 +678,11 @@ export class Subscriber {
 			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
-			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/latencyMax/etc.
 			const update = new SubscribeUpdate({
 				priority: current,
 				ordered: msg.ordered,
-				maxLatency: msg.maxLatency,
+				latencyMax: msg.latencyMax,
 				startGroup: msg.startGroup,
 				endGroup: msg.endGroup,
 			});

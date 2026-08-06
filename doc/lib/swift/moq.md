@@ -68,6 +68,21 @@ do {
 }
 ```
 
+### Reconnecting
+
+The session automatically redials with backoff when the transport drops (a relay
+restart, a laptop waking from sleep), and broadcasts consumed through it ride out
+the gap. Call `client.setReconnect(false)` before connecting for a one-shot dial,
+or `client.setBackoff(...)` to tune the pacing. `session.status()` reports each
+transition, and `session.closed()` resolves only once the connection stops for
+good:
+
+```swift
+while let status = try? await session.status() {
+    print("status: \(status)")  // .connected / .disconnected / .migrating
+}
+```
+
 ## Subscribe
 
 Every consumer is an `AsyncSequence`, so iterate directly:

@@ -137,6 +137,10 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
+/** A connection lifecycle transition reported by [Session.status]. */
+typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
+typealias Backoff = uniffi.moq.MoqBackoff
 /** Configures a lossy latest-value JSON track. */
 typealias JsonSnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 /** Configures a lossless JSON stream track. */

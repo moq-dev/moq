@@ -26,7 +26,6 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use crate::rml::handshake::{Handshake, HandshakeProcessResult, PeerType};
 use crate::rml::sessions::{
@@ -67,7 +66,7 @@ pub struct Client<S = TcpStream> {
 	work: VecDeque<ClientSessionResult>,
 	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY).
-	latency: Duration,
+	latency: moq_mux::Latency,
 }
 
 impl Client<TcpStream> {
@@ -151,9 +150,9 @@ impl<S: Stream> Client<S> {
 
 	/// Set how long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
 	/// before skipping to a newer one (the moq-level frame-drop latency). Defaults
-	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass [`Duration::ZERO`] to
-	/// drop stale groups aggressively.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); pass
+	/// [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) to drop stale groups aggressively.
+	pub fn with_latency(mut self, latency: moq_mux::Latency) -> Self {
 		self.latency = latency;
 		self
 	}

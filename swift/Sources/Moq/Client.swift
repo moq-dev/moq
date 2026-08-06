@@ -61,6 +61,19 @@ public final class Client: Sendable {
         ffi.setConsume(origin: origin?.ffi)
     }
 
+    /// Enable or disable automatic reconnecting (on by default). When enabled, the
+    /// session redials with backoff whenever the transport drops, and broadcasts
+    /// consumed through it ride out the gap. Disable for a one-shot dial whose
+    /// transport close ends the session.
+    public func setReconnect(_ enabled: Bool) {
+        ffi.setReconnect(enabled: enabled)
+    }
+
+    /// Configure retry pacing for the automatic reconnect.
+    public func setBackoff(_ backoff: Backoff) {
+        ffi.setBackoff(backoff: backoff)
+    }
+
     /// Connect and wait for the session to be established. Cancellable via `cancel()`.
     ///
     /// With neither `setPublish` nor `setConsume` wired, both sides of the session share one
@@ -96,9 +109,24 @@ public final class Session: Sendable {
         OriginConsumer(ffi.consumer())
     }
 
-    /// Suspend until the session is closed.
+    /// Suspend until the session is over: an error when the connection gave up for
+    /// good, a normal return after a local `shutdown()`/`cancel()`. Transient drops
+    /// the reconnect loop rides out don't resolve this; watch `status()` for those.
     public func closed() async throws {
         try await ffi.closed()
+    }
+
+    /// Suspend until the connection status differs from the one last reported. A
+    /// client session reports `.connected` first, then follows the reconnect loop
+    /// (`.disconnected` while redialing, `.migrating` during a GOAWAY handover) and
+    /// throws once the connection stops for good. A server-accepted session's only
+    /// transition is terminal: this waits for the close and throws its reason.
+    ///
+    /// This is the current status, not a queue of every edge: a drop that
+    /// reconnects before you ask again is coalesced away, so the outages it hides
+    /// are the ones that already healed. Don't count outages with it.
+    public func status() async throws -> ConnectionStatus {
+        try await ffi.status()
     }
 
     /// Close the session with the given error code. Code 0 means "no error";

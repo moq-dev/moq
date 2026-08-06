@@ -86,9 +86,11 @@ impl Session {
 		self.inner.version().to_string()
 	}
 
-	/// Resolve when the session closes (cleanly or with an error).
+	/// Reject when the session closes, with the reason it closed.
+	///
+	/// Every close carries a reason, including a clean one, so this never resolves.
 	pub async fn closed(&self) -> Result<(), JsValue> {
-		self.inner.closed().await.map_err(js_err)
+		Err(js_err(self.inner.closed().await))
 	}
 
 	/// Subscribe to a broadcast by path, waiting until it is announced.
@@ -174,6 +176,6 @@ impl Group {
 		*cell.borrow_mut() = Some(group);
 
 		let frame = result.map_err(js_err)?;
-		Ok(frame.map(|bytes| Uint8Array::from(bytes.as_ref())))
+		Ok(frame.map(|frame| Uint8Array::from(frame.payload.as_ref())))
 	}
 }

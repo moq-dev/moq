@@ -17,7 +17,7 @@ pub struct Subscribe<'a> {
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: std::time::Duration,
+	pub latency_max: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 	/// First frame to deliver within `start_group`'s group; 0 is the whole group.
@@ -35,14 +35,14 @@ impl Message for Subscribe<'_> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 
-		let (ordered, max_latency, start_group, end_group) = match version {
+		let (ordered, latency_max, start_group, end_group) = match version {
 			Version::Lite01 | Version::Lite02 => (false, std::time::Duration::ZERO, None, None),
 			_ => {
 				let ordered = u8::decode(r, version)? != 0;
-				let max_latency = std::time::Duration::decode(r, version)?;
+				let latency_max = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
-				(ordered, max_latency, start_group, end_group)
+				(ordered, latency_max, start_group, end_group)
 			}
 		};
 
@@ -54,7 +54,7 @@ impl Message for Subscribe<'_> {
 			track,
 			priority,
 			ordered,
-			max_latency,
+			latency_max,
 			start_group,
 			end_group,
 			start_frame,
@@ -72,7 +72,7 @@ impl Message for Subscribe<'_> {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
 				(self.ordered as u8).encode(w, version)?;
-				self.max_latency.encode(w, version)?;
+				self.latency_max.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 			}
@@ -152,7 +152,7 @@ fn encode_frame_bounds<W: bytes::BufMut>(
 pub struct SubscribeOk {
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: std::time::Duration,
+	pub latency_max: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 }
@@ -169,7 +169,7 @@ impl Message for SubscribeOk {
 			_ => {
 				self.priority.encode(w, version)?;
 				(self.ordered as u8).encode(w, version)?;
-				self.max_latency.encode(w, version)?;
+				self.latency_max.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 			}
@@ -183,28 +183,28 @@ impl Message for SubscribeOk {
 			Version::Lite01 => Ok(Self {
 				priority: u8::decode(r, version)?,
 				ordered: false,
-				max_latency: std::time::Duration::ZERO,
+				latency_max: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
 			}),
 			Version::Lite02 => Ok(Self {
 				priority: 0,
 				ordered: false,
-				max_latency: std::time::Duration::ZERO,
+				latency_max: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
 			}),
 			_ => {
 				let priority = u8::decode(r, version)?;
 				let ordered = u8::decode(r, version)? != 0;
-				let max_latency = std::time::Duration::decode(r, version)?;
+				let latency_max = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
 
 				Ok(Self {
 					priority,
 					ordered,
-					max_latency,
+					latency_max,
 					start_group,
 					end_group,
 				})
@@ -279,7 +279,7 @@ impl Message for SubscribeEnd {
 pub struct SubscribeUpdate {
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: std::time::Duration,
+	pub latency_max: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 	/// See [`Subscribe::start_frame`].
@@ -299,7 +299,7 @@ impl Message for SubscribeUpdate {
 
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
-		let max_latency = std::time::Duration::decode(r, version)?;
+		let latency_max = std::time::Duration::decode(r, version)?;
 		let start_group = match u64::decode(r, version)? {
 			0 => None,
 			group => Some(group - 1),
@@ -314,7 +314,7 @@ impl Message for SubscribeUpdate {
 		Ok(Self {
 			priority,
 			ordered,
-			max_latency,
+			latency_max,
 			start_group,
 			end_group,
 			start_frame,
@@ -332,7 +332,7 @@ impl Message for SubscribeUpdate {
 
 		self.priority.encode(w, version)?;
 		(self.ordered as u8).encode(w, version)?;
-		self.max_latency.encode(w, version)?;
+		self.latency_max.encode(w, version)?;
 
 		match self.start_group {
 			Some(start_group) => start_group
@@ -564,7 +564,7 @@ mod test {
 			track: Cow::Borrowed("video"),
 			priority: 3,
 			ordered: true,
-			max_latency: std::time::Duration::from_millis(250),
+			latency_max: std::time::Duration::from_millis(250),
 			start_group: Some(7),
 			end_group: Some(9),
 			start_frame: 4,
@@ -639,7 +639,7 @@ mod test {
 		let resp = SubscribeResponse::Ok(SubscribeOk {
 			priority: 1,
 			ordered: true,
-			max_latency: std::time::Duration::ZERO,
+			latency_max: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		});

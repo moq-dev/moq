@@ -5,7 +5,7 @@ from __future__ import annotations
 from moq_ffi import MoqSession
 
 from .origin import OriginConsumer, OriginProducer
-from .types import ConnectionStats
+from .types import ConnectionStats, ConnectionStatus
 
 
 class Session:
@@ -29,8 +29,28 @@ class Session:
         self.shutdown()
 
     async def closed(self) -> None:
-        """Wait until the session is closed by either side."""
+        """Wait until the session is over.
+
+        A client session resolves when its connection stops for good: it raises the
+        terminal error when the connection gave up, and returns normally after a local
+        :meth:`shutdown`/:meth:`cancel`. Transient drops the reconnect loop rides out
+        do not resolve this; watch :meth:`status` for those. A server-accepted session
+        raises the session's close reason."""
         await self._inner.closed()
+
+    async def status(self) -> ConnectionStatus:
+        """Wait for the connection status to differ from the one last reported.
+
+        A client session reports ``CONNECTED`` first (the connect it was built from),
+        then follows the reconnect loop: ``DISCONNECTED`` while redialing,
+        ``CONNECTED`` again on success, ``MIGRATING`` during a GOAWAY handover. It
+        raises once the connection stops for good. A server-accepted session's only
+        transition is terminal: this waits for the close and raises its reason.
+
+        This is the current status, not a queue of every edge: a drop that
+        reconnects before you ask again is coalesced away, so the outages it hides
+        are the ones that already healed. Do not count outages with it."""
+        return await self._inner.status()
 
     def cancel(self, code: int) -> None:
         """Close the session with the given error code."""

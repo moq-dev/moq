@@ -103,7 +103,9 @@ impl Subscriber {
 		}
 
 		let source = moq_mux::Source::new(origin.consume(), path);
-		let export = ts::Export::new(source).await?.with_latency(latency);
+		let export = ts::Export::new(source)
+			.await?
+			.with_latency(moq_mux::Latency::max(latency));
 		Ok(Some(Self { export }))
 	}
 

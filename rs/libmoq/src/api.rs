@@ -227,7 +227,9 @@ impl From<&moq_subscription> for moq_net::track::Subscription {
 		let mut out = moq_net::track::Subscription::default()
 			.with_priority(subscription.priority)
 			.with_ordered(subscription.ordered)
-			.with_latency_max(std::time::Duration::from_millis(subscription.latency_max_ms));
+			.with_latency(moq_net::Latency::max(std::time::Duration::from_millis(
+				subscription.latency_max_ms,
+			)));
 		if subscription.group_start_valid {
 			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
 		}
@@ -1527,7 +1529,7 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_latency_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `latency_max_ms` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a positive frame ID per frame, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_frame` is never called again and
@@ -1542,16 +1544,16 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_latency_ms: u64,
+	latency_max_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_latency = std::time::Duration::from_millis(max_latency_ms);
+		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(latency_max_ms));
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock().consume.video(catalog, index, max_latency, on_frame)
+		State::lock().consume.video(catalog, index, latency, on_frame)
 	})
 }
 
@@ -1576,7 +1578,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_frame` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_close].
-/// The `max_latency_ms` parameter controls how long to wait before skipping frames.
+/// The `latency_max_ms` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -1586,16 +1588,16 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_latency_ms: u64,
+	latency_max_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_latency = std::time::Duration::from_millis(max_latency_ms);
+		let latency = moq_mux::Latency::max(std::time::Duration::from_millis(latency_max_ms));
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
-		State::lock().consume.audio(catalog, index, max_latency, on_frame)
+		State::lock().consume.audio(catalog, index, latency, on_frame)
 	})
 }
 

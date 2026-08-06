@@ -70,12 +70,17 @@
 //! run on any executor.
 
 #![warn(missing_docs)]
+// The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
+// too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
+// `Arc` stays and the lint is unactionable here.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 mod client;
 mod coding;
 mod error;
 pub mod goaway;
 mod ietf;
+mod latency;
 mod lite;
 mod model;
 mod path;
@@ -90,6 +95,7 @@ pub mod stats;
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use error::*;
+pub use latency::Latency;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;

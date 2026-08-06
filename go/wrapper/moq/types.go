@@ -24,6 +24,8 @@ type (
 	Catalog = ffi.MoqCatalog
 	// ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte and packet counters); each field is nil when unreported.
 	ConnectionStats = ffi.MoqConnectionStats
+	// ConnectionStatus is a connection lifecycle transition reported by Session.Status.
+	ConnectionStatus = ffi.MoqConnectionStatus
 	// Datagram is a best-effort track datagram as received: sequence number, timestamp, and payload.
 	Datagram = ffi.MoqDatagram
 	// Dimensions is a width and height in pixels.
@@ -160,6 +162,16 @@ func SoftwareEncoder() VideoEncoderKind {
 func NamedEncoder(name string) VideoEncoderKind {
 	return VideoEncoderKindNamed{Name: name}
 }
+
+// ConnectionStatus values: the lifecycle of a client session's connection.
+const (
+	// StatusConnected means a session connected (the first connect, or a reconnect after a drop).
+	StatusConnected = ffi.MoqConnectionStatusConnected
+	// StatusDisconnected means the session dropped; a reconnect attempt follows.
+	StatusDisconnected = ffi.MoqConnectionStatusDisconnected
+	// StatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
+	StatusMigrating = ffi.MoqConnectionStatusMigrating
+)
 
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {

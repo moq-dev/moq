@@ -21,7 +21,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use moq_net::origin;
 
@@ -47,9 +46,9 @@ pub struct Config {
 
 	/// How long a play's FLV muxer waits for a stalled group before skipping to a
 	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Duration::ZERO`] to drop
-	/// stale groups aggressively. Only affects egress (plays); ingest ignores it.
-	pub latency: Duration,
+	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); set [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME)
+	/// to drop stale groups aggressively. Only affects egress (plays); ingest ignores it.
+	pub latency: moq_mux::Latency,
 
 	/// TLS configuration for RTMPS (RTMP over TLS). When set, the
 	/// [`listen`](Self::listen) address speaks RTMPS instead of plaintext RTMP,

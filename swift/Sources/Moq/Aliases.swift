@@ -77,6 +77,12 @@ public typealias TrackInfo = MoqFFI.MoqTrackInfo
 /// counters). Fields are `nil` when the transport backend doesn't report them.
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
+/// Retry pacing for the automatic reconnect; see `Client.setBackoff`.
+public typealias Backoff = MoqFFI.MoqBackoff
+
+/// A connection lifecycle transition reported by `Session.status()`.
+public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
+
 /// The error thrown by every throwing call in this package. Already conforms to
 /// `Swift.Error` and `LocalizedError`; see `Errors.swift` for conveniences.
 public typealias MoqError = MoqFFI.MoqError

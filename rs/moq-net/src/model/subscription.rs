@@ -1,4 +1,4 @@
-use std::{task::Poll, time::Duration};
+use std::task::Poll;
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -15,14 +15,15 @@ pub struct Subscription {
 	/// out-of-order (or not at all) over the network. Defaults to `false`; the
 	/// aggregate is ordered only when every live subscriber asks for it.
 	pub ordered: bool,
-	/// The maximum age of a non-latest group before it is skipped. `Duration::ZERO`
-	/// skips immediately (e.g. group 8 arriving means group 7 is skipped); a larger
-	/// value tolerates that much reordering before giving up on the older group.
+	/// How far this subscriber may drift from the live edge before a group is skipped.
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) skips immediately (e.g. group 8 arriving means group 7 is
+	/// skipped); a larger ceiling tolerates that much reordering before giving up on the
+	/// older group.
 	///
 	/// This is the `Subscriber Max Latency` on the wire, enforced by the publisher's
 	/// cache. Receivers that buffer (e.g. a jitter buffer) enforce the same budget
 	/// locally, and a group is skipped once either measure exceeds it.
-	pub latency_max: Duration,
+	pub latency: crate::Latency,
 	/// First [`Position`] the publisher should deliver, or `None` to start at the latest
 	/// group.
 	///
@@ -54,7 +55,7 @@ impl Default for Subscription {
 		Self {
 			priority: 0,
 			ordered: false,
-			latency_max: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			start: None,
 			end: None,
 		}
@@ -75,10 +76,10 @@ impl Subscription {
 		self
 	}
 
-	/// Set the maximum age of a non-latest group before it is skipped, returning
-	/// `self` for chaining.
-	pub fn with_latency_max(mut self, latency_max: Duration) -> Self {
-		self.latency_max = latency_max;
+	/// Set how far this subscriber may drift from the live edge before a group is
+	/// skipped, returning `self` for chaining.
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
+		self.latency = latency;
 		self
 	}
 
@@ -114,7 +115,7 @@ impl Subscription {
 			priority: self.priority.max(combined.priority),
 			// Sequence-first prioritization is enabled only when every subscriber wants it.
 			ordered: self.ordered && combined.ordered,
-			latency_max: self.latency_max.max(combined.latency_max),
+			latency: self.latency.merge(combined.latency),
 			// Bounds fold as whole positions. Two subscribers starting in the same group
 			// are separated only by their frame, so folding group and frame independently
 			// would invent a bound neither asked for.

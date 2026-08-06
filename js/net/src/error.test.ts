@@ -2,10 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { StreamError } from "@moq/qmux";
 import { fromClose, fromTransport, RemoteError, reason, SessionCode, StreamCode, toTransport } from "./error.ts";
 
-// Stand-in for the DOM WebTransportError, which the test runtime may not define. The
-// constructor mirrors the real `(message, options)` signature rather than a convenient one,
-// since code under test calls it: a differently-shaped stub silently passes arguments to the
-// wrong fields and reports a correct caller as broken.
+// Stand-in for the current WebTransportError constructor, which the test runtime may not define.
 class FakeWebTransportError extends Error {
 	readonly source: string;
 	readonly streamErrorCode: number | null;
@@ -15,6 +12,26 @@ class FakeWebTransportError extends Error {
 		this.name = "WebTransportError";
 		this.source = options?.source ?? "stream";
 		this.streamErrorCode = options?.streamErrorCode ?? null;
+	}
+}
+
+// Chromium still implements the previous constructor shape even though the current DOM types
+// expose `(message, options)`. This strict stand-in reproduces Chromium rejecting a string where
+// it expects WebTransportErrorInit.
+class LegacyFakeWebTransportError extends Error {
+	static standardAttempts = 0;
+
+	readonly source = "stream";
+	readonly streamErrorCode: number | null;
+
+	constructor(init: { message?: string; streamErrorCode?: number | null }) {
+		if (typeof init !== "object" || init === null) {
+			LegacyFakeWebTransportError.standardAttempts += 1;
+			throw new TypeError("The provided value is not of type 'WebTransportErrorInit'");
+		}
+		super(init.message ?? "");
+		this.name = "WebTransportError";
+		this.streamErrorCode = init.streamErrorCode ?? null;
 	}
 }
 
@@ -164,6 +181,18 @@ test("toTransport: carries a code the transports will actually send", () => {
 	expect(decoded).toBeInstanceOf(RemoteError);
 	expect((decoded as RemoteError).code).toBe(StreamCode.Cancel);
 	expect((decoded as RemoteError).code).not.toBe(StreamCode.Internal);
+});
+
+test("toTransport: supports Chromium's single-dictionary constructor", () => {
+	globals.WebTransportError = LegacyFakeWebTransportError;
+	const reason = toTransport(StreamCode.Cancel, "cancel");
+	expect(reason).toBeInstanceOf(LegacyFakeWebTransportError);
+	expect(reason.message).toBe("cancel");
+	expect((reason as LegacyFakeWebTransportError).streamErrorCode).toBe(StreamCode.Cancel);
+
+	// Remember the constructor shape so routine stream cancellation does not throw every time.
+	toTransport(StreamCode.Cancel, "cancel again");
+	expect(LegacyFakeWebTransportError.standardAttempts).toBe(1);
 });
 
 // Without the global, the fallback must still produce the shape qmux and fromTransport read.

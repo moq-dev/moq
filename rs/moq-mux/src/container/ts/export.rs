@@ -56,7 +56,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 pub struct Export<E: catalog::Catalog = ()> {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<E>>,
-	latency: Duration,
+	latency: crate::Latency,
 
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
@@ -198,7 +198,7 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(Self {
 			source,
 			catalog: Some(catalog),
-			latency: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
@@ -211,8 +211,12 @@ impl<E: catalog::Catalog> Export<E> {
 		})
 	}
 
-	/// Set the maximum buffering latency for each per-track source.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// Set the latency tolerance for each per-track source.
+	///
+	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
+	/// per-track skip behavior. Defaults to
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
 		self
 	}
