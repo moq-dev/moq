@@ -46,6 +46,8 @@ pub async fn accept_setup<S: web_transport_trait::Session>(session: &S, version:
 
 /// Everything one moq-lite session needs to start.
 pub struct Config<S: web_transport_trait::Session> {
+	/// The transport carrying the session. Cloned into every loop that outlives
+	/// [`start`], so the connection closes when the last of them drops.
 	pub session: S,
 
 	/// The stream used to set up the session, after exchanging setup messages.
