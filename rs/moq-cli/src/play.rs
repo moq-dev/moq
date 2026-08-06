@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Args as ClapArgs;
+use hang::moq_net;
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_video::render::wgpu;
 use winit::application::ApplicationHandler;
@@ -96,7 +97,7 @@ enum Event {
 /// thread, so this has to stay on the `#[tokio::main]` future rather than being
 /// spawned. Media and transport run on tasks and talk to it through the proxy.
 pub fn run(
-	source: moq_mux::Source,
+	origin: moq_net::origin::Consumer,
 	broadcast: String,
 	args: Args,
 	network: tokio::task::JoinSet<anyhow::Result<()>>,
@@ -109,7 +110,7 @@ pub fn run(
 	let audio_clock = Arc::new(Mutex::new(None));
 
 	let media = tokio::spawn(run_media(
-		source,
+		origin,
 		broadcast.clone(),
 		args,
 		video.clone(),
@@ -158,14 +159,14 @@ async fn watch_network(mut tasks: tokio::task::JoinSet<anyhow::Result<()>>, prox
 }
 
 async fn run_media(
-	source: moq_mux::Source,
+	origin: moq_net::origin::Consumer,
 	broadcast_name: String,
 	args: Args,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	audio_clock: Arc<Mutex<Option<Clock>>>,
 	proxy: EventLoopProxy<Event>,
 ) {
-	let result = media(source, broadcast_name, args, video, audio_clock, proxy.clone()).await;
+	let result = media(origin, broadcast_name, args, video, audio_clock, proxy.clone()).await;
 	let event = match result {
 		Ok(()) => Event::Finished,
 		Err(err) => Event::Failed(format!("{err:#}")),
@@ -174,13 +175,23 @@ async fn run_media(
 }
 
 async fn media(
-	source: moq_mux::Source,
+	origin: moq_net::origin::Consumer,
 	broadcast_name: String,
 	args: Args,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	audio_clock: Arc<Mutex<Option<Clock>>>,
 	proxy: EventLoopProxy<Event>,
 ) -> anyhow::Result<()> {
+	// Wait for the announcement before resolving anything. A request against an
+	// origin no session has reached yet fails `Unroutable` on the spot, and this
+	// task starts well before the first handshake lands. The window is already
+	// up, so the wait shows as black rather than as a hang.
+	origin
+		.announced_broadcast(&broadcast_name)
+		.await
+		.with_context(|| format!("origin closed before broadcast `{broadcast_name}` was announced"))?;
+
+	let source = moq_mux::Source::new(origin, &broadcast_name);
 	let broadcast = source
 		.broadcast()
 		.await

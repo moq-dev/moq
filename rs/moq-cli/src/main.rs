@@ -163,8 +163,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 
 	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
 
-	let source = moq_mux::Source::new(origin.consume(), &name);
-	play::run(source, name, args, tasks)
+	play::run(origin.consume(), name, args, tasks)
 }
 
 /// Route one source INTO the shared Origin, exposing it to the MoQ network.
