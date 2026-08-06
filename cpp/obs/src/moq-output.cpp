@@ -317,8 +317,9 @@ void MoQOutput::SessionClosed(const SessionRef &ref, int code)
 		obs_output_signal_stop(output, connected ? OBS_OUTPUT_DISCONNECTED : OBS_OUTPUT_CONNECT_FAILED);
 	}
 
-	// Drop it before the wait below: the destructor blocks on session_cv holding
-	// session_mutex, and its Reset() wants signal_mutex.
+	// Nothing below reports to OBS, so narrow the hold: the destructor can be
+	// blocked in Reset() waiting for this lock, and it only reaches its
+	// session_cv wait once it has it.
 	signal_lock.unlock();
 
 	// Terminal callback: the session task has ended and will not touch `this`

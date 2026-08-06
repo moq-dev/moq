@@ -64,11 +64,24 @@ private:
 	// obs_output_begin_data_capture, so a session that dies mid-startup cannot
 	// report against an output that isn't committed yet.
 	//
-	// Recursive because obs_output_signal_stop runs the frontend's handlers
-	// inline, and a frontend may call obs_output_stop straight back into Stop().
+	// Recursive because obs_output_signal_stop and obs_output_begin_data_capture
+	// run the frontend's handlers inline, and a frontend may call obs_output_stop
+	// straight back into Stop() on this thread.
 	//
 	// Lock order: signal_mutex first, then session_mutex. Never the reverse, and
-	// never take signal_mutex from inside a libmoq call.
+	// never take signal_mutex from inside a libmoq call. That keeps it ordered
+	// ahead of libmoq's runtime lock too, since the status callback runs with no
+	// libmoq locks held.
+	//
+	// Two costs this buys, both bounded and deliberate:
+	// - A frontend that re-enters this output from a *different* thread while we
+	//   hold it would deadlock, which recursion does not help with. OBS reaches
+	//   one such point, the pthread_join in end_data_capture_internal. Studio's
+	//   frontend queues its handlers, so it does not arise there.
+	// - libmoq's runtime is single threaded, so a terminal callback parked here
+	//   stalls every MoQ session in the process. The holds are short, and the
+	//   expensive part of starting (obs_output_initialize_encoders) is
+	//   deliberately outside the lock.
 	std::recursive_mutex signal_mutex;
 
 	std::string server_url;
