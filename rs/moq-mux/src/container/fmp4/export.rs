@@ -675,7 +675,8 @@ pub(crate) fn infer_missing_durations(frames: &mut [Frame], successor: Option<&F
 		frames[i].duration = infer_from_pts
 			.then(|| duration_bound(frames, successor, i))
 			.flatten()
-			.and_then(|next| next.timestamp.checked_sub(frames[i].timestamp).ok())
+			.and_then(|next| next.timestamp.convert(frames[i].timestamp.scale()).ok())
+			.and_then(|next| next.checked_sub(frames[i].timestamp).ok())
 			.filter(|duration| !duration.is_zero())
 			.or(fallback);
 	}

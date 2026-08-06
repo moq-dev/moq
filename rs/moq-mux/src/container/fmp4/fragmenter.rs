@@ -302,6 +302,24 @@ mod tests {
 		assert_eq!(tfdts, vec![0, 1_500, 3_000]);
 	}
 
+	// LOC permits each frame to carry its own timescale. Normalize the successor before
+	// subtraction so a scale change does not discard the real PTS gap for the pending frame.
+	#[test]
+	fn a_successor_with_another_scale_times_the_pending_frame() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(Default::default());
+		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
+
+		let successor = Frame {
+			timestamp: Timestamp::from_micros(50_000).unwrap(),
+			duration: None,
+			..tick_frame(0, false)
+		};
+		let first = one(fragmenter.push(successor).unwrap());
+
+		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
+	}
+
 	// A stated frame that arrives behind a pending frame is already ready too. Returning both
 	// keeps the live edge available even when no later frame arrives and flush is not called.
 	#[test]
@@ -322,6 +340,20 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
 		assert_eq!(super::super::sample_durations(&second.data), vec![Some(1_000)]);
 		assert!(fragmenter.flush().unwrap().is_none());
+	}
+
+	// A positive frame duration must remain positive at the chosen output timescale. A zero
+	// trun duration would keep tfdt stationary while Fragment::duration still advances.
+	#[test]
+	fn a_coarse_timescale_rejects_a_sub_tick_duration() {
+		let muxer = video_muxer().with_timescale(moq_net::Timescale::SECOND).unwrap();
+		let mut fragmenter = muxer.fragmenter(Default::default());
+
+		let err = fragmenter.push(tick_frame(0, true)).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::Error::Cmaf(super::super::Error::SampleDurationTooSmall(1))
+		));
 	}
 
 	// An EXT-X-PART needs a DURATION and an INDEPENDENT flag. The duration has to be the

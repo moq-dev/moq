@@ -157,6 +157,10 @@ pub enum Error {
 	/// while the fragment metadata kept the full duration, putting them on different timelines.
 	#[error("sample duration {0} does not fit the 32-bit trun field")]
 	SampleDurationTooLarge(u128),
+
+	/// A positive sample duration must occupy at least one tick in the output timescale.
+	#[error("sample duration is shorter than one tick at timescale {0}")]
+	SampleDurationTooSmall(u64),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -480,6 +484,9 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 /// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.
 fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
 	let ticks = duration.as_scale(timescale);
+	if !duration.is_zero() && ticks == 0 {
+		return Err(Error::SampleDurationTooSmall(timescale.as_u64()));
+	}
 	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(ticks))
 }
 
@@ -1082,6 +1089,29 @@ mod tests {
 		};
 		let fragment = encode_fragment(info(1, timescale, 0), &[largest]).unwrap();
 		assert_eq!(sample_durations(&fragment), vec![Some(u32::MAX)]);
+	}
+
+	// A positive duration that becomes zero ticks would leave tfdt stationary while the
+	// fragment metadata still advances, so a coarse override has to fail explicitly.
+	#[test]
+	fn encode_fragment_rejects_a_duration_shorter_than_one_tick() {
+		let timescale = moq_net::Timescale::SECOND;
+		let frame = Frame {
+			timestamp: Timestamp::from_secs(0).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::from_millis(33).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(err, Error::SampleDurationTooSmall(1)));
+
+		let one_tick = Frame {
+			duration: Some(Timestamp::from_secs(1).unwrap()),
+			..frame
+		};
+		let fragment = encode_fragment(info(1, timescale, 0), &[one_tick]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(1)]);
 	}
 
 	// tfdt is 64 bits. A timestamp rescaled past that range must fail rather than wrap the
