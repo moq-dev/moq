@@ -19,7 +19,7 @@ pub struct Consumer {
 	/// so the codec would otherwise migrate between executor workers and
 	/// unbalance the per-thread COM apartment the Windows backend opens.
 	decoder: Sink,
-	track: moq_mux::container::Consumer<moq_mux::container::legacy::Wire>,
+	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
 	/// Frames a single access unit decoded to but `read` hasn't returned yet.
 	/// One AU yields one frame in the low-delay path, but a backend may hand back
 	/// more, so we buffer to keep `read` one-frame-per-call.
@@ -42,7 +42,11 @@ impl Consumer {
 			.track(&name)?
 			.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
 			.await?;
-		let mut track = moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire);
+		// The catalog says how the track is framed, and it is not always the legacy
+		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
+		// varint timestamp plus a payload decodes to garbage rather than failing.
+		let container = moq_mux::catalog::hang::Container::try_from(&catalog.container)?;
+		let mut track = moq_mux::container::Consumer::new(track, container);
 		if let Some(latency) = config.latency_max {
 			track = track.with_latency(latency);
 		}
