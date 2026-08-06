@@ -1,4 +1,4 @@
-use crate::{Error, State, ffi};
+use crate::{Connect, Error, State, ffi};
 
 use std::ffi::c_char;
 use std::ffi::c_void;
@@ -731,6 +731,9 @@ pub unsafe extern "C" fn moq_client_set_tls_fingerprints(
 ) -> i32 {
 	ffi::enter(move || {
 		let fingerprints = unsafe { ffi::parse_strings(fingerprints, count)? };
+		for fingerprint in &fingerprints {
+			moq_native::tls::parse_fingerprint(fingerprint).map_err(|err| Error::InvalidConfig(err.to_string()))?;
+		}
 		let client = ffi::parse_id(client)?;
 		State::lock().client.get_mut(client)?.tls.fingerprint = fingerprints;
 		Ok(())
@@ -826,7 +829,7 @@ pub extern "C" fn moq_client_set_backoff_multiplier(client: u32, multiplier: u32
 
 /// Set the ceiling on the growing reconnect delay, in milliseconds.
 ///
-/// Defaults to 30s.
+/// Defaults to 5s.
 ///
 /// Returns zero on success, or a negative code if the handle is unknown.
 #[unsafe(no_mangle)]
@@ -840,7 +843,7 @@ pub extern "C" fn moq_client_set_backoff_max(client: u32, delay_ms: u64) -> i32 
 
 /// Set how long to keep retrying before giving up, in milliseconds.
 ///
-/// Zero retries forever. Defaults to 5 minutes. This is also how long published
+/// Zero retries forever. Defaults to 10s. This is also how long published
 /// broadcasts linger across a drop, so a longer timeout papers over a longer relay
 /// outage.
 ///
@@ -1188,23 +1191,54 @@ pub unsafe extern "C" fn moq_client_connect(
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
-	ffi::enter(move || {
-		let url = ffi::parse_url(url, url_len)?;
-
-		let mut state = State::lock();
-		let config = state.client.config(ffi::parse_id_optional(client)?)?;
-		let publish = ffi::parse_id_optional(origin_publish)?
-			.map(|id| state.origin.get(id))
-			.transpose()?
-			.cloned();
-		let consume = ffi::parse_id_optional(origin_consume)?
-			.map(|id| state.origin.get(id))
-			.transpose()?
-			.cloned();
-
-		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
-		state.session.connect(config, url, publish, consume, on_status)
+	ffi::enter(move || unsafe {
+		connect_session(
+			url,
+			url_len,
+			client,
+			origin_publish,
+			origin_consume,
+			on_status,
+			user_data,
+		)
 	})
+}
+
+/// Resolve handles under the global lock, prepare the client without it, then insert
+/// the ready session under a short second lock.
+unsafe fn connect_session(
+	url: *const c_char,
+	url_len: usize,
+	client: u32,
+	origin_publish: u32,
+	origin_consume: u32,
+	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
+	user_data: *mut c_void,
+) -> Result<crate::Id, Error> {
+	let url = ffi::parse_url(url, url_len)?;
+	let client = ffi::parse_id_optional(client)?;
+	let origin_publish = ffi::parse_id_optional(origin_publish)?;
+	let origin_consume = ffi::parse_id_optional(origin_consume)?;
+
+	let (config, publish, consume) = {
+		let state = State::lock();
+		let config = state.client.config(client)?;
+		let publish = origin_publish.map(|id| state.origin.get(id)).transpose()?.cloned();
+		let consume = origin_consume.map(|id| state.origin.get(id)).transpose()?.cloned();
+		(config, publish, consume)
+	};
+
+	let callback = unsafe { ffi::OnStatus::new(user_data, on_status) };
+	let request = Connect {
+		config,
+		url,
+		publish,
+		consume,
+		callback,
+	}
+	.prepare()?;
+
+	State::lock().session.connect(request)
 }
 
 /// Start establishing a connection to a MoQ server.
@@ -1252,22 +1286,8 @@ pub unsafe extern "C" fn moq_session_connect(
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
-	ffi::enter(move || {
-		let url = ffi::parse_url(url, url_len)?;
-
-		let mut state = State::lock();
-		let publish = ffi::parse_id_optional(origin_publish)?
-			.map(|id| state.origin.get(id))
-			.transpose()?
-			.cloned();
-		let consume = ffi::parse_id_optional(origin_consume)?
-			.map(|id| state.origin.get(id))
-			.transpose()?
-			.cloned();
-
-		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
-		let config = moq_native::ClientConfig::default();
-		state.session.connect(config, url, publish, consume, on_status)
+	ffi::enter(move || unsafe {
+		connect_session(url, url_len, 0, origin_publish, origin_consume, on_status, user_data)
 	})
 }
 

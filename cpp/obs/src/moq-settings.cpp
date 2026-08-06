@@ -2,6 +2,7 @@
 #include "moq-settings.h"
 #include "logger.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -60,6 +61,20 @@ bool TriState(obs_data_t *settings, const char *key, bool *out)
 	return true;
 }
 
+// Read an integer setting inside the range declared by its Field. Scene collections
+// are editable JSON, so the widget bounds alone do not protect the unsigned C API.
+uint64_t Amount(obs_data_t *settings, const char *key)
+{
+	const long long value = obs_data_get_int(settings, key);
+	for (const Field &field : Fields()) {
+		if (strcmp(field.key, key) == 0)
+			return static_cast<uint64_t>(std::clamp(value, field.min, field.max));
+	}
+
+	LOG_ERROR("Advanced integer setting has no Field: %s", key);
+	return 0;
+}
+
 // Report a failed libmoq call with the reason it recorded. moq_error() only describes
 // the most recent call on this thread, so read it before anything else runs.
 void LogFailure(const char *what, int code)
@@ -68,31 +83,39 @@ void LogFailure(const char *what, int code)
 	LOG_ERROR("Advanced setting %s rejected (%d): %s", what, code, reason ? reason : "(no reason)");
 }
 
-// The protocol versions this build of libmoq offers, so the menu can't drift from what
-// moq_client_set_versions accepts.
-std::vector<Option> VersionOptions()
+// Enumerate a libmoq capability into menu options. The names live beside the caller's
+// static field table because Option borrows their pointers.
+std::vector<Option> CapabilityOptions(int (*enumerate)(moq_string *, size_t), const char *automatic,
+				      std::vector<std::string> &names)
 {
-	std::vector<Option> options = {{"Automatic (offer all)", AUTO}};
+	std::vector<Option> options = {{automatic, AUTO}};
 
-	int count = moq_versions(nullptr, 0);
+	int count = enumerate(nullptr, 0);
 	if (count <= 0)
 		return options;
 
 	std::vector<moq_string> raw(static_cast<size_t>(count));
-	if (moq_versions(raw.data(), raw.size()) < 0)
+	const int reported = enumerate(raw.data(), raw.size());
+	if (reported < 0)
 		return options;
+	const size_t written = std::min(raw.size(), static_cast<size_t>(reported));
 
-	// Option holds borrowed pointers, and the names libmoq hands back are not NUL
-	// terminated, so park NUL-terminated copies somewhere that outlives Fields().
-	// Filled exactly once, because Fields() builds its table once.
-	static std::vector<std::string> names;
-	names.reserve(raw.size());
-	for (const moq_string &name : raw)
-		names.emplace_back(name.data, name.len);
+	names.clear();
+	names.reserve(written);
+	for (size_t i = 0; i < written; ++i)
+		names.emplace_back(raw[i].data, raw[i].len);
 
 	for (const std::string &name : names)
 		options.push_back({name.c_str(), name.c_str()});
 	return options;
+}
+
+// The protocol versions this build of libmoq offers, so the menu can't drift from what
+// moq_client_set_versions accepts.
+std::vector<Option> VersionOptions()
+{
+	static std::vector<std::string> names;
+	return CapabilityOptions(moq_versions, "Automatic (offer all)", names);
 }
 
 // The QUIC backends this build of libmoq compiled in, so the menu can't offer one the
@@ -100,26 +123,8 @@ std::vector<Option> VersionOptions()
 // dead options in front of the user on a release build.
 std::vector<Option> BackendOptions()
 {
-	std::vector<Option> options = {{"Automatic", AUTO}};
-
-	int count = moq_backends(nullptr, 0);
-	if (count <= 0)
-		return options;
-
-	std::vector<moq_string> raw(static_cast<size_t>(count));
-	if (moq_backends(raw.data(), raw.size()) < 0)
-		return options;
-
-	// Same borrowing rule as VersionOptions: Option holds pointers and the names are
-	// not NUL terminated, so park copies that outlive Fields().
 	static std::vector<std::string> names;
-	names.reserve(raw.size());
-	for (const moq_string &name : raw)
-		names.emplace_back(name.data, name.len);
-
-	for (const std::string &name : names)
-		options.push_back({name.c_str(), name.c_str()});
-	return options;
+	return CapabilityOptions(moq_backends, "Automatic", names);
 }
 
 // Shorthands so the table below reads as data rather than aggregate initializers.
@@ -273,9 +278,9 @@ const std::vector<Field> &Fields()
 				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", d.backoff_initial_ms, 0, 60000, 100,
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", d.backoff_initial_ms, 1, 60000, 100,
 				   "Delay before the first reconnect attempt; it grows from here."));
-		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", d.backoff_max_ms, 0, 600000, 1000,
+		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", d.backoff_max_ms, 1, 600000, 1000,
 				   "Ceiling on the growing reconnect delay."));
 		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", d.backoff_timeout_ms, 0, 3600000, 1000,
 				   "Total time to keep retrying before the stream fails. Also how long the "
@@ -431,11 +436,11 @@ int CreateClient(obs_data_t *settings)
 			return fail("bind address");
 	}
 
-	code = moq_client_set_connect_timeout(client, (uint64_t)obs_data_get_int(settings, CONNECT_TIMEOUT));
+	code = moq_client_set_connect_timeout(client, Amount(settings, CONNECT_TIMEOUT));
 	if (code < 0)
 		return fail("connect timeout");
 
-	code = moq_client_set_failover_delay(client, (uint64_t)obs_data_get_int(settings, FAILOVER_DELAY));
+	code = moq_client_set_failover_delay(client, Amount(settings, FAILOVER_DELAY));
 	if (code < 0)
 		return fail("Happy Eyeballs delay");
 
@@ -463,27 +468,27 @@ int CreateClient(obs_data_t *settings)
 	if (code < 0)
 		return fail("server name override");
 
-	code = moq_client_set_backoff_initial(client, (uint64_t)obs_data_get_int(settings, BACKOFF_INITIAL));
+	code = moq_client_set_backoff_initial(client, Amount(settings, BACKOFF_INITIAL));
 	if (code < 0)
 		return fail("reconnect delay");
 
-	code = moq_client_set_backoff_max(client, (uint64_t)obs_data_get_int(settings, BACKOFF_MAX));
+	code = moq_client_set_backoff_max(client, Amount(settings, BACKOFF_MAX));
 	if (code < 0)
 		return fail("reconnect delay cap");
 
-	code = moq_client_set_backoff_timeout(client, (uint64_t)obs_data_get_int(settings, BACKOFF_TIMEOUT));
+	code = moq_client_set_backoff_timeout(client, Amount(settings, BACKOFF_TIMEOUT));
 	if (code < 0)
 		return fail("reconnect give-up timeout");
 
-	code = moq_client_set_quic_max_streams(client, (uint64_t)obs_data_get_int(settings, QUIC_MAX_STREAMS));
+	code = moq_client_set_quic_max_streams(client, Amount(settings, QUIC_MAX_STREAMS));
 	if (code < 0)
 		return fail("max concurrent streams");
 
-	code = moq_client_set_quic_idle_timeout(client, (uint64_t)obs_data_get_int(settings, QUIC_IDLE_TIMEOUT));
+	code = moq_client_set_quic_idle_timeout(client, Amount(settings, QUIC_IDLE_TIMEOUT));
 	if (code < 0)
 		return fail("idle timeout");
 
-	code = moq_client_set_quic_keep_alive(client, (uint64_t)obs_data_get_int(settings, QUIC_KEEP_ALIVE));
+	code = moq_client_set_quic_keep_alive(client, Amount(settings, QUIC_KEEP_ALIVE));
 	if (code < 0)
 		return fail("keep-alive interval");
 
@@ -519,7 +524,7 @@ int CreateClient(obs_data_t *settings)
 	if (code < 0)
 		return fail("WebSocket fallback");
 
-	code = moq_client_set_websocket_delay(client, (uint64_t)obs_data_get_int(settings, WEBSOCKET_DELAY));
+	code = moq_client_set_websocket_delay(client, Amount(settings, WEBSOCKET_DELAY));
 	if (code < 0)
 		return fail("WebSocket fallback delay");
 

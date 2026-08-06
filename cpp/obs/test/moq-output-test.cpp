@@ -43,6 +43,7 @@ std::mutex g_signals_mutex;
 std::vector<RecordedSignal> g_signals;
 std::string g_last_error;
 std::atomic<int> g_begin_capture{0};
+std::atomic<int> g_client_result{0};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -85,6 +86,13 @@ const char *obs_service_get_connect_info(const obs_service_t *, uint32_t type)
 {
 	return type == OBS_SERVICE_CONNECT_INFO_SERVER_URL ? "https://relay.example/anon" : "room";
 }
+
+obs_data_t *obs_service_get_settings(const obs_service_t *)
+{
+	return reinterpret_cast<obs_data_t *>(0x3);
+}
+
+void obs_data_release(obs_data_t *) {}
 
 obs_encoder_t *obs_output_get_video_encoder2(const obs_output_t *, size_t idx)
 {
@@ -132,6 +140,13 @@ const char *obs_encoder_get_codec(const obs_encoder_t *)
 }
 
 } // extern "C"
+
+namespace MoQSettings {
+int CreateClient(obs_data_t *)
+{
+	return g_client_result;
+}
+} // namespace MoQSettings
 
 // ------------------------------------------------------------- libmoq stubs
 
@@ -215,6 +230,17 @@ int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_
 	return handle;
 }
 
+int32_t moq_client_connect(const char *url, size_t url_len, uint32_t, uint32_t origin_publish, uint32_t origin_consume,
+			   void (*on_status)(void *, int32_t), void *user_data)
+{
+	return moq_session_connect(url, url_len, origin_publish, origin_consume, on_status, user_data);
+}
+
+int32_t moq_client_close(uint32_t)
+{
+	return 0;
+}
+
 int32_t moq_session_close(uint32_t session)
 {
 	g_closed_handle = static_cast<int>(session);
@@ -290,6 +316,7 @@ void reset()
 	g_on_status = nullptr;
 	g_closed_handle = 0;
 	g_begin_capture = 0;
+	g_client_result = 0;
 	g_start_gate = nullptr;
 	g_connect_fires_terminal = false;
 	g_connect_fires_terminal_threaded = false;
@@ -309,6 +336,19 @@ void reset()
 int main()
 {
 	auto out = reinterpret_cast<obs_output_t *>(0x9);
+
+	// Invalid advanced settings stop before a session or capture is created.
+	{
+		reset();
+		g_client_result = -40;
+		MoQOutput o(nullptr, out);
+		CHECK(!o.Start());
+		CHECK(g_on_status == nullptr);
+		CHECK(g_begin_capture == 0);
+		CHECK(signalCount() == 1);
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+	}
+	printf("invalid advanced settings: ok\n");
 
 	// Reconnection gave up after the session had been up: OBS must be told, with
 	// the libmoq reason attached, so it stops reporting a live stream.

@@ -140,6 +140,12 @@ pub enum Error {
 /// Convenience alias for results produced by this module.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Parse a hex-encoded SHA-256 certificate fingerprint.
+pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
+	let bytes = hex::decode(value.trim()).map_err(Error::Fingerprint)?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
+}
+
 /// Read a PEM file into its list of certificates.
 pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 	let file = fs::File::open(path).map_err(Error::Open)?;
@@ -437,10 +443,7 @@ impl Client {
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
 		self.effective_fingerprint()
 			.iter()
-			.map(|fp| {
-				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
-				bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
-			})
+			.map(|fp| parse_fingerprint(fp))
 			.collect()
 	}
 
@@ -898,10 +901,8 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 #[cfg(test)]
 #[cfg(all(any(feature = "quinn", feature = "noq", feature = "quiche"), feature = "aws-lc-rs"))]
 mod tests {
-	/// Disabling verification alongside a fingerprint or root used to keep the
-	/// insecure path and drop the trust material without a word, which is the worst
-	/// way to be wrong: someone hardening a dev setup by adding a pin would still
-	/// accept every certificate.
+	/// Disabling verification cannot be combined with trust material that it would
+	/// otherwise ignore.
 	#[test]
 	fn disable_verify_rejects_trust_material() {
 		let insecure = Client {
@@ -935,6 +936,16 @@ mod tests {
 		assert!(matches!(
 			with_system_roots.verification(),
 			Err(Error::DisableVerifyWithTrust)
+		));
+
+		let without_system_roots = Client {
+			disable_verify: Some(true),
+			system_roots: Some(false),
+			..Default::default()
+		};
+		assert!(matches!(
+			without_system_roots.verification(),
+			Ok(Verification::Disabled)
 		));
 	}
 

@@ -159,7 +159,7 @@ pub enum Error {
 	#[error("client not found")]
 	ClientNotFound,
 
-	/// A client configuration value could not be parsed.
+	/// A client configuration value could not be parsed or initialized.
 	#[error("invalid config: {0}")]
 	InvalidConfig(String),
 }

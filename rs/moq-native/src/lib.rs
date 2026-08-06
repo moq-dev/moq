@@ -133,7 +133,7 @@ impl QuicBackend {
 	///
 	/// [`FromStr`]: std::str::FromStr
 	pub fn as_str(&self) -> &'static str {
-		match self {
+		match *self {
 			#[cfg(feature = "quinn")]
 			Self::Quinn => "quinn",
 			#[cfg(feature = "quiche")]

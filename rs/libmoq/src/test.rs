@@ -2341,6 +2341,37 @@ fn client_optional_strings_clear_on_null() {
 }
 
 #[test]
+fn client_set_tls_fingerprints_rejects_malformed_values_before_mutating() {
+	let client = id(moq_client_create());
+	let _guard = Guard(Some(|| {
+		moq_client_close(client);
+	}));
+
+	for invalid in ["not-hex", "abcd"] {
+		let fingerprints = [moq_str(invalid)];
+		let ret = unsafe { moq_client_set_tls_fingerprints(client, fingerprints.as_ptr(), fingerprints.len()) };
+		assert_eq!(ret, Error::InvalidConfig(String::new()).code());
+		let client_id = ffi::parse_id(client).unwrap();
+		assert!(
+			State::lock()
+				.client
+				.get_mut(client_id)
+				.unwrap()
+				.tls
+				.fingerprint
+				.is_empty()
+		);
+	}
+
+	let valid_value = "ab".repeat(32);
+	let valid = [moq_str(&valid_value)];
+	assert_eq!(
+		unsafe { moq_client_set_tls_fingerprints(client, valid.as_ptr(), valid.len()) },
+		0
+	);
+}
+
+#[test]
 fn client_set_quic_rejects_unknown_congestion_control() {
 	let client = id(moq_client_create());
 	let _guard = Guard(Some(|| {
@@ -2485,9 +2516,8 @@ fn getters_read_back_what_the_setters_wrote() {
 	);
 }
 
-/// An idle timeout past QUIC's millisecond varint used to panic inside the backend while
-/// the global state lock was held, which poisoned it for every later call in the process.
-/// It has to come back as an ordinary error instead.
+/// An idle timeout outside QUIC's millisecond varint returns an ordinary configuration
+/// error, and later client API calls remain usable.
 #[test]
 fn client_connect_rejects_an_unrepresentable_idle_timeout() {
 	let client = id(moq_client_create());
@@ -2509,10 +2539,9 @@ fn client_connect_rejects_an_unrepresentable_idle_timeout() {
 			std::ptr::null_mut(),
 		)
 	};
-	assert!(ret < 0, "connect must fail, got {ret}");
+	assert_eq!(ret, Error::InvalidConfig(String::new()).code());
 
-	// The real damage was to everything after: a poisoned lock takes the whole process
-	// down with it, so prove the next call still works.
+	// A rejected dial leaves the global client state usable.
 	let next = id(moq_client_create());
 	moq_client_close(next);
 }

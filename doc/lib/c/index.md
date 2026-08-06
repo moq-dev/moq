@@ -93,22 +93,40 @@ generated header at `../../target/release/moq.h`.
 
 ```c
 int client = moq_client_create();
+if (client < 0)
+    return client;
+
+int result;
 
 // Pin the handshake to one draft instead of offering every supported version.
 struct moq_string version = { "moq-lite-05", 11 };
-moq_client_set_versions(client, &version, 1);
+result = moq_client_set_versions(client, &version, 1);
+if (result < 0) {
+    moq_client_close(client);
+    return result;
+}
 
 // Trust one self-signed relay without accepting every certificate.
 struct moq_string fingerprint = { hex_sha256, strlen(hex_sha256) };
-moq_client_set_tls_fingerprints(client, &fingerprint, 1);
+result = moq_client_set_tls_fingerprints(client, &fingerprint, 1);
+if (result < 0) {
+    moq_client_close(client);
+    return result;
+}
 
-moq_client_set_quic_congestion_control(client, "delay", 5);
+result = moq_client_set_quic_congestion_control(client, "delay", 5);
+if (result < 0) {
+    moq_client_close(client);
+    return result;
+}
 
 int session = moq_client_connect(url, url_len, client, origin, 0, on_status, user_data);
 
 // The config is copied into the session, so the handle can be released (or reused
 // for another dial, or edited in between) right away.
 moq_client_close(client);
+if (session < 0)
+    return session;
 ```
 
 A `client` of `0` means the defaults, so `moq_client_connect(url, len, 0, ...)` is exactly `moq_session_connect`.
@@ -122,7 +140,7 @@ The setters fall into a few groups:
 
 Every knob is its own setter, and a knob you never set stays at its default. That is deliberate rather than incidental: the C ABI is stable, so a new knob has to be a new function. Bundling several into one `struct` you pass by pointer would freeze their layout, and adding a field later would break every caller compiled against the old size. The optional strings (`congestion_control`, `qlog`, the TLS paths) are set-or-clear, where NULL or empty puts the knob back to automatic, so a setting can be undone without rebuilding the handle.
 
-Every setter has a matching `moq_client_get_*`, and a knob you never set reads back as its default:
+Setters for reportable knobs have a matching `moq_client_get_*`, and a knob you never set reads back as its default:
 
 ```c
 uint32_t client = moq_client_create();
@@ -137,7 +155,7 @@ The knobs whose default depends on the backend (GSO, path MTU discovery, congest
 Two capabilities are compile-time optional, so ask before offering them:
 
 - `moq_backends` lists the QUIC backends this build has, the same way `moq_versions` lists the drafts. A name it doesn't report is rejected by `moq_client_set_backend`.
-- `moq_qlog_supported` reports whether traces can be captured. `moq_client_set_quic_qlog` stores a directory either way, but dialing fails without the support.
+- `moq_qlog_supported` reports whether traces can be captured. `moq_client_set_quic_qlog` stores a directory either way, but a non-empty directory is rejected while the client configuration is initialized, before a connection is created.
 
 Combinations that would quietly drop a setting are rejected at dial rather than resolved by precedence. `moq_client_set_tls_disable_verify` accepts every certificate, so pairing it with a fingerprint or a root fails instead of ignoring the trust material, and the reconnect knobs must leave a non-zero delay or retrying would spin.
 

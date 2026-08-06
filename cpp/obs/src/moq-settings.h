@@ -13,8 +13,7 @@
 namespace MoQSettings {
 
 // Whether any of this applies. With it off the output dials with libmoq's defaults and
-// ignores every other key, so the default path stays exactly what it was before these
-// settings existed.
+// ignores every other key.
 inline constexpr const char *ENABLED = "advanced";
 
 // The value a Choice field carries when the user hasn't picked: leave the knob wherever

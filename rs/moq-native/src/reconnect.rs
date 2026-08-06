@@ -93,6 +93,11 @@ impl Backoff {
 		}
 	}
 
+	/// Grow the retry delay without overflowing before applying the configured cap.
+	fn next_delay(&self, delay: Duration) -> Duration {
+		delay.saturating_mul(self.multiplier.max(1)).min(self.max)
+	}
+
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
 	/// [`timeout`](Self::timeout), so when the loop does give up its error surfaces
@@ -307,7 +312,7 @@ impl Reconnect {
 			if let Some(deadline) = deadline {
 				wait = wait.min(deadline - now);
 			}
-			delay = (delay * backoff.multiplier.max(1)).min(backoff.max);
+			delay = backoff.next_delay(delay);
 
 			tracing::warn!(%url, ?wait, "reconnecting after backoff");
 			tokio::time::sleep(wait).await;
@@ -505,6 +510,15 @@ mod tests {
 			..Default::default()
 		};
 		assert!(forever.validate().is_ok());
+	}
+
+	#[test]
+	fn backoff_growth_saturates_before_applying_the_cap() {
+		let backoff = Backoff {
+			multiplier: u32::MAX,
+			..Default::default()
+		};
+		assert_eq!(backoff.next_delay(Duration::MAX), backoff.max);
 	}
 
 	use super::*;
