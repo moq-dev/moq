@@ -123,7 +123,7 @@ impl Fragmenter {
 			// is never a duration (the publisher may have paused across it), so the pending frame
 			// then takes the catalog cadence.
 			let successor = (!group_start).then_some(&frame);
-			infer_missing_duration(&mut pending.frame, successor, next.default_frame);
+			infer_missing_duration(&mut pending.frame, successor, next.default_frame, next.timescale);
 			fragments.push(next.emit(pending.frame, pending.group_start)?);
 		}
 
@@ -146,7 +146,7 @@ impl Fragmenter {
 		let Some(mut pending) = self.pending.take() else {
 			return Ok(None);
 		};
-		infer_missing_duration(&mut pending.frame, None, self.default_frame);
+		infer_missing_duration(&mut pending.frame, None, self.default_frame, self.timescale);
 		Ok(Some(self.emit(pending.frame, pending.group_start)?))
 	}
 
@@ -312,8 +312,8 @@ mod tests {
 
 	// A duration-less frame waits one push for its real successor, instead of falling back to
 	// the catalog cadence the way a one-frame `Muxer::fragment` call must. This is the drift
-	// the fragmenter exists to avoid: at a real 1500-tick cadence the catalog default of 999
-	// runs a third short on every sample.
+	// the fragmenter exists to avoid: a real 1500-tick cadence differs from the catalog's
+	// 1000-tick 30 fps default.
 	#[test]
 	fn a_pending_frame_is_timed_by_its_real_successor() {
 		let muxer = video_muxer();
@@ -338,7 +338,7 @@ mod tests {
 			.collect();
 		assert_eq!(
 			durations,
-			vec![vec![Some(1_500)], vec![Some(1_500)], vec![Some(999)]],
+			vec![vec![Some(1_500)], vec![Some(1_500)], vec![Some(1_000)]],
 			"timed by the successor; only the flushed tail takes the catalog cadence"
 		);
 
@@ -406,7 +406,7 @@ mod tests {
 		assert!(fragmenter.push(tail).unwrap().is_empty());
 		let tail = fragmenter.flush().unwrap().expect("the pending tail");
 
-		assert_eq!(super::super::sample_durations(&tail.data), vec![Some(999)]);
+		assert_eq!(super::super::sample_durations(&tail.data), vec![Some(1_000)]);
 	}
 
 	// A stated frame that arrives behind a pending frame is already ready too. Returning both
@@ -464,6 +464,30 @@ mod tests {
 		));
 	}
 
+	// Flooring every 1/24-second frame to 41 milliseconds would make the stateful decode
+	// timeline lose 16 milliseconds per second, so reject an incompatible override.
+	#[test]
+	fn fragmenter_rejects_an_inexact_sample_duration() {
+		let muxer = video_muxer().with_timescale(moq_net::Timescale::MILLI).unwrap();
+		let mut fragmenter = muxer.fragmenter(Default::default());
+		let input_scale = moq_net::Timescale::new(24).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::new(0, input_scale).unwrap(),
+			duration: Some(Timestamp::new(1, input_scale).unwrap()),
+			..tick_frame(0, true)
+		};
+
+		let err = fragmenter.push(frame).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::Error::Cmaf(super::super::Error::SampleDurationInexact {
+				value: 1,
+				source_timescale: 24,
+				output_timescale: 1_000,
+			})
+		));
+	}
+
 	// An EXT-X-PART needs a DURATION and an INDEPENDENT flag. The duration has to be the
 	// resolved one written into the trun, not the raw PTS gap: the caller has nothing to read
 	// for the stream's last frame and would disagree with the media it is describing.
@@ -485,9 +509,9 @@ mod tests {
 			"video is independent only at a GOP boundary"
 		);
 
-		// 1500/30000 and 999/30000: the trun durations, not the 0.05 gap for all three.
+		// 1500/30000 and 1000/30000: the trun durations, not the 0.05 gap for all three.
 		let durations: Vec<_> = fragments.iter().map(|f| (f.duration * 1e6).round() as u64).collect();
-		assert_eq!(durations, vec![50_000, 50_000, 33_300], "microseconds");
+		assert_eq!(durations, vec![50_000, 50_000, 33_333], "microseconds");
 	}
 
 	// Audio has no keyframes, so every audio part can start a segment. Opus states its own
@@ -532,7 +556,7 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
 		assert_eq!(
 			super::super::sample_durations(&second.data),
-			vec![Some(999)],
+			vec![Some(1_000)],
 			"the pause is a discontinuity, not a 2405 second sample"
 		);
 		assert_eq!(

@@ -255,7 +255,7 @@ impl Muxer {
 	fn resolve_durations(&self, frames: &[Frame]) -> Vec<Frame> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
-		infer_missing_durations(&mut frames, None, self.default_frame);
+		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale);
 		frames
 	}
 

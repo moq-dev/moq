@@ -162,6 +162,16 @@ pub enum Error {
 	#[error("sample duration is shorter than one tick at timescale {0}")]
 	SampleDurationTooSmall(u64),
 
+	/// Repeatedly flooring fractional sample ticks would make the decode timeline drift.
+	#[error(
+		"sample duration {value}/{source_timescale} seconds is not exactly representable at timescale {output_timescale}"
+	)]
+	SampleDurationInexact {
+		value: u64,
+		source_timescale: u64,
+		output_timescale: u64,
+	},
+
 	/// Presentation timestamps do not reveal decode duration for reordered video.
 	#[error("duration-less video needs stated durations or presentation-ordered inference")]
 	MissingVideoDuration,
@@ -487,9 +497,19 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 
 /// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.
 fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
-	let ticks = duration.as_scale(timescale);
+	let source_timescale = duration.scale().as_u64();
+	let output_timescale = timescale.as_u64();
+	let scaled = u128::from(duration.value()) * u128::from(output_timescale);
+	let ticks = scaled / u128::from(source_timescale);
 	if !duration.is_zero() && ticks == 0 {
 		return Err(Error::SampleDurationTooSmall(timescale.as_u64()));
+	}
+	if scaled % u128::from(source_timescale) != 0 {
+		return Err(Error::SampleDurationInexact {
+			value: duration.value(),
+			source_timescale,
+			output_timescale,
+		});
 	}
 	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(ticks))
 }
@@ -1116,6 +1136,34 @@ mod tests {
 		};
 		let fragment = encode_fragment(info(1, timescale, 0), &[one_tick]).unwrap();
 		assert_eq!(sample_durations(&fragment), vec![Some(1)]);
+	}
+
+	// Flooring every 1/24-second sample at a 1 kHz output scale would lose 16 ticks per
+	// second. The caller must choose a scale that represents the duration exactly.
+	#[test]
+	fn encode_fragment_rejects_an_inexact_sample_duration() {
+		let input_scale = moq_net::Timescale::new(24).unwrap();
+		let output_scale = moq_net::Timescale::MILLI;
+		let frame = Frame {
+			timestamp: Timestamp::new(0, input_scale).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::new(1, input_scale).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, output_scale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::SampleDurationInexact {
+				value: 1,
+				source_timescale: 24,
+				output_timescale: 1_000,
+			}
+		));
+
+		let exact_scale = moq_net::Timescale::new(24_000).unwrap();
+		let fragment = encode_fragment(info(1, exact_scale, 0), &[frame]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(1_000)]);
 	}
 
 	// tfdt is 64 bits. A timestamp rescaled past that range must fail rather than wrap the
