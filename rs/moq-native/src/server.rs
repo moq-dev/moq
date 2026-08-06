@@ -336,12 +336,33 @@ impl Server {
 		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 	}
 
+	/// Bind the listeners that bind lazily, so a bind failure surfaces here.
+	///
+	/// The QUIC socket is bound by [`ServerConfig::init`], but the stream
+	/// (`tcp`/`unix`) listeners need a runtime, so they wait for the first
+	/// [`accept`](Self::accept) instead. That makes a bind failure arrive as a `None`
+	/// from `accept`, which a caller cannot tell apart from an ordinary shutdown.
+	/// Call this first and the two are distinct: the error is yours to handle, and a
+	/// later `None` means the server stopped.
+	///
+	/// Idempotent, and optional: `accept` still binds them itself (logging the
+	/// failure) for a caller that doesn't.
+	pub async fn listen(&mut self) -> crate::Result<()> {
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		self.streams.ensure_started().await?;
+		Ok(())
+	}
+
 	/// Returns the next partially established session, across every configured
 	/// transport (QUIC, WebSocket, and plaintext qmux over TCP/Unix).
 	///
 	/// This returns a [Request] instead of a session so the connection can be
 	/// rejected early on an invalid path or missing auth. Call [Request::ok] or
 	/// [Request::close] to complete the handshake.
+	///
+	/// `None` means the server stopped: it was interrupted (Ctrl-C), or a lazy
+	/// listener failed to bind. Call [`listen`](Self::listen) up front to tell those
+	/// two apart.
 	#[cfg(any(
 		feature = "noq",
 		feature = "quinn",
@@ -487,7 +508,10 @@ impl Server {
 								Ok(Request { transport: Transport::WebSocket, url: None, identity: None, kind: RequestKind::Qmux(Box::new(request)) })
 							}.boxed());
 						}
-						Err(err) => tracing::debug!(%err, "failed to accept WebSocket session"),
+						// One connection's upgrade, not the listener's: a failed
+						// `accept(2)` never reaches here, having been classified,
+						// counted, and warned about by the listener itself.
+						Err(err) => tracing::debug!(%err, "WebSocket upgrade failed"),
 					}
 				}
 				Some(res) = self.accept.next() => {
@@ -703,7 +727,9 @@ fn spawn_tcp_loop(
 		loop {
 			match listener.accept().await {
 				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, versions.clone(), tx.clone()),
-				Some(Err(err)) => tracing::warn!(%err, "tcp listener accept failed"),
+				// Per-connection: a failed `accept(2)` is the listener's own to
+				// classify and pace, and never surfaces here.
+				Some(Err(err)) => tracing::warn!(%err, "tcp qmux handshake failed"),
 				None => break,
 			}
 		}
@@ -730,7 +756,8 @@ fn spawn_unix_loop(
 					}
 					spawn_stream_request(session, Transport::Unix, versions.clone(), tx.clone());
 				}
-				Some(Err(err)) => tracing::warn!(%err, "unix listener accept failed"),
+				// Per-connection, as in `spawn_tcp_loop`.
+				Some(Err(err)) => tracing::warn!(%err, "unix qmux handshake failed"),
 				None => break,
 			}
 		}

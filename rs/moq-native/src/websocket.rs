@@ -16,7 +16,8 @@ use url::Url;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The TCP socket failed to bind, accept, or connect.
+	/// The TCP socket failed to bind or connect. Not accept: a failed `accept(2)` is
+	/// the listener's own to classify and retry (see [`crate::accept`]).
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
@@ -243,6 +244,7 @@ impl Error {
 pub struct Listener {
 	listener: tokio::net::TcpListener,
 	server: qmux::Server,
+	health: crate::accept::Health,
 }
 
 impl Listener {
@@ -258,7 +260,11 @@ impl Listener {
 		// doesn't restrict; qmux by default also accepts legacy clients that
 		// only offer a bare wire-format ALPN (today's moq-net clients still do).
 		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
-		Ok(Self { listener, server })
+		Ok(Self {
+			listener,
+			server,
+			health: crate::accept::Health::new("websocket"),
+		})
 	}
 
 	/// The local address the listener is bound to.
@@ -266,18 +272,40 @@ impl Listener {
 		Ok(self.listener.local_addr()?)
 	}
 
+	/// A live handle to this listener's accept-loop health, for an embedder that
+	/// publishes it (see [`crate::accept`]).
+	pub fn accept_health(&self) -> crate::accept::Health {
+		self.health.clone()
+	}
+
 	/// Accept the next connection, performing the WebSocket upgrade and qmux handshake.
 	///
-	/// Returns `None` only if the listener itself is gone; a per-connection failure is
-	/// yielded as `Some(Err(..))` so the accept loop keeps running.
+	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
+	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
+	/// retried, because the caller has no better answer than to ask again. A
+	/// per-connection upgrade failure is still yielded as `Some(Err(..))`, and `None`
+	/// only if the listener itself is gone.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		match self.listener.accept().await {
-			Ok((stream, addr)) => {
-				tracing::debug!(%addr, "accepted WebSocket TCP connection");
-				let server = self.server.clone();
-				Some(server.accept(stream).await.map_err(Error::Accept))
+		let (stream, addr) = self.accept_socket().await;
+		tracing::debug!(%addr, "accepted WebSocket TCP connection");
+		let server = self.server.clone();
+		Some(server.accept(stream).await.map_err(Error::Accept))
+	}
+
+	/// The `accept(2)` half: keep asking until a connection comes back.
+	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
+		loop {
+			match self.listener.accept().await {
+				Ok(accepted) => {
+					self.health.accepted();
+					return accepted;
+				}
+				Err(err) => {
+					if let Some(delay) = self.health.failed(&err) {
+						tokio::time::sleep(delay).await;
+					}
+				}
 			}
-			Err(e) => Some(Err(e.into())),
 		}
 	}
 }

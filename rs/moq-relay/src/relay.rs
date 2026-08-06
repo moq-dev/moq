@@ -129,13 +129,16 @@ impl Relay {
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
 
-		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
-		// when unconfigured.
-		let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
-
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 		let web = Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web);
+
+		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
+		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
+		// when unconfigured. The web server's accept health rides this listener, since
+		// the public one is exactly what goes quiet when the node runs out of sockets.
+		let internal = Internal::new(config.internal, cluster.stats.clone())
+			.with_cluster(&cluster)
+			.with_listener(web.accept_health());
 
 		match addr {
 			Some(addr) => tracing::info!(%addr, "listening"),

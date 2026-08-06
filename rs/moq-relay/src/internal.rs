@@ -7,10 +7,11 @@
 //!
 //! Today it serves:
 //! - `/metrics` - this node's own traffic counters as Prometheus text
-//!   exposition. A distinct plane from both the customer `web` surface and the
-//!   MoQ `.stats` broadcast: the same atomics, but a different transport and
-//!   audience (an ops scraper, not a customer or the dashboard/billing
-//!   aggregators).
+//!   exposition, plus the accept-loop health of its TCP listeners
+//!   ([`with_listener`](Internal::with_listener)). A distinct plane from both the
+//!   customer `web` surface and the MoQ `.stats` broadcast: the same atomics, but
+//!   a different transport and audience (an ops scraper, not a customer or the
+//!   dashboard/billing aggregators).
 //! - `/health` - a liveness mirror of the public probe, for internal checks
 //!   that don't want to hit the customer port.
 //! - `/nodes` - the cluster nodes visible through gossip plus established
@@ -59,22 +60,43 @@ pub struct Internal {
 	config: InternalConfig,
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	health: moq_native::accept::Health,
+	listeners: Vec<moq_native::accept::Health>,
 }
 
 #[derive(Clone)]
 struct InternalState {
 	stats: moq_net::stats::Registry,
 	nodes: Option<crate::nodes::Nodes>,
+	listeners: Vec<moq_native::accept::Health>,
 }
 
 impl Internal {
 	/// Create the service from its config and the node's stats registry.
 	pub fn new(config: InternalConfig, stats: moq_net::stats::Registry) -> Self {
+		// This listener registers itself: it is the one rendering the counters, and
+		// its own are evidence about the node (the resources it can run out of are
+		// process-wide) rather than about this socket.
+		let health = moq_native::accept::Health::new("internal");
 		Self {
 			config,
 			stats,
 			nodes: None,
+			health: health.clone(),
+			listeners: vec![health],
 		}
+	}
+
+	/// Report another listener's accept health at `/metrics`.
+	///
+	/// The relay's own listeners register themselves; pass
+	/// [`Web::accept_health`](crate::Web::accept_health), and anything an embedder
+	/// listens on itself, so one scrape covers every socket on the node. See
+	/// [`moq_native::accept`] for what the classes mean and why a UDP-multiplexed
+	/// listener (every QUIC backend) has nothing to register.
+	pub fn with_listener(mut self, health: moq_native::accept::Health) -> Self {
+		self.listeners.push(health);
+		self
 	}
 
 	/// Attach the relay cluster used to serve the `/nodes` topology snapshot.
@@ -97,6 +119,7 @@ impl Internal {
 			.with_state(InternalState {
 				stats: self.stats.clone(),
 				nodes: self.nodes.clone(),
+				listeners: self.listeners.clone(),
 			})
 	}
 
@@ -120,7 +143,9 @@ impl Internal {
 		let listener = moq_native::bind::tcp(listen).context("failed to bind internal listener")?;
 		// No blanket "…server failed" context here: the caller (main.rs) adds
 		// that single top-level layer, matching `Web::serve` / `Cluster::run`.
-		axum_server::from_tcp(listener)?.serve(app.into_make_service()).await?;
+		crate::listener::server(listener, self.health)?
+			.serve(app.into_make_service())
+			.await?;
 		Ok(())
 	}
 
@@ -152,7 +177,7 @@ async fn serve_health() -> Response {
 /// current cumulative snapshot; a downstream scraper derives rates and live
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
-	let body = render_metrics(&state.stats.snapshot());
+	let body = render_metrics(&state.stats.snapshot(), &state.listeners);
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
@@ -171,7 +196,7 @@ async fn serve_nodes(State(state): State<InternalState>) -> Json<crate::nodes::S
 /// already are the registry, and a snapshot is a fixed handful of labeled
 /// counters, so a registry would only add a second source of truth to keep in
 /// sync.
-fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
+fn render_metrics(snap: &moq_net::stats::Snapshot, listeners: &[moq_native::accept::Health]) -> String {
 	use std::fmt::Write as _;
 
 	let traffic = snap.traffic();
@@ -267,12 +292,108 @@ fn render_metrics(snap: &moq_net::stats::Snapshot) -> String {
 		);
 	}
 
+	render_accepts(&mut out, listeners);
+
 	out
+}
+
+/// The accept-loop health of every listener on the node.
+///
+/// The counters are the load-bearing half: a process out of descriptors cannot
+/// answer this scrape either, so an episode is often only readable once it is over,
+/// and the gauge below has gone back to zero by then. Only `exhausted` is worth
+/// paging on; `connection` is junk traffic the node is fielding, and `unknown` is an
+/// errno the classifier has never seen (worth a dashboard, never an escalation, since
+/// a remote peer could drive it).
+fn render_accepts(out: &mut String, listeners: &[moq_native::accept::Health]) {
+	use moq_native::accept::Failure;
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_accept_failures_total Failed accept() calls on a listener, by class."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_accept_failures_total counter");
+	for health in listeners {
+		for failure in Failure::ALL {
+			let _ = writeln!(
+				out,
+				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",
+				health.listener(),
+				failure.as_str(),
+				health.failures(failure)
+			);
+		}
+	}
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_accept_stalled_seconds How long a listener has been unable to accept a connection; 0 when it is serving."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_accept_stalled_seconds gauge");
+	for health in listeners {
+		let _ = writeln!(
+			out,
+			"moq_relay_accept_stalled_seconds{{listener=\"{}\"}} {}",
+			health.listener(),
+			health.stalled().unwrap_or_default().as_secs_f64()
+		);
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Every registered listener has to appear in the exposition, at zero, before it
+	/// has ever failed.
+	///
+	/// A counter that only springs into existence on the first failure is the shape
+	/// that makes an alert unwritable: `rate(...)` over a series that does not exist
+	/// yet is empty, not zero, so the dashboard is blank on a healthy node and there
+	/// is nothing to notice going missing.
+	#[cfg(unix)]
+	#[test]
+	fn accept_metrics_list_every_listener_from_zero() {
+		let web = moq_native::accept::Health::new("web");
+		let internal =
+			Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled()).with_listener(web.clone());
+
+		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
+
+		for listener in ["internal", "web"] {
+			for class in ["connection", "exhausted", "unknown"] {
+				let line = format!("moq_relay_accept_failures_total{{listener=\"{listener}\",class=\"{class}\"}} 0");
+				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+			assert!(body.contains(&format!(
+				"moq_relay_accept_stalled_seconds{{listener=\"{listener}\"}} 0"
+			)));
+		}
+
+		// An exhaustion stall is what an operator pages on, so it has to be readable
+		// as a growing count and a non-zero gauge, not just a log line the node may
+		// not have had the descriptors to ship.
+		let emfile = std::io::Error::from_raw_os_error(24);
+		// Asserted rather than assumed: 24 is EMFILE on Linux and macOS, and the
+		// classification is what makes the rest of this meaningful.
+		assert_eq!(
+			moq_native::accept::Failure::classify(&emfile),
+			moq_native::accept::Failure::Exhausted
+		);
+		let _ = web.failed(&emfile);
+		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
+		assert!(body.contains("moq_relay_accept_failures_total{listener=\"web\",class=\"exhausted\"} 1"));
+
+		let prefix = "moq_relay_accept_stalled_seconds{listener=\"web\"} ";
+		let stalled: f64 = body
+			.lines()
+			.find_map(|line| line.strip_prefix(prefix))
+			.expect("stall gauge for the web listener")
+			.parse()
+			.expect("stall gauge is a number");
+		assert!(stalled > 0.0, "a stalled listener must not report zero seconds");
+	}
 
 	/// `serve` hosts the router it is HANDED, so an embedder's extra ops routes
 	/// answer on the same internal listener as the built-in ones. That is what
@@ -340,6 +461,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: None,
+			listeners: Vec::new(),
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
@@ -354,6 +476,7 @@ mod tests {
 		let state = InternalState {
 			stats: moq_net::stats::Registry::disabled(),
 			nodes: Some(nodes),
+			listeners: Vec::new(),
 		};
 
 		let Json(snapshot) = serve_nodes(State(state)).await;
@@ -411,7 +534,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let body = render_metrics(&stats.snapshot());
+		let body = render_metrics(&stats.snapshot(), &[]);
 
 		assert!(
 			body.contains("# TYPE moq_relay_bytes_total counter"),

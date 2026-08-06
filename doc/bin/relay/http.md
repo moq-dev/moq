@@ -103,8 +103,40 @@ Bind it only to loopback or a trusted private network:
 listen = "127.0.0.1:9101"
 ```
 
-It mirrors `/health`, exposes Prometheus traffic counters at `/metrics`, and
-adds the cluster topology endpoint below.
+It mirrors `/health`, exposes Prometheus counters at `/metrics`, and adds the
+cluster topology endpoint below.
+
+### GET /metrics
+
+Prometheus text exposition of this node's own traffic counters (bytes, frames,
+groups, subscriptions, viewers, sessions), split by `tier` and `role`.
+
+Alongside them are the TCP listeners' accept-loop counters, which are how a node
+that has stopped accepting connections says so:
+
+```
+moq_relay_accept_failures_total{listener="web",class="connection"} 41
+moq_relay_accept_failures_total{listener="web",class="exhausted"} 0
+moq_relay_accept_failures_total{listener="web",class="unknown"} 0
+moq_relay_accept_stalled_seconds{listener="web"} 0
+```
+
+`connection` counts connections that died before the relay dequeued them (a peer
+reset, a firewall rule, a scanner): ordinary traffic on a public port, and never
+a fault. A non-zero `exhausted` is the one worth paging on, and means the process
+or the host ran out of a resource `accept` needs (file descriptors, kernel
+memory) while connections were queued; `moq_relay_accept_stalled_seconds` is how
+long that has been true, and only a successful accept clears it. `unknown` is an
+errno the relay does not classify: worth a look, not an alert.
+
+Alert on the `exhausted` counter rather than the gauge. A process out of
+descriptors often cannot serve this scrape either, so the gauge tends to read
+zero again by the time a scrape gets through, while the counter still shows the
+jump.
+
+Nothing here reports host CPU, memory, disk, or network; run a node exporter for
+those. The QUIC listener has no accept counters at all: it multiplexes every
+session over one UDP socket, so it never calls `accept` and cannot exhaust it.
 
 ### GET /nodes
 

@@ -30,6 +30,14 @@ fn newest_lite_version() -> moq_net::Version {
 }
 
 async fn build_web(port: u16, ws: bool) -> Web {
+	let mut config = WebConfig::default();
+	config.ws = ws;
+	config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	build_web_with(config).await
+}
+
+/// [`build_web`] for a test that configures the listeners itself (e.g. HTTPS).
+async fn build_web_with(web_config: WebConfig) -> Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -55,10 +63,6 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init().expect("server init");
-
-	let mut web_config = WebConfig::default();
-	web_config.ws = ws;
-	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
 	Web::new(auth, cluster, server.certificates(), web_config)
 }
@@ -234,6 +238,61 @@ async fn relay_web_serves_merged_routes() {
 		.await
 		.expect("read embedded response");
 	assert_eq!(body, "embedded\n");
+
+	handle.abort();
+}
+
+/// The HTTPS listener has to terminate TLS and answer a real request.
+///
+/// The plain-HTTP tests above go through `axum_server`'s default acceptor, so they
+/// say nothing about the TLS stack: `MtlsAcceptor` wraps `RustlsAcceptor`, hot
+/// reload swaps the config underneath it, and the listener the relay hands
+/// `axum_server` is its own. A compile is not evidence any of that still handshakes.
+#[tokio::test]
+async fn relay_https_terminates_tls() {
+	let port = free_tcp_port();
+	let dir = tempfile::TempDir::new().expect("tempdir");
+
+	let key = rcgen::KeyPair::generate().expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let cert = params.self_signed(&key).expect("self-signed cert");
+	let cert_path = dir.path().join("cert.pem");
+	let key_path = dir.path().join("key.pem");
+	std::fs::write(&cert_path, cert.pem()).expect("write cert");
+	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+
+	let mut config = WebConfig::default();
+	config.ws = false;
+	config.https.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	config.https.cert = vec![cert_path];
+	config.https.key = vec![key_path];
+	let web = build_web_with(config).await;
+
+	// Held past `serve`, which consumes the server: this is the whole point of
+	// taking the handle up front.
+	let health = web.accept_health();
+
+	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		let _ = server_result_tx.send(web.run().await);
+	});
+
+	wait_for_http(port, &mut server_result_rx).await;
+
+	let client = reqwest::Client::builder()
+		.add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).expect("parse root"))
+		.build()
+		.expect("build https client");
+	let resp = tokio::time::timeout(TIMEOUT, client.get(format!("https://localhost:{port}/health")).send())
+		.await
+		.expect("https request timed out")
+		.expect("https request failed");
+	assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+	// A listener that just served a request is not stalled, and the connections it
+	// fielded were not junk.
+	assert_eq!(health.stalled(), None);
+	assert_eq!(health.failures(moq_native::accept::Failure::Exhausted), 0);
 
 	handle.abort();
 }
