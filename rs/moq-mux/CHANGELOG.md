@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.3...moq-mux-v0.9.4) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
+### Fixed
+
+- *(moq-mux)* make the synthesized fMP4 init playable on strict players ([#2679](https://github.com/moq-dev/moq/pull/2679))
+
 ## [0.9.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.9.2...moq-mux-v0.9.3) - 2026-08-05
 
 ### Fixed

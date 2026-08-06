@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5](https://github.com/moq-dev/moq/compare/libmoq-v0.5.4...libmoq-v0.5.5) - 2026-08-06
+
+### Fixed
+
+- *(libmoq)* stop holding the global locks across a video encode ([#2663](https://github.com/moq-dev/moq/pull/2663))
+- *(libmoq)* fix the generated CMake package config for Windows and installs ([#2671](https://github.com/moq-dev/moq/pull/2671))
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
 ## [0.5.4](https://github.com/moq-dev/moq/compare/libmoq-v0.5.3...libmoq-v0.5.4) - 2026-08-05
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.2...moq-rtc-v0.2.3) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-rtc-v0.2.1...moq-rtc-v0.2.2) - 2026-07-25
 
 ### Added

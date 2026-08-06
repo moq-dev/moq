@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14](https://github.com/moq-dev/moq/compare/moq-video-v0.0.13...moq-video-v0.0.14) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
+### Fixed
+
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
 ## [0.0.13](https://github.com/moq-dev/moq/compare/moq-video-v0.0.12...moq-video-v0.0.13) - 2026-08-05
 
 ### Added

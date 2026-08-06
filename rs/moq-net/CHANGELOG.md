@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9](https://github.com/moq-dev/moq/compare/moq-net-v0.2.8...moq-net-v0.2.9) - 2026-08-06
+
+### Fixed
+
+- *(moq-net)* stop a reflected announce from evicting the source we publish ([#2684](https://github.com/moq-dev/moq/pull/2684))
+- *(moq-wasm)* repair the consume path and gate wasm32 in CI ([#2683](https://github.com/moq-dev/moq/pull/2683))
+- *(moq-net)* close the session on a malformed NAMESPACE ([#2667](https://github.com/moq-dev/moq/pull/2667))
+- *(moq-net)* move the publisher group order out of message parameters ([#2677](https://github.com/moq-dev/moq/pull/2677))
+- *(net)* let the accepting side pick the retention window when the wire carries none ([#2657](https://github.com/moq-dev/moq/pull/2657))
+- *(moq-net)* send IETF subscribe/fetch rejections without resetting the stream ([#2673](https://github.com/moq-dev/moq/pull/2673))
+
+### Other
+
+- *(moq-net)* describe what with_cost actually prices ([#2668](https://github.com/moq-dev/moq/pull/2668))
+- *(moq-net)* give lite::start a Config, like ietf::start ([#2686](https://github.com/moq-dev/moq/pull/2686))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/moq-net-v0.2.7...moq-net-v0.2.8) - 2026-08-05
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.7...moq-ffi-v0.3.8) - 2026-08-06
+
+### Fixed
+
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-ffi-v0.3.6...moq-ffi-v0.3.7) - 2026-08-05
 
 ### Added
