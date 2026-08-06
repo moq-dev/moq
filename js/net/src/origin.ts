@@ -57,6 +57,26 @@ class OriginState {
 }
 
 /**
+ * A non-owning handle on an origin: publish into it and read it, without its lifecycle.
+ *
+ * What a shared connection lends out. {@link Producer} implements it, so code that is
+ * handed an origin rather than owning one should accept this type: closing the origin
+ * stays the owner's alone, and a borrower cannot express it.
+ *
+ * @public
+ */
+export interface Table {
+	/** Settles once the origin closes; see {@link Producer.closed}. */
+	readonly closed: GetPromise<Error | null>;
+
+	/** Publish a broadcast at `path`, returning its producer; see {@link Producer.publish}. */
+	publish(path: Path.Valid): broadcast.Producer;
+
+	/** A read handle for this origin; see {@link Producer.consume}. */
+	consume(): Consumer;
+}
+
+/**
  * The write side of an origin: publish broadcasts by path.
  *
  * Independent of any connection. A connection given this origin (via its `publish` option)
@@ -67,7 +87,7 @@ class OriginState {
  *
  * @public
  */
-export class Producer {
+export class Producer implements Table {
 	#state = new OriginState();
 
 	/**

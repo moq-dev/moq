@@ -10,7 +10,7 @@ import { type Kind, Rendition } from "./rendition";
 export type BroadcastInput = {
 	// The origin to publish into. Independent of any connection: whichever sessions serve the
 	// origin announce the broadcast, and it survives their reconnects.
-	origin: Getter<Moq.Origin.Producer | undefined>;
+	origin: Getter<Moq.Origin.Table | undefined>;
 
 	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
 	enabled: Getter<boolean>;

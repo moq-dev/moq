@@ -69,10 +69,11 @@ export class Shared {
 	/**
 	 * The shared origin for the current URL, or undefined while disabled or URL-less.
 	 *
-	 * Publish into it, consume from it, or stand requests on it; it is the same origin every
-	 * other handle on this URL uses, and it spans the connection's reconnects.
+	 * Publish into it or consume from it; it is the same origin every other handle on this
+	 * URL uses, and it spans the connection's reconnects. Borrowed, not owned: the type has
+	 * no close, since closing it would tear the origin down under every other handle.
 	 */
-	readonly origin: Getter<Origin.Producer | undefined>;
+	readonly origin: Getter<Origin.Table | undefined>;
 
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<Established | undefined>(undefined);
