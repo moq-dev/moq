@@ -269,8 +269,9 @@ async fn relay_https_terminates_tls() {
 	let web = build_web_with(config).await;
 
 	// Held past `serve`, which consumes the server: this is the whole point of
-	// taking the handle up front.
-	let health = web.accept_health();
+	// taking the handle up front. `Some` because a listener is configured; a relay
+	// with neither HTTP nor HTTPS reports nothing rather than a permanent zero.
+	let health = web.accept_health().expect("an HTTPS listener is configured");
 
 	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
 	let handle = tokio::spawn(async move {

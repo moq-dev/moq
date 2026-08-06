@@ -134,11 +134,13 @@ impl Relay {
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
-		// when unconfigured. The web server's accept health rides this listener, since
-		// the public one is exactly what goes quiet when the node runs out of sockets.
+		// when unconfigured. Every listener that performs a real accept(2) reports here,
+		// web and stream alike: a stream-only relay has no web listener at all, and the
+		// point is that whichever socket goes quiet is the one a scrape can see.
 		let internal = Internal::new(config.internal, cluster.stats.clone())
 			.with_cluster(&cluster)
-			.with_listener(web.accept_health());
+			.with_listeners(web.accept_health())
+			.with_listeners(server.accept_health());
 
 		match addr {
 			Some(addr) => tracing::info!(%addr, "listening"),

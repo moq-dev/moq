@@ -8,7 +8,7 @@
 //! Today it serves:
 //! - `/metrics` - this node's own traffic counters as Prometheus text
 //!   exposition, plus the accept-loop health of its TCP listeners
-//!   ([`with_listener`](Internal::with_listener)). A distinct plane from both the
+//!   ([`with_listeners`](Internal::with_listeners)). A distinct plane from both the
 //!   customer `web` surface and the MoQ `.stats` broadcast: the same atomics, but
 //!   a different transport and audience (an ops scraper, not a customer or the
 //!   dashboard/billing aggregators).
@@ -76,26 +76,38 @@ impl Internal {
 	pub fn new(config: InternalConfig, stats: moq_net::stats::Registry) -> Self {
 		// This listener registers itself: it is the one rendering the counters, and
 		// its own are evidence about the node (the resources it can run out of are
-		// process-wide) rather than about this socket.
+		// process-wide) rather than about this socket. Only when it will actually run,
+		// though: `routes()` is public, so an embedder can merge this surface onto its
+		// own listener while `serve` stays disabled, and a zero series for a socket
+		// nobody opened is a watch that can never fire.
 		let health = moq_native::accept::Health::new("internal");
+		let listeners = match config.listen {
+			Some(_) => vec![health.clone()],
+			None => Vec::new(),
+		};
 		Self {
 			config,
 			stats,
 			nodes: None,
-			health: health.clone(),
-			listeners: vec![health],
+			health,
+			listeners,
 		}
 	}
 
-	/// Report another listener's accept health at `/metrics`.
+	/// Report other listeners' accept health at `/metrics`.
 	///
-	/// The relay's own listeners register themselves; pass
-	/// [`Web::accept_health`](crate::Web::accept_health), and anything an embedder
-	/// listens on itself, so one scrape covers every socket on the node. See
-	/// [`moq_native::accept`] for what the classes mean and why a UDP-multiplexed
-	/// listener (every QUIC backend) has nothing to register.
-	pub fn with_listener(mut self, health: moq_native::accept::Health) -> Self {
-		self.listeners.push(health);
+	/// Takes an iterator so the accessors feed it directly, however many listeners
+	/// they turn out to describe: [`Web::accept_health`](crate::Web::accept_health)
+	/// yields an `Option`, [`moq_native::Server::accept_health`] a `Vec`, and an
+	/// embedder can pass its own. Register every socket on the node, so a scrape
+	/// covers the one that actually went quiet.
+	///
+	/// Register nothing for a listener that isn't running. A permanently-zero series
+	/// is worse than an absent one: it reads as a watch that is passing. See
+	/// [`moq_native::accept`] for that argument, and for why no QUIC backend has
+	/// anything to register.
+	pub fn with_listeners(mut self, health: impl IntoIterator<Item = moq_native::accept::Health>) -> Self {
+		self.listeners.extend(health);
 		self
 	}
 
@@ -345,6 +357,44 @@ fn render_accepts(out: &mut String, listeners: &[moq_native::accept::Health]) {
 mod tests {
 	use super::*;
 
+	/// An `InternalConfig` whose listener is enabled, so `Internal` registers its own.
+	fn listening() -> InternalConfig {
+		InternalConfig {
+			listen: Some("127.0.0.1:0".parse().unwrap()),
+		}
+	}
+
+	/// A listener that isn't running must not appear at all, and one that is must
+	/// appear even though nothing else registered it.
+	///
+	/// The failure this guards is a stream-only node: it has no web listener, so a
+	/// `web` series there would be a permanent zero standing in for a socket that was
+	/// never opened, while the `tcp` listener that can actually fail goes unreported.
+	/// Both halves are silent in exactly the way that reads as healthy.
+	#[test]
+	fn absent_listeners_are_not_reported_as_healthy() {
+		let disabled = Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled());
+		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &disabled.listeners);
+		assert!(
+			!body.contains("listener=\"internal\""),
+			"a disabled internal listener must not publish counters:\n{body}"
+		);
+
+		// What a stream-only relay looks like: no web, one tcp.
+		let stream_only = Internal::new(listening(), moq_net::stats::Registry::disabled())
+			.with_listeners(None)
+			.with_listeners([moq_native::accept::Health::new("tcp")]);
+		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &stream_only.listeners);
+		assert!(
+			body.contains("moq_relay_accept_failures_total{listener=\"tcp\",class=\"exhausted\"} 0"),
+			"the tcp listener must be reported:\n{body}"
+		);
+		assert!(
+			!body.contains("listener=\"web\""),
+			"a relay with no web listener must not publish a web series:\n{body}"
+		);
+	}
+
 	/// Every registered listener has to appear in the exposition, at zero, before it
 	/// has ever failed.
 	///
@@ -356,8 +406,7 @@ mod tests {
 	#[test]
 	fn accept_metrics_list_every_listener_from_zero() {
 		let web = moq_native::accept::Health::new("web");
-		let internal =
-			Internal::new(InternalConfig::default(), moq_net::stats::Registry::disabled()).with_listener(web.clone());
+		let internal = Internal::new(listening(), moq_net::stats::Registry::disabled()).with_listeners([web.clone()]);
 
 		let body = render_metrics(&moq_net::stats::Registry::disabled().snapshot(), &internal.listeners);
 

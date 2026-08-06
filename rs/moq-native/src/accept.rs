@@ -79,10 +79,14 @@ impl Failure {
 	pub const ALL: [Failure; 3] = [Failure::Connection, Failure::Exhausted, Failure::Unknown];
 
 	/// Classify a failed `accept(2)`.
+	///
+	/// Unrecognized is [`Unknown`](Self::Unknown), never [`Connection`](Self::Connection):
+	/// the default has to be the one that paces, because guessing "per connection" on a
+	/// listener-wide failure is the mistake that spins.
 	pub fn classify(err: &io::Error) -> Self {
 		match err.raw_os_error() {
-			Some(code) if EXHAUSTED.contains(&code) => Self::Exhausted,
-			Some(code) if PER_CONNECTION.contains(&code) => Self::Connection,
+			Some(code) if exhausted(code) => Self::Exhausted,
+			Some(code) if per_connection(code) => Self::Connection,
 			_ => Self::Unknown,
 		}
 	}
@@ -103,53 +107,88 @@ impl std::fmt::Display for Failure {
 	}
 }
 
-/// Errnos meaning `accept` itself had nothing to work with. All of these persist
-/// until something outside the accept loop returns the resource.
+/// Whether `accept` itself had nothing to work with, so the failure persists until
+/// something outside the accept loop returns the resource.
 #[cfg(unix)]
-const EXHAUSTED: &[i32] = &[libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM];
+fn exhausted(code: i32) -> bool {
+	[libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM].contains(&code)
+}
 
-/// Errnos belonging to the one connection being dequeued. The bulk of the list is
-/// the "already-pending network error on the new socket" set `accept(2)` documents
-/// on Linux; each reports the state of that connection, never of the listener.
+/// Whether the failure belongs to the one connection being dequeued rather than to
+/// the listener.
+///
+/// The bulk of the list is the "already-pending network error on the new socket" set
+/// `accept(2)` documents on Linux, which is a Linux behavior specifically (BSD holds
+/// the error until the socket is used). Each reports the state of that connection,
+/// never of the listener, so each is safe to retry at once.
 #[cfg(unix)]
-const PER_CONNECTION: &[i32] = &[
-	libc::ECONNABORTED,
-	libc::ECONNRESET,
-	libc::ETIMEDOUT,
-	// A netfilter/firewall rule rejected this connection.
-	libc::EPERM,
-	libc::EPROTO,
-	libc::ENOPROTOOPT,
-	libc::EOPNOTSUPP,
-	libc::EHOSTDOWN,
-	libc::EHOSTUNREACH,
-	libc::ENETDOWN,
-	libc::ENETUNREACH,
-	// Not a connection error at all: the syscall was interrupted by a signal.
-	// Grouped here because it wants the same handling (retry at once) and says
-	// nothing about the listener.
-	libc::EINTR,
-];
+fn per_connection(code: i32) -> bool {
+	let common = [
+		libc::ECONNABORTED,
+		libc::ECONNRESET,
+		libc::ETIMEDOUT,
+		// A netfilter/firewall rule rejected this connection.
+		libc::EPERM,
+		libc::EPROTO,
+		libc::ENOPROTOOPT,
+		libc::EOPNOTSUPP,
+		libc::EHOSTDOWN,
+		libc::EHOSTUNREACH,
+		libc::ENETDOWN,
+		libc::ENETUNREACH,
+		// Not a connection error at all: the syscall was interrupted by a signal.
+		// Grouped here because it wants the same handling (retry at once) and says
+		// nothing about the listener.
+		libc::EINTR,
+	]
+	.contains(&code);
 
-/// Winsock reports the same two families under `WSAE*` codes rather than errnos.
-/// Spelled out because the constants live in `windows-sys`, which is a large
-/// dependency to take on for four integers; they are fixed by the Winsock ABI.
+	// `ENONET` rounds out the pending-error set above, and exists only where that set
+	// does: it is absent from the BSD/Apple headers entirely.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	let common = common || code == libc::ENONET;
+
+	common
+}
+
+/// Winsock reports these under `WSAE*` codes rather than errnos. Spelled out because
+/// the constants live in `windows-sys`, a large dependency to take on for four
+/// integers; they are fixed by the Winsock ABI.
+///
+/// Deliberately narrower than the unix set. `accept` on Windows documents far fewer
+/// per-connection failures, and the ones that look analogous are not: `WSAENETDOWN`
+/// is "the network subsystem has failed", which is listener-wide and would spin if
+/// retried at once. Anything not listed here lands in [`Failure::Unknown`], which
+/// paces, so the narrow list fails safe.
 #[cfg(windows)]
-const EXHAUSTED: &[i32] = &[
-	10024, // WSAEMFILE: too many open sockets
-	10055, // WSAENOBUFS: no buffer space available
-];
+fn exhausted(code: i32) -> bool {
+	[
+		10024, // WSAEMFILE: no more socket descriptors available
+		10055, // WSAENOBUFS: no buffer space available
+	]
+	.contains(&code)
+}
 
 #[cfg(windows)]
-const PER_CONNECTION: &[i32] = &[
-	10053, // WSAECONNABORTED
-	10054, // WSAECONNRESET
-	10060, // WSAETIMEDOUT
-	10064, // WSAEHOSTDOWN
-	10065, // WSAEHOSTUNREACH
-	10050, // WSAENETDOWN
-	10051, // WSAENETUNREACH
-];
+fn per_connection(code: i32) -> bool {
+	[
+		10053, // WSAECONNABORTED: software caused connection abort
+		10054, // WSAECONNRESET: the peer terminated the indicated connection
+	]
+	.contains(&code)
+}
+
+/// No error table for a platform we have never run a listener on. Everything is
+/// [`Failure::Unknown`], which paces and warns rather than claiming a cause.
+#[cfg(not(any(unix, windows)))]
+fn exhausted(_code: i32) -> bool {
+	false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn per_connection(_code: i32) -> bool {
+	false
+}
 
 /// One listener's accept-loop health: how to react to a failure, and what a
 /// supervisor outside the process can read back.
@@ -340,6 +379,28 @@ mod tests {
 		// and a warning, never a claim about the cause.
 		assert_eq!(Failure::classify(&io(libc::EINVAL)), Failure::Unknown);
 		assert_eq!(Failure::classify(&io::Error::other("never seen")), Failure::Unknown);
+	}
+
+	/// `ENONET` belongs to the pending-error set the `classifies_*` test covers, and
+	/// exists only on Linux, so it needs its own gate. Without it the errno lands in
+	/// `Unknown` and a firewalled connection costs the listener a backoff.
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	#[test]
+	fn linux_pending_network_errors_are_per_connection() {
+		assert_eq!(Failure::classify(&io(libc::ENONET)), Failure::Connection);
+	}
+
+	/// Not compiled on a unix host; the Windows gates in `just rs windows` are the
+	/// only thing that builds this.
+	#[cfg(windows)]
+	#[test]
+	fn windows_subsystem_failure_is_not_per_connection() {
+		// WSAENETDOWN is "the network subsystem has failed", which is listener-wide.
+		// Retrying it at once is the spin this module exists to prevent, so it must
+		// fall through to Unknown (which paces) rather than read as one dead peer.
+		assert_eq!(Failure::classify(&io(10050)), Failure::Unknown);
+		assert_eq!(Failure::classify(&io(10054)), Failure::Connection);
+		assert_eq!(Failure::classify(&io(10024)), Failure::Exhausted);
 	}
 
 	#[cfg(unix)]

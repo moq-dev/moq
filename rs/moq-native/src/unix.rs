@@ -205,6 +205,16 @@ impl Listener {
 		self.health.clone()
 	}
 
+	/// Report into `health` instead of the one this listener made for itself.
+	///
+	/// For an owner that has to hand the handle out *before* the listener exists:
+	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// registering them with a metrics endpoint does so at startup.
+	pub fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
+		self.health = health;
+		self
+	}
+
 	/// Advertise these application protocols (moq ALPNs) for in-band negotiation,
 	/// in preference order. The first server entry the client also offers wins.
 	pub fn with_protocols<I, S>(mut self, protocols: I) -> Self

@@ -165,12 +165,17 @@ impl Web {
 	/// a WebSocket session, a WHIP offer, or an HLS request while every other metric
 	/// looks healthy. Take it before `serve` consumes the server.
 	///
-	/// Both listeners report into this one handle. The failures worth escalating on
-	/// are process- or host-wide (out of descriptors, out of kernel memory), so an
+	/// `None` when neither listener is configured, so a QUIC-only relay publishes no
+	/// counters for a socket it never opens. A permanently-zero series for an absent
+	/// listener reads as a watch that is passing when there is nothing there to watch.
+	///
+	/// When both are configured they share one handle. The failures worth escalating
+	/// on are process- or host-wide (out of descriptors, out of kernel memory), so an
 	/// HTTP accept that succeeds is real evidence that the HTTPS one is not stalled
 	/// either.
-	pub fn accept_health(&self) -> moq_native::accept::Health {
-		self.health.clone()
+	pub fn accept_health(&self) -> Option<moq_native::accept::Health> {
+		let configured = self.config.http.listen.is_some() || self.config.https.listen.is_some();
+		configured.then(|| self.health.clone())
 	}
 
 	/// Build the default web router with `state` applied, returning a

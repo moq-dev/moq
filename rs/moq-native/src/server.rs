@@ -336,6 +336,27 @@ impl Server {
 		unreachable!("no transport compiled; enable a QUIC backend, tcp, or uds feature");
 	}
 
+	/// The accept-loop health of every listener this server owns that performs a real
+	/// `accept(2)`: the `tcp`/`unix` stream listeners and, if one was set,
+	/// [`with_websocket`](Self::with_websocket).
+	///
+	/// Empty on a QUIC-only server, which is the honest answer rather than a
+	/// convenient one: a QUIC backend multiplexes every session over one UDP socket,
+	/// so it never calls `accept` and has nothing that could fail this way. Publishing
+	/// a zero for it would read as a watch that is passing when it can never fire.
+	///
+	/// Available before [`listen`](Self::listen), so an owner can register these with
+	/// a metrics endpoint at startup even though the sockets bind later.
+	pub fn accept_health(&self) -> Vec<crate::accept::Health> {
+		#[allow(unused_mut)]
+		let mut health = Vec::new();
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		health.extend(self.streams.health.iter().cloned());
+		#[cfg(feature = "websocket")]
+		health.extend(self.websocket.as_ref().map(|ws| ws.accept_health()));
+		health
+	}
+
 	/// Bind the listeners that bind lazily, so a bind failure surfaces here.
 	///
 	/// The QUIC socket is bound by [`ServerConfig::init`], but the stream
@@ -627,6 +648,19 @@ enum StreamBind {
 	Unix(PathBuf),
 }
 
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+impl StreamBind {
+	/// The name this listener reports its accept health under.
+	fn name(&self) -> &'static str {
+		match self {
+			#[cfg(feature = "tcp")]
+			Self::Tcp(_) => "tcp",
+			#[cfg(all(feature = "uds", unix))]
+			Self::Unix(_) => "unix",
+		}
+	}
+}
+
 /// The stream (`tcp`/`unix`) listeners owned by a [`Server`].
 ///
 /// Bound lazily on the first [`Server::accept`] (they need a runtime), after
@@ -636,6 +670,10 @@ enum StreamBind {
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 struct StreamListeners {
 	binds: Vec<StreamBind>,
+	/// One per entry in `binds`, in the same order, and created up front rather than
+	/// with the listener: an owner registering these with a metrics endpoint does so
+	/// at startup, long before the first `accept` binds anything.
+	health: Vec<crate::accept::Health>,
 	versions: moq_net::Versions,
 	#[cfg(all(feature = "uds", unix))]
 	unix_allow: Option<crate::unix::Allow>,
@@ -650,8 +688,13 @@ impl StreamListeners {
 		versions: moq_net::Versions,
 		#[cfg(all(feature = "uds", unix))] unix_allow: Option<crate::unix::Allow>,
 	) -> Self {
+		let health = binds
+			.iter()
+			.map(|bind| crate::accept::Health::new(bind.name()))
+			.collect();
 		Self {
 			binds,
+			health,
 			versions,
 			#[cfg(all(feature = "uds", unix))]
 			unix_allow,
@@ -667,7 +710,8 @@ impl StreamListeners {
 		}
 
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
-		for bind in self.binds.drain(..) {
+		let health = self.health.clone();
+		for (bind, health) in self.binds.drain(..).zip(health) {
 			let versions = self.versions.clone();
 			match bind {
 				#[cfg(feature = "tcp")]
@@ -675,7 +719,10 @@ impl StreamListeners {
 					if !addr.ip().is_loopback() {
 						tracing::warn!(%addr, "tcp listener bound to a non-loopback address; qmux is UNENCRYPTED, ensure the network is trusted");
 					}
-					let listener = crate::tcp::Listener::bind(addr).await?.with_protocols(versions.alpns());
+					let listener = crate::tcp::Listener::bind(addr)
+						.await?
+						.with_protocols(versions.alpns())
+						.with_accept_health(health);
 					tracing::info!(%addr, "listening (tcp)");
 					self.tasks.push(spawn_tcp_loop(listener, versions, tx.clone()));
 				}
@@ -683,7 +730,8 @@ impl StreamListeners {
 				StreamBind::Unix(path) => {
 					let listener = crate::unix::Listener::bind(&path)
 						.await?
-						.with_protocols(versions.alpns());
+						.with_protocols(versions.alpns())
+						.with_accept_health(health);
 					// Loose file perms: the uid/gid/pid allow list is the real gate,
 					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
@@ -1057,6 +1105,33 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The handles have to exist before anything binds, and cover the stream
+	/// listeners rather than just the ones an owner happens to construct itself.
+	///
+	/// `tcp`/`unix` bind lazily on the first `accept`, so a naive implementation
+	/// hands out nothing at startup, which is exactly when a metrics endpoint is
+	/// assembled. A stream-only node would then publish no accept counters for the
+	/// only sockets on it that can fail.
+	#[cfg(feature = "tcp")]
+	#[test]
+	fn accept_health_covers_stream_listeners_before_they_bind() {
+		let mut config = ServerConfig::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let server = Server::new(config).expect("stream-only server");
+
+		let names: Vec<_> = server.accept_health().iter().map(|h| h.listener()).collect();
+		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
+	}
+
+	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and
+	/// never calls `accept`, so a zero counter would be a watch that cannot fire.
+	#[cfg(all(feature = "quinn", not(feature = "tcp")))]
+	#[test]
+	fn accept_health_is_empty_without_a_stream_listener() {
+		let server = ServerConfig::default().init().expect("quic server");
+		assert!(server.accept_health().is_empty());
+	}
 
 	#[test]
 	fn transport_names_are_stable() {

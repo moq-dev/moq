@@ -121,6 +121,13 @@ moq_relay_accept_failures_total{listener="web",class="unknown"} 0
 moq_relay_accept_stalled_seconds{listener="web"} 0
 ```
 
+One `listener` per socket that is actually configured: `web` for the HTTP/HTTPS
+pair, `internal` for this listener, and `tcp` / `unix` for the qmux stream
+listeners. A listener you have not configured is absent rather than zero, so a
+stream-only relay publishes no `web` series at all. That is deliberate: a
+permanent zero for a socket nobody opened reads as a watch that is passing, when
+there is nothing there to watch.
+
 `connection` counts connections that died before the relay dequeued them (a peer
 reset, a firewall rule, a scanner): ordinary traffic on a public port, and never
 a fault. A non-zero `exhausted` is the one worth paging on, and means the process
