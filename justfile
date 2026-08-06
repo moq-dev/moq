@@ -229,7 +229,7 @@ fix-all:
 _fix-common:
     bun install
     bun remark . --quiet --output
-    @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
+    @if command -v shfmt >/dev/null 2>&1; then files=$(git ls-files -z | xargs -0 shfmt -f); shfmt --write $files; fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --justfile "$f"; done
