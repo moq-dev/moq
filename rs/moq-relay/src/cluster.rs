@@ -387,8 +387,6 @@ pub struct ClusterConfig {
 	pub linger: Option<Duration>,
 }
 
-/// A relay cluster built around a single [`origin::Producer`].
-///
 /// LAN discovery configuration (`[cluster.lan]`).
 ///
 /// Advertises [`ClusterConfig::node`] over mDNS and dials the node URLs other
@@ -433,14 +431,6 @@ pub struct LanConfig {
 	pub secret: Option<String>,
 }
 
-/// Local sessions and remote cluster connections all publish into the same
-/// origin. Loop prevention and route preference come from the hop list carried
-/// on each broadcast's route (see [`moq_net::broadcast::Route`]).
-///
-/// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
-/// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
-/// methods. A cluster without a client can serve local sessions but cannot
-/// dial remote peers.
 /// A [`Cluster`] whose config is validated and whose resources are bound,
 /// produced by [`Cluster::start`] and run with [`run`](Self::run).
 ///
@@ -492,6 +482,16 @@ struct Work {
 	discovery: Option<moq_native::mdns::Discovery>,
 }
 
+/// A relay cluster built around a single [`origin::Producer`].
+///
+/// Local sessions and remote cluster connections all publish into the same
+/// origin. Loop prevention and route preference come from the hop list carried
+/// on each broadcast's route (see [`moq_net::broadcast::Route`]).
+///
+/// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
+/// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
+/// methods. A cluster without a client can serve local sessions but cannot
+/// dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
@@ -811,7 +811,7 @@ impl Cluster {
 
 		// Static `--cluster-connect` peers and gossip-discovered peers share one
 		// dial map so a peer reached via both paths only opens a single dial.
-		// Gossip-driven unannounces don't abort immediately — the discovery loop
+		// Gossip-driven unannounces don't abort immediately. The discovery loop
 		// runs a periodic sweep that only aborts entries whose unannounce has
 		// stuck for [`STALE_AFTER`]. That filters out the prefer-shorter-hop flap
 		// (sub-millisecond unannounce-then-announce) while still cleaning up

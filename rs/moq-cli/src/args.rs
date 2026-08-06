@@ -147,7 +147,12 @@ impl MoqSide {
 			"a MoQ side is required: pass --client-connect <url> to dial a relay, --server-bind <addr> to self-host, or --cluster-lan to mesh over the LAN"
 		);
 		#[cfg(feature = "cluster-lan")]
-		self.cluster.validate()?;
+		{
+			self.cluster.validate()?;
+			if self.lan() {
+				crate::cluster::validate_versions(&self.client, &self.server_config())?;
+			}
+		}
 		Ok(())
 	}
 
@@ -159,10 +164,16 @@ impl MoqSide {
 	/// fail `moq token` in any shell that exports the variable for a publisher, and an
 	/// ambient env value is not the deliberate request this is meant to catch.
 	pub fn reject(&self, command: &str) -> anyhow::Result<()> {
+		#[cfg(feature = "cluster-lan")]
+		let cluster_secret = self.cluster.secret.is_some();
+		#[cfg(not(feature = "cluster-lan"))]
+		let cluster_secret = false;
+
 		let ignored = [
 			("--client-connect", self.client.connect.is_some()),
 			("--server-bind", self.server.bind.is_some()),
 			("--cluster-lan", self.lan()),
+			("--cluster-lan-secret", cluster_secret),
 			("--broadcast", self.broadcast.is_some()),
 		];
 
@@ -422,6 +433,21 @@ mod tests {
 			let cli = Cli::try_parse_from(["moq", "--cluster-lan", "token", "generate"]).unwrap();
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains("--cluster-lan"), "{err}");
+
+			// Clap considers the secret's `requires` satisfied when the boolean flag
+			// is explicitly present but false. The local verb still has to reject the
+			// otherwise silently ignored secret.
+			let cli = Cli::try_parse_from([
+				"moq",
+				"--cluster-lan=false",
+				"--cluster-lan-secret",
+				"cluster.key",
+				"token",
+				"generate",
+			])
+			.unwrap();
+			let err = cli.moq.reject("token").unwrap_err().to_string();
+			assert!(err.contains("--cluster-lan-secret"), "{err}");
 		}
 	}
 
@@ -500,5 +526,33 @@ mod tests {
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
 		assert_eq!(cli.moq.cluster.secret.as_deref(), Some("cluster.key"));
+	}
+
+	/// A mesh dial authenticates through its request path, which legacy moq-lite
+	/// versions do not carry.
+	#[cfg(feature = "cluster-lan")]
+	#[test]
+	fn cluster_lan_requires_a_path_capable_version() {
+		for flag in ["--client-version", "--server-version"] {
+			let cli =
+				Cli::try_parse_from(["moq", "--cluster-lan", flag, "moq-lite-04", "import", "ts"]).expect("parse");
+			let err = cli.moq.validate().unwrap_err().to_string();
+			assert!(err.contains(flag), "{err}");
+		}
+
+		let cli = Cli::try_parse_from([
+			"moq",
+			"--cluster-lan",
+			"--client-version",
+			"moq-lite-04",
+			"--client-version",
+			"moq-lite-05",
+			"--server-version",
+			"moq-lite-05",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		assert!(cli.moq.validate().is_ok());
 	}
 }

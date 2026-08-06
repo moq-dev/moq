@@ -76,8 +76,6 @@ pub enum Direction {
 /// clients, the LAN mesh when `--cluster-lan` is on, and the certificate
 /// endpoint for an explicit `--server-bind`. A no-op with no listener configured.
 ///
-/// Readiness is signaled once every attachment is live, so a bind, mDNS, or key
-/// failure surfaces before the process claims to be up.
 async fn spawn_server(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 	moq: &MoqSide,
@@ -97,8 +95,6 @@ async fn spawn_server(
 		true => Some(cluster::Lan::start(&moq.cluster, origin.clone(), &server, moq.client.clone()).await?),
 		false => None,
 	};
-	moq::notify_ready();
-
 	#[cfg(feature = "cluster-lan")]
 	match lan {
 		Some((lan, discovery)) => {
@@ -236,7 +232,6 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 	if moq.client.connect.is_some()
 		&& let Some(reconnect) = net.client(moq.client.clone())?.publish(origin.consume())
 	{
-		moq::notify_ready();
 		// Read before the handle moves into the task. This consumer is
 		// persistent: it survives reconnects, reading `None` while down, so it
 		// can be wired up before anything connects.
@@ -247,6 +242,10 @@ async fn run_import(moq: MoqSide, import: Import, net: Net) -> anyhow::Result<()
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Import).await?;
+	// Every configured MoQ attachment is now initialized. In particular, a
+	// combined client + LAN process must not report ready before the listener and
+	// mDNS announcement have succeeded.
+	moq::notify_ready();
 
 	// Foreign side: the single source.
 	if let Some(format) = import.source.stdin_format() {
@@ -338,10 +337,13 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	if moq.client.connect.is_some()
 		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
 	{
-		moq::notify_ready();
 		tasks.spawn(async move { Ok(reconnect.closed().await?) });
 	}
 	spawn_server(&mut tasks, &moq, &origin, &net, Direction::Export).await?;
+	// Every configured MoQ attachment is now initialized. In particular, a
+	// combined client + LAN process must not report ready before the listener and
+	// mDNS announcement have succeeded.
+	moq::notify_ready();
 
 	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {

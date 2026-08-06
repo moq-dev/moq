@@ -21,6 +21,27 @@ use url::Url;
 /// than an ordinary publisher or viewer on the same listener.
 const MESH_PATH: &str = "/.cluster";
 
+/// Whether a protocol version carries the request path used to mark a mesh dial.
+fn carries_request_path(version: &moq_net::Version) -> bool {
+	!version.is_lite() || version.code() >= 0xff0dad05
+}
+
+/// Reject version restrictions that leave the mesh with no request path.
+pub(crate) fn validate_versions(
+	client: &moq_native::ClientConfig,
+	server: &moq_native::ServerConfig,
+) -> anyhow::Result<()> {
+	let client = client.versions();
+	let server = server.versions();
+	anyhow::ensure!(
+		client
+			.iter()
+			.any(|version| carries_request_path(version) && server.contains(version)),
+		"--cluster-lan needs --client-version and --server-version to share a version that carries a request path (moq-lite-05 or any moq-transport version)"
+	);
+	Ok(())
+}
+
 /// The LAN mesh policy: dial every discovered peer, accept the ones that prove
 /// membership.
 ///
@@ -79,6 +100,15 @@ impl Lan {
 		// nonzero `--client-bind` means the second peer (or the first, when
 		// `--client-connect` already owns it) fails with EADDRINUSE.
 		client.bind.set_port(0);
+		// The membership proof rides in the request path. Legacy moq-lite versions
+		// ignore that path, so they cannot be offered by a mesh dial even when the
+		// same client config also serves an ordinary relay connection.
+		client.version = client
+			.versions()
+			.iter()
+			.filter(|version| carries_request_path(version))
+			.copied()
+			.collect();
 
 		let discovery = config.advertise().await?;
 		let credential = discovery.credential().map(str::to_string);

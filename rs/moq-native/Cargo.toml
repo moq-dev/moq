@@ -105,8 +105,8 @@ libc = "0.2"
 anyhow = "1"
 bytes = "1"
 chrono = "0.4"
-# The channel type `mdns_sd::Receiver` is an alias for, so the mDNS readiness
-# gate can be driven with synthetic daemon events.
+# Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
+# be driven with synthetic daemon events.
 flume = "0.12"
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 tempfile = "3"
