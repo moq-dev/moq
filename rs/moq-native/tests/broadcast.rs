@@ -2254,6 +2254,50 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 		.expect("server task failed");
 }
 
+/// A GOAWAY ends a one-shot connection instead of being ignored.
+///
+/// The peer here sends a GOAWAY naming no deadline and then waits, which is the
+/// case that deadlocks if the client ignores it: nothing force-closes, the peer
+/// has stopped accepting requests and is waiting for us to leave, and we would
+/// sit on the session waiting for the peer. A one-shot client cannot dial the
+/// replacement, so leaving is the only answer it has.
+///
+/// The assertion is that `closed()` resolves at all; before the fix the GOAWAY
+/// arm was not polled without reconnecting, and this hung until the test timeout.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn one_shot_goaway_ends_the_connection() {
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.ok().await?;
+
+		// No deadline, so nothing on the peer's side ever force-closes us.
+		session
+			.drain()
+			.send(moq_net::goaway::Goaway::default())
+			.expect("send goaway");
+
+		// Wait for the client to leave, exactly as a draining peer does. If the
+		// client ignores the GOAWAY, both sides wait here forever.
+		session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let connection = test_client().with_reconnect(false).connect(url);
+	tokio::time::timeout(TIMEOUT, connection.closed())
+		.await
+		.expect("a one-shot GOAWAY must end the connection, not wait for the peer")
+		.expect("leaving on request is a clean close, not an error");
+
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server failed");
+}
+
 /// With reconnecting disabled, the session ending ends the connection: its close
 /// reason surfaces through `closed()` and the loop never dials again.
 #[tracing_test::traced_test]

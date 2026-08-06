@@ -516,13 +516,21 @@ impl Connection {
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					// One-shot mode ignores GOAWAY: it cannot dial the replacement, and the
-					// peer force-closes at its own deadline anyway.
-					let ended = run_session(shared, &session, &mut draining, client.reconnect).await;
+					let ended = run_session(shared, &session, &mut draining).await;
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
 					let healthy = connected.elapsed() >= initial;
+
+					// One-shot mode leaves rather than migrating: there is no replacement to
+					// dial, and a GOAWAY naming no deadline never force-closes, so the peer
+					// stops accepting requests and waits for us. Ignoring it is how both
+					// sides end up waiting on each other forever. Checked before the
+					// migration branch below, which would otherwise loop back to redial.
+					if !client.reconnect && matches!(ended, Ended::Goaway(_)) {
+						shared.disconnected();
+						return Ok(());
+					}
 
 					if let Ended::Goaway(msg) = &ended {
 						// A redirect is an assignment: keep dialing it from here on.
@@ -578,11 +586,11 @@ impl Connection {
 
 					// One-shot mode: the session ending ends the connection. Its close
 					// reason is the terminal error, mirroring `moq_net::Session::closed`.
+					// A GOAWAY already returned above.
 					if !client.reconnect {
 						return match ended {
 							Ended::Closed(res) => res.map_err(Error::from),
-							// The GOAWAY arm is not polled in one-shot mode.
-							Ended::Goaway(_) => Ok(()),
+							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
 						};
 					}
 
@@ -864,12 +872,7 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
 /// polled through the waiter's own waker. `migrate` is whether a GOAWAY ends this session's
 /// tenure ([`Ended::Goaway`]); when false the arm isn't polled and only a close returns.
-async fn run_session(
-	shared: &Shared,
-	session: &moq_net::Session,
-	draining: &mut Option<Draining>,
-	migrate: bool,
-) -> Ended {
+async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
 	let goaway = session.draining();
@@ -886,7 +889,13 @@ async fn run_session(
 
 		// Checked before the close arm: a GOAWAY means the session is still up, and
 		// migrating from it is not the same as reconnecting after it died.
-		if migrate && let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
+		//
+		// Polled in one-shot mode too, even though there is no replacement to dial.
+		// A GOAWAY naming no deadline never force-closes, and the peer stops
+		// accepting requests and waits for us to leave, so ignoring it is how both
+		// sides end up waiting on each other forever. The caller ends the connection
+		// instead: asked to leave, with no way to migrate, leaving is the answer.
+		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
 			return Poll::Ready(Ended::Goaway(msg));
 		}
 
