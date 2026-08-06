@@ -713,8 +713,12 @@ impl Display {
 		let (output, reconfigure) = match self.surface.get_current_texture() {
 			CurrentSurfaceTexture::Success(output) => (output, false),
 			CurrentSurfaceTexture::Suboptimal(output) => (output, true),
-			// Nothing to show it on, and nothing to fix: the next frame tries again.
-			CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(Presented::Shown),
+			// The swapchain was busy, not broken. Ask again rather than waiting on a
+			// next frame that a stalled or ending stream may never produce.
+			CurrentSurfaceTexture::Timeout => return Ok(Presented::Retry),
+			// Nobody is looking, so there is nothing to retry for. Being shown again
+			// is itself a redraw.
+			CurrentSurfaceTexture::Occluded => return Ok(Presented::Shown),
 			CurrentSurfaceTexture::Outdated => {
 				self.surface.configure(&self.device, &self.config);
 				return Ok(Presented::Retry);
