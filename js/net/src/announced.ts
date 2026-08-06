@@ -135,30 +135,38 @@ export class Consumer {
 const warnedNoDiscovery = new WeakSet<Established>();
 
 /**
- * What to watch, for {@link Broadcast}. Provide exactly one of `connection` or `origin`.
+ * What to watch, for {@link Broadcast}: a path on exactly one source, enforced by the
+ * union so a call with neither or both does not compile.
  *
  * @public
  */
-export interface BroadcastProps {
-	/**
-	 * The connection to watch on. Accepts a live {@link Established} session, or a reactive one
-	 * (a `Connection.Reload`'s `established`), which is how the handle survives reconnects.
-	 */
-	connection?: GetterInit<Established | undefined>;
-
-	/**
-	 * The origin to watch instead of a session; wins when both are given.
-	 *
-	 * The handle then follows the origin's table: it resolves whenever anything routes the
-	 * path (a local publish, or any session feeding the origin), which is how it spans
-	 * reconnects without watching the connection itself. On an origin whose sessions lack
-	 * discovery it falls back to a standing request, so `active` means assumed present.
-	 */
-	origin?: GetterInit<OriginConsumer | undefined>;
-
+export type BroadcastProps = {
 	/** The broadcast path to watch. */
 	path: Path.Valid;
-}
+} & (
+	| {
+			/**
+			 * The connection to watch on. Accepts a live {@link Established} session, or a
+			 * reactive one (a `Connection.Reload`'s `established`), which is how the handle
+			 * survives reconnects.
+			 */
+			connection: GetterInit<Established | undefined>;
+			origin?: undefined;
+	  }
+	| {
+			/**
+			 * The origin to watch instead of a session.
+			 *
+			 * The handle then follows the origin's table: it resolves whenever anything
+			 * routes the path (a local publish, or any session feeding the origin), which is
+			 * how it spans reconnects without watching the connection itself. While every
+			 * attached session lacks discovery it falls back to a standing request, so
+			 * `active` means assumed present.
+			 */
+			origin: GetterInit<OriginConsumer | undefined>;
+			connection?: undefined;
+	  }
+);
 
 /**
  * A reactive handle to a single broadcast: {@link Broadcast.active} holds a live
@@ -311,38 +319,25 @@ export class Broadcast {
 		const origin = effect.get(source);
 		if (!origin) return;
 
-		const discovery = effect.get(origin.discovery);
-		// Nothing is attached yet, so nothing can resolve; wait rather than request from nobody.
-		if (discovery === undefined) return;
+		// The two ways the broadcast can resolve. The table wins: it is knowledge (a local
+		// publish or an announcement) while a request's answer is only assumed present.
+		const table = new Signal<broadcast.Consumer | undefined>(undefined);
+		const requested = new Signal<broadcast.Consumer | undefined>(undefined);
+		effect.run((nested) => {
+			nested.set(this.#active, nested.get(table) ?? nested.get(requested), undefined);
+		});
 
-		if (!discovery) {
-			// No announcement will ever arrive. Loopback still works: prefer the routed
-			// broadcast (a local publish), else stand a request for whichever session answers.
-			const routed = origin.consume(this.path);
-			if (routed) {
-				effect.cleanup(() => routed.close());
-				effect.set(this.#active, routed, undefined);
-				return;
-			}
-
-			const request = origin.request(this.path);
-			effect.cleanup(() => request.close());
-			effect.run((nested) => {
-				nested.set(this.#active, nested.get(request.active), undefined);
-			});
-			return;
-		}
-
+		// Follow the table regardless of sessions: a local publish resolves with no
+		// connection at all (and keeps resolving while one reconnects), and the
+		// identity-diffed announcements swap the handle on a republish.
 		const announced = origin.announced(this.path);
 		effect.cleanup(() => announced.close());
 
 		let current: broadcast.Consumer | undefined;
 		const offline = () => {
-			const mine = current;
 			current?.close();
 			current = undefined;
-			// Only clear what this run put there; see the session path above.
-			if (this.#active.peek() === mine) this.#active.set(undefined);
+			table.set(undefined);
 		};
 		effect.cleanup(offline);
 
@@ -357,7 +352,7 @@ export class Broadcast {
 				if (event.active) {
 					current?.close();
 					current = origin.consume(this.path);
-					this.#active.set(current);
+					table.set(current);
 				} else {
 					offline();
 				}
@@ -365,6 +360,20 @@ export class Broadcast {
 
 			// The origin closed, or this run was torn down. Either way nothing routes the path.
 			offline();
+		});
+
+		// Blind fallback: while every attached session lacks discovery, nothing remote will
+		// ever reach the table, so stand a request for whichever session answers. Gated on
+		// exactly `false`: with no session there is nobody to ask, and with discovery the
+		// announcement gate is the point, so a blind subscribe would defeat it.
+		effect.run((nested) => {
+			if (nested.get(origin.discovery) !== false) return;
+
+			const request = origin.request(this.path);
+			nested.cleanup(() => request.close());
+			nested.run((inner) => {
+				inner.set(requested, inner.get(request.active), undefined);
+			});
 		});
 	}
 
