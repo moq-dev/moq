@@ -1,5 +1,5 @@
-# Accept crane as argument to the overlay
-{ crane }:
+# Accept build inputs as arguments to the overlay.
+{ crane, nixpkgs-darwin }:
 final: prev:
 let
   # Pin crane to the workspace MSRV (Cargo.toml rust-version /
@@ -204,10 +204,12 @@ let
 
   # Native x86_64-darwin package set (matches cache.nixos.org's prebuilt
   # binaries), used to link the cross moq-gst plugin against an x86_64
-  # GStreamer. pkgsCross would rebuild GStreamer from source under a cross
-  # stdenv; this fetches it. Lazy, so it's only instantiated when the cross
-  # plugin is actually built (aarch64-darwin only, see flake.nix).
-  pkgsX86Darwin = import final.path { system = "x86_64-darwin"; };
+  # GStreamer. Nixpkgs 26.11 dropped Intel macOS, so keep this one package set
+  # on the last supported stable branch. pkgsCross would rebuild GStreamer
+  # from source under a cross stdenv; this fetches it. Lazy, so it's only
+  # instantiated when the cross plugin is actually built (aarch64-darwin only,
+  # see flake.nix).
+  pkgsX86Darwin = import nixpkgs-darwin { system = "x86_64-darwin"; };
 
   moqGstPluginArgs = crateInfo ../rs/moq-gst/Cargo.toml // {
     src = craneLib.cleanCargoSource ../.;

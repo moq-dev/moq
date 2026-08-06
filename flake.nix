@@ -18,6 +18,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
@@ -30,6 +31,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-darwin,
       flake-utils,
       crane,
       rust-overlay,
@@ -40,7 +42,7 @@
         moq-relay = import ./nix/modules/moq-relay.nix;
       };
 
-      overlays.default = import ./nix/overlay.nix { inherit crane; };
+      overlays.default = import ./nix/overlay.nix { inherit crane nixpkgs-darwin; };
     }
     // flake-utils.lib.eachDefaultSystem (
       system:
