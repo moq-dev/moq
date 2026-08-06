@@ -2398,6 +2398,10 @@ impl Drop for Request {
 /// handler drops before serving it.
 pub struct Requesting {
 	inner: RequestState,
+	// The path the requester asked for, relative to its cursor's root. Stamped on the
+	// resolved broadcast (see [`broadcast::Info::path`]) because a handler is free to
+	// serve a broadcast created somewhere else entirely, or at no path at all.
+	path: PathOwned,
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
@@ -2415,24 +2419,28 @@ enum RequestState {
 
 impl Requesting {
 	fn ready(broadcast: broadcast::Consumer) -> Self {
-		Self {
-			inner: RequestState::Ready(broadcast),
-			stats: stats::Scope::default(),
-		}
+		Self::new(RequestState::Ready(broadcast))
 	}
 
 	fn failed(error: Error) -> Self {
+		Self::new(RequestState::Failed(error))
+	}
+
+	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
+		Self::new(RequestState::Pending(consumer))
+	}
+
+	fn new(inner: RequestState) -> Self {
 		Self {
-			inner: RequestState::Failed(error),
+			inner,
+			path: PathOwned::default(),
 			stats: stats::Scope::default(),
 		}
 	}
 
-	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
-		Self {
-			inner: RequestState::Pending(consumer),
-			stats: stats::Scope::default(),
-		}
+	fn with_path(mut self, path: PathOwned) -> Self {
+		self.path = path;
+		self
 	}
 
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -2440,17 +2448,22 @@ impl Requesting {
 		self
 	}
 
+	/// Stamp a resolved broadcast with the path this cursor asked for and its egress scope.
+	fn hand_out(&self, broadcast: broadcast::Consumer) -> broadcast::Consumer {
+		broadcast.with_path(self.path.clone()).with_stats(self.stats.clone())
+	}
+
 	/// Poll for the requested broadcast without blocking.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		match &self.inner {
-			RequestState::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone().with_stats(self.stats.clone()))),
+			RequestState::Ready(broadcast) => Poll::Ready(Ok(self.hand_out(broadcast.clone()))),
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending(consumer) => Poll::Ready(
 				match ready!(consumer.poll(waiter, |state| match &state.resolved {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				})) {
-					Ok(result) => result.map(|broadcast| broadcast.with_stats(self.stats.clone())),
+					Ok(result) => result.map(|broadcast| self.hand_out(broadcast)),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -2755,6 +2768,10 @@ impl Consumer {
 		// counters resolve against the same broadcast the ingress side wrote.
 		let absolute = self.root.join(&path).to_owned();
 		let scope = self.stats.egress(&absolute);
+		// The resolved handle is named by what *this* cursor asked for, not by the absolute
+		// path: a rooted cursor cannot name anything above its own root, so that is what a
+		// catalog it reads may reference.
+		let requested = path.to_owned();
 
 		// Prefer a live announcement when one is present; the dynamic queue is only a
 		// fallback for a path we hold nothing for. A broadcast we do hold but cannot
@@ -2762,7 +2779,10 @@ impl Consumer {
 		// with no route chain to check, so falling through would let it route around
 		// the split horizon and rebuild the loop.
 		match self.resolve(&path) {
-			Resolved::Found(broadcast) => return kio::Pending::new(Requesting::ready(broadcast).with_stats(scope)),
+			Resolved::Found(broadcast) => {
+				let resolved = Requesting::ready(broadcast).with_path(requested).with_stats(scope);
+				return kio::Pending::new(resolved);
+			}
 			Resolved::Excluded => return kio::Pending::new(Requesting::failed(Error::Unroutable)),
 			Resolved::Missing => {}
 		}
@@ -2773,7 +2793,8 @@ impl Consumer {
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
 		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			return kio::Pending::new(Requesting::ready(weak.consume()).with_stats(scope));
+			let resolved = Requesting::ready(weak.consume()).with_path(requested).with_stats(scope);
+			return kio::Pending::new(resolved);
 		}
 
 		// Coalesce onto a pending request for the same path; otherwise register a new
@@ -2789,7 +2810,7 @@ impl Consumer {
 			consumer
 		};
 
-		kio::Pending::new(Requesting::pending(consumer).with_stats(scope))
+		kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope))
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -2904,21 +2925,24 @@ impl AnnounceConsumer {
 		}
 	}
 
-	/// Drive the egress announce guards and tag the broadcast for one update.
+	/// Stamp the broadcast for one update and drive the egress announce guards.
 	///
-	/// An announce opens a guard (keyed by absolute path) and tags the yielded
-	/// broadcast with the egress scope; an unannounce drops the guard. A no-op for
-	/// an untagged stream.
-	fn attribute(&mut self, update: OriginAnnounce) -> OriginAnnounce {
+	/// An announce stamps the yielded broadcast with the path it was announced at (see
+	/// [`broadcast::Info::path`]) plus the egress scope, and opens a guard keyed by the
+	/// absolute path; an unannounce drops the guard. The stamped path is the
+	/// cursor-relative one, so a catalog served by the broadcast resolves its relative
+	/// references against exactly the subtree this cursor may name.
+	fn hand_out(&mut self, update: OriginAnnounce) -> OriginAnnounce {
 		let OriginAnnounce { path, broadcast } = update;
 		let absolute = self.root.join(&path).to_owned();
 		match broadcast {
 			Some(broadcast) => {
 				let scope = self.stats.egress(&absolute);
 				self.guards.entry(absolute).or_insert_with(|| scope.announce());
+				let broadcast = broadcast.with_path(path.clone()).with_stats(scope);
 				OriginAnnounce {
 					path,
-					broadcast: Some(broadcast.with_stats(scope)),
+					broadcast: Some(broadcast),
 				}
 			}
 			None => {
@@ -2958,7 +2982,7 @@ impl AnnounceConsumer {
 			};
 			state.take().expect("predicate guaranteed an update")
 		};
-		Poll::Ready(Some(self.attribute(update)))
+		Poll::Ready(Some(self.hand_out(update)))
 	}
 
 	/// Returns the next (un)announced broadcast without blocking.
@@ -2967,7 +2991,7 @@ impl AnnounceConsumer {
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<OriginAnnounce> {
 		let update = self.state.write().ok()?.take()?;
-		Some(self.attribute(update))
+		Some(self.hand_out(update))
 	}
 
 	/// Returns true if the cursor is closed (no more updates will arrive).
@@ -5294,6 +5318,74 @@ mod tests {
 			dynamic.requested_broadcast().now_or_never().is_some(),
 			"a genuinely missing path must still fall back"
 		);
+	}
+
+	/// A dynamic handler may serve a broadcast that was never created at the requested
+	/// path, so the requester's handle is named by what it asked for rather than by
+	/// whatever the producer was stamped with. A standalone broadcast (path `""`) served
+	/// at `a/pub` would otherwise be its own root, and a legal `../source` reference in
+	/// its catalog would read as escaping.
+	#[tokio::test]
+	async fn test_dynamic_broadcast_named_by_the_requested_path() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+
+		// A standalone broadcast, with no origin and no path of its own.
+		let mut standalone = broadcast::Info::new().produce();
+		let _track = standalone.create_track("catalog.json", None).unwrap();
+		assert_eq!(standalone.info().path.as_str(), "");
+
+		let requesting = origin.consume().request_broadcast("a/pub");
+		settle().await;
+		dynamic
+			.requested_broadcast()
+			.await
+			.expect("handler should be asked for the path")
+			.accept(&standalone);
+
+		let broadcast = requesting.await.expect("the handler served it");
+		assert_eq!(broadcast.info().path.as_str(), "a/pub");
+		// The stamp reaches the tracks, which is what a catalog reader resolves against.
+		let track = broadcast.track("catalog.json").unwrap();
+		assert_eq!(track.broadcast().path.as_str(), "a/pub");
+		assert_eq!(track.subscribe(None).await.unwrap().broadcast().path.as_str(), "a/pub");
+
+		// A repeat request shares the served broadcast and is named the same way.
+		let cached = origin.consume().request_broadcast("a/pub").await.unwrap();
+		assert_eq!(cached.info().path.as_str(), "a/pub");
+
+		// The handler's own handle keeps the broadcast's own (empty) name.
+		assert_eq!(standalone.consume().info().path.as_str(), "");
+	}
+
+	/// A rooted cursor names a broadcast relative to its own root, both when it requests
+	/// one by path and when it observes an announce. That is the only name it can
+	/// resolve against, so a catalog reference is bounds-checked against exactly the
+	/// subtree the cursor may reach rather than the origin's wider root.
+	#[tokio::test]
+	async fn test_rooted_cursor_names_broadcasts_relatively() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let _source = origin.create_broadcast("a/pub", announce()).unwrap();
+		settle().await;
+		settle().await;
+
+		// The origin stamps the absolute path at creation.
+		let absolute = origin.consume().request_broadcast("a/pub").await.unwrap();
+		assert_eq!(absolute.info().path.as_str(), "a/pub");
+
+		let rooted = origin.consume().with_root("a").unwrap();
+		assert_eq!(
+			rooted.request_broadcast("pub").await.unwrap().info().path.as_str(),
+			"pub"
+		);
+
+		let update = rooted.announced().next().await.unwrap();
+		assert_eq!(update.path.as_str(), "pub");
+		assert_eq!(update.broadcast.unwrap().info().path.as_str(), "pub");
 	}
 
 	/// When every route flows through the requester, the path is unroutable for
