@@ -109,6 +109,7 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 
 ## Rust conventions
 
+- **Use typed time units**: never represent a duration or timestamp as an untyped numeric value such as `f64` seconds or `u64` milliseconds. Use `std::time::Duration`, `moq_net::Timestamp`, or another type that carries the unit. When a serialized format requires a numeric value, convert at that boundary with `serde_with` where possible.
 - **Retry loops use capped backoff with jitter** (root Retries has the policy). For a local loop, escalate a `Duration` toward a `const MAX`, jitter each wait (`delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)`), and keep its budget next to the delay. Reuse an existing operation-specific retry abstraction when one owns the sequence already.
 - **Prefer `kio` over tokio sync primitives**: reach for `kio::Producer`/`Consumer` (and the `poll_*` plumbing) instead of `tokio::sync` channels or `watch`. A `tokio::sync::watch` (or a channel) carrying a single value is a code smell. `kio` ties into the runtime-free `poll_*` model and avoids a hard runtime dependency.
 - **Errors**: `thiserror` with `#[from]` for libraries, `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries. Always `#[non_exhaustive]` on public error enums (e.g. `moq-net/src/error.rs`, `moq-ffi/src/error.rs`, `moq-loc/src/lib.rs`). Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors (see `moq-token/src/error.rs`).
