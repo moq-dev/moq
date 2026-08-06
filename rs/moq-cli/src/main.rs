@@ -102,7 +102,13 @@ async fn spawn_server(
 	#[cfg(feature = "cluster-lan")]
 	match lan {
 		Some((lan, discovery)) => {
-			tasks.spawn(cluster::serve(server, lan.clone(), origin.clone(), direction));
+			tasks.spawn(cluster::serve(
+				server,
+				lan.clone(),
+				origin.clone(),
+				direction,
+				moq.server.bind.is_some(),
+			));
 			tasks.spawn(lan.run(discovery));
 		}
 		None => spawn_serve(tasks, server, origin, direction),

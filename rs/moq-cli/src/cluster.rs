@@ -69,6 +69,16 @@ impl Lan {
 		// A peer that is still advertising is still wanted, however long it has
 		// been unreachable; mDNS expiry is what ends a dial, not a retry budget.
 		client.backoff.timeout = Some(std::time::Duration::ZERO);
+		// Whatever `--client-reconnect` means for the relay dial, a mesh dial has to
+		// keep redialing: the map is keyed on the advertisement, so a one-shot handle
+		// that stopped after the first session would sit there dead until mDNS
+		// expired the peer and re-reported it.
+		client.reconnect = Some(true);
+		// Each peer gets its own client, so they cannot all share one fixed port.
+		// Keep the configured interface and let the OS pick the port, otherwise a
+		// nonzero `--client-bind` means the second peer (or the first, when
+		// `--client-connect` already owns it) fails with EADDRINUSE.
+		client.bind.set_port(0);
 
 		let discovery = config.advertise().await?;
 		let credential = discovery.credential().map(str::to_string);
@@ -237,6 +247,7 @@ pub async fn serve(
 	lan: Lan,
 	origin: moq_net::origin::Producer,
 	direction: crate::Direction,
+	public: bool,
 ) -> anyhow::Result<()> {
 	let mut tasks = tokio::task::JoinSet::new();
 
@@ -252,6 +263,17 @@ pub async fn serve(
 					tracing::warn!(%err, "LAN peer session ended");
 				}
 			});
+			continue;
+		}
+
+		// The mesh's own listener is not a public one. `--cluster-lan` fills in
+		// `--server-bind` when it is unset, so a user who asked only to mesh never
+		// asked to serve viewers, and the membership proof gates the mesh path
+		// alone. Attaching an unauthenticated stranger to the origin here would
+		// hand them exactly what the secret is meant to withhold.
+		if !public {
+			tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
+			request.close(404).await.ok();
 			continue;
 		}
 
@@ -436,7 +458,9 @@ mod tests {
 			credential: None,
 		};
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-		lan.dial(&peer).expect("a pinned dial must not inherit the CA roots");
+		// Held rather than dropped: the dial is what's under test, and dropping the
+		// connection would abort it before the assertion means anything.
+		let _connection = lan.dial(&peer).expect("a pinned dial must not inherit the CA roots");
 	}
 
 	#[test]
@@ -519,7 +543,7 @@ mod tests {
 		accept.origin = origin_b.clone();
 		// The mesh shares the listener with ordinary clients, so go through the
 		// same dispatch `--cluster-lan` installs rather than calling `accept`.
-		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import));
+		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import, false));
 
 		let mut dialer = lan(None);
 		dialer.origin = origin_a.clone();
@@ -562,7 +586,7 @@ mod tests {
 		let (server, peer) = listener();
 		let mut accept = lan(Some("the-real-proof"));
 		accept.origin = origin_b.clone();
-		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import));
+		tokio::spawn(serve(server, accept, origin_b.clone(), crate::Direction::Import, false));
 
 		// A peer that reached the port but never saw a verifiable advertisement.
 		let mut dialer = lan(None);
@@ -573,5 +597,48 @@ mod tests {
 		let mut announced_on_a = origin_a.consume().announced();
 		let update = tokio::time::timeout(std::time::Duration::from_secs(2), announced_on_a.next()).await;
 		assert!(update.is_err(), "an unauthorized peer must not share broadcasts");
+	}
+
+	/// A listener `--cluster-lan` invented is for the mesh, not for viewers.
+	///
+	/// The membership proof only gates the `/.cluster` path, so an ordinary path
+	/// used to skip authorization entirely and be attached to the origin: someone
+	/// who found the advertised ephemeral port could read an `import` or publish
+	/// into an `export` without the secret, which is what the secret is for. A
+	/// user who passed `--server-bind` did ask to serve, so that case still does.
+	#[tokio::test]
+	async fn a_mesh_only_listener_refuses_ordinary_clients() {
+		let origin = moq_net::Origin::random().produce();
+		let _published = origin
+			.create_broadcast("secret-stream", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("failed to create broadcast");
+
+		let (server, peer) = listener();
+		let mut accept = lan(Some("the-real-proof"));
+		accept.origin = origin.clone();
+		// `public: false` is what `--cluster-lan` passes with no `--server-bind`.
+		tokio::spawn(serve(server, accept, origin.clone(), crate::Direction::Import, false));
+
+		// An ordinary client: no mesh marker, no proof, just the advertised port.
+		let mut config = moq_native::ClientConfig::default();
+		config.tls = moq_native::tls::Client::default();
+		config.tls.fingerprint = vec![peer.fingerprint.clone().expect("fingerprint")];
+		config.reconnect = Some(false);
+		let stolen = moq_net::Origin::random().produce();
+		let url = peer.urls().into_iter().next().expect("an address");
+		let connection = config
+			.init()
+			.expect("client")
+			.with_subscriber(stolen.clone())
+			.connect(url);
+
+		// The broadcast must never reach them.
+		let mut announced = stolen.consume().announced();
+		let update = tokio::time::timeout(std::time::Duration::from_secs(2), announced.next()).await;
+		assert!(
+			update.is_err(),
+			"a mesh-only listener must not serve broadcasts to an unauthenticated client"
+		);
+		drop(connection);
 	}
 }
