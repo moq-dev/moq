@@ -33,11 +33,16 @@ class OriginState {
 	// closes, so late writes fail loudly.
 	//
 	// Local is what this endpoint publishes; sessions announce and serve it. Remote is
-	// what sessions feeding the origin discovered; it dies with the session that inserted
-	// it. They are separate maps so a session can never announce a remote entry back to a
-	// peer, which is what makes an origin shared by both directions echo-free.
+	// what sessions feeding the origin discovered; an entry dies with the session that
+	// inserted it. They are separate maps so a session can never announce a remote entry
+	// back to a peer, which is what makes an origin shared by both directions echo-free.
+	//
+	// Remote keeps every session's front per path, newest first: [0] is the route consumers
+	// resolve, and removing it promotes the next, so a session dying does not black-hole a
+	// path another live session still carries (which would stay dark forever, since that
+	// session already announced it and will not again).
 	local = new Signal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
-	remote = new Signal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
+	remote = new Signal<Map<Path.Valid, broadcast.Consumer[]> | undefined>(new Map());
 
 	// Paths consumers asked for without waiting for an announcement; attached sessions
 	// answer them with blind subscriptions. Never announced: an answered request is assumed
@@ -105,32 +110,40 @@ export class Producer {
 	/**
 	 * Insert a broadcast discovered by a session, taking ownership of `front`.
 	 *
-	 * The returned dispose retracts the entry (unless something newer replaced it) and
-	 * releases the front; call it when the announcement ends or the session dies. Inserting
-	 * into a closed origin releases the front immediately and retracts nothing.
+	 * The newest insertion becomes the route consumers resolve; earlier ones are kept as
+	 * fallbacks and promoted when it goes away, so overlapping sessions carrying the same
+	 * path fail over instead of black-holing it. The returned dispose retracts this front
+	 * (whichever position it holds) and releases it; call it when the announcement ends or
+	 * the session dies. Inserting into a closed origin releases the front immediately and
+	 * retracts nothing.
 	 *
 	 * @internal
 	 */
 	insertRemote(path: Path.Valid, front: broadcast.Consumer): Dispose {
-		let replaced = false;
+		let closed = false;
 		this.#state.remote.mutate((broadcasts) => {
 			if (!broadcasts) {
-				replaced = true;
+				closed = true;
 				return;
 			}
-			broadcasts.get(path)?.close();
-			broadcasts.set(path, front);
+			const fronts = broadcasts.get(path);
+			if (fronts) fronts.unshift(front);
+			else broadcasts.set(path, [front]);
 		});
-		if (replaced) {
+		if (closed) {
 			front.close();
 			return () => {};
 		}
 
 		return () => {
 			this.#state.remote.mutate((broadcasts) => {
-				if (broadcasts?.get(path) === front) broadcasts.delete(path);
+				const fronts = broadcasts?.get(path);
+				if (!fronts) return;
+				const index = fronts.indexOf(front);
+				if (index < 0) return;
+				fronts.splice(index, 1);
+				if (fronts.length === 0) broadcasts?.delete(path);
 			});
-			// Idempotent, so a close by a superseding insert is fine.
 			front.close();
 		};
 	}
@@ -168,6 +181,36 @@ export class Producer {
 		return this.#state.requests;
 	}
 
+	/**
+	 * Provide `front` as the answer for the open request on `path`, taking ownership of it.
+	 *
+	 * Returns undefined (releasing the front) when the request is gone or already answered;
+	 * first session in wins, and a loser must stay eligible to answer later. The returned
+	 * withdraw releases the front and, if it was the standing answer, vacates the slot and
+	 * wakes the other serving loops so a standby session answers immediately; call it when
+	 * the session dies.
+	 *
+	 * @internal
+	 */
+	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined {
+		const slot = this.#state.requests.peek()?.get(path);
+		if (!slot || slot.front.peek() !== undefined) {
+			front.close();
+			return undefined;
+		}
+		slot.front.set(front);
+
+		return () => {
+			if (slot.front.peek() === front) {
+				slot.front.set(undefined);
+				// The slot signal only reaches its requesters; poke the map so every
+				// serving loop re-scans and one of them re-answers.
+				this.#state.requests.mutate(() => {});
+			}
+			front.close();
+		};
+	}
+
 	/** A read handle for this origin. */
 	consume(): Consumer {
 		return makeConsumer(this.#state);
@@ -185,8 +228,8 @@ export class Producer {
 		});
 		this.#state.remote.update((broadcasts) => {
 			// Remote broadcasts are somebody else's; only release our handles on them.
-			for (const front of broadcasts?.values() ?? []) {
-				front.close();
+			for (const fronts of broadcasts?.values() ?? []) {
+				for (const front of fronts) front.close();
 			}
 			return undefined;
 		});
@@ -304,7 +347,7 @@ export class Consumer {
 	consume(path: Path.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
 		if (local) return local.clone();
-		return this.#state.remote.peek()?.get(path)?.clone();
+		return this.#state.remote.peek()?.get(path)?.[0]?.clone();
 	}
 
 	/**
@@ -337,11 +380,18 @@ export class Consumer {
 		return new Request(path, taken.front, () => {
 			taken.count -= 1;
 			if (taken.count > 0) return;
-			this.#state.requests.mutate((map) => {
-				if (map?.get(path) === taken) map.delete(path);
+
+			// Defer the teardown a microtask: an effect whose rerun was triggered by the
+			// answer resolving closes its old request and takes a new one in the same tick,
+			// and tearing down in between would drop the answer it is about to read.
+			queueMicrotask(() => {
+				if (taken.count > 0) return;
+				this.#state.requests.mutate((map) => {
+					if (map?.get(path) === taken) map.delete(path);
+				});
+				taken.front.peek()?.close();
+				taken.front.set(undefined);
 			});
-			taken.front.peek()?.close();
-			taken.front.set(undefined);
 		});
 	}
 
@@ -373,11 +423,13 @@ export class Consumer {
 				const next = new Map<Path.Valid, broadcast.Consumer>();
 				// Remote first, so a local publish at the same path overwrites it: the
 				// announcement points at whatever consume() would resolve.
-				for (const map of [remote, local]) {
-					for (const [path, front] of map ?? []) {
-						const suffix = Path.stripPrefix(prefix, path);
-						if (suffix !== null) next.set(suffix, front);
-					}
+				for (const [path, fronts] of remote ?? []) {
+					const suffix = Path.stripPrefix(prefix, path);
+					if (suffix !== null && fronts[0]) next.set(suffix, fronts[0]);
+				}
+				for (const [path, front] of local ?? []) {
+					const suffix = Path.stripPrefix(prefix, path);
+					if (suffix !== null) next.set(suffix, front);
 				}
 
 				for (const [path, front] of active) {

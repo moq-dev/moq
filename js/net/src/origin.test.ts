@@ -282,12 +282,109 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	again.close();
 	expect(request.active.peek()).toBeDefined();
 
-	// The last close withdraws the request and releases the front.
+	// The last close withdraws the request and releases the front, a microtask later so an
+	// effect rerun can re-acquire the slot without dropping the answer.
 	request.close();
-	expect(origin.requests.peek()?.has(path)).toBe(false);
 	await settle();
+	expect(origin.requests.peek()?.has(path)).toBe(false);
 	expect(upstream.closed.peek()).not.toBeUndefined();
 
+	origin.close();
+});
+
+test("a request closed and retaken in the same tick keeps its answer", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("stable");
+
+	const first = consumer.request(path);
+	const upstream = new BroadcastProducer();
+	const withdraw = origin.answer(path, upstream.consume());
+	expect(withdraw).toBeDefined();
+	const front = first.active.peek();
+	expect(front).toBeDefined();
+
+	// The pattern an effect produces when its rerun was triggered by the answer resolving:
+	// cleanup closes the old request, the rerun takes a new one, all in one tick. The
+	// answer must survive, or the subscription flaps and is re-dialed forever.
+	first.close();
+	const second = consumer.request(path);
+	await settle();
+	await settle();
+
+	expect(second.active.peek()).toBe(front);
+	expect(upstream.closed.peek()).toBeUndefined();
+
+	second.close();
+	origin.close();
+});
+
+test("disposing the newest remote route promotes the fallback", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("redundant");
+
+	// Two sessions announced the same path; the older one is still alive when the newer
+	// one goes away, so the route must fail over rather than black-hole.
+	const older = new BroadcastProducer();
+	older.createTrack("chat");
+	const disposeOlder = origin.insertRemote(path, older.consume());
+
+	const newer = new BroadcastProducer();
+	const disposeNewer = origin.insertRemote(path, newer.consume());
+
+	const announced = consumer.announced();
+	expect(await announced.next()).toEqual({ path, active: true });
+
+	// The newer session dies: consumers see a retract then the promoted fallback.
+	disposeNewer();
+	expect(await announced.next()).toEqual({ path, active: false });
+	expect(await announced.next()).toEqual({ path, active: true });
+
+	const handle = consumer.consume(path);
+	const track = handle?.subscribe("chat");
+	expect(track).toBeDefined();
+	track?.close();
+	handle?.close();
+
+	// The older source was never the origin's to close.
+	expect(older.closed.peek()).toBeUndefined();
+
+	disposeOlder();
+	await settle();
+	expect(consumer.consume(path)).toBeUndefined();
+
+	announced.close();
+	origin.close();
+});
+
+test("withdrawing an answer wakes the requests table", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const path = Path.from("handoff");
+
+	const request = consumer.request(path);
+
+	const first = new BroadcastProducer();
+	const withdraw = origin.answer(path, first.consume());
+	expect(withdraw).toBeDefined();
+
+	// A second answer while one stands must lose and stay eligible.
+	const second = new BroadcastProducer();
+	expect(origin.answer(path, second.consume())).toBeUndefined();
+
+	// Withdrawing pokes the requests map, which is what a standby serving loop sleeps on.
+	const woken = origin.requests.changed();
+	withdraw?.();
+	await woken;
+	expect(request.active.peek()).toBeUndefined();
+
+	// The slot is vacant again, so a standby answers.
+	const third = new BroadcastProducer();
+	expect(origin.answer(path, third.consume())).toBeDefined();
+	expect(request.active.peek()).toBeDefined();
+
+	request.close();
 	origin.close();
 });
 

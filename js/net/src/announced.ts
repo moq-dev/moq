@@ -368,6 +368,11 @@ export class Broadcast {
 		});
 	}
 
+	/** Resolves once the handle is closed, so an owner can drop its reference. */
+	get closed(): Promise<void> {
+		return this.#signals.closed;
+	}
+
 	/** Closes the handle and the broadcast it currently holds. Idempotent. */
 	close() {
 		this.#signals.close();
