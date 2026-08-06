@@ -163,14 +163,8 @@ pub enum Error {
 	SampleDurationTooSmall(u64),
 
 	/// Repeatedly flooring fractional sample ticks would make the decode timeline drift.
-	#[error(
-		"sample duration {value}/{source_timescale} seconds is not exactly representable at timescale {output_timescale}"
-	)]
-	SampleDurationInexact {
-		value: u64,
-		source_timescale: u64,
-		output_timescale: u64,
-	},
+	#[error("sample duration is not exactly representable at timescale {0}")]
+	SampleDurationInexact(u64),
 
 	/// Presentation timestamps do not reveal decode duration for reordered video.
 	#[error("duration-less video needs stated durations or presentation-ordered inference")]
@@ -505,11 +499,7 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 		return Err(Error::SampleDurationTooSmall(timescale.as_u64()));
 	}
 	if scaled % u128::from(source_timescale) != 0 {
-		return Err(Error::SampleDurationInexact {
-			value: duration.value(),
-			source_timescale,
-			output_timescale,
-		});
+		return Err(Error::SampleDurationInexact(output_timescale));
 	}
 	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(ticks))
 }
@@ -1152,14 +1142,7 @@ mod tests {
 		};
 
 		let err = encode_fragment(info(1, output_scale, 0), std::slice::from_ref(&frame)).unwrap_err();
-		assert!(matches!(
-			err,
-			Error::SampleDurationInexact {
-				value: 1,
-				source_timescale: 24,
-				output_timescale: 1_000,
-			}
-		));
+		assert!(matches!(err, Error::SampleDurationInexact(1_000)));
 
 		let exact_scale = moq_net::Timescale::new(24_000).unwrap();
 		let fragment = encode_fragment(info(1, exact_scale, 0), &[frame]).unwrap();

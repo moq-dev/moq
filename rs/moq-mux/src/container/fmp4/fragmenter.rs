@@ -123,7 +123,7 @@ impl Fragmenter {
 			// is never a duration (the publisher may have paused across it), so the pending frame
 			// then takes the catalog cadence.
 			let successor = (!group_start).then_some(&frame);
-			infer_missing_duration(&mut pending.frame, successor, next.default_frame, next.timescale);
+			infer_missing_duration(&mut pending.frame, successor, next.default_frame, next.timescale)?;
 			fragments.push(next.emit(pending.frame, pending.group_start)?);
 		}
 
@@ -146,7 +146,7 @@ impl Fragmenter {
 		let Some(mut pending) = self.pending.take() else {
 			return Ok(None);
 		};
-		infer_missing_duration(&mut pending.frame, None, self.default_frame, self.timescale);
+		infer_missing_duration(&mut pending.frame, None, self.default_frame, self.timescale)?;
 		Ok(Some(self.emit(pending.frame, pending.group_start)?))
 	}
 
@@ -391,6 +391,32 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(15_000)]);
 	}
 
+	// Reduce the rational difference directly against the output scale. The LCM of these
+	// legal coprime timestamp scales exceeds the Timestamp range even though the gap is one
+	// second and needs only 30,000 output ticks.
+	#[test]
+	fn a_simple_gap_does_not_require_a_representable_lcm() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
+		let start_scale = 4_000_000_007;
+		let end_scale = 4_000_000_009;
+		let first = Frame {
+			timestamp: Timestamp::from_scale(0, start_scale).unwrap(),
+			duration: None,
+			..tick_frame(0, true)
+		};
+		let successor = Frame {
+			timestamp: Timestamp::from_scale(end_scale, end_scale).unwrap(),
+			duration: None,
+			..tick_frame(0, false)
+		};
+
+		assert!(fragmenter.push(first).unwrap().is_empty());
+		let first = one(fragmenter.push(successor).unwrap());
+
+		assert_eq!(super::super::sample_durations(&first.data), vec![Some(30_000)]);
+	}
+
 	// Keep the catalog fallback in its native precision too. Converting 1/30 second to the
 	// frame's 1 Hz timestamp scale would turn a positive tail duration into zero.
 	#[test]
@@ -480,11 +506,7 @@ mod tests {
 		let err = fragmenter.push(frame).unwrap_err();
 		assert!(matches!(
 			err,
-			crate::Error::Cmaf(super::super::Error::SampleDurationInexact {
-				value: 1,
-				source_timescale: 24,
-				output_timescale: 1_000,
-			})
+			crate::Error::Cmaf(super::super::Error::SampleDurationInexact(1_000))
 		));
 	}
 

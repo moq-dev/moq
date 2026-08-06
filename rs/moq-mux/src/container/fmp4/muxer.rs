@@ -220,7 +220,7 @@ impl Muxer {
 	/// To make each frame separately addressable instead, use
 	/// [`fragmenter`](Self::fragmenter).
 	pub fn fragment(&self, sequence: u32, frames: &[Frame]) -> crate::Result<Bytes> {
-		let frames = self.resolve_durations(frames);
+		let frames = self.resolve_durations(frames)?;
 		Ok(super::encode_fragment(self.fragment_info(sequence), &frames)?)
 	}
 
@@ -252,11 +252,11 @@ impl Muxer {
 
 	/// Give every frame a duration: the one its codec states, else the gap to its successor in
 	/// this slice, else the catalog frame rate / sample rate.
-	fn resolve_durations(&self, frames: &[Frame]) -> Vec<Frame> {
+	fn resolve_durations(&self, frames: &[Frame]) -> crate::Result<Vec<Frame>> {
 		let mut frames = frames.to_vec();
 		apply_codec_durations(&mut frames, self.opus);
-		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale);
-		frames
+		infer_missing_durations(&mut frames, None, self.default_frame, self.timescale)?;
+		Ok(frames)
 	}
 
 	/// Where a fragment sits: this muxer's single track, at its resolved timescale.
