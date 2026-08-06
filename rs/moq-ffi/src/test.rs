@@ -719,6 +719,33 @@ async fn create_broadcast_announces() {
 	_broadcast.finish().unwrap();
 }
 
+/// Waiting for an exact path must hand the broadcast back named by that path, the base a
+/// catalog's relative `broadcast` references resolve against. Implementing the wait by
+/// rooting the cursor *at* the path would name it "", making the broadcast its own root, so
+/// a legal `../sibling` reference would read as escaping for every binding built on this.
+#[tokio::test]
+async fn announced_broadcast_keeps_the_requested_path() {
+	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
+	let consumer = origin.consume();
+	let broadcast = origin.create_broadcast("a/pub".into()).unwrap();
+
+	let announced = consumer.announced_broadcast("a/pub".into()).unwrap();
+	let waited = tokio::time::timeout(TIMEOUT, announced.available())
+		.await
+		.expect("timed out waiting for the announcement")
+		.unwrap();
+	assert_eq!(waited.inner().info().path.as_str(), "a/pub");
+
+	// The same broadcast reached by request names itself identically.
+	let requested = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("a/pub".into()))
+		.await
+		.expect("timed out requesting the broadcast")
+		.unwrap();
+	assert_eq!(requested.inner().info().path.as_str(), "a/pub");
+
+	broadcast.finish().unwrap();
+}
+
 #[tokio::test]
 async fn set_announce_toggles_announcement() {
 	let origin = MoqOriginProducer::new(MoqOriginOptions::default());
