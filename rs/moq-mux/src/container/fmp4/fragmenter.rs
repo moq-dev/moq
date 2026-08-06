@@ -29,7 +29,7 @@ use super::export::{apply_codec_durations, fragment_seconds, infer_missing_durat
 /// # fn example(muxer: &moq_mux::container::fmp4::Muxer, frames: Vec<moq_mux::container::Frame>) -> moq_mux::Result<()> {
 /// let mut fragmenter = muxer.fragmenter(moq_mux::container::fmp4::fragment::Config::default());
 /// for frame in frames {
-///     if let Some(fragment) = fragmenter.push(frame)? {
+///     for fragment in fragmenter.push(frame)? {
 ///         // store fragment.data; fragment.duration and .independent describe the Part
 ///     }
 /// }
@@ -41,11 +41,10 @@ use super::export::{apply_codec_durations, fragment_seconds, infer_missing_durat
 /// ```
 ///
 /// A frame that states its own duration (CMAF input, an Opus TOC byte, or a publisher that
-/// sets [`Frame::duration`]) normally emits with no lookahead. If the preceding frame was
-/// waiting for this one to determine its duration, that preceding fragment is returned first
-/// and the stated frame remains queued for the next `push` or [`flush`](Self::flush). A
-/// successor that opens a new group (a keyframe) is never used as a duration bound, since the
-/// publisher may have paused across the boundary; the pending frame then takes the catalog
+/// sets [`Frame::duration`]) emits with no lookahead. If the preceding frame was waiting for
+/// this one to determine its duration, the same `push` returns both fragments in decode order.
+/// A successor that opens a new group (a keyframe) is never used as a duration bound, since
+/// the publisher may have paused across the boundary; the pending frame then takes the catalog
 /// cadence, exactly like the last frame of a [`Muxer::fragment`](super::Muxer::fragment) call.
 ///
 /// Each group re-anchors the decode timeline at its keyframe's presentation time. When the
@@ -63,7 +62,7 @@ pub struct Fragmenter {
 	pub(super) is_video: bool,
 	/// True for Opus audio, whose packets state their own duration in the TOC byte.
 	pub(super) opus: bool,
-	/// The next frame waiting for either its duration or its turn to be emitted.
+	/// A duration-less frame held until its successor arrives to time it.
 	pub(super) pending: Option<Frame>,
 	/// The next fragment's decode time in ticks at `timescale`; `None` before the first frame.
 	pub(super) dts: Option<u64>,
@@ -72,32 +71,36 @@ pub struct Fragmenter {
 }
 
 impl Fragmenter {
-	/// Feed the next frame in decode order, returning a finished fragment when one is ready.
+	/// Feed the next frame in decode order, returning every fragment that became ready.
 	///
-	/// Returns `Some` for the earliest frame ready to emit: normally the frame itself when it
-	/// states its own duration, or the previously pushed frame once this one has timed it. At
-	/// most one fragment is returned per push, so a stated frame stays queued when the previous
-	/// frame uses that push's output slot. The final queued frame is retrieved with
-	/// [`flush`](Self::flush).
-	pub fn push(&mut self, mut frame: Frame) -> crate::Result<Option<Fragment>> {
+	/// Returns no fragments when the frame must wait for a successor, one in the normal case,
+	/// or two when the incoming frame both times a pending frame and states its own duration.
+	/// The final pending frame is retrieved with [`flush`](Self::flush).
+	pub fn push(&mut self, mut frame: Frame) -> crate::Result<Vec<Fragment>> {
 		// Opus states its duration in the TOC byte; read it now so such a frame never waits.
 		apply_codec_durations(std::slice::from_mut(&mut frame), self.opus);
 
-		let Some(mut pending) = self.pending.take() else {
-			if stated(&frame) {
-				return Ok(Some(self.emit(frame)?));
-			}
-			self.pending = Some(frame);
-			return Ok(None);
-		};
+		// Build the next state separately so a failure while encoding the second ready frame
+		// does not consume the pending frame or advance the timeline without returning output.
+		let mut next = self.snapshot();
+		let mut fragments = Vec::new();
 
-		// The incoming frame is the successor that times the pending one. A keyframe may
-		// open a new group, and a group boundary is never a duration (the publisher may
-		// have paused across it), so the pending frame then takes the catalog cadence.
-		infer_missing_durations(std::slice::from_mut(&mut pending), Some(&frame), self.default_frame);
-		let fragment = self.emit(pending)?;
-		self.pending = Some(frame);
-		Ok(Some(fragment))
+		if let Some(mut pending) = next.pending.take() {
+			// The incoming frame is the successor that times the pending one. A keyframe may
+			// open a new group, and a group boundary is never a duration (the publisher may
+			// have paused across it), so the pending frame then takes the catalog cadence.
+			infer_missing_durations(std::slice::from_mut(&mut pending), Some(&frame), next.default_frame);
+			fragments.push(next.emit(pending)?);
+		}
+
+		if stated(&frame) {
+			fragments.push(next.emit(frame)?);
+		} else {
+			next.pending = Some(frame);
+		}
+
+		*self = next;
+		Ok(fragments)
 	}
 
 	/// Emit the pending frame at the end of the stream.
@@ -134,12 +137,12 @@ impl Fragmenter {
 			.map(|duration| super::trun_duration(duration, self.timescale))
 			.transpose()?
 			.unwrap_or(0);
-		let data = super::encode_at(info, dts, std::slice::from_ref(&frame))?;
-		self.sequence = self.sequence.wrapping_add(1);
-
 		// Advance by the value the trun stores, so the next tfdt continues exactly what
 		// this fragment claimed.
-		self.dts = Some(dts.checked_add(u64::from(ticks)).ok_or(super::Error::PtsOverflow)?);
+		let next_dts = dts.checked_add(u64::from(ticks)).ok_or(super::Error::PtsOverflow)?;
+		let data = super::encode_at(info, dts, std::slice::from_ref(&frame))?;
+		self.sequence = self.sequence.wrapping_add(1);
+		self.dts = Some(next_dts);
 
 		Ok(Fragment {
 			data,
@@ -149,6 +152,20 @@ impl Fragmenter {
 			independent: !self.is_video || frame.keyframe,
 			duration: fragment_seconds(std::slice::from_ref(&frame), self.default_frame),
 		})
+	}
+
+	/// Copy the small timeline state so a push that produces two fragments commits atomically.
+	fn snapshot(&self) -> Self {
+		Self {
+			track_id: self.track_id,
+			timescale: self.timescale,
+			default_frame: self.default_frame,
+			is_video: self.is_video,
+			opus: self.opus,
+			pending: self.pending.clone(),
+			dts: self.dts,
+			sequence: self.sequence,
+		}
 	}
 }
 
@@ -204,6 +221,12 @@ mod tests {
 		panic!("no moof");
 	}
 
+	/// Unwrap the one fragment expected from this push.
+	fn one(mut fragments: Vec<Fragment>) -> Fragment {
+		assert_eq!(fragments.len(), 1);
+		fragments.pop().unwrap()
+	}
+
 	// One fragment per frame over a reordered (I, P, B) run: every frame states its duration,
 	// so each push emits immediately with no lookahead, tfdt walks the decode timeline, and
 	// each cts carries the reorder, so presentation order survives being cut up.
@@ -216,12 +239,7 @@ mod tests {
 
 		let fragments: Vec<Fragment> = input
 			.iter()
-			.map(|frame| {
-				fragmenter
-					.push(frame.clone())
-					.unwrap()
-					.expect("a stated duration emits immediately")
-			})
+			.map(|frame| one(fragmenter.push(frame.clone()).unwrap()))
 			.collect();
 
 		let timelines: Vec<_> = fragments.iter().map(|f| super::super::timeline(&f.data)).collect();
@@ -259,17 +277,11 @@ mod tests {
 		];
 
 		assert!(
-			fragmenter.push(input[0].clone()).unwrap().is_none(),
+			fragmenter.push(input[0].clone()).unwrap().is_empty(),
 			"no duration and no successor yet"
 		);
-		let first = fragmenter
-			.push(input[1].clone())
-			.unwrap()
-			.expect("times the pending frame");
-		let second = fragmenter
-			.push(input[2].clone())
-			.unwrap()
-			.expect("times the pending frame");
+		let first = one(fragmenter.push(input[1].clone()).unwrap());
+		let second = one(fragmenter.push(input[2].clone()).unwrap());
 		let last = fragmenter.flush().unwrap().expect("the final pending frame");
 
 		let durations: Vec<_> = [&first, &second, &last]
@@ -290,23 +302,26 @@ mod tests {
 		assert_eq!(tfdts, vec![0, 1_500, 3_000]);
 	}
 
-	// One push returns at most one fragment. When a stated frame first has to time a pending
-	// frame, it remains queued and flush preserves its own duration instead of replacing it.
+	// A stated frame that arrives behind a pending frame is already ready too. Returning both
+	// keeps the live edge available even when no later frame arrives and flush is not called.
 	#[test]
-	fn a_stated_frame_queues_behind_the_pending_fragment() {
+	fn a_stated_frame_emits_with_the_pending_fragment() {
 		let muxer = video_muxer();
 		let mut fragmenter = muxer.fragmenter(Default::default());
-		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_none());
+		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
 
 		let stated = Frame {
 			duration: Some(Timestamp::from_scale(1_000, 30_000).unwrap()),
 			..tick_frame(1_500, false)
 		};
-		let first = fragmenter.push(stated).unwrap().expect("the pending frame");
-		let second = fragmenter.flush().unwrap().expect("the stated frame");
+		let fragments = fragmenter.push(stated).unwrap();
+		assert_eq!(fragments.len(), 2);
+		let first = &fragments[0];
+		let second = &fragments[1];
 
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
 		assert_eq!(super::super::sample_durations(&second.data), vec![Some(1_000)]);
+		assert!(fragmenter.flush().unwrap().is_none());
 	}
 
 	// An EXT-X-PART needs a DURATION and an INDEPENDENT flag. The duration has to be the
@@ -352,10 +367,7 @@ mod tests {
 				keyframe: false,
 				duration: None,
 			};
-			let fragment = fragmenter
-				.push(frame)
-				.unwrap()
-				.expect("the TOC duration emits immediately");
+			let fragment = one(fragmenter.push(frame).unwrap());
 			assert!(fragment.independent, "audio fragments are always independent");
 			assert!((fragment.duration - 0.02).abs() < 1e-9, "the 20 ms TOC duration");
 		}
@@ -372,12 +384,9 @@ mod tests {
 		// A 40 minute pause between the first group and the second, in 30 kHz ticks.
 		let paused_until = 2_405 * 30_000;
 
-		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_none());
-		let first = fragmenter.push(untimed_frame(1_500, false)).unwrap().expect("timed");
-		let second = fragmenter
-			.push(untimed_frame(paused_until, true))
-			.unwrap()
-			.expect("the keyframe flushes the pending frame");
+		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
+		let first = one(fragmenter.push(untimed_frame(1_500, false)).unwrap());
+		let second = one(fragmenter.push(untimed_frame(paused_until, true)).unwrap());
 		let third = fragmenter.flush().unwrap().expect("the keyframe itself");
 
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
@@ -402,7 +411,7 @@ mod tests {
 
 		let sequences: Vec<u32> = (0..3)
 			.map(|i| {
-				let fragment = fragmenter.push(tick_frame(i * 1_000, i == 0)).unwrap().unwrap();
+				let fragment = one(fragmenter.push(tick_frame(i * 1_000, i == 0)).unwrap());
 				sequence(&fragment)
 			})
 			.collect();
@@ -418,7 +427,7 @@ mod tests {
 		let frame = tick_frame(5_000, true);
 
 		let batch = muxer.fragment(0, std::slice::from_ref(&frame)).unwrap();
-		let pushed = muxer.fragmenter(Default::default()).push(frame).unwrap().unwrap();
+		let pushed = one(muxer.fragmenter(Default::default()).push(frame).unwrap());
 		assert_eq!(pushed.data, batch);
 	}
 }
