@@ -2417,10 +2417,10 @@ fn a_fresh_handle_reads_back_the_defaults() {
 
 	let mut value = 0u64;
 	assert_eq!(unsafe { moq_client_get_connect_timeout(client, &mut value) }, 0);
-	assert_eq!(value, config.connect_timeout().as_millis() as u64);
+	assert_eq!(value, config.resolved_connect_timeout().as_millis() as u64);
 
 	assert_eq!(unsafe { moq_client_get_failover_delay(client, &mut value) }, 0);
-	assert_eq!(value, config.effective_failover_delay().as_millis() as u64);
+	assert_eq!(value, config.resolved_failover_delay().as_millis() as u64);
 
 	assert_eq!(unsafe { moq_client_get_backoff_initial(client, &mut value) }, 0);
 	assert_eq!(value, config.backoff.initial.as_millis() as u64);

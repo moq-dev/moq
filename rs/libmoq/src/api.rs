@@ -992,7 +992,7 @@ pub unsafe extern "C" fn moq_client_get_connect_timeout(client: u32, out: *mut u
 	ffi::enter(move || {
 		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let client = ffi::parse_id(client)?;
-		*out = millis(State::lock().client.get_mut(client)?.connect_timeout());
+		*out = millis(State::lock().client.get_mut(client)?.resolved_connect_timeout());
 		Ok(())
 	})
 }
@@ -1009,7 +1009,7 @@ pub unsafe extern "C" fn moq_client_get_failover_delay(client: u32, out: *mut u6
 	ffi::enter(move || {
 		let out = unsafe { out.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let client = ffi::parse_id(client)?;
-		*out = millis(State::lock().client.get_mut(client)?.effective_failover_delay());
+		*out = millis(State::lock().client.get_mut(client)?.resolved_failover_delay());
 		Ok(())
 	})
 }
