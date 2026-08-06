@@ -330,6 +330,7 @@ pub struct ClusterConfig {
 	// Accepted so existing configs keep parsing (`deny_unknown_fields`), but
 	// ignored: a broadcast now closes as soon as its last publisher is lost.
 	#[doc(hidden)]
+	#[deprecated(note = "ignored; a broadcast closes as soon as its last publisher is lost")]
 	#[arg(
 		id = "cluster-linger",
 		long = "cluster-linger",
@@ -409,6 +410,7 @@ impl Cluster {
 			Some(id) => Origin::new(id).expect("cluster id already validated"),
 			None => Origin::random(),
 		};
+		#[allow(deprecated)]
 		if config.linger.is_some() {
 			tracing::warn!(
 				"cluster linger is deprecated and ignored; a broadcast closes as soon as its last publisher is lost"

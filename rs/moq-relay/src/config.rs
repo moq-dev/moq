@@ -248,8 +248,10 @@ latency_default = \"20s\"",
 
 	/// Regression test for the clap+TOML clobber bug applied to `cluster.linger`.
 	/// The field is `Option<Duration>` so a TOML-configured window survives the
-	/// CLI re-parse when no `--cluster-linger` flag is passed.
+	/// CLI re-parse when no `--cluster-linger` flag is passed (deprecated and
+	/// ignored, but it must keep parsing so existing configs boot).
 	#[test]
+	#[allow(deprecated)]
 	fn cli_does_not_clobber_toml_linger() {
 		let _env = EnvGuard::clear(&["MOQ_CLUSTER_LINGER"]);
 
