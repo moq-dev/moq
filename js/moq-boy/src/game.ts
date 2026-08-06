@@ -116,7 +116,7 @@ export class Game {
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
-			origin: config.origin.consume(),
+			origin: config.origin,
 			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
 			enabled: true,
 		});
@@ -140,7 +140,7 @@ export class Game {
 
 		this.sync = new Watch.Sync({
 			latency: this.latency,
-			connection: connection.established,
+			probe: connection.probe,
 			video: this.videoSource.out.jitter,
 			audio: this.audioSource.out.jitter,
 		});

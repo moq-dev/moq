@@ -35,8 +35,9 @@ export type SyncInput = {
 	// Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
 	latency: Getter<Latency>;
 
-	// The connection used for "real-time" jitter: PROBE supplies RTT.
-	connection: Getter<Moq.Connection.Established | undefined>;
+	// The connection's PROBE estimates, whose RTT drives "real-time" jitter. Usually wired
+	// from a `Connection.Shared`'s or `Reload`'s `probe`.
+	probe: Getter<Moq.Connection.Probe | undefined>;
 
 	// Any additional delay required for audio or video (wired from the per-rendition source).
 	audio: Getter<Time.Milli | undefined>;
@@ -97,7 +98,7 @@ export class Sync {
 	constructor(props?: Inputs<SyncInput>) {
 		this.in = {
 			latency: getter(props?.latency ?? ("real-time" as Latency)),
-			connection: getter(props?.connection),
+			probe: getter(props?.probe),
 			audio: getter(props?.audio),
 			video: getter(props?.video),
 		};
@@ -144,9 +145,8 @@ export class Sync {
 			return;
 		}
 
-		// "real-time" mode: compute jitter from RTT on the established connection.
-		const conn = effect.get(this.in.connection);
-		const rtt = conn && effect.get(conn.probe).rtt;
+		// "real-time" mode: compute jitter from the connection's RTT estimate.
+		const rtt = effect.get(this.in.probe)?.rtt;
 		if (rtt !== undefined) {
 			// Track minimum RTT as baseline, ignoring bufferbloat.
 			this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;

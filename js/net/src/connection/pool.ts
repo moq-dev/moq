@@ -3,13 +3,14 @@
  *
  * @module
  */
-import { Computed, Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import type { Established } from "./established.ts";
 import { Reload, type ReloadStatus } from "./reload.ts";
 import type { Probe, Stats } from "./stats.ts";
+import type { Transport } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
 const LINGER_MS = 2000;
@@ -60,8 +61,13 @@ export class Shared {
 	/** Current status of the shared connection. */
 	readonly status: Getter<ReloadStatus>;
 
-	/** The currently established session, or undefined while disconnected. */
-	readonly established: Getter<Established | undefined>;
+	/**
+	 * The wire transport the current session runs over, or undefined while disconnected.
+	 *
+	 * The session itself is deliberately not exposed: it is shared, so no handle may close
+	 * or reconfigure it, and everything else it offers is reachable through {@link origin}.
+	 */
+	readonly transport: Getter<Transport | undefined>;
 
 	/** The current connection's PROBE estimates, or undefined while disconnected. */
 	readonly probe: Getter<Probe | undefined>;
@@ -93,9 +99,9 @@ export class Shared {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
-		this.established = this.#established;
 		this.probe = this.#probe;
 		this.origin = this.#origin;
+		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
 		const linger = props?.linger;
 
@@ -140,7 +146,7 @@ export class Shared {
 			const origin = effect.get(this.#origin);
 			if (!origin) return;
 
-			const upstream = origin.consume().announced(prefix);
+			const upstream = origin.announced(prefix);
 			effect.cleanup(() => upstream.close());
 
 			// Track what this origin announced so a URL switch retracts it.
@@ -176,12 +182,9 @@ export class Shared {
 	 * Close the handle when done.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
-		// The mapping computed belongs to the handle, not this connection: parking it on
-		// #signals would retain one per call until the whole connection closes.
-		const origin = new Computed((effect) => effect.get(this.#origin)?.consume());
-		const watch = new Announce.Broadcast({ origin, path });
-		void watch.closed.then(() => origin.close());
-		return watch;
+		// The signal is handed out directly: Producer implements the non-owning Table, so
+		// the handle can read the origin but never close it.
+		return new Announce.Broadcast({ origin: this.#origin, path });
 	}
 
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */

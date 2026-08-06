@@ -1213,7 +1213,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	expect(await announced.next()).toEqual({ path: Path.from("test"), active: true });
 
 	// Consuming through the origin reaches the wire.
-	const remote = reader.consume(Path.from("test"));
+	const remote = reader.get(Path.from("test"));
 	if (!remote) throw new Error("expected the origin to route the broadcast");
 	const track = remote.track("video").subscribe();
 	expect(await track.readString()).toBe("hello");
@@ -1221,7 +1221,7 @@ async function runOriginFlow(protocol: string, version?: number) {
 	// Unpublishing retracts the entry over the wire and out of the origin.
 	broadcast.close();
 	expect(await announced.next()).toEqual({ path: Path.from("test"), active: false });
-	await until(() => reader.consume(Path.from("test")) === undefined);
+	await until(() => reader.get(Path.from("test")) === undefined);
 
 	await serving;
 	track.close();
@@ -1255,16 +1255,16 @@ test("origin: remote entries retract when the session dies, local ones survive",
 	const mine = clientOrigin.publish(Path.from("mine"));
 
 	const reader = clientOrigin.consume();
-	await until(() => reader.consume(Path.from("remote")) !== undefined);
+	await until(() => reader.get(Path.from("remote")) !== undefined);
 
 	client.close();
 	server.close();
 
 	// The session that fed the entry is gone, so the entry goes with it.
-	await until(() => reader.consume(Path.from("remote")) === undefined);
+	await until(() => reader.get(Path.from("remote")) === undefined);
 
 	// The local publish is not the session's to take.
-	const local = reader.consume(Path.from("mine"));
+	const local = reader.get(Path.from("mine"));
 	expect(local).toBeDefined();
 	local?.close();
 
@@ -1290,7 +1290,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	{
 		const remote = serverSees.publish(Path.from("from-server"));
 		const reader = shared.consume();
-		await until(() => reader.consume(Path.from("from-server")) !== undefined);
+		await until(() => reader.get(Path.from("from-server")) !== undefined);
 		remote.close();
 	}
 
@@ -1298,7 +1298,7 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 	const mine = shared.publish(Path.from("from-client"));
 	mine.createTrack("chat");
 	const reader = shared.consume();
-	const loopback = reader.consume(Path.from("from-client"));
+	const loopback = reader.get(Path.from("from-client"));
 	if (!loopback) throw new Error("expected a local route");
 	const track = loopback.subscribe("chat");
 	expect(track).toBeDefined();
@@ -1307,13 +1307,13 @@ test("origin: one origin on both directions consumes locally and never echoes", 
 
 	// The server sees the client's broadcast once, as its own remote entry.
 	const serverReader = serverSees.consume();
-	await until(() => serverReader.consume(Path.from("from-client")) !== undefined);
+	await until(() => serverReader.get(Path.from("from-client")) !== undefined);
 
 	// The critical part: the client must NOT re-announce "from-server" back. If it did, the
 	// server's forwarder would insert it as a remote entry in serverSees. Give the wire a
 	// moment, then check the only remote entry the server has is the client's own broadcast.
 	await sleep(50);
-	expect(serverReader.consume(Path.from("from-server"))).toBeUndefined();
+	expect(serverReader.get(Path.from("from-server"))).toBeUndefined();
 
 	mine.close();
 	client.close();
@@ -1346,7 +1346,7 @@ test("origin: a request resolves blind on a relay without discovery", async () =
 	expect(reader.discovery.peek()).toBe(false);
 
 	// Nothing announced, so the table stays empty; a request is the only way through.
-	expect(reader.consume(Path.from("blind"))).toBeUndefined();
+	expect(reader.get(Path.from("blind"))).toBeUndefined();
 
 	const request = reader.request(Path.from("blind"));
 	await until(() => request.active.peek() !== undefined);
@@ -1390,7 +1390,7 @@ test("origin: a request is re-answered by the next session", async () => {
 		subscribe: clientOrigin,
 	});
 
-	const request = clientOrigin.consume().request(Path.from("standing"));
+	const request = clientOrigin.request(Path.from("standing"));
 
 	try {
 		await until(() => request.active.peek() !== undefined);
@@ -1421,7 +1421,7 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 		accept(pair.server, url, { publish: serverOrigin.consume() }),
 	]);
 
-	const watch = new Announce.Broadcast({ origin: clientOrigin.consume(), path: Path.from("show") });
+	const watch = new Announce.Broadcast({ origin: clientOrigin, path: Path.from("show") });
 
 	// Nothing published yet: the handle waits instead of subscribing blind.
 	for (let i = 0; i < 5; i++) await sleep(1);
@@ -1475,14 +1475,14 @@ test("origin: overlapping sessions carrying one path fail over", async () => {
 	const second = await setup();
 
 	const reader = clientOrigin.consume();
-	await until(() => reader.consume(Path.from("redundant")) !== undefined);
+	await until(() => reader.get(Path.from("redundant")) !== undefined);
 
 	// The newer session dies; the older one still carries the path and must keep serving.
 	second.client.close();
 	second.server.close();
 	await sleep(50);
 
-	const remote = reader.consume(Path.from("redundant"));
+	const remote = reader.get(Path.from("redundant"));
 	if (!remote) throw new Error("route black-holed despite a live session");
 	const track = remote.track("chat").subscribe();
 	expect(await track.readString()).toBe("still here");
@@ -1522,7 +1522,7 @@ test("origin: a standby session re-answers a request when the answerer dies", as
 	};
 
 	// The first session answers the standing request; the second attaches as a standby.
-	const request = clientOrigin.consume().request(Path.from("blind"));
+	const request = clientOrigin.request(Path.from("blind"));
 	const answerer = await setup("from answerer");
 	await until(() => request.active.peek() !== undefined);
 	const standby = await setup("from standby");

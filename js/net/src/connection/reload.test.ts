@@ -274,17 +274,17 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
 		// publish lands in the server's.
-		await waitUntil(() => reader.consume(Path.from("remote")) !== undefined);
-		await waitUntil(() => servers[0]?.saw.consume().consume(Path.from("mine")) !== undefined);
+		await waitUntil(() => reader.get(Path.from("remote")) !== undefined);
+		await waitUntil(() => servers[0]?.saw.get(Path.from("mine")) !== undefined);
 
 		// Kill the session: the remote entry retracts, the local publish stays put.
 		servers[0]?.session.close();
-		await waitUntil(() => reader.consume(Path.from("remote")) === undefined);
+		await waitUntil(() => reader.get(Path.from("remote")) === undefined);
 
 		// The reconnect re-announces the (untouched) publish and re-populates the table.
 		await waitUntil(() => servers.length > 1);
-		await waitUntil(() => reader.consume(Path.from("remote")) !== undefined);
-		await waitUntil(() => servers[1]?.saw.consume().consume(Path.from("mine")) !== undefined);
+		await waitUntil(() => reader.get(Path.from("remote")) !== undefined);
+		await waitUntil(() => servers[1]?.saw.get(Path.from("mine")) !== undefined);
 	} finally {
 		reload.close();
 		publishOrigin.close();
