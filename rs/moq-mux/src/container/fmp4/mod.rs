@@ -7,6 +7,7 @@
 //! produces them.
 
 mod export;
+pub mod fragment;
 mod fragmenter;
 mod import;
 mod muxer;
@@ -151,6 +152,11 @@ pub enum Error {
 	/// truncated while the fragments kept the full value, putting them on different timelines.
 	#[error("timescale {0} does not fit the 32-bit mdhd field")]
 	TimescaleTooLarge(u64),
+
+	/// A sample duration is a 32-bit `trun` field. A larger value would wrap in the media
+	/// while the fragment metadata kept the full duration, putting them on different timelines.
+	#[error("sample duration {0} does not fit the 32-bit trun field")]
+	SampleDurationTooLarge(u128),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -367,7 +373,7 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 	let Some(first) = frames.first() else {
 		return Ok(Bytes::new());
 	};
-	encode_at(info, base_ticks(first, info.timescale), frames)
+	encode_at(info, base_ticks(first, info.timescale)?, frames)
 }
 
 /// A frame's presentation time as a tick count at the track's timescale.
@@ -375,8 +381,8 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 /// When the importer preserved the source scale (the common passthrough case) this is a no-op;
 /// otherwise it's a single rescale rather than the legacy `micros * scale / 1_000_000`
 /// round-trip.
-fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> u64 {
-	frame.timestamp.as_scale(timescale) as u64
+fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> Result<u64> {
+	u64::try_from(frame.timestamp.as_scale(timescale)).map_err(|_| Error::PtsOverflow)
 }
 
 /// Encode a single-traf moof+mdat fragment whose decode timeline starts at `base_dts` ticks.
@@ -416,7 +422,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
-			let duration = f.duration.map(|d| d.as_scale(timescale) as u32);
+			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
 			let pts = f.timestamp.as_scale(timescale) as i128;
 			let cts = pts - i128::from(dts);
 			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
@@ -469,6 +475,12 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	mdat.encode(&mut buf)?;
 
 	Ok(Bytes::from(buf))
+}
+
+/// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.
+fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u32> {
+	let ticks = duration.as_scale(timescale);
+	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(ticks))
 }
 
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
@@ -1046,6 +1058,46 @@ mod tests {
 
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].duration, Some(ts(33_333)));
+	}
+
+	// A trun sample duration is 32 bits. Narrowing silently would make the media claim a
+	// shorter duration than the metadata returned to the fragmenting consumer.
+	#[test]
+	fn encode_fragment_rejects_a_duration_too_large_for_trun() {
+		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let over = u64::from(u32::MAX) + 1;
+		let frame = Frame {
+			timestamp: Timestamp::from_scale(0, timescale.as_u64()).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: Some(Timestamp::from_scale(over, timescale.as_u64()).unwrap()),
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), std::slice::from_ref(&frame)).unwrap_err();
+		assert!(matches!(err, Error::SampleDurationTooLarge(ticks) if ticks == u128::from(over)));
+
+		let largest = Frame {
+			duration: Some(Timestamp::from_scale(u64::from(u32::MAX), timescale.as_u64()).unwrap()),
+			..frame
+		};
+		let fragment = encode_fragment(info(1, timescale, 0), &[largest]).unwrap();
+		assert_eq!(sample_durations(&fragment), vec![Some(u32::MAX)]);
+	}
+
+	// tfdt is 64 bits. A timestamp rescaled past that range must fail rather than wrap the
+	// fragment back onto an unrelated point in the presentation.
+	#[test]
+	fn encode_fragment_rejects_a_pts_too_large_for_tfdt() {
+		let timescale = moq_net::Timescale::new(u64::from(u32::MAX)).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::from_secs(1 << 40).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+
+		let err = encode_fragment(info(1, timescale, 0), &[frame]).unwrap_err();
+		assert!(matches!(err, Error::PtsOverflow));
 	}
 
 	#[test]

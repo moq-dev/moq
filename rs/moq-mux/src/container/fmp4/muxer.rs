@@ -12,7 +12,7 @@ use crate::container::source::{VideoTransform, build_video_transform};
 use super::export::{
 	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
 };
-use super::{Error, Fragmenter, synthesize_audio_trak, synthesize_video_trak};
+use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
 
 /// The single track id used by a muxer's init segment and fragments.
 ///
@@ -231,7 +231,7 @@ impl Muxer {
 	/// stream in decode order. One fragmenter per continuous stream: a fetch-on-demand caller
 	/// serving unrelated groups builds a fresh one per group and
 	/// [`flush`](Fragmenter::flush)es it.
-	pub fn fragmenter(&self) -> Fragmenter {
+	pub fn fragmenter(&self, _config: fragment::Config) -> Fragmenter {
 		Fragmenter {
 			track_id: TRACK_ID,
 			timescale: self.timescale,
