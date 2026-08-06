@@ -120,7 +120,7 @@ check-all *args:
 _check-common:
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
+    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then files=$(git ls-files -z | xargs -0 shfmt -f); shfmt --diff $files && shellcheck $files; fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done

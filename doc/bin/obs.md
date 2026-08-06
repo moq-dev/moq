@@ -63,7 +63,7 @@ just obs build
 
 It needs the `libobs` headers plus a built `libmoq` (`target/include/moq.h`). On macOS and Windows the headers come from the obs-deps bundle `just obs setup` downloads; on Linux they come from the Nix dev shell via `pkg-config`. Set `OBS_INCLUDE_DIR` to point it somewhere else. Like `just rs macos` and `just rs windows`, it is a manual gate: PR CI never compiles this plugin.
 
-It also needs a clang or gcc style compiler with ThreadSanitizer, so it fails rather than skipping when one isn't available. Linux and macOS are covered by the toolchains the plugin already builds with; on Windows run it from WSL, since neither MSVC nor clang on Windows implements ThreadSanitizer.
+It also needs a Clang or GCC compiler that supports ThreadSanitizer, so it fails rather than skipping when one isn't available. Linux and macOS are covered by the toolchains the plugin already builds with; on Windows run it from WSL, since neither MSVC nor clang on Windows implements ThreadSanitizer.
 
 ```bash
 just obs test
