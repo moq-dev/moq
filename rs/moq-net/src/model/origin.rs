@@ -2191,7 +2191,18 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							let _ = resume.abort(err);
 							return;
 						}
-						dead.clear();
+						// `dead` is deliberately NOT cleared here. A dead source can
+						// never serve again (ids are never reused; `is_closing` is
+						// terminal), and its entry is reclaimed by the retain above
+						// once its watcher detaches it. Clearing on takeover
+						// resurrected corpse verdicts: with a closing route still
+						// `active` and a healthy standby, the takeover un-skipped the
+						// corpse, `serve_route`'s active preference dispatched it, the
+						// instant failure re-marked it dead, and the healthy route was
+						// re-spliced - a synchronous cycle with no await, spinning
+						// inside a single task poll and starving the watcher that
+						// would have detached the corpse (the 2026-08-06 relay-fleet
+						// CPU wedge).
 						// The new segment has produced nothing yet, so this is
 						// the edge the copy is asked to advance.
 						spliced_edge = resume.latest();
@@ -6859,5 +6870,245 @@ mod tests {
 			request_fut.now_or_never().is_none(),
 			"request should stay pending until served"
 		);
+	}
+
+	/// Run `scenario` on its own thread with a current_thread runtime and fail
+	/// if it does not complete within `secs`. A `serve_track` task that spins
+	/// inside a single poll (the livelock class this guards against) never
+	/// yields, so the runtime wedges and the scenario cannot finish; a timeout
+	/// here IS the detection, not flakiness.
+	fn wedge_watchdog<F>(name: &str, secs: u64, scenario: F)
+	where
+		F: std::future::Future<Output = ()> + Send + 'static,
+	{
+		let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+		let handle = std::thread::spawn(move || {
+			let rt = ::tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.build()
+				.unwrap();
+			rt.block_on(scenario);
+			let _ = done_tx.send(());
+		});
+		match done_rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+			Ok(()) => {
+				let _ = handle.join();
+			}
+			Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+				// The scenario thread panicked before sending: surface it.
+				let err = handle.join().unwrap_err();
+				std::panic::resume_unwind(err);
+			}
+			Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+				panic!("{name}: scenario wedged; a task is spinning inside a single poll")
+			}
+		}
+	}
+
+	/// A closing route that is still `active` (its watcher has not detached it
+	/// yet) must not be re-dispatched after a successful takeover from a
+	/// healthy standby. `dead.clear()` on takeover used to resurrect the
+	/// corpse's verdict, and because the corpse fails instantly and the healthy
+	/// copy (a live cached producer) splices instantly, serve_track cycled
+	/// splice(corpse) -> splice(healthy) -> takeover -> splice(corpse) with no
+	/// await: a livelock inside one task poll that also starved the watcher
+	/// whose detach would have ended it (the 2026-08-06 relay-fleet CPU wedge).
+	///
+	/// The setup makes every step of the cycle synchronous, exactly like the
+	/// fleet wedge: the healthy source holds a live producer (so a re-splice
+	/// needs no handler roundtrip), and the corpse is aborted while its track
+	/// request is still pending (so serve_track, a value waiter, wakes before
+	/// the corpse's closed-watcher and enters the cycle first).
+	#[test]
+	fn test_active_corpse_does_not_livelock_takeover() {
+		wedge_watchdog("active-corpse", 20, async {
+			let origin = Origin::random().produce();
+			let consumer = origin.consume();
+			let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+
+			// The healthy source: accepts the track and keeps the producer
+			// alive, so a later re-splice resolves synchronously from cache.
+			let source_a = origin
+				.create_broadcast("test", announce().with_hops(hops.clone()))
+				.unwrap();
+			let mut dynamic_a = source_a.dynamic();
+			settle().await;
+			settle().await;
+
+			let broadcast = consumer.request_broadcast("test").await.unwrap();
+			let subscribing = broadcast.track("video").unwrap().subscribe(None);
+			let mut producer_a = accept_track(&mut dynamic_a, "video").await;
+			settle().await;
+			let mut sub = subscribing.await.unwrap();
+			producer_a.append_group().unwrap();
+			sub.assert_group();
+
+			// A newer same-cost source attaches: recency wins the tie, so it
+			// becomes `active` and the serve task asks it for the track. Leave
+			// the request unanswered.
+			let source_b = origin
+				.create_broadcast("test", announce().with_hops(hops.clone()))
+				.unwrap();
+			let dynamic_b = source_b.dynamic();
+			settle().await;
+
+			// Kill it with the request still pending: a corpse that is still
+			// attached and still `active`. Dropping the handler first queues the
+			// serve task's request-failure wake ahead of the corpse watcher's
+			// closed-wake, so the serve task observes the corpse before the
+			// watcher can detach it - the fleet-wedge ordering. It must fail
+			// over to the healthy cached copy and park there instead of
+			// re-dispatching the corpse.
+			drop(dynamic_b);
+			source_b.abort(Error::Dropped).unwrap();
+			settle().await;
+
+			// Progress through the healthy source proves the serve task parked
+			// instead of spinning.
+			producer_a.append_group().unwrap();
+			sub.assert_group();
+			sub.assert_not_closed();
+		});
+	}
+
+	/// Randomized source/subscriber churn over one path: sources attach with
+	/// per-track behaviors (refuse, serve-then-abort, serve-and-hold, finish),
+	/// detach by abort or plain drop, and subscribers come and go. Found the
+	/// active-corpse livelock above (seed 4); kept as a general wedge net.
+	#[test]
+	fn test_route_churn_never_wedges() {
+		for seed in 1..=8u64 {
+			wedge_watchdog(&format!("churn seed {seed}"), 30, churn_scenario(seed));
+		}
+	}
+
+	async fn churn_scenario(seed: u64) {
+		// LCG: deterministic sequence per seed.
+		let mut rng = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+		let mut next = move || {
+			rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			rng >> 33
+		};
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+		let names: Vec<Arc<str>> = (0..8).map(|i| Arc::from(format!("t{i}"))).collect();
+
+		let mut subs: Vec<track::Subscriber> = Vec::new();
+		let mut pending_subs: Vec<kio::Pending<track::Subscribing>> = Vec::new();
+
+		struct Source {
+			producer: Option<broadcast::Producer>,
+			server: ::tokio::task::JoinHandle<()>,
+		}
+		let mut sources: Vec<Source> = Vec::new();
+
+		for step in 0..400u64 {
+			match next() % 10 {
+				// Attach a source whose handler randomly refuses / serves-then-
+				// aborts / serves-and-holds / finishes each track request.
+				0 | 1 => {
+					if sources.len() >= 3 {
+						continue;
+					}
+					let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+					let route = announce().with_hops(hops).with_cost(next() % 4);
+					let Ok(source) = origin.create_broadcast("test", route) else {
+						continue;
+					};
+					let mut dynamic = source.dynamic();
+					let behavior = next();
+					let server = ::tokio::spawn(async move {
+						let mut round = 0u64;
+						let mut kept: Vec<track::Producer> = Vec::new();
+						while let Ok(request) = dynamic.requested_track().await {
+							round += 1;
+							match (behavior >> (round % 16)) % 4 {
+								0 => drop(request), // refuse
+								1 => {
+									let mut producer = request.accept(None);
+									let _ = producer.create_group(group::Info { sequence: round });
+									let _ = producer.abort(Error::Dropped);
+								}
+								2 => {
+									let mut producer = request.accept(None);
+									let _ = producer.create_group(group::Info { sequence: round });
+									kept.push(producer);
+								}
+								_ => {
+									let mut producer = request.accept(None);
+									let _ = producer.finish();
+								}
+							}
+						}
+					});
+					sources.push(Source {
+						producer: Some(source),
+						server,
+					});
+				}
+				// Detach a source, by abort or plain drop.
+				2 | 3 => {
+					if sources.is_empty() {
+						continue;
+					}
+					let i = (next() as usize) % sources.len();
+					let mut source = sources.swap_remove(i);
+					if next() % 2 == 0
+						&& let Some(producer) = source.producer.take()
+					{
+						let _ = producer.abort(Error::Dropped);
+					}
+					source.server.abort();
+				}
+				// Subscribe to a random track.
+				4..=6 => {
+					if subs.len() + pending_subs.len() >= 24 {
+						continue;
+					}
+					let Some(broadcast) = consumer.get_broadcast("test") else {
+						continue;
+					};
+					let name = &names[(next() as usize) % names.len()];
+					if let Ok(track) = broadcast.track(name.as_ref()) {
+						pending_subs.push(track.subscribe(None));
+					}
+				}
+				// Drop a random subscriber.
+				7 => {
+					if subs.is_empty() {
+						continue;
+					}
+					let i = (next() as usize) % subs.len();
+					subs.swap_remove(i);
+				}
+				// Drain: resolve pending subscriptions and read groups.
+				_ => {
+					for sub in pending_subs.drain(..) {
+						match ::tokio::time::timeout(std::time::Duration::from_millis(5), sub).await {
+							Ok(Ok(sub)) => subs.push(sub),
+							Ok(Err(_)) => {}
+							// Still pending: dropping unsubscribes.
+							Err(_) => {}
+						}
+					}
+					for sub in subs.iter_mut() {
+						while let Some(Ok(Some(_))) = sub.recv_group().now_or_never() {}
+					}
+				}
+			}
+			if step % 16 == 0 {
+				settle().await;
+			}
+			// Vary task interleaving per seed.
+			for _ in 0..(next() % 3) {
+				::tokio::task::yield_now().await;
+			}
+		}
+
+		for source in sources {
+			source.server.abort();
+		}
+		settle().await;
 	}
 }
