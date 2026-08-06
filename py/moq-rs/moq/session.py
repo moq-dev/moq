@@ -39,13 +39,17 @@ class Session:
         await self._inner.closed()
 
     async def status(self) -> ConnectionStatus:
-        """Wait for the next connection status change.
+        """Wait for the connection status to differ from the one last reported.
 
         A client session reports ``CONNECTED`` first (the connect it was built from),
         then follows the reconnect loop: ``DISCONNECTED`` while redialing,
         ``CONNECTED`` again on success, ``MIGRATING`` during a GOAWAY handover. It
         raises once the connection stops for good. A server-accepted session's only
-        transition is terminal: this waits for the close and raises its reason."""
+        transition is terminal: this waits for the close and raises its reason.
+
+        This is the current status, not a queue of every edge: a drop that
+        reconnects before you ask again is coalesced away, so the outages it hides
+        are the ones that already healed. Do not count outages with it."""
         return await self._inner.status()
 
     def cancel(self, code: int) -> None:

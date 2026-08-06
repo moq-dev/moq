@@ -333,11 +333,19 @@ struct Shared {
 	state: kio::Producer<State>,
 	send_bw: BandwidthProducer,
 	recv_bw: BandwidthProducer,
+	closed: CloseGuard,
 }
 
 impl Shared {
 	/// A session is live and serving.
 	fn connected(&self, session: &moq_net::Session) {
+		// Held across the publish: see [`CloseGuard`]. A close that already ran is
+		// honored here rather than leaving this session parked in the final state.
+		let closed = self.closed.lock().unwrap();
+		if let Some(err) = closed.as_ref() {
+			session.abort(err.clone());
+			return;
+		}
 		if let Ok(mut state) = self.state.write() {
 			state.status = Some(Status::Connected);
 			state.version = Some(session.version());
@@ -429,13 +437,26 @@ pub struct Connection {
 }
 
 /// Aborts the connection loop when the last [`Connection`] clone drops.
-struct AbortOnDrop(tokio::task::AbortHandle);
+struct AbortOnDrop {
+	handle: tokio::task::AbortHandle,
+	closed: CloseGuard,
+}
 
 impl Drop for AbortOnDrop {
 	fn drop(&mut self) {
-		self.0.abort();
+		self.handle.abort();
 	}
 }
+
+/// Serializes [`Connection::abort`] against the loop publishing a fresh session.
+///
+/// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
+/// completing in that window would otherwise hand [`Shared::connected`] a session
+/// that `abort` had already looked for and missed, and it would be closed by the
+/// refcount drop instead of carrying the caller's error code to the peer. Both
+/// sides take this lock around their `state` access, so the session is either
+/// published before the close is recorded or refused after it.
+type CloseGuard = std::sync::Arc<std::sync::Mutex<Option<moq_net::Error>>>;
 
 impl Connection {
 	pub(crate) fn new(client: Client, url: Url) -> Self {
@@ -449,12 +470,16 @@ impl Connection {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.consume();
 
+		let closed: CloseGuard = Default::default();
+		let task_closed = closed.clone();
+
 		let task = tokio::spawn(async move {
 			let reconnect = client.reconnect;
 			let shared = Shared {
 				state: producer,
 				send_bw,
 				recv_bw,
+				closed: task_closed,
 			};
 			if let Err(err) = Self::run(&shared, client, url).await {
 				// In one-shot mode the session ending is the expected lifecycle, and
@@ -468,7 +493,10 @@ impl Connection {
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
 		Self {
-			task: std::sync::Arc::new(AbortOnDrop(task.abort_handle())),
+			task: std::sync::Arc::new(AbortOnDrop {
+				handle: task.abort_handle(),
+				closed,
+			}),
 			state,
 			send_bandwidth,
 			recv_bandwidth,
@@ -488,10 +516,17 @@ impl Connection {
 	/// `err` is what carries the code to the peer, since the drop path only ever
 	/// sends a bare `Cancel`.
 	pub fn abort(&self, err: moq_net::Error) {
-		if let Some(session) = self.state.read().session.clone() {
+		// Record the close and take the session under one lock, so a redial landing
+		// in the abort window is refused rather than parked: see [`CloseGuard`].
+		let session = {
+			let mut closed = self.task.closed.lock().unwrap();
+			*closed = Some(err.clone());
+			self.state.read().session.clone()
+		};
+		if let Some(session) = session {
 			session.abort(err);
 		}
-		self.task.0.abort();
+		self.task.handle.abort();
 	}
 
 	/// Stop the loop now, for every clone. [`abort`](Self::abort) with no error code.

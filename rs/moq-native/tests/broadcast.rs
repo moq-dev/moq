@@ -2913,3 +2913,40 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 
 	server_handle.abort();
 }
+
+/// `abort` must carry its code to the peer, not merely stop the loop: the code is
+/// the whole reason it takes one. Reconnecting stays on, since that is the mode
+/// where the loop would otherwise redial straight past the stop.
+///
+/// This covers the ordinary path, where a session is live when `abort` runs. The
+/// race it is paired with (a redial landing inside the abort window) is not
+/// reachable from here, since it turns on when tokio cancels the loop task.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn abort_carries_its_code_to_the_peer() {
+	let (mut server, addr) = test_server();
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let (reason_tx, reason_rx) = tokio::sync::oneshot::channel();
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		let session = request.ok().await?;
+		let _ = reason_tx.send(session.closed().await);
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let connection = tokio::time::timeout(TIMEOUT, test_client().connect(url).established())
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	connection.abort(moq_net::Error::App(42));
+
+	let reason = tokio::time::timeout(TIMEOUT, reason_rx)
+		.await
+		.expect("the peer never saw the close")
+		.expect("server task gone");
+	assert!(matches!(reason, moq_net::Error::App(42)), "unexpected close: {reason}");
+
+	server_handle.abort();
+}

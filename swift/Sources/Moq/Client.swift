@@ -116,11 +116,15 @@ public final class Session: Sendable {
         try await ffi.closed()
     }
 
-    /// Suspend until the next connection status change. A client session reports
-    /// `.connected` first, then follows the reconnect loop (`.disconnected` while
-    /// redialing, `.migrating` during a GOAWAY handover) and throws once the
-    /// connection stops for good. A server-accepted session's only transition is
-    /// terminal: this waits for the close and throws its reason.
+    /// Suspend until the connection status differs from the one last reported. A
+    /// client session reports `.connected` first, then follows the reconnect loop
+    /// (`.disconnected` while redialing, `.migrating` during a GOAWAY handover) and
+    /// throws once the connection stops for good. A server-accepted session's only
+    /// transition is terminal: this waits for the close and throws its reason.
+    ///
+    /// This is the current status, not a queue of every edge: a drop that
+    /// reconnects before you ask again is coalesced away, so the outages it hides
+    /// are the ones that already healed. Don't count outages with it.
     public func status() async throws -> ConnectionStatus {
         try await ffi.status()
     }

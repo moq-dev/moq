@@ -79,9 +79,15 @@ async def test_client_reconnects_and_resumes_announcements():
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         sessions: list = []
         accepted = asyncio.Event()
+        # Gate the redial. status() reports the current status rather than every
+        # edge, so if the reconnect landed before we asked, CONNECTED -> CONNECTED
+        # is coalesced away and the wait below would block until its timeout.
+        regate = asyncio.Event()
 
         async def accept_loop() -> None:
             async for request in server:
+                if sessions:
+                    await regate.wait()
                 sessions.append(await request.accept())
                 accepted.set()
 
@@ -103,7 +109,12 @@ async def test_client_reconnects_and_resumes_announcements():
                 await asyncio.wait_for(accepted.wait(), timeout=10)
                 sessions[0].cancel(0)
 
+                # Nothing accepts the redial until the gate opens, so DISCONNECTED
+                # is still the current status when we ask for it.
+                assert await asyncio.wait_for(session.status(), timeout=10) == moq.ConnectionStatus.DISCONNECTED
+
                 # The client redials on its own; the accept loop serves it.
+                regate.set()
                 while await asyncio.wait_for(session.status(), timeout=10) != moq.ConnectionStatus.CONNECTED:
                     pass
 

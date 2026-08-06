@@ -504,7 +504,7 @@ impl MoqSession {
 			.await
 	}
 
-	/// Wait for the next connection status change.
+	/// Wait for the connection status to differ from the one this handle last reported.
 	///
 	/// A client session reports `Connected` first (the connect it was built from), then
 	/// follows the reconnect loop: `Disconnected` while redialing, `Connected` again on
@@ -512,6 +512,10 @@ impl MoqSession {
 	/// connection stops for good (same terminal result as [`closed`](Self::closed)).
 	/// A server-accepted session is a single transport, so its only transition is
 	/// terminal: this waits for the close and returns its reason.
+	///
+	/// This is the current status, not a queue of every edge: a drop that reconnects
+	/// before you ask again is coalesced away, so the outages it hides are the ones
+	/// that already healed. Don't count outages with it.
 	pub async fn status(&self) -> Result<MoqConnectionStatus, MoqError> {
 		self.status
 			.run(|mut inner| async move {
