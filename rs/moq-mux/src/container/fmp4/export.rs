@@ -81,6 +81,22 @@ impl Chunk {
 			Chunk::Fragment(fragment) => fragment.data,
 		}
 	}
+
+	/// The init segment's bytes, or `None` for a media fragment.
+	pub fn init(self) -> Option<Bytes> {
+		match self {
+			Chunk::Init(data) => Some(data),
+			Chunk::Fragment(_) => None,
+		}
+	}
+
+	/// The media fragment, or `None` for the init segment.
+	pub fn fragment(self) -> Option<Fragment> {
+		match self {
+			Chunk::Init(_) => None,
+			Chunk::Fragment(fragment) => Some(fragment),
+		}
+	}
 }
 
 /// One moof+mdat fragment, with the metadata a segmenting consumer needs.
@@ -94,8 +110,8 @@ pub struct Fragment {
 	/// fragments are always independent.
 	pub independent: bool,
 
-	/// Presentation duration of the fragment in seconds.
-	pub duration: f64,
+	/// Presentation duration of the fragment.
+	pub duration: Duration,
 }
 
 struct Fmp4Track {
@@ -605,7 +621,7 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	// independent only when its buffer opened on a keyframe (a GOP boundary).
 	let independent = !track.is_video || track.buffer_independent;
 	let frames = infer_missing_durations(frames, successor, track.default_frame);
-	let duration = fragment_seconds(&frames, track.default_frame);
+	let duration = fragment_duration(&frames, track.default_frame);
 	let data = encode_fragment(track, frames)?;
 	Ok(Fragment {
 		data,
@@ -614,15 +630,15 @@ fn emit_fragment(track: &mut Fmp4Track, mut frames: Vec<Frame>, successor: Optio
 	})
 }
 
-/// Presentation duration of a fragment, in seconds.
+/// Presentation duration of a fragment.
 ///
 /// When every sample carries a duration (the CMAF case) the per-sample durations
 /// tile the timeline, so their sum is exact. Legacy / LOC sources carry none, so
 /// fall back to the presentation span plus one `default_frame` for the trailing
 /// sample (which has no successor to bound it).
-fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
+fn fragment_duration(frames: &[Frame], default_frame: Duration) -> Duration {
 	if frames.is_empty() {
-		return 0.0;
+		return Duration::ZERO;
 	}
 	if frames
 		.iter()
@@ -631,8 +647,7 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 		return frames
 			.iter()
 			.map(|f| Duration::from(f.duration.unwrap()))
-			.sum::<Duration>()
-			.as_secs_f64();
+			.sum::<Duration>();
 	}
 	let mut min = Duration::MAX;
 	let mut max = Duration::ZERO;
@@ -641,7 +656,7 @@ fn fragment_seconds(frames: &[Frame], default_frame: Duration) -> f64 {
 		min = min.min(pts);
 		max = max.max(pts);
 	}
-	((max - min) + default_frame).as_secs_f64()
+	(max - min) + default_frame
 }
 
 /// Fill in the durations the codec states outright, before anything has to be inferred
@@ -805,7 +820,10 @@ mod tests {
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.116334);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(116_334)
+		);
 	}
 
 	#[test]
@@ -813,7 +831,10 @@ mod tests {
 		let frames = infer_missing_durations(vec![frame(83_333, Some(0))], None, Duration::from_millis(40));
 
 		assert_eq!(frames[0].duration, Some(ts(40_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(40)), 0.04);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(40)),
+			Duration::from_millis(40)
+		);
 	}
 
 	#[test]
@@ -822,7 +843,10 @@ mod tests {
 		let frames = infer_missing_durations(vec![frame(41_667, None)], Some(&successor), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.041667);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(41_667)
+		);
 	}
 
 	/// The regression for moq-dev/moq.pro#814: a subscriber that got a stale cached group
@@ -835,7 +859,10 @@ mod tests {
 		let frames = infer_missing_durations(vec![frame(63_244, None)], Some(&next_group), Duration::from_millis(33));
 
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.033);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_millis(33)
+		);
 	}
 
 	/// Audio never rolls a fragment on a keyframe, so its buffer can span whole groups.
@@ -922,7 +949,10 @@ mod tests {
 		assert_eq!(frames[0].duration, Some(ts(33_000)));
 		assert_eq!(frames[1].duration, Some(ts(33_000)));
 		assert_eq!(frames[2].duration, Some(ts(33_000)));
-		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.099);
+		assert_eq!(
+			fragment_duration(&frames, Duration::from_millis(33)),
+			Duration::from_micros(99_000)
+		);
 	}
 
 	// A source init whose trak carries an edit list must come out of extract_init with

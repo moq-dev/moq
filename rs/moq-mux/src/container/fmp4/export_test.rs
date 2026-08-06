@@ -23,7 +23,10 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	let init = init_now(&mut exporter).await;
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut saw_ftyp = false;
@@ -83,7 +86,10 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	let init = init_now(&mut exporter).await;
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut moov: Option<mp4_atom::Moov> = None;
@@ -140,7 +146,10 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	let init = init_now(&mut exporter).await;
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut moov: Option<mp4_atom::Moov> = None;
@@ -195,7 +204,10 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	let init = init_now(&mut exporter).await;
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut moov: Option<mp4_atom::Moov> = None;
@@ -257,7 +269,10 @@ async fn av1_source_to_cmaf_export_synthesizes_av01() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	let init = init_now(&mut exporter).await;
+	let init = chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	let mut cursor = Cursor::new(init.as_ref());
 	let mut moov: Option<mp4_atom::Moov> = None;
@@ -439,15 +454,21 @@ async fn next_chunk_reports_segment_metadata() {
 		.with_fragment_duration(std::time::Duration::from_millis(20));
 
 	// First emit is the init segment, which carries no segmenting metadata to assert on.
-	init_now(&mut exporter).await;
+	chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
 	// The track is finished, so its three media fragments are all available. The
 	// catalog stays open, so the exporter never reaches a clean end. Read the
 	// known fragment count rather than looping to `None`.
 	let mut independents = Vec::new();
 	for _ in 0..3 {
-		let frag = fragment_now(&mut exporter).await;
-		assert!(frag.duration > 0.0, "media fragment duration should be positive");
+		let frag = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
+		assert!(
+			frag.duration > std::time::Duration::ZERO,
+			"media fragment duration should be positive"
+		);
 		independents.push(frag.independent);
 	}
 
@@ -486,11 +507,14 @@ async fn zero_fragment_duration_emits_without_successor() {
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await)
 		.with_fragment_duration(std::time::Duration::ZERO);
-	init_now(&mut exporter).await;
+	chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
-	let fragment = fragment_now(&mut exporter).await;
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert!(fragment.independent, "a keyframe-led fragment can start a segment");
-	assert!(fragment.duration > 0.0);
+	assert!(fragment.duration > std::time::Duration::ZERO);
 }
 
 #[tokio::test(start_paused = true)]
@@ -509,14 +533,17 @@ async fn audio_only_default_mode_emits_without_successor() {
 	live.track.write(raw_frame(0, &[0x01, 0x02, 0x03, 0x04], true)).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	init_now(&mut exporter).await;
+	chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
-	let fragment = fragment_now(&mut exporter).await;
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert!(fragment.independent, "audio fragments are always independent");
 	// An AAC frame is 1024 samples, so the catalog fallback is the real duration.
 	assert!(
-		(fragment.duration - 1024.0 / 44100.0).abs() < 1e-4,
-		"expected one AAC frame of duration, got {}",
+		(fragment.duration.as_secs_f64() - 1024.0 / 44100.0).abs() < 1e-4,
+		"expected one AAC frame of duration, got {:?}",
 		fragment.duration
 	);
 }
@@ -530,12 +557,15 @@ async fn opus_frame_duration_from_toc() {
 	live.track.write(raw_frame(0, &[0x08, 0xaa, 0xbb, 0xcc], true)).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
-	init_now(&mut exporter).await;
+	chunk_now(&mut exporter)
+		.await
+		.init()
+		.expect("the init segment comes first");
 
-	let fragment = fragment_now(&mut exporter).await;
+	let fragment = chunk_now(&mut exporter).await.fragment().expect("a media fragment");
 	assert!(
-		(fragment.duration - 0.02).abs() < 1e-4,
-		"expected the 20 ms TOC duration, got {}",
+		(fragment.duration.as_secs_f64() - 0.02).abs() < 1e-4,
+		"expected the 20 ms TOC duration, got {:?}",
 		fragment.duration
 	);
 }
@@ -611,22 +641,4 @@ async fn chunk_now(
 		.expect("waited for a successor frame")
 		.expect("exporter failed")
 		.expect("expected a chunk")
-}
-
-/// The next chunk, which must be a media fragment.
-async fn fragment_now(
-	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
-) -> crate::container::fmp4::Fragment {
-	match chunk_now(exporter).await {
-		crate::container::fmp4::Chunk::Fragment(fragment) => fragment,
-		crate::container::fmp4::Chunk::Init(_) => panic!("expected a media fragment, got the init segment"),
-	}
-}
-
-/// The next chunk, which must be the init segment.
-async fn init_now(exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>) -> bytes::Bytes {
-	match chunk_now(exporter).await {
-		crate::container::fmp4::Chunk::Init(data) => data,
-		crate::container::fmp4::Chunk::Fragment(_) => panic!("expected the init segment, got a media fragment"),
-	}
 }
