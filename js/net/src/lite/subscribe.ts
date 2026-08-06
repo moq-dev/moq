@@ -62,7 +62,7 @@ async function decodeFrameBounds(
 export class SubscribeUpdate {
 	priority: number;
 	ordered: boolean;
-	/** Subscriber Max Latency in milliseconds before an older group is skipped. */
+	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
 	latencyMax: number;
 	startGroup?: number;
 	endGroup?: number;
@@ -154,7 +154,7 @@ export class Subscribe {
 	track: string;
 	priority: number;
 	ordered: boolean;
-	/** Subscriber Max Latency in milliseconds before an older group is skipped. */
+	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
 	latencyMax: number;
 
 	startGroup?: number;
@@ -267,7 +267,7 @@ export class Subscribe {
 export class SubscribeOk {
 	priority: number;
 	ordered: boolean;
-	/** Subscriber Max Latency in milliseconds before an older group is skipped. */
+	/** Accepted subscriber max latency in milliseconds. */
 	latencyMax: number;
 	startGroup?: number;
 	endGroup?: number;
