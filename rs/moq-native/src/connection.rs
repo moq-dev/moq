@@ -53,9 +53,19 @@ fn attempt_deadline(
 	now: tokio::time::Instant,
 	budget: Option<tokio::time::Instant>,
 ) -> Option<tokio::time::Instant> {
+	// An equal share of what's left, not all of it. Handing each candidate the
+	// whole remaining window lets the first couple spend it between them and
+	// strand a reachable address further down the list, which is the opposite of
+	// what walking the list is for. Recomputed per attempt, so one that fails fast
+	// leaves more for the rest.
+	let share = budget.map(|budget| {
+		let remaining = total - index;
+		now + budget.saturating_duration_since(now) / remaining as u32
+	});
 	let bound = attempt_timeout(index, total).map(|limit| now + limit);
-	match (bound, budget) {
-		(Some(bound), Some(budget)) => Some(bound.min(budget)),
+
+	match (bound, share) {
+		(Some(bound), Some(share)) => Some(bound.min(share)),
 		(Some(only), None) | (None, Some(only)) => Some(only),
 		(None, None) => None,
 	}
@@ -1679,12 +1689,27 @@ mod tests {
 		assert_eq!(attempt_deadline(0, 2, now, None), Some(now + CONNECT_ATTEMPT));
 		assert_eq!(attempt_deadline(1, 2, now, None), None);
 
-		// A budget shorter than the fixed bound wins, including on the last
-		// candidate, which used to run to the client's connect timeout and let a
-		// few black-holed addresses overrun the give-up window several times over.
-		let tight = now + Duration::from_secs(1);
-		assert_eq!(attempt_deadline(0, 2, now, Some(tight)), Some(tight));
+		// A tight budget is split, not spent by whoever asks first. Two seconds
+		// across two candidates is a second each, so the second one still gets a
+		// turn; handing the first the whole window would strand it.
+		let tight = now + Duration::from_secs(2);
+		assert_eq!(
+			attempt_deadline(0, 2, now, Some(tight)),
+			Some(now + Duration::from_secs(1))
+		);
+		// The last candidate gets what is actually left, which here is all of it
+		// because nothing has been spent yet in this synthetic call.
 		assert_eq!(attempt_deadline(1, 2, now, Some(tight)), Some(tight));
+
+		// The share is what a black-holed pair used to exhaust: with the default
+		// 10s window and the 5s bound, two candidates ate it and a reachable third
+		// was never dialed. Now each gets a third.
+		let default_window = now + Duration::from_secs(10);
+		assert_eq!(
+			attempt_deadline(0, 3, now, Some(default_window)),
+			Some(now + Duration::from_secs(10) / 3),
+			"a reachable third candidate must still get a turn"
+		);
 
 		// A budget with room to spare leaves the per-candidate bound in charge, so
 		// one slow address still cannot eat the others' turn.

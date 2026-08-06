@@ -858,17 +858,18 @@ impl Cluster {
 
 		#[cfg(feature = "cluster-lan")]
 		if let Some(discovery) = discovery {
-			// `start` only binds discovery when the LAN mesh is on, which requires `node`.
-			let node = node.clone().expect("--cluster-lan requires --cluster-node");
 			let this = self.clone();
 			let token = token.clone();
 			let dialed = dialed.clone();
+			// The identity discovery actually advertises, not the configured URL it
+			// came from. `with_node` strips userinfo before publishing, so comparing
+			// the raw `--cluster-node` here would tiebreak against a spelling no peer
+			// ever sees: both sides could decide the other should dial, and neither
+			// would.
+			let self_url = canonicalize_peer_key(discovery.id());
 			// Supervised rather than fire-and-forget: a dial task ending is ordinary
 			// (that peer went away), but discovery ending is the relay going blind.
-			supervised.spawn(async move {
-				this.run_mdns(canonicalize_peer_key(&node), token, dialed, discovery)
-					.await
-			});
+			supervised.spawn(async move { this.run_mdns(self_url, token, dialed, discovery).await });
 		}
 
 		// Held in scope so the registration stays announced until `run` exits.
