@@ -24,12 +24,12 @@ use super::{Container, Frame};
 /// [`discontinuity`](Self::discontinuity) goes further and publishes an empty group, for
 /// when the timeline is about to jump rather than merely continue.
 ///
-/// ## Latency Buffering
+/// ## Buffering
 ///
-/// When `latency` is zero (default), each frame is written immediately as its own
-/// container frame. When non-zero, frames are buffered and flushed together when:
+/// When the buffer duration is zero (default), each frame is written immediately as its
+/// own container frame. When non-zero, frames are buffered and flushed together when:
 /// - A keyframe arrives (flushes the previous group's buffer, starts new group),
-/// - The buffered duration exceeds `latency`,
+/// - The buffered duration exceeds the configured duration,
 /// - `finish()` is called.
 ///
 /// This is useful for CMAF where multiple samples should be packed into one moof+mdat.
@@ -39,7 +39,7 @@ pub struct Producer<C: Container> {
 	group: Option<moq_net::group::Producer>,
 	buffer: Vec<Frame>,
 
-	latency: std::time::Duration,
+	buffer_duration: std::time::Duration,
 
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
@@ -62,8 +62,8 @@ pub struct Producer<C: Container> {
 impl<C: Container> Producer<C> {
 	/// Create a Producer wrapping the given moq-lite producer, muxing into `container`.
 	///
-	/// A plain media track by default: no latency buffering, no timeline. Add buffering with
-	/// [`with_latency`](Self::with_latency); the timeline recorder is wired by the catalog (see
+	/// A plain media track by default: no buffering, no timeline. Add buffering with
+	/// [`with_buffer`](Self::with_buffer); the timeline recorder is wired by the catalog (see
 	/// [`catalog::Producer::media_producer`](crate::catalog::Producer::media_producer)).
 	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
 		Self {
@@ -71,7 +71,7 @@ impl<C: Container> Producer<C> {
 			container,
 			group: None,
 			buffer: Vec::new(),
-			latency: std::time::Duration::ZERO,
+			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
 			recorder: None,
 			end: None,
@@ -107,13 +107,16 @@ impl<C: Container> Producer<C> {
 		self.group.is_none()
 	}
 
-	/// Set the maximum buffering latency.
+	/// Buffer up to `duration` of frames into each container frame.
 	///
-	/// When non-zero, frames are buffered and flushed together when the buffered duration exceeds
+	/// When non-zero, frames are buffered and flushed together once the buffered duration exceeds
 	/// it, or a keyframe arrives, packing multiple samples into one container frame (e.g. a CMAF
 	/// moof+mdat). Zero (the default) flushes each frame immediately.
-	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
-		self.latency = latency;
+	///
+	/// This is the publisher-side counterpart to the consumer's
+	/// [`Latency`](crate::Latency), and the one knob here that genuinely *adds* delay.
+	pub fn with_buffer(mut self, duration: std::time::Duration) -> Self {
+		self.buffer_duration = duration;
 		self
 	}
 
@@ -171,7 +174,7 @@ impl<C: Container> Producer<C> {
 		}
 
 		// Buffer or write the frame.
-		if self.latency.is_zero() {
+		if self.buffer_duration.is_zero() {
 			let group = self.group.as_mut().unwrap();
 			let (timestamp, duration, bytes) = (frame.timestamp, frame.duration, frame.payload.len());
 			self.container.write(group, &[frame])?;
@@ -188,7 +191,7 @@ impl<C: Container> Producer<C> {
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
-			// Flush if the buffered span has reached the latency budget. Compute
+			// Flush if the buffered span has reached the buffer duration. Compute
 			// min/max across the buffer rather than first/last: frames within a track
 			// are in *decode* order, and B-frames have non-monotonic PTS, so
 			// `last - first` can shrink as a B-frame lands between two earlier-PTS
@@ -197,7 +200,7 @@ impl<C: Container> Producer<C> {
 				let mut iter = self.buffer.iter().map(|f| std::time::Duration::from(f.timestamp));
 				let first = iter.next().unwrap();
 				let (min, max) = iter.fold((first, first), |(min, max), d| (min.min(d), max.max(d)));
-				if max.saturating_sub(min) >= self.latency {
+				if max.saturating_sub(min) >= self.buffer_duration {
 					self.flush(None)?;
 				}
 			}
@@ -728,7 +731,7 @@ mod tests {
 	async fn keyframe_backfills_batched_durations() {
 		let track = track_producer("test", hang::container::track_info());
 		let recording = Recording::default();
-		let mut producer = Producer::new(track, recording.clone()).with_latency(std::time::Duration::from_secs(10));
+		let mut producer = Producer::new(track, recording.clone()).with_buffer(std::time::Duration::from_secs(10));
 
 		producer.write(frame(0, true)).unwrap(); // group 0 opens
 		producer.write(frame(33_000, false)).unwrap(); // buffered

@@ -80,6 +80,7 @@ mod coding;
 mod error;
 pub mod goaway;
 mod ietf;
+mod latency;
 mod lite;
 mod model;
 mod path;
@@ -94,6 +95,7 @@ pub mod stats;
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, VarInt};
 pub use error::*;
+pub use latency::Latency;
 /// The session direction a client advertises in its SETUP (moq-lite-05+).
 pub use lite::Role;
 pub use model::*;

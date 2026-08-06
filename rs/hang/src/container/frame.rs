@@ -40,8 +40,8 @@ const LATENCY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 /// which is why every media track should start here rather than at `Info::default()`. It is a
 /// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
 /// anyone play further behind live: a subscriber's own
-/// [`Subscription::latency_max`](moq_net::track::Subscription::latency_max) still defaults to zero
-/// (skip the moment a newer group arrives).
+/// [`Subscription::latency`](moq_net::track::Subscription::latency) defaults to
+/// [`Latency::REAL_TIME`](moq_net::Latency::REAL_TIME) (skip the moment a newer group arrives).
 pub fn track_info() -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)

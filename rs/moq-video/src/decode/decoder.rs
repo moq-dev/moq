@@ -8,8 +8,6 @@
 //! until the first keyframe so the backend never sees a delta frame it can't
 //! decode.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use hang::catalog::{AV1, VideoCodec, VideoConfig};
 use moq_mux::codec::{annexb, h264, h265};
@@ -44,10 +42,12 @@ pub enum Kind {
 pub struct Config {
 	/// Which backend to use.
 	pub kind: Kind,
-	/// Upper bound on buffering before a stalled group is skipped. `None` uses
-	/// the moq-mux default (skip aggressively); set it to your playout buffer for
-	/// a softer skip. Forwarded to the container consumer's `with_latency_max`.
-	pub latency_max: Option<Duration>,
+	/// How far playback may drift from the live edge before a stalled group is
+	/// skipped. Defaults to [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME)
+	/// (skip aggressively); set [`Latency::max`](moq_mux::Latency::max) to your
+	/// playout buffer for a softer skip. Forwarded to
+	/// [`moq_mux::container::Consumer::with_latency`].
+	pub latency: moq_mux::Latency,
 	/// Ask the decoder to emit frames at this size (both dimensions even) instead
 	/// of the stream's native one. Best effort: a hardware decoder with a
 	/// built-in scaler (NVDEC) honors it for free, other backends ignore it.
@@ -57,7 +57,7 @@ pub struct Config {
 }
 
 impl Config {
-	/// A default config: automatic backend selection, default latency.
+	/// A default config: automatic backend selection, real-time latency.
 	pub fn new() -> Self {
 		Self::default()
 	}

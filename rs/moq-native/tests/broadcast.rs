@@ -819,7 +819,8 @@ async fn broadcast_route_migration() {
 	let broadcast = broadcast.expect("expected announce");
 
 	// Subscribe once; a generous stale window so cached groups are served.
-	let subscription = moq_net::track::Subscription::default().with_latency_max(Duration::from_secs(10));
+	let subscription =
+		moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10)));
 	let mut sub = broadcast
 		.track("video")
 		.unwrap()
@@ -1060,7 +1061,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let mut sub = broadcast
 		.track("video")
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency_max(Duration::from_secs(10)))
+		.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10))))
 		.await
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);
@@ -1084,7 +1085,7 @@ async fn route_replaced_test(version: Option<&str>) {
 	let mut sub = replacement
 		.track("video")
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_latency_max(Duration::from_secs(10)))
+		.subscribe(moq_net::track::Subscription::default().with_latency(moq_net::Latency::max(Duration::from_secs(10))))
 		.await
 		.expect("subscribe to the replacement failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g0"]);

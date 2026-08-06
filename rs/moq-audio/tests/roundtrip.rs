@@ -141,7 +141,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 	config.format = Format::S16;
 	config.sample_rate = Some(44_100);
 	config.channels = Some(1);
-	config.latency_max = Some(Duration::from_millis(500));
+	config.latency = moq_mux::Latency::max(Duration::from_millis(500));
 
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, cfg, "audio", config)
 		.await

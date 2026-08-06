@@ -150,7 +150,7 @@ pub(crate) async fn connect(
 	match config.delay {
 		Some(delay) if !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
 			tokio::time::sleep(delay).await;
-			tracing::debug!(%url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
 		}
 		_ => {}
 	}
@@ -171,7 +171,7 @@ pub(crate) async fn connect(
 		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
 
-	tracing::debug!(%url, "connecting via WebSocket");
+	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via WebSocket");
 
 	// Use the existing TLS config (which respects tls-disable-verify) for secure connections.
 	let connector = if needs_tls {
@@ -193,7 +193,7 @@ pub(crate) async fn connect(
 		.await
 		.map_err(Error::Connect)?;
 
-	tracing::warn!(%url, "using WebSocket fallback");
+	tracing::warn!(peer = %crate::connect::Endpoint(&url), "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)

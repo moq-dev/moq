@@ -608,7 +608,7 @@ pub struct Play<S = Conn> {
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
 	/// one. Defaults to [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY); override with
 	/// [`with_latency`](Self::with_latency).
-	latency: Duration,
+	latency: moq_mux::Latency,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -636,8 +636,9 @@ impl<S: Stream> Play<S> {
 	/// newer one (the moq-level frame-drop latency). Defaults to
 	/// [`DEFAULT_LATENCY`](crate::DEFAULT_LATENCY). RTMP is unpaced (tags go out as
 	/// fast as the socket accepts them), so this bounds buffering, not the wire
-	/// rate. Pass [`Duration::ZERO`] to drop stale groups aggressively.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// rate. Pass [`Latency::REAL_TIME`](moq_mux::Latency::REAL_TIME) to drop stale groups
+	/// aggressively.
+	pub fn with_latency(mut self, latency: moq_mux::Latency) -> Self {
 		self.latency = latency;
 		self
 	}

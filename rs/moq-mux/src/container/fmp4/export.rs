@@ -37,7 +37,7 @@ use moq_net::Timestamp;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	latency: Duration,
+	latency: crate::Latency,
 	fragment_duration: Option<Duration>,
 
 	tracks: HashMap<String, Fmp4Track>,
@@ -113,7 +113,7 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			latency: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			catalog_snapshot: None,
@@ -121,11 +121,12 @@ impl<S: Stream> Export<S> {
 		}
 	}
 
-	/// Set the maximum buffering latency for each per-track source.
+	/// Set the latency tolerance for each per-track source.
 	///
-	/// See [`crate::container::Consumer::with_latency_max`] for the per-track skip behavior.
-	/// Default is zero (skip aggressively).
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
+	/// per-track skip behavior. Defaults to
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
 		self
 	}

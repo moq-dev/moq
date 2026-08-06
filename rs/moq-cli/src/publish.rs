@@ -560,7 +560,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(Duration::ZERO),
+				.with_latency(moq_mux::Latency::REAL_TIME),
 		)
 		.await
 	}
@@ -597,7 +597,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_latency(Duration::ZERO),
+				.with_latency(moq_mux::Latency::REAL_TIME),
 		)
 		.await;
 
@@ -656,7 +656,7 @@ mod tests {
 	/// Read the first frame of a verbatim track back as raw bytes.
 	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy).with_latency_max(Duration::ZERO);
+		let mut reader = Consumer::new(track, Container::Legacy).with_latency(moq_mux::Latency::REAL_TIME);
 		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read())
 			.await
 			.expect("verbatim read timed out")

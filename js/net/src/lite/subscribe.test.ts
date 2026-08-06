@@ -51,7 +51,7 @@ async function encodeSubscribe(msg: Subscribe): Promise<void> {
 
 test("SubscribeOk round-trips priority/ordered/groups on draft-04", async () => {
 	const got = await responseRoundtrip(Version.DRAFT_04, {
-		ok: new SubscribeOk({ priority: 7, ordered: true, maxLatency: 250, startGroup: 3 }),
+		ok: new SubscribeOk({ priority: 7, ordered: true, latencyMax: 250, startGroup: 3 }),
 	});
 	expect("ok" in got).toBe(true);
 	if (!("ok" in got)) throw new Error("expected ok");

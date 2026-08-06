@@ -13,7 +13,6 @@
 //!   extracted from the avcC are injected ahead of every keyframe.
 
 use std::task::Poll;
-use std::time::Duration;
 
 use bytes::Bytes;
 use hang::Catalog;
@@ -27,7 +26,7 @@ use crate::container::ExportSource;
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
-	latency: Duration,
+	latency: crate::Latency,
 	track: Option<H264Track>,
 }
 
@@ -61,13 +60,17 @@ impl<S: Stream> Export<S> {
 		Self {
 			source,
 			catalog: Some(catalog),
-			latency: Duration::ZERO,
+			latency: crate::Latency::REAL_TIME,
 			track: None,
 		}
 	}
 
-	/// Set the maximum buffering latency for the per-track source.
-	pub fn with_latency(mut self, latency: Duration) -> Self {
+	/// Set the latency tolerance for the per-track source.
+	///
+	/// See [`Consumer::with_latency`](crate::container::Consumer::with_latency) for the
+	/// per-track skip behavior. Defaults to
+	/// [`Latency::REAL_TIME`](crate::Latency::REAL_TIME) (skip aggressively).
+	pub fn with_latency(mut self, latency: crate::Latency) -> Self {
 		self.latency = latency;
 		self
 	}

@@ -94,7 +94,7 @@ pub(crate) async fn connect(
 	let host = url.host_str().ok_or(Error::MissingHostname)?;
 	let port = url.port().ok_or(Error::MissingPort)?;
 
-	tracing::debug!(%url, "connecting via TCP");
+	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TCP");
 	let addrs = tokio::net::lookup_host((host, port)).await?;
 	connect_addrs(crate::failover::interleave(addrs), protocols, failover_delay).await
 }

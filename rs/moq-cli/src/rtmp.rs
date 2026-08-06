@@ -41,6 +41,13 @@ pub struct ExportArgs {
 	pub latency_max: Duration,
 }
 
+impl ExportArgs {
+	/// The configured latency tolerance.
+	pub fn latency(&self) -> moq_mux::Latency {
+		moq_mux::Latency::max(self.latency_max)
+	}
+}
+
 /// Accept incoming RTMP publishes into the Origin as `name`; reject plays (import).
 pub async fn listen_import(origin: moq_net::origin::Producer, addr: SocketAddr, name: String) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
@@ -75,7 +82,7 @@ pub async fn listen_export(
 	origin: moq_net::origin::Consumer,
 	addr: SocketAddr,
 	name: String,
-	latency: Duration,
+	latency: moq_mux::Latency,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr).await?;
 	tracing::info!(%addr, %name, "RTMP listening (export)");
@@ -121,7 +128,7 @@ pub async fn connect_export(
 	origin: moq_net::origin::Consumer,
 	url: Url,
 	name: String,
-	latency: Duration,
+	latency: moq_mux::Latency,
 ) -> anyhow::Result<()> {
 	let (addr, app, key) = parse_url(&url).await?;
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;

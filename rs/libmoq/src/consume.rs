@@ -330,7 +330,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		latency: moq_mux::Latency,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -362,7 +362,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.video))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;
@@ -382,7 +382,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		latency: moq_mux::Latency,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
@@ -411,7 +411,7 @@ impl Consume {
 					.track(&name)?
 					.subscribe(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio))
 					.await?;
-				let track = moq_mux::container::Consumer::new(track, container).with_latency_max(latency);
+				let track = moq_mux::container::Consumer::new(track, container).with_latency(latency);
 				Self::run_track(on_frame, track, channel.1).await
 			}
 			.await;

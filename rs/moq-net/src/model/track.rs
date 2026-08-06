@@ -70,12 +70,12 @@ pub struct Info {
 	pub timescale: Timescale,
 	/// The maximum age of a non-latest group before the publisher evicts it (the
 	/// newest group is always retained). A subscriber's
-	/// [`Subscription::latency_max`] window is clamped to this, since a group can't be
+	/// [`Subscription::latency`] window is clamped to this, since a group can't be
 	/// waited for longer than it's kept around. Reported in TRACK_INFO so
 	/// relays re-serve with the same window. Defaults to [`DEFAULT_LATENCY_MAX`].
 	///
 	/// This is the `Publisher Max Latency` on the wire, the publisher-side half of
-	/// the same budget [`Subscription::latency_max`] sets for a subscriber.
+	/// the same budget [`Subscription::latency`] sets for a subscriber.
 	pub latency_max: Duration,
 	/// The publisher's priority for this track, used only to break ties between
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
@@ -1317,7 +1317,7 @@ impl Producer {
 	/// when there are no live subscribers. Unlike [`Self::subscription`], this
 	/// doesn't wait for a change or advance the change cursor.
 	///
-	/// The aggregate's [`Subscription::latency_max`] is clamped to this track's
+	/// The aggregate's [`Subscription::latency`] is clamped to this track's
 	/// [`Info::latency_max`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
@@ -1647,7 +1647,7 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Option<Subscription> {
 	let mut combined = combined?;
 	if let Some(bound) = bound {
-		combined.latency_max = combined.latency_max.min(bound);
+		combined.latency.max = combined.latency.max.min(bound);
 	}
 	Some(combined)
 }
@@ -2981,6 +2981,7 @@ impl Subscriber {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::Latency;
 	use crate::model::test_tracing::count_drop_warnings;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
@@ -3432,20 +3433,21 @@ mod test {
 		// A latency budget beyond the cache is capped in the aggregate; a group can't be
 		// waited for longer than the publisher keeps it. The subscriber's own preference
 		// is stored verbatim, so what it asked for stays readable.
-		let mut subscriber = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
-		assert_eq!(subscriber.subscription().latency_max, Duration::from_secs(10));
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		let mut subscriber =
+			producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
+		assert_eq!(subscriber.subscription().latency.max, Duration::from_secs(10));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		// A budget within the cache is left alone, and ZERO (skip immediately) stays ZERO.
 		subscriber
-			.update(Subscription::default().with_latency_max(Duration::from_millis(500)))
+			.update(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_millis(500));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_millis(500));
 
 		subscriber
-			.update(Subscription::default().with_latency_max(Duration::ZERO))
+			.update(Subscription::default().with_latency(Latency::REAL_TIME))
 			.unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::ZERO);
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::ZERO);
 	}
 
 	/// Mint a track under an origin whose retention ceiling is `cap`, so the
@@ -3506,18 +3508,18 @@ mod test {
 	#[test]
 	fn latency_max_clamped_via_every_update_path() {
 		let producer = track_producer("test", Info::default().with_latency_max(Duration::from_secs(2)));
-		let over = Subscription::default().with_latency_max(Duration::from_secs(10));
+		let over = Subscription::default().with_latency(Latency::max(Duration::from_secs(10)));
 
 		// The clamp lives in the aggregation, so it applies no matter which entry point
 		// wrote the raw preference. Previously only `Subscriber::update` clamped.
 		let mut subscriber = producer.subscribe(over.clone());
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		subscriber.control().update(over.clone()).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 
 		subscriber.update(over).unwrap();
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 	}
 
 	#[test]
@@ -3526,10 +3528,10 @@ mod test {
 
 		// The aggregate takes the max, then clamps once. Equivalent to clamping each
 		// subscriber first, since `min` distributes over `max`.
-		let _a = producer.subscribe(Subscription::default().with_latency_max(Duration::from_millis(500)));
-		let _b = producer.subscribe(Subscription::default().with_latency_max(Duration::from_secs(10)));
+		let _a = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_millis(500))));
+		let _b = producer.subscribe(Subscription::default().with_latency(Latency::max(Duration::from_secs(10))));
 
-		assert_eq!(producer.subscription().unwrap().latency_max, Duration::from_secs(2));
+		assert_eq!(producer.subscription().unwrap().latency.max, Duration::from_secs(2));
 	}
 
 	#[test]

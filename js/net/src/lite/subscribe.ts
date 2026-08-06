@@ -62,7 +62,8 @@ async function decodeFrameBounds(
 export class SubscribeUpdate {
 	priority: number;
 	ordered: boolean;
-	maxLatency: number;
+	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
+	latencyMax: number;
 	startGroup?: number;
 	endGroup?: number;
 	/** See {@link Subscribe.startFrame}. */
@@ -73,7 +74,7 @@ export class SubscribeUpdate {
 	constructor(props: {
 		priority: number;
 		ordered?: boolean;
-		maxLatency?: number;
+		latencyMax?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
@@ -81,7 +82,7 @@ export class SubscribeUpdate {
 	}) {
 		this.priority = props.priority;
 		this.ordered = props.ordered ?? false;
-		this.maxLatency = props.maxLatency ?? 0;
+		this.latencyMax = props.latencyMax ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -97,7 +98,7 @@ export class SubscribeUpdate {
 			default:
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
-				await w.u53(this.maxLatency);
+				await w.u53(this.latencyMax);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
@@ -113,7 +114,7 @@ export class SubscribeUpdate {
 			default: {
 				const priority = await r.u8();
 				const ordered = await r.bool();
-				const maxLatency = await r.u53();
+				const latencyMax = await r.u53();
 				const startGroup = (await r.u53()) || undefined;
 				const endGroup = (await r.u53()) || undefined;
 				const frames = await decodeFrameBounds(
@@ -125,7 +126,7 @@ export class SubscribeUpdate {
 				return new SubscribeUpdate({
 					priority,
 					ordered,
-					maxLatency,
+					latencyMax,
 					startGroup: startGroup !== undefined ? startGroup - 1 : undefined,
 					endGroup: endGroup !== undefined ? endGroup - 1 : undefined,
 					...frames,
@@ -153,7 +154,8 @@ export class Subscribe {
 	track: string;
 	priority: number;
 	ordered: boolean;
-	maxLatency: number;
+	/** Subscriber max latency in milliseconds; zero skips once a newer group is available. */
+	latencyMax: number;
 
 	startGroup?: number;
 	endGroup?: number;
@@ -176,7 +178,7 @@ export class Subscribe {
 		track: string;
 		priority: number;
 		ordered?: boolean;
-		maxLatency?: number;
+		latencyMax?: number;
 		startGroup?: number;
 		endGroup?: number;
 		startFrame?: number;
@@ -187,7 +189,7 @@ export class Subscribe {
 		this.track = props.track;
 		this.priority = props.priority;
 		this.ordered = props.ordered ?? false;
-		this.maxLatency = props.maxLatency ?? 0;
+		this.latencyMax = props.latencyMax ?? 0;
 		this.startGroup = props.startGroup;
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
@@ -206,7 +208,7 @@ export class Subscribe {
 				break;
 			default:
 				await w.bool(this.ordered);
-				await w.u53(this.maxLatency);
+				await w.u53(this.latencyMax);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
@@ -226,7 +228,7 @@ export class Subscribe {
 				return new Subscribe({ id, broadcast, track, priority });
 			default: {
 				const ordered = await r.bool();
-				const maxLatency = await r.u53();
+				const latencyMax = await r.u53();
 				const startGroup = (await r.u53()) || undefined;
 				const endGroup = (await r.u53()) || undefined;
 				const start = startGroup !== undefined ? startGroup - 1 : undefined;
@@ -238,7 +240,7 @@ export class Subscribe {
 					track,
 					priority,
 					ordered,
-					maxLatency,
+					latencyMax,
 					startGroup: start,
 					endGroup: end,
 					...frames,
@@ -265,26 +267,27 @@ export class Subscribe {
 export class SubscribeOk {
 	priority: number;
 	ordered: boolean;
-	maxLatency: number;
+	/** Accepted subscriber max latency in milliseconds. */
+	latencyMax: number;
 	startGroup?: number;
 	endGroup?: number;
 
 	constructor({
 		priority = 0,
 		ordered = false,
-		maxLatency = 0,
+		latencyMax = 0,
 		startGroup = undefined,
 		endGroup = undefined,
 	}: {
 		priority?: number;
 		ordered?: boolean;
-		maxLatency?: number;
+		latencyMax?: number;
 		startGroup?: number;
 		endGroup?: number;
 	}) {
 		this.priority = priority;
 		this.ordered = ordered;
-		this.maxLatency = maxLatency;
+		this.latencyMax = latencyMax;
 		this.startGroup = startGroup;
 		this.endGroup = endGroup;
 	}
@@ -302,7 +305,7 @@ export class SubscribeOk {
 			default:
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
-				await w.u53(this.maxLatency);
+				await w.u53(this.latencyMax);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				break;
@@ -312,7 +315,7 @@ export class SubscribeOk {
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority: number | undefined;
 		let ordered: boolean | undefined;
-		let maxLatency: number | undefined;
+		let latencyMax: number | undefined;
 		let startGroup: number | undefined;
 		let endGroup: number | undefined;
 
@@ -326,7 +329,7 @@ export class SubscribeOk {
 			default:
 				priority = await r.u8();
 				ordered = await r.bool();
-				maxLatency = await r.u53();
+				latencyMax = await r.u53();
 				startGroup = await r.u53();
 				endGroup = await r.u53();
 				break;
@@ -335,7 +338,7 @@ export class SubscribeOk {
 		return new SubscribeOk({
 			priority,
 			ordered,
-			maxLatency,
+			latencyMax,
 			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
 			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
 		});
