@@ -25,6 +25,29 @@ fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
 }
 
+/// When the attempt at candidate `index` of `total` must be given up, or `None`
+/// to let it run.
+///
+/// Two bounds, whichever comes first. [`attempt_timeout`] keeps one slow
+/// candidate from eating the others' turn, and `budget` is the retry window from
+/// [`Backoff::timeout`], which the walk has to respect too: bounding only the
+/// non-final attempts left the last one to run to the client's connect timeout,
+/// so a handful of black-holed addresses could blow through a give-up budget
+/// several times over before reporting anything.
+fn attempt_deadline(
+	index: usize,
+	total: usize,
+	now: tokio::time::Instant,
+	budget: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+	let bound = attempt_timeout(index, total).map(|limit| now + limit);
+	match (bound, budget) {
+		(Some(bound), Some(budget)) => Some(bound.min(budget)),
+		(Some(only), None) | (None, Some(only)) => Some(only),
+		(None, None) => None,
+	}
+}
+
 /// Exponential backoff configuration for reconnection attempts.
 ///
 /// Every field is optional so a value set in TOML survives the CLI re-parse that follows it; read
@@ -575,7 +598,11 @@ impl Connection {
 				return Err(timeout_error(timeout, last_error.as_ref()));
 			}
 
-			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
+			// The walk respects the same give-up window the loop does, so a list of
+			// black-holed addresses cannot outrun it several attempts at a time.
+			let budget = (!timeout.is_zero()).then(|| retry_start + timeout);
+
+			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
 				Ok((url, session)) => {
 					tracing::info!(peer = %Endpoint(&url), "connected");
 					shared.connected(&session);
@@ -748,11 +775,18 @@ impl Connection {
 		client: &Client,
 		addrs: &Addrs,
 		draining: &mut Option<Draining>,
+		budget: Option<tokio::time::Instant>,
 	) -> crate::Result<(Url, moq_net::Session)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
 
 		for (index, url) in candidates.iter().enumerate() {
+			// The retry window can run out mid-walk. Stop rather than starting an
+			// attempt with no time to finish; the caller reports the budget error.
+			if budget.is_some_and(|budget| tokio::time::Instant::now() >= budget) {
+				break;
+			}
+
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
 			let mut dial = std::pin::pin!(client.dial(url.clone()));
@@ -763,9 +797,10 @@ impl Connection {
 				waiter.poll_future(dial.as_mut())
 			});
 
-			let dialed = match attempt_timeout(index, candidates.len()) {
+			let deadline = attempt_deadline(index, candidates.len(), tokio::time::Instant::now(), budget);
+			let dialed = match deadline {
 				None => dialed.await,
-				Some(limit) => match tokio::time::timeout(limit, dialed).await {
+				Some(deadline) => match tokio::time::timeout_at(deadline, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -783,7 +818,9 @@ impl Connection {
 			}
 		}
 
-		Err(last.expect("Addrs is never empty, so at least one attempt ran"))
+		// `Addrs` is never empty, so the only way to get here without a failure is
+		// the budget running out before the first attempt started.
+		Err(last.unwrap_or_else(|| Error::Reconnect("retry window elapsed before dialing".to_string())))
 	}
 
 	/// Poll until a session is established (the first connect, or the current one).
@@ -1503,7 +1540,7 @@ mod tests {
 
 		let (connected, _session) = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
 		)
 		.await
 		.expect("the walk must not hang")
@@ -1523,7 +1560,7 @@ mod tests {
 
 		let result = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+			Connection::dial_any(&shared, &client, &addrs, &mut draining, None),
 		)
 		.await
 		.expect("the walk must not hang");
@@ -1551,7 +1588,7 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
-		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
+		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining, None).await else {
 			panic!("a refused address must fail");
 		};
 
@@ -1561,9 +1598,32 @@ mod tests {
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
 	}
 
-	/// Only an attempt with somewhere to fall back on is bounded. The last
-	/// candidate runs to completion, so a reachable-but-slow final address is not
-	/// cancelled and then re-cancelled on every reconnect cycle.
+	/// Whichever of the two bounds comes first wins, and the retry window applies
+	/// to every candidate including the last.
+	#[test]
+	fn the_retry_window_bounds_the_walk_too() {
+		let now = tokio::time::Instant::now();
+
+		// No budget: only the fixed per-candidate bound applies, and the last
+		// candidate runs free.
+		assert_eq!(attempt_deadline(0, 2, now, None), Some(now + CONNECT_ATTEMPT));
+		assert_eq!(attempt_deadline(1, 2, now, None), None);
+
+		// A budget shorter than the fixed bound wins, including on the last
+		// candidate, which used to run to the client's connect timeout and let a
+		// few black-holed addresses overrun the give-up window several times over.
+		let tight = now + Duration::from_secs(1);
+		assert_eq!(attempt_deadline(0, 2, now, Some(tight)), Some(tight));
+		assert_eq!(attempt_deadline(1, 2, now, Some(tight)), Some(tight));
+
+		// A budget with room to spare leaves the per-candidate bound in charge, so
+		// one slow address still cannot eat the others' turn.
+		let loose = now + Duration::from_secs(60);
+		assert_eq!(attempt_deadline(0, 2, now, Some(loose)), Some(now + CONNECT_ATTEMPT));
+		assert_eq!(attempt_deadline(1, 2, now, Some(loose)), Some(loose));
+	}
+
+	/// Only an attempt with somewhere to fall back on gets the fixed bound.
 	#[test]
 	fn only_a_candidate_with_a_fallback_is_bounded() {
 		assert_eq!(attempt_timeout(0, 1), None, "a lone address");
