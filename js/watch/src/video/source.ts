@@ -38,6 +38,11 @@ export type SourceInput = {
 	// A function that checks if a video configuration can be played. Renditions that fail the
 	// probe are filtered out. Nothing is selected until one is provided.
 	supported: Getter<Supported | undefined>;
+
+	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
+	// explicit bitrate. Usually wired from a `Connection.Reload`'s `probe`. Optional: without
+	// it auto-selection falls back to the preference order alone.
+	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
 type SourceOutput = {
@@ -231,6 +236,7 @@ export class Source {
 			broadcast: getter(props?.broadcast),
 			target: getter(props?.target),
 			supported: getter(props?.supported),
+			probe: getter(props?.probe),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -303,9 +309,7 @@ export class Source {
 		// Auto-select: use recv bandwidth if no explicit bitrate target.
 		let effectiveTarget = target;
 		if (!target?.bitrate) {
-			const broadcast = effect.get(this.in.broadcast);
-			const connection = broadcast ? effect.get(broadcast.in.connection) : undefined;
-			const estimate = connection && effect.get(connection.probe).estimatedRecvRate;
+			const estimate = effect.get(this.in.probe)?.estimatedRecvRate;
 			if (estimate != null) {
 				// Apply a safety margin (80%) to avoid oscillation.
 				const safeBitrate = Math.round(estimate * 0.8);

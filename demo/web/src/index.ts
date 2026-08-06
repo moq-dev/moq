@@ -79,7 +79,7 @@ const metaSignal = new Signals.Signal<unknown>(undefined);
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
 
 // Discovery connection (the tiles each open their own connection internally).
-const connection = new Net.Connection.Reload({ url: relayUrl, enabled: true });
+const connection = new Net.Connection.Shared({ url: relayUrl });
 
 // ---------------------------------------------------------------------------
 // Per-broadcast tile (a <moq-watch-ui> in the left column)

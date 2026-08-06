@@ -2,17 +2,17 @@ import * as Moq from "@moq/net";
 
 async function main() {
 	const url = new URL("https://cdn.moq.dev/anon");
-	const connection = await Moq.Connection.connect(url);
 
-	// Create a broadcast (a collection of tracks)
-	const broadcast = new Moq.Broadcast.Producer();
+	// The origin holds what we publish; the connection announces and serves it.
+	const origin = new Moq.Origin.Producer();
+	await Moq.Connection.connect(url, { publish: origin.consume() });
+
+	// Create a broadcast (a collection of tracks) at a path on the origin
+	const broadcast = origin.publish(Moq.Path.from("my-broadcast"));
 
 	// Insert the "chat" track up front. A subscriber is served directly from this
 	// track, no requested() round-trip needed. Mirrors the Rust createTrack/insertTrack.
 	void publishTrack(broadcast.createTrack("chat"));
-
-	// Publish the broadcast to the connection
-	connection.publish(Moq.Path.from("my-broadcast"), broadcast);
 	console.log("Published broadcast: my-broadcast");
 
 	// Tracks created on demand (instead of up front) are still supported: handle any

@@ -6,6 +6,7 @@
 import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type * as broadcast from "./broadcast.js";
 import type { Established } from "./connection/established.js";
+import type { Consumer as OriginConsumer } from "./origin.js";
 import * as Path from "./path.js";
 
 /**
@@ -134,7 +135,7 @@ export class Consumer {
 const warnedNoDiscovery = new WeakSet<Established>();
 
 /**
- * What to watch, for {@link Broadcast}.
+ * What to watch, for {@link Broadcast}. Provide exactly one of `connection` or `origin`.
  *
  * @public
  */
@@ -143,7 +144,17 @@ export interface BroadcastProps {
 	 * The connection to watch on. Accepts a live {@link Established} session, or a reactive one
 	 * (a `Connection.Reload`'s `established`), which is how the handle survives reconnects.
 	 */
-	connection: GetterInit<Established | undefined>;
+	connection?: GetterInit<Established | undefined>;
+
+	/**
+	 * The origin to watch instead of a session; wins when both are given.
+	 *
+	 * The handle then follows the origin's table: it resolves whenever anything routes the
+	 * path (a local publish, or any session feeding the origin), which is how it spans
+	 * reconnects without watching the connection itself. On an origin whose sessions lack
+	 * discovery it falls back to a standing request, so `active` means assumed present.
+	 */
+	origin?: GetterInit<OriginConsumer | undefined>;
 
 	/** The broadcast path to watch. */
 	path: Path.Valid;
@@ -201,15 +212,21 @@ export class Broadcast {
 	#signals = new Effect();
 
 	/**
-	 * Watch a path on a connection.
+	 * Watch a path on a connection or an origin.
 	 *
 	 * Prefer `announcedBroadcast(path)` on the connection itself. Reach for this when the
-	 * session you want to follow isn't either connection type, e.g. your own
-	 * `Getter<Established | undefined>`.
+	 * source you want to follow isn't either connection type, e.g. your own
+	 * `Getter<Established | undefined>` or an origin fed by a `subscribe` option.
 	 */
-	constructor({ connection, path }: BroadcastProps) {
+	constructor({ connection, path, origin }: BroadcastProps) {
 		this.path = path;
 		this.active = this.#active;
+
+		if (origin) {
+			const source = getter(origin);
+			this.#signals.run((effect) => this.#runOrigin(effect, source));
+			return;
+		}
 
 		const source = getter(connection);
 		this.#signals.run((effect) => {
@@ -283,6 +300,71 @@ export class Broadcast {
 				// way there is nothing left announcing the path, so don't hold a dead broadcast.
 				offline();
 			});
+		});
+	}
+
+	// Follow the origin's table instead of a session's announce stream. The table already
+	// merges every source (local publishes, every feeding session), so this is simpler than
+	// the session path: no hop bookkeeping, and the table's identity-diffed announcements
+	// retract before a republish, which is what lets a plain re-consume suffice.
+	#runOrigin(effect: Effect, source: Getter<OriginConsumer | undefined>): void {
+		const origin = effect.get(source);
+		if (!origin) return;
+
+		const discovery = effect.get(origin.discovery);
+		// Nothing is attached yet, so nothing can resolve; wait rather than request from nobody.
+		if (discovery === undefined) return;
+
+		if (!discovery) {
+			// No announcement will ever arrive. Loopback still works: prefer the routed
+			// broadcast (a local publish), else stand a request for whichever session answers.
+			const routed = origin.consume(this.path);
+			if (routed) {
+				effect.cleanup(() => routed.close());
+				effect.set(this.#active, routed, undefined);
+				return;
+			}
+
+			const request = origin.request(this.path);
+			effect.cleanup(() => request.close());
+			effect.run((nested) => {
+				nested.set(this.#active, nested.get(request.active), undefined);
+			});
+			return;
+		}
+
+		const announced = origin.announced(this.path);
+		effect.cleanup(() => announced.close());
+
+		let current: broadcast.Consumer | undefined;
+		const offline = () => {
+			const mine = current;
+			current?.close();
+			current = undefined;
+			// Only clear what this run put there; see the session path above.
+			if (this.#active.peek() === mine) this.#active.set(undefined);
+		};
+		effect.cleanup(offline);
+
+		effect.spawn(async () => {
+			for (;;) {
+				const event = await Promise.race([effect.cancel, announced.next()]);
+				if (!event) break;
+
+				// Scoped to `path`, so the exact broadcast arrives with an empty suffix; ignore children.
+				if (event.path !== Path.empty()) continue;
+
+				if (event.active) {
+					current?.close();
+					current = origin.consume(this.path);
+					this.#active.set(current);
+				} else {
+					offline();
+				}
+			}
+
+			// The origin closed, or this run was torn down. Either way nothing routes the path.
+			offline();
 		});
 	}
 

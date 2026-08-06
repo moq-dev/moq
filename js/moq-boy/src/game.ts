@@ -18,6 +18,8 @@ export interface GameConfig {
 	sessionId: string;
 	/** MoQ connection to the relay. */
 	connection: Moq.Connection.Reload;
+	/** The origin viewer broadcasts are published into; the connection serves it. */
+	origin: Moq.Origin.Producer;
 	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
 	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
@@ -114,7 +116,7 @@ export class Game {
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
-			connection: connection.established,
+			origin: config.origin.consume(),
 			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
 			enabled: true,
 		});
@@ -126,6 +128,7 @@ export class Game {
 			broadcast: this.broadcast,
 			target: this.#target,
 			supported: Watch.Video.Decoder.supported,
+			probe: connection.probe,
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
@@ -183,7 +186,7 @@ export class Game {
 		this.#signals.run(this.#runStatus.bind(this));
 
 		// Command publishing.
-		this.#signals.run(this.#runCommands.bind(this, connection));
+		this.#signals.run(this.#runCommands.bind(this, connection, config.origin));
 	}
 
 	/** Send a button state update. */
@@ -273,7 +276,9 @@ export class Game {
 		});
 	}
 
-	#runCommands(connection: Moq.Connection.Reload, effect: Moq.Signals.Effect) {
+	#runCommands(connection: Moq.Connection.Reload, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
+		// Publishing goes through the origin, but gate on a live connection anyway: a command
+		// broadcast for a game nobody is connected to is feedback into the void.
 		const conn = effect.get(connection.established);
 		if (!conn) return;
 
@@ -291,8 +296,7 @@ export class Game {
 		const viewerId = Math.random().toString(36).slice(2, 8);
 		this.viewerId.set(viewerId);
 
-		const viewerBroadcast = new Moq.Broadcast.Producer();
-		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
+		const viewerBroadcast = origin.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`));
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

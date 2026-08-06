@@ -72,12 +72,13 @@ ENVIRONMENT VARIABLES:
 }
 
 async function publish(config: Config) {
-	const connection = await Moq.Connection.connect(new URL(config.url));
+	// The origin holds what we publish; the connection announces and serves it.
+	const origin = new Moq.Origin.Producer();
+	await Moq.Connection.connect(new URL(config.url), { publish: origin.consume() });
 	console.log("✅ Connected to relay:", config.url);
 
 	// Create a new "broadcast", which is a collection of tracks.
-	const broadcast = new Moq.Broadcast.Producer();
-	connection.publish(Moq.Path.from(config.broadcast), broadcast);
+	const broadcast = origin.publish(Moq.Path.from(config.broadcast));
 
 	console.log("✅ Published broadcast:", config.broadcast);
 
