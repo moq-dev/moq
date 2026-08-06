@@ -1230,6 +1230,8 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn unix_listener_serves_the_configured_publisher() {
+		use rand::RngExt;
+
 		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,
 		// so bind under /tmp with a name unique to this process.
 		let path = PathBuf::from(format!("/tmp/moq-native-publish-{}.sock", std::process::id()));
@@ -1256,10 +1258,16 @@ mod tests {
 		// The listener binds on the first accept, so wait for the socket. Keep the
 		// last error: a bind failure is logged and swallowed, so it's the only clue
 		// to why the socket never showed up.
-		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
-			assert!(std::time::Instant::now() < deadline, "unix listener never bound: {err}");
-			tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"unix listener never bound: {err}"
+			);
+			tokio::time::sleep(delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)).await;
+			delay = (delay * 2).min(MAX_DELAY);
 		}
 
 		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
