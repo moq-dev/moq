@@ -2191,18 +2191,15 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							let _ = resume.abort(err);
 							return;
 						}
-						// `dead` is deliberately NOT cleared here. A dead source can
-						// never serve again (ids are never reused; `is_closing` is
-						// terminal), and its entry is reclaimed by the retain above
-						// once its watcher detaches it. Clearing on takeover
-						// resurrected corpse verdicts: with a closing route still
-						// `active` and a healthy standby, the takeover un-skipped the
-						// corpse, `serve_route`'s active preference dispatched it, the
-						// instant failure re-marked it dead, and the healthy route was
-						// re-spliced - a synchronous cycle with no await, spinning
-						// inside a single task poll and starving the watcher that
-						// would have detached the corpse (the 2026-08-06 relay-fleet
-						// CPU wedge).
+						// `dead` must survive the takeover. A dead source can never
+						// serve again (ids are never reused; `is_closing` is
+						// terminal), and the retain above reclaims its entry once
+						// its watcher detaches it. Re-admitting a still-attached
+						// closing route here would let `serve_route`'s active
+						// preference re-dispatch it, and because both its instant
+						// failure and a cached standby splice resolve without
+						// awaiting, the loop would spin inside a single poll,
+						// starving the watcher whose detach ends the cycle.
 						// The new segment has produced nothing yet, so this is
 						// the edge the copy is asked to advance.
 						spliced_edge = resume.latest();
@@ -6907,18 +6904,16 @@ mod tests {
 
 	/// A closing route that is still `active` (its watcher has not detached it
 	/// yet) must not be re-dispatched after a successful takeover from a
-	/// healthy standby. `dead.clear()` on takeover used to resurrect the
-	/// corpse's verdict, and because the corpse fails instantly and the healthy
-	/// copy (a live cached producer) splices instantly, serve_track cycled
-	/// splice(corpse) -> splice(healthy) -> takeover -> splice(corpse) with no
-	/// await: a livelock inside one task poll that also starved the watcher
-	/// whose detach would have ended it (the 2026-08-06 relay-fleet CPU wedge).
+	/// healthy standby. If the takeover re-admits the corpse, serve_track
+	/// cycles splice(corpse) -> splice(healthy) -> takeover -> splice(corpse)
+	/// with no await: a livelock inside one task poll that also starves the
+	/// watcher whose detach would end it.
 	///
-	/// The setup makes every step of the cycle synchronous, exactly like the
-	/// fleet wedge: the healthy source holds a live producer (so a re-splice
-	/// needs no handler roundtrip), and the corpse is aborted while its track
-	/// request is still pending (so serve_track, a value waiter, wakes before
-	/// the corpse's closed-watcher and enters the cycle first).
+	/// The setup makes every step of the cycle synchronous: the healthy source
+	/// holds a live producer (so a re-splice needs no handler roundtrip), and
+	/// the corpse is aborted while its track request is still pending (so
+	/// serve_track, a value waiter, wakes before the corpse's closed-watcher
+	/// and observes the corpse still attached).
 	#[test]
 	fn test_active_corpse_does_not_livelock_takeover() {
 		wedge_watchdog("active-corpse", 20, async {
@@ -6973,8 +6968,11 @@ mod tests {
 
 	/// Randomized source/subscriber churn over one path: sources attach with
 	/// per-track behaviors (refuse, serve-then-abort, serve-and-hold, finish),
-	/// detach by abort or plain drop, and subscribers come and go. Found the
-	/// active-corpse livelock above (seed 4); kept as a general wedge net.
+	/// detach by abort or plain drop, and subscribers come and go. A wedge net
+	/// for the livelock class the test above pins down. The LCG makes each
+	/// seed's action sequence repeatable, but task interleaving still varies
+	/// per run, so treat a wedge here as real and shrink it with the seed as a
+	/// starting point rather than expecting an identical replay.
 	#[test]
 	fn test_route_churn_never_wedges() {
 		for seed in 1..=8u64 {
