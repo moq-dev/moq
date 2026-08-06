@@ -226,6 +226,19 @@ int32_t moq_session_close(uint32_t session)
 namespace {
 int g_failures = 0;
 
+// Spin until `ready`, giving up after a few seconds. A test that hangs reports
+// nothing; one that fails names the assertion.
+bool spinUntil(const std::atomic<bool> &ready)
+{
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!ready.load(std::memory_order_relaxed)) {
+		if (std::chrono::steady_clock::now() > deadline)
+			return false;
+		std::this_thread::yield();
+	}
+	return true;
+}
+
 // Indexing directly turns a missing signal into a segfault, which hides which
 // assertion actually regressed.
 RecordedSignal signalAt(size_t i)
@@ -407,7 +420,9 @@ int main()
 		auto elapsed = std::chrono::steady_clock::now() - start;
 		late.join();
 		CHECK(elapsed > std::chrono::milliseconds(100));
-		CHECK(elapsed < std::chrono::seconds(2));
+		// Comfortably under the destructor's own 2s bounded wait, so this fails if
+		// teardown returned on that timeout instead of on the callback.
+		CHECK(elapsed < std::chrono::milliseconds(1500));
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_SUCCESS);
 	}
@@ -462,10 +477,12 @@ int main()
 		int reconnect_after_stop = 0;
 		for (int i = 0; i < rounds; i++) {
 			MoQOutput o(nullptr, out);
-			o.Start();
+			CHECK(o.Start());
 			fire(1); // connected, so a failure would ask OBS to reconnect
 			auto cb = g_on_status;
 			auto ud = g_user_data;
+			if (!cb)
+				break;
 			g_on_status = nullptr;
 
 			size_t before = signalCount();
@@ -474,8 +491,7 @@ int main()
 
 			// Wait until the callback has committed to reporting a failure and is
 			// sitting in the window, then stop from underneath it.
-			while (!g_in_report_window.load(std::memory_order_relaxed))
-				std::this_thread::yield();
+			CHECK(spinUntil(g_in_report_window));
 			o.Stop(true); // the user pressed stop
 			terminal.join();
 
@@ -523,9 +539,11 @@ int main()
 		const int rounds = 200;
 		for (int i = 0; i < rounds; i++) {
 			MoQOutput o(nullptr, out);
-			o.Start();
+			CHECK(o.Start());
 			auto cb = g_on_status;
 			auto ud = g_user_data;
+			if (!cb)
+				break;
 			g_on_status = nullptr;
 			std::thread terminal([cb, ud] { cb(ud, -34); });
 			o.Stop(false);
@@ -554,29 +572,40 @@ int main()
 	{
 		reset();
 		MoQOutput o(nullptr, out);
+		std::atomic<bool> stranded{false};
 		for (int i = 0; i < 500; i++) {
-			o.Start();
+			CHECK(o.Start());
 			auto cb = g_on_status;
 			auto ud = g_user_data;
+			if (!cb)
+				break;
 			g_on_status = nullptr;
 			std::atomic<bool> gate{false};
-			std::thread stale([cb, ud, &gate] {
-				while (!gate.load(std::memory_order_relaxed))
-					;
+			std::thread stale([cb, ud, &gate, &stranded] {
+				// The gate opens from inside the next Start(); if that never
+				// happens, give up rather than hanging the run.
+				if (!spinUntil(gate)) {
+					stranded = true;
+					return;
+				}
 				cb(ud, -34);
 			});
 			o.Stop(false);
 			g_start_gate = &gate;
-			o.Start();
+			bool restarted = o.Start();
 			g_start_gate = nullptr;
 			stale.join();
+			CHECK(restarted);
 
 			auto live = g_on_status;
 			auto live_ud = g_user_data;
+			if (!live)
+				break;
 			g_on_status = nullptr;
 			o.Stop(false);
 			live(live_ud, 0);
 		}
+		CHECK(!stranded);
 	}
 	printf("stale terminal racing restart: ok\n");
 
