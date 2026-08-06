@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.0](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.7...moq-relay-v0.15.0) - 2026-08-06
+## [0.14.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.7...moq-relay-v0.14.8) - 2026-08-06
 
 ### Added
 

@@ -86,7 +86,7 @@ moq-json = { version = "0.3.3", path = "rs/moq-json" }
 moq-loc = { version = "0.2", path = "rs/moq-loc" }
 moq-msf = { version = "0.4", path = "rs/moq-msf" }
 moq-mux = { version = "0.9", path = "rs/moq-mux" }
-moq-native = { version = "0.20", path = "rs/moq-native", default-features = false }
+moq-native = { version = "0.19", path = "rs/moq-native", default-features = false }
 moq-net = { version = "0.2", path = "rs/moq-net" }
 # NVENC bindings, forked from ViliamVadocz/nvidia-video-codec-sdk to dlopen the
 # driver at runtime. Compiles on any platform (macOS included) but only actually

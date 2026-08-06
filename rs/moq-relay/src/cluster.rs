@@ -436,10 +436,9 @@ impl Cluster {
 		})
 	}
 
-	/// Attach the resolved [`Cache`](crate::Cache) (the shared group pool, the
-	/// per-track retention ceiling, and the window for tracks whose publisher
-	/// advertises none) so every session's broadcasts cache into one memory
-	/// budget bounded by both bytes and age. Call before deriving any origin
+	/// Attach the resolved [`Cache`](crate::Cache) (the shared group pool and the
+	/// per-track retention ceiling) so every session's broadcasts cache into one
+	/// memory budget bounded by both bytes and age. Call before deriving any origin
 	/// handles (e.g. [`with_stats`](Self::with_stats)) so they inherit the settings.
 	///
 	/// Rebuilds the origin with the cache: safe because the cluster's origin is
@@ -449,8 +448,7 @@ impl Cluster {
 			.info
 			.clone()
 			.with_pool(cache.pool)
-			.with_cache_duration(cache.duration)
-			.with_latency_default(cache.latency_default);
+			.with_cache_duration(cache.duration);
 		self.origin = self.info.clone().produce();
 		self.nodes = self.nodes.with_origin(self.origin.clone());
 		self
