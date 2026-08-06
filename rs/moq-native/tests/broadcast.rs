@@ -43,7 +43,8 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		server_config.version = vec![v];
 	}
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -161,7 +162,8 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let sub_origin = Origin::random().produce();
@@ -278,7 +280,8 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let sub_origin = Origin::random().produce();
@@ -402,7 +405,8 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let sub_origin = Origin::random().produce();
@@ -509,7 +513,8 @@ async fn broadcast_moq_lite_05_default_timescale() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-05".parse().unwrap()];
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
 	let sub_origin = Origin::random().produce();
@@ -598,7 +603,8 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-06-wip".parse().unwrap()];
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
 	let sub_origin = Origin::random().produce();
@@ -762,18 +768,20 @@ async fn broadcast_route_migration() {
 			.expect("write frame");
 		group.finish().expect("finish group");
 	}
-	let mut server_a = {
+	let server_a = {
 		let mut config = moq_native::ServerConfig::default();
 		config.bind = Some("[::]:0".to_string());
 		config.tls.generate = vec!["localhost".into()];
 		config.init().expect("init server a")
 	};
-	let mut server_b = {
+	let server_b = {
 		let mut config = moq_native::ServerConfig::default();
 		config.bind = Some("[::]:0".to_string());
 		config.tls.generate = vec!["localhost".into()];
 		config.init().expect("init server b")
 	};
+	let mut server_a = server_a.listen().await.expect("listen a");
+	let mut server_b = server_b.listen().await.expect("listen b");
 	let addr_a = server_a.local_addr().expect("local addr");
 	let addr_b = server_b.local_addr().expect("local addr");
 
@@ -890,7 +898,8 @@ async fn route_reannounce_test(version: Option<&str>) {
 	if let Some(v) = version {
 		server_config.version = vec![v];
 	}
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
 	// A clone to re-advertise from the test body while the task owns the rest.
@@ -1026,7 +1035,8 @@ async fn route_replaced_test(version: Option<&str>) {
 	if let Some(v) = version {
 		server_config.version = vec![v];
 	}
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
 	let mut route_producer = producer.clone();
@@ -1311,7 +1321,8 @@ async fn latency_max_test(version: &str) -> Duration {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("local addr");
 
 	let handle = tokio::spawn(async move {
@@ -1602,10 +1613,11 @@ async fn broadcast_websocket() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let mut server = server_config
+	let server = server_config
 		.init()
 		.expect("failed to init server")
 		.with_websocket(ws_listener);
+	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
@@ -1712,10 +1724,11 @@ async fn broadcast_websocket_fallback() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let mut server = server_config
+	let server = server_config
 		.init()
 		.expect("failed to init server")
 		.with_websocket(ws_listener);
+	let mut server = server.listen().await.expect("failed to listen");
 
 	// ── subscriber (client) ─────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
@@ -1827,10 +1840,11 @@ async fn broadcast_websocket_uses_newest_version() {
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
 
-	let mut server = server_config
+	let server = server_config
 		.init()
 		.expect("failed to init server")
 		.with_websocket(ws_listener);
+	let mut server = server.listen().await.expect("failed to listen");
 
 	let sub_origin = Origin::random().produce();
 	let mut client_config = moq_native::ClientConfig::default();
@@ -1900,10 +1914,11 @@ async fn broadcast_race_quic_wins() {
 	server_config.bind = Some(format!("[::]:{port}"));
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let mut server = server_config
+	let server = server_config
 		.init()
 		.expect("failed to init server")
 		.with_websocket(ws_listener);
+	let mut server = server.listen().await.expect("failed to listen");
 
 	let sub_origin = Origin::random().produce();
 	let mut client_config = moq_native::ClientConfig::default();
@@ -1975,7 +1990,8 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec!["moq-lite-03".parse().unwrap()];
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("server addr");
 
 	let sub_origin = Origin::random().produce();
@@ -2105,7 +2121,8 @@ async fn idle_subscription_releases_the_viewer_count() {
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
-	let mut server = server_config.init().expect("init server");
+	let server = server_config.init().expect("init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("server addr");
 
 	// The publisher counts viewers through a stats context, exactly like the relay.
@@ -2268,7 +2285,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_goaway_ends_the_connection() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2307,7 +2324,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	use std::sync::Arc;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	// Keep accepting so a buggy redial would show up as a second accept, and
@@ -2380,7 +2397,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.scope(&["allowed".into()])
 		.expect("failed to scope publish origin");
 
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 
 	// ── subscriber (client): interested in both "allowed" and "denied" ──
 	// "denied" is disjoint from the publisher's scope, so its announce stream is FINed.
@@ -2448,7 +2465,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.expect("failed to scope consume origin");
 	let mut announcements = consume.consume().announced();
 
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2532,11 +2549,12 @@ async fn publish_only_client_to_subscribe_only_server() {
 }
 
 /// A test server bound to a free port with a generated localhost certificate.
-fn test_server() -> (moq_native::Server, std::net::SocketAddr) {
+async fn test_server() -> (moq_native::Listener, std::net::SocketAddr) {
 	let mut config = moq_native::ServerConfig::default();
 	config.bind = Some("[::]:0".to_string());
 	config.tls.generate = vec!["localhost".into()];
 	let server = config.init().expect("failed to init server");
+	let server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 	(server, addr)
 }
@@ -2589,7 +2607,8 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
@@ -2725,7 +2744,8 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
-	let mut server = server_config.init().expect("failed to init server");
+	let server = server_config.init().expect("failed to init server");
+	let mut server = server.listen().await.expect("failed to listen");
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	let mut client_config = moq_native::ClientConfig::default();
@@ -2802,7 +2822,7 @@ async fn connect_once(
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let pub_origin = Origin::random().produce();
@@ -2838,7 +2858,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn session_close_surfaces_a_rejection_code() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2868,7 +2888,7 @@ async fn session_close_surfaces_a_rejection_code() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_a_session_level_rejection() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2896,7 +2916,7 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_surfaces_a_session_level_rejection() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2925,7 +2945,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn abort_carries_its_code_to_the_peer() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let (reason_tx, reason_rx) = tokio::sync::oneshot::channel();

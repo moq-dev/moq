@@ -1561,7 +1561,8 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn dial_any_walks_past_the_dead_addresses() {
-		let (mut server, live, client) = pair();
+		let (server, live, client) = pair();
+		let mut server = server.listen().await.expect("listen");
 		tokio::spawn(async move { while server.accept().await.is_some() {} });
 
 		let addrs = Addrs::collect([refused(), refused(), live.clone()]).expect("not empty");

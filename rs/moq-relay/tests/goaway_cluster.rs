@@ -136,11 +136,12 @@ fn spawn_upstream(
 	tokio::sync::mpsc::UnboundedReceiver<moq_net::Session>,
 	tokio::task::JoinHandle<()>,
 ) {
-	let (port, mut server) = bind_free_tcp_server();
+	let (port, server) = bind_free_tcp_server();
 
 	let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
 	let handle = tokio::spawn(async move {
+		let mut server = server.listen().await.expect("listen");
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = Origin::random().produce();
@@ -294,7 +295,8 @@ async fn spawn_relay_with_upstream(
 ) -> (u16, tokio::task::JoinHandle<()>) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	let (port, mut server) = bind_free_tcp_server();
+	let (port, server) = bind_free_tcp_server();
+	let mut server = server.listen().await.expect("listen");
 
 	// Fully public auth: any no-JWT stream client gets the whole root.
 	#[allow(deprecated)]

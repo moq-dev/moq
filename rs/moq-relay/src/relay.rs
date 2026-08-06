@@ -268,12 +268,11 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 /// Public because an embedder running its own `select!` still needs the accept
 /// loop, and reimplementing it means re-deriving details like where a `conn` id
 /// comes from.
-pub async fn serve(
-	mut server: moq_native::Server,
-	cluster: Cluster,
-	auth: Auth,
-	shutdown: Shutdown,
-) -> anyhow::Result<()> {
+pub async fn serve(server: moq_native::Server, cluster: Cluster, auth: Auth, shutdown: Shutdown) -> anyhow::Result<()> {
+	// Binds whatever is still unbound (the `tcp`/`unix` listeners), so a bind
+	// failure is reported here rather than as an immediate stop.
+	let mut server = server.listen().await.context("failed to bind listeners")?;
+
 	while let Some(request) = server.accept().await {
 		let conn = Connection::new(request, cluster.clone(), auth.clone())
 			.with_id(cluster.next_connection_id())
