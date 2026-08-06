@@ -396,5 +396,30 @@ mod tests {
 		assert_eq!(play.latency_max, Duration::from_millis(500));
 		assert_eq!(play.select.video_name.as_deref(), Some("hd"));
 		assert!(cli.moq.validate().is_ok());
+		assert!(play.validate().is_ok());
+	}
+
+	/// The selection flags are shared with the exports, which pass every codec
+	/// through. Playback has to decode, so it rejects the rest up front instead
+	/// of filtering the catalog down to a rendition that can't open.
+	#[cfg(feature = "play")]
+	#[test]
+	fn play_rejects_undecodable_codecs() {
+		for flag in [["--video-codec", "vp9"], ["--audio-codec", "aac"]] {
+			let cli = Cli::try_parse_from([
+				"moq",
+				"--client-connect",
+				"https://relay.example.com/anon",
+				"play",
+				flag[0],
+				flag[1],
+			])
+			.unwrap();
+			let Command::Play(play) = cli.command else {
+				panic!("expected play")
+			};
+			let err = play.validate().unwrap_err().to_string();
+			assert!(err.contains(flag[1]), "{err}");
+		}
 	}
 }

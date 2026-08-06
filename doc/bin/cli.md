@@ -117,7 +117,7 @@ Native playback is gated behind the `play` feature, which adds the platform
 window, graphics, decoder, and speaker dependencies:
 
 ```bash
-cargo install moq-cli --features play
+cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or build from a checkout:
 cargo build --release -p moq-cli --features play
 # or run straight from that checkout:
@@ -125,23 +125,33 @@ cargo run -p moq-cli --features play -- \
     --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
+Drop the defaults on Linux, as above. The default `pipewire` feature links
+libpipewire-0.3 at build time, and its bindgen wants libclang, all to give
+`import capture` a display source that playback never uses. macOS and Windows
+have nothing to trim, so plain `--features play` is enough there.
+
 Once built, play a broadcast with:
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
-`play` watches the catalog until it has a playable audio and video rendition,
-then stays on them. "First" means the alphabetically first track name, so pass
-`--video-name` / `--audio-name` to pick a specific rung of a ladder. Audio
-drives the video clock when both are present; audio-only and video-only
-broadcasts also work, and playback ends once every track it started has ended.
-The window preserves the video's aspect ratio and can be closed with Escape, the
-close button, or Ctrl-C.
+`play` starts each media role as soon as the catalog offers a rendition it can
+decode, independently of the other, and keeps following catalog updates until
+both have started. Audio-only and video-only broadcasts play fine; playback ends
+once every track it started has ended. It doesn't switch renditions afterwards,
+so a publisher that replaces the one being played ends that role.
 
-Use `--video-name`, `--audio-name`, `--video-codec`, or `--audio-codec` to select
-a rendition. `--latency-max` controls how far a stalled media group may lag
-before it is skipped and defaults to `500ms`:
+Within a role it takes the first rendition it can decode, in track-name order,
+which is arbitrary as a quality choice. Pass `--video-name` / `--audio-name` to
+pick a specific rung of a ladder. Audio drives the video clock when both are
+present. The window preserves the video's aspect ratio and can be closed with
+Escape, the close button, or Ctrl-C.
+
+Playback decodes h264, h265, and av1 video, and opus and pcm audio, so
+`--video-codec` / `--audio-codec` are rejected up front for anything else.
+`--latency-max` controls how far a stalled media group may lag before it is
+skipped and defaults to `500ms`. These flags all follow the `play` verb:
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast conference.hang \
@@ -433,8 +443,9 @@ discovery. When omitted, it's auto-detected from the broadcast name suffix
 - `hangz` - the DEFLATE-compressed `catalog.json.z` catalog (opt-in; shares the `.hang` suffix and is never auto-detected)
 - `msf` - the MSF `catalog` track
 
-Stdout exports and `play` can also select one rendition per media role, before
-the sink subcommand:
+Stdout exports can also select one rendition per media role. The flags go before
+the sink subcommand here; `play` takes the same four after its own verb (see
+[Play a Broadcast](#play-a-broadcast)):
 
 ```bash
 moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \

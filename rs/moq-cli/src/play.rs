@@ -50,6 +50,26 @@ impl Args {
 			.or_else(|| CatalogFormat::detect(broadcast))
 			.unwrap_or_default()
 	}
+
+	/// Reject a codec the local decoders can't open.
+	///
+	/// The selection flags are shared with the stdout exports, which pass bytes
+	/// through and so accept every codec the catalog can name. Asking for one of
+	/// those here would filter the catalog down to a rendition that then fails to
+	/// decode, leaving a blank window rather than an error.
+	pub fn validate(&self) -> anyhow::Result<()> {
+		use crate::subscribe::{AudioCodecArg, VideoCodecArg};
+
+		anyhow::ensure!(
+			!matches!(self.select.video_codec, Some(VideoCodecArg::Vp8 | VideoCodecArg::Vp9)),
+			"`play` cannot decode vp8 or vp9; pass --video-codec h264, h265, or av1"
+		);
+		anyhow::ensure!(
+			!matches!(self.select.audio_codec, Some(AudioCodecArg::Aac)),
+			"`play` cannot decode aac; pass --audio-codec opus or pcm"
+		);
+		Ok(())
+	}
 }
 
 #[derive(Clone, Copy)]
@@ -196,7 +216,16 @@ async fn media(
 
 				if !video_started {
 					for (name, config) in snapshot.video.renditions {
-						let rendition = source.resolve(config.broadcast.as_ref()).await?;
+						// A rendition pointing at a broadcast we can't reach is that
+						// rendition's problem, not the catalog's: fall through to the
+						// next one like an unsupported codec does.
+						let rendition = match source.resolve(config.broadcast.as_ref()).await {
+							Ok(rendition) => rendition,
+							Err(err) => {
+								tracing::warn!(track = name, %err, "cannot resolve video rendition");
+								continue;
+							}
+						};
 						let mut decode = moq_video::decode::Config::new();
 						decode.latency_max = Some(args.latency_max);
 						match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
@@ -213,7 +242,13 @@ async fn media(
 
 				if !audio_started {
 					for (name, config) in snapshot.audio.renditions {
-						let rendition = source.resolve(config.broadcast.as_ref()).await?;
+						let rendition = match source.resolve(config.broadcast.as_ref()).await {
+							Ok(rendition) => rendition,
+							Err(err) => {
+								tracing::warn!(track = name, %err, "cannot resolve audio rendition");
+								continue;
+							}
+						};
 						let mut decode = moq_audio::decode::Config::new();
 						decode.latency_max = Some(args.latency_max);
 						// The sink and the frame-duration math below both assume f32,
@@ -356,8 +391,11 @@ impl App {
 		}
 		display.present()?;
 
+		// `checked_add`: the wait comes from a wire timestamp, and adding a bogus
+		// one to an `Instant` panics rather than saturating. No deadline just means
+		// the next frame waits for a media wakeup instead.
 		self.next_redraw = match (clock, next_timestamp) {
-			(Some(clock), Some(next)) => Some(Instant::now() + next.saturating_sub(clock.now())),
+			(Some(clock), Some(next)) => Instant::now().checked_add(next.saturating_sub(clock.now())),
 			_ => None,
 		};
 		Ok(())

@@ -154,6 +154,9 @@ fn spawn_moq_consume(
 /// `#[tokio::main]` polls this future.
 #[cfg(feature = "play")]
 async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
+	// Before anything dials: a codec we can't decode is a blank window otherwise.
+	args.validate()?;
+
 	let origin = moq.origin()?;
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
