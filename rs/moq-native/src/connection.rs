@@ -819,9 +819,18 @@ impl Connection {
 
 			match dialed {
 				Ok(session) => return Ok((url.clone(), session)),
-				// Credentials are the peer's answer, not this address's, so don't keep
-				// offering them at the rest of its addresses.
-				Err(err) if err.is_auth() => return Err(err),
+				// A status the peer actually sent is its answer, not this address's, so
+				// unless it invites another attempt it settles the whole walk. Carrying
+				// on would offer the same rejected credentials at the peer's other
+				// addresses, and worse, a later transport failure would overwrite the
+				// real reason and leave the outer loop retrying until its budget ran out.
+				Err(err)
+					if err
+						.status()
+						.is_some_and(|status| !crate::error::status_retryable(status)) =>
+				{
+					return Err(err);
+				}
 				Err(err) => {
 					tracing::debug!(peer = %Endpoint(url), %err, "address unreachable");
 					last = Some(err);
@@ -1607,6 +1616,33 @@ mod tests {
 		assert!(logs_contain("connecting"), "the dial never logged at all");
 		assert!(!logs_contain(SECRET), "a log line leaked the credential");
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
+	}
+
+	/// A settled answer from one candidate ends the walk instead of being buried.
+	///
+	/// The walk keeps only the last failure, so without this a `404` from the first
+	/// address would be overwritten by a transport error from the second, and the
+	/// outer loop would retry the whole list until its budget ran out over a
+	/// question the peer had already answered. Only the statuses that invite
+	/// another attempt keep the walk going.
+	#[test]
+	fn a_settled_status_stops_the_walk() {
+		let settled = [401, 403, 404, 400, 500];
+		for status in settled {
+			assert!(
+				!crate::error::status_retryable(status),
+				"{status} is the peer's answer, so the walk should stop"
+			);
+		}
+
+		// The ones worth asking again about: request timeout, rate limit, and the
+		// gateway/overload statuses. A different address may well do better.
+		for status in [408, 429, 502, 503, 504] {
+			assert!(
+				crate::error::status_retryable(status),
+				"{status} invites another attempt, so the walk should continue"
+			);
+		}
 	}
 
 	/// The retry window bounds the walk only when there are retries.

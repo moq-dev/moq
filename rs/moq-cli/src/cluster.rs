@@ -170,7 +170,11 @@ impl Lan {
 			}
 		}
 
-		Ok(())
+		// Discovery only ends if the daemon or its channel died, which is a failure
+		// rather than a finished job: `drive` returns on the first task to report
+		// `Ok(())`, so returning success here would exit an otherwise healthy
+		// process with status zero and take the media tasks down with it.
+		anyhow::bail!("LAN discovery stopped unexpectedly");
 	}
 
 	/// Start a reconnecting session to one peer.
@@ -290,7 +294,10 @@ pub async fn serve(
 		});
 	}
 
-	Ok(())
+	// Same reasoning as `Lan::run`: the accept loop only ends if the listener is
+	// gone, and reporting that as success would exit the process cleanly. A
+	// shutdown never gets here, since `drive` returns on the signal task instead.
+	anyhow::bail!("the MoQ listener stopped accepting");
 }
 
 /// One peer's reconnect loop, plus the advertisement it was started from so a
