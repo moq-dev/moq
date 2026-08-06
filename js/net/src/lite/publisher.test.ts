@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Fetch } from "./fetch.ts";
@@ -16,11 +16,11 @@ import { ALPN_05, ALPN_06_WIP, Version } from "./version.ts";
 // SUBSCRIBE_END boundary the publisher put on the wire.
 async function subscribeEnd(sequences: number[]): Promise<number> {
 	const pair = createMockTransportPair(ALPN_05);
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);
@@ -386,11 +386,11 @@ async function serve(
 	bounds: { startGroup?: number; startFrame?: number; endGroup?: number; endFrame?: number },
 ): Promise<{ start?: number; end?: number; served: Served[] }> {
 	const pair = createMockTransportPair(ALPN_06_WIP);
-	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomOrigin());
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomOrigin(), origin.consume());
 
-	const broadcast = new BroadcastProducer();
+	const broadcast = origin.publish(Path.from("test"));
 	const track = broadcast.createTrack("video");
-	publisher.publish(Path.from("test"), broadcast);
 
 	const client = await Stream.open(pair.client);
 	const server = await Stream.accept(pair.server);

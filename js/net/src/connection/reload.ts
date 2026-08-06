@@ -1,6 +1,7 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { error, RemoteError, SessionCode } from "../error.ts";
+import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
@@ -99,6 +100,25 @@ export class Reload {
 	 */
 	discovery?: boolean;
 
+	/**
+	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
+	 *
+	 * Each session announces the origin's table when it attaches, so a broadcast published
+	 * while offline surfaces on the next connection and a reconnect re-announces everything
+	 * still published. See the `publish` connect option.
+	 */
+	publish?: OriginConsumer;
+
+	/**
+	 * The origin fed with the peer's announced broadcasts, spanning reconnects (not
+	 * reactive).
+	 *
+	 * The entries a session fed retract when it dies, and the next session re-populates the
+	 * table, so a consumer watching the origin sees offline/online transitions across a
+	 * reconnect. See the `subscribe` connect option.
+	 */
+	subscribe?: OriginProducer;
+
 	/** Backoff settings for the reconnect loop. */
 	delay: ReloadDelay;
 
@@ -136,6 +156,8 @@ export class Reload {
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
+		this.publish = props?.publish;
+		this.subscribe = props?.subscribe;
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
@@ -193,6 +215,8 @@ export class Reload {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					publish: this.publish,
+					subscribe: this.subscribe,
 					signal,
 				});
 
@@ -284,6 +308,10 @@ export class Reload {
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
+		// With a subscribe origin the table already spans reconnects (the forwarder retracts
+		// a dead session's entries), so its stream is the same thing with less machinery.
+		if (this.subscribe) return this.subscribe.consume().announced(prefix);
+
 		const producer = new Announce.Producer(prefix);
 		const consumer = producer.consume();
 
@@ -349,6 +377,8 @@ export class Reload {
 	 * Close the handle when done; {@link Reload.close} only drops it to `undefined`.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
+		// Same delegation as announced(): the origin's table is the reconnect-spanning view.
+		if (this.subscribe) return new Announce.Broadcast({ origin: this.subscribe.consume(), path });
 		return new Announce.Broadcast({ connection: this.established, path });
 	}
 

@@ -1,7 +1,8 @@
-import { type Dispose, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
 import { error, reason } from "../error.ts";
 import type * as group from "../group.ts";
+import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Timescale } from "../time.ts";
@@ -46,39 +47,25 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 
-	// Our published broadcasts.
-	// It's a signal so we can live update any subscribe_namespace streams.
-	#broadcasts = new Signal<Map<Path.Valid, broadcast.Producer> | undefined>(new Map());
+	// The published broadcasts, borrowed from the origin this session serves. The origin
+	// outlives the session, so this is read-only here: subscribe_namespace streams watch it
+	// for changes, and closing the session leaves the broadcasts alone. The namespaces are
+	// only advertised in response to a SUBSCRIBE_NAMESPACE (see {@link runSubscribeNamespace}),
+	// mirroring the moq-lite publisher.
+	#broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session (for uni streams)
 	 * @param session - The session abstraction for bidi streams and request IDs
+	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, session: Session) {
+	constructor(quic: WebTransport, session: Session, publish?: OriginConsumer) {
 		this.#quic = quic;
 		this.#session = session;
-	}
-
-	/**
-	 * Publishes a broadcast with any associated tracks.
-	 * The namespace is only advertised in response to a SUBSCRIBE_NAMESPACE
-	 * (see {@link runSubscribeNamespace}), mirroring the moq-lite publisher.
-	 */
-	publish(path: Path.Valid, broadcast: broadcast.Producer) {
-		this.#broadcasts.mutate((broadcasts) => {
-			if (!broadcasts) throw new Error("closed");
-			broadcasts.set(path, broadcast);
-		});
-
-		// Remove the broadcast from the lookup when it's closed.
-		void broadcast.closed.then(() => {
-			this.#broadcasts.mutate((broadcasts) => {
-				broadcasts?.delete(path);
-			});
-		});
+		this.#broadcasts = publish?.broadcasts ?? new Signal(new Map());
 	}
 
 	/**
@@ -297,14 +284,16 @@ export class Publisher {
 				}
 			};
 
-			// Advertise the currently published broadcasts under the prefix.
-			let active = new Set<Path.Valid>();
-			for (const name of this.#broadcasts.peek()?.keys() ?? []) {
+			// Advertise the currently published broadcasts under the prefix. Keyed by suffix,
+			// valued by the routing front, so a republish diffs as withdraw-then-advertise
+			// rather than nothing.
+			let active = new Map<Path.Valid, broadcast.Consumer>();
+			for (const [name, front] of this.#broadcasts.peek() ?? []) {
 				const suffix = Path.stripPrefix(prefix, name);
 				if (suffix === null) continue;
-				active.add(suffix);
+				active.set(suffix, front);
 			}
-			for (const suffix of active) {
+			for (const suffix of active.keys()) {
 				await advertise(suffix);
 			}
 
@@ -312,7 +301,7 @@ export class Publisher {
 			for (;;) {
 				// TODO Make a better helper within Signals.
 				let dispose!: Dispose;
-				const changed = new Promise<Map<Path.Valid, broadcast.Producer> | undefined>((resolve) => {
+				const changed = new Promise<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>((resolve) => {
 					dispose = this.#broadcasts.changed(resolve);
 				});
 
@@ -321,18 +310,19 @@ export class Publisher {
 				dispose();
 				if (!broadcasts) break;
 
-				const newActive = new Set<Path.Valid>();
-				for (const name of broadcasts.keys()) {
+				const newActive = new Map<Path.Valid, broadcast.Consumer>();
+				for (const [name, front] of broadcasts) {
 					const suffix = Path.stripPrefix(prefix, name);
 					if (suffix === null) continue;
-					newActive.add(suffix);
+					newActive.set(suffix, front);
 				}
 
-				for (const added of newActive.difference(active)) {
-					await advertise(added);
+				// Withdraw first so a republish reads as withdraw-then-advertise (a restart).
+				for (const [removed, front] of active) {
+					if (newActive.get(removed) !== front) await withdraw(removed);
 				}
-				for (const removed of active.difference(newActive)) {
-					await withdraw(removed);
+				for (const [added, front] of newActive) {
+					if (active.get(added) !== front) await advertise(added);
 				}
 
 				active = newActive;
@@ -443,19 +433,5 @@ export class Publisher {
 			await ok.encode(stream.writer, version);
 		}
 		stream.close();
-	}
-
-	/**
-	 * Closes every published broadcast and stops accepting new ones.
-	 *
-	 * @internal
-	 */
-	close() {
-		this.#broadcasts.update((broadcasts) => {
-			for (const broadcast of broadcasts?.values() ?? []) {
-				broadcast.close();
-			}
-			return undefined;
-		});
 	}
 }
