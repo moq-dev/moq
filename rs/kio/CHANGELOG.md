@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/moq-dev/moq/compare/kio-v0.5.3...kio-v0.5.4) - 2026-08-05
+
+### Added
+
+- *(kio)* add Fan, a waker for a whole WaiterList ([#2604](https://github.com/moq-dev/moq/pull/2604))
+
 ## [0.5.3](https://github.com/moq-dev/moq/compare/kio-v0.5.2...kio-v0.5.3) - 2026-08-03
 
 ### Added

@@ -1,14 +1,14 @@
 use std::{
 	cell::RefCell,
 	ffi::{CString, c_char, c_void},
-	sync::{LazyLock, Mutex},
+	sync::LazyLock,
 };
 
 use url::Url;
 
 use crate::{Error, Id};
 
-pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
+pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
@@ -22,19 +22,18 @@ pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
 		})
 		.expect("failed to spawn runtime thread");
 
-	Mutex::new(handle)
+	handle
 });
 
 /// Runs the provided function in the runtime context.
 /// Additionally, we convert the return code to a C-compatible return value.
 ///
-/// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
-/// as required by tokio to avoid panics in multi-threaded FFI contexts.
+/// Callers run concurrently: entering a handle only sets a thread-local, so
+/// nothing here is shared between threads. Tokio's requirement that the guards
+/// be dropped in LIFO order is per-thread too, and this one lives and dies in
+/// this frame, so a nested call nests rather than crosses.
 pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
-	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
-	// If this starts to become a bottleneck, we might have to rethink our runtime model.
-	let handle = RUNTIME.lock().unwrap();
-	let _guard = handle.enter();
+	let _guard = RUNTIME.enter();
 
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
 		Ok(ret) => {
@@ -231,6 +230,45 @@ pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a 
 	let slice = unsafe { parse_slice(cstr.cast::<u8>(), cstr_len)? };
 	let string = std::str::from_utf8(slice)?;
 	Ok(string)
+}
+
+/// Parse an optional C string, where a NULL or empty value means "unset".
+///
+/// Config setters use this so one function both sets and clears a knob, rather than
+/// needing a paired `moq_client_clear_*` for every optional field.
+///
+/// # Safety
+/// The caller must ensure that cstr is valid for 'a.
+pub unsafe fn parse_str_optional<'a>(cstr: *const c_char, cstr_len: usize) -> Result<Option<&'a str>, Error> {
+	if cstr.is_null() {
+		return Ok(None);
+	}
+
+	let string = unsafe { parse_str(cstr, cstr_len)? };
+	Ok((!string.is_empty()).then_some(string))
+}
+
+/// Parse a C array of [`crate::moq_string`] into owned strings.
+///
+/// A NULL array is only valid when `count` is zero, which yields an empty list.
+///
+/// # Safety
+/// The caller must ensure that items is valid for count elements, and that each
+/// element points to its own length in bytes.
+pub unsafe fn parse_strings(items: *const crate::moq_string, count: usize) -> Result<Vec<String>, Error> {
+	if items.is_null() {
+		if count == 0 {
+			return Ok(Vec::new());
+		}
+
+		return Err(Error::InvalidPointer);
+	}
+
+	let items = unsafe { std::slice::from_raw_parts(items, count) };
+	items
+		.iter()
+		.map(|item| Ok(unsafe { parse_str(item.data, item.len)? }.to_string()))
+		.collect()
 }
 
 /// Parse a raw pointer and size into a byte slice.

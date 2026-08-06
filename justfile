@@ -89,16 +89,24 @@ check $BASE="":
     if [[ -n "$files" ]]; then
     	just js check "$files"
     	just rs check-changed "$files"
+    	# The OBS plugin has no compile job in PR CI, so its lint + CMake
+    	# guards are the only automated coverage it gets.
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs check
+    	fi
     else
     	echo "check: nothing changed."
     fi
 
     just _check-common
 
-# Check every JavaScript workspace and every default Rust member.
+# Check every JavaScript workspace, every default Rust member, and moq-wasm.
 check-all *args:
     just js check
     just rs check {{ args }}
+    # Not covered by the line above: moq-wasm only exists on the wasm32 target.
+    just rs wasm
+    just obs check
     just _check-common
 
 # Repository-wide non-compiling checks shared by `check` and `check-all`.
@@ -107,12 +115,51 @@ check-all *args:
 # `bun install` because remark-cli lives in node_modules and `just js check` is
 # where it would otherwise be installed, which a Rust-only diff skips.
 
+# Run shell checks or formatting over tracked files that exist in the worktree.
+[private]
+_shell $ACTION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! command -v shfmt >/dev/null 2>&1; then
+        exit 0
+    fi
+    if [[ "$ACTION" == "check" ]] && ! command -v shellcheck >/dev/null 2>&1; then
+        exit 0
+    fi
+
+    scripts_file=$(mktemp)
+    trap 'rm -f "$scripts_file"' EXIT
+    shfmt -f=0 . > "$scripts_file"
+
+    scripts=()
+    while IFS= read -r -d '' file; do
+        if git --literal-pathspecs ls-files --error-unmatch -- "$file" >/dev/null 2>&1; then
+            scripts+=("$file")
+        fi
+    done < "$scripts_file"
+    ((${#scripts[@]})) || exit 0
+
+    case "$ACTION" in
+        check)
+            shfmt --diff "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+            ;;
+        fix)
+            shfmt --write "${scripts[@]}"
+            ;;
+        *)
+            echo "invalid shell action: $ACTION" >&2
+            exit 2
+            ;;
+    esac
+
 # Repository-wide lints, shared by `check` and `check-all`.
 [private]
 _check-common:
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
+    just _shell check
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
@@ -150,6 +197,15 @@ ci BASE="":
     	just go    ci "$files"
     fi
 
+    # The OBS plugin has no compile job in PR CI, so its lint + CMake guards
+    # are the only automated coverage it gets. Empty $files is a force-run,
+    # so run then.
+    if [[ -z "$files" ]] || echo "$files" | grep -q '^cpp/obs/'; then
+    	just obs check
+    else
+    	echo "ci: no cpp/obs changes; skipping obs check."
+    fi
+
     # Validate the flake (eval + dev shell build) via `nix flake check`. This no
     # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
     # to `just rs ci` (plain cargo), leaving only lightweight Nix checks -- so
@@ -166,8 +222,8 @@ ci BASE="":
     # when the diff has no JS-scoped files.
     bun install --frozen-lockfile
     bun remark . --quiet --frail
-    shfmt --diff $(shfmt -f . | grep -v '\.direnv/')
-    shellcheck $(shfmt -f . | grep -v '\.direnv/')
+    shfmt --diff $(just _shell-files)
+    shellcheck $(just _shell-files)
     RUST_LOG=error taplo format --check
     nixfmt --check $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*')
     for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
@@ -186,6 +242,9 @@ fix $BASE="":
     if [[ -n "$files" ]]; then
     	just js fix "$files"
     	just rs fix-changed "$files"
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs fix
+    	fi
     else
     	echo "fix: nothing changed."
     fi
@@ -198,6 +257,7 @@ fix-all:
     just js fix
     just rs fix
     just py fix
+    just obs fix
     just _fix-common
 
 # Optional tools skip if missing locally. `bun install` for the same reason as
@@ -208,7 +268,7 @@ fix-all:
 _fix-common:
     bun install
     bun remark . --quiet --output
-    @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
+    just _shell fix
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi
     @if command -v nixfmt >/dev/null 2>&1; then nixfmt $(find . -name '*.nix' -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); fi
     @for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --justfile "$f"; done

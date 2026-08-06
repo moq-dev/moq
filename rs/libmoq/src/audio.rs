@@ -18,7 +18,7 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, ffi};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
 
@@ -124,9 +124,13 @@ pub struct moq_audio_frame {
 
 // ---- State extensions (used internally by lib.rs) ----
 
+/// An audio producer, shared so the Opus encode in `write` runs with the global
+/// lock released. See [`Shared`].
+type AudioProducer = Shared<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>;
+
 #[derive(Default)]
 pub struct Audio {
-	producers: NonZeroSlab<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>,
+	producers: NonZeroSlab<AudioProducer>,
 	consumer_tasks: NonZeroSlab<Option<AudioTaskEntry>>,
 	frames: NonZeroSlab<moq_audio::Frame>,
 }
@@ -150,19 +154,22 @@ impl Audio {
 		options: moq_audio::encode::Options,
 	) -> Result<Id, Error> {
 		let producer = moq_audio::encode::Producer::new(broadcast, catalog, input, &options)?;
-		self.producers.insert(producer)
+		self.producers.insert(Shared::new(producer))
 	}
 
-	pub fn publish_frame(&mut self, id: Id, frame: moq_audio::Frame) -> Result<(), Error> {
-		let producer = self.producers.get_mut(id).ok_or(Error::MediaNotFound)?;
-		producer.write(&frame)?;
-		Ok(())
+	/// Resolve a producer handle, so the caller can encode with the global lock
+	/// released.
+	///
+	/// Bind the result before locking it: a temporary [`State`] guard lives to the
+	/// end of the statement that created it, so resolving and locking in one
+	/// expression would put the encode back under the global lock.
+	pub(crate) fn producer(&self, id: Id) -> Result<AudioProducer, Error> {
+		self.producers.get(id).cloned().ok_or(Error::MediaNotFound)
 	}
 
-	pub fn publish_finish(&mut self, id: Id) -> Result<(), Error> {
-		let producer = self.producers.remove(id).ok_or(Error::MediaNotFound)?;
-		producer.finish()?;
-		Ok(())
+	/// Resolve a producer and drop its id, so nothing can be published to it after.
+	pub(crate) fn remove(&mut self, id: Id) -> Result<AudioProducer, Error> {
+		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
 	pub fn consume(
@@ -340,7 +347,9 @@ pub unsafe extern "C" fn moq_publish_audio_raw_frame(producer: u32, frame: *cons
 			data: Bytes::copy_from_slice(data),
 		};
 
-		State::lock().audio.publish_frame(producer, owned)
+		let producer = State::lock().audio.producer(producer)?;
+		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.write(&owned)?;
+		Ok(())
 	})
 }
 
@@ -349,7 +358,11 @@ pub unsafe extern "C" fn moq_publish_audio_raw_frame(producer: u32, frame: *cons
 pub extern "C" fn moq_publish_audio_raw_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
 		let producer = ffi::parse_id(producer)?;
-		State::lock().audio.publish_finish(producer)
+		// The id is dropped first, so nothing new queues behind the flush; whatever
+		// is mid-encode still finishes before this takes the producer.
+		let producer = State::lock().audio.remove(producer)?;
+		producer.take().ok_or(Error::MediaNotFound)?.finish()?;
+		Ok(())
 	})
 }
 

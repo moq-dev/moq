@@ -272,7 +272,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		let track = self
 			.broadcast
-			.create_track(self.broadcast.unique_name(suffix), hang::container::track_info())?;
+			.create_track(self.broadcast.unique_name(suffix), self.catalog.track_info())?;
 		let name = track.name().to_string();
 
 		// Build the media producer before publishing the rendition. It is fallible (its

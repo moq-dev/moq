@@ -12,11 +12,12 @@ use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use crate::Error;
 
-use super::{OriginList, Requests, WeakCache};
+use super::{Origin, OriginList, Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -142,6 +143,66 @@ impl Route {
 	pub fn with_announce(mut self, announce: bool) -> Self {
 		self.announce = announce;
 		self
+	}
+}
+
+/// How long a drained broadcast keeps advertising a zero cost before restoring its
+/// cold one.
+///
+/// Pure hysteresis: demand edges arrive exactly (via [`Demand`]), but re-pricing the
+/// instant the last viewer leaves would flap routing across the mesh on viewer churn.
+pub(crate) const COST_LINGER: Duration = Duration::from_secs(5);
+
+/// The routes advertisable to one peer, best first: the announced ones whose hop chain
+/// avoids both the peer (`exclude`) and ourselves (a reflection), each paired with
+/// whether it is the serving route.
+///
+/// `routes` is the broadcast's table in preference order with the serving (active)
+/// route first, so a peer usually receives exactly what we serve everyone; a peer the
+/// active chain flows through receives the best standby instead of nothing. The
+/// subscribe path picks its source by the same exclusion (see
+/// [`origin::Consumer::excluding`](super::origin::Consumer::excluding)), which keeps
+/// the advertised chain truthful and the mesh loop-free.
+///
+/// Callers take the first entry they can actually stamp themselves onto, since a chain
+/// already at `MAX_HOPS` has no room and almost certainly means a loop. Empty when
+/// every chain loops through the peer or us, or none is announced.
+/// [`Origin::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
+pub(crate) fn advertisable_routes(
+	routes: &[Route],
+	self_origin: Origin,
+	exclude: Origin,
+) -> impl Iterator<Item = (&Route, bool)> {
+	routes.iter().enumerate().filter_map(move |(index, route)| {
+		// Offline routes are reachable by exact path but never advertised.
+		if !route.announce {
+			return None;
+		}
+		if exclude != Origin::UNKNOWN && route.hops.contains(&exclude) {
+			return None;
+		}
+		if self_origin != Origin::UNKNOWN && route.hops.contains(&self_origin) {
+			return None;
+		}
+		Some((route, index == 0))
+	})
+}
+
+/// The cost to advertise for a route.
+///
+/// While the broadcast has demand, the *serving* (active) route costs zero: our
+/// ingress is already paid for (or, for a local standby publisher, the work is already
+/// running), so one more subscriber only pays the links below us. That is what lets a
+/// cluster deduplicate onto a warm copy. A standby advertised to a peer the active
+/// chain flows through keeps its own accumulated cost, since serving that peer means
+/// opening a fresh ingest. Otherwise we forward the accumulated cost unchanged.
+///
+/// The receiving side adds its own link price on top, so this never accounts for the
+/// link we are sending over.
+pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> u64 {
+	match serving && demand.is_used() {
+		true => 0,
+		false => route.cost,
 	}
 }
 

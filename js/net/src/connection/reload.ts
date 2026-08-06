@@ -1,5 +1,6 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { error } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import {
@@ -17,7 +18,15 @@ import type { Probe, Stats } from "./stats.ts";
 export type ReloadProps = ConnectProps;
 
 /** The backoff used when nothing else is asked for. */
-const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 30000 };
+const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 5000 };
+
+/**
+ * How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset.
+ *
+ * Short on purpose: a failure that clears within it was transient, and one that doesn't should
+ * surface as an error rather than leave the page silently reconnecting for minutes.
+ */
+const DEFAULT_TIMEOUT = 10000;
 
 /** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -73,15 +82,20 @@ export class Reload {
 	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
 	#signals = new Effect();
 
-	/** Resolves when the reconnect loop stops via {@link Reload.close} or the retry timeout. */
+	/**
+	 * Resolves when the reconnect loop stops via {@link Reload.close}.
+	 *
+	 * Rejects when the loop gives up instead, carrying the failure that was in flight when the
+	 * retry window expired.
+	 */
 	closed: Promise<void>;
 	#closedResolve!: () => void;
 	#closedReject!: (err: Error) => void;
 
-	#delay: DOMHighResTimeStamp;
-
-	// Timestamp when the current retry sequence started (for timeout).
-	#retryStart: DOMHighResTimeStamp | undefined;
+	// The current wait between attempts, doubling per failure, and when the retry window expires.
+	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
+	#delay: DOMHighResTimeStamp | undefined;
+	#deadline: DOMHighResTimeStamp | undefined;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -102,8 +116,6 @@ export class Reload {
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
 
-		this.#delay = this.delay.initial;
-
 		// A supplied session is good for one connection, so a loop that reconnects has nothing
 		// to reuse after the first drop and dials its own instead. Say so out loud rather than
 		// silently handing back a session the caller didn't ask for.
@@ -115,6 +127,11 @@ export class Reload {
 			this.#closedResolve = resolve;
 			this.#closedReject = reject;
 		});
+
+		// A caller is free to never await `closed`, and giving up rejects it unprompted. Marking the
+		// rejection handled here keeps that from surfacing as an `unhandledrejection`; a consumer
+		// awaiting the same promise still receives it.
+		this.closed.catch(() => {});
 
 		if (typeof window !== "undefined" && typeof document !== "undefined") {
 			this.#signals.event(window, "pagehide", () => this.#suspended.set(true));
@@ -200,9 +217,9 @@ export class Reload {
 	}
 
 	/**
-	 * Schedule the next connect attempt after the current backoff, or give up when the
-	 * retry window has expired. `connected` is when the dead session was established, if
-	 * it ever was, and `cause` the error that killed it, if it died with one.
+	 * Schedule the next connect attempt after the current backoff, or stop once the retry window
+	 * has expired. `connected` is when the dead session was established, if it ever was, and
+	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
 		// Any session is dead now: report disconnected during the backoff rather than
@@ -221,28 +238,29 @@ export class Reload {
 		// shorter is a peer that accepts and immediately severs, which has to keep
 		// escalating or we hammer it forever at the initial delay.
 		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
-			this.#delay = this.delay.initial;
-			this.#retryStart = undefined;
+			this.#delay = undefined;
+			this.#deadline = undefined;
 		}
 
-		// Track retry start for timeout.
-		this.#retryStart ??= performance.now();
+		const now = performance.now();
+		const timeout = this.delay.timeout ?? DEFAULT_TIMEOUT;
+		this.#delay ??= this.delay.initial;
+		this.#deadline ??= timeout > 0 ? now + timeout : Number.POSITIVE_INFINITY;
 
-		const timeout = this.delay.timeout ?? 300000;
-		if (timeout > 0) {
-			const elapsed = performance.now() - this.#retryStart;
-			if (elapsed >= timeout) {
-				console.warn("reconnect timed out");
-				// A graceful close has no error, so report the timeout itself.
-				this.#finish(cause ?? new Error("reconnect timed out"));
-				return;
-			}
+		if (now >= this.#deadline) {
+			console.warn("reconnect timed out");
+			// A graceful close has no error, so report the timeout itself.
+			this.#finish(cause ?? new Error("reconnect timed out"));
+			return;
 		}
+
+		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
+		// tick, and never past the deadline the retry window promised.
+		const wait = Math.min(this.#delay * (0.5 + Math.random() / 2), this.#deadline - now);
+		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
 
 		const tick = this.#tick.peek() + 1;
-		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
-
-		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
 	}
 
 	/**
@@ -349,6 +367,6 @@ export class Reload {
 		this.#signals.close();
 
 		if (cause === undefined) this.#closedResolve();
-		else this.#closedReject(cause instanceof Error ? cause : new Error(String(cause)));
+		else this.#closedReject(error(cause));
 	}
 }

@@ -139,6 +139,11 @@ pub enum Error {
 
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
+
+	/// `mdhd.timescale` is a 32-bit field, so a larger scale would reach the init segment
+	/// truncated while the fragments kept the full value, putting them on different timelines.
+	#[error("timescale {0} does not fit the 32-bit mdhd field")]
+	TimescaleTooLarge(u64),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -484,7 +489,13 @@ pub(crate) fn synthesize_video_trak(
 		other => return Err(Error::UnsupportedSynthesis(format!("video codec {:?}", other))),
 	};
 
-	Ok(build_video_trak(track_id, timescale, sample_entry, width, height))
+	Ok(build_video_trak(
+		track_id,
+		mdhd_timescale(timescale)?,
+		sample_entry,
+		width,
+		height,
+	))
 }
 
 /// Synthesize a CMAF `Trak` for an audio rendition that has no init segment.
@@ -530,7 +541,18 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 			let mut cursor = std::io::Cursor::new(description.as_ref());
 			let dec_specific = mp4_atom::esds::DecoderSpecific::decode(&mut cursor)?;
 
-			let bitrate = config.bitrate.unwrap_or(0) as u32;
+			// Safari and AVFoundation reject an AAC track whose DecoderConfigDescriptor is all
+			// zeros: they endOfStream("decode") on the *init* append, which leaves the
+			// ManagedMediaSource ended and every later audio and video append failing. The
+			// catalog bitrate is optional and real publishers omit it, so fall back to the
+			// AAC-LC values ffmpeg and the iTunes encoders write. A zero or wider-than-u32
+			// bitrate takes the fallback as well, since writing it back would rebuild the
+			// all-zero descriptor this exists to avoid.
+			let bitrate = config.bitrate.and_then(|b| u32::try_from(b).ok()).filter(|b| *b > 0);
+			let (max_bitrate, avg_bitrate) = match bitrate {
+				Some(bitrate) => (bitrate, bitrate),
+				None => (256_000, 128_000),
+			};
 			mp4_atom::Codec::from(mp4_atom::Mp4a {
 				audio,
 				esds: mp4_atom::Esds {
@@ -541,9 +563,10 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 							object_type_indication: 0x40, // MPEG-4 AAC
 							stream_type: 0x05,            // audio
 							up_stream: 0,
-							buffer_size_db: Default::default(),
-							max_bitrate: bitrate,
-							avg_bitrate: bitrate,
+							// 24 KiB, the decoder buffer those same encoders declare.
+							buffer_size_db: mp4_atom::u24::from([0x00, 0x60, 0x00]),
+							max_bitrate,
+							avg_bitrate,
 							dec_specific,
 						},
 						sl_config: Default::default(),
@@ -585,12 +608,17 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 		other => return Err(Error::UnsupportedSynthesis(format!("audio codec {:?}", other))),
 	};
 
-	Ok(build_audio_trak(track_id, timescale, sample_entry))
+	Ok(build_audio_trak(track_id, mdhd_timescale(timescale)?, sample_entry))
 }
+
+/// All-ones: the ISO/IEC 14496-12 spelling of "duration not known up front", which is always
+/// the case for the live fragmented streams synthesized here. Zero reads as an empty file to a
+/// strict parser, and VLC refuses to play one.
+const UNKNOWN_DURATION: u64 = u64::MAX;
 
 fn build_video_trak(
 	track_id: u32,
-	timescale: u64,
+	timescale: u32,
 	sample_entry: mp4_atom::Codec,
 	width: u16,
 	height: u16,
@@ -599,6 +627,10 @@ fn build_video_trak(
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			// track_in_movie. A player is entitled to skip a track the presentation doesn't
+			// claim, and the flags field is 0x000001 rather than 0x000003 without it.
+			in_movie: true,
+			duration: UNKNOWN_DURATION,
 			width: mp4_atom::FixedPoint::from(width),
 			height: mp4_atom::FixedPoint::from(height),
 			..Default::default()
@@ -608,11 +640,16 @@ fn build_video_trak(
 	}
 }
 
-fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
+fn build_audio_trak(track_id: u32, timescale: u32, sample_entry: mp4_atom::Codec) -> mp4_atom::Trak {
 	mp4_atom::Trak {
 		tkhd: mp4_atom::Tkhd {
 			track_id,
 			enabled: true,
+			in_movie: true,
+			duration: UNKNOWN_DURATION,
+			// Full volume (8.8 fixed point). The default is 0, which is a muted track, and
+			// only an audio track carries a meaningful value.
+			volume: mp4_atom::FixedPoint::from(1),
 			..Default::default()
 		},
 		mdia: build_mdia(timescale, b"soun", false, sample_entry),
@@ -620,10 +657,66 @@ fn build_audio_trak(track_id: u32, timescale: u64, sample_entry: mp4_atom::Codec
 	}
 }
 
-fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
+/// Assemble a fragmented init segment (ftyp + moov) around already-built traks.
+///
+/// `ftyp` is the one a passed-through CMAF init carried, if any; otherwise a plain `isom` one
+/// is synthesized. The `mvhd` is ours either way, so it declares the unknown duration and the
+/// movie timescale of the assembled init rather than of whatever source a trak came from.
+/// [`extract_init`] normalizes a passed-through trak to match.
+pub(crate) fn encode_init(
+	ftyp: Option<mp4_atom::Ftyp>,
+	traks: Vec<mp4_atom::Trak>,
+	trexs: Vec<mp4_atom::Trex>,
+) -> Result<Bytes> {
+	use mp4_atom::Encode;
+
+	let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
+		major_brand: b"isom".into(),
+		minor_version: 0x200,
+		compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
+	});
+	let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
+	let next_track_id = traks.iter().map(|t| t.tkhd.track_id).max().unwrap_or(0) + 1;
+
+	let moov = mp4_atom::Moov {
+		mvhd: mp4_atom::Mvhd {
+			timescale,
+			duration: UNKNOWN_DURATION,
+			// Normal playback rate and full volume (16.16 and 8.8 fixed point). Both default
+			// to 0, which declares a stopped, muted presentation.
+			rate: mp4_atom::FixedPoint::from(1),
+			volume: mp4_atom::FixedPoint::from(1),
+			// The next id a track could take, so it must be past every one already present.
+			next_track_id,
+			..Default::default()
+		},
+		trak: traks,
+		mvex: (!trexs.is_empty()).then(|| mp4_atom::Mvex {
+			trex: trexs,
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	let mut buf = Vec::new();
+	ftyp.encode(&mut buf)?;
+	moov.encode(&mut buf)?;
+	Ok(Bytes::from(buf))
+}
+
+/// Narrow a media timescale to the 32-bit `mdhd` field, rejecting what would truncate.
+///
+/// `moq_net::Timescale` permits the whole QUIC varint range, so a caller-supplied scale can be
+/// wider than the field. Truncating would put the init segment and the fragments on different
+/// timelines, silently, so refuse instead.
+fn mdhd_timescale(timescale: u64) -> Result<u32> {
+	u32::try_from(timescale).map_err(|_| Error::TimescaleTooLarge(timescale))
+}
+
+fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: mp4_atom::Codec) -> mp4_atom::Mdia {
 	mp4_atom::Mdia {
 		mdhd: mp4_atom::Mdhd {
-			timescale: timescale as u32,
+			timescale,
 			..Default::default()
 		},
 		hdlr: mp4_atom::Hdlr {
@@ -654,11 +747,21 @@ fn build_mdia(timescale: u64, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// Used by the fMP4 exporter when synthesizing an init segment for a
 /// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
 /// integer duration), falling back to 90 kHz (the MPEG-TS convention).
+///
+/// A framerate that scales to less than one tick takes the fallback too: zero and negative land
+/// on 0 through `as u64`, which is not a timescale anything accepts, and a non-finite one is
+/// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
+/// range a `Timescale` holds. A fractional tick count truncates rather than falling back, so
+/// 30.0005 fps gives 30000; the common broadcast rates (29.97, 59.94, 23.976) all land on a whole
+/// tick already.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	if let Some(fps) = config.framerate {
-		(fps * 1000.0) as u64
-	} else {
-		90000
+	let ticks = config
+		.framerate
+		.filter(|fps| fps.is_finite())
+		.map(|fps| (fps * 1000.0) as u64);
+	match ticks {
+		Some(ticks) if ticks > 0 => ticks,
+		_ => 90000,
 	}
 }
 
@@ -668,6 +771,117 @@ mod tests {
 
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
+	}
+
+	// An AAC-LC / 44.1 kHz / stereo AudioSpecificConfig, the catalog `description` shape.
+	fn aac_config(bitrate: Option<u64>) -> AudioConfig {
+		let mut config = AudioConfig::new(AudioCodec::AAC(hang::catalog::AAC { profile: 2 }), 44_100, 2);
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+		config.bitrate = bitrate;
+		config
+	}
+
+	/// The moov an encoded init segment carries, so a test asserts on what a player parses
+	/// rather than on the struct that went in.
+	fn moov(init: &Bytes) -> mp4_atom::Moov {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init.as_ref());
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
+			if let mp4_atom::Any::Moov(moov) = atom {
+				return moov;
+			}
+		}
+		panic!("no moov");
+	}
+
+	fn dec_config(trak: &mp4_atom::Trak) -> mp4_atom::esds::DecoderConfig {
+		match &trak.mdia.minf.stbl.stsd.codecs[0] {
+			mp4_atom::Codec::Mp4a(mp4a) => mp4a.esds.es_desc.dec_config,
+			other => panic!("expected mp4a, got {other:?}"),
+		}
+	}
+
+	// Safari and AVFoundation reject an all-zero DecoderConfigDescriptor on the *init* append,
+	// which ends the ManagedMediaSource and fails every append after it. The catalog bitrate is
+	// optional and real publishers omit it, so a synthesized esds must not lean on it.
+	#[test]
+	fn synthesized_aac_init_has_non_zero_bitrates() {
+		let inferred = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap());
+		assert_ne!(u32::from(inferred.buffer_size_db), 0);
+		assert_ne!(inferred.max_bitrate, 0);
+		assert_ne!(inferred.avg_bitrate, 0);
+
+		let stated = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(Some(96_000))).unwrap());
+		assert_eq!(stated.max_bitrate, 96_000, "the catalog's bitrate wins");
+		assert_eq!(stated.avg_bitrate, 96_000);
+
+		// A stated bitrate the field can't carry rebuilds the same all-zero descriptor, so it
+		// takes the fallback rather than the catalog.
+		for unusable in [Some(0), Some(u64::from(u32::MAX) + 1)] {
+			let config = dec_config(&synthesize_audio_trak(1, 44_100, &aac_config(unusable)).unwrap());
+			assert_eq!(config.max_bitrate, inferred.max_bitrate, "{unusable:?}");
+			assert_eq!(config.avg_bitrate, inferred.avg_bitrate, "{unusable:?}");
+		}
+	}
+
+	// `framerate * 1000` is 0 for a zero, negative or non-finite catalog framerate, and 0 is not
+	// a timescale: Timescale::new rejects it, so Muxer::video would fail to build at all.
+	#[test]
+	fn default_video_timescale_ignores_an_unusable_framerate() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		for unusable in [0.0, -30.0, f64::NAN, f64::INFINITY, 0.0005] {
+			config.framerate = Some(unusable);
+			assert_eq!(default_video_timescale(&config), 90_000, "{unusable}");
+		}
+
+		config.framerate = Some(30.0);
+		assert_eq!(default_video_timescale(&config), 30_000);
+	}
+
+	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a
+	// strict parser: VLC refuses to play one.
+	#[test]
+	fn synthesized_init_declares_unknown_duration() {
+		let trak = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		assert_eq!(trak.tkhd.duration, u64::MAX);
+
+		let init = encode_init(None, vec![trak], Vec::new()).unwrap();
+		let moov = moov(&init);
+		assert_eq!(moov.mvhd.duration, u64::MAX);
+		assert_eq!(moov.trak[0].tkhd.duration, u64::MAX);
+	}
+
+	// The header defaults are all the "off" value: a track the presentation doesn't claim, a
+	// stopped playback rate, a muted volume, and a next id that collides with the track already
+	// there. A strict player is entitled to act on any of them.
+	#[test]
+	fn synthesized_init_headers_describe_a_playable_presentation() {
+		let audio = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		let init = encode_init(None, vec![audio], Vec::new()).unwrap();
+		let moov = moov(&init);
+
+		assert_eq!(moov.mvhd.rate.integer(), 1, "normal playback rate");
+		assert_eq!(moov.mvhd.volume.integer(), 1, "full volume");
+		assert_eq!(moov.mvhd.next_track_id, 2, "past the only track id");
+
+		let tkhd = &moov.trak[0].tkhd;
+		assert!(tkhd.enabled && tkhd.in_movie, "flags 0x000003");
+		assert_eq!(tkhd.volume.integer(), 1, "an audio track carries the volume");
+	}
+
+	// A video track's volume stays 0: the field only means something for audio.
+	#[test]
+	fn synthesized_video_init_sets_the_track_flags() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(30.0);
+		let video = synthesize_video_trak(1, 30_000, &config, None).unwrap();
+		let init = encode_init(None, vec![video], Vec::new()).unwrap();
+		let moov = moov(&init);
+
+		let tkhd = &moov.trak[0].tkhd;
+		assert!(tkhd.enabled && tkhd.in_movie, "flags 0x000003");
+		assert_eq!(tkhd.volume.integer(), 0);
 	}
 
 	#[test]

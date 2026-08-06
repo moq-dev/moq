@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.7...moq-relay-v0.14.8) - 2026-08-06
+
+### Added
+
+- *(moq-native)* classify, pace, and publish accept(2) failures ([#2687](https://github.com/moq-dev/moq/pull/2687))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+- *(relay)* add Internal::serve(router) for embedders ([#2678](https://github.com/moq-dev/moq/pull/2678))
+
+### Fixed
+
+- *(net)* let the accepting side pick the retention window when the wire carries none ([#2657](https://github.com/moq-dev/moq/pull/2657))
+
+## [0.14.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.6...moq-relay-v0.14.7) - 2026-08-05
+
+### Added
+
+- *(relay)* assemble the relay in `Relay::load` instead of `main` ([#2639](https://github.com/moq-dev/moq/pull/2639))
+
+### Fixed
+
+- *(relay)* fail the WebSocket handshake when no subprotocol matches ([#2625](https://github.com/moq-dev/moq/pull/2625))
+- *(native)* bound Client::connect so a silent peer can't wedge reconnect ([#2622](https://github.com/moq-dev/moq/pull/2622))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.14.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.14.5...moq-relay-v0.14.6) - 2026-08-03
 
 ### Fixed

@@ -20,6 +20,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// RELAY_COST, from the MoQ Cluster extension.
+	RelayCost = super::cluster::RELAY_COST,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -31,6 +33,8 @@ pub enum ParameterBytes {
 	AuthorizationToken = 3,
 	Authority = 5,
 	Implementation = 7,
+	/// RELAY_HOPS, from the MoQ Cluster extension.
+	RelayHops = super::cluster::RELAY_HOPS,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -498,15 +502,18 @@ macro_rules! decode_params {
 					}
 				};
 
-				match _key {
-					$($key => {
+				// An if-chain rather than a `match`, so a key can be a named constant:
+				// the macro captures it as an expression, which is not a legal pattern.
+				$(
+					if _key == $key {
 						if $name.is_some() {
 							return Err($crate::coding::DecodeError::Duplicate);
 						}
 						$name = Some(<$ty as $crate::ietf::Param>::param_decode($r, _version)?);
-					})*
-					_ => return Err($crate::coding::DecodeError::InvalidValue),
-				}
+						continue;
+					}
+				)*
+				return Err($crate::coding::DecodeError::InvalidValue);
 			}
 		}
 

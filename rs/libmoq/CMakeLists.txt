@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.21)
-project(moq VERSION 0.6.1 LANGUAGES C)
+
+# release-plz owns the version and only ever bumps Cargo.toml, so read it from
+# there. A copy here goes stale the next release and stamps a wrong version into
+# the installed find_package(moq) config, where it silently breaks version
+# constraints rather than failing the build.
+file(READ "${CMAKE_CURRENT_LIST_DIR}/Cargo.toml" _cargo_toml)
+string(REGEX MATCH "\nversion[ \t]*=[ \t]*\"([^\"]+)\"" _match "${_cargo_toml}")
+set(_version "${CMAKE_MATCH_1}")
+unset(_cargo_toml)
+unset(_match)
+
+if(NOT _version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Unsupported version '${_version}' in rs/libmoq/Cargo.toml (project() takes a numeric x.y.z)")
+endif()
+
+project(moq VERSION ${_version} LANGUAGES C)
 
 option(BUILD_RUST_LIB "Build the Rust library using cargo" ON)
 
@@ -118,6 +133,11 @@ if(PROJECT_IS_TOP_LEVEL)
 
     # Generate and install CMake package config files
     include(CMakePackageConfigHelpers)
+
+    # The remaining placeholders in cmake/moq-config.cmake.in. rs/libmoq/build.sh
+    # and nix/overlay.nix fill the same two in for the release artifacts.
+    get_filename_component(LIB_FILE "${RUST_LIB}" NAME)
+    set(VERSION "${PROJECT_VERSION}")
 
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-config.cmake.in

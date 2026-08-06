@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "moq-service.h"
+#include "moq-settings.h"
 
 // TODO: Define supported codecs.
 const char *audio_codecs[] = {"aac", "opus", nullptr};
@@ -25,7 +26,14 @@ obs_properties_t *MoQService::Properties()
 	obs_properties_add_text(ppts, "server", "URL", OBS_TEXT_DEFAULT);
 	obs_properties_add_text(ppts, "key", "Path (optional)", OBS_TEXT_DEFAULT);
 
+	MoQSettings::AddProperties(ppts);
+
 	return ppts;
+}
+
+void MoQService::Defaults(obs_data_t *settings)
+{
+	MoQSettings::Defaults(settings);
 }
 
 void MoQService::ApplyEncoderSettings(obs_data_t *video_settings, obs_data_t *)
@@ -79,6 +87,9 @@ void register_moq_service()
 	};
 	info.get_properties = [](void *) -> obs_properties_t * {
 		return MoQService::Properties();
+	};
+	info.get_defaults = [](obs_data_t *settings) {
+		MoQService::Defaults(settings);
 	};
 	info.get_protocol = [](void *) -> const char * {
 		return "MoQ";

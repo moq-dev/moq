@@ -23,6 +23,7 @@ public:
 private slots:
 	void ToggleStream();
 	void UpdateStatus();
+	void OpenAdvanced();
 
 private:
 	void StartStream();
@@ -40,7 +41,14 @@ private:
 	QLineEdit *urlEdit;
 	QLineEdit *pathEdit;
 	QPushButton *button;
+	QPushButton *advancedButton;
 	QLabel *status;
+
+	// Advanced connection settings, edited in their own window so the dock stays
+	// small. Persisted alongside the URL and path, and copied into the throwaway
+	// service at StartStream so the output reads them the same way it does for a
+	// service configured through Settings -> Stream.
+	OBSDataAutoRelease advanced;
 
 	QTimer *pollTimer;
 

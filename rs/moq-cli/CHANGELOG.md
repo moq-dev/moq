@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.7...moq-cli-v0.9.8) - 2026-08-06
+
+### Added
+
+- *(hang)* declare a configurable 30s retention on media tracks, and fix relayed cache misses ([#2615](https://github.com/moq-dev/moq/pull/2615))
+
+### Fixed
+
+- *(libmoq)* unbreak the Linux C link list, and make VAAPI opt-in ([#2669](https://github.com/moq-dev/moq/pull/2669))
+
+## [0.9.7](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.6...moq-cli-v0.9.7) - 2026-08-05
+
+### Added
+
+- *(moq-video)* resize Direct3D11 textures on the GPU ([#2601](https://github.com/moq-dev/moq/pull/2601))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.9.6](https://github.com/moq-dev/moq/compare/moq-cli-v0.9.5...moq-cli-v0.9.6) - 2026-08-03
 
 ### Added

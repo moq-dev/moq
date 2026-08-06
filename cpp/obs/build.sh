@@ -110,8 +110,8 @@ if [[ -n "$VERSION" ]]; then
 fi
 if [[ -n "$MOQ_RELEASE" ]]; then
     # Empty MOQ_LOCAL forces CMake's release-download branch; MOQ_VERSION and
-    # MOQ_TARGET steer it at this target's archive (the presets hard-code an
-    # x86_64/stale default). MOQ_ARCHIVE is correct per preset already.
+    # MOQ_TARGET steer it at this target's archive. MOQ_ARCHIVE is correct per
+    # preset already.
     echo "Linking libmoq release v$MOQ_RELEASE ($TARGET)"
     CONFIGURE_ARGS+=(-DMOQ_LOCAL= "-DMOQ_VERSION=$MOQ_RELEASE" "-DMOQ_TARGET=$TARGET")
 fi

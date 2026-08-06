@@ -12,7 +12,12 @@ import { type PoolProps, poolKey, sessionPool } from "./pool.ts";
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
 
-/** Exponential backoff settings for the reconnect loop; see `reload` on the connect options. */
+/**
+ * Exponential backoff settings for the reconnect loop; see {@link ConnectProps.reload}.
+ *
+ * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
+ * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the loop.
+ */
 export type ReloadDelay = {
 	/** The delay in milliseconds before reconnecting (default: 1000). */
 	initial: DOMHighResTimeStamp;
@@ -20,13 +25,12 @@ export type ReloadDelay = {
 	/** The multiplier for the delay (default: 2). */
 	multiplier: number;
 
-	/** The maximum delay in milliseconds (default: 30000). */
+	/** The maximum delay in milliseconds (default: 5000). */
 	max: DOMHighResTimeStamp;
 
 	/**
 	 * Maximum total time in milliseconds to spend retrying before giving up (default:
-	 * 300000, 5 minutes). Resets after each successful connection. Set to 0 for
-	 * unlimited retries.
+	 * 10000). Resets after each successful connection. Set to 0 for unlimited retries.
 	 */
 	timeout?: DOMHighResTimeStamp;
 };

@@ -1,4 +1,4 @@
-//! Intel/AMD VAAPI hardware backend via the `moq-vaapi` crate (Linux, always-on).
+//! Intel/AMD VAAPI hardware backend via the opt-in `moq-vaapi` crate on Linux.
 //!
 //! `moq-vaapi` is a focused VA-API H.264 encoder vendored and trimmed from
 //! cros-libva + discord/cros-codecs. It takes tightly-packed NV12 and emits an

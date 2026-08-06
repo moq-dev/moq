@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Container as CatalogContainer, VideoConfig};
-use mp4_atom::Encode;
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::Frame;
@@ -171,34 +170,7 @@ impl Muxer {
 			CatalogContainer::Unknown(unknown) => return Err(crate::Error::unsupported_container(unknown)),
 		}
 
-		let ftyp = ftyp.unwrap_or(mp4_atom::Ftyp {
-			major_brand: b"isom".into(),
-			minor_version: 0x200,
-			compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
-		});
-		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(1000);
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale,
-				..Default::default()
-			},
-			trak: traks,
-			mvex: if trexs.is_empty() {
-				None
-			} else {
-				Some(mp4_atom::Mvex {
-					trex: trexs,
-					..Default::default()
-				})
-			},
-			..Default::default()
-		};
-
-		let mut buf = Vec::new();
-		ftyp.encode(&mut buf).map_err(Error::from)?;
-		moov.encode(&mut buf).map_err(Error::from)?;
-		Ok(Some(Bytes::from(buf)))
+		Ok(Some(super::encode_init(ftyp, traks, trexs)?))
 	}
 
 	/// Encode frames as one moof+mdat fragment.
@@ -337,5 +309,19 @@ mod tests {
 		let decoded = super::super::decode(fragment, timescale).unwrap();
 		let first = decoded[0].duration.unwrap().as_micros();
 		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
+	}
+
+	// mdhd.timescale is a 32-bit field, but the video timescale is `framerate * 1000`, so an
+	// absurd catalog framerate overflows it. Truncating would leave the init and the fragments
+	// on different timelines with no error.
+	#[test]
+	fn init_rejects_a_catalog_scale_too_large_for_mdhd() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(5_000_000.0); // 5e9 ticks, past u32::MAX
+		let err = Muxer::video(&config).unwrap().init().unwrap_err();
+		assert!(
+			matches!(err, crate::Error::Cmaf(Error::TimescaleTooLarge(_))),
+			"got {err:?}"
+		);
 	}
 }
