@@ -196,7 +196,7 @@ impl Relay {
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad
 		// key or an mDNS failure would otherwise release the units depending on a
 		// relay that is about to exit.
-		let startup = cluster.start().await.context("cluster failed to start")?;
+		let started = cluster.clone().start().await.context("cluster failed to start")?;
 
 		#[cfg(unix)]
 		// Notify systemd that we're ready after all initialization is complete
@@ -208,7 +208,7 @@ impl Relay {
 		let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
 		tokio::select! {
-			Err(err) = cluster.clone().run(startup) => Err(err).context("cluster failed"),
+			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.run() => Err(err).context("web server failed"),
 			Err(err) = internal.run() => Err(err).context("internal server failed"),
 			Err(err) = serve(server, cluster, auth, shutdown.clone()) => Err(err).context("server failed"),

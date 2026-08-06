@@ -441,30 +441,47 @@ pub struct LanConfig {
 /// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
 /// methods. A cluster without a client can serve local sessions but cannot
 /// dial remote peers.
-/// The validated config and bound resources [`Cluster::run`] needs, produced by
-/// [`Cluster::start`].
+/// A [`Cluster`] whose config is validated and whose resources are bound,
+/// produced by [`Cluster::start`] and run with [`run`](Self::run).
 ///
-/// Opaque: it exists so the fallible half of starting a cluster happens before
-/// the process signals readiness, not to be inspected. Holding one means the
-/// config parsed and the LAN advertisement (if any) is live, so dropping it
-/// without running retires that advertisement.
-pub struct Startup {
-	/// `None` when nothing is configured, so [`Cluster::run`] returns immediately.
+/// It owns the cluster it came from rather than being handed back to one. The
+/// two carry matched state (a resolved node URL, a token, a live mDNS
+/// advertisement), so letting a caller pair them up would let one cluster run on
+/// another's identity, or a standalone startup silently disable a configured
+/// cluster. Owning it makes that unrepresentable instead of merely wrong.
+///
+/// Holding one means the config parsed and the LAN advertisement (if any) is
+/// live, so dropping it without running retires that advertisement.
+pub struct Started {
+	cluster: Cluster,
+	/// `None` when nothing is configured, so [`run`](Self::run) returns immediately.
 	work: Option<Work>,
+}
+
+impl Started {
+	/// Run the cluster until it stops.
+	///
+	/// Returns immediately when nothing is configured (standalone).
+	pub async fn run(self) -> anyhow::Result<()> {
+		match self.work {
+			Some(work) => self.cluster.run_work(work).await,
+			None => Ok(()),
+		}
+	}
 }
 
 /// Hand-written because the bound mDNS advertisement isn't `Debug`, and the
 /// contents are internal anyway: what a reader wants is whether there is
 /// anything to run.
-impl std::fmt::Debug for Startup {
+impl std::fmt::Debug for Started {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Startup")
+		f.debug_struct("Started")
 			.field("standalone", &self.work.is_none())
 			.finish()
 	}
 }
 
-/// The resolved settings behind a [`Startup`] that has work to do.
+/// The resolved settings behind a [`Started`] that has work to do.
 struct Work {
 	gossip: bool,
 	node: Option<String>,
@@ -572,7 +589,7 @@ impl Cluster {
 
 	/// Attach a QUIC client used to dial cluster peers.
 	///
-	/// Required when `config.connect` is non-empty; [`run`](Self::run) returns
+	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
 	/// an error otherwise.
 	pub fn with_client(mut self, client: moq_native::Client) -> Self {
 		self.client = Some(client);
@@ -668,10 +685,10 @@ impl Cluster {
 		false
 	}
 
-	/// Validate the cluster config and bind anything that can fail, returning the
-	/// [`Startup`] that [`run`](Self::run) consumes.
+	/// Validate the cluster config and bind anything that can fail, returning a
+	/// [`Started`] to run.
 	///
-	/// Split from `run` because `run`'s future is first polled well after the
+	/// Split from running because that future is first polled well after the
 	/// process reports itself ready. Anything fallible left inside it (a malformed
 	/// node URL, an unreadable token file, a bad LAN key, an mDNS bind failure)
 	/// would release systemd's dependent units on a relay that is about to exit.
@@ -679,7 +696,7 @@ impl Cluster {
 	///
 	/// Bails when `mesh` gossip is on without `node`, or when peers are configured
 	/// to dial but no client was attached via [`with_client`](Self::with_client).
-	pub async fn start(&self) -> anyhow::Result<Startup> {
+	pub async fn start(self) -> anyhow::Result<Started> {
 		let (gossip, node) = self.resolve_mesh()?;
 		anyhow::ensure!(
 			!gossip || node.is_some(),
@@ -710,7 +727,10 @@ impl Cluster {
 		let has_work = can_dial || gossip;
 		if !has_work {
 			tracing::info!("no cluster peers configured; running standalone");
-			return Ok(Startup { work: None });
+			return Ok(Started {
+				work: None,
+				cluster: self,
+			});
 		}
 
 		if can_dial {
@@ -759,7 +779,7 @@ impl Cluster {
 			false => None,
 		};
 
-		Ok(Startup {
+		Ok(Started {
 			work: Some(Work {
 				gossip,
 				node,
@@ -768,21 +788,18 @@ impl Cluster {
 				#[cfg(feature = "cluster-lan")]
 				discovery,
 			}),
+			cluster: self,
 		})
 	}
 
-	/// Runs the cluster event loop, using the [`Startup`] from
-	/// [`start`](Self::start).
+	/// Runs the cluster event loop against the work [`start`](Self::start)
+	/// resolved.
 	///
-	/// Modes are derived from config: standalone (no work) returns immediately;
-	/// passive rendezvous (`node` + `mesh` gossip, no peers to dial) parks after
-	/// publishing self-registration and does not require a QUIC client; active
-	/// (`connect` / `connect_api` set) dials peers and, when `mesh` gossip is on,
-	/// also advertises `node` and runs discovery.
-	pub async fn run(self, startup: Startup) -> anyhow::Result<()> {
-		let Some(work) = startup.work else {
-			return Ok(());
-		};
+	/// Modes are derived from config: passive rendezvous (`node` + `mesh` gossip,
+	/// no peers to dial) parks after publishing self-registration and does not
+	/// require a QUIC client; active (`connect` / `connect_api` set) dials peers
+	/// and, when `mesh` gossip is on, also advertises `node` and runs discovery.
+	async fn run_work(self, work: Work) -> anyhow::Result<()> {
 		let Work {
 			gossip,
 			node,
@@ -801,6 +818,10 @@ impl Cluster {
 		// peers that truly left.
 		let dialed = DialMap::default();
 		let mut tasks = tokio::task::JoinSet::new();
+		// Tasks whose ending is a failure rather than an ordinary lifecycle event,
+		// so their result has to be looked at instead of drained.
+		#[allow(unused_mut, reason = "only the cluster-lan feature spawns into it")]
+		let mut supervised: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
 			let key = canonicalize_peer_key(peer);
@@ -842,9 +863,11 @@ impl Cluster {
 			let this = self.clone();
 			let token = token.clone();
 			let dialed = dialed.clone();
-			tasks.spawn(async move {
+			// Supervised rather than fire-and-forget: a dial task ending is ordinary
+			// (that peer went away), but discovery ending is the relay going blind.
+			supervised.spawn(async move {
 				this.run_mdns(canonicalize_peer_key(&node), token, dialed, discovery)
-					.await;
+					.await
 			});
 		}
 
@@ -877,13 +900,22 @@ impl Cluster {
 			None
 		};
 
-		if tasks.is_empty() {
+		if tasks.is_empty() && supervised.is_empty() {
 			// Passive rendezvous: park to keep `self_registration` alive. The
 			// process still exits via the other arms of `tokio::select!` in main.
 			std::future::pending::<()>().await
 		}
 
-		while tasks.join_next().await.is_some() {}
+		loop {
+			tokio::select! {
+				// A supervised task ending at all is a failure, so its result decides
+				// the cluster's. A panic surfaces too rather than being swallowed.
+				Some(res) = supervised.join_next() => res.context("cluster task panicked")??,
+				// A dial task ending is ordinary: that peer went away.
+				Some(_) = tasks.join_next() => {}
+				else => break,
+			}
+		}
 
 		// Deliberate shutdown: finish the registration rather than dropping it, so
 		// there is no dropped-without-finish warning.
@@ -979,7 +1011,7 @@ impl Cluster {
 		token: String,
 		dialed: DialMap,
 		mut discovery: moq_native::mdns::Discovery,
-	) {
+	) -> anyhow::Result<()> {
 		use moq_native::mdns::Event;
 
 		while let Some(event) = discovery.recv().await {
@@ -1018,6 +1050,12 @@ impl Cluster {
 				_ => continue,
 			}
 		}
+
+		// Discovery only ends if the daemon or its channel died. The relay would
+		// otherwise keep serving, still reporting ready, while permanently blind to
+		// LAN peers. Startup refuses to come up without mDNS, so losing it later is
+		// the same failure arriving late.
+		anyhow::bail!("LAN discovery stopped unexpectedly");
 	}
 
 	/// Drive `--cluster-connect-api`: an http(s) URL is polled, a local path (or
@@ -1762,9 +1800,8 @@ mod tests {
 		// `cluster` so we can later check that the registration was published.
 		let mut watcher = cluster.origin.consume().announced();
 
-		let cluster_run = cluster.clone();
-		let startup = cluster_run.start().await.expect("cluster start");
-		let mut handle = tokio::spawn(async move { cluster_run.run(startup).await });
+		let started = cluster.clone().start().await.expect("cluster start");
+		let mut handle = tokio::spawn(async move { started.run().await });
 
 		// Give the runtime a moment to execute the synchronous setup work.
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

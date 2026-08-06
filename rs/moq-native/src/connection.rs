@@ -556,7 +556,6 @@ impl Connection {
 		}
 	}
 
-<<<<<<< HEAD
 	/// Stop the loop now, for every clone, closing the live session with `err`.
 	///
 	/// `err` is the code the peer sees. Locally this is still a deliberate stop, so
@@ -1542,6 +1541,7 @@ mod tests {
 			state: kio::Producer::default(),
 			send_bw: BandwidthProducer::new(),
 			recv_bw: BandwidthProducer::new(),
+			closed: CloseGuard::default(),
 		}
 	}
 
