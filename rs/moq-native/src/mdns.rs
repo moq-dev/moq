@@ -79,6 +79,11 @@ enum ErrorKind {
 	#[error("secret must be 64 hexadecimal characters or a path to a file containing them, and {0} is neither")]
 	SecretFile(String, #[source] std::io::Error),
 
+	#[error(
+		"a secret needs a fingerprint or a node URL to bind its proof to, otherwise the whole record can be replayed from another address"
+	)]
+	UnboundSecret,
+
 	#[error("no network interface could announce on the LAN within {0:?}")]
 	NoInterface(std::time::Duration),
 
@@ -266,7 +271,24 @@ impl Config {
 	/// Use it when this process is reachable by name with a certificate peers
 	/// already trust. It also becomes the discovery identity, so a restart keeps
 	/// the same one.
-	pub fn with_node(mut self, node: Url) -> Self {
+	///
+	/// Userinfo and the fragment are stripped before the URL goes out: the record
+	/// is multicast in the clear, and a secret authenticates it rather than hiding
+	/// it, so a `user:password@` would be published to everyone on the network.
+	/// Neither means anything to a peer dialing this URL, so dropping them costs
+	/// nothing.
+	///
+	/// The **query is published verbatim**, because callers use it to carry dial
+	/// parameters a peer needs (the relay prices links with `?cost=`). Nothing in
+	/// this module can tell a parameter from a credential, so a caller that puts
+	/// one in the query is publishing it; sanitize there, where the vocabulary is
+	/// known.
+	pub fn with_node(mut self, mut node: Url) -> Self {
+		node.set_fragment(None);
+		// These only fail on a URL that cannot have userinfo (e.g. `mailto:`),
+		// which is already not something a peer could dial.
+		node.set_username("").ok();
+		node.set_password(None).ok();
 		self.node = Some(node);
 		self
 	}
@@ -382,6 +404,17 @@ pub struct Discovery {
 
 impl Discovery {
 	async fn new(config: Config) -> Result<Self> {
+		// A proof binds to the record's public fields, and every one of them can be
+		// copied: mDNS has no authentication, so a responder can answer with another
+		// host's instance name, port, nonce, and proof while its own A records point
+		// at itself. What it cannot forge is a certificate it has no key for, or a
+		// name it does not control. Without one of those the record verifies from
+		// anywhere and discovery reports the impostor as a member, so refuse the
+		// combination rather than advertising a proof that proves nothing.
+		if config.secret.is_some() && config.fingerprint.is_none() && config.node.is_none() {
+			return Err(Error(ErrorKind::UnboundSecret));
+		}
+
 		let instance = format!("{:016x}", rand::random::<u64>());
 		let id = match &config.node {
 			Some(node) => node.to_string(),

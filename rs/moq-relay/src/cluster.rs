@@ -1253,7 +1253,12 @@ impl Cluster {
 		// a failed attempt, so an A-redirects-to-B-redirects-to-A loop escalates
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
-		let mut reconnect = client.connect(url.clone());
+		//
+		// Forced on regardless of `--client-reconnect`: that flag is about the
+		// relay's own upstream dial, and a cluster peer link that stopped following
+		// GOAWAY would break rolling handoff, redialing the drained URL after the
+		// old session finally closed instead of migrating to the replacement.
+		let mut reconnect = client.with_reconnect(true).connect(url.clone());
 		let mut connection = None;
 		loop {
 			match reconnect.status().await? {
@@ -1277,12 +1282,23 @@ impl Cluster {
 async fn lan_discovery(node: &str, secret: &str) -> anyhow::Result<moq_native::mdns::Discovery> {
 	let url = peer_url(node)?;
 	// The advertisement is multicast in the clear. The secret authenticates the
-	// record, it does not hide it, so an inline token here would be handed to
-	// every listener on the network.
+	// record, it does not hide it, so anything in the query is handed to every
+	// listener on the network.
+	//
+	// An allowlist rather than a `jwt` denylist: `cost` is the only query param a
+	// peer needs off the advertised URL, and listing what may go out means the
+	// next credential-bearing param is refused the day it is added instead of
+	// leaking until someone remembers to ban it.
+	let published: Vec<String> = url
+		.query_pairs()
+		.map(|(key, _)| key.into_owned())
+		.filter(|key| key != "cost")
+		.collect();
 	anyhow::ensure!(
-		!url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()),
-		"`--cluster-node` carries an inline `?jwt=`, which `--cluster-lan` would broadcast in the clear. \
-		 Drop it from the node URL and pass the credential with `--cluster-token` instead."
+		published.is_empty(),
+		"`--cluster-node` carries query parameters that `--cluster-lan` would broadcast in the clear ({}). \
+		 Only `?cost=` may be advertised; pass credentials with `--cluster-token` instead.",
+		published.join(", ")
 	);
 	let port = url.port_or_known_default().unwrap_or(443);
 	let secret = moq_native::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
