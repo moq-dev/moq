@@ -2916,7 +2916,7 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_surfaces_a_session_level_rejection() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
@@ -2945,7 +2945,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn abort_carries_its_code_to_the_peer() {
-	let (mut server, addr) = test_server();
+	let (mut server, addr) = test_server().await;
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let (reason_tx, reason_rx) = tokio::sync::oneshot::channel();

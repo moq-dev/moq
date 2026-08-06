@@ -579,6 +579,9 @@ impl Server {
 
 	/// The body of [`Listener::close`].
 	async fn shutdown(&mut self) {
+		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+		self.streams.shutdown().await;
+
 		#[cfg(feature = "noq")]
 		if let Some(noq) = self.noq.as_mut() {
 			noq.close();
@@ -602,8 +605,6 @@ impl Server {
 		{
 			let _ = self.websocket.take();
 		}
-		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
-		unreachable!("no QUIC backend compiled");
 	}
 }
 
@@ -632,8 +633,10 @@ impl Listener {
 	/// Close every listener, giving in-flight connections a moment to see the
 	/// shutdown.
 	///
+	/// Consumes the listener so its bound sockets are released before this returns.
+	///
 	/// [`accept`](Self::accept) calls this for you on Ctrl-C.
-	pub async fn close(&mut self) {
+	pub async fn close(mut self) {
 		self.server.shutdown().await;
 	}
 
@@ -834,6 +837,15 @@ impl StreamListeners {
 		match self.rx.as_mut() {
 			Some(rx) => rx.recv().await,
 			None => std::future::pending().await,
+		}
+	}
+
+	/// Stop every accept task and wait until it has released its listener.
+	async fn shutdown(&mut self) {
+		self.rx = None;
+		for task in self.tasks.drain(..) {
+			task.abort();
+			let _ = task.await;
 		}
 	}
 }
@@ -1234,6 +1246,26 @@ mod tests {
 
 		assert!(server.listen().await.is_err(), "the unix bind must fail");
 		std::net::TcpListener::bind(("127.0.0.1", port)).expect("the tcp port must be free again");
+	}
+
+	/// Closing consumes the listener and immediately releases its stream sockets.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn close_releases_stream_listeners() {
+		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
+		let addr = probe.local_addr().expect("probe addr");
+		drop(probe);
+
+		let mut config = ServerConfig::default();
+		config.tcp.bind = Some(addr);
+		let listener = Server::new(config)
+			.expect("stream-only server")
+			.listen()
+			.await
+			.expect("listen");
+
+		listener.close().await;
+		std::net::TcpListener::bind(addr).expect("close must release the tcp port");
 	}
 
 	/// The stream listeners must hand accepted sessions to the *configured*

@@ -296,12 +296,13 @@ fn split_credential(request: &str) -> (&str, Option<&str>) {
 /// [`moq_native::Server::serve_publish`] and its sibling already do the ordinary
 /// half, so this exists only to interleave the two.
 pub async fn serve(
-	mut server: moq_native::Server,
+	server: moq_native::Server,
 	lan: Lan,
 	origin: moq_net::origin::Producer,
 	direction: crate::Direction,
 	public: bool,
 ) -> anyhow::Result<()> {
+	let mut server = server.listen().await.context("failed to bind listeners")?;
 	let mut tasks = tokio::task::JoinSet::new();
 
 	while let Some(request) = server.accept().await {
