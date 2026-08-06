@@ -4,11 +4,21 @@ use std::time::Duration;
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
 use moq_net::kio;
+use rand::RngExt;
 use url::Url;
 
 use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
+///
+/// This decides how long to wait between reconnect attempts and when to give up. The delays carry
+/// jitter, so a fleet knocked offline together doesn't reconnect in lockstep.
+///
+/// [`timeout`](Self::timeout) is what ends a hopeless loop: every failure rides the same backoff,
+/// and the short default budget is what surfaces a broken target instead of hiding it. The only
+/// failures short-circuited are answers a server actually gave (an auth rejection, or a CONNECT
+/// status that isn't an invitation to retry). A zero timeout removes the backstop, so it belongs
+/// only where an unattended process must outlive an outage of any length.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -32,7 +42,7 @@ pub struct Backoff {
 	#[arg(
 		id = "backoff-max",
 		long,
-		default_value = "30s",
+		default_value = "5s",
 		env = "MOQ_BACKOFF_MAX",
 		value_parser = humantime::parse_duration,
 	)]
@@ -46,7 +56,7 @@ pub struct Backoff {
 	#[arg(
 		id = "backoff-timeout",
 		long,
-		default_value = "5m",
+		default_value = "10s",
 		env = "MOQ_BACKOFF_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
@@ -59,8 +69,8 @@ impl Default for Backoff {
 		Self {
 			initial: Duration::from_secs(1),
 			multiplier: 2,
-			max: Duration::from_secs(30),
-			timeout: Duration::from_secs(300),
+			max: Duration::from_secs(5),
+			timeout: Duration::from_secs(10),
 		}
 	}
 }
@@ -76,6 +86,15 @@ impl Backoff {
 			true => Duration::MAX,
 			false => self.timeout.saturating_add(Duration::from_secs(1)),
 		}
+	}
+}
+
+/// When a reconnect sequence gives up, or `None` when [`Backoff::timeout`] is zero and it never
+/// does. Measured from now, so it covers the connect attempts as well as the waits between them.
+fn deadline_from(backoff: &Backoff) -> Option<tokio::time::Instant> {
+	match backoff.timeout.is_zero() {
+		true => None,
+		false => Some(tokio::time::Instant::now() + backoff.timeout),
 	}
 }
 
@@ -99,7 +118,8 @@ struct State {
 	status: Option<Status>,
 	/// The negotiated MoQ version of the live session, or `None` when disconnected.
 	version: Option<Version>,
-	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
+	/// Set when the reconnect loop permanently gives up: the backoff timeout expiring, or a server
+	/// answer that redialing cannot change.
 	error: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`ConnectionStatsReader`] to snapshot live connection stats.
@@ -125,7 +145,11 @@ impl ConnectionStatsReader {
 /// Handle to a background reconnect loop.
 ///
 /// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
+/// backoff until [`Backoff::timeout`] runs out. This loop is the only retry owner for the connection:
+/// a caller that rebuilds it on failure restarts the backoff from its initial delay, which turns the
+/// escalation back into a tight loop. Watch [`closed`](Self::closed) instead.
+///
+/// The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
 /// that transparently reconnects: [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`connected`](Self::connected)
@@ -180,20 +204,14 @@ impl Reconnect {
 		url: Url,
 		backoff: Backoff,
 	) -> crate::Result<()> {
+		// The escalating wait between attempts, and the instant the give-up budget expires. Both
+		// restart after a session that stayed healthy, so a one-off drop reconnects promptly. A zero
+		// timeout means no deadline at all: retry for as long as the process lives.
 		let mut delay = backoff.initial;
-		let mut retry_start = tokio::time::Instant::now();
+		let mut deadline = deadline_from(&backoff);
 		let mut last_error: Option<Error> = None;
 
 		loop {
-			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
-				let timeout = backoff.timeout;
-				let msg = match last_error {
-					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
-					None => format!("reconnect timed out after {timeout:?}"),
-				};
-				return Err(Error::Reconnect(msg));
-			}
-
 			tracing::info!(%url, "connecting");
 
 			match client.connect(url.clone()).await {
@@ -223,7 +241,7 @@ impl Reconnect {
 						// window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
 						delay = backoff.initial;
-						retry_start = tokio::time::Instant::now();
+						deadline = deadline_from(&backoff);
 						last_error = None;
 					} else {
 						// Connected then dropped almost immediately (e.g. the server accepts then
@@ -240,16 +258,42 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
+					// The two answers a server can give that redialing cannot change: it rejected our
+					// credentials, or it answered the CONNECT with a status that isn't an invitation
+					// to come back. Everything else falls through to the backoff, whose budget is
+					// what stops the loop.
 					if err.is_auth() {
+						return Err(err);
+					}
+					if let Some(status) = err.status()
+						&& !crate::error::status_retryable(status)
+					{
 						return Err(err);
 					}
 					last_error = Some(err);
 				}
 			}
 
-			tracing::warn!(%url, ?delay, "reconnecting after backoff");
-			tokio::time::sleep(delay).await;
-			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+			let now = tokio::time::Instant::now();
+			if deadline.is_some_and(|deadline| now >= deadline) {
+				let timeout = backoff.timeout;
+				let msg = match last_error {
+					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
+					None => format!("reconnect timed out after {timeout:?}"),
+				};
+				return Err(Error::Reconnect(msg));
+			}
+
+			// Jittered so a fleet knocked offline together doesn't reconnect on the same tick, and
+			// never past the deadline the budget promised.
+			let mut wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+			if let Some(deadline) = deadline {
+				wait = wait.min(deadline - now);
+			}
+			delay = (delay * backoff.multiplier.max(1)).min(backoff.max);
+
+			tracing::warn!(%url, ?wait, "reconnecting after backoff");
+			tokio::time::sleep(wait).await;
 		}
 	}
 
@@ -315,8 +359,9 @@ impl Reconnect {
 
 	/// Poll whether the reconnect loop has stopped.
 	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded), `Ready(Ok(()))` if
-	/// stopped by dropping the handle, `Pending` while it's still running.
+	/// `Ready(Err)` if it permanently gave up (a failure no retry can clear, or the backoff timeout
+	/// expiring), `Ready(Ok(()))` if stopped by dropping the handle, `Pending` while it's still
+	/// running.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
@@ -415,8 +460,8 @@ mod tests {
 		let backoff = Backoff::default();
 		assert_eq!(backoff.initial, Duration::from_secs(1));
 		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Duration::from_secs(30));
-		assert_eq!(backoff.timeout, Duration::from_secs(300));
+		assert_eq!(backoff.max, Duration::from_secs(5));
+		assert_eq!(backoff.timeout, Duration::from_secs(10));
 	}
 
 	/// The linger outlives the give-up timeout (so the reconnect error surfaces

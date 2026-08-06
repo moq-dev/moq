@@ -206,6 +206,13 @@ export class Subscriber {
 			let nextAnnounceId = 0n;
 			const announcedById = new Map<bigint, Path.Valid>();
 
+			// The publisher behind each path we currently advertise, so a restart can tell a
+			// route change (same publisher, subscriptions resume) from a replacement (a new
+			// generation took the path, nothing carries over). At most one advertisement per
+			// path is current, and every announce on this stream shares `prefix`, so the
+			// suffix is the key.
+			const advertised = new Map<Path.Valid, Origin | undefined>();
+
 			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
 				const announce = await Promise.race([
@@ -254,19 +261,61 @@ export class Subscriber {
 					}
 				}
 
+				const path = Path.join(prefix, suffix);
+
+				// Retract the path: forget the advertisement, drop the shared consume entry so a
+				// later announce subscribes fresh rather than cloning the dead generation's tracks,
+				// and tell the consumer.
+				const retract = () => {
+					advertised.delete(suffix);
+					this.#consumes.evict(path);
+					console.debug(`announced: broadcast=${path} active=false`);
+					announced.append({ path: suffix, active: false });
+				};
+
 				// In Lite05+ the sender's origin arrives via AnnounceOk, not in each hop
 				// list, so fold it back in before checking.
 				if (hops !== undefined && dropReflected) {
 					const full = responderOrigin !== undefined ? [...hops, responderOrigin] : hops;
 					if (full.includes(this.origin)) {
+						// A reflected restart means the peer's remaining route loops back through
+						// us, so the advertisement is gone even though the message says active.
+						if (advertised.has(suffix)) retract();
 						continue;
 					}
 				}
 
-				const path = Path.join(prefix, suffix);
+				if (active) {
+					// The first hop identifies the original publisher; an empty chain means the
+					// peer itself originated it. See `restart_announce` in the Rust subscriber.
+					const publisher = hops?.[0] ?? responderOrigin;
 
-				console.debug(`announced: broadcast=${path} active=${active}`);
-				announced.append({ path: suffix, active });
+					// A second advertisement for a path we already carry is a restart: either an
+					// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+					if (advertised.has(suffix)) {
+						if (advertised.get(suffix) === publisher) {
+							// Same publisher, new route. In-flight subscriptions resume across it,
+							// so there is nothing for a consumer to react to.
+							console.debug(`announced: broadcast=${path} rerouted`);
+							continue;
+						}
+
+						// A different publisher took the path, so cached track info and existing
+						// subscriptions must not carry over. Surface a real end before the start.
+						retract();
+					}
+
+					// After `retract()`, which clears the entry: the path is advertised again, by
+					// whoever just took it over. Recording it before would leave nothing behind, so
+					// the *next* takeover would read as a first announcement and skip its own end.
+					advertised.set(suffix, publisher);
+				} else {
+					retract();
+					continue;
+				}
+
+				console.debug(`announced: broadcast=${path} active=true`);
+				announced.append({ path: suffix, active: true });
 			}
 
 			announced.close();

@@ -260,9 +260,12 @@ Each advertisement carries an `Epoch` identifying the generation of content at t
 
 A receiver MUST discard an announcement whose reconstructed path contains its own Hop ID: it has looped back, so forwarding it would extend the loop and subscribing through it would route the receiver back to itself.
 This is the only loop defense moq-lite requires, and it catches loops of any length.
+A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
 
-A publisher SHOULD advertise, per stream, the best path for each broadcast whose entries avoid the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)), and nothing when every known path contains it.
+A publisher MUST NOT advertise a path whose entries contain the origin the subscriber declared in its SETUP (see [Origin Parameter](#origin-parameter)).
+The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
+Of the paths that remain a publisher SHOULD advertise the best, and nothing when every known path contains that origin.
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
 The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
 
@@ -599,13 +602,15 @@ The role is a hint that only ever narrows the session: a server MUST still enfor
 Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 ### Cost Parameter {#cost-parameter}
-The Cost Parameter declares the routing cost of this connection: each endpoint adds the value to the Route Cost of every announcement it receives over the connection (see [Routing](#routing)).
+The Cost Parameter declares what subscribing from this endpoint costs: a receiver adds the value the sender declared to the Route Cost of every announcement that sender forwards (see [Routing](#routing)).
 
 The Parameter Value is a variable-length integer in deployment-chosen units, the same units as the Route Cost.
 An absent parameter means the default cost of 1, under which the accumulated Route Cost equals the hop count and routing degenerates to shortest-path.
-A value of 0 is meaningful and distinct from absent: it makes the link free, e.g. between two relays in the same datacenter.
+A value of 0 is meaningful and distinct from absent: it makes that direction free, e.g. between two relays in the same datacenter.
 
-Only the client sends it, so both ends charge the same link the same amount; a server MUST NOT send it and a relay MUST NOT forward it.
+Both endpoints send it and the two values need not match: the parameter prices the sender's own egress. A relay MUST NOT forward it.
+
+A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot reprice its neighbours by declaring itself cheap.
 
 ### Origin Parameter {#origin-parameter}
 The Origin Parameter declares the sender's Hop ID: the identity it stamps onto announcements it forwards.
@@ -720,7 +725,7 @@ A Hop ID value of 0 means the hop is unknown: either it was never assigned or a 
 **Route Cost**:
 The marginal cost of subscribing to the broadcast via this advertisement, in units chosen by the deployment.
 The original publisher seeds the value with its production cost: 0 for content it is already producing, larger for content it would have to start producing on demand (e.g. a standby transcoder).
-When forwarding an announcement received from an upstream peer, a relay adds the cost of the link the announcement arrived on (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
+When forwarding an announcement received from an upstream peer, a relay adds the cost that peer declared (see [Cost Parameter](#cost-parameter)), saturating rather than wrapping so an absurd upstream value ranks last instead of overflowing to best.
 
 A relay that is actively carrying the broadcast (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead of the accumulated value: its ingress is already paid for, which is what lets a cluster deduplicate onto a warm copy.
 The discount applies only to the path the relay actually serves from; a standby path keeps its accumulated value, since serving from it means opening a fresh ingest.
@@ -1145,11 +1150,11 @@ The `Message Length` describes the payload size on the wire.
 - Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_UPDATE: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
-- Added a SETUP `Cost` parameter (0x4) declaring the price a link adds to every announcement crossing it; unpriced links default to 1, degrading to shortest-path routing.
+- Added a SETUP `Cost` parameter (0x4) declaring what subscribing from the sender costs, added by the receiver to every announcement that sender forwards. Both endpoints send their own, so the two directions are priced independently, and a receiver MAY charge a locally configured value instead. Unpriced directions default to 1, degrading to shortest-path routing.
 - Removed `Exclude Hop` from ANNOUNCE_REQUEST. The receiver's hop-based loop check already discards a looped announcement, so the field only saved the wasted send.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
-- Made advertisement selection per subscriber: the publisher advertises the best path avoiding each subscriber's declared origin (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared Epoch) publishers fail over across a mesh.
+- Made advertisement selection per subscriber: a publisher MUST NOT advertise a path containing the subscriber's declared origin and otherwise advertises the best remaining one (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant (shared Epoch) publishers fail over across a mesh.
 
 ## moq-lite-05
 - Renamed ANNOUNCE_INTEREST to ANNOUNCE_REQUEST and ANNOUNCE to ANNOUNCE_BROADCAST.

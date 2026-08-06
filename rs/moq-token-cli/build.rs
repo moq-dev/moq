@@ -23,7 +23,7 @@ fn git_version(prefix: &str) -> Option<String> {
 	let version = desc.strip_prefix(prefix)?;
 	// "0.5.17-3-gabcdef" → "0.5.17-abcdef" (drop count, strip 'g')
 	if let Some((base, hash)) = version.rsplit_once("-g") {
-		let base = base.rsplit_once('-').map(|(b, _)| b).unwrap_or(base);
+		let base = base.rsplit_once('-').map_or(base, |(b, _)| b);
 		Some(format!("{base}-{hash}"))
 	} else {
 		Some(version.to_string())

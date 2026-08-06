@@ -128,11 +128,6 @@
             # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
             # only, via `alsaPlugins`.
             pkgs.alsa-plugins
-            # moq-video's VAAPI backend (always-on for Linux): moq-vaapi dlopen's
-            # libva at runtime, so it isn't needed to build. This is here only to
-            # actually run vaapi in the devShell; a libva-less host loads and falls
-            # back cleanly. macOS has no VAAPI.
-            pkgs.libva
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
@@ -219,9 +214,11 @@
           ];
 
         # Developer workflow tooling not needed for builds: the GitHub CLI
-        # for opening/reviewing PRs from the dev shell.
+        # for opening/reviewing PRs, plus jq to read `cargo metadata` in
+        # `just rs check-changed`.
         devTools = with pkgs; [
           gh
+          jq
         ];
 
         # Linters / formatters required by `just ci`; `just check` and

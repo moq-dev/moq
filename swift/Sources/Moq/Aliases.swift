@@ -41,6 +41,21 @@ public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 public typealias AudioFormat = MoqFFI.MoqAudioFormat
 /// An audio codec identifier (e.g. Opus).
 public typealias AudioCodec = MoqFFI.MoqAudioCodec
+/// One raw video frame: pixels in the configured layout plus a presentation
+/// timestamp.
+public typealias VideoFrame = MoqFFI.MoqVideoFrame
+/// The pixel layout, resolution, and framerate written to a `VideoProducer`.
+public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
+/// The encoder-side config for a published video track: codec, bitrate,
+/// keyframe interval, and backend preference.
+public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
+/// A raw pixel layout (I420 or RGBA) fed to a `VideoProducer`.
+public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
+/// A video codec identifier (H.264 or H.265).
+public typealias VideoCodec = MoqFFI.MoqVideoCodec
+/// Which encoder implementation to use: automatic, hardware, software, or one
+/// named backend.
+public typealias VideoEncoderKind = MoqFFI.MoqVideoEncoderKind
 /// How a track's frames are packaged (Legacy, CMAF, or LOC), as advertised in
 /// the catalog.
 public typealias Container = MoqFFI.MoqContainer

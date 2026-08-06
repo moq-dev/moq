@@ -28,11 +28,15 @@ just --list
 # just web
 # just pub bbb
 
-# Make sure the code compiles and passes linting
+# Make sure the code you changed compiles and passes linting
 just check
 
-# Auto-fix linting errors
+# Auto-fix linting errors, same scope
 just fix
+
+# Same as the above, over every package
+just check-all
+just fix-all
 
 # Run the tests
 just test
@@ -108,6 +112,7 @@ Recommended extensions:
 
 Run `just fix` before pushing your changes, otherwise CI will yell at you.
 It runs `just check` so that's the easiest way to debug any issues.
+`just check` and `just fix` only touch the packages your branch changed (plus anything depending on them), measured against the branch's upstream; `just check-all` and `just fix-all` cover everything.
 
 Please don't submit a vibe coded PR unless you understand it.
 `You're absolutely right!` is not always good enough.

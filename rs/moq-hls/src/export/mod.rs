@@ -27,12 +27,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_mux::catalog::{self, CatalogFormat, Stream};
+use rand::RngExt;
 
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 
-/// How long to wait before retrying the initial catalog subscription.
-const CATALOG_RETRY: Duration = Duration::from_millis(250);
+/// Backoff bounds for the initial catalog subscription.
+///
+/// The usual failure is a publisher that has announced its broadcast but not yet written its
+/// catalog track, so this waits for external state rather than repeating a failed request.
+/// Escalating for that reason: a source that stays silent for an hour must not be polled four times
+/// a second for an hour.
+///
+/// Deliberately no give-up budget, and no attempt to judge which failures are worth waiting on. The
+/// broadcast closing is what ends the wait, and a relay-side broadcast outlives its publisher's
+/// session, so any deadline here is a window in which a publisher outage leaves the broadcaster
+/// permanently empty with nothing to recover it.
+const CATALOG_RETRY_MIN: Duration = Duration::from_millis(250);
+const CATALOG_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// Export tuning shared across renditions.
 ///
@@ -173,13 +185,17 @@ async fn watch_catalog(
 	config: Config,
 	renditions: renditions::Producer,
 ) {
+	let mut delay = CATALOG_RETRY_MIN;
+
 	let mut consumer = loop {
 		match catalog::Consumer::<()>::new(&broadcast, CatalogFormat::Hang).await {
 			Ok(consumer) => break consumer,
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
+				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
-					_ = tokio::time::sleep(CATALOG_RETRY) => {}
+					_ = tokio::time::sleep(wait) => {}
 					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
 						renditions.close();
 						return;

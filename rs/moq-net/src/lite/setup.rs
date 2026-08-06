@@ -148,10 +148,11 @@ pub struct Setup {
 	/// session. `None` is sent as the absence of the parameter, which is also how a
 	/// client that predates the parameter decodes.
 	pub role: Option<Role>,
-	/// What crossing this link costs (lite-06+), added to the route cost of every
-	/// announcement forwarded over it. Sent only by the dialing side, since the link
-	/// cost lives in its connect config; the accepting side reads it here so both
-	/// ends price the same link identically. `None` means the default cost of 1.
+	/// What subscribing from this endpoint costs (lite-06+), added by the peer to the
+	/// route cost of every announcement we forward it.
+	///
+	/// Directional: it prices the sender's own egress, so both ends declare their own
+	/// and the two need not match. `None` means the default cost of 1.
 	pub cost: Option<u64>,
 	/// This endpoint's origin (hop) id, the identity it stamps onto forwarded
 	/// announcements. The peer uses it to serve this endpoint's subscriptions from

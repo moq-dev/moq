@@ -333,7 +333,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let stream = match stream_type {
 			StreamType::H264 => {
-				let track = crate::import::unique_track(&mut self.broadcast, ".avc3")?;
+				let track = self.broadcast.unique_track(".avc3", self.catalog.track_info())?;
 				Stream::H264 {
 					split: h264::Split::new(),
 					import: Box::new(h264::Import::new(track, self.catalog.reserve(), Default::default())?),
@@ -341,7 +341,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			StreamType::H265 => {
-				let track = crate::import::unique_track(&mut self.broadcast, ".hev1")?;
+				let track = self.broadcast.unique_track(".hev1", self.catalog.track_info())?;
 				Stream::H265 {
 					split: h265::Split::new(),
 					import: Box::new(h265::Import::new(track, self.catalog.reserve(), Default::default())?),
@@ -368,7 +368,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// come from the descriptors, so the importer is built up front.
 			StreamType::Mpeg2PacketizedData if registration_format(descriptors) == Some(*b"Opus") => {
 				let channel_count = opus_channel_count(descriptors).unwrap_or(2);
-				let track = crate::import::unique_track(&mut self.broadcast, ".opus")?;
+				let track = self.broadcast.unique_track(".opus", self.catalog.track_info())?;
 				let config = opus::Config::new(48_000, channel_count);
 				Stream::Opus(Box::new(OpusStream {
 					import: opus::Import::new(track, self.catalog.reserve(), config.into())?,
@@ -723,7 +723,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
 	// so the track declares that timescale to match.
-	let track = broadcast.unique_track(".ts", hang::container::track_info())?;
+	let track = broadcast.unique_track(".ts", catalog.track_info())?;
 	let name = track.name().to_string();
 
 	// Build the media producer before advertising the track. It is fallible (its
@@ -1243,11 +1243,12 @@ impl<E: CatalogExt> AacStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let track = crate::import::unique_track(&mut self.broadcast, ".aac")?;
-					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					// Consume the reservation held since the PMT: this resolves the gated rendition,
+					// and carries the catalog's declared media retention onto the track.
 					// The importer synthesizes the AudioSpecificConfig `description` from the config so
 					// out-of-band consumers (fMP4/MKV export, WebCodecs) can configure the decoder.
 					let reserved = self.reserved.take().expect("aac reservation already consumed");
+					let track = self.broadcast.unique_track(".aac", reserved.track_info())?;
 					let aac = aac::Import::new(track, reserved, config.into())?;
 					self.import.insert(aac)
 				}
@@ -1531,9 +1532,12 @@ impl<E: CatalogExt> LegacyStream<E> {
 						sample_rate: header.sample_rate,
 						channel_count: header.channel_count,
 					};
-					let track = crate::import::unique_track(&mut self.broadcast, self.descriptor.track_suffix)?;
-					// Consume the reservation held since the PMT: this resolves the gated rendition.
+					// Consume the reservation held since the PMT: this resolves the gated rendition,
+					// and carries the catalog's declared media retention onto the track.
 					let reserved = self.reserved.take().expect("legacy reservation already consumed");
+					let track = self
+						.broadcast
+						.unique_track(self.descriptor.track_suffix, reserved.track_info())?;
 					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
 					self.import.insert(legacy)
 				}

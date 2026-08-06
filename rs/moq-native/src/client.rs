@@ -4,6 +4,8 @@ use std::future::Future;
 use std::net;
 use url::Url;
 
+const DEFAULT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -33,6 +35,42 @@ pub struct ClientConfig {
 	/// Auto-detected from compiled features if not specified.
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
+
+	/// Delay before also dialing the next resolved address (Happy Eyeballs).
+	///
+	/// When DNS returns multiple addresses, attempts alternate between IPv6 and
+	/// IPv4, each starting this long after the previous one (or immediately when
+	/// it fails), and the first connection to complete wins. `0s` dials every
+	/// address at once. Defaults to 250ms. Applies to the QUIC and `tcp://` dials.
+	///
+	/// This staggers the attempts within one [`Client::connect`]; [`Self::timeout`]
+	/// bounds that call as a whole.
+	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+	#[arg(
+		id = "client-failover-delay",
+		long = "client-failover-delay",
+		env = "MOQ_CLIENT_FAILOVER_DELAY",
+		value_parser = humantime::parse_duration,
+	)]
+	pub failover_delay: Option<std::time::Duration>,
+
+	/// Maximum time for one [`Client::connect`], covering the dial and the MoQ
+	/// handshake. Defaults to 30 seconds; set to 0 to wait forever.
+	///
+	/// This has to live above the transports rather than inside one: QUIC bounds its
+	/// own dial, but the WebSocket fallback and the handshake that follows either
+	/// transport have no deadline of their own, so a peer that accepts TCP and then
+	/// never speaks would hang the whole connect. [`Client::reconnect`] only re-arms
+	/// its backoff between attempts, so an attempt that never returns stalls the
+	/// retry loop indefinitely.
+	#[arg(
+		id = "client-connect-timeout",
+		long = "client-connect-timeout",
+		env = "MOQ_CLIENT_CONNECT_TIMEOUT",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none", with = "humantime_serde::option")]
+	pub timeout: Option<std::time::Duration>,
 
 	/// QUIC transport tuning (`--client-quic-*`): stream limits, GSO, timeouts.
 	#[command(flatten)]
@@ -82,6 +120,17 @@ impl ClientConfig {
 			moq_net::Versions::from(self.version.clone())
 		}
 	}
+
+	/// The Happy Eyeballs stagger to use, resolving the default. Every backend
+	/// reads it from here so the four dial paths can't drift apart.
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche", feature = "tcp"))]
+	pub(crate) fn effective_failover_delay(&self) -> std::time::Duration {
+		self.failover_delay.unwrap_or(crate::failover::DEFAULT_DELAY)
+	}
+
+	fn connect_timeout(&self) -> std::time::Duration {
+		self.timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT)
+	}
 }
 
 impl Default for ClientConfig {
@@ -90,6 +139,8 @@ impl Default for ClientConfig {
 			connect: None,
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
+			failover_delay: None,
+			timeout: None,
 			quic: crate::quic::Client::default(),
 			version: Vec::new(),
 			tls: crate::tls::Client::default(),
@@ -113,7 +164,13 @@ pub struct Client {
 	versions: moq_net::Versions,
 	/// The URL from [`ClientConfig::connect`], dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
+	/// Deadline for one [`Client::connect`], from [`ClientConfig::timeout`]. Zero waits forever.
+	timeout: std::time::Duration,
 	backoff: Backoff,
+	/// The resolved Happy Eyeballs stagger, used by the `tcp://` dial here; the
+	/// QUIC backends capture their own copy from the config.
+	#[cfg(feature = "tcp")]
+	failover_delay: std::time::Duration,
 	#[cfg(feature = "websocket")]
 	websocket: crate::websocket::Client,
 	tls: rustls::ClientConfig,
@@ -185,11 +242,19 @@ impl Client {
 		};
 
 		let versions = config.versions();
+		// Read before the struct literal below moves fields out of `config`.
+		#[cfg(feature = "tcp")]
+		let failover_delay = config.effective_failover_delay();
+		let timeout = config.connect_timeout();
+
 		Ok(Self {
 			moq: moq_net::Client::new().with_versions(versions.clone()),
 			versions,
 			connect: config.connect,
+			timeout,
 			backoff: config.backoff,
+			#[cfg(feature = "tcp")]
+			failover_delay,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -329,7 +394,19 @@ impl Client {
 	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let pair = Box::pin(self.connect_inner(url)).await?;
+		let attempt = Box::pin(self.connect_inner(url));
+
+		// The deadline covers the dial AND the handshake, for every transport: it is the
+		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
+		// arm was still pending.
+		let pair = match self.timeout.is_zero() {
+			true => attempt.await?,
+			false => match tokio::time::timeout(self.timeout, attempt).await {
+				Ok(res) => res?,
+				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
+			},
+		};
+
 		tracing::info!(version = %pair.0.version(), "connected");
 		Ok(crate::spawn_session(pair))
 	}
@@ -370,7 +447,7 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session = crate::tcp::connect(url, &self.versions.alpns()).await?;
+			let session = crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay).await?;
 			return Ok(moq.connect(session).await?);
 		}
 
@@ -776,6 +853,26 @@ mod tests {
 	}
 
 	#[test]
+	fn test_toml_failover_delay_survives_update_from() {
+		let toml = r#"
+			failover_delay = "1s"
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_secs(1)));
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-failover-delay flag).
+		config.update_from(["test"]);
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_secs(1)));
+	}
+
+	#[test]
+	fn test_cli_failover_delay() {
+		let config = ClientConfig::parse_from(["test", "--client-failover-delay", "50ms"]);
+		assert_eq!(config.failover_delay, Some(std::time::Duration::from_millis(50)));
+	}
+
+	#[test]
 	fn test_toml_fingerprint_survives_update_from() {
 		let toml = r#"
 			tls.fingerprint = ["abcd1234", "ef567890"]
@@ -920,5 +1017,59 @@ mod tests {
 		.expect("race waited for WebSocket after QUIC transport connected")
 		.unwrap();
 		assert_eq!(value, super::TransportRace::Quic("quic"));
+	}
+
+	#[test]
+	fn connect_timeout_defaults_to_thirty_seconds() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.timeout, None);
+		assert_eq!(config.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
+	}
+
+	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
+	/// gives up on its own, but the WebSocket arm has no deadline of its own, so the
+	/// race stays pending forever. Without the connect timeout this test hangs.
+	///
+	/// That is what wedged a publisher against a livelocked relay: `Reconnect` only
+	/// re-arms its backoff (and checks its give-up timeout) *between* attempts, so an
+	/// attempt that never returns stalls the retry loop for good.
+	#[cfg(feature = "websocket")]
+	#[tokio::test]
+	async fn connect_times_out_against_a_peer_that_never_speaks() {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let addr = listener.local_addr().unwrap();
+
+		let timeout = DEFAULT_CONNECT_TIMEOUT;
+		let mut config = ClientConfig {
+			timeout: Some(timeout),
+			..Default::default()
+		};
+		config.websocket.delay = Some(std::time::Duration::ZERO);
+		let client = config.init().unwrap();
+
+		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket
+		// arm alone against the silent peer.
+		let url: Url = format!("https://127.0.0.1:{}/", addr.port()).parse().unwrap();
+
+		let mut attempt = Box::pin(client.connect(url));
+		let _silent = tokio::select! {
+			res = &mut attempt => match res {
+				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),
+				Ok(_) => panic!("connected to a peer that never spoke"),
+			},
+			res = listener.accept() => res.unwrap().0,
+		};
+
+		// Freeze only after TCP connected, then advance directly to the deadline. The
+		// accepted socket stays in scope and silent until the attempt returns.
+		tokio::time::pause();
+		tokio::time::advance(timeout).await;
+
+		let err = match attempt.await {
+			Err(err) => err,
+			Ok(_) => panic!("connected to a peer that never spoke"),
+		};
+
+		assert!(matches!(err, Error::ConnectTimeout(_)), "unexpected error: {err}");
 	}
 }

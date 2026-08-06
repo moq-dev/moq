@@ -62,6 +62,12 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The per-rendition timeline producers, memoized by media-track name so the catalog
 	/// section and the media track's group recorder share one track. See [`media_producer`](Self::media_producer).
 	timelines: Arc<Mutex<BTreeMap<String, crate::timeline::Producer>>>,
+
+	/// Retention override for the media tracks minted under this catalog, or `None` to keep
+	/// hang's default. Fixed at construction, so every clone and every
+	/// [`Reserved`](super::Reserved) mints tracks under one policy. See
+	/// [`Config::with_latency_max`].
+	latency_max: Option<std::time::Duration>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -76,18 +82,68 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			clock: self.clock,
 			broadcast: self.broadcast.clone(),
 			timelines: self.timelines.clone(),
+			latency_max: self.latency_max,
 		}
+	}
+}
+
+/// Everything a catalog [`Producer`] is built from: the initial catalog and any overrides.
+///
+/// Start from [`default`](Default::default), which is the media-only catalog with hang's own
+/// defaults, and chain the setters.
+///
+/// These are constructor arguments rather than setters on a live producer, so a clone or a
+/// [`Reserved`](super::Reserved) taken at any point mints tracks under the same policy.
+#[derive(Clone)]
+pub struct Config<E: CatalogExt = ()> {
+	catalog: Catalog<E>,
+	latency_max: Option<std::time::Duration>,
+}
+
+impl Default for Config<()> {
+	fn default() -> Self {
+		Self {
+			catalog: Catalog::default(),
+			latency_max: None,
+		}
+	}
+}
+
+impl<E: CatalogExt> Config<E> {
+	/// Start from an extended catalog rather than the media-only one, e.g. the untyped
+	/// [`Extra`] for the by-name / FFI path. Set application sections through
+	/// [`Producer::lock`](Producer::lock) afterwards.
+	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
+		Config {
+			catalog,
+			latency_max: self.latency_max,
+		}
+	}
+
+	/// Override how long the media tracks minted under this catalog keep a non-latest group
+	/// fetchable, replacing hang's default. `None` keeps it.
+	///
+	/// That default suits a segmented egress (HLS/DASH), which may only advertise segments a
+	/// FETCH can still reach. Lower it when nothing reads history and the memory matters;
+	/// raise it for a deeper seek window. It is a RETENTION budget, not a delivery one, so it
+	/// never makes a subscriber play further behind live -- it caps what one may ask to wait
+	/// for, and a subscriber's own budget still defaults to zero.
+	///
+	/// Applies to the media tracks the catalog mints. The catalog and timeline tracks keep
+	/// moq-net's default: both are read at the live edge, which is retained unconditionally.
+	pub fn with_latency_max(mut self, latency_max: impl Into<Option<std::time::Duration>>) -> Self {
+		self.latency_max = latency_max.into();
+		self
 	}
 }
 
 impl Producer<()> {
 	/// Create a new media-only catalog producer with the default (empty) catalog.
 	///
-	/// For an extended catalog, use [`with_catalog`](Self::with_catalog) with a
-	/// `Catalog<E>` (e.g. the untyped [`Extra`] for the by-name / FFI path). Set
-	/// application sections through [`lock`](Self::lock).
+	/// For an extended catalog or a retention override, use
+	/// [`with_config`](Self::with_config).
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> Result<Self, moq_net::Error> {
-		Self::with_catalog(broadcast, Catalog::default())
+		Self::with_config(broadcast, Config::default())
 	}
 }
 
@@ -96,6 +152,14 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn with_catalog(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: Catalog<E>,
+	) -> Result<Self, moq_net::Error> {
+		Self::with_config(broadcast, Config::default().with_catalog(catalog))
+	}
+
+	/// Create a new catalog producer from a full [`Config`].
+	pub fn with_config(
+		broadcast: &mut moq_net::broadcast::Producer,
+		config: Config<E>,
 	) -> Result<Self, moq_net::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let hangz_track =
@@ -116,12 +180,26 @@ impl<E: CatalogExt> Producer<E> {
 			hang,
 			hangz,
 			msf_track,
-			current: Arc::new(Mutex::new(catalog)),
+			current: Arc::new(Mutex::new(config.catalog)),
 			reservations: Arc::new(Mutex::new(Reservations::default())),
 			clock: crate::Clock::new(),
 			broadcast: broadcast.clone(),
 			timelines: Arc::new(Mutex::new(BTreeMap::new())),
+			latency_max: config.latency_max,
 		})
+	}
+
+	/// Track properties for a media track under this catalog: hang's media defaults, plus any
+	/// [`Config::with_latency_max`] override.
+	///
+	/// Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a container that
+	/// carries the source's own scale (CMAF and Matroska both do).
+	pub fn track_info(&self) -> moq_net::track::Info {
+		let info = hang::container::track_info();
+		match self.latency_max {
+			Some(latency_max) => info.with_latency_max(latency_max),
+			None => info,
+		}
 	}
 
 	/// Resolve a timestamp, synthesizing one from the broadcast's shared
@@ -475,6 +553,45 @@ mod test {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
+
+	#[test]
+	fn media_tracks_inherit_the_catalogs_declared_retention() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+
+		// Unset, a catalog mints hang's media defaults, sized so a segmented egress can serve a
+		// full playlist window rather than moq-net's live-edge default.
+		let catalog = Producer::new(&mut broadcast).unwrap();
+		assert_eq!(
+			catalog.track_info().latency_max,
+			hang::container::track_info().latency_max
+		);
+		assert!(catalog.track_info().latency_max > moq_net::track::DEFAULT_LATENCY_MAX);
+
+		// An override reaches every media track this catalog mints, and does NOT disturb the
+		// timescale hang pins (or survive a retimescale for a source-scale container).
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_latency_max(std::time::Duration::from_secs(3));
+		let catalog = Producer::with_config(&mut broadcast, config).unwrap();
+
+		let info = catalog.track_info();
+		assert_eq!(info.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(info.timescale, hang::container::TIMESCALE);
+
+		let at = info.with_timescale(moq_net::Timescale::MILLI);
+		assert_eq!(at.latency_max, std::time::Duration::from_secs(3));
+		assert_eq!(at.timescale, moq_net::Timescale::MILLI);
+
+		// Every handle mints under the same policy, whatever order it was taken in: the codec
+		// paths hold a reservation and the container paths hold a clone.
+		assert_eq!(
+			catalog.reserve().track_info().latency_max,
+			std::time::Duration::from_secs(3)
+		);
+		assert_eq!(
+			catalog.clone().track_info().latency_max,
+			std::time::Duration::from_secs(3)
+		);
+	}
 
 	#[test]
 	fn publishes_plain_and_compressed_tracks() {

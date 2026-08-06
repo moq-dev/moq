@@ -10,14 +10,18 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 
 ```bash
 # Code quality and testing
-nix develop --command just check        # Run all tests and linting
-nix develop --command just fix          # Auto-fix linting issues
+nix develop --command just check        # Lint and compile what the branch changed
+nix develop --command just fix          # Auto-fix lint/formatting, same scope
+nix develop --command just check-all    # Same as check, over every package
+nix develop --command just fix-all      # Same as fix, over every package
 nix develop --command just build        # Build all packages
 ```
 
 Use the Nix dev shell for project commands so local runs match CI tooling. If Nix is unavailable, use `cargo` or `bun` directly.
 
-CI runs `just ci`, which layers a few checks on top of `just check` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
+`just check` and `just fix` both diff the branch against its base and touch only the crates that changed plus everything depending on them, which is what keeps them fast when several worktrees are building at once. They skip a language entirely when the diff doesn't touch it. Reach for `just check-all` / `just fix-all` when you want the unscoped suite, or pass an explicit base (`just check origin/dev`). See [Workflow](#workflow) for how the base is resolved.
+
+CI runs `just ci`, which layers a few checks on top of `just check-all` (notably `cargo doc` with `-D warnings`, so a broken doc link after a rename or visibility change passes `just check` but fails CI).
 
 ## Architecture
 
@@ -45,7 +49,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
-- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
+- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. PR CI never compiles it, so `just obs build` and `just obs test` (the latter runs `cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer) are manual gates, like `just rs macos`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare). The `/draft/` section is generated from `drafts/` by `doc/.vitepress/drafts.ts`.
@@ -92,6 +96,10 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 - Remove the example invocations and prose that mention it from `/doc`.
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
+
+## Retries
+
+Fail fast; retry only what a few seconds can fix. Every retry loop uses capped exponential backoff with jitter, inlined at the call site (no shared `Backoff` type), and is bounded by *time*, not by error type: a short budget (~10s), then surface the last real error. Don't classify errors as retryable (`is_retryable()`); an ephemeral failure is one that clears within the budget, so the budget is the classifier. The one exception is an answer a peer actually sent, where the protocol defines the meaning: an HTTP status short-circuits (a `404` fails immediately; `408`/`429`/gateway statuses ride the backoff) via the `status()` accessors on `moq_native::Error` / `moq_hls::Error`. The only unbounded loops are process-lifetime supervisors with nobody to return an error to (cluster peers, device reopen, accept loops); they retry forever but cap the delay at seconds and warn per attempt, loudly broken rather than silently parked. Exactly one layer owns a retry: an outer loop that rebuilds an inner one resets its escalation, so watch the inner loop's terminal signal instead.
 
 ## Root Cause First
 
@@ -179,10 +187,17 @@ PRs target `main` by default, however large the change: bug fixes, new behavior,
 
 When making changes to the codebase:
 
-1. Pick the base branch per [Branch Targeting](#branch-targeting) above. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
-2. Make your code changes
-3. Run `just fix` before committing to auto-format and fix linting issues
-4. Run `just check` to verify everything passes
-5. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
-6. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
-7. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews
+1. Pick the base branch per [Branch Targeting](#branch-targeting) above: `dev` only for a semver break in a published API, `main` for everything else. **When creating a new worktree, base it on the freshly-fetched remote branch** (`git fetch origin` first, then branch off `origin/main` / `origin/dev`), not on whatever local `main`/`dev` the repo happens to be sitting on. A local branch can lag the remote by many commits (or carry a stale local merge), which produces a massive conflicting PR diff against the real base at merge time.
+2. **Point the branch's upstream at that base**, which is where `just check` reads it from:
+
+   ```bash
+   git branch --set-upstream-to=origin/dev   # or origin/main
+   ```
+
+   Then push with `git push origin HEAD`, **not** `git push -u`: `-u` repoints the upstream at the branch's own remote copy, and `just check` then has nothing to diff against and silently falls back to `origin/main`. On a `dev`-based branch that fallback drags in every commit `dev` is ahead by, so the check is correct but much slower than it needs to be.
+3. Make your code changes
+4. Run `just fix` before committing to auto-format and fix linting issues
+5. Run `just check` to verify everything passes. Both only touch the crates the branch changed plus their dependents, so use `just fix-all` / `just check-all` when you have changed something the diff can't attribute to a package (build config, a lint rule, a shared toolchain pin)
+6. Walk the Cross-Package Sync table; update paired packages and docs in the same PR
+7. Add tests where they're easy to write; bug fixes need a regression test (see Root Cause First)
+8. Commit and push; follow [CONTRIBUTING.md](CONTRIBUTING.md) for commit messages, PR descriptions, and reviews

@@ -888,7 +888,9 @@ mod probe {
 			SOURCE.height,
 			TARGET.width,
 			TARGET.height,
-			mae(got.y(), expected.y())
+			// `into_i420` hands back one packed buffer, so its luma is the leading
+			// `width * height` bytes rather than a plane accessor.
+			mae(got.y(), &expected[..TARGET.pixels() as usize])
 		);
 		Ok(())
 	}
@@ -1127,6 +1129,9 @@ mod probe {
 		eprintln!("[ladder] primed the decoder; starting live decode and the rungs");
 
 		let stop = &AtomicBool::new(false);
+		// Outside the scope alongside `stop`: a scoped thread's borrow has to
+		// outlive the scope, which a binding declared inside it does not.
+		let start = &Barrier::new(2);
 		let frames = &frames;
 		std::thread::scope(|scope| -> Result<()> {
 			let mut workers = Vec::with_capacity(RUNGS);
@@ -1157,7 +1162,6 @@ mod probe {
 				}));
 			}
 
-			let start = &Barrier::new(2);
 			let scale_device = device.clone();
 			let scale_source = source.clone();
 			let scale_worker = scope.spawn(move || -> Result<()> {

@@ -41,10 +41,84 @@ install:
     bun install
     cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-semver-checks release-plz
 
-# Fast inner-loop checks. Optional shell, workflow, TOML, Nix, and justfile lints skip if missing.
-check *args:
+# Reports the base it picked on stderr, so a surprising scope is traceable.
+
+# Print the files this branch changed relative to BASE, one per line.
+[private]
+_changed $BASE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Resolve BASE: arg > upstream > origin/main. A branch's upstream is the
+    # branch it merges into, which is the base a `dev`-targeted branch needs.
+    # `git push -u` repoints upstream at the branch's own remote copy, which
+    # would diff HEAD against itself, so ignore that case (see CLAUDE.md).
+    base="$BASE"
+    if [[ -z "$base" ]]; then
+    	base=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    	if [[ -z "$base" || "$base" == */"$(git branch --show-current)" ]]; then
+    		base="origin/main"
+    	fi
+    fi
+
+    merge_base=$(git merge-base "$base" HEAD) || {
+    	echo "error: cannot resolve merge-base against $base (is full history fetched?)" >&2
+    	exit 1
+    }
+    echo "base: $base" >&2
+
+    # Untracked files count too: a brand new crate or module is the whole change.
+    {
+    	git diff --name-only "$merge_base"
+    	git ls-files --others --exclude-standard
+    } | sort -u
+
+# Fast inner-loop checks. Lints and compiles only the packages the branch
+# changed plus everything depending on them, so several worktrees can build at
+# once. `check-all` is the unscoped suite.
+
+# Lint and compile what the branch changed since BASE, plus its dependents.
+check $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    files=$(just _changed "$BASE")
+
+    # An empty list means "force-run" to the per-lang recipes, which is the
+    # wrong semantic here, so don't dispatch at all.
+    if [[ -n "$files" ]]; then
+    	just js check "$files"
+    	just rs check-changed "$files"
+    	# The OBS plugin has no compile job in PR CI, so its lint + CMake
+    	# guards are the only automated coverage it gets.
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs check
+    	fi
+    else
+    	echo "check: nothing changed."
+    fi
+
+    just _check-common
+
+# Check every JavaScript workspace, every default Rust member, and moq-wasm.
+check-all *args:
     just js check
     just rs check {{ args }}
+    # Not covered by the line above: moq-wasm only exists on the wasm32 target.
+    just rs wasm
+    just obs check
+    just _check-common
+
+# Repository-wide non-compiling checks shared by `check` and `check-all`.
+# Optional shell, workflow, TOML, Nix, and justfile lints skip if missing.
+#
+# `bun install` because remark-cli lives in node_modules and `just js check` is
+# where it would otherwise be installed, which a Rust-only diff skips.
+
+# Repository-wide lints, shared by `check` and `check-all`.
+[private]
+_check-common:
+    bun install --frozen-lockfile
     bun remark . --quiet --frail
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f . | grep -v '\.direnv/') && shellcheck $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format --check; fi
@@ -84,6 +158,15 @@ ci BASE="":
     	just go    ci "$files"
     fi
 
+    # The OBS plugin has no compile job in PR CI, so its lint + CMake guards
+    # are the only automated coverage it gets. Empty $files is a force-run,
+    # so run then.
+    if [[ -z "$files" ]] || echo "$files" | grep -q '^cpp/obs/'; then
+    	just obs check
+    else
+    	echo "ci: no cpp/obs changes; skipping obs check."
+    fi
+
     # Validate the flake (eval + dev shell build) via `nix flake check`. This no
     # longer compiles the workspace -- the heavy Rust CI (clippy/doc/test) moved
     # to `just rs ci` (plain cargo), leaving only lightweight Nix checks -- so
@@ -107,11 +190,44 @@ ci BASE="":
     for f in $(find . -name justfile -not -path './node_modules/*' -not -path './target/*' -not -path './.venv/*' -not -path './.direnv/*'); do just --fmt --check --justfile "$f"; done
     just gh ci
 
-# Auto-fix linting/formatting issues; optional tools skip if missing locally.
-fix:
+# Scoped exactly like `check`, because `clippy --fix` compiles what it fixes.
+# `fix-all` is the unscoped version.
+
+# Auto-fix lint and formatting for what the branch changed since BASE.
+fix $BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    files=$(just _changed "$BASE")
+
+    if [[ -n "$files" ]]; then
+    	just js fix "$files"
+    	just rs fix-changed "$files"
+    	if echo "$files" | grep -q '^cpp/obs/'; then
+    		just obs fix
+    	fi
+    else
+    	echo "fix: nothing changed."
+    fi
+
+    just py fix
+    just _fix-common
+
+# Auto-fix every JavaScript workspace and every default Rust member.
+fix-all:
     just js fix
     just rs fix
     just py fix
+    just obs fix
+    just _fix-common
+
+# Optional tools skip if missing locally. `bun install` for the same reason as
+# `_check-common`.
+
+# Repository-wide fixes, shared by `fix` and `fix-all`.
+[private]
+_fix-common:
+    bun install
     bun remark . --quiet --output
     @if command -v shfmt >/dev/null 2>&1; then shfmt --write $(shfmt -f . | grep -v '\.direnv/'); fi
     @if command -v taplo >/dev/null 2>&1; then RUST_LOG=error taplo format; fi

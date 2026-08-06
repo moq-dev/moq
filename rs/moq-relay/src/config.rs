@@ -156,18 +156,24 @@ depth = 2
 		assert_eq!(config.stats.depth, Some(2));
 	}
 
-	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Both
-	/// fields are `Option<String>` so a TOML-configured cache size survives the
-	/// CLI re-parse when no `--cache-*` flag is passed.
+	/// Regression test for the clap+TOML clobber bug applied to `[cache]`. Every
+	/// field is an `Option` so a TOML-configured cache setting survives the CLI
+	/// re-parse when no `--cache-*` flag is passed.
 	#[test]
 	fn cli_does_not_clobber_toml_cache() {
-		let _env = EnvGuard::clear(&["MOQ_CACHE_CAPACITY", "MOQ_CACHE_HEADROOM", "MOQ_CACHE_DURATION"]);
+		let _env = EnvGuard::clear(&[
+			"MOQ_CACHE_CAPACITY",
+			"MOQ_CACHE_HEADROOM",
+			"MOQ_CACHE_DURATION",
+			"MOQ_CACHE_LATENCY_DEFAULT",
+		]);
 
 		let toml = r#"
 [cache]
 capacity = "8GiB"
 headroom = "10%"
 duration = "30s"
+latency_default = "20s"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -188,22 +194,38 @@ duration = "30s"
 			Some(std::time::Duration::from_secs(30)),
 			"TOML's cache.duration must not be clobbered by the CLI re-parse"
 		);
+		assert_eq!(
+			config.cache.latency_default,
+			Some(std::time::Duration::from_secs(20)),
+			"TOML's cache.latency_default must not be clobbered by the CLI re-parse"
+		);
 	}
 
-	/// `cache.duration` is an `Option<Duration>` behind plain `humantime_serde`
-	/// (not `humantime_serde::option`), so pin both directions including the
-	/// `None` serialize path, which the merge test above never exercises.
+	/// `cache.duration` and `cache.latency_default` are `Option<Duration>` behind
+	/// plain `humantime_serde` (not `humantime_serde::option`), so pin both
+	/// directions including the `None` serialize path, which the merge test above
+	/// never exercises.
 	#[test]
 	fn cache_duration_serde_round_trip() {
-		let set: CacheConfig = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
+		let set: CacheConfig = toml::from_str(
+			"duration = \"30s\"
+latency_default = \"20s\"",
+		)
+		.expect("deserialize Some");
 		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(set.latency_default, Some(std::time::Duration::from_secs(20)));
 
 		let unset: CacheConfig = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
+		assert_eq!(unset.latency_default, None);
 
 		let encoded = toml::to_string(&set).expect("serialize Some");
 		let decoded: CacheConfig = toml::from_str(&encoded).expect("re-deserialize");
 		assert_eq!(decoded.duration, set.duration, "round trip must preserve the duration");
+		assert_eq!(
+			decoded.latency_default, set.latency_default,
+			"round trip must preserve the latency default"
+		);
 
 		toml::to_string(&unset).expect("serialize None");
 	}
@@ -332,6 +354,27 @@ congestion_control = "loss"
 			Some(moq_native::quic::CongestionControl::Loss),
 			"TOML's client.quic.congestion_control must not be clobbered by the CLI re-parse"
 		);
+	}
+
+	/// The client connect timeout is optional at the clap layer so an absent CLI
+	/// flag does not replace the TOML value with the resolved 30-second default.
+	#[test]
+	fn cli_does_not_clobber_toml_client_connect_timeout() {
+		let _env = EnvGuard::clear(&["MOQ_CLIENT_CONNECT_TIMEOUT"]);
+
+		let toml = r#"
+[client]
+timeout = "2m"
+"#;
+		let dir = std::env::temp_dir().join("moq-relay-config-test");
+		std::fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("client-connect-timeout-toml-wins.toml");
+		std::fs::write(&path, toml).unwrap();
+
+		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
+		let config = Config::parse_and_merge(args).expect("config load");
+
+		assert_eq!(config.client.timeout, Some(std::time::Duration::from_secs(120)));
 	}
 
 	#[test]

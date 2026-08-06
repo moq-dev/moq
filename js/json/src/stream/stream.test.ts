@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Track } from "@moq/net";
-import { Consumer, Producer } from "./stream.ts";
+import { Consumer, Producer } from "./index.ts";
 
 type Rec = { n: number };
 

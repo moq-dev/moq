@@ -1,23 +1,126 @@
-//! Native video decode via [`moq_video`].
+//! Native video encode/decode via [`moq_video`].
 //!
-//! The video counterpart to [`audio`](crate::audio)'s decoder: subscribe to an
-//! H.264 track and hand back decoded raw frames, with the decode happening
-//! inside the FFI boundary (VideoToolbox on macOS, openh264 elsewhere; no
-//! ffmpeg). Sibling to `moq_consume_video`, which delivers the
-//! still-encoded frames for a caller that brings its own decoder.
+//! The video counterpart to [`audio`](crate::audio): publish raw pictures as an
+//! encoded video track, and subscribe to one and hand back decoded raw frames,
+//! with the codec running inside the FFI boundary (VideoToolbox on macOS, Media
+//! Foundation on Windows, NVENC/NVDEC on Linux, openh264 as the software
+//! fallback; no ffmpeg). Siblings to `moq_publish_media_*` /
+//! `moq_consume_video`, which carry already-encoded frames for a caller that
+//! brings its own codec.
 //!
-//! Only H.264 is supported. A non-H.264 rendition fails the subscribe with a
-//! terminal error on the callback.
+//! Decode is H.264 only; a non-H.264 rendition fails the subscribe with a
+//! terminal error on the callback. Encode covers H.264 and H.265 (see
+//! [`moq_video_codec`]).
 
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, ffi};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
+
+/// Pixel layout of the raw frames handed to [`moq_publish_video_raw_frame`].
+///
+/// The enum is exposed in the C header for readability, but ABI fields that
+/// carry it are typed `u32`. A C caller passing an unknown discriminant gets
+/// `Error::InvalidCode` instead of UB.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_video_pixel_format {
+	/// Tightly-packed planar I420: Y, then U, then V, no row padding.
+	/// `width * height * 3 / 2` bytes, the same layout [`moq_consume_video_raw`]
+	/// hands back.
+	MOQ_VIDEO_PIXEL_FORMAT_I420 = 0,
+	/// Tightly-packed RGBA, `width * height * 4` bytes, no row padding.
+	MOQ_VIDEO_PIXEL_FORMAT_RGBA = 1,
+}
+
+/// Output video codec for [`moq_publish_video_raw`].
+///
+/// Not every codec has a backend on every machine: H.265 is hardware-only, so
+/// publishing it fails where no hardware encoder is available.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_video_codec {
+	/// H.264 / AVC, published as an `avc3` track.
+	MOQ_VIDEO_CODEC_H264 = 0,
+	/// H.265 / HEVC, published as a `hev1` track.
+	MOQ_VIDEO_CODEC_H265 = 1,
+}
+
+/// Which encoder implementation [`moq_publish_video_raw`] should use.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_video_encoder_kind {
+	/// Prefer a platform hardware encoder, falling back to software.
+	MOQ_VIDEO_ENCODER_KIND_AUTO = 0,
+	/// Hardware only; fails if none is available.
+	MOQ_VIDEO_ENCODER_KIND_HARDWARE = 1,
+	/// Software only (openh264, H.264 only).
+	MOQ_VIDEO_ENCODER_KIND_SOFTWARE = 2,
+	/// A specific backend, named by `moq_video_encoder_output::encoder`.
+	MOQ_VIDEO_ENCODER_KIND_NAMED = 3,
+}
+
+/// Raw frame layout the caller hands to [`moq_publish_video_raw_frame`], plus
+/// the resolution and rate the encoder is opened at. Every published frame must
+/// match `width` x `height`; scale before publishing if your source moves.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_encoder_input {
+	/// `moq_video_pixel_format` discriminant.
+	pub format: u32,
+	/// Encoded width in pixels. Must be even (I420 chroma is subsampled 2x2).
+	pub width: u32,
+	/// Encoded height in pixels. Must be even.
+	pub height: u32,
+	/// Nominal frames per second, used for the codec time base and the default
+	/// bitrate and keyframe interval. Must be non-zero.
+	pub framerate: u32,
+}
+
+/// Codec-side configuration for [`moq_publish_video_raw`]. Every knob spells
+/// "unset" as 0.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_encoder_output {
+	/// `moq_video_codec` discriminant.
+	pub codec: u32,
+	/// Target bitrate in bits per second. 0 derives one from the resolution and
+	/// framerate.
+	pub bitrate: u64,
+	/// Keyframe interval in frames: a subscriber joining mid-stream waits at
+	/// most this many frames before it can decode. 0 uses ~2 seconds.
+	pub gop: u32,
+	/// `moq_video_encoder_kind` discriminant.
+	pub kind: u32,
+	/// Backend name, UTF-8, e.g. `"videotoolbox"`, `"nvenc"`, `"mediafoundation"`,
+	/// `"openh264"`. Read only when `kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
+	pub encoder: *const c_char,
+	pub encoder_len: usize,
+}
+
+/// One raw frame handed to [`moq_publish_video_raw_frame`].
+///
+/// Pixel format and resolution are fixed by [`moq_video_encoder_input`] at
+/// publish time, so a frame carries neither: `data` is exactly one picture in
+/// that layout, borrowed for the duration of the call (the encoder copies before
+/// returning). The decode side has its own [`moq_video_frame`], which does carry
+/// dimensions, since there they are what the stream turned out to be.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct moq_video_encoder_frame {
+	/// Presentation timestamp, in microseconds.
+	pub timestamp_us: u64,
+	pub data: *const u8,
+	pub data_size: usize,
+}
 
 /// Decode-side configuration the caller passes to [`moq_consume_video_raw`].
 ///
@@ -34,13 +137,16 @@ pub struct moq_video_decoder_output {
 	pub latency_max_ms: u64,
 }
 
-/// One decoded video frame: packed I420 plus a presentation timestamp.
+/// One decoded video frame from [`moq_consume_video_raw`]: packed I420 plus a
+/// presentation timestamp.
 ///
-/// `data` is `width * height * 3 / 2` bytes: the Y plane (`width * height`),
-/// then U, then V (`width/2 * height/2` each), no row padding. It's BT.601
-/// limited range. `width` and `height` are even. `data` is owned by the consume
-/// slab and stays valid until the same id is released with
-/// [`moq_consume_video_raw_frame_free`].
+/// `data` is the Y plane (`width * height`), then U, then V (`width/2 *
+/// height/2` each), no row padding, BT.601 limited range, with `width` and
+/// `height` even. It's owned by the consume slab and stays valid until the same
+/// id is released with [`moq_consume_video_raw_frame_free`].
+///
+/// The publish side has its own [`moq_video_encoder_frame`], which carries no
+/// dimensions because the encoder already fixed them.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_frame {
@@ -53,11 +159,44 @@ pub struct moq_video_frame {
 
 // ---- State extension (used internally by lib.rs) ----
 
-/// Raw-video consume state: decoder tasks plus their buffered decoded frames.
+/// Raw-video state: encoders being published, plus decoder tasks and their
+/// buffered decoded frames.
 #[derive(Default)]
 pub struct Video {
+	producers: NonZeroSlab<Shared<VideoEncoder>>,
 	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
 	frames: NonZeroSlab<VideoFrame>,
+}
+
+/// Wait out an encode-thread round trip from a C entry point.
+///
+/// The C ABI hands back a status code, so there is no executor to yield to and
+/// this is where [`Sink`](moq_video::encode::Sink)'s futures stop. Blocking is
+/// also what paces the caller: a raw frame is megabytes, so a publish free to run
+/// ahead of the codec would queue pictures without bound.
+///
+/// `pollster` rather than a tokio helper because those panic when the calling
+/// thread is driving a runtime, which the one dispatching a callback is.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+	pollster::block_on(future)
+}
+
+/// An encoder paired with the track publishing its output, plus the pixel format
+/// its caller feeds it (fixed at publish time, so a frame carries only pixels and
+/// a timestamp).
+///
+/// The encoder is a [`Sink`](moq_video::encode::Sink) rather than a bare
+/// `Encoder` because a C caller drives a handle from whichever thread it likes,
+/// so a bare `Encoder` would be built on one thread and dropped on another,
+/// unbalancing the per-thread COM apartment the Windows backend opens. The sink
+/// owns the thread instead, so every caller is welcome.
+pub(crate) struct VideoEncoder {
+	encoder: moq_video::encode::Sink,
+	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	format: moq_video_pixel_format,
+	/// The encoded resolution, from the publish config. Frames carry only pixels,
+	/// so this is what says how to read them.
+	size: moq_video::Size,
 }
 
 /// A delivered frame, flattened to CPU I420 at delivery time: the C ABI hands
@@ -68,6 +207,25 @@ struct VideoFrame {
 	width: u32,
 	height: u32,
 	data: bytes::Bytes,
+}
+
+/// End a video track, given the result of draining its encoder into it.
+///
+/// A clean finish is a promise that the track holds everything the publisher
+/// produced, so a lost tail has to end the track as an abort instead. Finishing
+/// anyway would leave a truncated stream indistinguishable from a complete one,
+/// and only the local caller would ever learn otherwise.
+fn finalize(
+	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	drained: Result<(), moq_video::Error>,
+) -> Result<(), Error> {
+	match drained {
+		Ok(()) => Ok(producer.finish()?),
+		Err(err) => {
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err.into())
+		}
+	}
 }
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
@@ -81,7 +239,86 @@ struct VideoTaskEntry {
 	callback: OnStatus,
 }
 
+impl VideoEncoder {
+	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<(), Error> {
+		// A buffer that isn't one picture at the configured size is rejected here,
+		// by the surface constructors, rather than reinterpreted.
+		let size = self.size;
+		let surface = match self.format {
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 => {
+				moq_video::Surface::I420(moq_video::I420::new(size.width, size.height, data.to_vec())?)
+			}
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA => moq_video::Surface::rgba(data, size)?,
+		};
+
+		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
+		// A backend that pipelines hands back an earlier frame's output, so this is
+		// zero or more access units rather than one per call.
+		let encoded = block_on(self.encoder.encode(frame))?;
+		self.producer.publish(&encoded)?;
+		Ok(())
+	}
+
+	fn publish_cut(&mut self) {
+		// A keyframe is what a cut is on the wire: the importer closes the open
+		// group and starts a new one at it.
+		self.encoder.keyframe();
+	}
+
+	fn publish_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		block_on(self.encoder.set_bitrate(bitrate))?;
+		Ok(())
+	}
+
+	fn publish_finish(self) -> Result<(), Error> {
+		let VideoEncoder {
+			encoder, mut producer, ..
+		} = self;
+		// Drain the codec into the track before ending it, so the last frames land
+		// in it rather than being dropped with the encoder.
+		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
+		finalize(producer, drained)
+	}
+}
+
 impl Video {
+	/// Advertise a track for an already-opened encoder.
+	///
+	/// The encoder is opened by the caller, and before this, so a config this
+	/// machine can't encode fails without leaving a track advertised that will
+	/// never carry frames.
+	pub fn publish(
+		&mut self,
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
+		format: moq_video_pixel_format,
+		config: &moq_video::encode::Config,
+		encoder: moq_video::encode::Sink,
+	) -> Result<Id, Error> {
+		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, config.codec)?;
+		self.producers.insert(Shared::new(VideoEncoder {
+			encoder,
+			producer,
+			format,
+			size: config.size(),
+		}))
+	}
+
+	/// Resolve a producer handle, so the caller can encode with the global lock
+	/// released.
+	///
+	/// Bind the result before locking it: a temporary [`State`] guard lives to the
+	/// end of the statement that created it, so resolving and locking in one
+	/// expression would put the encode back under the global lock.
+	pub(crate) fn producer(&self, id: Id) -> Result<Shared<VideoEncoder>, Error> {
+		self.producers.get(id).cloned().ok_or(Error::MediaNotFound)
+	}
+
+	/// Resolve a producer and drop its id, so nothing can be published to it after.
+	pub(crate) fn remove(&mut self, id: Id) -> Result<Shared<VideoEncoder>, Error> {
+		self.producers.remove(id).ok_or(Error::MediaNotFound)
+	}
+
 	pub fn consume(
 		&mut self,
 		broadcast: &moq_net::broadcast::Consumer,
@@ -185,6 +422,177 @@ impl Video {
 
 // ---- C entry points ----
 
+fn pixel_format_from_u32(value: u32) -> Result<moq_video_pixel_format, Error> {
+	Ok(match value {
+		v if v == moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32 => {
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420
+		}
+		v if v == moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32 => {
+			moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA
+		}
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+fn codec_from_u32(value: u32) -> Result<moq_video::encode::Codec, Error> {
+	use moq_video::encode::Codec;
+	Ok(match value {
+		v if v == moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32 => Codec::H264,
+		v if v == moq_video_codec::MOQ_VIDEO_CODEC_H265 as u32 => Codec::H265,
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+/// # Safety
+/// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
+///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
+unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::encode::Kind, Error> {
+	use moq_video::encode::Kind;
+	Ok(match output.kind {
+		v if v == moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_AUTO as u32 => Kind::Auto,
+		v if v == moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_HARDWARE as u32 => Kind::Hardware,
+		v if v == moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32 => Kind::Software,
+		v if v == moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_NAMED as u32 => {
+			Kind::Named(unsafe { ffi::parse_str(output.encoder, output.encoder_len)? }.to_string())
+		}
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+/// Open a video track on a broadcast, encoding the raw frames you publish to it.
+///
+/// The encoder is opened here, so an unsupported codec, resolution, or backend
+/// fails now rather than on the first frame. The track is named after the codec
+/// (`.avc3` / `.hev1`) and its catalog rendition appears once the first keyframe
+/// has been encoded, which is where the resolution and codec string come from.
+///
+/// Returns a non-zero handle on success or a negative error code.
+///
+/// # Safety
+/// - `input` / `output` must point to fully populated structs.
+/// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
+///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_raw(
+	broadcast: u32,
+	input: *const moq_video_encoder_input,
+	output: *const moq_video_encoder_output,
+) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+
+		let format = pixel_format_from_u32(raw_input.format)?;
+
+		let mut config = moq_video::encode::Config::new(raw_input.width, raw_input.height, raw_input.framerate);
+		config.codec = codec_from_u32(raw_output.codec)?;
+		config.kind = unsafe { encoder_kind(raw_output)? };
+		// The C ABI spells an unset knob as 0, which neither field accepts as a real
+		// value: a zero bitrate or GOP is the default, not a request.
+		config.bitrate = (raw_output.bitrate != 0).then_some(raw_output.bitrate);
+		if raw_output.gop != 0 {
+			config.gop = raw_output.gop;
+		}
+
+		// Opened before the global lock is taken: bringing up a hardware encoder is
+		// slow enough that every other call would wait behind it.
+		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
+
+		let mut state = State::lock();
+		let State { publish, video, .. } = &mut *state;
+		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
+
+		video.publish(broadcast_producer, catalog.clone(), format, &config, encoder)
+	})
+}
+
+/// Encode and publish one raw frame.
+///
+/// `frame->data` is borrowed for the duration of the call and must be exactly one
+/// picture in the pixel format and at the resolution declared by
+/// [`moq_video_encoder_input`].
+/// A backend that pipelines publishes an earlier frame's output here, so a call
+/// that emits nothing is normal rather than an error.
+///
+/// # Safety
+/// - `frame` must point to a valid [`moq_video_encoder_frame`].
+/// - `frame->data` must point to `frame->data_size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_video_raw_frame(producer: u32, frame: *const moq_video_encoder_frame) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
+
+		let producer = State::lock().video.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.publish_frame(frame.timestamp_us, data)
+	})
+}
+
+/// Cut a new group at the next published frame.
+///
+/// Optional. The encoder already keyframes every `moq_video_encoder_output.gop`
+/// frames, and each of those cuts a group, so a subscriber can always join
+/// without you calling this. Reach for it only to place the boundaries yourself:
+/// aligning groups with something the encoder cannot see, such as a scene change,
+/// a source switch, or resuming after an idle gap.
+///
+/// The next frame is encoded as a keyframe, which closes the open group and
+/// starts a new one at it. Calling this repeatedly before that frame arrives cuts
+/// once, not several times.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_video_raw_cut(producer: u32) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let producer = State::lock().video.producer(producer)?;
+		producer.lock().as_mut().ok_or(Error::MediaNotFound)?.publish_cut();
+		Ok(())
+	})
+}
+
+/// Retune a live encoder to `bitrate` bits per second, taking effect from
+/// roughly the next frame. No keyframe is forced, so this is cheap enough to
+/// drive from a congestion controller.
+///
+/// The configured bitrate is a ceiling on some backends (openh264 rejects a raise
+/// above the rate it opened at), so set `bitrate` to the highest you will ask
+/// for and adapt downwards from there.
+///
+/// Returns a negative code if this backend cannot retune while running. That is
+/// not fatal: the encoder keeps running at its current rate, so stop adapting
+/// rather than stop publishing.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_video_raw_bitrate(producer: u32, bitrate: u64) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		let producer = State::lock().video.producer(producer)?;
+		producer
+			.lock()
+			.as_mut()
+			.ok_or(Error::MediaNotFound)?
+			.publish_bitrate(bitrate)
+	})
+}
+
+/// Flush any frames the codec is still holding and finalize the video track.
+///
+/// The handle is released, so nothing can be published to it afterwards.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_video_raw_finish(producer: u32) -> i32 {
+	ffi::enter(move || {
+		let producer = ffi::parse_id(producer)?;
+		// The id is dropped first, so nothing new queues behind the drain; whatever
+		// is mid-encode still finishes before this takes the encoder.
+		let producer = State::lock().video.remove(producer)?;
+		producer.take().ok_or(Error::MediaNotFound)?.publish_finish()
+	})
+}
+
 /// Subscribe to a video track and decode it into raw I420 frames.
 ///
 /// The catalog `index` selects which video rendition to subscribe to, matching
@@ -269,4 +677,53 @@ pub extern "C" fn moq_consume_video_raw_frame_free(id: u32) -> i32 {
 		let id = ffi::parse_id(id)?;
 		State::lock().video.frame_free(id)
 	})
+}
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A video track wired up without an encoder, plus a subscriber on it: enough
+	/// to pin what [`finalize`] shows the far end.
+	async fn track_under_test() -> (
+		moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+		moq_net::track::Subscriber,
+	) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog =
+			moq_mux::catalog::Producer::with_catalog(&mut broadcast, moq_mux::catalog::hang::Catalog::default())
+				.unwrap();
+		let consumer = broadcast.consume();
+		let producer = moq_video::encode::Producer::new(broadcast, catalog, moq_video::encode::Codec::H264).unwrap();
+
+		let name = producer.demand().name().to_string();
+		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+		(producer, track)
+	}
+
+	/// A clean finish reaches the subscriber as the end of the track, which is what
+	/// makes the abort case below meaningful rather than vacuous.
+	#[tokio::test]
+	async fn a_successful_drain_ends_the_track_cleanly() {
+		let (producer, mut track) = track_under_test().await;
+		finalize(producer, Ok(())).unwrap();
+		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
+	}
+
+	/// Regression: a lost tail must reach the subscriber as an abort. Finishing the
+	/// track anyway would report a truncated stream as a complete one, and only the
+	/// publisher would ever know otherwise.
+	#[tokio::test]
+	async fn a_failed_drain_aborts_the_track() {
+		let (producer, mut track) = track_under_test().await;
+		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
+		finalize(producer, Err(err)).unwrap_err();
+
+		let Err(err) = track.recv_group().await else {
+			panic!("expected an abort, not a clean end");
+		};
+		assert!(
+			err.to_string().contains("the codec lost the tail"),
+			"the abort should carry the drain failure: {err}"
+		);
+	}
 }

@@ -12,20 +12,92 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox},
 };
 
-use super::{Message, Version};
+use super::{Message, Version, cluster};
 
-/// A broadcast whose route table is watched for `advertisable` flips while the
-/// peer has an assigned identity (`Client::with_peer_origin`).
+/// A broadcast whose route table is watched for changes in what we advertise: the
+/// namespace becoming (un)advertisable, or its path or cost moving.
 struct Watched {
 	broadcast: crate::broadcast::Consumer,
+	/// Demand edges re-price the serving route without a route change (see
+	/// [`crate::broadcast::outgoing_cost`]), so the loop watches this too.
+	demand: crate::broadcast::Demand,
+	/// What the peer currently holds for this namespace, or [`Advert::None`] while it
+	/// is filtered. A selection that differs is worth a wire message; one that matches
+	/// is not.
+	sent: Advert,
+	/// When demand drained while a zero cost was advertised. Restoring the cold cost is
+	/// deferred by [`crate::broadcast::COST_LINGER`] past this, so viewer churn does not
+	/// flap routing across the mesh; demand returning in the window cancels it.
+	idle_at: Option<web_async::time::Instant>,
 	/// Set once the broadcast errors, so a dead entry stops being polled.
 	dead: bool,
 }
 
 impl Watched {
 	fn new(broadcast: crate::broadcast::Consumer) -> Self {
-		Self { broadcast, dead: false }
+		Self {
+			demand: broadcast.demand(),
+			broadcast,
+			sent: Advert::None,
+			idle_at: None,
+			dead: false,
+		}
 	}
+
+	/// Record what the peer now holds, retiring any linger the old advertisement armed.
+	///
+	/// Only a discounted advertisement has a cost to restore. Leaving `idle_at` set past
+	/// one that isn't would keep [`Publisher::linger_deadline`] handing back an expired
+	/// instant that nothing ever clears, and the announce loops would spin on it.
+	fn set_sent(&mut self, sent: Advert) {
+		if !sent.discounted() {
+			self.idle_at = None;
+		}
+		self.sent = sent;
+	}
+}
+
+/// What to advertise to this peer for one broadcast.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Advert {
+	/// Nothing: every route loops through the peer or us, or none is announced.
+	#[default]
+	None,
+	/// The namespace, with no routing information: the peer did not negotiate the MoQ
+	/// Cluster extension, so there is nowhere to put a path or a cost.
+	Plain,
+	/// The namespace, with the path it traversed and that path's accumulated cost.
+	Cluster(cluster::Advert),
+}
+
+impl Advert {
+	/// Whether the peer should hold this namespace at all.
+	fn wanted(&self) -> bool {
+		!matches!(self, Self::None)
+	}
+
+	/// The parameters to put on the wire, as the message structs carry them.
+	fn params(&self) -> Option<cluster::Advert> {
+		match self {
+			Self::Cluster(advert) => Some(advert.clone()),
+			_ => None,
+		}
+	}
+
+	/// Whether this advertisement carries a zero cost, which is what the serving-route
+	/// discount produces and what the linger is watching to restore.
+	fn discounted(&self) -> bool {
+		matches!(self, Self::Cluster(advert) if advert.cost == 0)
+	}
+}
+
+/// What a watched broadcast reported.
+enum Watch {
+	/// Its route table or demand moved; re-run the selection.
+	Changed(crate::PathOwned),
+	/// Demand just drained while a discounted cost was advertised. The cold cost is
+	/// restored once the linger expires, not now, so viewer churn does not flap routing.
+	Idle(crate::PathOwned),
 }
 
 /// What woke an announce-forwarding loop.
@@ -34,8 +106,13 @@ enum NamespaceEvent {
 	Closed(Result<(), Error>),
 	/// An origin-level (un)announce, `None` once the announce stream ends.
 	Update(Option<crate::announce::Update>),
-	/// A watched broadcast's route table changed; re-decide `advertisable`.
+	/// A watched broadcast's route table or demand moved; re-run the selection.
 	Routes(crate::PathOwned),
+	/// A watched broadcast's demand drained; start its linger.
+	Idle(crate::PathOwned),
+	/// The linger sleep fired without an expired entry (it was canceled, or a later
+	/// deadline remains): restart the turn so the next deadline arms a fresh sleep.
+	Linger,
 }
 
 #[derive(Clone)]
@@ -44,11 +121,16 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
 	control: Control,
-	// The identity assigned to the peer by `Client::with_peer_origin`.
-	// moq-transport has no exclude-hop on the wire, so this is the only signal
-	// for filtering announces that would echo the peer's own broadcasts back at
-	// it; the data plane is covered by the exclusion the client set on `origin`.
+	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
+	// origin we consume so it matches the local relay identity across every session,
+	// which is what makes cross-session loop detection work.
+	self_origin: crate::Origin,
+	// The identity assigned to the peer by `Client::with_peer_origin`, used when the
+	// peer declares none itself. A peer that negotiates the MoQ Cluster extension
+	// declares its own, which wins.
 	peer_origin: Option<crate::Origin>,
+	// What the peer declared in its SETUP, filled when that stream is read.
+	peer_setup: cluster::PeerSetup,
 	version: Version,
 }
 
@@ -58,54 +140,158 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: origin::Consumer,
 		control: Control,
 		peer_origin: Option<crate::Origin>,
+		peer_setup: cluster::PeerSetup,
 		version: Version,
 	) -> Self {
 		Self {
 			session,
+			self_origin: *origin,
 			origin,
 			control,
 			peer_origin,
+			peer_setup,
 			version,
 		}
 	}
 
-	/// Whether an announced broadcast should be advertised to this peer: it needs
-	/// at least one advertisable route that doesn't flow through the identity the
-	/// peer was assigned. A same-path source can splice in or detach without an
-	/// origin-level (un)announce, silently flipping this, so the announce loops
-	/// watch every announced broadcast's route table (see [`Watched`]) and
-	/// advertise or withdraw the namespace when eligibility changes.
-	fn advertisable(&self, broadcast: &crate::broadcast::Consumer) -> bool {
-		let Some(peer) = self.peer_origin else {
-			return true;
-		};
-		broadcast
-			.routes()
-			.iter()
-			.any(|route| route.announce && !route.hops.contains(&peer))
+	/// What the peer declared in its SETUP, or the default (extension off) on a version
+	/// that cannot negotiate it.
+	///
+	/// Blocks until the peer's SETUP arrives, because the extension changes the NAMESPACE
+	/// encoding: nothing can be advertised until we know whether the peer speaks it.
+	async fn peer(&self) -> cluster::Peer {
+		match cluster::supported(self.version) {
+			true => self.peer_setup.get().await,
+			false => cluster::Peer::default(),
+		}
 	}
 
-	/// Poll every watched broadcast for a route-table change, reporting the first
-	/// changed path. Only populated when the peer has an assigned identity;
-	/// without one `advertisable` is constant and there is nothing to watch.
-	fn poll_watched(watched: &mut HashMap<crate::PathOwned, Watched>, waiter: &kio::Waiter) -> Poll<crate::PathOwned> {
+	/// The origin to serve this peer's subscriptions from: sources whose hop chain flows
+	/// through the peer are excluded, so a subscription is never handed data that already
+	/// flowed through the subscriber.
+	///
+	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
+	/// keeps advertised paths truthful and prevents subscription cycles of any length.
+	async fn serving_origin(&self) -> origin::Consumer {
+		let peer = self.peer().await;
+		match self.exclude(&peer) {
+			crate::Origin::UNKNOWN => self.origin.clone(),
+			exclude => self.origin.clone().excluding(exclude),
+		}
+	}
+
+	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
+	///
+	/// A peer that negotiated the extension declares its own; otherwise fall back to
+	/// one the caller assigned out of band (`Client::with_peer_origin`), since
+	/// moq-transport itself carries no identity.
+	fn exclude(&self, peer: &cluster::Peer) -> crate::Origin {
+		match peer.negotiated() {
+			true => peer.exclude(),
+			false => self.peer_origin.unwrap_or(crate::Origin::UNKNOWN),
+		}
+	}
+
+	/// Pick what to advertise to this peer for one broadcast.
+	///
+	/// A same-path source can splice in or detach without an origin-level (un)announce,
+	/// and demand can re-price the serving route in place, so the announce loops watch
+	/// every announced broadcast (see [`Watched`]) and re-run this when either moves.
+	fn select(&self, watch: &Watched, peer: &cluster::Peer) -> Advert {
+		let routes = watch.broadcast.routes();
+		let exclude = self.exclude(peer);
+
+		for (route, serving) in crate::broadcast::advertisable_routes(&routes, self.self_origin, exclude) {
+			if !peer.negotiated() {
+				return Advert::Plain;
+			}
+
+			let cost = crate::broadcast::outgoing_cost(&watch.demand, route, serving);
+			// Our own Hop ID is always the last entry, so the peer reconstructs the full
+			// path. A chain with no room left is a loop in all but name; try the next route.
+			match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
+				Ok(advert) => return Advert::Cluster(advert),
+				Err(_) => continue,
+			}
+		}
+
+		Advert::None
+	}
+
+	/// Poll every watched broadcast for a change in what it should advertise, reporting
+	/// the first changed path.
+	///
+	/// Two things move it: the route table (a failover, a standby attaching, a
+	/// re-price) and demand on the serving route (which switches the discount on and
+	/// off). `fired` is the linger deadline's verdict for this turn.
+	fn poll_watched(
+		watched: &mut HashMap<crate::PathOwned, Watched>,
+		fired: Option<web_async::time::Instant>,
+		waiter: &kio::Waiter,
+	) -> Poll<Watch> {
 		for (path, watch) in watched.iter_mut() {
 			if watch.dead {
 				continue;
 			}
 			match watch.broadcast.poll_routes_changed(waiter) {
-				Poll::Ready(Ok(())) => return Poll::Ready(path.clone()),
+				Poll::Ready(Ok(())) => return Poll::Ready(Watch::Changed(path.clone())),
 				// A dying broadcast has no further route changes; the origin's
 				// unannounce is what removes the entry.
-				Poll::Ready(Err(_)) => watch.dead = true,
+				Poll::Ready(Err(_)) => {
+					watch.dead = true;
+					continue;
+				}
 				Poll::Pending => {}
+			}
+
+			// Only a cost-carrying advertisement re-prices on demand; a plain one has
+			// nowhere to put the discount, so watching demand would fire forever.
+			if !matches!(watch.sent, Advert::Cluster(_)) {
+				continue;
+			}
+
+			if !watch.sent.discounted() {
+				// Not discounted: demand arriving is what applies the discount.
+				if let Poll::Ready(Ok(())) = watch.demand.poll_used(waiter) {
+					return Poll::Ready(Watch::Changed(path.clone()));
+				}
+				continue;
+			}
+
+			match watch.idle_at {
+				// Demand coming back within the linger cancels the restore; fall through
+				// to re-arm the unused watch.
+				Some(_) if watch.demand.is_used() => watch.idle_at = None,
+				// The linger expired: restore the cold cost.
+				Some(at) if fired.is_some_and(|now| now >= at + crate::broadcast::COST_LINGER) => {
+					watch.idle_at = None;
+					return Poll::Ready(Watch::Changed(path.clone()));
+				}
+				// Still lingering: the sleep owns the wakeup, and `poll_used` re-arms
+				// the cancel check above.
+				Some(_) => {
+					let _ = watch.demand.poll_used(waiter);
+					continue;
+				}
+				None => {}
+			}
+
+			// Demand just drained. Start the linger rather than re-pricing now, and end
+			// the turn so the caller arms a deadline for it.
+			if let Poll::Ready(Ok(())) = watch.demand.poll_unused(waiter) {
+				return Poll::Ready(Watch::Idle(path.clone()));
 			}
 		}
 		Poll::Pending
 	}
 
-	pub async fn run(self) -> Result<(), Error> {
-		self.run_announce().await
+	/// The earliest deferred cost-restore across every watched broadcast.
+	fn linger_deadline(watched: &HashMap<crate::PathOwned, Watched>) -> Option<web_async::time::Instant> {
+		watched
+			.values()
+			.filter_map(|watch| watch.idle_at)
+			.min()
+			.map(|at| at + crate::broadcast::COST_LINGER)
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
@@ -203,12 +389,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement. `request_broadcast` resolves it immediately, or falls back to
 		// an `origin::Dynamic` handler if one is registered.
-		let broadcast = match self.origin.request_broadcast(&msg.track_namespace).await {
+		let broadcast = match self
+			.serving_origin()
+			.await
+			.request_broadcast(&msg.track_namespace)
+			.await
+		{
 			Ok(broadcast) => broadcast,
 			Err(_) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
-					.await?;
-				return Ok(());
+				return self
+					.reject_subscribe(stream, request_id, 404, "Broadcast not found")
+					.await;
 			}
 		};
 
@@ -220,9 +411,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = match async { broadcast.track(&msg.track_name)?.subscribe(subscription).await }.await {
 			Ok(track) => track,
 			Err(err) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
-					.await?;
-				return Ok(());
+				return self.reject_subscribe(stream, request_id, 404, &err.to_string()).await;
 			}
 		};
 
@@ -236,9 +425,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => None,
 				},
 				track_alias: request_id.0,
-				// Declaring the timescale is what opts the track into timestamps; every
-				// object Timestamp below is in these units.
-				timescale: Some(track.info().timescale),
+				properties: ietf::Properties {
+					// Declaring the timescale is what opts the track into timestamps; every
+					// object Timestamp below is in these units.
+					timescale: Some(track.info().timescale),
+					// We serve the newest group first, matching moq-lite.
+					group_order: Some(GroupOrder::Descending),
+				},
 			})
 			.await?;
 
@@ -280,9 +473,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			})
 			.await;
 
-		stream.writer.finish().ok();
+		// PUBLISH_DONE is the last thing on this stream, so it needs the acknowledgement too.
+		let _ = stream.writer.close().await;
 
 		res
+	}
+
+	/// Reject a SUBSCRIBE, ending the request stream.
+	///
+	/// Takes the whole stream because delivering the error is the other half of the job:
+	/// [`Writer`] resets on drop, and a reset discards data the peer has not acknowledged, so
+	/// returning here without [`Writer::close`] leaves the subscriber waiting on a request we
+	/// already refused.
+	async fn reject_subscribe(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		self.write_subscribe_error(&mut stream.writer, request_id, error_code, reason)
+			.await?;
+
+		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
+		let _ = stream.writer.close().await;
+		Ok(())
 	}
 
 	/// Write a subscribe error on the bidi stream writer.
@@ -463,25 +678,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_fetch_stream(self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let _subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
-				self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-					.await?;
-				return Ok(());
+				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id,
 				group_offset,
 			} => {
 				if group_offset != 0 {
-					self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-						.await?;
-					return Ok(());
+					return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 				}
 				subscriber_request_id
 			}
 			FetchType::AbsoluteJoining { .. } => {
-				self.write_fetch_error(&mut stream.writer, msg.request_id, 500, "not supported")
-					.await?;
-				return Ok(());
+				return self.reject_fetch(stream, msg.request_id, 500, "not supported").await;
 			}
 		};
 
@@ -497,8 +706,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				request_id: msg.request_id,
 			})
 			.await?;
-		writer.finish()?;
-		writer.closed().await?;
+		writer.close().await?;
 
 		Ok(())
 	}
@@ -533,6 +741,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				writer.encode(&ietf::RequestOk { request_id: None }).await?;
 			}
 		}
+		Ok(())
+	}
+
+	/// Reject a FETCH, ending the request stream. See [`Self::reject_subscribe`] for why the
+	/// close is not optional.
+	async fn reject_fetch(
+		&self,
+		mut stream: Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		self.write_fetch_error(&mut stream.writer, request_id, error_code, reason)
+			.await?;
+
+		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
@@ -580,155 +804,223 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Outgoing PublishNamespace: announce each namespace via a bidi stream.
-	async fn run_announce(self) -> Result<(), Error> {
-		// Each accepted namespace holds a `publisher()` announce guard (bumps
-		// `announced` / `announced_closed`) alongside its stream, so dropping the
-		// tuple on unannounce or cleanup records the close.
-		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)> = HashMap::new();
-		let mut announced = self.origin.announced();
-		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+	/// Bring the peer's view of one namespace in line with the current selection.
+	///
+	/// Draft-16+ re-sends NAMESPACE on the SUBSCRIBE_NAMESPACE stream (the receiver
+	/// treats a repeat as a replacement) and retracts with NAMESPACE_DONE.
+	/// Draft-14/15 carry each advertisement on its own PUBLISH_NAMESPACE request:
+	/// an update re-sends PUBLISH_NAMESPACE **on the stream that already carries
+	/// it**, since a second stream would leave two claiming one namespace, and a
+	/// withdrawal closes the request with PUBLISH_NAMESPACE_DONE.
+	async fn sync_namespace(
+		&self,
+		suffix: &crate::PathOwned,
+		path: &crate::PathOwned,
+		peer: &cluster::Peer,
+		watched: &mut HashMap<crate::PathOwned, Watched>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		stream: &mut Stream<S, Version>,
+	) -> Result<(), Error> {
+		let Some(watch) = watched.get(suffix) else {
+			return Ok(());
+		};
+		let advert = self.select(watch, peer);
+		if advert == watch.sent {
+			return Ok(());
+		}
+		let held = watch.sent.wanted();
 
-		loop {
-			// Wait for the next (un)announce or watched route change, bailing once
-			// the session dies.
-			let event = {
-				let mut closed = std::pin::pin!(self.session.closed());
-				kio::wait(|waiter| {
-					if waiter.poll_future(closed.as_mut()).is_ready() {
-						return Poll::Ready(NamespaceEvent::Closed(Ok(())));
-					}
-					if let Poll::Ready(update) = announced.poll_next(waiter) {
-						return Poll::Ready(NamespaceEvent::Update(update));
-					}
-					Self::poll_watched(&mut watched, waiter).map(NamespaceEvent::Routes)
-				})
-				.await
-			};
-
-			match event {
-				NamespaceEvent::Closed(res) => return res,
-				NamespaceEvent::Update(None) => break,
-				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
-					let suffix = path.to_owned();
-					match broadcast {
-						Some(broadcast) => {
-							let advertisable = self.advertisable(&broadcast);
-							if self.peer_origin.is_some() {
-								watched.insert(suffix.clone(), Watched::new(broadcast));
-							}
-							// A broadcast with no route avoiding the peer would only echo
-							// its own content back; skip it. The watch re-decides when its
-							// route table changes.
-							if advertisable {
-								self.announce_namespace(suffix, &mut namespace_streams).await?;
-							}
+		let absolute = self.origin.absolute(path).to_owned();
+		let sent = match self.version {
+			Version::Draft14 | Version::Draft15 => {
+				match (advert.wanted(), requests.get_mut(suffix)) {
+					(false, _) => {
+						if held {
+							tracing::debug!(broadcast = %absolute, "namespace_done");
 						}
-						None => {
-							watched.remove(&suffix);
-							// A no-op for a namespace that was never announced (no stream
-							// to tear down).
-							self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-						}
+						self.withdraw_namespace(stream, requests, suffix.clone()).await?;
+					}
+					(true, Some(request)) => {
+						tracing::debug!(broadcast = %absolute, "announce update");
+						request.stream.writer.encode(&ietf::PublishNamespace::ID).await?;
+						request
+							.stream
+							.writer
+							.encode(&ietf::PublishNamespace {
+								request_id: request.request_id,
+								track_namespace: request.path.as_path(),
+								cluster: advert.params(),
+							})
+							.await?;
+					}
+					(true, None) => {
+						tracing::debug!(broadcast = %absolute, "namespace");
+						self.advertise_namespace(requests, path, suffix.clone(), advert.params())
+							.await?;
 					}
 				}
-				NamespaceEvent::Routes(suffix) => {
-					let Some(watch) = watched.get(&suffix) else { continue };
-					let advertisable = self.advertisable(&watch.broadcast);
-					if advertisable && !namespace_streams.contains_key(&suffix) {
-						self.announce_namespace(suffix, &mut namespace_streams).await?;
-					} else if !advertisable && namespace_streams.contains_key(&suffix) {
-						self.unannounce_namespace(&suffix, &mut namespace_streams).await;
-					}
+				// The peer can reject a fresh PUBLISH_NAMESPACE, which leaves no request
+				// behind. Record what it actually holds, so a later route change retries
+				// instead of believing the namespace is already advertised.
+				match requests.contains_key(suffix) {
+					true => advert,
+					false => Advert::None,
 				}
 			}
-		}
+			_ => {
+				match (advert.wanted(), held) {
+					(true, _) => {
+						tracing::debug!(broadcast = %absolute, "namespace");
+						stream.writer.encode(&ietf::Namespace::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::Namespace {
+								suffix: suffix.as_path(),
+								cluster: advert.params(),
+							})
+							.await?;
+					}
+					(false, true) => {
+						tracing::debug!(broadcast = %absolute, "namespace_done");
+						stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::NamespaceDone {
+								suffix: suffix.as_path(),
+							})
+							.await?;
+					}
+					// Never advertised and still not advertisable: nothing to say.
+					(false, false) => {}
+				}
+				advert
+			}
+		};
 
-		// Clean up remaining streams
-		let suffixes: Vec<crate::PathOwned> = namespace_streams.keys().cloned().collect();
-		for suffix in suffixes {
-			self.unannounce_namespace(&suffix, &mut namespace_streams).await;
+		if let Some(watch) = watched.get_mut(suffix) {
+			watch.set_sent(sent);
 		}
-
 		Ok(())
 	}
 
-	/// Open a bidi stream and send a PublishNamespace, recording the stream for later teardown.
-	async fn announce_namespace(
+	/// Open a PUBLISH_NAMESPACE request for one namespace (draft-14/15, which have
+	/// no NAMESPACE message), recording it in `requests` so an update or withdrawal
+	/// reuses the same stream. A declined request records nothing.
+	async fn advertise_namespace(
 		&self,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
+		cluster: Option<cluster::Advert>,
 	) -> Result<(), Error> {
-		let absolute = self.origin.absolute(&suffix).to_owned();
-		tracing::debug!(broadcast = %absolute, "announce");
-
 		let request_id = self.control.next_request_id().await?;
-		let mut stream = Stream::open(&self.session, self.version).await?;
+		let mut request = Stream::open(&self.session, self.version).await?;
 
-		stream.writer.encode(&ietf::PublishNamespace::ID).await?;
-		stream
+		request.writer.encode(&ietf::PublishNamespace::ID).await?;
+		request
 			.writer
 			.encode(&ietf::PublishNamespace {
 				request_id,
-				track_namespace: suffix.as_path(),
+				track_namespace: path.as_path(),
+				cluster,
 			})
 			.await?;
 
-		let type_id: u64 = stream.reader.decode().await?;
-		let size: u16 = stream.reader.decode().await?;
-		let mut data = stream.reader.read_exact(size as usize).await?;
+		let type_id: u64 = request.reader.decode().await?;
+		let size: u16 = request.reader.decode().await?;
+		let mut data = request.reader.read_exact(size as usize).await?;
 
 		match (self.version, type_id) {
 			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
 				let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
-				namespace_streams.insert(suffix, (request_id, stream));
 			}
 			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
+				return Ok(());
 			}
 			(_, ietf::RequestOk::ID) => {
 				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
-				namespace_streams.insert(suffix, (request_id, stream));
 			}
 			(_, ietf::RequestError::ID) => {
 				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
+				return Ok(());
 			}
 			_ => return Err(Error::UnexpectedMessage),
 		}
 
+		requests.insert(
+			suffix,
+			NamespaceRequest {
+				path: path.clone(),
+				request_id,
+				stream: request,
+			},
+		);
 		Ok(())
 	}
 
-	/// Tear down the namespace stream for a suffix, sending PublishNamespaceDone where required.
-	async fn unannounce_namespace(
+	/// Withdraw an advertised namespace: NAMESPACE_DONE inline on draft-16+, or
+	/// PUBLISH_NAMESPACE_DONE closing its own request on draft-14/15.
+	async fn withdraw_namespace(
 		&self,
-		suffix: &crate::PathOwned,
-		namespace_streams: &mut HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)>,
-	) {
-		tracing::debug!(broadcast = %self.origin.absolute(suffix), "unannounce");
-		if let Some((request_id, mut stream)) = namespace_streams.remove(suffix) {
-			// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
-			match self.version {
-				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-					let _ = stream
+		stream: &mut Stream<S, Version>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		suffix: crate::PathOwned,
+	) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 | Version::Draft15 => {
+				if let Some(mut request) = requests.remove(&suffix) {
+					// Best effort: the peer may already be gone.
+					let _ = request
+						.stream
 						.writer
 						.encode_message(&ietf::PublishNamespaceDone {
-							track_namespace: suffix.as_path(),
-							request_id,
+							track_namespace: request.path.as_path(),
+							request_id: request.request_id,
 						})
 						.await;
+
+					// The withdrawal rides this request's own stream, which drops with it, so
+					// it needs the acknowledgement before the drop-time reset can discard it.
+					let _ = request.stream.writer.close().await;
 				}
-				_ => {}
 			}
-			stream.writer.finish().ok();
+			_ => {
+				stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::NamespaceDone {
+						suffix: suffix.as_path(),
+					})
+					.await?;
+			}
+		}
+		Ok(())
+	}
+
+	/// Close out every open draft-14/15 PUBLISH_NAMESPACE request. A no-op on
+	/// later drafts, whose entries ride the SUBSCRIBE_NAMESPACE stream itself.
+	async fn withdraw_requests(
+		&self,
+		stream: &mut Stream<S, Version>,
+		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+	) {
+		let suffixes: Vec<crate::PathOwned> = requests.keys().cloned().collect();
+		for suffix in suffixes {
+			let _ = self.withdraw_namespace(stream, requests, suffix).await;
 		}
 	}
 
 	/// Handle a SUBSCRIBE_NAMESPACE on its bidi stream.
+	///
+	/// Namespaces are only advertised in response to one of these, and all the
+	/// announce state is local to this task (mirroring `lite::Publisher`'s
+	/// announce handling): whatever this subscription advertised is withdrawn
+	/// when its stream ends.
 	async fn run_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
@@ -772,120 +1064,106 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		match self.version {
-			// v14/v15: Namespace/NamespaceDone don't exist. After OK, the publisher
-			// sends PUBLISH_NAMESPACE/PUBLISH_NAMESPACE_DONE as separate control
-			// stream messages (handled by run_announce). Just wait for stream close.
-			Version::Draft14 | Version::Draft15 => {
-				return stream.reader.closed().await;
-			}
-			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
-			_ => {
-				let mut announced = origin.announced();
+		let mut announced = origin.announced();
+		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
+		// namespace. Empty on later drafts, whose entries ride `stream` inline.
+		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
-				// Namespaces actually sent to the peer, so a filtered announce (no
-				// route avoiding the peer's assigned identity) never gets a dangling
-				// NamespaceDone.
-				let mut sent: std::collections::HashSet<crate::PathOwned> = std::collections::HashSet::new();
-				let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
+		// The extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+		let mut linger = kio::time::Deadline::new();
 
-				// Send initial NAMESPACE messages for currently active namespaces.
-				while let Some(crate::announce::Update { path, broadcast }) = announced.try_next() {
-					if let Some(broadcast) = broadcast {
-						let suffix = path
-							.strip_prefix(&prefix)
-							.expect("origin returned invalid path")
-							.to_owned();
-						let advertisable = self.advertisable(&broadcast);
-						if self.peer_origin.is_some() {
+		// Stream updates (origin (un)announces plus watched route and demand
+		// changes), bailing if the peer closes its side first.
+		let res = loop {
+			linger.set(Self::linger_deadline(&watched));
+
+			let event = {
+				let mut closed = std::pin::pin!(stream.reader.closed());
+				kio::wait(|waiter| {
+					if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
+						return Poll::Ready(NamespaceEvent::Closed(res));
+					}
+					if let Poll::Ready(update) = announced.poll_next(waiter) {
+						return Poll::Ready(NamespaceEvent::Update(update));
+					}
+					// Stamped per poll rather than kept: the turn always ends in a
+					// `Ready` below once it fires, so it never has to survive.
+					let fired = linger.poll(waiter).is_ready().then(web_async::time::Instant::now);
+					match Self::poll_watched(&mut watched, fired, waiter) {
+						Poll::Ready(Watch::Changed(path)) => return Poll::Ready(NamespaceEvent::Routes(path)),
+						Poll::Ready(Watch::Idle(path)) => return Poll::Ready(NamespaceEvent::Idle(path)),
+						Poll::Pending => {}
+					}
+					match fired.is_some() {
+						true => Poll::Ready(NamespaceEvent::Linger),
+						false => Poll::Pending,
+					}
+				})
+				.await
+			};
+
+			match event {
+				NamespaceEvent::Closed(res) => break res,
+				NamespaceEvent::Linger => continue,
+				NamespaceEvent::Update(None) => {
+					// The origin is gone: withdraw everything, then finish the
+					// stream and wait for delivery.
+					self.withdraw_requests(&mut stream, &mut requests).await;
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
+				NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+					let path = path.to_owned();
+
+					match broadcast {
+						Some(broadcast) => {
 							watched.insert(suffix.clone(), Watched::new(broadcast));
+							self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
+								.await?;
 						}
-						if !advertisable {
-							continue;
+						None => {
+							// Only close out namespaces the peer actually saw.
+							let held = watched.remove(&suffix).is_some_and(|watch| watch.sent.wanted());
+							if held {
+								tracing::debug!(broadcast = %self.origin.absolute(&path), "namespace_done");
+								self.withdraw_namespace(&mut stream, &mut requests, suffix).await?;
+							}
 						}
-						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
-						sent.insert(suffix.clone());
-						stream.writer.encode(&ietf::Namespace::ID).await?;
-						stream.writer.encode(&ietf::Namespace { suffix }).await?;
 					}
 				}
-
-				// Stream updates (origin (un)announces plus watched route changes),
-				// bailing if the peer closes its side first.
-				loop {
-					let event = {
-						let mut closed = std::pin::pin!(stream.reader.closed());
-						kio::wait(|waiter| {
-							if let Poll::Ready(res) = waiter.poll_future(closed.as_mut()) {
-								return Poll::Ready(NamespaceEvent::Closed(res));
-							}
-							if let Poll::Ready(update) = announced.poll_next(waiter) {
-								return Poll::Ready(NamespaceEvent::Update(update));
-							}
-							Self::poll_watched(&mut watched, waiter).map(NamespaceEvent::Routes)
-						})
-						.await
-					};
-
-					match event {
-						NamespaceEvent::Closed(res) => return res,
-						NamespaceEvent::Update(None) => {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
-						}
-						NamespaceEvent::Update(Some(crate::announce::Update { path, broadcast })) => {
-							let suffix = path
-								.strip_prefix(&prefix)
-								.expect("origin returned invalid path")
-								.to_owned();
-							let absolute = origin.absolute(&path).to_owned();
-
-							match broadcast {
-								Some(broadcast) => {
-									let advertisable = self.advertisable(&broadcast);
-									if self.peer_origin.is_some() {
-										watched.insert(suffix.clone(), Watched::new(broadcast));
-									}
-									// Filtered now, but the watch re-decides when the
-									// route table changes.
-									if !advertisable {
-										continue;
-									}
-									tracing::debug!(broadcast = %absolute, "namespace");
-									sent.insert(suffix.clone());
-									stream.writer.encode(&ietf::Namespace::ID).await?;
-									stream.writer.encode(&ietf::Namespace { suffix }).await?;
-								}
-								None => {
-									watched.remove(&suffix);
-									// Only close out namespaces the peer actually saw.
-									if sent.remove(&suffix) {
-										tracing::debug!(broadcast = %absolute, "namespace_done");
-										stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-										stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
-									}
-								}
-							}
-						}
-						NamespaceEvent::Routes(suffix) => {
-							let Some(watch) = watched.get(&suffix) else { continue };
-							let advertisable = self.advertisable(&watch.broadcast);
-							if advertisable && !sent.contains(&suffix) {
-								tracing::debug!(broadcast = %suffix, "namespace");
-								sent.insert(suffix.clone());
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							} else if !advertisable && sent.remove(&suffix) {
-								tracing::debug!(broadcast = %suffix, "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
-							}
-						}
+				NamespaceEvent::Routes(suffix) => {
+					let path = prefix.join(&suffix);
+					self.sync_namespace(&suffix, &path, &peer, &mut watched, &mut requests, &mut stream)
+						.await?;
+				}
+				NamespaceEvent::Idle(suffix) => {
+					if let Some(watch) = watched.get_mut(&suffix) {
+						watch.idle_at = Some(web_async::time::Instant::now());
 					}
 				}
 			}
-		}
+		};
+
+		// This subscription's advertisements die with it.
+		self.withdraw_requests(&mut stream, &mut requests).await;
+
+		res
 	}
+}
+
+/// One draft-14/15 advertisement: the PUBLISH_NAMESPACE request it rode on and
+/// what closes it out with PUBLISH_NAMESPACE_DONE.
+struct NamespaceRequest<S: web_transport_trait::Session> {
+	path: crate::PathOwned,
+	request_id: RequestId,
+	stream: Stream<S, Version>,
 }
 
 #[cfg(test)]
@@ -920,6 +1198,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
+			cluster::PeerSetup::default(),
 			Version::Draft16,
 		);
 
@@ -946,11 +1225,60 @@ mod tests {
 		// Broadcast visibility is deferred until the executor ticks.
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
+		let peer = cluster::Peer::default();
+
 		let echoed = consumer.get_broadcast("from/peer").unwrap();
-		assert!(!publisher.advertisable(&echoed));
+		assert!(!publisher.select(&Watched::new(echoed), &peer).wanted());
 
 		let local = consumer.get_broadcast("from/us").unwrap();
-		assert!(publisher.advertisable(&local));
+		assert_eq!(publisher.select(&Watched::new(local), &peer), Advert::Plain);
+	}
+
+	/// A drained broadcast arms a linger so the cold cost is restored after a grace
+	/// period. If the advertisement stops being discounted before that fires, the
+	/// linger must go with it: an expired deadline that nothing clears makes
+	/// `linger_deadline` hand back the same instant every turn, and the announce loops
+	/// spin on it forever.
+	#[tokio::test]
+	async fn linger_clears_when_the_advert_stops_being_discounted() {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let broadcast = origin
+			.clone()
+			.create_broadcast("cam", crate::broadcast::Route::announced())
+			.unwrap();
+
+		let mut watch = Watched::new(broadcast.consume());
+		let hops = crate::OriginList::try_from(vec![crate::Origin::new(7).unwrap()]).unwrap();
+
+		// Discounted (cost 0) and drained: the linger is running.
+		watch.set_sent(Advert::Cluster(cluster::Advert {
+			hops: cluster::HopPath::new(hops.clone()),
+			cost: 0,
+		}));
+		watch.idle_at = Some(web_async::time::Instant::now());
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert!(Publisher::<SinkSession>::linger_deadline(&watched).is_some());
+
+		// A re-priced advertisement has a cost to advertise, so there is nothing left
+		// to restore.
+		let mut watch = watched.into_values().next().unwrap();
+		watch.set_sent(Advert::Cluster(cluster::Advert {
+			hops: cluster::HopPath::new(hops),
+			cost: 9,
+		}));
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert_eq!(
+			Publisher::<SinkSession>::linger_deadline(&watched),
+			None,
+			"a non-discounted advert must not leave a deadline behind"
+		);
+
+		// So does one that stopped being advertisable at all.
+		let mut watch = watched.into_values().next().unwrap();
+		watch.idle_at = Some(web_async::time::Instant::now());
+		watch.set_sent(Advert::None);
+		let watched = HashMap::from([(crate::Path::new("cam").to_owned(), watch)]);
+		assert_eq!(Publisher::<SinkSession>::linger_deadline(&watched), None);
 	}
 
 	/// A same-path source can splice into (or detach from) an existing broadcast
@@ -971,6 +1299,7 @@ mod tests {
 			origin.consume(),
 			Control::new(None, false),
 			Some(assigned),
+			cluster::PeerSetup::default(),
 			Version::Draft16,
 		);
 
@@ -1026,5 +1355,280 @@ mod tests {
 			2,
 			"NAMESPACE_DONE after the last clean route detaches"
 		);
+	}
+
+	/// The peer's OK to a PUBLISH_NAMESPACE, framed exactly as the announce path
+	/// reads it -- built with the crate's own writer so the framing can't drift
+	/// from the encoder under test.
+	async fn publish_namespace_ok(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+
+		match version {
+			Version::Draft14 => {
+				writer.encode(&ietf::PublishNamespaceOk::ID).await.unwrap();
+				writer
+					.encode(&ietf::PublishNamespaceOk {
+						request_id: RequestId(1),
+					})
+					.await
+					.unwrap();
+			}
+			_ => {
+				writer.encode(&ietf::RequestOk::ID).await.unwrap();
+				writer
+					.encode(&ietf::RequestOk {
+						request_id: Some(RequestId(1)),
+					})
+					.await
+					.unwrap();
+			}
+		}
+
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// Draft-14/15 predate the NAMESPACE message, so a SUBSCRIBE_NAMESPACE is
+	/// answered with one PUBLISH_NAMESPACE request per matching namespace over the
+	/// control stream, and PUBLISH_NAMESPACE_DONE withdraws it. The state is local
+	/// to the subscription's task, mirroring lite's announce handling.
+	#[tokio::test]
+	async fn v14_subscribe_namespace_is_answered_with_publish_namespace() {
+		const VERSION: Version = Version::Draft14;
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+
+		// Announced before the peer subscribes: it must only hit the wire after.
+		let early = origin
+			.create_broadcast("early-cam", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		settle().await;
+
+		// Stream 1 is the peer's SUBSCRIBE_NAMESPACE (the peer stays quiet after);
+		// streams 2 and 3 answer our two PUBLISH_NAMESPACE requests.
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new(), ok.clone(), ok]);
+		let log = session.log.clone();
+
+		let publisher = Publisher::new(
+			session.clone(),
+			consumer,
+			Control::new(None, false),
+			None,
+			cluster::PeerSetup::default(),
+			VERSION,
+		);
+
+		let stream = Stream::open(&session, VERSION).await.unwrap();
+		let msg = ietf::SubscribeNamespace {
+			request_id: RequestId(1),
+			namespace: crate::Path::new(""),
+		};
+		let mut run = std::pin::pin!(publisher.run_subscribe_namespace_stream(stream, msg));
+
+		// The subscription solicits the already-announced namespace.
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"early-cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"early-cam"),
+			1,
+			"PUBLISH_NAMESPACE after subscribing"
+		);
+
+		// A later announce reaches the same subscription.
+		let _late = origin
+			.create_broadcast("late-cam", crate::broadcast::Route::new().with_announce(true))
+			.unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"late-cam") >= 1 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"late-cam"),
+			1,
+			"PUBLISH_NAMESPACE for a live announce"
+		);
+
+		// An unannounce closes out its own request with PUBLISH_NAMESPACE_DONE.
+		drop(early);
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"early-cam") >= 2 {
+				break;
+			}
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"early-cam"),
+			2,
+			"PUBLISH_NAMESPACE_DONE on unannounce"
+		);
+
+		// One stream for the subscription itself, one per PUBLISH_NAMESPACE: the
+		// withdrawal rode the announce's own request, not a new stream.
+		assert_eq!(log.bi_opens(), 3, "no extra stream for the withdrawal");
+	}
+
+	/// A publisher talking to a scripted peer that never answers, over one bidi stream.
+	struct Harness {
+		publisher: Publisher<crate::lite::test_transport::ScriptedSession>,
+		session: crate::lite::test_transport::ScriptedSession,
+		log: crate::lite::test_transport::Log,
+		/// Keeps the origin alive; the publisher only holds a consumer.
+		_origin: origin::Producer,
+	}
+
+	fn harness(version: Version) -> Harness {
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+		let log = session.log.clone();
+
+		// Serving a request blocks on the peer's SETUP, which no scripted peer sends here.
+		let peer_setup = cluster::PeerSetup::default();
+		peer_setup.set(cluster::Peer::default());
+
+		let publisher = Publisher::new(
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			version,
+		);
+
+		Harness {
+			publisher,
+			session,
+			log,
+			_origin: origin,
+		}
+	}
+
+	/// Subscribe to a path nothing publishes, returning what the peer would read off the
+	/// request stream plus the reset codes the stream recorded.
+	async fn subscribe_missing(version: Version) -> (Vec<u8>, Vec<u32>) {
+		let h = harness(version);
+
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_subscribe_stream(
+				stream,
+				ietf::Subscribe {
+					request_id: RequestId(1),
+					track_namespace: crate::Path::new("nothing/here"),
+					track_name: "video".into(),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					filter_type: FilterType::LargestObject,
+				},
+			)
+			.await
+			.unwrap();
+
+		let writes = h.log.writes.lock().unwrap().clone();
+		(writes, h.log.resets())
+	}
+
+	/// Send a FETCH we don't implement, returning the same pair.
+	async fn fetch_unsupported(version: Version, fetch_type: FetchType<'_>) -> (Vec<u8>, Vec<u32>) {
+		let h = harness(version);
+
+		let stream = Stream::open(&h.session, version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: RequestId(1),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					fetch_type,
+				},
+			)
+			.await
+			.unwrap();
+
+		let writes = h.log.writes.lock().unwrap().clone();
+		(writes, h.log.resets())
+	}
+
+	/// A SUBSCRIBE for a path with no publisher is refused with REQUEST_ERROR, and the refusal
+	/// has to survive the trip. `Writer` resets the stream on drop, and a reset that races the
+	/// write discards the bytes the peer has not read yet, which leaves the subscriber waiting
+	/// on a request we already refused. Finishing first makes the drop-time reset a no-op.
+	#[tokio::test]
+	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			let (writes, resets) = subscribe_missing(version).await;
+
+			assert!(!writes.is_empty(), "{version}: nothing was sent");
+			assert_eq!(
+				writes[0],
+				ietf::RequestError::ID as u8,
+				"{version}: not a REQUEST_ERROR"
+			);
+			assert!(resets.is_empty(), "{version}: stream reset, discarding the error");
+		}
+	}
+
+	/// Every FETCH we refuse goes out through its own error encoder, so it needs the same
+	/// finish: a reset there loses the rejection the same way.
+	#[tokio::test]
+	async fn unsupported_fetch_is_refused_without_resetting_the_stream() {
+		let unsupported = || {
+			[
+				(
+					"standalone",
+					FetchType::Standalone {
+						namespace: crate::Path::new("nothing/here"),
+						track: "video".into(),
+						start: Location { group: 0, object: 0 },
+						end: Location { group: 1, object: 0 },
+					},
+				),
+				(
+					"relative joining with an offset",
+					FetchType::RelativeJoining {
+						subscriber_request_id: RequestId(3),
+						group_offset: 1,
+					},
+				),
+				(
+					"absolute joining",
+					FetchType::AbsoluteJoining {
+						subscriber_request_id: RequestId(3),
+						group_id: 7,
+					},
+				),
+			]
+		};
+
+		for version in [Version::Draft17, Version::Draft18, Version::Draft19] {
+			for (label, fetch_type) in unsupported() {
+				let (writes, resets) = fetch_unsupported(version, fetch_type).await;
+
+				assert!(!writes.is_empty(), "{version} {label}: nothing was sent");
+				assert_eq!(
+					writes[0],
+					ietf::RequestError::ID as u8,
+					"{version} {label}: not a REQUEST_ERROR"
+				);
+				assert!(
+					resets.is_empty(),
+					"{version} {label}: stream reset, discarding the error"
+				);
+			}
+		}
 	}
 }

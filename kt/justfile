@@ -43,10 +43,10 @@ clean:
 # non-empty and none match the Kotlin scope. Run `just kt ci` (no
 
 # FILES) to force-run.
-ci FILES="":
+ci $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(kt/|rs/moq-ffi/)'; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(kt/|rs/moq-ffi/)' <<< "$FILES"; then
     	echo "kt: no Kotlin changes; skipping."
     	exit 0
     fi

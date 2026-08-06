@@ -13,15 +13,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
+use rand::RngExt;
 
 use super::mixer::{self, Mixer};
 use super::sink::{Registration, Sink};
 use crate::Error;
 
-/// Backoff bounds for reopening a device that failed. The first retry is quick
-/// because the common case is a device that came right back (a USB re-enumerate,
-/// a sample-rate change); the ceiling keeps a permanently gone device from
-/// spinning.
+/// Backoff bounds for reopening a device that failed. The first retry is quick because the common
+/// case is a device that came right back (a USB re-enumerate, a sample-rate change); the ceiling
+/// keeps a permanently gone device from spinning.
+///
+/// No give-up budget: the engine outlives any one device, and the user plugging a headset back in
+/// is exactly the external change a retry is waiting for.
 const RETRY_MIN: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(4);
 
@@ -417,6 +420,7 @@ struct Driver {
 	/// Bumped on every stream, so an error from a retired one can be told apart
 	/// from one the live stream raised.
 	generation: u64,
+	/// Delay before reopening a device that would not start, doubling per failure.
 	retry: Duration,
 	/// When a failed start may be retried, and what the command wait times out
 	/// against. `None` while the stream is healthy.
@@ -593,10 +597,13 @@ impl Driver {
 	}
 
 	/// When the next restart may be attempted, doubling the backoff.
+	///
+	/// Jittered so a host running many streams doesn't reopen the device in lockstep after a
+	/// suspend or a driver reload.
 	fn schedule(&mut self) -> Instant {
-		let at = Instant::now() + self.retry;
+		let wait = self.retry.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 		self.retry = (self.retry * 2).min(RETRY_MAX);
-		at
+		Instant::now() + wait
 	}
 
 	/// Whether a failure reported by stream `generation` should rebuild the

@@ -121,11 +121,15 @@ just
 # Build everything
 just build
 
-# Run tests and linting
+# Lint and compile what your branch changed
 just check
 
-# Automatically fix some linting errors
+# Automatically fix some linting errors, same scope
 just fix
+
+# Same as the above, over every package
+just check-all
+just fix-all
 ```
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.

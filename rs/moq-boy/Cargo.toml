@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["moq", "gameboy", "streaming", "emulator", "live"]
 categories = ["multimedia::video", "emulators", "network-programming"]
 
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 rust-version.workspace = true
 
@@ -29,8 +29,8 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-net = { workspace = true }
-# Enable the NVENC / VAAPI hardware encoders (default-off at the workspace level).
-moq-video = { workspace = true, features = ["nvenc", "vaapi"] }
+# Enable the NVENC hardware encoder (default-off at the workspace level).
+moq-video = { workspace = true, features = ["nvenc"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"

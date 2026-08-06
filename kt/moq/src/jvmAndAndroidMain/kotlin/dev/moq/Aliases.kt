@@ -69,6 +69,8 @@ typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
 typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
+/** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
+typealias VideoProducer = uniffi.moq.MoqVideoProducer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
 /** Publishes lossy latest-value JSON snapshots. */
@@ -121,6 +123,18 @@ typealias AudioDecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
 /** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
+/** One video frame: pixels in the configured layout plus a presentation timestamp. */
+typealias VideoFrame = uniffi.moq.MoqVideoFrame
+/** A video codec identifier (H.264 or H.265). */
+typealias VideoCodec = uniffi.moq.MoqVideoCodec
+/** A raw pixel layout (I420 or RGBA) fed to a [VideoProducer]. */
+typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
+/** The pixel layout, resolution, and framerate the caller feeds a [VideoProducer]. */
+typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
+/** The codec-side encoder configuration: codec, bitrate, keyframe interval, and backend preference. */
+typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
+/** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
+typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
 /** Configures a lossy latest-value JSON track. */

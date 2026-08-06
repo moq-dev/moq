@@ -279,8 +279,9 @@ mod tests {
 			let gray = vec![0x80u8; 320 * 240 * 4];
 
 			for sequence in 0..groups {
-				// Under `tokio::time::pause` this advances once every task is
-				// idle, i.e. once all rungs are attached and waiting.
+				// Paces the source: a real sleep, since the rungs encode off the
+				// executor and cannot be sequenced by paused-time idle detection.
+				// Also the window the subscribers attach in, before group 0.
 				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 				let mut group = track.create_group(sequence.into()).unwrap();
 				for index in 0..frames {
@@ -309,8 +310,12 @@ mod tests {
 	/// both must produce complete groups mirroring the source sequences.
 	#[tokio::test]
 	async fn live_multi_rung() {
-		tokio::time::pause();
-
+		// Real time on purpose, unlike most timed tests here. The rungs encode on
+		// their own threads (`encode::Sink`), so a rung waiting on one looks idle
+		// to tokio and `pause()` auto-advances the source's sleep while the encode
+		// is still in flight. The source then outruns the feed's bounded broadcast
+		// and every rung sees `Lagged` instead of its frames. Real sleeps pace the
+		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		let config = Config {
 			rungs: vec![Rung::new(120, 100_000), Rung::new(60, 50_000)],
@@ -368,8 +373,12 @@ mod tests {
 			eprintln!("skipping: no hardware decoder + encoder available");
 			return;
 		}
-		tokio::time::pause();
-
+		// Real time on purpose, unlike most timed tests here. The rungs encode on
+		// their own threads (`encode::Sink`), so a rung waiting on one looks idle
+		// to tokio and `pause()` auto-advances the source's sleep while the encode
+		// is still in flight. The source then outruns the feed's bounded broadcast
+		// and every rung sees `Lagged` instead of its frames. Real sleeps pace the
+		// source against the encoders the way a live source does.
 		let (source, producer_task) = source_broadcast_live(3, 5);
 		// 180p and 120p: NVENC rejects tiny frames (80x60 is below its minimum
 		// encode resolution), so the hardware ladder stays a bit larger than the

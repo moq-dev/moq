@@ -108,11 +108,18 @@ Two ways to serve `rtmps://`:
   which runs the RTMP handshake and yields the same `Request`:
 
   ```rust
+  moq_rtmp::configure_socket(&tcp, peer); // Nagle off, keepalive on
   let tls = acceptor.accept(tcp).await?; // your tokio_rustls TlsAcceptor
   if let Some(request) = moq_rtmp::accept_stream(tls, peer).await? {
       // authorize, then match on Request::Publish / Request::Play and accept it
   }
   ```
+
+  When the transport is a `TcpStream` you own, call `configure_socket` on it
+  first; `Server` does this for every socket it accepts. Its keepalive is the
+  only thing that reaps a **play** session whose viewer vanished without a FIN:
+  publishers are bounded by `PUBLISH_IDLE_TIMEOUT`, but a play session sitting on
+  a quiet broadcast neither reads nor writes, so nothing else would notice.
 
 ## CLI
 

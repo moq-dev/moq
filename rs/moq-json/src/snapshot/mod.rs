@@ -15,549 +15,55 @@
 //!
 //! Deltas are controlled by [`ProducerConfig::delta_ratio`]. A ratio of `0` disables them, so every
 //! change is a fresh snapshot group, matching a plain "one JSON blob per group" track.
+//!
+//! # Choosing a layer
+//!
+//! [`Producer`] and [`Consumer`] own a track: hand one a
+//! [`track::Producer`](moq_net::track::Producer) and it manages the groups for you.
+//!
+//! [`Encoder`] and [`Decoder`] are the same logic without the track. The encoder turns values into
+//! [`Encoded`] frame payloads and says where the group boundaries fall; the decoder reconstructs a
+//! value from those payloads. Reach for them when something else is already in charge of the track,
+//! for example a `moq_mux::container::Producer` also managing a timeline and a catalog estimate.
+//! [`Encoded::keyframe`] maps straight onto `moq_mux::container::Frame::keyframe`.
+//!
+//! Encoding advances state that the frame's consumers depend on, so [`Encoder::update`] hands back a
+//! [`Pending`] the caller commits once the write succeeds. Dropping it uncommitted resynchronizes
+//! the encoder, which keeps a frame that never reached the wire from desyncing the stream.
 
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::Poll;
+mod consumer;
+mod decoder;
+mod encoder;
+mod producer;
 
-use bytes::Bytes;
-use moq_flate::{Decoder, Encoder};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
-
-use crate::{Diff, Error, Result, diff};
-
-/// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced.
-///
-/// Kept well below moq-net's per-group frame cap so a late joiner can always read the snapshot
-/// at frame 0 before the group is evicted.
-const MAX_DELTA_FRAMES: usize = 256;
-/// Configuration for a [`Producer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new
-/// options stay additive), or chain the `with_*` setters.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct ProducerConfig {
-	/// Controls how aggressively the producer emits deltas (merge patches) instead of full snapshots.
-	///
-	/// A ratio of `0` disables deltas: every change is published as a new snapshot group.
-	///
-	/// A positive ratio enables deltas. A new snapshot group is started once the deltas *already
-	/// written* to the current group (excluding the snapshot frame) exceed `ratio` times the snapshot
-	/// size. The pending delta is excluded from that check, so the one that first crosses the budget
-	/// still lands before the group rolls. So `1` allows roughly one snapshot's worth of deltas before
-	/// rolling, and a larger ratio tolerates more.
-	///
-	/// When [`compression`](Self::compression) is on, both sides of the comparison are measured on
-	/// the *compressed* frame sizes (the real wire cost).
-	///
-	/// Defaults to `8`.
-	pub delta_ratio: u32,
-
-	/// Compress each group as one sync-flushed DEFLATE stream, so deltas reuse the snapshot as
-	/// context and shrink sharply.
-	///
-	/// `false` (the default) writes plaintext JSON frames, identical on the wire to an uncompressed
-	/// track. A [`Consumer`] reading the track must set [`ConsumerConfig::compression`] to match.
-	pub compression: bool,
-}
-
-impl ProducerConfig {
-	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
-		self.delta_ratio = delta_ratio;
-		self
-	}
-
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
-
-impl Default for ProducerConfig {
-	fn default() -> Self {
-		Self {
-			delta_ratio: 8,
-			compression: false,
-		}
-	}
-}
-
-/// Configuration for a [`Consumer`].
-///
-/// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
-/// stay additive), or chain the `with_*` setters.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {
-	/// Whether the track's frames are DEFLATE-compressed. Must match the producer's
-	/// [`ProducerConfig::compression`]. Defaults to `false`.
-	pub compression: bool,
-}
-
-impl ConsumerConfig {
-	/// Set [`compression`](Self::compression) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_compression(mut self, compression: bool) -> Self {
-		self.compression = compression;
-		self
-	}
-}
-
-/// Publishes a JSON value over a track, choosing snapshots and deltas automatically.
-///
-/// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
-/// producers.
-pub struct Producer<T> {
-	inner: Arc<Mutex<Inner>>,
-	_marker: PhantomData<fn(T)>,
-}
-
-impl<T> Clone for Producer<T> {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-			_marker: PhantomData,
-		}
-	}
-}
-
-impl<T> Producer<T> {
-	/// Create a subscriber for the underlying track.
-	pub fn consume(&self) -> moq_net::track::Subscriber {
-		self.inner.lock().unwrap().track.subscribe(None)
-	}
-}
-
-impl<T: Serialize> Producer<T> {
-	/// Create a producer that publishes to the given track.
-	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
-		Self {
-			inner: Arc::new(Mutex::new(Inner {
-				track,
-				group: None,
-				encoder: None,
-				last: None,
-				delta_bytes: 0,
-				snapshot_len: 0,
-				group_frames: 0,
-				config,
-			})),
-			_marker: PhantomData,
-		}
-	}
-
-	/// Publish a new value, emitting a snapshot or a delta automatically.
-	///
-	/// Does nothing if the value is unchanged from the previous publish.
-	pub fn update(&mut self, value: &T) -> Result<()> {
-		self.inner.lock().unwrap().update(value)
-	}
-
-	/// Lock the current value for in-place editing, publishing on drop.
-	///
-	/// The returned [`Guard`] derefs to the last-published value (or `T::default()` if nothing has
-	/// been published yet). Editing it through [`DerefMut`] marks the guard dirty; when a dirty
-	/// guard drops it publishes the result, a no-op if unchanged.
-	///
-	/// This is the counterpart to a callback: hold the guard, mutate, drop. The guard holds the
-	/// producer's lock for its lifetime, so independent owners are serialized: each one starts from
-	/// the latest value and their changes compose instead of clobbering. Don't hold a guard across
-	/// an `.await`, since that keeps the lock held while suspended.
-	///
-	/// Publishing on drop can fail (a closed track, a value that won't serialize) and only logs a
-	/// warning. Call [`Guard::commit`] instead to handle the error.
-	pub fn lock(&mut self) -> Guard<'_, T>
-	where
-		T: Default + DeserializeOwned,
-	{
-		let inner = self.inner.lock().unwrap();
-		let value = inner
-			.last
-			.as_ref()
-			.and_then(|last| serde_json::from_value(last.clone()).ok())
-			.unwrap_or_default();
-
-		Guard {
-			inner,
-			value,
-			dirty: false,
-		}
-	}
-
-	/// Finish the track, closing any open group.
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.lock().unwrap().finish()
-	}
-}
-
-/// An RAII editing guard returned by [`Producer::lock`].
-///
-/// Holds the producer's lock for its lifetime and derefs to the current value. Mutating it through
-/// [`DerefMut`] marks it dirty, and dropping a dirty guard publishes the edited value.
-///
-/// Publishing on drop swallows any error into a warning, so prefer [`commit`](Self::commit) when the
-/// caller can act on a failure.
-pub struct Guard<'a, T: Serialize> {
-	inner: MutexGuard<'a, Inner>,
-	value: T,
-	dirty: bool,
-}
-
-impl<T: Serialize> Guard<'_, T> {
-	/// Publish the edited value, returning any error.
-	///
-	/// Consumes the guard, so the subsequent drop publishes nothing. A no-op if the value was never
-	/// mutated.
-	pub fn commit(mut self) -> Result<()> {
-		self.publish()
-	}
-
-	/// Publish a dirty value once, clearing the dirty flag so it isn't published again.
-	fn publish(&mut self) -> Result<()> {
-		if !self.dirty {
-			return Ok(());
-		}
-		self.dirty = false;
-
-		// We already hold the lock, so publish through the held guard rather than re-locking.
-		self.inner.update(&self.value)
-	}
-}
-
-impl<T: Serialize> Deref for Guard<'_, T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value
-	}
-}
-
-impl<T: Serialize> DerefMut for Guard<'_, T> {
-	fn deref_mut(&mut self) -> &mut T {
-		self.dirty = true;
-		&mut self.value
-	}
-}
-
-impl<T: Serialize> Drop for Guard<'_, T> {
-	fn drop(&mut self) {
-		if let Err(err) = self.publish() {
-			tracing::warn!(%err, "failed to publish JSON value on guard drop");
-		}
-	}
-}
-
-/// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
-struct Inner {
-	track: moq_net::track::Producer,
-	group: Option<moq_net::group::Producer>,
-	// Per-group DEFLATE encoder, `Some` while a compressed group is open (recreated per group).
-	encoder: Option<Encoder>,
-	last: Option<Value>,
-	// Bytes of deltas accumulated in the current group, excluding the snapshot frame. Compressed
-	// slice sizes when compressing, raw patch sizes otherwise.
-	delta_bytes: u64,
-	// Reference size the delta budget is measured against: the current group's snapshot frame.
-	// Its compressed slice size when compressing, raw otherwise.
-	snapshot_len: u64,
-	group_frames: usize,
-	config: ProducerConfig,
-}
-
-impl Inner {
-	fn update<T: Serialize>(&mut self, value: &T) -> Result<()> {
-		// The first publish (or the first after `finish`) has no baseline to diff against, so it seeds
-		// the stream with a snapshot.
-		let Some(last) = self.last.as_ref() else {
-			return self.snapshot(value);
-		};
-
-		// Diff straight off `T`, without building a full `Value` for the new value first.
-		let Diff { patch, forced_snapshot } = diff(last, value);
-
-		// An empty object patch with no forced null means the value is unchanged: publish nothing.
-		if !forced_snapshot && patch.as_object().is_some_and(serde_json::Map::is_empty) {
-			return Ok(());
-		}
-
-		// A forced snapshot (a genuine null, or a non-object root) or an exhausted delta budget rolls a
-		// new group; otherwise the change rides as a delta in the open group.
-		if forced_snapshot || !self.delta_allowed() {
-			return self.snapshot(value);
-		}
-
-		// Compress into the per-group window only now, for a frame we are committed to writing.
-		let bytes = serde_json::to_vec(&patch)?;
-		let slice = match self.encoder.as_mut() {
-			Some(encoder) => encoder.frame(&bytes),
-			None => Bytes::from(bytes),
-		};
-		let len = slice.len() as u64;
-		self.group
-			.as_mut()
-			.expect("delta_allowed guarantees an open group")
-			.write_frame(moq_net::Timestamp::now(), slice)?;
-		self.delta_bytes += len;
-		self.group_frames += 1;
-
-		// Fold the delta into the baseline so the next diff is against the value we just published.
-		json_patch::merge(self.last.as_mut().expect("a snapshot precedes any delta"), &patch);
-		Ok(())
-	}
-
-	/// Whether the current change may ride as a delta in the open group.
-	///
-	/// The budget gate measures the deltas *already written* (excluding the frame about to land)
-	/// against the group's snapshot frame. Both are compressed sizes when compressing and raw
-	/// otherwise, so the comparison is like-for-like. Because the pending frame is excluded, the delta
-	/// that tips the group past `ratio * snapshot` still lands: a group overshoots by at most one delta
-	/// before rolling.
-	fn delta_allowed(&self) -> bool {
-		let ratio = self.config.delta_ratio as u64;
-		ratio != 0
-			&& self.group.is_some()
-			&& self.group_frames < MAX_DELTA_FRAMES
-			&& self.delta_bytes <= ratio * self.snapshot_len
-	}
-
-	/// Start a new group with a full snapshot of `value` as its first frame, and reseed the baseline.
-	fn snapshot<T: Serialize>(&mut self, value: &T) -> Result<()> {
-		// Serialize directly from `value` so the snapshot frame preserves the type's own field order,
-		// keeping the wire bytes identical to serializing `T` straight to a frame.
-		let snapshot = serde_json::to_vec(value)?;
-
-		// The previous group is complete; no more frames will be appended to it.
-		if let Some(mut group) = self.group.take() {
-			group.finish()?;
-		}
-
-		let mut group = self.track.append_group()?;
-
-		// Open a fresh per-group encoder (cold window) and compress the snapshot as frame 0, recording
-		// its wire size as the delta anchor.
-		let (slice, encoder) = if self.config.compression {
-			let mut encoder = Encoder::new();
-			let slice = encoder.frame(&snapshot);
-			(slice, Some(encoder))
-		} else {
-			(Bytes::from(snapshot), None)
-		};
-		self.snapshot_len = slice.len() as u64;
-		group.write_frame(moq_net::Timestamp::now(), slice)?;
-		self.delta_bytes = 0;
-		self.group_frames = 1;
-		self.encoder = encoder;
-
-		if self.config.delta_ratio != 0 {
-			// Keep the group (and its encoder) open so future deltas can be appended.
-			self.group = Some(group);
-		} else {
-			// Deltas disabled: one frame per group, identical to a plain JSON track.
-			self.encoder = None;
-			group.finish()?;
-		}
-
-		// Reseed the baseline with the full new value for the next diff.
-		self.last = Some(serde_json::to_value(value)?);
-		Ok(())
-	}
-
-	fn finish(&mut self) -> Result<()> {
-		if let Some(mut group) = self.group.take() {
-			group.finish()?;
-		}
-		self.track.finish()?;
-		Ok(())
-	}
-}
-
-/// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
-pub struct Consumer<T> {
-	track: moq_net::track::Subscriber,
-	group: Option<moq_net::group::Consumer>,
-	// Whether frames are DEFLATE-compressed, matching the producer's [`ProducerConfig::compression`].
-	compressed: bool,
-	// Per-group DEFLATE decoder, built lazily on the first compressed frame of a group.
-	decoder: Option<Decoder>,
-	current: Option<Value>,
-	frames_read: usize,
-	_marker: PhantomData<fn() -> T>,
-}
-
-impl<T: DeserializeOwned> Consumer<T> {
-	/// Create a consumer reading from the given track subscriber.
-	///
-	/// Set [`ConsumerConfig::compression`] to read a track written by a producer with
-	/// [`ProducerConfig::compression`] on.
-	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
-		Self {
-			track,
-			group: None,
-			compressed: config.compression,
-			decoder: None,
-			current: None,
-			frames_read: 0,
-			_marker: PhantomData,
-		}
-	}
-
-	/// Get the next reconstructed value, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<T>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for the next reconstructed value, without blocking.
-	///
-	/// Jumps to the newest group, reads its snapshot, and applies deltas in order. All frames already
-	/// buffered in the group are applied in one poll but only the resulting *latest* value is yielded:
-	/// the intermediate reconstructions are stale, so a late joiner (or any consumer that has fallen
-	/// behind) catches up to the head in a single step instead of replaying every superseded state.
-	/// Frames must still be decoded in order (the DEFLATE window and merge patches are sequential);
-	/// only the per-frame deserialize and yield are skipped. Switching to a newer group discards the
-	/// older one.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<T>>> {
-		// Drain to the newest group, resetting reconstruction state whenever we switch.
-		let track_finished = loop {
-			match self.track.poll_next_group(waiter)? {
-				Poll::Ready(Some(group)) => {
-					self.group = Some(group);
-					self.current = None;
-					self.frames_read = 0;
-					// Each group is its own compressed stream, so reset the decoder state.
-					self.decoder = None;
-				}
-				Poll::Ready(None) => break true,
-				Poll::Pending => break false,
-			}
-		};
-
-		// Apply every frame currently buffered in the group, tracking whether any moved us forward and
-		// whether the group is still open with nothing buffered yet (vs. exhausted).
-		// `poll_read_frame` returns an owned `Poll`, so the borrow of `self.group` ends before the
-		// match arms, leaving `apply` (and clearing the group) free to take `&mut self`.
-		let mut advanced = false;
-		let mut group_pending = false;
-		while let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter)? {
-				Poll::Ready(Some(frame)) => {
-					self.apply(frame.payload)?;
-					advanced = true;
-				}
-				// The current group is exhausted; wait for a newer one.
-				Poll::Ready(None) => {
-					self.group = None;
-					break;
-				}
-				// The group is still open but has nothing buffered yet.
-				Poll::Pending => {
-					group_pending = true;
-					break;
-				}
-			}
-		}
-
-		if advanced {
-			// Deserialize once, from the head of the backlog we just drained.
-			return Poll::Ready(Ok(Some(self.reconstruct()?)));
-		}
-
-		// An open group may still deliver frames even after the track finishes (it was appended before
-		// the finish), so wait on it rather than ending the stream.
-		if group_pending {
-			return Poll::Pending;
-		}
-
-		if track_finished {
-			Poll::Ready(Ok(None))
-		} else {
-			Poll::Pending
-		}
-	}
-
-	/// Decompress a frame slice, or pass it through when the track is uncompressed.
-	///
-	/// The per-group decoder is built lazily on the first compressed frame and advanced by every
-	/// following frame, so the shared DEFLATE window carries across the group's snapshot and deltas.
-	fn decode(&mut self, slice: Bytes) -> Result<Bytes> {
-		if !self.compressed {
-			return Ok(slice);
-		}
-
-		let decoder = self.decoder.get_or_insert_with(Decoder::new);
-		Ok(decoder.frame(&slice)?)
-	}
-
-	/// Apply one frame to the in-progress value: frame 0 of a group is a snapshot, the rest are merge
-	/// patches. Updates internal state only; call [`reconstruct`](Self::reconstruct) to materialize `T`.
-	fn apply(&mut self, frame: Bytes) -> Result<()> {
-		let frame = self.decode(frame)?;
-		if self.frames_read == 0 {
-			self.current = Some(serde_json::from_slice(&frame)?);
-		} else {
-			let patch: Value = serde_json::from_slice(&frame)?;
-			let current = self.current.as_mut().expect("a snapshot precedes any delta");
-			json_patch::merge(current, &patch);
-		}
-		self.frames_read += 1;
-		Ok(())
-	}
-
-	/// Materialize the current reconstructed value into `T`. Call only after at least one frame has
-	/// been applied in the current group.
-	///
-	/// Deserializing from the reconstructed [`Value`] rather than the frame bytes costs the line and
-	/// column a parse error would carry, so the error is prefixed with the JSON path of the offending
-	/// field instead. Without it a rejected field deep in a document reports only its own complaint,
-	/// with nothing to say where it came from.
-	fn reconstruct(&self) -> Result<T> {
-		let current = self
-			.current
-			.as_ref()
-			.expect("a value is present after applying a frame");
-
-		serde_path_to_error::deserialize(current).map_err(|err| {
-			let path = err.path().to_string();
-			match path.as_str() {
-				// The whole document, not a field within it: nothing useful to prefix.
-				"." => Error::Json(err.into_inner().to_string()),
-				_ => Error::Json(format!("{}: {}", path, err.into_inner())),
-			}
-		})
-	}
-}
+pub use consumer::Consumer;
+pub use decoder::{ConsumerConfig, Decoder};
+pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
+pub use producer::{Guard, Producer};
 
 #[cfg(test)]
 mod test {
+	use std::task::Poll;
+
+	use bytes::Bytes;
+	use serde_json::{Value, json};
+
+	use super::encoder::MAX_DELTA_FRAMES;
 	use super::*;
-	use serde_json::json;
 
 	/// An uncompressed config with the given delta ratio.
 	fn cfg(delta_ratio: u32) -> ProducerConfig {
-		ProducerConfig {
-			delta_ratio,
-			..Default::default()
-		}
+		ProducerConfig::default().with_delta_ratio(delta_ratio)
 	}
 
 	/// A DEFLATE-compressed config with the given delta ratio.
 	fn cfg_deflate(delta_ratio: u32) -> ProducerConfig {
-		ProducerConfig {
-			delta_ratio,
-			compression: true,
-		}
+		cfg(delta_ratio).with_compression(true)
 	}
 
 	/// A consumer reading compressed frames.
 	fn deflate_consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
-		Consumer::new(track, ConsumerConfig { compression: true })
+		Consumer::new(track, ConsumerConfig::default().with_compression(true))
 	}
 
 	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
@@ -625,8 +131,7 @@ mod test {
 
 	#[test]
 	fn deltas_share_one_group() {
-		let config = cfg(100);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
@@ -644,8 +149,7 @@ mod test {
 		// checks the deltas already written, so the delta that tips the group over budget still lands
 		// (a one-frame overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls
 		// group 1. (Still distinct from 0, which disables deltas entirely.)
-		let config = cfg(1);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(1));
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
 		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0 (deltas = 7)
 		producer.update(&json!({ "a": 3 })).unwrap(); // delta, group 0 (deltas = 14, now over budget)
@@ -662,8 +166,7 @@ mod test {
 		// `ratio = 8` budgets 56 bytes of deltas. The gate checks the deltas already written, so the
 		// group keeps filling until the accumulated deltas first exceed 56 (nine deltas = 63 bytes) and
 		// the next update rolls (a one-frame overshoot past the 56-byte budget).
-		let config = cfg(8);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(8));
 		for n in 0..=10 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
@@ -676,8 +179,7 @@ mod test {
 
 	#[test]
 	fn array_change_is_delta() {
-		let config = cfg(100);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(100));
 		producer.update(&json!({ "list": [1, 2] })).unwrap();
 		producer.update(&json!({ "list": [1, 2, 3] })).unwrap();
 		producer.finish().unwrap();
@@ -689,8 +191,7 @@ mod test {
 
 	#[test]
 	fn frame_cap_rolls_snapshot() {
-		let config = cfg(1_000_000);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(1_000_000));
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
 		for i in 0..=MAX_DELTA_FRAMES {
 			producer.update(&json!({ "n": i })).unwrap();
@@ -704,8 +205,7 @@ mod test {
 
 	#[test]
 	fn late_joiner_reconstructs_from_deltas() {
-		let config = cfg(100);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
@@ -780,6 +280,89 @@ mod test {
 		assert!(matches!(guard.commit(), Err(crate::Error::Net(_))));
 	}
 
+	/// A rejected frame must not erase the last-published value: `lock` seeds its editing guard from
+	/// it, so losing it makes the next edit publish a document with every other field dropped.
+	#[test]
+	fn a_failed_publish_keeps_the_value_for_lock() {
+		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+		struct Doc {
+			#[serde(skip_serializing_if = "Option::is_none")]
+			video: Option<String>,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			scte35: Option<u32>,
+		}
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let mut producer = Producer::<Doc>::new(track, ProducerConfig::default());
+
+		producer.lock().video = Some("v1".to_string());
+
+		// The track is finished, so the next publish is rejected and the encoder resynchronizes.
+		producer.finish().unwrap();
+		let mut guard = producer.lock();
+		guard.scte35 = Some(42);
+		assert!(guard.commit().is_err());
+
+		// The editing baseline still carries what was actually published.
+		let guard = producer.lock();
+		assert_eq!(
+			guard.video,
+			Some("v1".to_string()),
+			"a rejected frame erased the baseline"
+		);
+	}
+
+	/// Finishing takes the open group with it, so the encoder must stop emitting deltas into a group
+	/// that no longer exists. A later update has to surface the closed track as an error rather than
+	/// writing a delta with nowhere to put it.
+	#[test]
+	fn update_after_finish_errors_instead_of_panicking() {
+		let (mut producer, _track) = producer(cfg(100));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		producer.update(&json!({ "a": 2 })).unwrap(); // a delta, so a group is open
+		producer.finish().unwrap();
+
+		assert!(matches!(producer.update(&json!({ "a": 3 })), Err(crate::Error::Net(_))));
+	}
+
+	/// A track whose timescale is extreme enough that converting a wall-clock timestamp into it
+	/// overflows, so `write_frame` rejects every frame. That stands in for any post-`append_group`
+	/// write failure (the reported one is a frame over moq-net's 32 MB per-group cache) without
+	/// allocating 32 MB to provoke it.
+	fn rejecting_track() -> moq_net::track::Producer {
+		let mut info = moq_net::track::Info::default();
+		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+
+		moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap()
+	}
+
+	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
+	/// close the track. Dropping the handle does not close the group either, so without an explicit
+	/// close a subscriber that advanced into it waits there forever.
+	#[test]
+	fn a_rejected_snapshot_does_not_strand_an_empty_group() {
+		let track = rejecting_track();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::<Value>::new(track, cfg(0));
+
+		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the group was published, so a subscriber sees it");
+		};
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"the empty group must be closed, not left open for a subscriber to wait in"
+		);
+	}
+
 	#[test]
 	fn commit_publishes_once() {
 		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
@@ -807,8 +390,7 @@ mod test {
 	fn newer_group_supersedes_in_progress_reconstruction() {
 		// A tight ratio fills group 0 with a couple of deltas, then forces a later update into a new
 		// snapshot group (the gate overshoots the budget by one delta before rolling).
-		let config = cfg(1);
-		let (mut producer, track) = producer(config);
+		let (mut producer, track) = producer(cfg(1));
 		let observer = producer.consume();
 		let mut consumer = Consumer::<Value>::new(track, ConsumerConfig::default());
 		let waiter = kio::Waiter::noop();

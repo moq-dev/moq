@@ -18,17 +18,32 @@ export class Retry {
 	/** How long a track has to survive before earlier failures stop counting against it. */
 	static readonly SETTLED = 5000;
 
+	/**
+	 * Escalating pause between attempts, so a device mid-re-enumerate gets a moment rather than
+	 * being asked three more times in the same millisecond.
+	 *
+	 * No give-up deadline: {@link LIMIT} is this budget, counted in attempts. Counting time instead
+	 * would make the outcome depend on how long the OS takes to say no.
+	 */
+	static readonly DELAY = { initial: 250, multiplier: 2, max: 1000 };
+
 	readonly #rerun = new Signal(0);
 
 	// Deliberately plain fields: effect reruns must not unwind them, or the budget never runs out.
 	#failures = 0;
 	#settings: unknown[] | undefined;
+	#delay = Retry.DELAY.initial;
+
+	// How long the next attempt still owes the backoff, set by `failed` and paid by `begin`.
+	#wait: DOMHighResTimeStamp | undefined;
 
 	/**
-	 * Subscribe the capture effect and report whether an attempt is still worth making.
+	 * Subscribe the capture effect and report whether an attempt is worth making right now.
 	 *
-	 * False means the budget is spent: return from the run without capturing, and the previous run's
-	 * cleanup clears whatever it published.
+	 * False means don't capture on this run: either the budget is spent, or the backoff from the
+	 * last failure hasn't elapsed and a rerun is already scheduled for when it has. Return from the
+	 * run either way, and the previous run's cleanup clears whatever it published. Splitting it like
+	 * this is what lets a dead track be dropped immediately while the *reopen* still waits.
 	 *
 	 * The budget belongs to `settings`, the caller's live capture settings. Changing any of them is
 	 * new intent rather than another go at the same thing, so it starts a fresh budget: picking a
@@ -39,22 +54,35 @@ export class Retry {
 
 		if (settings.some((setting, i) => setting !== this.#settings?.[i])) {
 			this.#settings = settings;
-			this.#failures = 0;
+			this.#clear();
 		}
 
-		return this.#failures <= Retry.LIMIT;
+		if (this.#failures > Retry.LIMIT) return false;
+
+		const wait = this.#wait;
+		if (wait !== undefined) {
+			this.#wait = undefined;
+			effect.timer(() => this.#rerun.update((rerun) => rerun + 1), wait);
+			return false;
+		}
+
+		return true;
 	}
 
 	/** The attempt produced no usable track. Spends budget and reruns the effect. */
 	failed(): void {
 		this.#failures += 1;
+		// Unlimited budget, so there is always a next delay.
+		// Equal jitter, so a page with several captures doesn't reopen them all on the same tick.
+		this.#wait = this.#delay * (0.5 + Math.random() / 2);
+		this.#delay = Math.min(this.#delay * Retry.DELAY.multiplier, Retry.DELAY.max);
 		this.#rerun.update((rerun) => rerun + 1);
 	}
 
 	/** The attempt produced a live track. Reruns the effect if it dies. */
 	succeeded(effect: Effect, track: MediaStreamTrack): void {
 		effect.timer(() => {
-			this.#failures = 0;
+			this.#clear();
 		}, Retry.SETTLED);
 
 		effect.event(track, "ended", () => this.failed());
@@ -62,9 +90,16 @@ export class Retry {
 
 	/** Refund the budget, because something changed that makes another attempt worth trying. */
 	refund(): void {
-		if (this.#failures === 0) return;
+		if (this.#failures === 0 && this.#wait === undefined) return;
 
-		this.#failures = 0;
+		this.#clear();
 		this.#rerun.update((rerun) => rerun + 1);
+	}
+
+	/** Forget the failures so far, along with the pause they earned. */
+	#clear(): void {
+		this.#failures = 0;
+		this.#wait = undefined;
+		this.#delay = Retry.DELAY.initial;
 	}
 }

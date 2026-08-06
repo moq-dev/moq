@@ -12,16 +12,40 @@ pub use moq_net::{Timescale, Timestamp};
 /// so encoders normalize to this scale and decoders attach it.
 pub const TIMESCALE: Timescale = Timescale::MICRO;
 
+/// How long a media track asks its publisher (and, through TRACK_INFO, every relay) to keep a
+/// non-latest group fetchable.
+///
+/// Media is the one thing on a broadcast that is read as HISTORY rather than followed at the live
+/// edge: a segmented egress (HLS/DASH) may only advertise segments a FETCH can still reach, and a
+/// standard player starts several target durations behind live. `moq_net`'s conservative default
+/// is sized for a live-edge follower and leaves such a player addressing groups that are already
+/// gone.
+///
+/// Declared per track rather than by raising that default, so the tracks that do NOT index history
+/// keep the cheap default: the catalog is snapshot mode and the timeline is a single never-rolled
+/// group, and in both the useful value is the live edge, which is retained unconditionally.
+const LATENCY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Track properties for creating a track that carries [`Frame`]s, via
 /// [`create_track`](moq_net::broadcast::Producer::create_track) or
 /// [`accept`](moq_net::track::Request::accept).
 ///
-/// This pins the track's timescale to [`TIMESCALE`]. `moq_net::track::Info::default()`
-/// is milliseconds, which would quantize the net-level frame timestamps that
-/// moq-lite-05 and later delta-encode on the wire, even though the container prefix
-/// stays at microseconds.
+/// Pins the track's timescale to [`TIMESCALE`]. `moq_net::track::Info::default()` is milliseconds,
+/// which would quantize the net-level frame timestamps that moq-lite-05 and later delta-encode on
+/// the wire, even though the container prefix stays at microseconds. Chain
+/// [`with_timescale`](moq_net::track::Info::with_timescale) for a container that carries the
+/// source's own scale instead (CMAF and Matroska both do).
+///
+/// Also declares a retention long enough for a segmented egress to serve a full playlist window,
+/// which is why every media track should start here rather than at `Info::default()`. It is a
+/// retention budget and a CEILING on what a subscriber may ask to wait for, so it never makes
+/// anyone play further behind live: a subscriber's own
+/// [`Subscription::latency_max`](moq_net::track::Subscription::latency_max) still defaults to zero
+/// (skip the moment a newer group arrives).
 pub fn track_info() -> moq_net::track::Info {
-	moq_net::track::Info::default().with_timescale(TIMESCALE)
+	moq_net::track::Info::default()
+		.with_timescale(TIMESCALE)
+		.with_latency_max(LATENCY_MAX)
 }
 
 /// A media frame with a timestamp and codec-specific payload.
@@ -144,5 +168,30 @@ mod test {
 	#[test]
 	fn track_info_uses_container_timescale() {
 		assert_eq!(track_info().timescale, TIMESCALE);
+	}
+
+	#[test]
+	fn media_tracks_declare_their_retention() {
+		// A media track is read as history (a segmented egress FETCHes segments a playlist
+		// advertised), so it declares a retention rather than inheriting the live-edge default.
+		assert_eq!(track_info().latency_max, LATENCY_MAX);
+		assert!(LATENCY_MAX > moq_net::track::DEFAULT_LATENCY_MAX);
+
+		// Retimescaling for a container that carries the source's own scale keeps it, since that
+		// is the shape that would otherwise reach for `Info::default()` and lose the retention.
+		let at = track_info().with_timescale(Timescale::MILLI);
+		assert_eq!(at.timescale, Timescale::MILLI);
+		assert_eq!(at.latency_max, LATENCY_MAX);
+	}
+
+	#[test]
+	fn non_media_tracks_keep_the_default_retention() {
+		// The catalog is snapshot mode and the timeline is a single never-rolled group: in both
+		// the useful value is the live edge, which is retained unconditionally, so neither pays
+		// for history it never serves.
+		assert_eq!(
+			crate::Catalog::default_track_info().latency_max,
+			moq_net::track::DEFAULT_LATENCY_MAX
+		);
 	}
 }

@@ -1,5 +1,5 @@
 import { type Getter, Signal } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import * as announce from "../announced.ts";
 import type * as broadcast from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
@@ -175,6 +175,16 @@ export class Connection implements Established {
 
 	consume(path: Path.Valid): broadcast.Consumer {
 		return this.#subscriber.consume(path);
+	}
+
+	/**
+	 * Watches a broadcast, live only while it is announced.
+	 *
+	 * @param path - The path of the broadcast to watch
+	 * @returns A reactive handle to the broadcast
+	 */
+	announcedBroadcast(path: Path.Valid): announce.Broadcast {
+		return new announce.Broadcast({ connection: this, path });
 	}
 
 	async #runSession() {

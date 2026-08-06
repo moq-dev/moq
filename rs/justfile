@@ -21,6 +21,113 @@ check *args:
     cargo shear
     cargo sort --workspace --check --no-format
 
+# Auto-fix clippy/format/shear/sort.
+fix *args:
+    cargo clippy --fix --allow-staged --allow-dirty --all-targets {{ args }}
+    cargo fmt --all
+    cargo shear --fix
+    cargo sort --workspace --no-format
+
+# Prints `ALL` when the diff hits something every crate depends on, and nothing
+# when no crate is affected.
+#
+# FILES is an exported parameter, not `{{ FILES }}`: just interpolates the
+# latter into the recipe source, where a filename like `$(...)` would run as a
+# command. Git-derived paths are untrusted input, so they stay data.
+
+# Print `--package` flags for the crates a diff touches, plus their dependents.
+[private]
+_select $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Workspace-wide inputs affect every crate, so there is nothing to scope to.
+    if [[ -z "$FILES" ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml)$' <<< "$FILES"; then
+    	echo ALL
+    	exit 0
+    fi
+
+    grep -q '^rs/' <<< "$FILES" || exit 0
+
+    # `--no-deps` keeps this to workspace members and off the network.
+    metadata=$(cargo metadata --format-version 1 --no-deps)
+
+    # Every crate directory is named after the crate it holds, which is what
+    # makes a changed path a seed below. Verify it rather than trust it: under-
+    # selecting silently checks nothing, so fall back to checking everything.
+    if jq -e '.packages[] | select((.manifest_path | split("/")[-2]) != .name)' <<< "$metadata" > /dev/null; then
+    	echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
+    	echo ALL
+    	exit 0
+    fi
+
+    seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' <<< "$FILES" | sort -u)
+
+    edges=$(jq -r '
+    	.workspace_default_members as $members
+    	| .packages[]
+    	| select(.id | IN($members[]))
+    	| .name as $name
+    	| .dependencies[]
+    	| "\($name) \(.name)"
+    ' <<< "$metadata")
+
+    # A crate has to be rebuilt when anything it depends on changed, so walk the
+    # edges backwards until the selection stops growing. Non-default members
+    # (libmoq, moq-ffi, moq-gst, moq-wasm) have no edges here and drop out,
+    # matching what an unscoped `cargo check` would have compiled.
+    awk -v seeds="$seeds" '
+    	BEGIN { split(seeds, s, "\n"); for (i in s) want[s[i]] = 1 }
+    	{ pkg[NR] = $1; dep[NR] = $2 }
+    	END {
+    		do {
+    			grew = 0
+    			for (i = 1; i <= NR; i++)
+    				if (want[dep[i]] && !want[pkg[i]]) { want[pkg[i]] = 1; grew = 1 }
+    		} while (grew)
+    		for (i = 1; i <= NR; i++) if (want[pkg[i]]) print pkg[i]
+    	}
+    ' <<< "$edges" | sort -u | sed 's/^/--package /' | tr '\n' ' '
+
+# Takes a newline-separated list of changed files; skips when no crate is
+# affected. The `just rs ...` calls below go through the root justfile's
+# `mod rs` because these recipes run from the repo root, where a bare `check`
+# would resolve to the root recipe of that name.
+
+# Like `check`, but only the crates a diff touches plus their dependents.
+check-changed $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(just rs _select "$FILES")
+    case "$packages" in
+    	"")    echo "rs: no crates affected; skipping." ;;
+    	ALL)   just rs check ;;
+    	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
+    esac
+
+    # moq-wasm is a non-default member, so `_select` never reaches it and the
+    # branch above would check nothing at all for a moq-wasm-only diff.
+    if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
+    	just rs wasm
+    fi
+
+# Same as `fix`, but scoped the same way as `check-changed`.
+fix-changed $FILES:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(just rs _select "$FILES")
+    case "$packages" in
+    	"")    echo "rs: no crates affected; skipping." ;;
+    	ALL)   just rs fix ;;
+    	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
+    esac
+
+    # Mirrors `check-changed`: without this a moq-wasm-only diff is never
+    # formatted, and `ci`'s `cargo fmt --all --check` fails on it later.
+    if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
+    	just rs wasm-fix
+    fi
+
 # Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
 # Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
 # gate skips entirely. Cross-compiling can't stand in, because openh264-sys2
@@ -32,8 +139,8 @@ check *args:
 # someone runs this by hand on a Windows host.
 #
 # Default features rather than `--all-features`: jemalloc and the quiche
-# backend don't build on MSVC, while moq-video's Linux-only nvenc/vaapi/nvdec
-# defaults are already no-ops off Linux. moq-gst is excluded because it links
+# backend don't build on MSVC, while moq-video's Linux-only nvenc/nvdec defaults
+# are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
@@ -62,6 +169,29 @@ windows *args:
 macos *args:
     cargo check -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
+# Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
+# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
+# compiles an empty crate and every error in it stays invisible. Only a wasm32
+# build sees the code.
+#
+# Unlike those two this needs no special host, so `ci` runs it on every Rust PR.
+# The wasm32 target and the `getrandom`/`web-sys` cfg flags come from the Nix dev
+# shell and `.cargo/config.toml`. Not to be confused with the root `just wasm`,
+# which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
+# this is the compile gate.
+
+# Compile and lint the browser/WASM bindings, which the host-target check skips.
+wasm *args:
+    cargo clippy -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }} -- -D warnings
+
+# The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
+# because this runs alongside `fix`, which already formats everything else.
+
+# Auto-fix the browser/WASM bindings.
+wasm-fix *args:
+    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }}
+    cargo fmt -p moq-wasm
+
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty
 # and none match the Rust scope. Run `just rs ci` (no FILES) to
@@ -70,10 +200,10 @@ macos *args:
 # `cargo deny` runs here (not in `check`) so the inner-loop stays fast
 
 # and devs aren't blocked by a fresh upstream advisory mid-edit.
-ci FILES="":
+ci $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "{{ FILES }}" ]] && ! echo "{{ FILES }}" | grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)'; then
+    if [[ -n "$FILES" ]] && ! grep -qE '^(rs/|Cargo\.toml$|Cargo\.lock$)' <<< "$FILES"; then
     	echo "rs: no Rust changes; skipping."
     	exit 0
     fi
@@ -96,6 +226,9 @@ ci FILES="":
     cargo check --workspace --no-default-features
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+    # `--workspace` above still compiles moq-wasm for the host, where its crate
+    # root cfgs away to nothing, so this wasm32 pass is what actually checks it.
+    just rs wasm
     # nextest compiles + runs the test binaries with real parallelism (faster than
     # `cargo test`'s serial harness). It does not build or run
     # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an
@@ -103,13 +236,6 @@ ci FILES="":
     # `--profile ci` picks up the longer hang timeout in .config/nextest.toml;
     # without it a runner under load could trip the local one.
     cargo nextest run --profile ci --workspace --all-targets --all-features
-
-# Auto-fix clippy/format/shear/sort.
-fix:
-    cargo clippy --fix --allow-staged --allow-dirty --all-targets
-    cargo fmt --all
-    cargo shear --fix
-    cargo sort --workspace --no-format
 
 # Run the test suite.
 #

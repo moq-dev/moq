@@ -15,7 +15,7 @@ pub struct Bridge {
 impl Bridge {
 	/// Publish an `.av1` track on `broadcast`, adding the catalog rendition once config is known.
 	pub fn new(mut broadcast: moq_net::broadcast::Producer, catalog: moq_mux::catalog::Producer) -> Result<Self> {
-		let track = moq_mux::import::unique_track(&mut broadcast, ".av1")?;
+		let track = broadcast.unique_track(".av1", catalog.track_info())?;
 		let import = moq_mux::codec::av1::Import::new(track, catalog.reserve(), Default::default())?;
 		let split = moq_mux::codec::av1::Split::new();
 		Ok(Self { split, import })

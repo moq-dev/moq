@@ -52,9 +52,10 @@ slow path. AV1 is decode-only, via NVDEC.
 cargo add moq-video
 ```
 
-Hardware codecs are on by default. Rendering and PipeWire screen capture are not,
-since they pull in a graphics stack and a `libpipewire` build dependency
-respectively:
+NVIDIA hardware codecs are on by default. VAAPI is not, since that backend has
+never been validated on real hardware, and neither are rendering and PipeWire
+screen capture, which pull in a graphics stack and a `libpipewire` build
+dependency respectively:
 
 ```bash
 cargo add moq-video --features render,pipewire
@@ -63,11 +64,11 @@ cargo add moq-video --features render,pipewire
 | Feature | Default | Pulls in |
 | --- | --- | --- |
 | `nvenc` / `nvdec` | yes | NVIDIA encode/decode on Linux (`cudarc`, `moq-nvenc`) |
-| `vaapi` | yes | Intel/AMD encode on Linux (`moq-vaapi`) |
+| `vaapi` | no | Intel/AMD encode on Linux (`moq-vaapi`), unvalidated on hardware |
 | `render` | no | `wgpu` and the GPU renderer |
 | `pipewire` | no | Wayland/X11 screen capture via xdg-desktop-portal |
 
-The three default features are Linux-only in effect (their dependencies are), and
+The two default features are Linux-only in effect (their dependencies are), and
 `--no-default-features` gives a slim build that still captures V4L2 and encodes
 with openh264. A relay never needs any of them.
 
@@ -100,6 +101,17 @@ pixels), drive `encode::Encoder` and publish the results with `encode::Producer`
 Keyframes are the encoder's business: it inserts them per `encode::Config::gop`,
 and `Encoder::keyframe` is there for the rarer case where you need one at a
 specific frame.
+
+`encode::Sink` is the same encoder with a thread of its own, and an `async` API on
+top. Reach for it when the codec outlives a single thread's stack: an object
+shared between threads, a handle behind an FFI boundary, or a task that migrates
+between executor workers. Hardware codecs are not all thread-agnostic (a Media
+Foundation MFT's COM apartment is per-thread, so building it on one thread and
+dropping it on another corrupts COM state), and the sink confines the whole
+encoder lifetime to one thread so callers do not have to. Awaiting rather than
+blocking is the point: the executor keeps its worker while a slow hardware encoder
+works through a frame. A plain `Encoder` you build, drive, and drop inside one
+function needs none of this.
 
 ## Subscribing
 

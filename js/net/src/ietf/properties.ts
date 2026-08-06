@@ -7,39 +7,71 @@ import { type IetfVersion, Version } from "./version.ts";
 // presence is what opts the track into timestamps at all.
 const TIMESCALE = 0x08n;
 
-/// Write the track's Timescale as a Track Property block.
+// DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
+// It shares its number with the GROUP_ORDER *message parameter*, which is a different
+// registry: that one is only legal in SUBSCRIBE, PUBLISH_OK, and FETCH, where the
+// subscriber states its own preference.
+const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22n;
+
+/// The Track Properties block carried at the end of SUBSCRIBE_OK, PUBLISH, and FETCH_OK.
+export interface Properties {
+	/// The track's Timescale, which declares the units of every object Timestamp on it.
+	///
+	/// `undefined` declares no timeline, so the subscriber times objects by arrival.
+	timescale?: Timescale;
+
+	/// The publisher's preference for prioritizing groups within a subscription,
+	/// Ascending (0x1) or Descending (0x2).
+	///
+	/// `undefined` means the draft default, Ascending.
+	groupOrder?: number;
+}
+
+/// Write the block, which is the final field of the message: no count and no length, so
+/// the caller must not append anything after it.
 ///
-/// Track Properties are the final field of the message, so this writes the block with
-/// no count and no length; the caller must not append anything after it.
-export async function encode(w: Writer, timescale: Timescale, version: IetfVersion): Promise<void> {
-	// Track Properties only exist in draft-17+; older drafts have nowhere to put this.
+/// Properties are serialized in ascending order by type, delta-encoded.
+export async function encode(w: Writer, properties: Properties, version: IetfVersion): Promise<void> {
+	// Draft-16 carries the same block under the name Track Extensions, but we only write it
+	// from draft-17 on: a draft-16 peer running an older build rejects any trailing bytes it
+	// doesn't parse, and draft-16 never registered TIMESCALE (0x08). We still read the block
+	// on draft-16, so a peer that sends one is understood.
 	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 		return;
 	}
 
-	// First property in the block, so the delta-encoded type is the absolute id.
-	await w.u62(TIMESCALE);
-	await w.u62(BigInt(timescale));
-}
+	let prevType = 0n;
 
-/// Parse Track Properties from the remaining bytes of a message, returning the track's
-/// Timescale if it declared one.
-///
-/// Track Properties are delta-encoded Key-Value-Pairs (same format as
-/// Message Parameters) but with NO count prefix — they extend to the
-/// end of the message payload.
-///
-/// `undefined` means the track declared no timeline, which is not an error: the caller
-/// times its objects by arrival instead.
-///
-/// Only present in draft-17+; older drafts don't have Track Properties.
-export async function decode(r: Reader, version: IetfVersion): Promise<Timescale | undefined> {
-	// Track Properties only exist in draft-17+
-	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-		return undefined;
+	if (properties.timescale !== undefined) {
+		await w.u62(TIMESCALE);
+		await w.u62(BigInt(properties.timescale));
+		prevType = TIMESCALE;
 	}
 
-	let timescale: Timescale | undefined;
+	if (properties.groupOrder !== undefined) {
+		await w.u62(DEFAULT_PUBLISHER_GROUP_ORDER - prevType);
+		await w.u62(BigInt(properties.groupOrder));
+	}
+}
+
+/// Parse Track Properties from the remaining bytes of a message.
+///
+/// Track Properties are delta-encoded Key-Value-Pairs (same format as
+/// Message Parameters) but with NO count prefix: they extend to the
+/// end of the message payload.
+///
+/// Unlike an unknown message parameter, an unknown property is skipped rather than fatal,
+/// which is what lets a relay forward properties it does not implement.
+///
+/// Drafts before 16 have no such block, so this reads nothing and leaves the reader alone.
+export async function decode(r: Reader, version: IetfVersion): Promise<Properties> {
+	// Draft-16 calls the block Track Extensions, draft-17+ Track Properties. Same encoding, so
+	// read either rather than faulting the message for trailing bytes.
+	if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+		return {};
+	}
+
+	const properties: Properties = {};
 	let prevType = 0n;
 	let i = 0;
 
@@ -55,7 +87,14 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Timescale
 			if (abs === TIMESCALE && value > 0n) {
 				// A zero timescale is invalid; treat it as no declaration rather than
 				// failing the whole message over one property we could have ignored.
-				timescale = Timescale(Number(value));
+				properties.timescale = Timescale(Number(value));
+			} else if (abs === DEFAULT_PUBLISHER_GROUP_ORDER) {
+				// Only Ascending (0x1) and Descending (0x2) are defined here. Unlike the draft-14
+				// fields, 0x0 has no "publisher decides" meaning to fall back on.
+				if (value < 1n || value > 2n) {
+					throw new Error(`unknown group order: ${value}`);
+				}
+				properties.groupOrder = Number(value);
 			}
 		} else {
 			// Odd type: length-prefixed bytes
@@ -64,5 +103,5 @@ export async function decode(r: Reader, version: IetfVersion): Promise<Timescale
 		}
 	}
 
-	return timescale;
+	return properties;
 }

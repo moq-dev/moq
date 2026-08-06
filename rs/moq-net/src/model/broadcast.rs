@@ -12,11 +12,12 @@ use std::{
 	collections::{HashMap, VecDeque},
 	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use crate::Error;
 
-use super::{OriginList, Requests, WeakCache};
+use super::{Origin, OriginList, Requests, WeakCache};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -142,6 +143,66 @@ impl Route {
 	pub fn with_announce(mut self, announce: bool) -> Self {
 		self.announce = announce;
 		self
+	}
+}
+
+/// How long a drained broadcast keeps advertising a zero cost before restoring its
+/// cold one.
+///
+/// Pure hysteresis: demand edges arrive exactly (via [`Demand`]), but re-pricing the
+/// instant the last viewer leaves would flap routing across the mesh on viewer churn.
+pub(crate) const COST_LINGER: Duration = Duration::from_secs(5);
+
+/// The routes advertisable to one peer, best first: the announced ones whose hop chain
+/// avoids both the peer (`exclude`) and ourselves (a reflection), each paired with
+/// whether it is the serving route.
+///
+/// `routes` is the broadcast's table in preference order with the serving (active)
+/// route first, so a peer usually receives exactly what we serve everyone; a peer the
+/// active chain flows through receives the best standby instead of nothing. The
+/// subscribe path picks its source by the same exclusion (see
+/// [`origin::Consumer::excluding`](super::origin::Consumer::excluding)), which keeps
+/// the advertised chain truthful and the mesh loop-free.
+///
+/// Callers take the first entry they can actually stamp themselves onto, since a chain
+/// already at `MAX_HOPS` has no room and almost certainly means a loop. Empty when
+/// every chain loops through the peer or us, or none is announced.
+/// [`Origin::UNKNOWN`] identifies nothing, so it excludes nothing and is never a loop.
+pub(crate) fn advertisable_routes(
+	routes: &[Route],
+	self_origin: Origin,
+	exclude: Origin,
+) -> impl Iterator<Item = (&Route, bool)> {
+	routes.iter().enumerate().filter_map(move |(index, route)| {
+		// Offline routes are reachable by exact path but never advertised.
+		if !route.announce {
+			return None;
+		}
+		if exclude != Origin::UNKNOWN && route.hops.contains(&exclude) {
+			return None;
+		}
+		if self_origin != Origin::UNKNOWN && route.hops.contains(&self_origin) {
+			return None;
+		}
+		Some((route, index == 0))
+	})
+}
+
+/// The cost to advertise for a route.
+///
+/// While the broadcast has demand, the *serving* (active) route costs zero: our
+/// ingress is already paid for (or, for a local standby publisher, the work is already
+/// running), so one more subscriber only pays the links below us. That is what lets a
+/// cluster deduplicate onto a warm copy. A standby advertised to a peer the active
+/// chain flows through keeps its own accumulated cost, since serving that peer means
+/// opening a fresh ingest. Otherwise we forward the accumulated cost unchanged.
+///
+/// The receiving side adds its own link price on top, so this never accounts for the
+/// link we are sending over.
+pub(crate) fn outgoing_cost(demand: &Demand, route: &Route, serving: bool) -> u64 {
+	match serving && demand.is_used() {
+		true => 0,
+		false => route.cost,
 	}
 }
 
@@ -350,9 +411,26 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: impl Into<Option<track::Info>>,
 	) -> Result<track::Producer, Error> {
+		let name = name.into();
 		let info = info.into().unwrap_or_default();
+		let mut state = self.state.lock();
+
+		// A consumer may have requested this name before it existed (a live
+		// [`Dynamic`] queues such requests). Creating the track fulfills that
+		// request: its consumers resolve against this very producer. Without
+		// this they would be stranded, since the name is taken the moment the
+		// track exists, so no handler could ever serve their queue entry.
+		if let Some(request) = state.requests.take(name.as_ref()) {
+			let track = request.with_stats(self.stats.clone()).accept(info);
+			// Cache it like a served request so concurrent lookups coalesce; a
+			// live same-name entry cannot exist (its presence would have kept
+			// the request from queuing).
+			let _ = state.tracks.insert(name, track.weak());
+			return Ok(track);
+		}
+
 		let track = track::Producer::new(self.info.clone(), name, info).with_stats(self.stats.clone());
-		self.state.lock().insert_track(track.weak())?;
+		state.insert_track(track.weak())?;
 		Ok(track)
 	}
 
@@ -1454,6 +1532,34 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
+	}
+
+	/// Creating a track a consumer already requested fulfills that request: the
+	/// waiting subscriber resolves against the created producer, and no handler
+	/// ever sees the (now-taken) name. Without this the requester is stranded:
+	/// the name exists the moment the track does, so the queue entry could
+	/// never be served under it.
+	#[tokio::test]
+	async fn create_track_fulfills_queued_request() {
+		let mut producer = Info::new().produce();
+		let mut dynamic = producer.dynamic();
+		let bc = dynamic.consume();
+
+		// Queue a request for a track that doesn't exist yet.
+		let subscribing = subscribe_pending!(bc, "video");
+
+		// The producer creates the track before any handler drains the queue.
+		let mut track = producer.create_track("video", None).unwrap();
+		let mut sub = subscribing.await.expect("fulfilled by create_track");
+
+		// The fulfilled subscription is live against this very producer.
+		track.append_group().unwrap();
+		sub.recv_group().await.expect("recv").expect("group");
+
+		// The handler never sees the request; a fresh subscribe reuses the track.
+		dynamic.assert_no_request();
+		let again = bc.track("video").unwrap().subscribe(None).await.unwrap();
+		again.assert_is_clone(&track.subscribe(None));
 	}
 
 	// Cloning a `Consumer` resets its route cursor: a clone that inherited the

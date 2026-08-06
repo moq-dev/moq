@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3](https://github.com/moq-dev/moq/compare/hang-v0.20.2...hang-v0.20.3) - 2026-08-05
+
+### Fixed
+
+- *(hang)* reverse bits, not bytes, in the HEVC codec string ([#2658](https://github.com/moq-dev/moq/pull/2658))
+
+### Other
+
+- *(rs)* clean up pedantic clippy warnings ([#2621](https://github.com/moq-dev/moq/pull/2621))
+
 ## [0.20.2](https://github.com/moq-dev/moq/compare/hang-v0.20.1...hang-v0.20.2) - 2026-07-27
 
 ### Fixed

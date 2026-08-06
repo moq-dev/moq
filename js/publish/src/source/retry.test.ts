@@ -43,7 +43,12 @@ class FakeMediaDevices extends EventTarget {
 		return this.devices;
 	}
 
+	// Every capture attempt, including the ones that never produce a track. `tracks` can't stand in:
+	// a missing device rejects without pushing one.
+	attempts = 0;
+
 	async getUserMedia(): Promise<MediaStream> {
+		this.attempts += 1;
 		if (this.missing) throw new Error("NotFoundError");
 
 		const track = new FakeTrack();
@@ -109,6 +114,48 @@ async function settle(times = 20): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
 }
 
+/**
+ * Poll until `pred` holds, so a regression fails the test instead of hanging it.
+ *
+ * A reopen waits out {@link Retry.DELAY} on a real timer, so microtask flushing alone never
+ * reaches it. Polling rather than sleeping for the exact delay keeps a loaded runner from
+ * deciding the outcome.
+ */
+async function waitUntil(pred: () => boolean): Promise<void> {
+	const deadline = Date.now() + WAIT_TIMEOUT;
+	while (!pred()) {
+		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+		await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+	}
+}
+
+/**
+ * Poll until the capture stops reopening, meaning the budget is spent.
+ *
+ * Watches for quiet rather than an exact attempt count: a device-list change can refund the budget
+ * mid-cascade and buy another round. The window outlasts the largest backoff, so quiet here means
+ * stopped rather than mid-wait.
+ */
+async function waitSpent(media: FakeMediaDevices): Promise<void> {
+	const quiet = (Retry.DELAY.max ?? 0) + QUIET_MARGIN;
+
+	let seen = -1;
+	while (seen !== media.attempts) {
+		seen = media.attempts;
+		await new Promise((resolve) => setTimeout(resolve, quiet));
+	}
+	await settle();
+}
+
+/** How long a `waitUntil` polls before calling the condition unreachable. */
+const WAIT_TIMEOUT = 10_000;
+/** How often `waitUntil` re-checks; short, since everything it watches is in-process. */
+const POLL_INTERVAL = 5;
+/** Quiet time past the largest backoff that proves the capture really stopped reopening. */
+const QUIET_MARGIN = 100;
+/** Burning the whole budget waits out every backoff, which outlasts the default per-test timeout. */
+const SPENT_TIMEOUT = 30_000;
+
 /** The track a source published, or undefined. */
 function published(source: { track: MediaStreamTrack } | MediaStreamTrack | undefined): unknown {
 	if (!source) return undefined;
@@ -123,10 +170,10 @@ test("a microphone re-opens when its track dies", async () => {
 	expect(media.tracks).toHaveLength(1);
 
 	media.latest().end();
+	await waitUntil(() => media.tracks.length === 2);
 	await settle();
 
 	// A second capture happened, and the live replacement is what got published.
-	expect(media.tracks).toHaveLength(2);
 	expect(published(mic.out.source.peek())).toBe(media.latest());
 
 	mic.close();
@@ -140,9 +187,9 @@ test("a camera re-opens when its track dies", async () => {
 	expect(media.tracks).toHaveLength(1);
 
 	media.latest().end();
+	await waitUntil(() => media.tracks.length === 2);
 	await settle();
 
-	expect(media.tracks).toHaveLength(2);
 	expect(published(camera.out.source.peek())).toBe(media.latest());
 
 	camera.close();
@@ -154,11 +201,17 @@ test("running out of retries clears the source instead of publishing a corpse", 
 	const mic = new Microphone({ enabled: true });
 	await settle();
 
-	// Kill every replacement the moment it arrives.
-	for (let i = 0; i < Retry.LIMIT + 5; i++) {
+	// Kill every replacement the moment it arrives; the budget allows one reopen per failure.
+	for (let i = 0; i < Retry.LIMIT; i++) {
+		const before = media.tracks.length;
 		media.latest().end();
-		await settle();
+		await waitUntil(() => media.tracks.length > before);
 	}
+
+	// The budget is spent, so this death schedules nothing at all: a settle is enough to catch a
+	// reopen that shouldn't happen.
+	media.latest().end();
+	await settle();
 
 	// The first capture plus one retry per allowed failure, and nothing after.
 	expect(media.tracks).toHaveLength(Retry.LIMIT + 1);
@@ -182,85 +235,102 @@ test("a track that arrives dead is not published", async () => {
 	mic.close();
 });
 
-test("a replug recovers a capture whose retries all failed", async () => {
-	const media = install(new FakeMediaDevices());
+test(
+	"a replug recovers a capture whose retries all failed",
+	async () => {
+		const media = install(new FakeMediaDevices());
 
-	const camera = new Camera({ enabled: true });
-	await settle();
-	expect(media.tracks).toHaveLength(1);
+		const camera = new Camera({ enabled: true });
+		await settle();
+		expect(media.tracks).toHaveLength(1);
 
-	// Unplug the only camera: the track dies and every reopen finds nothing.
-	media.missing = true;
-	media.replug([]);
-	media.latest().end();
-	await settle();
+		// Unplug the only camera: the track dies and every reopen finds nothing.
+		media.missing = true;
+		media.replug([]);
+		media.latest().end();
+		await waitSpent(media);
 
-	const spent = media.tracks.length;
-	expect(camera.out.source.peek()).toBeUndefined();
+		const spent = media.tracks.length;
+		expect(camera.out.source.peek()).toBeUndefined();
 
-	// Plug it back in. Without the device-list refund this stays dead forever, because an unpinned
-	// `requested` is undefined both before and after, so nothing else reruns the capture.
-	media.missing = false;
-	media.replug([device("cam")]);
-	await settle(40);
+		// Plug it back in. Without the device-list refund this stays dead forever, because an unpinned
+		// `requested` is undefined both before and after, so nothing else reruns the capture.
+		media.missing = false;
+		media.replug([device("cam")]);
+		await waitUntil(() => media.tracks.length > spent);
+		await settle();
 
-	expect(media.tracks.length).toBeGreaterThan(spent);
-	expect(published(camera.out.source.peek())).toBe(media.latest());
+		expect(media.tracks.length).toBeGreaterThan(spent);
+		expect(published(camera.out.source.peek())).toBe(media.latest());
 
-	camera.close();
-});
+		camera.close();
+	},
+	SPENT_TIMEOUT,
+);
 
-test("picking a different device revives a capture whose retries all failed", async () => {
-	const media = install(new FakeMediaDevices());
-	media.devices = [device("cam"), device("cam2")];
+test(
+	"picking a different device revives a capture whose retries all failed",
+	async () => {
+		const media = install(new FakeMediaDevices());
+		media.devices = [device("cam"), device("cam2")];
 
-	const camera = new Camera({ enabled: true });
-	await settle();
+		const camera = new Camera({ enabled: true });
+		await settle();
 
-	// Burn the budget: every attempt hands back a dead track.
-	media.bornDead = true;
-	camera.device.preferred.set("cam");
-	await settle(40);
+		// Burn the budget: every attempt hands back a dead track.
+		media.bornDead = true;
+		camera.device.preferred.set("cam");
+		await waitSpent(media);
 
-	const spent = media.tracks.length;
-	expect(camera.out.source.peek()).toBeUndefined();
+		const spent = media.tracks.length;
+		expect(camera.out.source.peek()).toBeUndefined();
 
-	// Selecting another device is the user's obvious recovery, and the device list has not changed,
-	// so nothing else would rerun the capture.
-	media.bornDead = false;
-	camera.device.preferred.set("cam2");
-	await settle(40);
+		// Selecting another device is the user's obvious recovery, and the device list has not changed,
+		// so nothing else would rerun the capture.
+		media.bornDead = false;
+		camera.device.preferred.set("cam2");
+		await waitUntil(() => media.tracks.length > spent);
+		await settle();
 
-	expect(media.tracks.length).toBeGreaterThan(spent);
-	expect(published(camera.out.source.peek())).toBe(media.latest());
+		expect(media.tracks.length).toBeGreaterThan(spent);
+		expect(published(camera.out.source.peek())).toBe(media.latest());
 
-	camera.close();
-});
+		camera.close();
+	},
+	SPENT_TIMEOUT,
+);
 
-test("fixing a constraint revives a capture whose retries all failed", async () => {
-	const media = install(new FakeMediaDevices());
+test(
+	"changing the constraints revives a capture whose retries all failed",
+	async () => {
+		const media = install(new FakeMediaDevices());
 
-	const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
-	await settle();
+		const mic = new Microphone({ enabled: true, constraints: { channelCount: 99 } });
+		await settle();
 
-	// An impossible constraint fails instantly on every attempt, which is the quickest way to spend
-	// the whole budget.
-	media.missing = true;
-	mic.constraints.set({ channelCount: 98 });
-	await settle(40);
+		// Spend the whole budget. The fake ignores constraints, so `missing` is what makes every
+		// attempt fail; the constraint edit only moves the settings the budget is keyed to.
+		media.missing = true;
+		mic.constraints.set({ channelCount: 98 });
+		await waitSpent(media);
 
-	const spent = media.tracks.length;
-	expect(mic.out.source.peek()).toBeUndefined();
+		const spent = media.tracks.length;
+		expect(mic.out.source.peek()).toBeUndefined();
 
-	media.missing = false;
-	mic.constraints.set({ channelCount: 1 });
-	await settle(40);
+		// Editing a constraint is new intent rather than another go at the same thing, so it buys a
+		// fresh budget. Nothing else here would rerun the capture: the device list never changed.
+		media.missing = false;
+		mic.constraints.set({ channelCount: 1 });
+		await waitUntil(() => media.tracks.length > spent);
+		await settle();
 
-	expect(media.tracks.length).toBeGreaterThan(spent);
-	expect(published(mic.out.source.peek())).toBe(media.latest());
+		expect(media.tracks.length).toBeGreaterThan(spent);
+		expect(published(mic.out.source.peek())).toBe(media.latest());
 
-	mic.close();
-});
+		mic.close();
+	},
+	SPENT_TIMEOUT,
+);
 
 test("unrelated device churn does not disturb a healthy capture", async () => {
 	const media = install(new FakeMediaDevices());

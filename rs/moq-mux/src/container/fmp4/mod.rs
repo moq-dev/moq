@@ -813,9 +813,12 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
 /// integer duration), falling back to 90 kHz (the MPEG-TS convention).
 ///
-/// A framerate that doesn't scale to a whole tick takes the fallback too. Zero and negative land
-/// on 0 through `as u64`, which is not a timescale anything accepts, and infinity saturates to
-/// `u64::MAX`, which is past the varint range a `Timescale` holds.
+/// A framerate that scales to less than one tick takes the fallback too: zero and negative land
+/// on 0 through `as u64`, which is not a timescale anything accepts, and a non-finite one is
+/// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
+/// range a `Timescale` holds. A fractional tick count truncates rather than falling back, so
+/// 30.0005 fps gives 30000; the common broadcast rates (29.97, 59.94, 23.976) all land on a whole
+/// tick already.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 	let ticks = config
 		.framerate

@@ -48,6 +48,27 @@ type (
 	VideoHint = ffi.MoqVideoHint
 	// VideoProperties holds catalog properties shared by every video rendition; nil fields clear those properties.
 	VideoProperties = ffi.MoqVideoProperties
+	// VideoCodec identifies a published video track's codec: H.264 or H.265.
+	VideoCodec = ffi.MoqVideoCodec
+	// VideoPixelFormat is a raw pixel layout (I420 or RGBA) written to a VideoProducer.
+	VideoPixelFormat = ffi.MoqVideoPixelFormat
+	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
+	VideoEncoderInput = ffi.MoqVideoEncoderInput
+	// VideoEncoderOutput configures the video encoder: codec, optional bitrate and keyframe interval, and backend preference.
+	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
+	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
+	VideoFrame = ffi.MoqVideoFrame
+	// VideoEncoderKind selects the encoder implementation. Build one with
+	// AutoEncoder, HardwareEncoder, SoftwareEncoder, or NamedEncoder.
+	VideoEncoderKind = ffi.MoqVideoEncoderKind
+	// VideoEncoderKindAuto is the automatic variant of VideoEncoderKind; build one with AutoEncoder.
+	VideoEncoderKindAuto = ffi.MoqVideoEncoderKindAuto
+	// VideoEncoderKindHardware is the hardware-only variant of VideoEncoderKind; build one with HardwareEncoder.
+	VideoEncoderKindHardware = ffi.MoqVideoEncoderKindHardware
+	// VideoEncoderKindSoftware is the software-only variant of VideoEncoderKind; build one with SoftwareEncoder.
+	VideoEncoderKindSoftware = ffi.MoqVideoEncoderKindSoftware
+	// VideoEncoderKindNamed is the specific-backend variant of VideoEncoderKind; build one with NamedEncoder.
+	VideoEncoderKindNamed = ffi.MoqVideoEncoderKindNamed
 
 	// Container selects how subscribed media frames are demuxed. Build one with
 	// LegacyContainer, CmafContainer, or LocContainer.
@@ -99,6 +120,46 @@ const (
 
 // AudioCodecOpus is the only codec currently supported for raw audio tracks.
 const AudioCodecOpus = ffi.MoqAudioCodecOpus
+
+// VideoPixelFormat values: the raw pixel layout fed to the in-process encoder.
+const (
+	// VideoPixelFormatI420 is tightly-packed planar I420: Y, then U, then V.
+	VideoPixelFormatI420 = ffi.MoqVideoPixelFormatI420
+	// VideoPixelFormatRgba is tightly-packed RGBA, four bytes per pixel.
+	VideoPixelFormatRgba = ffi.MoqVideoPixelFormatRgba
+)
+
+// VideoCodec values: the codec a published video track is encoded to.
+const (
+	// VideoCodecH264 publishes H.264 / AVC as an avc3 track.
+	VideoCodecH264 = ffi.MoqVideoCodecH264
+	// VideoCodecH265 publishes H.265 / HEVC as a hev1 track. Hardware only, so it
+	// fails where no hardware encoder is available.
+	VideoCodecH265 = ffi.MoqVideoCodecH265
+)
+
+// AutoEncoder prefers a platform hardware encoder, falling back to software.
+func AutoEncoder() VideoEncoderKind {
+	return VideoEncoderKindAuto{}
+}
+
+// HardwareEncoder requires a hardware encoder, failing if none is available.
+func HardwareEncoder() VideoEncoderKind {
+	return VideoEncoderKindHardware{}
+}
+
+// SoftwareEncoder requires the software encoder (openh264, H.264 only).
+func SoftwareEncoder() VideoEncoderKind {
+	return VideoEncoderKindSoftware{}
+}
+
+// NamedEncoder selects a specific backend these bindings compile:
+// "videotoolbox" (macOS), "mediafoundation" (Windows), or "openh264"
+// (software, everywhere). Naming one this build lacks fails with a no-encoder
+// error.
+func NamedEncoder(name string) VideoEncoderKind {
+	return VideoEncoderKindNamed{Name: name}
+}
 
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {

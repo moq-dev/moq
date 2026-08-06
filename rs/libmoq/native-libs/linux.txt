@@ -8,7 +8,3 @@ pthread
 
 # openh264 (the software H.264 fallback) is C++
 stdc++
-
-# moq-video: the vaapi feature links libva for hardware encode and decode
-va
-va-drm

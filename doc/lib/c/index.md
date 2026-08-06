@@ -103,6 +103,12 @@ The matching `*_close` function only *requests* shutdown: it returns immediately
 
 Because the terminal callback runs on libmoq's thread, bindings that own thread-affine objects (e.g. a Qt `QObject`) should hop to the owning thread to perform the actual destruction; the `user_data` lifetime contract holds regardless of which thread tears the object down.
 
+## Threading
+
+Every function may be called from any thread, and a handle is not tied to the thread that created it.
+
+The raw publish functions (`moq_publish_video_raw_frame`, `moq_publish_audio_raw_frame`) block the caller until the codec has taken the frame, which is what paces a publisher against its encoder. Calls on the same producer are serialized, but concurrent calls have no defined order, so use one thread when frame, cut, or bitrate order matters. A second producer keeps encoding, and consume callbacks, frees, and shutdown are unaffected.
+
 ## Error handling
 
 Functions return a negative code on failure (`0` or a positive handle on success). The code identifies the kind of failure, but the human-readable reason is available separately via `moq_error()`:
@@ -144,6 +150,45 @@ if (moq_consume_video_properties(catalog, &snapshot) < 0) {
     fprintf(stderr, "video properties failed: %s\n", moq_error());
 }
 ```
+
+## Raw media
+
+The `moq_publish_media_*` and `moq_consume_video` / `moq_consume_audio` calls carry already-encoded frames, for a caller that brings its own codec. The `_raw` calls carry uncompressed media instead and run the codec inside libmoq, so a C application can publish pixels and PCM without linking one.
+
+`moq_publish_video_raw` opens an encoder and a video track together. Resolution, framerate, and pixel layout are fixed there, so each `moq_video_encoder_frame` carries only pixels and a timestamp:
+
+```c
+struct moq_video_encoder_input input = {
+    .format = MOQ_VIDEO_PIXEL_FORMAT_RGBA,
+    .width = 1280,
+    .height = 720,
+    .framerate = 30,
+};
+struct moq_video_encoder_output output = {
+    .codec = MOQ_VIDEO_CODEC_H264,
+    .kind = MOQ_VIDEO_ENCODER_KIND_AUTO,  // hardware if available, software otherwise
+};
+
+int32_t video = moq_publish_video_raw(broadcast, &input, &output);
+if (video < 0) {
+    fprintf(stderr, "publish video failed: %s\n", moq_error());
+}
+
+struct moq_video_encoder_frame frame = {
+    .timestamp_us = pts_us,
+    .data = rgba,
+    .data_size = 1280 * 720 * 4,
+};
+moq_publish_video_raw_frame(video, &frame);
+```
+
+Every zero in the output config means "pick a default": `bitrate` derives one from the resolution and framerate, `gop` uses roughly two seconds. `data` is borrowed only for the call, and must be exactly one picture at the configured resolution: the frame carries no dimensions of its own, so a wrong-sized buffer is rejected rather than reinterpreted. (The decode side's `moq_video_frame` does carry dimensions, since there they are whatever the stream turned out to be.) A hardware encoder pipelines, so a call that puts nothing on the wire is normal rather than an error.
+
+The track is named after the codec (`.avc3` / `.hev1`), and its catalog rendition appears once the first keyframe has been encoded, which is where the resolution and codec string come from. So a subscriber discovers the track through the catalog rather than a name you chose.
+
+Two knobs run the live encoder. `moq_publish_video_raw_bitrate` retunes it without forcing a keyframe, which is cheap enough to drive from a congestion controller; a negative return means this backend can't retune while running, so stop adapting rather than stop publishing. `moq_publish_video_raw_cut` starts a new group at the next frame, which is optional: the encoder keyframes every `gop` frames on its own, and each of those cuts a group, so a subscriber can always join without it. Reach for it only when you want to place the boundaries yourself, aligning groups with something the encoder can't see such as a scene change or a source switch. Call `moq_publish_video_raw_finish` to flush the codec and end the track.
+
+`moq_publish_audio_raw` is the same shape for PCM in and Opus out, and `moq_consume_video_raw` / `moq_consume_audio_raw` are the decode-side mirrors, delivering I420 frames and PCM through the usual callback contract.
 
 ## Raw Tracks
 

@@ -50,6 +50,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::Result;
 use crate::flv;
+use rand::RngExt;
 
 /// Read buffer size for pulling RTMP chunk-stream bytes off the socket.
 const READ_BUFFER: usize = 16 * 1024;
@@ -66,7 +67,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_PENDING_REQUESTS: usize = 128;
 
 /// Maximum gap between media packets from an accepted publisher.
-const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// Note this bounds the PUBLISH direction only; a play session has no equivalent,
+/// which is why [`configure_socket`]'s keepalive is not optional.
+pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.
@@ -213,6 +217,12 @@ impl AsyncWrite for Conn {
 	}
 }
 
+/// Backoff bounds after a failed `accept`. The listener is supervised for the process's lifetime,
+/// so there is no give-up budget: the descriptor pressure or firewall rule behind a failed accept
+/// clears on its own, and the next connection resets the escalation.
+const ACCEPT_RETRY_MIN: Duration = Duration::from_millis(100);
+const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(5);
+
 /// An RTMP server that yields each connection's pending request as a [`Request`].
 ///
 /// Build it with [`bind`](Self::bind), optionally enable RTMPS with
@@ -230,17 +240,30 @@ pub struct Server {
 	/// In-flight handshakes; each resolves to a ready [`Request`], or `None` if
 	/// the connection closed or errored before issuing a publish or play.
 	pending: FuturesUnordered<BoxFuture<'static, Option<Request<Conn>>>>,
+
+	/// Delay after a failed `accept`, doubling per consecutive failure. Lives on the server rather
+	/// than inside [`accept`](Self::accept) so the escalation survives across calls, and resets on
+	/// the next connection that does come in.
+	accept_delay: Duration,
+
+	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
+	/// being polled meanwhile: a connection that already got through must not wait out a backoff
+	/// earned by a different one.
+	accept_retry: Option<tokio::time::Instant>,
 }
 
 impl Server {
 	/// Bind an RTMP listener on `addr` (RTMP's well-known port is 1935).
 	pub async fn bind(addr: SocketAddr) -> Result<Self> {
 		let listener = TcpListener::bind(addr).await?;
+
 		Ok(Self {
 			listener,
 			#[cfg(feature = "tls")]
 			tls: None,
 			pending: FuturesUnordered::new(),
+			accept_delay: ACCEPT_RETRY_MIN,
+			accept_retry: None,
 		})
 	}
 
@@ -267,6 +290,9 @@ impl Server {
 	/// if the listener itself stops (it currently never does).
 	pub async fn accept(&mut self) -> Option<Request<Conn>> {
 		loop {
+			// Copied out so the timer arm below doesn't borrow `self` alongside the other two.
+			let retry = self.accept_retry;
+
 			tokio::select! {
 				// A handshake finished: yield its request, or skip a dead connection.
 				Some(maybe) = self.pending.next(), if !self.pending.is_empty() => {
@@ -274,9 +300,15 @@ impl Server {
 						return Some(request);
 					}
 				}
-				// A new TCP connection: start its (TLS +) handshake concurrently.
-				res = self.listener.accept(), if self.pending.len() < MAX_PENDING_REQUESTS => match res {
+				// A failed accept's backoff elapsed: start asking the listener again.
+				() = sleep_until(retry), if retry.is_some() => self.accept_retry = None,
+
+				// A new TCP connection: start its (TLS +) handshake concurrently. Paused while a
+				// failed accept is backing off, so a persistent error doesn't busy-spin.
+				res = self.listener.accept(), if retry.is_none() && self.pending.len() < MAX_PENDING_REQUESTS => match res {
 					Ok((stream, peer)) => {
+						// A connection got through, so whatever the last failure was has cleared.
+						self.accept_delay = ACCEPT_RETRY_MIN;
 						configure_socket(&stream, peer);
 						#[cfg(feature = "tls")]
 						let tls = self.tls.clone();
@@ -316,10 +348,17 @@ impl Server {
 						}
 					}
 					Err(err) => {
-						// A failed accept must not take the listener down; back off so a
-						// persistent error doesn't busy-spin.
+						// A failed accept must not take the listener down: the usual causes
+						// (descriptor exhaustion, a connection the firewall dropped mid-handshake)
+						// are per-connection or clear on their own, and none of them is a reason to
+						// stop serving. Escalate the wait so a persistent one stops busy-spinning
+						// instead of retrying ten times a second forever. Recorded as a deadline
+						// rather than slept on here, so the loop keeps serving in-flight handshakes
+						// through the pause.
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
-						tokio::time::sleep(Duration::from_millis(100)).await;
+						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
+						self.accept_retry = Some(tokio::time::Instant::now() + wait);
 					}
 				},
 			}
@@ -327,13 +366,31 @@ impl Server {
 	}
 }
 
+/// Sleep until `at`, or park forever when there is nothing to wait for.
+///
+/// The `select!` arm that uses this is guarded on `at` being set; the pending branch keeps the arm
+/// well-formed rather than leaving the macro with a `None` to unwrap.
+async fn sleep_until(at: Option<tokio::time::Instant>) {
+	match at {
+		Some(at) => tokio::time::sleep_until(at).await,
+		None => std::future::pending().await,
+	}
+}
+
 /// Tune an RTMP TCP socket (accepted by the server or dialed by the client):
 /// Nagle off for latency, keepalive on so a dead peer is reaped rather than
 /// pinning a broadcast forever.
 ///
-/// Both are best-effort: a failure to set either is logged and ignored rather
+/// [`Server`] applies this to every socket it accepts. Call it yourself when you own
+/// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
+/// thing bounding a play session whose viewer vanished without a FIN while its
+/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// nothing reads or writes on a silent play socket, so it would otherwise live until
+/// the process restarted, holding its origin consumer open.
+///
+/// Both options are best-effort: a failure to set either is logged and ignored rather
 /// than dropping an otherwise healthy connection.
-pub(crate) fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
+pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 	// Nagle off: RTMP is latency-sensitive and we write whole packets.
 	if let Err(err) = stream.set_nodelay(true) {
 		tracing::debug!(%peer, %err, "failed to set TCP_NODELAY");

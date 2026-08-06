@@ -122,7 +122,7 @@ pub enum Error {
 	#[error("failed DNS lookup")]
 	DnsLookup(#[source] std::io::Error),
 
-	/// DNS returned no address usable from the local socket, usually an address family mismatch.
+	/// DNS resolved the host to no addresses at all.
 	#[error("no DNS entries")]
 	NoDnsEntries,
 
@@ -221,6 +221,20 @@ pub enum Error {
 	/// The TLS configuration or certificates couldn't be loaded.
 	#[error(transparent)]
 	Tls(#[from] crate::tls::Error),
+
+	/// Two or more addresses were raced and every attempt failed, each paired
+	/// with its own error in dial order. All of them are kept: picking one to
+	/// report would bury a rejected certificate or a refused port behind
+	/// whichever address happened to be unroutable or to blackhole until its
+	/// timeout. A host with a single address reports that error directly instead.
+	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
+	Failover(Vec<crate::failover::Failure<Error>>),
+}
+
+impl crate::failover::Aggregate for Error {
+	fn aggregate(failures: Vec<crate::failover::Failure<Self>>) -> Self {
+		Self::Failover(failures)
+	}
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -235,6 +249,8 @@ pub(crate) struct QuinnClient {
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
 	pub host_name: Option<String>,
+	/// Stagger between Happy Eyeballs connection attempts (see [`crate::failover`]).
+	pub failover_delay: Duration,
 	/// Whether the bound socket really came back dual-stack, which decides
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
@@ -264,6 +280,7 @@ impl QuinnClient {
 			transport,
 			http_bootstrap: config.tls.allows_http_bootstrap(),
 			host_name: config.tls.host_name.clone(),
+			failover_delay: config.effective_failover_delay(),
 			dual_stack,
 		})
 	}
@@ -280,13 +297,17 @@ impl QuinnClient {
 		let host = url.host().ok_or(Error::InvalidDnsName)?.to_string();
 		let port = url.port().unwrap_or(443);
 
-		// Look up the DNS entry. Quinn doesn't support happy eyeballs, so we commit to
-		// a single address; `pick_addr` documents how that one is chosen.
+		// Resolve every DNS entry, adapted to the local socket's family; the dial
+		// below races them Happy Eyeballs style so one broken family can't stall
+		// the connect.
 		let local = self.quic.local_addr().map_err(Error::LocalAddr)?;
 		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.map_err(Error::DnsLookup)?;
-		let ip = crate::util::pick_addr(addrs, local, self.dual_stack).ok_or(Error::NoDnsEntries)?;
+		let candidates = crate::failover::match_local(addrs, local, self.dual_stack);
+		if candidates.is_empty() {
+			return Err(Error::NoDnsEntries);
+		}
 
 		if url.scheme() == "http" {
 			// Insecure per-connection bootstrap: only honored when no stronger
@@ -334,12 +355,21 @@ impl QuinnClient {
 		let mut config = quinn::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, %ip, "connecting");
+		tracing::debug!(%url, ?candidates, "connecting");
 
 		// Use the configured host_name override for SNI + cert verification, else the URL host.
 		let host_name = self.host_name.clone().unwrap_or(host);
 
-		let connection = self.quic.connect_with(config, ip, &host_name)?.await?;
+		// Race only the QUIC handshake: the winner alone performs the WebTransport
+		// CONNECT below, so the server sees a single request no matter how many
+		// addresses were dialed.
+		let connection = crate::failover::race(candidates, self.failover_delay, |addr| {
+			let endpoint = self.quic.clone();
+			let config = config.clone();
+			let host_name = host_name.clone();
+			async move { Ok::<_, Error>(endpoint.connect_with(config, addr, &host_name)?.await?) }
+		})
+		.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
@@ -376,6 +406,34 @@ impl Error {
 		match self {
 			Self::ConnectRejected(err) => Some(*err),
 			Self::Client(err) => classify_client_error(err),
+			Self::Failover(failures) => failures.iter().find_map(|failure| failure.error.connect_error()),
+			_ => None,
+		}
+	}
+
+	/// The HTTP status a server answered with, if it answered with one at all.
+	///
+	/// Two places see a real status: the insecure `http://` fingerprint bootstrap, and the
+	/// WebTransport CONNECT response. See [`crate::Error::status`].
+	pub(crate) fn status(&self) -> Option<u16> {
+		match self {
+			Self::FetchFingerprint(err) | Self::FingerprintStatus(err) | Self::ReadFingerprint(err) => {
+				err.status().map(|status| status.as_u16())
+			}
+			Self::Client(err) => client_status(err),
+			// Every raced address has to have answered, and answered with something not worth
+			// repeating, before the set counts as settled: one address refusing says nothing about
+			// the others, which may simply have been unroutable.
+			Self::Failover(failures) => {
+				let mut settled = None;
+				for failure in failures {
+					match failure.error.status() {
+						Some(status) if !crate::error::status_retryable(status) => settled = Some(status),
+						_ => return None,
+					}
+				}
+				settled
+			}
 			_ => None,
 		}
 	}
@@ -390,26 +448,35 @@ fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
 }
 
 fn classify_client_error(err: &web_transport_quinn::ClientError) -> Option<crate::ConnectError> {
+	client_status(err).and_then(crate::ConnectError::from_status_u16)
+}
+
+/// The HTTP status the server answered the WebTransport CONNECT with, when it answered with one at
+/// all (as opposed to the connection failing underneath the request).
+///
+/// Both classifications read this: [`classify_client_error`] turns an auth status into a
+/// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
+/// the status. A `404` or `405` is the server's settled answer, so retrying
+/// it just burns the reconnect budget on a URL that will never work.
+fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ClientError::HttpError(err) => classify_connect_error(err),
+		web_transport_quinn::ClientError::HttpError(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn classify_connect_error(err: &web_transport_quinn::ConnectError) -> Option<crate::ConnectError> {
+fn connect_status(err: &web_transport_quinn::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_quinn::ConnectError::ErrorStatus(status) => crate::ConnectError::from_status_u16(status.as_u16()),
-		web_transport_quinn::ConnectError::ProtoError(err) => classify_proto_error(err),
+		web_transport_quinn::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn classify_proto_error(err: &web_transport_quinn::proto::ConnectError) -> Option<crate::ConnectError> {
+fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 	match err {
 		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
-		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => {
-			crate::ConnectError::from_status_u16(status.as_u16())
-		}
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
@@ -654,6 +721,43 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn connect_rejected(status: u16) -> Error {
+		Error::Client(web_transport_quinn::ClientError::HttpError(
+			web_transport_quinn::ConnectError::ErrorStatus(
+				web_transport_quinn::http::StatusCode::from_u16(status).unwrap(),
+			),
+		))
+	}
+
+	/// A CONNECT the relay answered carries its status through to the caller, so a wrong path or an
+	/// endpoint that doesn't speak WebTransport can surface immediately rather than after the whole
+	/// reconnect budget.
+	#[test]
+	fn a_rejected_connect_reports_its_status() {
+		for status in [400, 404, 405, 410, 501] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(
+				!crate::error::status_retryable(status),
+				"{status} should stop the reconnect loop"
+			);
+		}
+
+		for status in [408, 429, 502, 503, 504] {
+			assert_eq!(connect_rejected(status).status(), Some(status));
+			assert!(crate::error::status_retryable(status), "{status} should be retried");
+		}
+
+		// Auth is peeled off into its own variant before reaching the generic client arm.
+		assert_eq!(
+			connect_rejected(401).connect_error(),
+			Some(crate::ConnectError::Unauthorized)
+		);
+		assert_eq!(
+			connect_rejected(403).connect_error(),
+			Some(crate::ConnectError::Forbidden)
+		);
+	}
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete quinn implementation it must map to.

@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.0.12"
+version = "0.0.13"
 edition = "2024"
 rust-version.workspace = true
 
@@ -13,11 +13,11 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# Hardware codecs are enabled by default. Disable them (e.g. `--no-default-features`)
-# for a slimmer self-compiled Linux build that drops the CUDA / libva deps: openh264
-# stays as the always-compiled software fallback and V4L2 capture is unaffected. All
-# three features are no-ops off Linux (their deps are Linux-only).
-default = ["nvenc", "vaapi", "nvdec"]
+# NVIDIA hardware codecs are enabled by default. Disable them (e.g.
+# `--no-default-features`) for a slimmer self-compiled Linux build that drops the
+# CUDA dependencies. Openh264 stays as the always-compiled software fallback and
+# V4L2 capture is unaffected. The default features are no-ops off Linux.
+default = ["nvenc", "nvdec"]
 # NVIDIA NVENC hardware encoder (Linux). dlopen'd at runtime (cudarc + moq-nvenc,
 # which loads libnvidia-encode), with a libloading probe for the driver libs, so
 # an nvenc build still links GPU-less and starts driverless, falling back to the
@@ -28,10 +28,11 @@ nvenc = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
 # links GPU-less and starts driverless, falling back to the next decoder. Decoded
 # frames stay in CUDA memory and feed NVENC zero-copy (the transcode path).
 nvdec = ["dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# Intel/AMD VAAPI hardware encoder (Linux). moq-vaapi dlopen's libva at runtime, so
-# an enabled-vaapi build needs no libva at build time and still starts on a
-# libva-less host; automatic backend selection then falls back to the next encoder,
-# like the NVENC backend.
+# Intel/AMD VAAPI hardware encoder (Linux). Off by default because the backend has
+# never been validated on real hardware, not because of anything it costs the
+# build: moq-vaapi dlopen's libva, so an enabled-vaapi build needs no libva at
+# build time and still starts on a libva-less host, where automatic backend
+# selection falls back to the next encoder like the NVENC backend does.
 vaapi = ["dep:moq-vaapi"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
 # converts a frame to RGBA and hands back a texture the caller presents. Off by
@@ -106,7 +107,7 @@ cudarc = { version = "0.19", optional = true, default-features = false, features
 # absent. Lets a GPU-less host fall back to the next encoder instead of crashing.
 libloading = { version = "0.9", optional = true }
 moq-nvenc = { workspace = true, optional = true }
-# Intel/AMD VAAPI hardware encoder, behind the default-on `vaapi` feature. As of
+# Intel/AMD VAAPI hardware encoder, behind the opt-in `vaapi` feature. As of
 # moq-vaapi 0.0.3 libva is dlopen'd at runtime, so the binary carries no NEEDED
 # libva: the build needs no libva-dev, and a libva-less host still loads. Automatic
 # backend selection then falls back to the next encoder instead of failing at load,
@@ -159,4 +160,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# `poll!`, to cancel an `encode::Sink` request exactly where a `select!` would.
+futures = "0.3"
 h264-reader = "0.8.0"
+# Driving `encode::Sink` from a plain test thread, the way an FFI caller does.
+pollster = "1.0"

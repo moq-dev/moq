@@ -215,6 +215,16 @@ public final class BroadcastProducer: Sendable {
         AudioProducer(try ffi.publishAudio(name: name, input: input, output: output))
     }
 
+    /// Open a raw-video track. Pixels written via `VideoProducer.write` are
+    /// encoded (H.264 or H.265) inside the FFI boundary per `input`/`output`.
+    ///
+    /// The track is named after the codec (`.avc3` / `.hev1`) and its catalog
+    /// rendition appears once the first keyframe has been encoded, so
+    /// subscribers discover it through the catalog rather than a name you pick.
+    public func publishVideo(input: VideoEncoderInput, output: VideoEncoderOutput) throws -> VideoProducer {
+        VideoProducer(try ffi.publishVideo(input: input, output: output))
+    }
+
     /// Open a JSON snapshot track (lossy latest-value), encoding each value from `Value`.
     ///
     /// Each `update` supersedes the last; a late joiner only sees the newest value. `deltaRatio`

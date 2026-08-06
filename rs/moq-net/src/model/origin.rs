@@ -117,6 +117,17 @@ pub struct Info {
 	/// ceiling, leaving each track's own window in force.
 	pub cache_duration: Duration,
 
+	/// The retention window given to a track whose publisher advertises none.
+	///
+	/// moq-lite 05+ carries [`latency_max`](track::Info::latency_max) in TRACK_INFO, so a
+	/// track relayed over it keeps the window its publisher chose. Every moq-transport
+	/// draft and moq-lite 01-04 have no such wire property, so a track arriving over one
+	/// of them lands here instead. Raise it on a relay fronting a segmented egress
+	/// (HLS/DASH), which needs a playlist window's worth of history rather than the live
+	/// edge. Defaults to [`track::DEFAULT_LATENCY_MAX`], and [`Self::cache_duration`]
+	/// still caps it.
+	pub latency_default: Duration,
+
 	/// How long a broadcast under this origin outlives the *ungraceful* loss of its
 	/// last source before closing. Within the window the path stays announced and a
 	/// source re-attaching at it (a session reconnecting, a publisher re-announcing)
@@ -136,6 +147,7 @@ impl Default for Info {
 			id: Origin::UNKNOWN,
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
+			latency_default: track::DEFAULT_LATENCY_MAX,
 			linger: Duration::ZERO,
 		}
 	}
@@ -157,6 +169,13 @@ impl Info {
 	/// under this origin, returning `self` for chaining.
 	pub fn with_cache_duration(mut self, cache_duration: Duration) -> Self {
 		self.cache_duration = cache_duration;
+		self
+	}
+
+	/// Set the retention window (see [`Self::latency_default`]) used for tracks whose
+	/// publisher advertises none, returning `self` for chaining.
+	pub fn with_latency_default(mut self, latency_default: Duration) -> Self {
+		self.latency_default = latency_default;
 		self
 	}
 
@@ -509,11 +528,26 @@ impl OriginConsumerState {
 struct AnnounceConsumerNotify {
 	root: PathOwned,
 	state: kio::Producer<OriginConsumerState>,
+	/// The peer this stream advertises to, when it is scoped to one (see
+	/// [`Consumer::excluding`]). Every broadcast handed out registers an
+	/// [`ExclusionGuard`] for it, which is what tells the front it is exposed to that
+	/// peer even before they subscribe.
+	exclude: Option<Origin>,
 }
 
 impl AnnounceConsumerNotify {
-	fn announce(&self, path: impl AsPath, broadcast: broadcast::Consumer) {
+	fn announce(&self, path: impl AsPath, broadcast: broadcast::Consumer, front: &kio::Producer<FrontState>) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
+
+		// Advertising a path to a peer exposes the front to them, so register the
+		// exclusion now rather than waiting for them to subscribe. A reflection can
+		// come back before any subscription does, and the front has to already know
+		// the route it arrives on leads to a peer we are feeding.
+		let broadcast = match self.exclude.and_then(|peer| ExclusionGuard::new(front, peer)) {
+			Some(guard) => broadcast.with_exclusion(guard),
+			None => broadcast,
+		};
+
 		self.state
 			.write()
 			.ok()
@@ -543,13 +577,16 @@ impl NotifyNode {
 		}
 	}
 
-	fn announce(&mut self, path: impl AsPath, broadcast: &broadcast::Consumer) {
+	/// `state` is the announced front's source table, so a consumer scoped to a peer
+	/// can register its [`ExclusionGuard`] against it (see
+	/// [`AnnounceConsumerNotify::announce`]).
+	fn announce(&mut self, path: impl AsPath, broadcast: &broadcast::Consumer, state: &kio::Producer<FrontState>) {
 		for consumer in self.consumers.values() {
-			consumer.announce(path.as_path(), broadcast.clone());
+			consumer.announce(path.as_path(), broadcast.clone(), state);
 		}
 
 		if let Some(parent) = &self.parent {
-			parent.lock().announce(path, broadcast);
+			parent.lock().announce(path, broadcast, state);
 		}
 	}
 
@@ -670,9 +707,10 @@ impl OriginNode {
 		existing.announced = announce;
 		let path = existing.path.clone();
 		let consumer = existing.broadcast.consume();
+		let state = existing.state.clone();
 		let mut notify = self.notify.lock();
 		if announce {
-			notify.announce(&path, &consumer);
+			notify.announce(&path, &consumer, &state);
 		} else {
 			notify.unannounce(&path);
 		}
@@ -689,7 +727,7 @@ impl OriginNode {
 		if let Some(broadcast) = &self.broadcast
 			&& broadcast.announced
 		{
-			notify.announce(&broadcast.path, broadcast.broadcast.consume());
+			notify.announce(&broadcast.path, broadcast.broadcast.consume(), &broadcast.state);
 		}
 
 		// Recursively subscribe to all nested nodes.
@@ -914,6 +952,10 @@ pub struct Producer {
 	// [`Info::cache_duration`]). `Duration::MAX` (no ceiling) by default.
 	cache_duration: Duration,
 
+	// Retention window for a track whose publisher advertises none (see
+	// [`Info::latency_default`]).
+	latency_default: Duration,
+
 	// How long a broadcast outlives ungracefully losing its last source (see
 	// [`Info::linger`]). Zero by default.
 	linger: Duration,
@@ -944,6 +986,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: info.pool,
 			cache_duration: info.cache_duration,
+			latency_default: info.latency_default,
 			linger: info.linger,
 			stats: stats::Session::default(),
 		}
@@ -977,8 +1020,15 @@ impl Producer {
 			id: self.info,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 		}
+	}
+
+	// The retention window for a track whose publisher advertises none (see
+	// [`Info::latency_default`]). Cheaper than `info()`, which clones the pool.
+	pub(crate) fn latency_default(&self) -> Duration {
+		self.latency_default
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -993,6 +1043,7 @@ impl Producer {
 			dynamic: kio::Shared::default(),
 			pool: cache::Pool::default(),
 			cache_duration: Duration::MAX,
+			latency_default: track::DEFAULT_LATENCY_MAX,
 			linger: Duration::ZERO,
 			stats: stats::Session::default(),
 		}
@@ -1095,6 +1146,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})
@@ -1151,6 +1203,7 @@ impl Producer {
 			dynamic: self.dynamic.clone(),
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
+			latency_default: self.latency_default,
 			linger: self.linger,
 			stats: self.stats.clone(),
 		})
@@ -1172,11 +1225,6 @@ impl Producer {
 		self.root.join(path)
 	}
 }
-
-/// How many times every attached source may refuse a single track (rejecting it,
-/// or never resolving its info) before the track is aborted instead of retried.
-/// Bounds the retry loop against a table that keeps rejecting one track.
-const MAX_TRACK_RETRIES: u32 = 3;
 
 /// How long a spliced track stays warm after its last reader leaves.
 ///
@@ -1220,12 +1268,18 @@ struct FrontState {
 	/// an exact tie toward the newest source.
 	next_route: u64,
 	routes: Vec<FrontRoute>,
-	/// Peers currently reading this front through the shared broadcast, refcounted
-	/// by live [`ExclusionGuard`]s. The resolve-time check only proves the table is
-	/// clean for a requester at that instant; the front picks per track and re-picks
-	/// on failover, so without this a route tainted for an attached peer could be
-	/// adopted underneath them and hand them back their own bytes. Routes through
-	/// these origins are avoided while any clean alternative exists.
+	/// Peers this front is exposed to, refcounted by live [`ExclusionGuard`]s: those
+	/// reading it through the shared broadcast, and those we merely advertise it to.
+	/// The resolve-time check only proves the table is clean for a requester at that
+	/// instant; the front picks per track and re-picks on failover, so without this a
+	/// route tainted for an attached peer could be adopted underneath them and hand
+	/// them back their own bytes. Routes through these origins are avoided while any
+	/// clean alternative exists.
+	///
+	/// Advertising registers a peer too, because a peer that cannot echo our identity
+	/// back (moq-transport carries no hop ids) may re-advertise the path to us before
+	/// it ever subscribes. That reflection is otherwise indistinguishable from a rival
+	/// publisher, and this is what tells [`attach_source`] apart.
 	excluded: HashMap<Origin, usize>,
 	/// The source tracks are dispatched to. Backups park until promoted.
 	active: Option<u64>,
@@ -1240,17 +1294,30 @@ struct FrontState {
 }
 
 impl FrontState {
-	/// The source new track requests should dispatch to: live first, then lowest
-	/// cost, then shortest hop chain with a deterministic hash tie-break and the
-	/// newest source last, skipping routes that flow through a peer currently
-	/// reading the front while any other route remains (see
-	/// [`Self::prefer_untainted`]).
-	fn best_route(&self) -> Option<u64> {
-		let candidates: Vec<&FrontRoute> = self.routes.iter().collect();
-		self.prefer_untainted(&candidates)
+	/// The one selection primitive every picker goes through: the best route by
+	/// [`route_order`] among those surviving `keep`. With `untainted`, the pick
+	/// also steers away from routes that flow through a peer currently reading
+	/// the shared front, unless that leaves nothing (see
+	/// [`Self::prefer_untainted`]); it is off for [`Self::dispatch`], which pins
+	/// one requester to one source rather than serving the shared front.
+	fn pick(&self, keep: impl Fn(&FrontRoute) -> bool, untainted: bool) -> Option<u64> {
+		let candidates: Vec<&FrontRoute> = self.routes.iter().filter(|r| keep(r)).collect();
+		let candidates = match untainted {
+			true => self.prefer_untainted(&candidates),
+			false => candidates,
+		};
+		candidates
 			.into_iter()
 			.min_by_key(|r| route_order(&self.path.as_path(), r))
 			.map(|r| r.id)
+	}
+
+	/// The source new track requests should dispatch to: live first, then lowest
+	/// cost, then shortest hop chain with a deterministic hash tie-break and the
+	/// newest source last, skipping routes that flow through a peer currently
+	/// reading the front while any other route remains.
+	fn best_route(&self) -> Option<u64> {
+		self.pick(|_| true, true)
 	}
 
 	/// The source a subscription from `exclude` should dispatch to: the best
@@ -1260,14 +1327,15 @@ impl FrontState {
 	/// truthful, so any would-be cycle surfaces the requester's own origin in
 	/// the candidate chain and is filtered here, at any cycle length.
 	fn dispatch(&self, exclude: Option<Origin>) -> Option<u64> {
-		self.routes
-			.iter()
-			.filter(|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)))
-			.min_by_key(|r| route_order(&self.path.as_path(), r))
-			.map(|r| r.id)
+		self.pick(|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)), false)
 	}
 
-	/// Whether serving from `route` would hand an attached peer its own bytes back.
+	/// Whether `route` flows back through a peer this front is exposed to, so serving
+	/// (or attaching) it would hand that peer its own bytes back.
+	///
+	/// Doubles as the reflection test in [`attach_source`]: a route arriving through a
+	/// peer we are already advertising this path to is our own broadcast coming home,
+	/// whatever its chain claims.
 	fn taints_a_reader(&self, route: &broadcast::Route) -> bool {
 		route.hops.iter().any(|hop| self.excluded.contains_key(hop))
 	}
@@ -1312,11 +1380,7 @@ impl FrontState {
 		{
 			return Some(active);
 		}
-		let candidates: Vec<&FrontRoute> = self.routes.iter().filter(|r| !skip(r.id)).collect();
-		self.prefer_untainted(&candidates)
-			.into_iter()
-			.min_by_key(|r| route_order(&self.path.as_path(), r))
-			.map(|r| r.id)
+		self.pick(|r| !skip(r.id), true)
 	}
 
 	/// Re-pick the active source after the table changed. Serve tasks watch
@@ -1430,6 +1494,9 @@ fn detach_source(
 	graceful: bool,
 ) {
 	let close = {
+		// Snapshotted before the state lock (lock order: broadcast, then front).
+		// A demand flip in between only stales this reselect's handover gate,
+		// which self-corrects on the next table change.
 		let carrying = broadcast.demand().is_used();
 		let Ok(mut s) = state.write() else { return };
 		let Some(pos) = s.routes.iter().position(|r| r.id == id) else {
@@ -1450,6 +1517,16 @@ fn detach_source(
 		broadcast.abort_spliced(Error::Dropped);
 	}
 	sync_front(state, broadcast, leaf);
+}
+
+/// Match the ingress announce guard to a route's announce flag: opening bumps
+/// the announced counters, dropping bumps the closed ones. See [`run_source`].
+fn sync_announce(guard: &mut Option<stats::Announce>, announced: bool, ingress: &stats::Scope) {
+	match (announced, guard.is_some()) {
+		(true, false) => *guard = Some(ingress.announce()),
+		(false, true) => *guard = None,
+		_ => {}
+	}
 }
 
 /// Owns one source's lifecycle: attaches it to the front at its path on the first
@@ -1504,9 +1581,9 @@ async fn run_source(
 		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone()) {
 			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
 			Attach::Parked(incumbent) => {
-				tracing::warn!(
+				tracing::debug!(
 					broadcast = %full,
-					"path already live with a different publisher; parking an offline source until it ends",
+					"path already live with a different publisher; parking this source until it ends",
 				);
 				// Wait for the incumbent front to close, or for our own route to
 				// change: announcing ourselves is what earns the takeover, and our
@@ -1526,11 +1603,7 @@ async fn run_source(
 				match update {
 					// Our route moved; recompute the guard and retry with it.
 					Some(Ok(update)) => {
-						match (update.announce, announce.is_some()) {
-							(true, false) => announce = Some(ingress.announce()),
-							(false, true) => announce = None,
-							_ => {}
-						}
+						sync_announce(&mut announce, update.announce, &ingress);
 						route = update;
 					}
 					// The source closed while parked; it was never visible.
@@ -1550,13 +1623,16 @@ async fn run_source(
 					// A different first hop is new content: this source can no
 					// longer feed the front it attached to. Detach deliberately
 					// (a linger would only stall the replacement) and re-attach.
+					//
+					// Plain equality, not `same_publisher`: within one source
+					// handle the session layer already guarantees continuity (it
+					// replaces the handle when identity breaks, UNKNOWN restarts
+					// included), so this only catches a caller moving a live
+					// handle to a new publisher. An UNKNOWN-to-UNKNOWN metadata
+					// update (a legacy peer repricing) must not detach.
 					if update.hops.iter().next().copied() != publisher {
 						detach_source(&state, &broadcast, &leaf, id, true);
-						match (announced, announce.is_some()) {
-							(true, false) => announce = Some(ingress.announce()),
-							(false, true) => announce = None,
-							_ => {}
-						}
+						sync_announce(&mut announce, announced, &ingress);
 						route = update;
 						continue 'attach;
 					}
@@ -1573,11 +1649,7 @@ async fn run_source(
 						s.reselect(carrying);
 					}
 					// Toggle the ingress announce guard on a live/offline transition.
-					match (announced, announce.is_some()) {
-						(true, false) => announce = Some(ingress.announce()),
-						(false, true) => announce = None,
-						_ => {}
-					}
+					sync_announce(&mut announce, announced, &ingress);
 					sync_front(&state, &broadcast, &leaf);
 				}
 				Err(_) => {
@@ -1597,9 +1669,10 @@ enum Attach {
 	/// source table, the spliced broadcast, and the source's table id.
 	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
 	/// The path's live front belongs to a different original publisher and this
-	/// source is offline, so it would rank below every route the front holds and
-	/// must not take the path from it. The caller parks on the returned table
-	/// until the front closes.
+	/// source may not take it: either the source is offline (so it would rank below
+	/// every route the front holds) or its chain leads back through a peer the front
+	/// is already exposed to, making it a reflection rather than rival content. The
+	/// caller parks on the returned table until the front closes.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -1611,6 +1684,21 @@ struct AttachContext<'a> {
 	full: &'a PathOwned,
 	/// Path relative to `node`, for locating (and later pruning) the leaf.
 	rest: &'a PathOwned,
+}
+
+/// Whether two sources carry the same content and may therefore splice.
+///
+/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
+/// identity, or that does not speak the hops extension at all, contributes as a
+/// first hop. Two such sources are not interchangeable even though their first
+/// hops compare equal, so splicing them would cut one publisher's subscribers
+/// over to an unrelated publisher's content. Every other id compares normally,
+/// including `None` for a locally produced broadcast with no hops.
+fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
+	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
+		return false;
+	}
+	a == b
 }
 
 /// Attach a source to the broadcast at `leaf`, creating (and publishing) the
@@ -1628,22 +1716,11 @@ struct AttachContext<'a> {
 /// Taking over requires announcing, which keeps the rule consistent with
 /// [`route_order`]: an offline source ranks below every announced route, so it
 /// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
-/// cutting its subscribers for content nobody has advertised.
-/// Whether two sources carry the same content and may therefore splice.
-///
-/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
-/// identity, or that does not speak the hops extension at all, contributes as a
-/// first hop. Two such sources are not interchangeable even though their first
-/// hops compare equal, so splicing them would cut one publisher's subscribers
-/// over to an unrelated publisher's content. Every other id compares normally,
-/// including `None` for a locally produced broadcast with no hops.
-fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
-	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
-		return false;
-	}
-	a == b
-}
-
+/// cutting its subscribers for content nobody has advertised. It also requires a
+/// chain that does not lead back through a peer this front is already exposed to
+/// (see [`FrontState::taints_a_reader`]): such a source is our own broadcast
+/// reflected by a peer that cannot detect the loop itself, and letting it evict the
+/// front is how a publish direction ends up withdrawing its own announce.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -1671,7 +1748,7 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
-			} else if !route.announce {
+			} else if !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
@@ -1731,7 +1808,10 @@ fn attach_source(
 		announced: announce,
 	};
 	if entry.announced {
-		leaf_guard.notify.lock().announce(ctx.full, &broadcast.consume());
+		leaf_guard
+			.notify
+			.lock()
+			.announce(ctx.full, &broadcast.consume(), &state);
 	}
 	leaf_guard.broadcast = Some(entry);
 	drop(leaf_guard);
@@ -1849,40 +1929,51 @@ async fn run_front(
 
 /// Serves one spliced logical track: splices in the best source's copy of the
 /// track, re-splicing on handover or failure, until the track completes or the
-/// front closes. A source that refuses the track (rejects it, or its info never
-/// resolves) is skipped for this track and the next-best route is tried; only a
-/// full sweep with every source refusing counts toward [`MAX_TRACK_RETRIES`],
-/// after which the track aborts as [`Error::Unroutable`]. Failures after a splice
-/// (a serving session dying mid-stream) are normal failover and re-splice from
-/// the next source at the first missing group.
+/// front closes. A refusal (a source rejecting the track, or its copy dying
+/// before delivering anything) is authoritative and never retried: the refuser
+/// is skipped for this track so a joining standby cannot kill a subscription
+/// the incumbent is serving, and once every attached source has refused, the
+/// track aborts with the last refusal's error. The verdict belongs to this
+/// request; a later consumer request asks afresh (see `track_inner`). Failures
+/// after delivered progress (a serving session dying mid-stream) are normal
+/// failover and re-splice from the next source at the first missing group; a
+/// source that fails while *closing* is a corpse to fail over past (its watcher
+/// is about to detach it), not a verdict on the track.
 async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resume: super::resume::Producer) {
 	enum Step {
 		Closed,
 		Splice(u64, broadcast::Consumer),
 		Complete,
-		Failed,
-		/// The route we were serving from left the table and every source still in
-		/// it has refused this track: close out the sweep and try them again.
-		Resweep,
+		Failed(Error),
+		/// The route we were serving from left the table with nothing servable to
+		/// replace it: drop our handle; the verdict block at the top of the loop
+		/// decides between aborting (all refused) and parking (corpses detaching,
+		/// or an empty table awaiting a reconnect).
+		NoRoute,
 		/// The linger expired with the track still unread: release the segment.
 		Idle,
 		/// A reader arrived or the last one left: recompute the demand gate.
 		Demand,
 	}
 
-	let mut fails = 0u32;
 	// The source whose copy is currently spliced in, and that copy.
 	let mut serving: Option<(u64, track::Consumer)> = None;
-	// Sources that refused this track. A standby joining a live front wins
-	// dispatch the moment it attaches, which is before a real publisher has
-	// created every track, so its refusal must cost the incumbent nothing: we
-	// keep serving from a route that has the track, and re-try the refuser on the
-	// next sweep.
+	// The delivered edge when that copy spliced in. A copy that dies without
+	// advancing it never delivered anything, which is what [`Step::Failed`]
+	// uses to tell a refusal from a mid-stream failover. Snapshotted per splice,
+	// not per wake: an unrelated wake between the copy's last group and its
+	// death must not launder its delivered progress away.
+	let mut spliced_edge: Option<u64> = None;
+	// Sources that refused this track, and the most recent refusal's error. A
+	// standby joining a live front wins dispatch the moment it attaches, which is
+	// before a real publisher has created every track, so its refusal must cost
+	// the incumbent nothing: we keep serving from a route that has the track.
 	let mut refused: HashSet<u64> = HashSet::new();
+	let mut refusal: Option<Error> = None;
 	// Sources whose splice failed because they had already closed. Their watchers
 	// are about to detach them, so wait for the table to move on rather than
-	// burning the strike budget on a corpse (ids are never reused, so this cannot
-	// wedge).
+	// treating a corpse's error as a refusal (ids are never reused, so this
+	// cannot wedge).
 	let mut dead: HashSet<u64> = HashSet::new();
 	// When the spliced segment stopped being read, starting the release countdown.
 	let mut idle_since: Option<web_async::time::Instant> = None;
@@ -1891,13 +1982,12 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 	loop {
 		let serving_id = serving.as_ref().map(|(id, _)| *id);
 
-		// Close out a sweep in which every attached source refused the track.
-		// Reached either by working through the table one refusal at a time, or by
-		// the route we were serving from leaving it, which is exactly the failover
-		// a refuser deserves to be re-tried on. Re-trying is what lets a publisher
-		// that had not created the track yet serve it once it has, so the sweep
-		// itself is the strike: a track no source will ever carry still ends after
-		// [`MAX_TRACK_RETRIES`] of them rather than looping forever.
+		// The table's verdict: once every attached source has refused, nothing
+		// will ever serve the track (refusals are never retried) and it aborts
+		// with the last refusal's error. A detached refuser leaves the set, so a
+		// source that reattaches (under a fresh id) is asked anew; a table blocked
+		// only by corpses awaiting detach parks instead, since their replacement
+		// (a reconnect) deserves the seamless splice.
 		{
 			let s = state.read();
 			refused.retain(|id| s.routes.iter().any(|r| r.id == *id));
@@ -1905,17 +1995,12 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 			let exhausted = !s.routes.is_empty()
 				&& s.serve_route(|id| refused.contains(&id) || dead.contains(&id))
 					.is_none();
-			// A sweep blocked only by a source we watched close is not the table's
-			// verdict: park for its detach instead of spending a strike.
 			if exhausted && dead.is_empty() {
 				drop(s);
-				fails += 1;
-				if fails >= MAX_TRACK_RETRIES {
-					tracing::debug!(name = %name, "aborting unservable track");
-					let _ = resume.abort(Error::Unroutable);
-					return;
-				}
-				refused.clear();
+				let err = refusal.take().unwrap_or(Error::NotFound);
+				tracing::debug!(name = %name, %err, "every source refused track; aborting");
+				let _ = resume.abort(err);
+				return;
 			}
 		}
 
@@ -1960,7 +2045,7 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 							return Poll::Ready(Step::Closed);
 						}
 						let Some(next) = guard.serve_route(skip) else {
-							return Poll::Ready(Step::Resweep);
+							return Poll::Ready(Step::NoRoute);
 						};
 						let source = guard
 							.routes
@@ -1988,13 +2073,13 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				}
 
 				// Watch the spliced copy for its end: complete means the logical
-				// track is over; anything else means the serving source died.
+				// track is over; anything else means the serving copy died.
 				if let Some((_, track)) = &serving
 					&& let Poll::Ready(result) = track.poll_complete(waiter)
 				{
 					return Poll::Ready(match result {
 						Ok(()) => Step::Complete,
-						Err(_) => Step::Failed,
+						Err(err) => Step::Failed(err),
 					});
 				}
 
@@ -2010,22 +2095,40 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 				let _ = resume.finish();
 				return;
 			}
-			Step::Failed => {
-				// The spliced copy died mid-serve: failover, not a strike.
-				// Re-splice from the (possibly same) active source.
+			Step::Failed(err) => {
+				// The spliced copy died mid-serve. With delivered progress since
+				// its splice it's a normal failover: re-splice from the (possibly
+				// same) active source. A copy that died before producing anything
+				// is a refusal (a source whose track keeps dying right after
+				// acceptance must not re-splice forever), unless the source
+				// itself is closing: that corpse parks for its detach so a
+				// reconnect gets the seamless splice.
+				if resume.latest() == spliced_edge
+					&& let Some(id) = serving_id
+				{
+					let closing = state
+						.read()
+						.routes
+						.iter()
+						.find(|r| r.id == id)
+						.is_some_and(|r| r.source.is_closing());
+					if closing {
+						dead.insert(id);
+					} else {
+						refused.insert(id);
+						refusal = Some(err);
+					}
+				}
 				serving = None;
 			}
 			// The outer loop recomputes `used` and the countdown on the next pass.
 			Step::Demand => {}
-			// The sweep is closed out at the top of the loop, which clears the
-			// refusals so the retry below picks a source.
-			//
 			// Forget which route we were serving from, or the `gone` edge that woke
 			// us keeps firing: the id stays absent from the table, the wait returns
 			// Ready at once, and the loop spins on a full core without ever parking.
 			// The segment itself stays spliced into `resume` (readers keep whatever
 			// it delivered) until a replacement is proven servable.
-			Step::Resweep => serving = None,
+			Step::NoRoute => serving = None,
 			Step::Idle => {
 				// Nobody has read the track for the linger: drop the source's copy so
 				// its session can release the track (and the cached `track::Info` that
@@ -2064,12 +2167,10 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 						})
 						.await;
 						match info {
-							// The table changed under us; retry from the top
-							// without a strike.
+							// The table changed under us; re-pick from the top.
 							None => continue,
 							// A copy that is already aborted can't be spliced;
-							// count a strike, or a source pinning a dead track
-							// alive would spin this loop without ever yielding.
+							// its error is the source's answer for the track.
 							Some(Ok(_)) => match track.poll_complete(&kio::Waiter::noop()) {
 								Poll::Ready(Err(err)) => Err(err),
 								_ => Ok(track),
@@ -2082,32 +2183,36 @@ async fn serve_track(state: kio::Producer<FrontState>, name: Arc<str>, mut resum
 
 				match attempt {
 					Ok(track) => {
-						if resume.takeover(&track).is_err() {
-							// The logical track already ended (finished or
-							// aborted); nothing left to serve.
+						if let Err(err) = resume.takeover(&track) {
+							// Closed means the logical track already ended
+							// (finished or aborted). Anything else is a boundary
+							// bug; abort rather than strand subscribers on a
+							// track no task serves (a no-op after a clean end).
+							let _ = resume.abort(err);
 							return;
 						}
-						// A successful splice proves the track servable: reset
-						// the strike budget. `refused` stays: re-trying the
-						// refusers now would only re-refuse and re-splice, and
-						// the loop would spin. A failover clears it instead.
-						fails = 0;
 						dead.clear();
+						// The new segment has produced nothing yet, so this is
+						// the edge the copy is asked to advance.
+						spliced_edge = resume.latest();
 						serving = Some((id, track));
 					}
 					// The source itself closed or deliberately ended: not a
-					// rejection, so no strike. Park until its watcher detaches
+					// verdict on the track. Park until its watcher detaches
 					// it and the table promotes a replacement.
 					Err(_) if source.is_closing() => {
 						dead.insert(id);
 						serving = None;
 					}
-					// This source can't serve the track: rule it out of this track
-					// only and let the next-best route try. The strike is spent by
-					// the sweep, at the top of the loop.
+					// The dispatched source does not carry the track: a publisher
+					// announces a broadcast only once its tracks exist, so the
+					// answer is authoritative and never re-asked. Skip the source
+					// for this track; the verdict block aborts once every source
+					// has refused.
 					Err(err) => {
 						tracing::debug!(name = %name, source = id, %err, "source refused track");
 						refused.insert(id);
+						refusal = Some(err);
 						serving = None;
 					}
 				}
@@ -2564,7 +2669,7 @@ impl Consumer {
 	/// set as initial announcements. Drop the returned [`AnnounceConsumer`]
 	/// to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone(), self.exclude)
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -2778,7 +2883,7 @@ impl AnnounceProducer {
 	pub fn consume(&self) -> AnnounceConsumer {
 		// Untagged: `AnnounceProducer` is used for internal announce plumbing, not
 		// egress attribution (which flows through `origin::Consumer::announced`).
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default(), None)
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -2811,7 +2916,7 @@ pub struct AnnounceConsumer {
 }
 
 impl AnnounceConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session) -> Self {
+	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session, exclude: Option<Origin>) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -2819,6 +2924,7 @@ impl AnnounceConsumer {
 			let notify = AnnounceConsumerNotify {
 				root: root.clone(),
 				state: state.clone(),
+				exclude,
 			};
 			node.lock().consume(id, notify);
 		}
@@ -3160,6 +3266,83 @@ mod tests {
 			state.active,
 			Some(1),
 			"an unannounced incumbent must always be displaced"
+		);
+	}
+
+	/// A route arriving through a peer the front is already exposed to is our own
+	/// broadcast reflected back, whatever its chain claims, so it must not evict the
+	/// front. This is the shape a relay with no hop ids produces when both directions
+	/// of a sync target point at it.
+	#[test]
+	fn test_reflection_through_an_exposed_peer_cannot_take_over() {
+		let peer = Origin::new(42).unwrap();
+		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
+		let reflected = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+
+		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+
+		// Nobody is exposed yet: a different publisher is free to take the path.
+		assert!(!state.taints_a_reader(&reflected));
+
+		// Advertising the path to `peer` registers them, and the same route is now
+		// recognizable as a reflection.
+		*state.excluded.entry(peer).or_default() += 1;
+		assert!(state.taints_a_reader(&reflected));
+	}
+
+	/// The exposure is what discriminates, not the shape of the chain: an unrelated
+	/// publisher reaching us through some *other* peer still takes the path over.
+	#[test]
+	fn test_rival_publisher_through_another_peer_still_takes_over() {
+		let peer = Origin::new(42).unwrap();
+		let elsewhere = Origin::new(43).unwrap();
+		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
+		let rival = announce().with_hops(OriginList::try_from(vec![Origin::UNKNOWN, elsewhere]).unwrap());
+
+		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+		*state.excluded.entry(peer).or_default() += 1;
+
+		assert!(!state.taints_a_reader(&rival), "only the peer we feed is a reflection");
+	}
+
+	/// A peer that carries no hop ids hides its depth: everything behind it collapses
+	/// into one entry, so its route understates its true length and wins the cost
+	/// comparison against a longer-looking but genuinely shorter path. Pricing the
+	/// opaque link (`Client::with_cost`) is what restores the intended order.
+	#[test]
+	fn test_opaque_peer_understates_its_depth() {
+		let us = Origin::new(1).unwrap();
+
+		// Our own upstream, honestly described: two hops, charged per link.
+		let direct = || {
+			announce()
+				.with_hops(OriginList::try_from(vec![Origin::new(7).unwrap(), Origin::new(8).unwrap()]).unwrap())
+				.with_cost(2)
+		};
+		// The same content reached through an opaque relay, which is actually further
+		// away but advertises no chain at all, so it lands as one unpriced hop.
+		let opaque = |cost| {
+			announce()
+				.with_hops(OriginList::try_from(vec![Origin::new(42).unwrap()]).unwrap())
+				.with_cost(cost)
+		};
+
+		// Unpriced, the opaque route wins on cost even though it is the longer path.
+		let mut state = front_state(us, vec![direct(), opaque(1)]);
+		state.reselect(false);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"an unpriced opaque link out-ranks a shorter real path"
+		);
+
+		// Priced to reflect what it hides, the real path wins again.
+		let mut state = front_state(us, vec![direct(), opaque(16)]);
+		state.reselect(false);
+		assert_eq!(
+			state.active,
+			Some(0),
+			"pricing the opaque link restores the intended order"
 		);
 	}
 
@@ -3752,10 +3935,11 @@ mod tests {
 		late.assert_closed();
 	}
 
-	/// A successful splice resets the retry budget: transient pre-splice failures
-	/// spread over a track's lifetime never accumulate into an abort.
+	/// A source rejecting a track ends the logical track immediately, with the
+	/// source's own error: which tracks a broadcast carries is the publisher's
+	/// contract, so there is no sweep of other routes and no retry budget.
 	#[tokio::test]
-	async fn test_serve_resets_retry_budget() {
+	async fn test_refused_track_aborts_instantly() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -3768,25 +3952,58 @@ mod tests {
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		// Queue the track; the subscription resolves once a serve finally sticks.
 		let subscribing = broadcast.track("video").unwrap().subscribe(None);
-
-		// Alternate a pre-splice failure with a successful splice, well past the
-		// retry cap; the resets keep the track alive.
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
-				.await
-				.expect("timed out waiting for a retry")
-				.unwrap();
-			request.reject(Error::NotFound);
-			let producer = accept_track(&mut dynamic, "video").await;
-			settle().await;
-			drop(producer);
-		}
-
-		let _producer = accept_track(&mut dynamic, "video").await;
+		let request = dynamic.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
 		settle().await;
-		let mut sub = subscribing.await.unwrap();
+
+		// One refusal is the verdict; the source is never re-asked.
+		assert!(matches!(subscribing.await, Err(Error::NotFound)));
+		dynamic.assert_no_request();
+	}
+
+	/// A rejection only rules its source out of the track, so a better route
+	/// taking over while the original source's info request is pending (and the
+	/// stale source rejecting at the same moment) rides the handover instead of
+	/// aborting the subscription.
+	#[tokio::test]
+	async fn test_stale_rejection_does_not_abort_a_handover() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		// The only route: dispatch parks on its pending info request.
+		let source_remote = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_remote = source_remote.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let request_remote = dynamic_remote.requested_track().await.unwrap();
+
+		// A better route attaches (taking dispatch) while the old source's
+		// request is still pending; the old source rejects in the same window.
+		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_local = source_local.dynamic();
+		request_remote.reject(Error::NotFound);
+		settle().await;
+
+		// The subscription rides the handover onto the new route.
+		let mut producer_local = accept_track(&mut dynamic_local, "video").await;
+		settle().await;
+		let mut sub = subscribing
+			.await
+			.expect("the handover must win over the stale rejection");
+		producer_local.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
 		sub.assert_not_closed();
 	}
 
@@ -4201,12 +4418,11 @@ mod tests {
 	///
 	/// An ungraceful loss empties the route table while the front waits out its
 	/// linger, so the route a track is spliced from is gone with no replacement to
-	/// serve it: the resweep. The task has to park for the whole window on the
-	/// strength of dropping the departed route, because nothing else bounds it. The
-	/// strike budget is gated on `!routes.is_empty()`, so an empty table never spends
-	/// one, and a "route gone" edge that keeps firing yields a wait that is Ready on
-	/// every poll: a full core per subscribed track, and the runtime that has to
-	/// deliver the reconnect starved along with it.
+	/// serve it. The task has to park for the whole window on the strength of
+	/// dropping the departed route, because nothing else bounds it: a "route gone"
+	/// edge that keeps firing yields a wait that is Ready on every poll, a full
+	/// core per subscribed track, and the runtime that has to deliver the
+	/// reconnect starved along with it.
 	///
 	/// Under a paused clock that spin never yields, so a regression hangs here
 	/// rather than failing.
@@ -4818,12 +5034,12 @@ mod tests {
 		sub.assert_not_closed();
 	}
 
-	/// The standby wins dispatch the instant it attaches, which is before a real
-	/// publisher has created every track: a live `moq import` announces its
-	/// broadcast on connect and only creates each track once its demuxer reaches
-	/// it. Refusing one track must cost the incumbent nothing (#2473, e2e finding
-	/// 2 in the field): the subscription keeps flowing from the route that has the
-	/// track, and the standby is re-tried once it does.
+	/// A standby that wins dispatch before creating a track must not kill a
+	/// subscription the incumbent is serving: its refusal only rules it out of
+	/// this track, and the incumbent keeps delivering. The refusal is still
+	/// never retried: once the incumbent goes away every remaining source has
+	/// refused, so the subscription aborts and the consumer's next request asks
+	/// afresh.
 	#[tokio::test]
 	async fn test_standby_missing_track_keeps_incumbent() {
 		tokio::time::pause();
@@ -4852,41 +5068,41 @@ mod tests {
 		assert_eq!(sub.assert_group().sequence, 0);
 
 		// The standby joins and wins dispatch, but has not created "audio" yet.
-		// Refuse it more times than the strike budget: the old code aborted the
-		// logical track after three, killing a subscription the incumbent was
-		// happily serving.
+		// Its refusal must cost the incumbent nothing.
 		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
 		let mut dynamic_local = source_local.dynamic();
 		settle().await;
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			if let Some(Ok(request)) = dynamic_local.requested_track().now_or_never() {
-				assert_eq!(request.name(), "audio");
-				request.reject(Error::NotFound);
-			}
-			settle().await;
-		}
+		let request = dynamic_local.requested_track().await.unwrap();
+		assert_eq!(request.name(), "audio");
+		request.reject(Error::NotFound);
+		settle().await;
 
 		// Still spliced to the incumbent, still delivering.
 		producer_remote.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();
 
-		// The incumbent going away re-tries the standby, which by now has the
-		// track: the subscription splices across instead of ending.
+		// The incumbent leaving exhausts the table (the standby's refusal is
+		// never retried): the subscription aborts.
 		source_remote.abort(Error::Dropped).unwrap();
 		settle().await;
 		settle().await;
+		sub.assert_closed();
+		dynamic_local.assert_no_request();
+
+		// A fresh consumer request asks the standby anew, which has the track now.
+		let retry = broadcast.track("audio").unwrap().subscribe(None);
 		let mut producer_local = accept_track(&mut dynamic_local, "audio").await;
 		settle().await;
+		let mut sub = retry.await.expect("a fresh request must reach the standby");
 		producer_local.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2);
-		sub.assert_not_closed();
 	}
 
-	/// A track every source refuses still aborts, but the verdict is not cached:
-	/// it belongs to the sources attached at the time, so a later request re-asks
-	/// them. Otherwise one early request for a track the publisher had not created
-	/// yet leaves the name dead for the life of the front.
+	/// A refused track aborts, but the verdict is not cached: it belongs to the
+	/// request that received it, so a later request re-asks the source. Otherwise
+	/// one early request for a track the publisher had not created yet leaves the
+	/// name dead for the life of the front.
 	#[tokio::test]
 	async fn test_unservable_track_retried_by_a_later_request() {
 		tokio::time::pause();
@@ -4900,14 +5116,12 @@ mod tests {
 		settle().await;
 		let broadcast = consumer.request_broadcast("test").await.unwrap();
 
-		// Nothing serves it: the strike budget runs out and the track aborts.
+		// Nothing serves it: the refusal aborts the track with the source's error.
 		let subscribing = broadcast.track("audio").unwrap().subscribe(None);
-		for _ in 0..MAX_TRACK_RETRIES {
-			let request = dynamic.requested_track().await.unwrap();
-			request.reject(Error::NotFound);
-			settle().await;
-		}
-		assert!(matches!(subscribing.await, Err(Error::Unroutable)));
+		let request = dynamic.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
+		settle().await;
+		assert!(matches!(subscribing.await, Err(Error::NotFound)));
 
 		// The publisher has the track now; a fresh request must reach it.
 		let retry = broadcast.track("audio").unwrap().subscribe(None);
@@ -4916,6 +5130,90 @@ mod tests {
 		let mut sub = retry.await.expect("a fresh request must reach the source");
 		producer.append_group().unwrap();
 		assert_eq!(sub.assert_group().sequence, 0);
+	}
+
+	/// A copy that dies before delivering anything is a refusal, not a failover:
+	/// a source whose track keeps dying right after acceptance must not
+	/// re-splice forever. With every attached source refused, the track aborts
+	/// with the copy's error, and the verdict belongs to that request: a fresh
+	/// consumer request asks again.
+	#[tokio::test]
+	async fn test_track_dying_without_progress_aborts() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+
+		// The copy dies without delivering a single group, from a source that is
+		// alive and well: that's its answer for the track, not a failover.
+		drop(producer);
+		settle().await;
+		sub.assert_closed();
+		dynamic.assert_no_request();
+
+		// A fresh request asks the (still attached) source anew.
+		let retry = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = retry.await.expect("a fresh request must reach the source");
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+	}
+
+	/// A copy that delivered and later died is a failover even when unrelated
+	/// wakes happened between its last group and its death: progress is tracked
+	/// per splice, so a demand edge must not launder it into a zero-progress
+	/// refusal that aborts the only route.
+	#[tokio::test]
+	async fn test_delivered_copy_death_survives_unrelated_wakes() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let hops = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let source = origin.create_broadcast("test", announce().with_hops(hops)).unwrap();
+		let mut dynamic = source.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing = broadcast.track("video").unwrap().subscribe(None);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		let mut sub = subscribing.await.unwrap();
+		producer.append_group().unwrap();
+		assert_eq!(sub.assert_group().sequence, 0);
+
+		// Unrelated demand-edge wakes after the copy's last group: the reader
+		// leaves and a new one arrives.
+		drop(sub);
+		settle().await;
+		let resubscribing = broadcast.track("video").unwrap().subscribe(None);
+		settle().await;
+		let mut sub = resubscribing.await.unwrap();
+		assert_eq!(sub.assert_group().sequence, 0, "cached group re-served");
+
+		// The copy then dies having delivered: failover, so the source is
+		// re-asked and the subscription resumes.
+		drop(producer);
+		let mut producer = accept_track(&mut dynamic, "video").await;
+		settle().await;
+		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(sub.assert_group().sequence, 1);
+		sub.assert_not_closed();
 	}
 
 	/// The front picks a source per track and re-picks on failover, so a route
@@ -4955,13 +5253,11 @@ mod tests {
 		settle().await;
 
 		// The peer is pinned to the clean source, so the fallback the front would
-		// take for everyone else is not reachable from their subscription.
-		for _ in 0..2 * MAX_TRACK_RETRIES {
-			if let Some(Ok(request)) = dynamic_clean.requested_track().now_or_never() {
-				request.reject(Error::NotFound);
-			}
-			settle().await;
-		}
+		// take for everyone else is not reachable from their subscription: the
+		// refusal aborts the track rather than asking the tainted route.
+		let request = dynamic_clean.requested_track().await.unwrap();
+		request.reject(Error::NotFound);
+		settle().await;
 		dynamic_tainted.assert_no_request();
 	}
 

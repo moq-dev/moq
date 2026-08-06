@@ -404,15 +404,11 @@ actively-maintained fork (Discord ships it for Go Live) that bumps to cros-libva
 **dlopen, like NVENC.** `dlopen` makes cros-libva load libva at runtime (no
 `cargo:rustc-link-lib`, no `DT_NEEDED libva.so.2`), so a `--features vaapi` binary
 links on a libva-less builder and loads on a libva-less machine, falling back to
-software (see `backend::open`). The build still needs libva *headers* for
-cros-libva's bindgen, so `libva` is in the nix devShell.
+software (see `backend::open`).
 
-> **Status (moq-vaapi 0.0.2): not yet realized.** The published `moq-vaapi` crate
-> we depend on today *links* libva via `pkg_config` (its `build.rs` probes `libva`
-> and `libva-drm`), so the binary carries `NEEDED libva.so.2` / `libva-drm.so.2`
-> and needs libva at both build and run time; a libva-less host fails to load
-> rather than falling back. Restoring the `dlopen` path in `moq-vaapi` (so this
-> section holds) is tracked in #1837.
+> **Status: realized in moq-vaapi 0.0.3** (#1837, bumped in #2465). It dlopens
+> libva and vendors the libva headers its bindgen reads, so VAAPI costs the build
+> nothing: no libva-dev, no `NEEDED libva.so.2`, no entry in the nix devShell.
 
 **Input is an NV12 surface upload, not zero-copy dmabuf.** The encoder wants an
 NV12 VA surface, but UVC webcams deliver YUYV/MJPEG (decoded to CPU I420); they

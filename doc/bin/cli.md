@@ -240,10 +240,12 @@ moq --client-connect https://relay.example.com/anon --broadcast screen.hang \
     import capture --display --system-audio
 ```
 
-On Linux the NVENC (NVIDIA) and VAAPI (Intel/AMD) encoders and the PipeWire
-screen capture are compiled in by default and link the CUDA / libva / libpipewire
-system libraries. To build `capture` without them (software openh264 + V4L2
-camera capture only, no system library dependency), drop the default features:
+On Linux the NVENC (NVIDIA) encoder and the PipeWire screen capture are compiled
+in by default. VAAPI (Intel/AMD) is behind the off-by-default `vaapi` feature,
+since that backend has never been validated on real hardware. To build `capture`
+without any of them (software openh264 + V4L2 camera capture only), drop the
+default features. `capture` itself still needs libclang and the V4L2 headers for
+the camera, and ALSA for the microphone:
 
 ```bash
 cargo build --release -p moq-cli --no-default-features \
@@ -260,15 +262,15 @@ On macOS these capture at the logical resolution, i.e. what the screen looks lik
 to its owner rather than its native pixels: a 2x retina display shares as
 1710x1106, not 3420x2214, which keeps the derived bitrate sane. Pass
 `--width`/`--height` to capture native pixels instead.
-The Linux screen backend links libpipewire and
-is behind the default-on `pipewire` feature; drop it (like the codecs above) for
-a build without the dependency. The codec is chosen with `--codec`
-(`h264` default, or `h265`). For H.264 it picks a hardware encoder
-(VideoToolbox on macOS, NVENC on Linux NVIDIA, VAAPI on Linux Intel/AMD) when one
-is present, falling back to the built-in software encoder (openh264); force either
+The Linux screen backend links libpipewire and is behind the default-on
+`pipewire` feature; drop it (like the codecs above) for a build without the
+dependency. The codec is chosen with `--codec` (`h264` default, or `h265`). For
+H.264 it picks a hardware encoder (VideoToolbox on macOS, NVENC on Linux NVIDIA,
+or VAAPI on Linux Intel/AMD when built with the `vaapi` feature) when one is
+present, falling back to the built-in software encoder (openh264); force either
 with `--hardware` / `--software`. H.265 is hardware-only (VideoToolbox on macOS,
-Media Foundation on Windows). `--camera` takes a bare integer as a device index, otherwise a
-device path (Linux) or name (a friendly-name substring on Windows, the
+Media Foundation on Windows). `--camera` takes a bare integer as a device index,
+otherwise a device path (Linux) or name (a friendly-name substring on Windows, the
 AVFoundation `uniqueID` on macOS). Microphone capture uses cpal (CoreAudio /
 WASAPI / ALSA) and encodes Opus. `--system-audio` is macOS-only: there is no
 loopback input device, so it goes through ScreenCaptureKit (the same API as
@@ -360,6 +362,16 @@ Import formats:
 - `flv` - FLV / RTMP (H.264 video, AAC audio)
 - `capture` - capture local devices directly (camera H.264 + microphone Opus; requires the `capture` build feature; does not read stdin)
 
+`import --latency-max <duration>` (default `30s`) declares how long relays keep a
+non-latest group of the published media tracks fetchable. It is a retention
+budget, so raising it never makes a subscriber play further behind live: it caps
+how far back a fetch can still reach. The default is sized for a segmented
+egress (HLS/DASH), which may only advertise segments that are still fetchable;
+lower it when nothing reads history and the memory matters. It applies to the
+media tracks only, and to the sources whose catalog this binary builds (the
+stdin containers, `hls`, and `capture`) - the other gateways reject the flag
+rather than accepting it and publishing at the default.
+
 Export formats:
 
 - `fmp4` - fragmented MP4 / CMAF
@@ -401,7 +413,10 @@ stdout containers and `rtmp` take `--latency-max` (default `500ms`), and `srt`
 reuses its `--latency` (the receive buffer doubles as the skip threshold).
 WebRTC (`rtc`) is real-time and doesn't buffer, so it has no such knob. HLS
 export doesn't subscribe to media at all (segments are fetched on demand), so
-it has no latency knob either.
+it has no latency knob either. This is the subscriber half of the pair the
+protocol names: the export knob is how long *this* consumer waits, while
+[`import --latency-max`](#container-formats) is how long the publisher keeps a
+group around for anyone to fetch.
 
 ### MPEG-TS
 

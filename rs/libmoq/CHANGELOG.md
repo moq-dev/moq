@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/moq-dev/moq/compare/libmoq-v0.5.3...libmoq-v0.5.4) - 2026-08-05
+
+### Added
+
+- *(bindings)* publish raw video with a native encoder ([#2608](https://github.com/moq-dev/moq/pull/2608))
+
+### Fixed
+
+- *(moq-video)* reject unrepresentable sizes, and unbreak the macOS build ([#2648](https://github.com/moq-dev/moq/pull/2648))
+
 ## [0.5.3](https://github.com/moq-dev/moq/compare/libmoq-v0.5.2...libmoq-v0.5.3) - 2026-08-03
 
 ### Other

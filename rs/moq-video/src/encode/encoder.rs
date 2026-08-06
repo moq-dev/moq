@@ -144,6 +144,7 @@ impl Encoder {
 		// I420 chroma is subsampled 2x2, so the encoded resolution must be even.
 		let size = config.size();
 		size.validate("encoder")?;
+		size.validate_encodable("encoder", config.framerate)?;
 
 		let backend = backend::open(config)?;
 		Ok(Self {

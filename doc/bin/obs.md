@@ -57,6 +57,18 @@ just obs setup
 just obs build
 ```
 
+### Tests
+
+`just obs test` compiles the plugin sources against stubbed `libobs`/`libmoq` under ThreadSanitizer and drives the session status callback's orderings directly: a connection that fails permanently, a terminal arriving mid-`Start()`, a restart, and one arriving while the output is being destroyed. Run it after touching `cpp/obs/src/`.
+
+It needs the `libobs` headers plus a built `libmoq` (`target/include/moq.h`). On macOS and Windows the headers come from the obs-deps bundle `just obs setup` downloads; on Linux they come from the Nix dev shell via `pkg-config`. Set `OBS_INCLUDE_DIR` to point it somewhere else. Like `just rs macos` and `just rs windows`, it is a manual gate: PR CI never compiles this plugin.
+
+It also needs a clang or gcc style compiler with ThreadSanitizer, so it fails rather than skipping when one isn't available. Linux and macOS are covered by the toolchains the plugin already builds with; on Windows run it from WSL, since neither MSVC nor clang on Windows implements ThreadSanitizer.
+
+```bash
+just obs test
+```
+
 ## Releases
 
 The plugin statically links `libmoq`, so it ships with every libmoq release rather than on its own schedule. The [`libmoq` workflow](https://github.com/moq-dev/moq/blob/main/.github/workflows/libmoq.yml) (triggered by a `libmoq-v*` tag) rebuilds the plugin against the libmoq release it just published, then cuts a matching `obs-moq-v<version>` release with **macOS (arm64)** and **Windows (x64)** binaries. `cpp/obs/build.sh --libmoq-release <version>` drives each build (it fetches the prebuilt libmoq archive, so no second cargo build).

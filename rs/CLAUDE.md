@@ -109,6 +109,7 @@ Negotiation: `version::NEGOTIATED` lists SETUP-negotiated versions in preference
 
 ## Rust conventions
 
+- **Retry loops inline their backoff** (root Retries has the policy). Escalate a local `Duration` toward a `const MAX` (seconds, not minutes), jitter each wait (`delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)`), and track the give-up deadline as a `tokio::time::Instant` next to the delay. No shared backoff helper, and no `is_retryable()` on error types; the one thing worth reading off a failure is a status a peer actually sent, via the `status()` accessors on `moq_native::Error` / `moq_hls::Error`.
 - **Prefer `kio` over tokio sync primitives**: reach for `kio::Producer`/`Consumer` (and the `poll_*` plumbing) instead of `tokio::sync` channels or `watch`. A `tokio::sync::watch` (or a channel) carrying a single value is a code smell. `kio` ties into the runtime-free `poll_*` model and avoids a hard runtime dependency.
 - **Errors**: `thiserror` with `#[from]` for libraries, `anyhow` (with `.context("...")`, not `.map_err(|_| anyhow!())`) for binaries. Always `#[non_exhaustive]` on public error enums (e.g. `moq-net/src/error.rs`, `moq-ffi/src/error.rs`, `moq-loc/src/lib.rs`). Use `#[error(transparent)]` + `#[from]` for wrapped foreign errors (see `moq-token/src/error.rs`).
 - **Config + TOML merge**: any `#[arg]` field on a TOML-loadable config must be `Option<T>`, never a bare `bool`/`String`/etc. The TOML->CLI merge re-applies clap defaults and silently clobbers TOML values for bare fields. See `moq-relay/src/config.rs` and its regression tests (`cli_does_not_clobber_toml_*`); add such a test for any new flag.
@@ -140,7 +141,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 ## Testing
 
-- `just check` runs all tests + lint; `just fix` auto-fixes formatting/lint. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
+- `just check` lints and compiles the crates your branch changed plus every crate depending on them; `just fix` auto-fixes formatting/lint over the same set (`just rs _select` does the selection, via `cargo metadata`). `just check-all` / `just fix-all` cover every default member. `just rs test -p <crate>` (or `cargo nextest run -p <crate>`) for one crate.
 
 - **Run tests through nextest, not `cargo test`.** `.config/nextest.toml` sets a
   `slow-timeout` with `terminate-after`, so a wedged test is reported as a
@@ -166,11 +167,12 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - Config-merge regressions belong next to the config (`moq-relay/src/config.rs::tests`); they serialize env mutation with a lock since clap reads env.
 
-- **`just check` only compiles the host's platform, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to it, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
+- **Local checks only compile the host's platform and target, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
   - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
-  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying pipewire/libva/alsa, so nvenc/nvdec/vaapi/pipewire all compile.
+  - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
+  - wasm32 (moq-wasm): `just rs wasm`. The crate root is `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace` compiles it down to nothing and sees no errors at all. This one needs no special host (the Nix shell carries the target), so `just rs ci` and `just check-all` both run it, and `just check` adds it when the diff touches `rs/moq-wasm/`. It's a compile gate, distinct from the root `just wasm`, which builds the shippable `@moq/wasm` package.
 
   What still compiles these automatically, and when:
 

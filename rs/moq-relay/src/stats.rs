@@ -78,10 +78,10 @@ impl StatsConfig {
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
 	///
 	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
-	/// attach the result unconditionally. Hand the producer's
-	/// [`registry`](moq_stats::Producer::registry) to the cluster and keep the
-	/// producer itself alive for as long as the relay runs (its publish task
-	/// stops when the last clone drops).
+	/// attach the result unconditionally. Hand it to
+	/// [`Cluster::with_stats`](crate::Cluster::with_stats), which takes over both
+	/// the registry and keeping the publish task alive (the task stops when the
+	/// last clone of the producer drops).
 	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
 		if !self.enabled.unwrap_or(false) {
 			return moq_stats::Producer::new(moq_stats::ProducerConfig::new());

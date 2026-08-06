@@ -126,7 +126,10 @@ be pulled back out over RTMP.
 - **RTMPS.** Embedders can terminate TLS themselves: set `Config::tls` (or
   `Server::with_tls`) with a `rustls::ServerConfig`, or accept the connection and
   finish the TLS handshake by hand and hand the stream to `moq_rtmp::accept_stream`
-  (which works over any `AsyncRead + AsyncWrite` transport).
+  (which works over any `AsyncRead + AsyncWrite` transport). An embedder that owns
+  the `TcpStream` should call `moq_rtmp::configure_socket` on it first, the way
+  `Server` does: its keepalive is what reaps a play session whose viewer
+  disappeared without closing.
 - **Codecs.** FLAC and MP3 enhanced-audio payloads are dropped (no MoQ catalog
   codec); everything else (H.264/HEVC/AV1/VP9 video, AAC/Opus/AC-3/E-AC-3 audio)
   is supported.

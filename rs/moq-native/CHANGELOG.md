@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.7](https://github.com/moq-dev/moq/compare/moq-native-v0.19.6...moq-native-v0.19.7) - 2026-08-05
+
+### Added
+
+- *(native)* race resolved addresses Happy Eyeballs style when dialing ([#2594](https://github.com/moq-dev/moq/pull/2594))
+
+### Fixed
+
+- *(rtmp,native)* close two keep-alive gaps on the accept side ([#2644](https://github.com/moq-dev/moq/pull/2644))
+- *(native)* bound Client::connect so a silent peer can't wedge reconnect ([#2622](https://github.com/moq-dev/moq/pull/2622))
+
 ## [0.19.6](https://github.com/moq-dev/moq/compare/moq-native-v0.19.5...moq-native-v0.19.6) - 2026-08-03
 
 ### Fixed

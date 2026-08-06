@@ -196,6 +196,10 @@ Client settings used when connecting to other relays (clustering).
 
 ```toml
 [client]
+# Maximum time for one outbound dial and MoQ handshake. Defaults to 30s.
+# Set to "0" to wait forever.
+timeout = "30s"
+
 # Disable TLS verification (development only!)
 tls.disable_verify = true
 
@@ -207,7 +211,27 @@ tls.disable_verify = true
 # e.g. to dial a local relay with a private CA and a remote one with a public CA.
 # Defaults to true only when no custom root is set.
 # tls.system_roots = true
+
+# Delay before also dialing the next resolved address (Happy Eyeballs).
+# When DNS returns both IPv6 and IPv4, attempts alternate between the families,
+# each starting this long after the previous one (or immediately, if that one
+# fails outright), and the first connection to complete wins. "0s" dials every
+# address at once. Defaults to 250ms, RFC 8305's Connection Attempt Delay.
+# failover_delay = "250ms"
 ```
+
+The connect timeout is also available as `--client-connect-timeout` or
+`MOQ_CLIENT_CONNECT_TIMEOUT`, and the failover delay as
+`--client-failover-delay` or `MOQ_CLIENT_FAILOVER_DELAY`. The two compose: the
+failover delay staggers the attempts within one dial, and the timeout bounds
+that dial as a whole.
+
+Pinning the source port (a non-zero port in `--client-bind`) disables address
+failover on the `quiche` backend, which binds a fresh socket per attempt and so
+can only dial one address at a time from a fixed port. The relay logs a warning
+at startup when both are set. Leave the bind port at `0` to keep failover, or
+use the `quinn` or `noq` backend, which share one socket across attempts and are
+unaffected.
 
 ### \[server.quic] and \[client.quic]
 
@@ -447,6 +471,15 @@ headroom = "2GiB"
 # stays cached. The latest group of every track is always retained, as it is
 # the live edge. Unbounded (each track keeps its own window) when unset.
 duration = "30s"
+
+# Retention window for a track whose publisher advertises none ("30s"), which
+# is every moq-transport peer and moq-lite 01-04: those wire formats carry no
+# publisher retention property, so the relay picks the window instead. Raise it
+# when this relay fronts a segmented egress (HLS/DASH) that advertises a longer
+# playlist window, since serving an older segment is a cache hit that far back.
+# moq-lite 05+ publishers advertise their own window and keep it. Defaults to
+# 5s, and `duration` still caps it.
+latency_default = "30s"
 ```
 
 The `capacity` budget counts group payload bytes, not process RSS, so leave
@@ -462,9 +495,13 @@ until it resumes or the broadcast closes; under memory pressure the byte budget
 is repaid by the tracks that are still writing. A publisher that disconnects has
 its groups released once the broadcast closes (see `cluster.linger`).
 
-All three flags also accept CLI arguments (`--cache-capacity`,
-`--cache-headroom`, `--cache-duration`) and environment variables
-(`MOQ_CACHE_CAPACITY`, `MOQ_CACHE_HEADROOM`, `MOQ_CACHE_DURATION`).
+`duration` only ever lowers retention. `latency_default` is the one knob that
+raises it, and only for peers whose protocol never told us what to keep.
+
+All four flags also accept CLI arguments (`--cache-capacity`,
+`--cache-headroom`, `--cache-duration`, `--cache-latency-default`) and
+environment variables (`MOQ_CACHE_CAPACITY`, `MOQ_CACHE_HEADROOM`,
+`MOQ_CACHE_DURATION`, `MOQ_CACHE_LATENCY_DEFAULT`).
 
 ### \[iroh]
 
