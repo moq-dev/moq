@@ -157,6 +157,22 @@ impl Producer {
 		}
 	}
 
+	/// Drop every listed segment numbered below `segment`: the publisher no longer holds their
+	/// media, so a client following the playlist would fetch a 404.
+	///
+	/// This is the hard bound on the window, where the configured duration is only a preference:
+	/// the duration says how much history to *keep*, a retraction says what is *gone*, so
+	/// whichever removes more wins. `EXT-X-MEDIA-SEQUENCE` reads off the front of the window and
+	/// this only ever pops from the front, so it advances and never rewinds.
+	pub fn trim(&self, segment: u64) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		while state.rows.front().is_some_and(|row| row.segment < segment) {
+			state.rows.pop_front();
+		}
+	}
+
 	/// Mark the timeline ended (the broadcast finished cleanly): the playlist gets
 	/// `EXT-X-ENDLIST` and cursors end once drained.
 	pub fn end(&self) {
@@ -471,5 +487,77 @@ mod tests {
 
 		live.end();
 		assert!(matches!(live.state.read().next_after(Some(1)), Next::Ended));
+	}
+
+	/// A retraction drops segments the publisher can no longer serve, so the playlist stops
+	/// advertising fetches that would 404. This is the hard bound: the duration window would
+	/// have kept all three.
+	#[test]
+	fn a_trim_drops_unfetchable_segments() {
+		let live = Producer::new();
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+		live.push(row(2, 2, 4_000, 2_000), window);
+		assert_eq!(live.window().segments.len(), 3);
+
+		live.trim(2);
+
+		let snapshot = live.window();
+		assert_eq!(snapshot.segments.len(), 1, "only segment 2 is still fetchable");
+		assert_eq!(snapshot.segments[0].segment, 2);
+		assert_eq!(snapshot.sequence, 2, "EXT-X-MEDIA-SEQUENCE follows the head");
+	}
+
+	/// `EXT-X-MEDIA-SEQUENCE` must never go backwards: a client that saw sequence N and then
+	/// sees it again over different content reloads into the wrong place. A stale or repeated
+	/// retraction is therefore a no-op rather than a rewind.
+	#[test]
+	fn a_trim_never_rewinds_the_media_sequence() {
+		let live = Producer::new();
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+		live.push(row(2, 2, 4_000, 2_000), window);
+
+		live.trim(2);
+		assert_eq!(live.window().sequence, 2);
+
+		// An older retraction arriving late, and a repeat of the current one.
+		live.trim(1);
+		live.trim(2);
+		assert_eq!(live.window().sequence, 2, "the head stayed put");
+		assert_eq!(live.window().segments.len(), 1);
+	}
+
+	/// A retraction can outrun what this playlist ever listed (it joined late, or its own
+	/// duration window already evicted them). Everything goes, and the window is empty rather
+	/// than listing something unfetchable.
+	#[test]
+	fn a_trim_past_the_window_empties_it() {
+		let live = Producer::new();
+		let window = Duration::from_secs(30);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+
+		live.trim(9);
+
+		let snapshot = live.window();
+		assert!(snapshot.segments.is_empty());
+		assert_eq!(snapshot.sequence, 0, "an empty window has no head to report");
+	}
+
+	/// The duration window stays a preference on top: whichever of the two removes more wins.
+	#[test]
+	fn the_duration_window_still_evicts_after_a_trim() {
+		let live = Producer::new();
+		let window = Duration::from_secs(3);
+		live.push(row(0, 0, 0, 2_000), window);
+		live.push(row(1, 1, 2_000, 2_000), window);
+		live.push(row(2, 2, 4_000, 2_000), window);
+
+		// Nothing was retracted, so the duration bound is what trimmed the front.
+		live.trim(0);
+		assert_eq!(live.window().segments.first().unwrap().segment, 1);
 	}
 }

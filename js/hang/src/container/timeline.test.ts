@@ -1,37 +1,89 @@
 import { expect, test } from "bun:test";
 import * as Json from "@moq/json";
-import type { Time } from "@moq/net";
-import { Track } from "@moq/net";
+import { Group, Time, Track } from "@moq/net";
 import { MOQ_EPOCH_UNIX_MILLIS, u53 } from "../catalog";
-import { Producer, type Record } from "./timeline.ts";
+import { Producer, type Record, type Recorder } from "./timeline.ts";
 
 const us = (ms: number): Time.Micro => (ms * 1000) as Time.Micro;
 
-/** A timeline whose published records are decoded back out of its MoQ track. */
+/**
+ * A media track feeding one timeline enrollment.
+ *
+ * The timeline watches the groups it is handed, so a test has to publish real ones: the backing
+ * track caches them, which is what keeps them available until a test evicts one on purpose.
+ */
+class Media {
+	#track: Track.Producer;
+	#recorder?: Recorder;
+	#groups = new Map<number, Group.Producer>();
+
+	constructor(timeline: Producer, name: string) {
+		this.#track = new Track.Producer(name);
+		this.#recorder = timeline.track(name);
+	}
+
+	/** Open group `sequence` at `pts` and report it. */
+	record(sequence: number, pts: Time.Micro, keyframe = true): void {
+		const group = new Group.Producer(sequence);
+		// An empty group is not cached, so it would read as gone the moment the timeline looked.
+		group.writeFrame({ payload: new Uint8Array([0]), timestamp: Time.Timestamp.fromMicros(pts) });
+		this.#track.writeGroup(group);
+		this.#recorder?.record(group, pts, keyframe);
+		this.#groups.set(sequence, group);
+	}
+
+	end(pts: Time.Micro): void {
+		this.#recorder?.end(pts);
+	}
+
+	/** End the timeline enrollment, leaving the media track and its cached groups alive. */
+	close(): void {
+		this.#recorder?.close();
+		this.#recorder = undefined;
+	}
+
+	/** Evict group `sequence` the way the cache does, so the timeline sees it go. */
+	evict(sequence: number): void {
+		const group = this.#groups.get(sequence);
+		if (!group) throw new Error(`group ${sequence} was not recorded`);
+		this.#groups.delete(sequence);
+		group.close(new Error("evicted"));
+	}
+
+	/** Finish group `sequence` cleanly, leaving it cached and fetchable. */
+	finishGroup(sequence: number): void {
+		this.#groups.get(sequence)?.close();
+	}
+}
+
+/** A timeline whose published updates are decoded back out of its MoQ track. */
 function capture(props?: ConstructorParameters<typeof Producer>[1]): {
 	timeline: Producer;
+	updates: () => Promise<Json.Window.Update<Record>[]>;
 	records: () => Promise<Record[]>;
 } {
 	const track = new Track.Producer("timeline.z");
-	const consumer = new Json.Stream.Consumer<Record>(track.subscribe(), { compression: true });
+	const consumer = new Json.Window.Consumer<Record>(track.subscribe(), { compression: true });
 	const timeline = new Producer(track, props);
 
-	const records = async () => {
-		const out: Record[] = [];
+	const updates = async () => {
+		const out: Json.Window.Update<Record>[] = [];
 		for (;;) {
-			const record = await consumer.next();
-			if (!record) return out;
-			out.push(record);
+			const update = await consumer.next();
+			if (!update) return out;
+			out.push(update);
 		}
 	};
-	return { timeline, records };
+	const records = async () => (await updates()).flatMap((update) => (update.type === "append" ? [update.value] : []));
+
+	return { timeline, updates, records };
 }
 
 // The coarsest track paces: video GOPs are longer than durationMin, so segments are GOPs.
 test("the coarsest track paces the segments", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
 
 	// Video keyframes every 2s, audio groups every 500ms, minimum 1s.
 	video.record(0, us(0));
@@ -85,7 +137,7 @@ test("the coarsest track paces the segments", async () => {
 // a segment could start and stay decodable, so the segment is simply long.
 test("a GOP longer than the minimum is one segment", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(30_000));
@@ -102,7 +154,7 @@ test("a GOP longer than the minimum is one segment", async () => {
 // Groups shorter than the minimum pack into one segment rather than each becoming one.
 test("short groups pack up to the minimum", async () => {
 	const { timeline, records } = capture({ durationMin: 1500 });
-	const audio = timeline.track("audio0");
+	const audio = new Media(timeline, "audio0");
 
 	for (let seq = 0; seq < 8; seq++) {
 		audio.record(seq, us(seq * 500));
@@ -120,8 +172,8 @@ test("short groups pack up to the minimum", async () => {
 // a rendition that was about to contribute to it.
 test("a segment waits for every track", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
 
 	video.record(0, us(0));
 	audio.record(0, us(0));
@@ -144,7 +196,7 @@ test("a segment waits for every track", async () => {
 // An application that knows its own boundaries overrides the pacing.
 test("explicit cuts override the pacing", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	// Keyframes every second, cut every three: the segments follow the cuts, not the GOPs.
 	timeline.cut(us(3000));
@@ -164,7 +216,7 @@ test("explicit cuts override the pacing", async () => {
 // segment shorter than the minimum is dropped rather than producing a stray segment.
 test("a cut below the minimum is ignored", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	video.record(0, us(0));
 	timeline.cut(us(2000));
@@ -188,7 +240,7 @@ test("a cut below the minimum is ignored", async () => {
 // the catalog.
 test("exceeding the declared maximum fails the timeline", async () => {
 	const { timeline, records } = capture({ durationMin: 1000, durationMax: 3000 });
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(2000));
@@ -214,7 +266,7 @@ test("an undeclared maximum is omitted from the catalog", () => {
 // final segment's duration collapses to zero (an HLS EXTINF:0).
 test("the final segment runs to the reported end", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	video.record(0, us(0));
 	video.record(1, us(2000));
@@ -236,7 +288,7 @@ test("a reservation defers flushing until every track enrolls", async () => {
 	const release = timeline.reserve();
 
 	// The primary rendition runs a whole batch of segments through before its sibling exists.
-	const first = timeline.track("video0");
+	const first = new Media(timeline, "video0");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -245,7 +297,7 @@ test("a reservation defers flushing until every track enrolls", async () => {
 		first.record(seq, us(ms));
 	}
 
-	const second = timeline.track("video1");
+	const second = new Media(timeline, "video1");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -280,8 +332,8 @@ test("a reservation defers flushing until every track enrolls", async () => {
 // A track that races ahead of the others still lands in the segment its content falls in.
 test("groups before the first boundary join the first segment", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
 
 	audio.record(0, us(0));
 	video.record(0, us(30));
@@ -311,8 +363,8 @@ test("groups before the first boundary join the first segment", async () => {
 
 test("sequence gaps split ranges", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
 
 	// Elemental-style gap: audio groups 2..=4 never existed inside segment 0.
 	video.record(0, us(0));
@@ -345,8 +397,8 @@ test("sequence gaps split ranges", async () => {
 // has merely gone quiet still gets to say where the boundary is.
 test("a closed track leaves a whole segment gap", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
-	const audio = timeline.track("audio0");
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
 
 	video.record(0, us(0));
 	audio.record(0, us(0));
@@ -362,7 +414,7 @@ test("a closed track leaves a whole segment gap", async () => {
 
 test("a non-keyframe range start is flagged", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	video.record(0, us(0));
 	// A mid-stream join: the group doesn't open on an IDR.
@@ -395,7 +447,7 @@ test("reservations nest", async () => {
 	const outer = timeline.reserve();
 	const inner = timeline.reserve();
 
-	const first = timeline.track("video0");
+	const first = new Media(timeline, "video0");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -407,7 +459,7 @@ test("reservations nest", async () => {
 	// If reservations didn't nest, releasing this one would publish segment 0 without video1.
 	inner();
 
-	const second = timeline.track("video1");
+	const second = new Media(timeline, "video1");
 	for (const [seq, ms] of [
 		[0, 0],
 		[1, 2000],
@@ -441,7 +493,7 @@ test("reservations nest", async () => {
 // spent cut must not block the ones behind it, and durationMin pacing must not race ahead of them.
 test("a cut on the first group does not poison later cuts", async () => {
 	const { timeline, records } = capture();
-	const video = timeline.track("video0");
+	const video = new Media(timeline, "video0");
 
 	// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the durationMin
 	// pacing would produce on its own.
@@ -457,4 +509,98 @@ test("a cut on the first group does not poison later cuts", async () => {
 	const out = await records();
 	expect(out[0]).toEqual({ segment: 0, pts: 0, duration: 3000, tracks: { video0: [{ start: 0, end: 2 }] } });
 	expect(out[1]).toEqual({ segment: 1, pts: 3000, duration: 3000, tracks: { video0: [{ start: 3, end: 5 }] } });
+});
+
+/**
+ * A segment's record is retracted once its media leaves the cache. The whole point of the window:
+ * a timeline must never advertise a segment a consumer would fail to fetch.
+ */
+test("eviction retracts the segment", async () => {
+	const { timeline, updates } = capture();
+	const video = new Media(timeline, "video0");
+
+	for (let seq = 0; seq < 4; seq++) {
+		video.record(seq, us(seq * 2000));
+	}
+
+	// Segment 0 is carried by group 0. Losing it retracts the record naming it, which the next
+	// report sweeps.
+	video.evict(0);
+	video.record(4, us(8000));
+	video.close();
+	timeline.finish();
+
+	const trims = (await updates()).flatMap((u) => (u.type === "trim" ? [u.offset] : []));
+	expect(trims).toEqual([1]);
+});
+
+/**
+ * A segment spans every enrolled track, so losing a group on ANY of them breaks it: a consumer
+ * fetches the whole segment, and a hole in audio is as fatal as one in video.
+ */
+test("a segment goes when any track loses a group", async () => {
+	const { timeline, updates } = capture();
+	const video = new Media(timeline, "video0");
+	const audio = new Media(timeline, "audio0");
+
+	for (let seq = 0; seq < 3; seq++) {
+		video.record(seq, us(seq * 2000));
+		audio.record(seq, us(seq * 2000));
+	}
+
+	// Video's group 0 is untouched; only audio's is lost.
+	audio.evict(0);
+	video.record(3, us(6000));
+	audio.record(3, us(6000));
+	video.close();
+	audio.close();
+	timeline.finish();
+
+	const trims = (await updates()).flatMap((u) => (u.type === "trim" ? [u.offset] : []));
+	expect(trims).toEqual([1]);
+});
+
+/**
+ * A cleanly finished group is still cached and fetchable, so its segment stays listed.
+ *
+ * The trap this pins: `closed` in js/net means completion, so watching it rather than `isGone`
+ * would retract every segment the instant its groups finished, i.e. immediately and always.
+ */
+test("a finished group is not a retraction", async () => {
+	const { timeline, updates } = capture();
+	const video = new Media(timeline, "video0");
+
+	video.record(0, us(0));
+	video.record(1, us(2000));
+	video.finishGroup(0);
+	video.finishGroup(1);
+	video.record(2, us(4000));
+	video.close();
+	timeline.finish();
+
+	const all = await updates();
+	expect(all.filter((u) => u.type === "trim")).toEqual([]);
+	expect(all.some((u) => u.type === "append")).toBe(true);
+});
+
+/**
+ * Eviction is charged from the frame-write path, so a group can die after the last record.
+ * `finish` sweeps once more, or the track would close still listing unfetchable media and a reader
+ * would take that clean end as a complete playlist.
+ */
+test("finish sweeps media lost after the last record", async () => {
+	const { timeline, updates } = capture();
+	const video = new Media(timeline, "video0");
+
+	video.record(0, us(0));
+	video.record(1, us(2000));
+	video.record(2, us(4000));
+	video.close();
+
+	// Nothing will report again; only finish() can notice this.
+	video.evict(0);
+	timeline.finish();
+
+	const trims = (await updates()).flatMap((u) => (u.type === "trim" ? [u.offset] : []));
+	expect(trims).toEqual([1]);
 });

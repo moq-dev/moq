@@ -924,7 +924,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					},
 				};
 				if let Some(recorder) = track.recorder.as_mut() {
-					recorder.record(g.sequence, reported, contains_keyframe);
+					recorder.record(&g, reported, contains_keyframe);
 				}
 
 				// Close the previous group for the bitrate estimator (used only when the

@@ -18,6 +18,18 @@ author:
 
 normative:
   moql: I-D.lcurley-moq-lite
+  json:
+    title: "Media over QUIC - JSON Tracks"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-json/
+    author:
+      - fullname: Luke Curley
+    date: false
+  flate:
+    title: "Media over QUIC - Group Compression"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
+    author:
+      - fullname: Luke Curley
+    date: false
   webcodecs:
     title: "WebCodecs"
     target: https://www.w3.org/TR/webcodecs/
@@ -438,15 +450,22 @@ A consumer derives the wall-clock time of any segment as `wall + pts`, and Unix 
 The epoch is 2020 rather than 1970 so the value stays small, safely within a 53-bit integer even at fine timescales.
 
 ## Track Framing {#timeline-framing}
-The timeline track is an append-log: a single group that is never rolled, with one record per frame, every record preserved in order.
+The timeline track is a JSON sliding window {{json}}: an ordered log that appends a record at the tail as each segment is indexed, and trims records from the head as their media stops being available.
 Each record is a UTF-8 JSON object.
 
-The frames are DEFLATE-compressed ({{!RFC1951}}) sharing a single compression window across the group, so each record compresses against all earlier ones.
-The publisher ends each frame's compressed data with an empty sync-flush block (the `0x00 0x00 0xff 0xff` trailer is removed, as in {{?RFC7692}}), so a consumer decompresses frames incrementally with one shared window.
-The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
+The window is what lets the timeline describe what is *available* rather than everything ever published.
+An append-log cannot: its whole history rides a single group that is never rolled, so a consumer must start at the first frame, and once the publisher's cache drops the earliest frames the track becomes unreadable for anyone joining later.
+A window's groups are each self-contained, so old ones are disposable and a late joiner reads only the newest.
 
-A consumer MUST start reading from the group's first frame; the shared window makes a mid-group join undecodable.
-The live group is therefore bounded history; deep history is served from a recording.
+A publisher SHOULD retract a record once the media it names is no longer retrievable, so that every segment the timeline lists can actually be fetched.
+The record's group ranges say exactly which groups that is: a record is retractable once any group in any of its ranges is gone, since a consumer fetches the whole segment and a missing group anywhere in it breaks the segment.
+A publisher MAY retract more aggressively (a bounded playlist length), and a consumer MUST NOT assume a listed segment is still fetchable: retraction is a publisher's best effort, not a guarantee, and the two race.
+
+Because a window has a single head, retracting a record whose predecessors are still available also retracts those predecessors.
+Publishers whose cache does not evict strictly oldest-first will therefore drop live records ahead of a dead one; this is preferable to listing media that cannot be fetched.
+
+The frames are DEFLATE-compressed ({{flate}}) sharing a single compression window across each group, so each record compresses against the earlier ones in its group.
+The `.z` suffix on the RECOMMENDED track name marks this compression, mirroring the catalog's `catalog.json.z` sibling.
 
 ## Records {#timeline-records}
 Each record describes one complete segment:

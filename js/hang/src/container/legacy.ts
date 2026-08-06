@@ -76,7 +76,7 @@ export class Producer {
 			this.#group?.close();
 			this.#group = this.#track.appendGroup();
 			// Report the group the moment it opens: its start is this keyframe's timestamp.
-			this.#timeline?.record(this.#group.sequence, timestamp, true);
+			this.#timeline?.record(this.#group, timestamp, true);
 		} else if (!this.#group) {
 			throw new Error("must start with a keyframe");
 		}
