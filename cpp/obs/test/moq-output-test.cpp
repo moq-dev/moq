@@ -206,6 +206,10 @@ int32_t moq_session_connect(const char *, size_t, uint32_t, uint32_t, void (*on_
 		auto cb = g_on_status;
 		auto ud = g_user_data;
 		g_on_status = nullptr;
+		// One connect per test with this flag set: reset() joins between tests, and
+		// moving onto a still-joinable thread would call std::terminate. Joining
+		// here instead would deadlock, since Start() holds signal_mutex and the
+		// terminal callback needs it.
 		g_connect_terminal_thread = std::thread([cb, ud] { cb(ud, -34); });
 	}
 	return handle;
@@ -275,6 +279,8 @@ void fire(int code)
 
 void reset()
 {
+	if (g_connect_terminal_thread.joinable())
+		g_connect_terminal_thread.join();
 	{
 		std::lock_guard<std::mutex> lock(g_signals_mutex);
 		g_signals.clear();
