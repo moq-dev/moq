@@ -18,9 +18,9 @@ use winit::window::{Window, WindowId};
 
 use crate::subscribe::{CatalogFormatArg, SelectArgs};
 
-/// Decoded frames held for presentation. About a second at 30fps, which absorbs
-/// a burst without letting a decoder that outruns the clock grow unbounded. The
-/// oldest go first, since the render loop would skip past them anyway.
+/// Decoded frames held for presentation, and the point at which the decoder is
+/// made to wait. About a second at 30fps: enough to absorb a burst, few enough
+/// that raw frames can't run away with memory.
 const MAX_VIDEO_FRAMES: usize = 30;
 
 /// How early a frame may be shown rather than waiting another wakeup for it.
@@ -33,6 +33,11 @@ const VIDEO_EARLY_TOLERANCE: Duration = Duration::from_millis(2);
 /// completed group arriving all at once) would otherwise lose its tail. Well
 /// under the sink's own ceiling, and well over the ~50 ms it settles at.
 const AUDIO_BUFFER_MAX: Duration = Duration::from_secs(1);
+
+/// Consecutive surface rebuilds before a frame is written off. A display change
+/// or a resume costs one; without a ceiling, a surface that can never present
+/// would redraw forever, since each retry is what schedules the next.
+const MAX_PRESENT_RETRIES: u32 = 8;
 
 /// Give up waiting on the speaker to drain this long after the last sample.
 /// A device that never opens reports its queue as full forever, and a truncated
@@ -122,6 +127,9 @@ pub fn run(
 	let proxy = event_loop.create_proxy();
 	let video = Arc::new(Mutex::new(VecDeque::new()));
 	let audio_clock = Arc::new(Mutex::new(None));
+	// Signals the decoder that the presenter took a frame, so it can hand over
+	// the next one instead of dropping it.
+	let drained = Arc::new(tokio::sync::Notify::new());
 
 	let media = tokio::spawn(
 		Media {
@@ -130,6 +138,7 @@ pub fn run(
 			args,
 			video: video.clone(),
 			audio_clock: audio_clock.clone(),
+			drained: drained.clone(),
 			proxy: proxy.clone(),
 		}
 		.run(),
@@ -149,7 +158,7 @@ pub fn run(
 	} else {
 		format!("moq play: {broadcast}")
 	};
-	let mut app = App::new(title, video, audio_clock);
+	let mut app = App::new(title, video, audio_clock, drained);
 	let result = event_loop.run_app(&mut app).context("playback event loop failed");
 	media.abort();
 	network.abort();
@@ -198,6 +207,7 @@ struct Media {
 	args: Args,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	audio_clock: Arc<Mutex<Option<Clock>>>,
+	drained: Arc<tokio::sync::Notify>,
 	proxy: EventLoopProxy<Event>,
 }
 
@@ -270,7 +280,12 @@ impl Media {
 							match moq_video::decode::Consumer::new(&rendition, &config, &name, decode).await {
 								Ok(consumer) => {
 									tracing::info!(track = name, decoder = consumer.name(), "playing video rendition");
-									tasks.spawn(play_video(consumer, self.video.clone(), self.proxy.clone()));
+									tasks.spawn(play_video(
+										consumer,
+										self.video.clone(),
+										self.drained.clone(),
+										self.proxy.clone(),
+									));
 									video_started = true;
 									break;
 								}
@@ -336,15 +351,20 @@ fn joined(result: Result<anyhow::Result<()>, tokio::task::JoinError>) -> anyhow:
 async fn play_video(
 	mut consumer: moq_video::decode::Consumer,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
+	drained: Arc<tokio::sync::Notify>,
 	proxy: EventLoopProxy<Event>,
 ) -> anyhow::Result<()> {
 	while let Some(frame) = consumer.read().await? {
-		let mut video = video.lock().unwrap();
-		video.push_back(frame);
-		while video.len() > MAX_VIDEO_FRAMES {
-			video.pop_front();
+		// Wait for room rather than dropping the oldest. Audio is paced to real
+		// time, so during a catch-up burst the frames at the front are still ahead
+		// of the clock, and dropping them would blank the window until the clock
+		// reached whatever survived. The presentation clock is anchored to the wall
+		// clock, so the queue always drains and this always clears.
+		while video.lock().unwrap().len() >= MAX_VIDEO_FRAMES {
+			drained.notified().await;
 		}
-		drop(video);
+
+		video.lock().unwrap().push_back(frame);
 		let _ = proxy.send_event(Event::Wake);
 	}
 	Ok(())
@@ -420,12 +440,15 @@ struct App {
 	title: String,
 	video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 	audio_clock: Arc<Mutex<Option<Clock>>>,
+	drained: Arc<tokio::sync::Notify>,
 	video_clock: Option<Clock>,
 	display: Option<Display>,
 	next_redraw: Option<Instant>,
 	/// The media tasks are done. Keep presenting whatever they left queued, then
 	/// stop; exiting the moment the decoder hits EOF would cut the tail off.
 	ending: bool,
+	/// Consecutive presents that rebuilt the surface instead of showing a frame.
+	retries: u32,
 	error: Option<String>,
 }
 
@@ -434,15 +457,18 @@ impl App {
 		title: String,
 		video: Arc<Mutex<VecDeque<moq_video::Frame>>>,
 		audio_clock: Arc<Mutex<Option<Clock>>>,
+		drained: Arc<tokio::sync::Notify>,
 	) -> Self {
 		Self {
 			title,
 			video,
 			audio_clock,
+			drained,
 			video_clock: None,
 			display: None,
 			next_redraw: None,
 			ending: false,
+			retries: 0,
 			error: None,
 		}
 	}
@@ -472,12 +498,18 @@ impl App {
 			due = video.pop_front();
 		}
 		let next_timestamp = video.front().map(|frame| timestamp(frame.timestamp));
+		let popped = due.is_some();
 		drop(video);
+
+		// Room in the queue, so the decoder can hand over whatever it held back.
+		if popped {
+			self.drained.notify_one();
+		}
 
 		if let Some(frame) = due {
 			display.render(&frame)?;
 		}
-		display.present()?;
+		let presented = display.present()?;
 
 		// `checked_add`: the wait comes from a wire timestamp, and adding a bogus
 		// one to an `Instant` panics rather than saturating. No deadline just means
@@ -486,6 +518,25 @@ impl App {
 			(Some(clock), Some(next)) => Instant::now().checked_add(next.saturating_sub(clock.now())),
 			_ => None,
 		};
+
+		// A rebuilt surface still owes us the frame we just drew, and nothing else
+		// will ask for it: a stalled live stream has no next frame to trigger one,
+		// and an ending stream would exit first. Bounded, so a surface that can
+		// never present fails instead of looping.
+		match presented {
+			Presented::Shown => self.retries = 0,
+			// Giving up is a dropped frame, not a failure: the next one redraws.
+			// Retrying without a budget would spin, since each retry asks for the
+			// redraw that produces the next one.
+			Presented::Retry if self.retries >= MAX_PRESENT_RETRIES => {
+				tracing::warn!("gave up re-presenting after rebuilding the graphics surface");
+				self.retries = 0;
+			}
+			Presented::Retry => {
+				self.retries += 1;
+				display.window.request_redraw();
+			}
+		}
 		Ok(())
 	}
 
@@ -567,7 +618,7 @@ impl ApplicationHandler<Event> for App {
 		// Nothing left to decode and nothing left to show. No window means nothing
 		// can drain the queue, so don't wait on it.
 		let drained = self.display.is_none() || self.video.lock().unwrap().is_empty();
-		if self.ending && self.next_redraw.is_none() && drained {
+		if self.ending && self.retries == 0 && self.next_redraw.is_none() && drained {
 			event_loop.exit();
 			return;
 		}
@@ -656,16 +707,17 @@ impl Display {
 		Ok(())
 	}
 
-	fn present(&mut self) -> anyhow::Result<()> {
+	fn present(&mut self) -> anyhow::Result<Presented> {
 		use wgpu::CurrentSurfaceTexture;
 
 		let (output, reconfigure) = match self.surface.get_current_texture() {
 			CurrentSurfaceTexture::Success(output) => (output, false),
 			CurrentSurfaceTexture::Suboptimal(output) => (output, true),
-			CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(()),
+			// Nothing to show it on, and nothing to fix: the next frame tries again.
+			CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(Presented::Shown),
 			CurrentSurfaceTexture::Outdated => {
 				self.surface.configure(&self.device, &self.config);
-				return Ok(());
+				return Ok(Presented::Retry);
 			}
 			// Not just a stale configuration like `Outdated`: the surface itself is
 			// gone and has to be rebuilt before it can be configured again. A
@@ -676,7 +728,7 @@ impl Display {
 					.create_surface(self.window.clone())
 					.context("failed to rebuild the playback window's graphics surface")?;
 				self.surface.configure(&self.device, &self.config);
-				return Ok(());
+				return Ok(Presented::Retry);
 			}
 			CurrentSurfaceTexture::Validation => anyhow::bail!("failed to acquire the playback window's next frame"),
 		};
@@ -700,8 +752,16 @@ impl Display {
 		if reconfigure {
 			self.surface.configure(&self.device, &self.config);
 		}
-		Ok(())
+		Ok(Presented::Shown)
 	}
+}
+
+/// Whether a present reached the screen, or recovered the surface and still owes
+/// the caller a redraw.
+#[derive(Clone, Copy)]
+enum Presented {
+	Shown,
+	Retry,
 }
 
 struct Presenter {
