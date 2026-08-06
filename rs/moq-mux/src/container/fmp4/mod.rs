@@ -161,6 +161,10 @@ pub enum Error {
 	/// A positive sample duration must occupy at least one tick in the output timescale.
 	#[error("sample duration is shorter than one tick at timescale {0}")]
 	SampleDurationTooSmall(u64),
+
+	/// Presentation timestamps do not reveal decode duration for reordered video.
+	#[error("duration-less video needs stated durations or presentation-ordered inference")]
+	MissingVideoDuration,
 }
 
 impl From<mp4_atom::Error> for Error {

@@ -231,13 +231,19 @@ impl Muxer {
 	/// stream in decode order. One fragmenter per continuous stream: a fetch-on-demand caller
 	/// serving unrelated groups builds a fresh one per group and
 	/// [`flush`](Fragmenter::flush)es it.
-	pub fn fragmenter(&self, _config: fragment::Config) -> Fragmenter {
+	pub fn fragmenter(&self, config: fragment::Config) -> Fragmenter {
+		let is_video = matches!(self.kind, Kind::Video(_));
 		Fragmenter {
 			track_id: TRACK_ID,
 			timescale: self.timescale,
 			default_frame: self.default_frame,
-			is_video: matches!(self.kind, Kind::Video(_)),
+			is_video,
 			opus: self.opus,
+			infer_missing: !is_video
+				|| matches!(
+					config.missing_duration,
+					fragment::MissingDuration::InferFromPresentationTime
+				),
 			pending: None,
 			dts: None,
 			sequence: 0,

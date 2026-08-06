@@ -21,9 +21,12 @@ use super::export::{apply_codec_durations, fragment_seconds, infer_missing_durat
 /// The fragmenter owns everything a per-frame caller would otherwise have to reproduce: the
 /// `tfdt` decode timeline advances by exactly the durations written into the preceding
 /// `trun`s, the moof sequence numbers count up on their own, and a frame that carries no
-/// [`duration`](Frame::duration) is held until its successor arrives to time it. Feed it
-/// frames in decode order with [`push`](Self::push) as they arrive, and [`flush`](Self::flush)
-/// at the end of the stream:
+/// [`duration`](Frame::duration) is held until its successor arrives to time it when that is
+/// safe. Audio can always infer this way. Video rejects missing durations by default because
+/// presentation timestamps cannot reveal decode duration when frames are reordered; a caller
+/// that knows its video is presentation ordered can opt into inference with
+/// [`fragment::MissingDuration`](super::fragment::MissingDuration). Feed frames in decode
+/// order with [`push`](Self::push) as they arrive, and [`flush`](Self::flush) at the end:
 ///
 /// ```no_run
 /// # fn example(muxer: &moq_mux::container::fmp4::Muxer, frames: Vec<moq_mux::container::Frame>) -> moq_mux::Result<()> {
@@ -62,6 +65,8 @@ pub struct Fragmenter {
 	pub(super) is_video: bool,
 	/// True for Opus audio, whose packets state their own duration in the TOC byte.
 	pub(super) opus: bool,
+	/// Whether a missing duration can be inferred from the successor's presentation time.
+	pub(super) infer_missing: bool,
 	/// A duration-less frame held until its successor arrives to time it.
 	pub(super) pending: Option<Frame>,
 	/// The next fragment's decode time in ticks at `timescale`; `None` before the first frame.
@@ -79,6 +84,9 @@ impl Fragmenter {
 	pub fn push(&mut self, mut frame: Frame) -> crate::Result<Vec<Fragment>> {
 		// Opus states its duration in the TOC byte; read it now so such a frame never waits.
 		apply_codec_durations(std::slice::from_mut(&mut frame), self.opus);
+		if !stated(&frame) && !self.infer_missing {
+			return Err(super::Error::MissingVideoDuration.into());
+		}
 
 		// Build the next state separately so a failure while encoding the second ready frame
 		// does not consume the pending frame or advance the timeline without returning output.
@@ -162,6 +170,7 @@ impl Fragmenter {
 			default_frame: self.default_frame,
 			is_video: self.is_video,
 			opus: self.opus,
+			infer_missing: self.infer_missing,
 			pending: self.pending.clone(),
 			dts: self.dts,
 			sequence: self.sequence,
@@ -188,6 +197,14 @@ mod tests {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.framerate = Some(30.0);
 		Muxer::video(&config).unwrap()
+	}
+
+	// Explicitly assert that duration-less video is presentation ordered before inferring from
+	// successor PTS. The default rejects it because a later B-frame can invalidate the gap.
+	fn infer_video_durations() -> super::super::fragment::Config {
+		super::super::fragment::Config {
+			missing_duration: super::super::fragment::MissingDuration::InferFromPresentationTime,
+		}
 	}
 
 	// One frame at the muxer's own 30_000 timescale, so a frame period is exactly 1000 ticks.
@@ -269,7 +286,7 @@ mod tests {
 	#[test]
 	fn a_pending_frame_is_timed_by_its_real_successor() {
 		let muxer = video_muxer();
-		let mut fragmenter = muxer.fragmenter(Default::default());
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
 		let input = [
 			untimed_frame(0, true),
 			untimed_frame(1_500, false),
@@ -307,7 +324,7 @@ mod tests {
 	#[test]
 	fn a_successor_with_another_scale_times_the_pending_frame() {
 		let muxer = video_muxer();
-		let mut fragmenter = muxer.fragmenter(Default::default());
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
 		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
 
 		let successor = Frame {
@@ -325,7 +342,7 @@ mod tests {
 	#[test]
 	fn a_stated_frame_emits_with_the_pending_fragment() {
 		let muxer = video_muxer();
-		let mut fragmenter = muxer.fragmenter(Default::default());
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
 		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
 
 		let stated = Frame {
@@ -340,6 +357,25 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
 		assert_eq!(super::super::sample_durations(&second.data), vec![Some(1_000)]);
 		assert!(fragmenter.flush().unwrap().is_none());
+	}
+
+	// The first successor PTS in an I, P, B decode-order run looks like a long I-frame duration,
+	// but the later B-frame proves that it was a composition offset. Reject before emitting it.
+	#[test]
+	fn durationless_reordered_video_is_rejected_by_default() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(Default::default());
+		let input = [
+			untimed_frame(0, true),
+			untimed_frame(3_000, false),
+			untimed_frame(1_000, false),
+		];
+
+		let err = fragmenter.push(input[0].clone()).unwrap_err();
+		assert!(matches!(
+			err,
+			crate::Error::Cmaf(super::super::Error::MissingVideoDuration)
+		));
 	}
 
 	// A positive frame duration must remain positive at the chosen output timescale. A zero
@@ -362,7 +398,7 @@ mod tests {
 	#[test]
 	fn fragments_carry_the_part_metadata() {
 		let muxer = video_muxer();
-		let mut fragmenter = muxer.fragmenter(Default::default());
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
 
 		let mut fragments = Vec::new();
 		for (pts, keyframe) in [(0u64, true), (1_500, false), (3_000, false)] {
@@ -412,7 +448,7 @@ mod tests {
 	#[test]
 	fn a_new_group_does_not_time_the_pending_frame() {
 		let muxer = video_muxer();
-		let mut fragmenter = muxer.fragmenter(Default::default());
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
 		// A 40 minute pause between the first group and the second, in 30 kHz ticks.
 		let paused_until = 2_405 * 30_000;
 
