@@ -9,7 +9,7 @@
 //! the sender's own timer, so it force-closes on schedule whether or not the peer
 //! could be told why. Callers do not branch on the negotiated version.
 //!
-//! Following the redirect is the caller's job. `moq_native::Reconnect` implements
+//! Following the redirect is the caller's job. `moq_native::Connection` implements
 //! it for native clients.
 
 use std::{

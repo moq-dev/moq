@@ -100,10 +100,8 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
 	let client = client_config.init().expect("client init");
-	let client_session = within("client connects", async {
-		client
-			.connect(format!("tcp://127.0.0.1:{port}/").parse().expect("parse url"))
-			.await
+	let (_client_connection_client, client_connection) = within("client connects", async {
+		connect_once(client, format!("tcp://127.0.0.1:{port}/").parse().expect("parse url")).await
 	})
 	.await
 	.expect("connect");
@@ -119,7 +117,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	within("drain_session returns", shutdown.drain_session(&server_session)).await;
 
 	// The peer observes the close rather than being left connected.
-	within("client observes the close", client_session.closed()).await;
+	let _ = within("client observes the close", client_connection.closed()).await;
 }
 
 #[test]
@@ -391,11 +389,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// Short handover so the test observes the old session close quickly.
 	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let mid_a_client = client_config.init().expect("mid-a client init");
-	let mid_a_upstream = within(
+	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
-		mid_a_client
-			.with_subscriber(mid_a_origin.clone())
-			.connect(top_url.parse().expect("parse top url")),
+		connect_once(
+			mid_a_client.with_subscriber(mid_a_origin.clone()),
+			top_url.parse().expect("parse top url"),
+		),
 	)
 	.await
 	.expect("mid-a upstream connect");
@@ -420,11 +419,12 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut sub_client_config = moq_native::ClientConfig::default();
 	sub_client_config.tls.disable_verify = Some(true);
 	let sub_client = sub_client_config.init().expect("subscriber client init");
-	let sub_session = within(
+	let (_sub_connection_client, sub_connection) = within(
 		"subscriber connects to BOTTOM",
-		sub_client
-			.with_subscriber(sub_origin.clone())
-			.connect(format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url")),
+		connect_once(
+			sub_client.with_subscriber(sub_origin.clone()),
+			format!("tcp://127.0.0.1:{bottom_port}/").parse().expect("parse url"),
+		),
 	)
 	.await
 	.expect("subscriber connect");
@@ -528,12 +528,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
-		sub_session.draining().peek().is_none(),
+		sub_connection.draining().expect("connected").peek().is_none(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 2s of silence is decisive).
-	let leaked = tokio::time::timeout(Duration::from_secs(2), sub_session.draining().recv()).await;
+	let leaked = tokio::time::timeout(
+		Duration::from_secs(2),
+		sub_connection.draining().expect("connected").recv(),
+	)
+	.await;
 	assert!(
 		leaked.is_err(),
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
@@ -664,4 +668,97 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	);
 
 	cluster_run.abort();
+}
+
+/// Dial once and hand back the client with its connection.
+///
+/// These tests want a single transport, so reconnecting is off: there is nothing
+/// left to redial, and dropping the connection closes the transport because it
+/// holds the last session clone.
+///
+/// The client comes back because it owns the transport endpoint (iroh's dies with
+/// it), and the caller has to outlive the connection it just got.
+async fn connect_once(
+	client: moq_native::Client,
+	url: url::Url,
+) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
+	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
+	Ok((client, connection))
+}
+
+#[test]
+fn goaway_handover_is_enforced_while_the_replacement_dial_hangs() {
+	run_cluster_test(goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner());
+}
+
+/// The handover deadline has to hold across the replacement dial, not just across
+/// the sleeps around it.
+///
+/// A GOAWAY off a healthy session goes straight into the replacement dial with the
+/// old one still draining. Redirect that dial at a listener that accepts TCP and
+/// then says nothing, so the handshake hangs, and the predecessor must still be
+/// closed on schedule rather than held for as long as the dial takes.
+async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let upstream_origin = Origin::random().produce();
+	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin);
+	wait_listening(port).await;
+
+	// Accepts the connection, then never speaks MoQ: the dial hangs in the handshake.
+	let black_hole = TcpListener::bind("127.0.0.1:0").expect("bind black hole");
+	let black_hole_port = black_hole.local_addr().expect("local addr").port();
+	let _black_hole = std::thread::spawn(move || {
+		// Hold every accepted socket open and idle for the life of the test.
+		let mut held = Vec::new();
+		while let Ok((socket, _)) = black_hole.accept() {
+			held.push(socket);
+		}
+	});
+
+	let handover = Duration::from_millis(200);
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	client_config.goaway.handover = Some(handover);
+	// The GOAWAY has to land on a *healthy* session, which is the path that goes
+	// straight into the replacement dial. Below this bar it takes the immediate
+	// redirect path instead, whose sleep polls the drain either way.
+	client_config.backoff.initial = Some(Duration::from_millis(50));
+	let client = client_config.init().expect("client init");
+
+	let connection = client.connect(format!("tcp://127.0.0.1:{port}/").parse().expect("parse url"));
+	let connection = within("client connects", connection.established())
+		.await
+		.expect("connect");
+
+	let server_session = within("upstream accepts", accepted.recv())
+		.await
+		.expect("accept channel closed");
+
+	// Clear the healthy bar, so the GOAWAY continues straight into the replacement
+	// dial rather than sleeping first.
+	tokio::time::sleep(Duration::from_millis(120)).await;
+
+	// Send the client somewhere that will never finish handshaking. No wire timeout:
+	// our own `--goaway-handover` is then the only thing bounding the old session.
+	server_session
+		.drain()
+		.send(moq_net::goaway::Goaway::redirect(format!(
+			"tcp://127.0.0.1:{black_hole_port}/"
+		)))
+		.expect("send goaway");
+
+	// The predecessor must close on its own deadline, not whenever that dial gives
+	// up. The bound is generous against a loaded runner but far below the seconds a
+	// hanging handshake takes, which is the gap being measured.
+	let sent = std::time::Instant::now();
+	let closed = tokio::time::timeout(handover * 10, server_session.closed()).await;
+	let elapsed = sent.elapsed();
+	assert!(
+		closed.is_ok() && elapsed < handover * 5,
+		"the old session outlived its {handover:?} handover by {elapsed:?}: \
+		 the replacement dial was never interrupted to enforce it"
+	);
+
+	drop(connection);
 }

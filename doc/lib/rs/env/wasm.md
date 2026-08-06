@@ -72,7 +72,7 @@ let transport = web_transport::ClientBuilder::new()
     .await?;
 
 // Hand the transport to moq-net and run the MoQ handshake.
-let origin = moq_net::Origin::new().produce();
+let origin = moq_net::Origin::random().produce();
 let mut consumer = origin.consume();
 let (session, driver) = moq_net::Client::new()
     .with_subscriber(origin)

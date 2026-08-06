@@ -106,9 +106,9 @@ checksum = "85965b6739a430150bdd138e2374a98af0c3ee0d030b3bb7fc3bddff58d0102e"
 
 [[package]]
 name = "android_system_properties"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
+checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
 dependencies = [
  "libc",
 ]
@@ -728,9 +728,9 @@ checksum = "6099cdc01846bc367c4e7dd630dc5966dccf36b652fae7a74e17b640411a91b2"
 
 [[package]]
 name = "blake3"
-version = "1.8.5"
+version = "1.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
 dependencies = [
  "arrayref",
  "arrayvec",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4087,7 +4087,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4337,7 +4337,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "block2",
  "bytes",
@@ -4353,6 +4353,7 @@ dependencies = [
  "objc2-core-media",
  "objc2-foundation",
  "objc2-screen-capture-kit",
+ "rand 0.10.2",
  "rubato",
  "sonora",
  "thiserror 2.0.19",
@@ -4382,7 +4383,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4402,7 +4403,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4431,7 +4432,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bytes",
  "hang",
@@ -4461,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4479,7 +4480,7 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -4491,6 +4492,7 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "percent-encoding",
+ "rand 0.10.2",
  "reqwest",
  "thiserror 2.0.19",
  "tokio",
@@ -4536,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4567,7 +4569,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.19.7"
+version = "0.19.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4578,6 +4580,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "jni 0.22.4",
+ "libc",
  "moq-net",
  "noq-proto",
  "notify",
@@ -4618,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "bytes",
  "criterion",
@@ -4649,7 +4652,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.14.7"
+version = "0.14.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4692,7 +4695,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4712,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4795,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4828,7 +4831,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "ashpd",

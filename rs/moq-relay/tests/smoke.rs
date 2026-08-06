@@ -30,6 +30,14 @@ fn newest_lite_version() -> moq_net::Version {
 }
 
 async fn build_web(port: u16, ws: bool) -> Web {
+	let mut config = WebConfig::default();
+	config.ws = ws;
+	config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	build_web_with(config).await
+}
+
+/// [`build_web`] for a test that configures the listeners itself (e.g. HTTPS).
+async fn build_web_with(web_config: WebConfig) -> Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -55,10 +63,6 @@ async fn build_web(port: u16, ws: bool) -> Web {
 	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	let server = server_config.init().expect("server init");
-
-	let mut web_config = WebConfig::default();
-	web_config.ws = ws;
-	web_config.http.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
 
 	Web::new(auth, cluster, server.certificates(), web_config)
 }
@@ -123,6 +127,9 @@ fn client() -> moq_native::Client {
 fn client_version(version: Option<moq_net::Version>) -> moq_native::Client {
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(true);
+	// One-shot: these tests were written against a single dial, and a background
+	// redial would re-register with the relay behind the assertions' back.
+	config.reconnect = Some(false);
 	// Zero head start so the WebSocket path runs immediately.
 	config.websocket.delay = None;
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
@@ -155,13 +162,14 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(TIMEOUT, client().with_publisher(&pub_origin).connect(url.clone()))
-		.await
-		.expect("publisher connect timeout")
-		.expect("publisher connect failed");
+	let (_client, pub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
+			.await
+			.expect("publisher connect timeout")
+			.expect("publisher connect failed");
 	assert_eq!(
-		pub_session.version(),
-		expected_version,
+		pub_connection.version(),
+		Some(expected_version),
 		"publisher negotiated stale version"
 	);
 
@@ -169,13 +177,14 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
+	let (_client, sub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+			.await
+			.expect("subscriber connect timeout")
+			.expect("subscriber connect failed");
 	assert_eq!(
-		sub_session.version(),
-		expected_version,
+		sub_connection.version(),
+		Some(expected_version),
 		"subscriber negotiated stale version"
 	);
 
@@ -206,8 +215,8 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	drop(track);
 	drop(broadcast);
 
-	drop(pub_session);
-	drop(sub_session);
+	drop(pub_connection);
+	drop(sub_connection);
 	web_handle.abort();
 }
 
@@ -238,6 +247,62 @@ async fn relay_web_serves_merged_routes() {
 	handle.abort();
 }
 
+/// The HTTPS listener has to terminate TLS and answer a real request.
+///
+/// The plain-HTTP tests above go through `axum_server`'s default acceptor, so they
+/// say nothing about the TLS stack: `MtlsAcceptor` wraps `RustlsAcceptor`, hot
+/// reload swaps the config underneath it, and the listener the relay hands
+/// `axum_server` is its own. A compile is not evidence any of that still handshakes.
+#[tokio::test]
+async fn relay_https_terminates_tls() {
+	let port = free_tcp_port();
+	let dir = tempfile::TempDir::new().expect("tempdir");
+
+	let key = rcgen::KeyPair::generate().expect("keypair");
+	let params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).expect("cert params");
+	let cert = params.self_signed(&key).expect("self-signed cert");
+	let cert_path = dir.path().join("cert.pem");
+	let key_path = dir.path().join("key.pem");
+	std::fs::write(&cert_path, cert.pem()).expect("write cert");
+	std::fs::write(&key_path, key.serialize_pem()).expect("write key");
+
+	let mut config = WebConfig::default();
+	config.ws = false;
+	config.https.listen = Some(format!("127.0.0.1:{port}").parse().expect("parse listen"));
+	config.https.cert = vec![cert_path];
+	config.https.key = vec![key_path];
+	let web = build_web_with(config).await;
+
+	// Held past `serve`, which consumes the server: this is the whole point of
+	// taking the handle up front. `Some` because a listener is configured; a relay
+	// with neither HTTP nor HTTPS reports nothing rather than a permanent zero.
+	let health = web.accept_health().expect("an HTTPS listener is configured");
+
+	let (server_result_tx, mut server_result_rx) = tokio::sync::oneshot::channel();
+	let handle = tokio::spawn(async move {
+		let _ = server_result_tx.send(web.run().await);
+	});
+
+	wait_for_http(port, &mut server_result_rx).await;
+
+	let client = reqwest::Client::builder()
+		.add_root_certificate(reqwest::Certificate::from_pem(cert.pem().as_bytes()).expect("parse root"))
+		.build()
+		.expect("build https client");
+	let resp = tokio::time::timeout(TIMEOUT, client.get(format!("https://localhost:{port}/health")).send())
+		.await
+		.expect("https request timed out")
+		.expect("https request failed");
+	assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+	// A listener that just served a request is not stalled, and the connections it
+	// fielded were not junk.
+	assert_eq!(health.stalled(), None);
+	assert_eq!(health.failures(moq_native::accept::Failure::Exhausted), 0);
+
+	handle.abort();
+}
+
 /// A client that dials a bare `host:port` with no path must still get a
 /// WebSocket upgrade at the root, not the landing page. The empty path is the
 /// root auth scope (same as the internal listener). Regression for the
@@ -261,9 +326,9 @@ async fn relay_websocket_root_path_upgrades() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(
+	let (_client, pub_connection) = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publisher(pub_origin.consume()).connect(url.clone()),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
@@ -272,10 +337,11 @@ async fn relay_websocket_root_path_upgrades() {
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed (root-path WS upgrade)");
+	let (_client, sub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+			.await
+			.expect("subscriber connect timeout")
+			.expect("subscriber connect failed (root-path WS upgrade)");
 
 	// ── data path ───────────────────────────────────────────────────
 	// The root auth scope is the empty path, so the broadcast announces at its
@@ -302,8 +368,8 @@ async fn relay_websocket_root_path_upgrades() {
 
 	drop(track);
 	drop(broadcast);
-	drop(pub_session);
-	drop(sub_session);
+	drop(pub_connection);
+	drop(sub_connection);
 	web_handle.abort();
 }
 
@@ -338,22 +404,29 @@ async fn two_publish_only_clients_coexist() {
 		.write_frame(moq_net::Timestamp::ZERO, b"b".as_ref())
 		.expect("write frame b");
 
-	let sess_a = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_a.consume()).connect(url.clone()))
-		.await
-		.expect("publisher a connect timeout")
-		.expect("publisher a connect failed");
-	let sess_b = tokio::time::timeout(TIMEOUT, client().with_publisher(pub_b.consume()).connect(url.clone()))
-		.await
-		.expect("publisher b connect timeout")
-		.expect("publisher b connect failed");
+	let (_client, sess_a) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client().with_publisher(pub_a.consume()), url.clone()),
+	)
+	.await
+	.expect("publisher a connect timeout")
+	.expect("publisher a connect failed");
+	let (_client, sess_b) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client().with_publisher(pub_b.consume()), url.clone()),
+	)
+	.await
+	.expect("publisher b connect timeout")
+	.expect("publisher b connect failed");
 
 	// ── one subscriber should see broadcasts from both publish-only clients ──
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
+	let (_client, sub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+			.await
+			.expect("subscriber connect timeout")
+			.expect("subscriber connect failed");
 
 	let mut seen = std::collections::HashSet::new();
 	while seen.len() < 2 {
@@ -378,7 +451,7 @@ async fn two_publish_only_clients_coexist() {
 
 	drop(sess_a);
 	drop(sess_b);
-	drop(sub_session);
+	drop(sub_connection);
 	web_handle.abort();
 }
 
@@ -477,26 +550,27 @@ async fn internal_tcp_round_trip() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(
+	let (_client, pub_connection) = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publisher(pub_origin.consume()).connect(url.clone()),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 	assert_eq!(
-		pub_session.version(),
-		expected_version,
+		pub_connection.version(),
+		Some(expected_version),
 		"publisher should negotiate the newest moq-lite version in-band over TCP"
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
+	let (_client, sub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+			.await
+			.expect("subscriber connect timeout")
+			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
 	// The internal listener grants the empty root, so the broadcast announces
@@ -523,8 +597,8 @@ async fn internal_tcp_round_trip() {
 
 	drop(track);
 	drop(broadcast);
-	drop(pub_session);
-	drop(sub_session);
+	drop(pub_connection);
+	drop(sub_connection);
 	handle.abort();
 }
 
@@ -589,26 +663,27 @@ async fn internal_unix_round_trip() {
 		.expect("write frame");
 	group.finish().expect("finish group");
 
-	let pub_session = tokio::time::timeout(
+	let (_client, pub_connection) = tokio::time::timeout(
 		TIMEOUT,
-		client().with_publisher(pub_origin.consume()).connect(url.clone()),
+		connect_once(client().with_publisher(pub_origin.consume()), url.clone()),
 	)
 	.await
 	.expect("publisher connect timeout")
 	.expect("publisher connect failed");
 	assert_eq!(
-		pub_session.version(),
-		expected_version,
+		pub_connection.version(),
+		Some(expected_version),
 		"publisher should negotiate the newest moq-lite version in-band over the Unix socket"
 	);
 
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
-	let sub_session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
+	let (_client, sub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
+			.await
+			.expect("subscriber connect timeout")
+			.expect("subscriber connect failed");
 
 	// ── data path ───────────────────────────────────────────────────
 	let moq_net::announce::Update {
@@ -636,8 +711,8 @@ async fn internal_unix_round_trip() {
 
 	drop(track);
 	drop(broadcast);
-	drop(pub_session);
-	drop(sub_session);
+	drop(pub_connection);
+	drop(sub_connection);
 	handle.abort();
 }
 
@@ -677,7 +752,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	group.finish().expect("finish group");
 
 	let pub_client = client_version(Some(version)).with_publisher(pub_origin.consume());
-	let pub_session = tokio::time::timeout(TIMEOUT, pub_client.connect(pub_url))
+	let (_client, pub_connection) = tokio::time::timeout(TIMEOUT, connect_once(pub_client, pub_url))
 		.await
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
@@ -685,7 +760,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume().announced();
 	let sub_client = client_version(Some(version)).with_subscriber(sub_origin);
-	let sub_session = tokio::time::timeout(TIMEOUT, sub_client.connect(sub_url))
+	let (_client, sub_connection) = tokio::time::timeout(TIMEOUT, connect_once(sub_client, sub_url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
@@ -697,8 +772,8 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 
 	drop(track);
 	drop(bc);
-	drop(pub_session);
-	drop(sub_session);
+	drop(pub_connection);
+	drop(sub_connection);
 	path.as_str().to_string()
 }
 
@@ -856,9 +931,14 @@ async fn subscribe_only_public_rejects_publisher_role() {
 	// before the relay's verdict lands. Either the connect fails outright, or the
 	// session it returns closes shortly after with the relay's rejection. A correctly
 	// scoped subscriber, by contrast, would stay open indefinitely.
-	match tokio::time::timeout(TIMEOUT, client().with_publisher(pub_origin.consume()).connect(url)).await {
-		Ok(Ok(session)) => {
-			tokio::time::timeout(TIMEOUT, session.closed())
+	match tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client().with_publisher(pub_origin.consume()), url),
+	)
+	.await
+	{
+		Ok(Ok((_client, connection))) => {
+			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
 				.await
 				.expect("relay should close a publisher whose token lacks publish scope, not leave it open");
 		}
@@ -878,13 +958,13 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 
 	let sub_origin = Origin::random().produce();
-	let session = tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url))
+	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
 		.await
 		.expect("subscriber connect timeout")
 		.expect("subscriber connect failed");
 
 	// The session must NOT be closed by the relay: a short wait should time out.
-	let still_open = tokio::time::timeout(Duration::from_millis(500), session.closed()).await;
+	let still_open = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
 	assert!(
 		still_open.is_err(),
 		"subscribe-only relay should keep a subscriber session open"
@@ -937,9 +1017,9 @@ async fn publish_only_public_rejects_subscriber_role() {
 
 	// Like the publisher case, `connect()` may resolve optimistically; either it fails
 	// outright, or the session the relay hands back closes shortly after.
-	match tokio::time::timeout(TIMEOUT, client().with_subscriber(sub_origin).connect(url)).await {
-		Ok(Ok(session)) => {
-			tokio::time::timeout(TIMEOUT, session.closed())
+	match tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url)).await {
+		Ok(Ok((_client, connection))) => {
+			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
 				.await
 				.expect("relay should close a subscriber whose token lacks subscribe scope, not leave it open");
 		}
@@ -948,4 +1028,20 @@ async fn publish_only_public_rejects_subscriber_role() {
 	}
 
 	handle.abort();
+}
+
+/// Dial once and hand back the client with its connection.
+///
+/// These tests want a single transport, so reconnecting is off: there is nothing
+/// left to redial, and dropping the connection closes the transport because it
+/// holds the last session clone.
+///
+/// The client comes back because it owns the transport endpoint (iroh's dies with
+/// it), and the caller has to outlive the connection it just got.
+async fn connect_once(
+	client: moq_native::Client,
+	url: url::Url,
+) -> moq_native::Result<(moq_native::Client, moq_native::Connection)> {
+	let connection = client.clone().with_reconnect(false).connect(url).established().await?;
+	Ok((client, connection))
 }

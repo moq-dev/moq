@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.8](https://github.com/moq-dev/moq/compare/moq-native-v0.19.7...moq-native-v0.19.8) - 2026-08-06
+
+### Added
+
+- *(moq-native)* classify, pace, and publish accept(2) failures ([#2687](https://github.com/moq-dev/moq/pull/2687))
+- fail-fast retries: jittered backoff bounded by time, not error type ([#2647](https://github.com/moq-dev/moq/pull/2647))
+
+### Fixed
+
+- *(net)* let the accepting side pick the retention window when the wire carries none ([#2657](https://github.com/moq-dev/moq/pull/2657))
+
 ## [0.19.7](https://github.com/moq-dev/moq/compare/moq-native-v0.19.6...moq-native-v0.19.7) - 2026-08-05
 
 ### Added

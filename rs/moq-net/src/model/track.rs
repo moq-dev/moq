@@ -1767,7 +1767,8 @@ impl Demand {
 pub struct Consumer {
 	name: Arc<str>,
 	// The broadcast this track belongs to, so a catalog track can name the path its
-	// relative references resolve against.
+	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
+	// that handle's view, which may name the broadcast differently than its producer did.
 	broadcast: Arc<broadcast::Info>,
 	inner: ConsumerKind,
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
@@ -1809,13 +1810,22 @@ impl Consumer {
 		self
 	}
 
+	/// Rebind the track to the broadcast handle it was reached through, so
+	/// [`broadcast`](Self::broadcast) reports the path that handle was handed out at (see
+	/// [`broadcast::Info::path`]). Called by [`broadcast::Consumer::track`].
+	pub(crate) fn with_broadcast(mut self, broadcast: Arc<broadcast::Info>) -> Self {
+		self.broadcast = broadcast;
+		self
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
 	}
 
-	/// The broadcast this track belongs to. Its [`path`](broadcast::Info::path) is what a
-	/// catalog's relative `broadcast` references resolve against.
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
 	pub fn broadcast(&self) -> &broadcast::Info {
 		&self.broadcast
 	}
@@ -2539,8 +2549,9 @@ impl Subscriber {
 		&self.name
 	}
 
-	/// The broadcast this track belongs to. Its [`path`](broadcast::Info::path) is what a
-	/// catalog's relative `broadcast` references resolve against.
+	/// The broadcast this track belongs to, as reached through the handle it came from.
+	/// Its [`path`](broadcast::Info::path) is what a catalog's relative `broadcast`
+	/// references resolve against.
 	pub fn broadcast(&self) -> &broadcast::Info {
 		&self.broadcast
 	}

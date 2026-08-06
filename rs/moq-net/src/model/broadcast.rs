@@ -34,10 +34,16 @@ pub struct Info {
 	/// broadcast with no relay origin).
 	pub origin: super::origin::Info,
 
-	/// This broadcast's path, relative to the root of the origin it was created under
-	/// (stamped by [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast),
-	/// including through a scoped producer). Relative references in a catalog served by this
-	/// broadcast (hang's `broadcast` field) resolve against it.
+	/// The path this broadcast is named by, which relative references in a catalog it
+	/// serves (hang's `broadcast` field) resolve against.
+	///
+	/// [`origin::Producer::create_broadcast`](super::origin::Producer::create_broadcast) stamps
+	/// the path the broadcast was created at, relative to the origin root (including through a
+	/// scoped producer). Every [`Consumer`] an origin hands out is then re-stamped with the path
+	/// *that handle* was requested or announced at, relative to its cursor's root, since the
+	/// same broadcast can be reached under more than one name: a dynamic handler may serve a
+	/// standalone broadcast at any path, and a rooted cursor names a broadcast more tightly
+	/// than the origin does.
 	///
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
@@ -984,7 +990,23 @@ impl Consumer {
 		self
 	}
 
-	/// The broadcast's static metadata, fixed when it was created.
+	/// Stamp the path this handle was handed out at, overriding [`Info::path`].
+	///
+	/// The origin applies it to every broadcast it resolves, because the name belongs to
+	/// the (broadcast, cursor) pair rather than to the broadcast: what a catalog's relative
+	/// references resolve against is where the *reader* found the broadcast, not where its
+	/// producer happened to create it. Free when the two already agree, which is the case
+	/// for a broadcast created at the path an unrooted cursor asks for.
+	pub(crate) fn with_path(mut self, path: crate::PathOwned) -> Self {
+		if self.info.path != path {
+			let mut info = (*self.info).clone();
+			info.path = path;
+			self.info = Arc::new(info);
+		}
+		self
+	}
+
+	/// The broadcast's metadata, as reached through this handle.
 	pub fn info(&self) -> &Info {
 		&self.info
 	}
@@ -1051,9 +1073,12 @@ impl Consumer {
 
 	/// Get a handle to a track on this broadcast.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
-		// Tag the resolved track with this broadcast's egress scope so its
-		// subscriptions, fetches, and groups are attributed to the same broadcast.
-		self.track_inner(name).map(|track| track.with_stats(self.stats.clone()))
+		// Rebind the track to *this* handle's view of the broadcast, so a catalog track
+		// resolves its relative references against the path we were handed out at rather
+		// than the one the producer was created at, and tag it with this broadcast's egress
+		// scope so its subscriptions, fetches, and groups are attributed to the same broadcast.
+		self.track_inner(name)
+			.map(|track| track.with_broadcast(self.info.clone()).with_stats(self.stats.clone()))
 	}
 
 	fn track_inner(&self, name: &str) -> Result<track::Consumer, Error> {

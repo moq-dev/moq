@@ -37,7 +37,8 @@ pub struct Config {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The TCP socket failed to bind, accept, or connect.
+	/// The TCP socket failed to bind or connect. Not accept: a failed `accept(2)` is
+	/// the listener's own to classify and retry (see [`crate::accept`]).
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
@@ -126,6 +127,7 @@ async fn connect_addrs(
 pub struct Listener {
 	listener: tokio::net::TcpListener,
 	protocols: Vec<String>,
+	health: crate::accept::Health,
 }
 
 impl Listener {
@@ -135,7 +137,24 @@ impl Listener {
 		Ok(Self {
 			listener,
 			protocols: Vec::new(),
+			health: crate::accept::Health::new("tcp"),
 		})
+	}
+
+	/// A live handle to this listener's accept-loop health, for an embedder that
+	/// publishes it (see [`crate::accept`]).
+	pub fn accept_health(&self) -> crate::accept::Health {
+		self.health.clone()
+	}
+
+	/// Report into `health` instead of the one this listener made for itself.
+	///
+	/// For an owner that has to hand the handle out *before* the listener exists:
+	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// registering them with a metrics endpoint does so at startup.
+	pub fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
+		self.health = health;
+		self
 	}
 
 	/// Advertise these application protocols (moq ALPNs) for in-band negotiation,
@@ -156,20 +175,39 @@ impl Listener {
 
 	/// Accept the next connection, performing the qmux handshake over plain TCP.
 	///
-	/// Returns `None` only if the listener itself is gone; a per-connection
-	/// failure is yielded as `Some(Err(..))` so the accept loop keeps running.
+	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
+	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
+	/// retried, because the caller has no better answer than to ask again. A
+	/// per-connection *handshake* failure is still yielded as `Some(Err(..))`.
+	///
+	/// The `Option` no longer has a `None` case to report: nothing ends the accept
+	/// loop, so this always yields. It stays because dropping it is a breaking change
+	/// to a published signature.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
-		match self.listener.accept().await {
-			Ok((stream, addr)) => {
-				tracing::debug!(%addr, "accepted TCP connection");
-				let session = qmux::tcp::Config::new(WIRE_VERSION)
-					.protocols(self.protocols.iter().map(String::as_str))
-					.accept(stream)
-					.await
-					.map_err(Error::Accept);
-				Some(session)
+		let (stream, addr) = self.accept_socket().await;
+		tracing::debug!(%addr, "accepted TCP connection");
+		let session = qmux::tcp::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.accept(stream)
+			.await
+			.map_err(Error::Accept);
+		Some(session)
+	}
+
+	/// The `accept(2)` half: keep asking until a connection comes back.
+	async fn accept_socket(&self) -> (tokio::net::TcpStream, net::SocketAddr) {
+		loop {
+			match self.listener.accept().await {
+				Ok(accepted) => {
+					self.health.accepted();
+					return accepted;
+				}
+				Err(err) => {
+					if let Some(delay) = self.health.failed(&err) {
+						tokio::time::sleep(delay).await;
+					}
+				}
 			}
-			Err(e) => Some(Err(e.into())),
 		}
 	}
 }

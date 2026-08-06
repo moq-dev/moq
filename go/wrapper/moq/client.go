@@ -3,6 +3,7 @@ package moq
 import (
 	"context"
 	"sync"
+	"time"
 
 	ffi "github.com/moq-dev/moq-go-ffi/moq"
 )
@@ -21,8 +22,75 @@ type clientConfig struct {
 	tlsCert            *string
 	tlsKey             *string
 	bind               *string
+	reconnect          *bool
+	backoff            *Backoff
 	publish            *OriginProducer
 	subscribe          *OriginProducer
+}
+
+// Backoff is the retry pacing for automatic reconnects: the delay starts at
+// Initial, multiplies by Multiplier after each failed attempt, and caps at Max.
+// After Timeout of consecutive failures the connection gives up for good.
+//
+// Every field is optional: the zero value means the default beside it, so a
+// partial Backoff overrides only what it sets. Pass RetryForever as Timeout to
+// keep retrying indefinitely.
+type Backoff struct {
+	Initial    time.Duration // delay before the first retry (default 1s)
+	Multiplier uint32        // applied to the delay after each failure (default 2)
+	Max        time.Duration // ceiling on the delay (default 30s)
+	Timeout    time.Duration // give up after this long (default 5m)
+}
+
+// RetryForever, passed as Backoff.Timeout, keeps a reconnecting session retrying
+// indefinitely instead of giving up.
+const RetryForever time.Duration = -1
+
+const (
+	defaultBackoffInitial    = time.Second
+	defaultBackoffMultiplier = 2
+	defaultBackoffMax        = 30 * time.Second
+	defaultBackoffTimeout    = 5 * time.Minute
+)
+
+// ffi resolves the unset fields, which is load-bearing rather than cosmetic:
+// the native side reads a zero timeout as "retry forever" and a zero delay as
+// no pacing at all, so passing Go's zero value straight through would turn
+// Backoff{} into an unthrottled dial loop.
+func (b Backoff) ffi() ffi.MoqBackoff {
+	multiplier := b.Multiplier
+	if multiplier == 0 {
+		multiplier = defaultBackoffMultiplier
+	}
+
+	// Zero is the native encoding of "forever" and also Go's zero value, so the
+	// two are spelled apart here: Backoff{} keeps the documented default and
+	// forever is explicit at the call site.
+	timeoutMs := backoffMs(b.Timeout, defaultBackoffTimeout)
+	if b.Timeout == RetryForever {
+		timeoutMs = 0
+	}
+
+	return ffi.MoqBackoff{
+		InitialMs:  backoffMs(b.Initial, defaultBackoffInitial),
+		Multiplier: multiplier,
+		MaxMs:      backoffMs(b.Max, defaultBackoffMax),
+		TimeoutMs:  timeoutMs,
+	}
+}
+
+// backoffMs converts d to milliseconds, substituting def when it is unset or
+// negative (a negative would wrap when cast to uint64) and flooring at 1ms so a
+// sub-millisecond duration doesn't truncate to an unpaced zero.
+func backoffMs(d, def time.Duration) uint64 {
+	if d <= 0 {
+		d = def
+	}
+	ms := d.Milliseconds()
+	if ms < 1 {
+		ms = 1
+	}
+	return uint64(ms)
 }
 
 // WithTLSVerify toggles TLS certificate verification. Verification is on by
@@ -71,6 +139,19 @@ func WithClientTLSKey(path string) ClientOption {
 // WithBind sets the local UDP socket bind address (default "[::]:0").
 func WithBind(addr string) ClientOption {
 	return func(c *clientConfig) { c.bind = &addr }
+}
+
+// WithReconnect toggles automatic reconnecting. It is on by default: the
+// session redials with backoff whenever the transport drops, and broadcasts
+// consumed through it ride out the gap. Pass false for a one-shot dial whose
+// transport close ends the session.
+func WithReconnect(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.reconnect = &enabled }
+}
+
+// WithBackoff sets retry pacing for the automatic reconnect.
+func WithBackoff(backoff Backoff) ClientOption {
+	return func(c *clientConfig) { c.backoff = &backoff }
 }
 
 // WithPublishOrigin sets the origin whose broadcasts are published to the
@@ -132,6 +213,12 @@ func Dial(ctx context.Context, url string, opts ...ClientOption) (*Client, error
 			inner.Cancel()
 			return nil, err
 		}
+	}
+	if cfg.reconnect != nil {
+		inner.SetReconnect(*cfg.reconnect)
+	}
+	if cfg.backoff != nil {
+		inner.SetBackoff(cfg.backoff.ffi())
 	}
 	if cfg.publish != nil {
 		inner.SetPublish(&cfg.publish.inner)

@@ -92,7 +92,8 @@ The section is omitted entirely when a broadcast publishes no captions.
 ### Cross-broadcast renditions
 
 A rendition may set an optional `broadcast` field: a path relative to the broadcast that served the catalog (e.g. `"../source"`), pointing at another broadcast that publishes the actual track.
-A consumer resolves the reference against the catalog broadcast's own path (`..` pops a segment, other segments append) and subscribes to the track on the resolved broadcast over the same connection.
+A consumer resolves the reference against the path it reached the catalog broadcast at (`..` pops a segment, other segments append) and subscribes to the track on the resolved broadcast over the same connection.
+That is the path the consumer asked for, not one the publisher declares, so a reference can only ever name a broadcast the consumer could have named itself.
 When the field is absent, the track lives in the same broadcast as the catalog.
 A reference that walks above the root (more `..` than the catalog path has segments) names no broadcast, so the whole catalog is rejected rather than pointed at whatever path the walk stops on.
 The root is the consumer's authorized subtree, so such a reference is an attempt to name content it cannot reach: a publisher emitting one has a bug, and quietly serving the remaining renditions would hide that.

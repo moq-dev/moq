@@ -298,7 +298,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let track = self.broadcast.create_track(
 				self.broadcast.unique_name(suffix),
-				moq_net::track::Info::default().with_timescale(timescale),
+				self.catalog.track_info().with_timescale(timescale),
 			)?;
 
 			// Enroll every track in the broadcast's timeline: passthrough writes groups by hand

@@ -4,82 +4,104 @@ use std::time::Duration;
 use moq_net::Version;
 use moq_net::bandwidth::{Consumer as BandwidthConsumer, Producer as BandwidthProducer};
 use moq_net::kio;
+use rand::RngExt;
 use url::Url;
 
 use crate::{Client, Error};
 
 /// Exponential backoff configuration for reconnection attempts.
-#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+///
+/// Every field is optional so a value set in TOML survives the CLI re-parse that follows it; read
+/// them through the accessors, which supply the defaults. The delays carry jitter, so a fleet
+/// knocked offline together does not reconnect in lockstep. The timeout bounds every failure;
+/// only a settled response from the server short-circuits it.
+#[derive(Clone, Debug, Default, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Backoff {
-	/// Initial delay before first reconnect attempt.
+	/// Initial delay before first reconnect attempt. Defaults to 1s.
+	///
+	/// Doubles as the bar a session must stay up to count as healthy, so it is
+	/// floored at 50ms: at zero every session would look healthy and the retry
+	/// pacing would collapse.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-initial",
 		long,
-		default_value = "1s",
 		env = "MOQ_BACKOFF_INITIAL",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub initial: Duration,
+	pub initial: Option<Duration>,
 
-	/// Multiplier applied to delay after each failure.
-	#[arg(id = "backoff-multiplier", long, default_value_t = 2, env = "MOQ_BACKOFF_MULTIPLIER")]
-	pub multiplier: u32,
+	/// Multiplier applied to delay after each failure. Defaults to 2.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "backoff-multiplier", long, env = "MOQ_BACKOFF_MULTIPLIER")]
+	pub multiplier: Option<u32>,
 
-	/// Maximum delay between reconnect attempts.
+	/// Maximum delay between reconnect attempts. Defaults to 5s.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-max",
 		long,
-		default_value = "30s",
 		env = "MOQ_BACKOFF_MAX",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub max: Duration,
+	pub max: Option<Duration>,
 
-	/// Maximum time to spend retrying before giving up.
+	/// Maximum time to spend retrying before giving up. Defaults to 10s.
+	///
 	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
 	/// session that reconnects then immediately drops still counts toward the timeout. Set to 0 for
 	/// unlimited retries.
+	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "backoff-timeout",
 		long,
-		default_value = "5m",
 		env = "MOQ_BACKOFF_TIMEOUT",
 		value_parser = humantime::parse_duration,
 	)]
 	#[serde(with = "humantime_serde")]
-	pub timeout: Duration,
-}
-
-impl Default for Backoff {
-	fn default() -> Self {
-		Self {
-			initial: Duration::from_secs(1),
-			multiplier: 2,
-			max: Duration::from_secs(30),
-			timeout: Duration::from_secs(300),
-		}
-	}
+	pub timeout: Option<Duration>,
 }
 
 impl Backoff {
+	/// The configured initial delay, or the default.
+	pub fn initial(&self) -> Duration {
+		self.initial.unwrap_or(DEFAULT_INITIAL)
+	}
+
+	/// The configured multiplier, or the default.
+	pub fn multiplier(&self) -> u32 {
+		self.multiplier.unwrap_or(DEFAULT_MULTIPLIER)
+	}
+
+	/// The configured delay ceiling, or the default.
+	pub fn max(&self) -> Duration {
+		self.max.unwrap_or(DEFAULT_MAX)
+	}
+
+	/// The configured give-up window, or the default. Zero retries forever.
+	pub fn timeout(&self) -> Duration {
+		self.timeout.unwrap_or(DEFAULT_TIMEOUT)
+	}
+
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
 	/// [`timeout`](Self::timeout), so when the loop does give up its error surfaces
 	/// before the broadcasts tear down. A zero timeout retries forever, so the
 	/// broadcasts linger forever too.
 	pub fn linger(&self) -> Duration {
-		match self.timeout.is_zero() {
+		let timeout = self.timeout();
+		match timeout.is_zero() {
 			true => Duration::MAX,
-			false => self.timeout.saturating_add(Duration::from_secs(1)),
+			false => timeout.saturating_add(Duration::from_secs(1)),
 		}
 	}
 }
 
-/// A connection lifecycle transition reported by [`Reconnect::status`].
+/// A connection lifecycle transition reported by [`Connection::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
@@ -213,6 +235,51 @@ pub struct GoawayConfig {
 	pub handover: Option<Duration>,
 }
 
+/// Defaults for the [`Backoff`] knobs, applied by its accessors when a field is unset.
+const DEFAULT_INITIAL: Duration = Duration::from_secs(1);
+const DEFAULT_MULTIPLIER: u32 = 2;
+const DEFAULT_MAX: Duration = Duration::from_secs(5);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Floor for the retry delay, which also sets the bar for calling a session
+/// healthy. Small enough to stay out of the way of a fast config, large enough
+/// that a session closed on sight never clears it.
+const MIN_BACKOFF: Duration = Duration::from_millis(50);
+
+/// The retry pacing a connection actually runs on: [`Backoff`] with the floors
+/// applied.
+///
+/// Every knob can zero the delay on its own, and a delay of zero is a dial loop
+/// that runs as fast as the runtime allows. `initial` seeds it, `multiplier`
+/// grows it, and `max` caps it, so a zero anywhere collapses the whole schedule.
+/// Resolving them once, here, keeps that from having to be re-argued at each of
+/// the three places the loop reaches for them.
+struct Pacing {
+	/// The first delay, and the bar a session must clear to count as healthy. At
+	/// zero every session looks healthy, which resets the give-up window forever.
+	initial: Duration,
+	/// Never below `initial`, so the cap cannot undo the floor on later retries.
+	max: Duration,
+	/// At least 1, since zero would shrink the delay back to nothing.
+	multiplier: u32,
+}
+
+impl Pacing {
+	fn new(backoff: &Backoff) -> Self {
+		let initial = backoff.initial().max(MIN_BACKOFF);
+		Self {
+			initial,
+			max: backoff.max().max(initial),
+			multiplier: backoff.multiplier().max(1),
+		}
+	}
+
+	/// The delay for the attempt after one that waited `delay`.
+	fn next(&self, delay: Duration) -> Duration {
+		std::cmp::min(delay.saturating_mul(self.multiplier), self.max)
+	}
+}
+
 /// Default handover window, and the ceiling a GOAWAY deadline is capped to when
 /// the config names none.
 const DEFAULT_HANDOVER: Duration = Duration::from_secs(10);
@@ -255,9 +322,80 @@ struct State {
 	session: Option<moq_net::Session>,
 }
 
-/// A cloneable read handle for the live connection stats of a [`Reconnect`] loop.
+/// The producer side of everything a [`Connection`] handle can observe.
 ///
-/// Obtained via [`Reconnect::stats`]. [`stats`](Self::stats) returns `None` while the loop is
+/// These three travel together through the loop, and every lifecycle transition
+/// touches more than one of them: leaving a session live in [`State`] while the
+/// bandwidth estimates reset (or the reverse) is how a handle ends up reporting a
+/// session that is already gone. Keeping them behind one value means a transition
+/// is one call rather than a block to remember.
+struct Shared {
+	state: kio::Producer<State>,
+	send_bw: BandwidthProducer,
+	recv_bw: BandwidthProducer,
+	closed: CloseGuard,
+}
+
+impl Shared {
+	/// A session is live and serving.
+	fn connected(&self, session: &moq_net::Session) {
+		// Held across the publish: see [`CloseGuard`]. A close that already ran is
+		// honored here rather than leaving this session parked in the final state.
+		let closed = self.closed.lock().unwrap();
+		if let Some(err) = closed.as_ref() {
+			session.abort(err.clone());
+			return;
+		}
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Connected);
+			state.version = Some(session.version());
+			state.session = Some(session.clone());
+		}
+	}
+
+	/// The peer sent a GOAWAY: the session in [`State`] keeps serving while its
+	/// replacement is dialed, so only the status moves.
+	fn migrating(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Migrating);
+		}
+	}
+
+	/// Nothing is live. Clears the session so a handle can't be handed a closed one,
+	/// and drops the estimates that belonged to it.
+	fn disconnected(&self) {
+		if let Ok(mut state) = self.state.write() {
+			state.status = Some(Status::Disconnected);
+			state.version = None;
+			state.session = None;
+		}
+		let _ = self.send_bw.set(None);
+		let _ = self.recv_bw.set(None);
+	}
+
+	/// Record the error the loop gave up with, for [`Connection::closed`].
+	fn failed(&self, err: Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.error = Some(err);
+		}
+	}
+}
+
+impl Drop for Shared {
+	fn drop(&mut self) {
+		// The loop is over, including when its task was aborted out from under it.
+		// Whoever still holds a consumer keeps the last state readable, so a
+		// [`ConnectionStatsReader`] outliving every [`Connection`] would otherwise
+		// keep the session clone parked here alive and the transport open with
+		// nothing left able to reach it. Releasing it drops the last clone, which
+		// is what closes the transport.
+		self.disconnected();
+	}
+}
+
+/// A cloneable read handle for the live connection stats of a [`Connection`].
+///
+/// Obtained via [`Connection::stats`]. [`stats`](Self::stats) returns `None` while the loop is
 /// between connections (reconnecting), and `Some` snapshot while a session is established.
 #[derive(Clone)]
 pub struct ConnectionStatsReader {
@@ -271,28 +409,57 @@ impl ConnectionStatsReader {
 	}
 }
 
-/// Handle to a background reconnect loop.
+/// Handle to a connection maintained by a background task.
 ///
-/// Spawns a tokio task that connects, waits for session close, then reconnects with exponential
-/// backoff. The read surface mirrors [`moq_net::Session`] so a caller can treat it like a session
-/// that transparently reconnects: [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
+/// The task connects, waits for the session to end, then (unless reconnecting is
+/// disabled, see [`ClientConfig::reconnect`](crate::ClientConfig::reconnect))
+/// redials with exponential backoff. The read surface mirrors [`moq_net::Session`]
+/// so a caller can treat it like a session that transparently reconnects:
+/// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
-/// The extra toggle a plain session doesn't have is the connection lifecycle: [`connected`](Self::connected)
-/// reads it synchronously and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
-/// waits for the loop to stop. Dropping the handle aborts the background task.
-pub struct Reconnect {
-	abort: tokio::task::AbortHandle,
+/// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
+/// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
+/// and [`status`](Self::status) waits for the next change. [`closed`](Self::closed)
+/// waits for the loop to stop. Clones share the loop; it stops when the last
+/// clone drops (or on an explicit [`close`](Self::close)).
+#[derive(Clone)]
+#[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]
+pub struct Connection {
+	task: std::sync::Arc<AbortOnDrop>,
 	state: kio::Consumer<State>,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: BandwidthConsumer,
 	/// The last status returned by [`status`](Self::status), for change detection.
+	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
 }
 
-impl Reconnect {
-	pub(crate) fn new(client: Client, url: Url, backoff: Backoff, goaway: GoawayConfig) -> Self {
+/// Aborts the connection loop when the last [`Connection`] clone drops.
+struct AbortOnDrop {
+	handle: tokio::task::AbortHandle,
+	closed: CloseGuard,
+}
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.handle.abort();
+	}
+}
+
+/// Serializes [`Connection::abort`] against the loop publishing a fresh session.
+///
+/// Aborting a tokio task doesn't interrupt it before its next yield, so a redial
+/// completing in that window would otherwise hand [`Shared::connected`] a session
+/// that `abort` had already looked for and missed, and it would be closed by the
+/// refcount drop instead of carrying the caller's error code to the peer. Both
+/// sides take this lock around their `state` access, so the session is either
+/// published before the close is recorded or refused after it.
+type CloseGuard = std::sync::Arc<std::sync::Mutex<Option<moq_net::Error>>>;
+
+impl Connection {
+	pub(crate) fn new(client: Client, url: Url) -> Self {
 		let producer = kio::Producer::<State>::default();
 		let state = producer.consume();
 
@@ -303,17 +470,33 @@ impl Reconnect {
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.consume();
 
+		let closed: CloseGuard = Default::default();
+		let task_closed = closed.clone();
+
 		let task = tokio::spawn(async move {
-			if let Err(err) = Self::run(&producer, &send_bw, &recv_bw, client, url, backoff, goaway).await {
-				tracing::error!(%err, "reconnect loop exited");
-				if let Ok(mut state) = producer.write() {
-					state.error = Some(err);
+			let reconnect = client.reconnect;
+			let shared = Shared {
+				state: producer,
+				send_bw,
+				recv_bw,
+				closed: task_closed,
+			};
+			if let Err(err) = Self::run(&shared, client, url).await {
+				// In one-shot mode the session ending is the expected lifecycle, and
+				// its close reason arrives here; don't dress it up as a loop failure.
+				match reconnect {
+					true => tracing::error!(%err, "connection loop exited"),
+					false => tracing::info!(%err, "connection closed"),
 				}
+				shared.failed(err);
 			}
 			// Dropping the producers here closes the channels, signaling consumers.
 		});
 		Self {
-			abort: task.abort_handle(),
+			task: std::sync::Arc::new(AbortOnDrop {
+				handle: task.abort_handle(),
+				closed,
+			}),
 			state,
 			send_bandwidth,
 			recv_bandwidth,
@@ -321,55 +504,100 @@ impl Reconnect {
 		}
 	}
 
-	async fn run(
-		state: &kio::Producer<State>,
-		send_bw: &BandwidthProducer,
-		recv_bw: &BandwidthProducer,
-		client: Client,
-		url: Url,
-		backoff: Backoff,
-		goaway: GoawayConfig,
-	) -> crate::Result<()> {
-		let mut delay = backoff.initial;
+	/// Stop the loop now, for every clone, closing the live session with `err`.
+	///
+	/// `err` is the code the peer sees. Locally this is still a deliberate stop, so
+	/// [`closed`](Self::closed) reports `Ok` rather than `err`.
+	///
+	/// Aborting the task is not enough on its own: it drops the loop's producer, but
+	/// the final state stays readable through every surviving handle, and the session
+	/// clone parked in it would hold the transport open until the last one went away.
+	/// Closing the session here is what makes "stop now" mean it, and closing it with
+	/// `err` is what carries the code to the peer, since the drop path only ever
+	/// sends a bare `Cancel`.
+	pub fn abort(&self, err: moq_net::Error) {
+		// Record the close and take the session under one lock, so a redial landing
+		// in the abort window is refused rather than parked: see [`CloseGuard`].
+		let session = {
+			let mut closed = self.task.closed.lock().unwrap();
+			*closed = Some(err.clone());
+			self.state.read().session.clone()
+		};
+		if let Some(session) = session {
+			session.abort(err);
+		}
+		self.task.handle.abort();
+	}
+
+	/// Stop the loop now, for every clone. [`abort`](Self::abort) with no error code.
+	///
+	/// Prefer just dropping the last clone; this is for teardown paths that can't
+	/// control which clone drops last.
+	pub fn close(&self) {
+		self.abort(moq_net::Error::Cancel);
+	}
+
+	async fn run(shared: &Shared, client: Client, url: Url) -> crate::Result<()> {
+		let backoff = client.backoff.clone();
+		let goaway = client.goaway.clone();
+		let pacing = Pacing::new(&backoff);
+		let initial = pacing.initial;
+		let mut delay = initial;
 		let mut retry_start = tokio::time::Instant::now();
 		let mut last_error: Option<Error> = None;
 		// Sticky across migrations: a redirect is an assignment, not a detour, so a
 		// later drop redials wherever we were last sent. Scoped to this loop, so a
-		// fresh Reconnect starts from the configured URL again.
+		// fresh Connection starts from the configured URL again.
 		let mut url = url;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
 
 		loop {
-			if !backoff.timeout.is_zero() && retry_start.elapsed() > backoff.timeout {
-				let timeout = backoff.timeout;
-				let msg = match last_error {
-					Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
-					None => format!("reconnect timed out after {timeout:?}"),
-				};
-				return Err(Error::Reconnect(msg));
+			let timeout = backoff.timeout();
+			if !timeout.is_zero() && retry_start.elapsed() >= timeout {
+				return Err(timeout_error(timeout, last_error.as_ref()));
 			}
 
 			tracing::info!(%url, "connecting");
 
-			match client.connect(url.clone()).await {
+			// Keep a predecessor's handover bounded across the dial. A GOAWAY off a
+			// healthy session comes straight here with the old one still draining, and
+			// a slow or blackholed replacement would otherwise hold it past the
+			// deadline we promised, still reported as `Migrating`, until the dial
+			// returned.
+			let mut dial = std::pin::pin!(client.dial(url.clone()));
+			let dialed = kio::wait(|waiter| {
+				if poll_draining(&mut draining, waiter) {
+					shared.disconnected();
+				}
+				waiter.poll_future(dial.as_mut())
+			})
+			.await;
+
+			match dialed {
 				Ok(session) => {
 					tracing::info!(%url, "connected");
-					if let Ok(mut state) = state.write() {
-						state.status = Some(Status::Connected);
-						state.version = Some(session.version());
-						state.session = Some(session.clone());
-					}
+					shared.connected(&session);
 
 					let connected = tokio::time::Instant::now();
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					let ended = run_session(send_bw, recv_bw, &session, &mut draining).await;
+					let ended = run_session(shared, &session, &mut draining).await;
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
-					let healthy = connected.elapsed() >= backoff.initial;
+					let healthy = connected.elapsed() >= initial;
+
+					// One-shot mode leaves rather than migrating: there is no replacement to
+					// dial, and a GOAWAY naming no deadline never force-closes, so the peer
+					// stops accepting requests and waits for us. Ignoring it is how both
+					// sides end up waiting on each other forever. Checked before the
+					// migration branch below, which would otherwise loop back to redial.
+					if !client.reconnect && matches!(ended, Ended::Goaway(_)) {
+						shared.disconnected();
+						return Ok(());
+					}
 
 					if let Ended::Goaway(msg) = &ended {
 						// A redirect is an assignment: keep dialing it from here on.
@@ -381,9 +609,7 @@ impl Reconnect {
 						// replacement at a group boundary. Tearing it down here instead
 						// would drop every group published until the replacement caught up.
 						tracing::info!(%url, "upstream GOAWAY; migrating");
-						if let Ok(mut state) = state.write() {
-							state.status = Some(Status::Migrating);
-						}
+						shared.migrating();
 						// Retire any predecessor first: overwriting would drop its deadline
 						// on the floor and leave it holding the connection open.
 						if let Some(mut old) = draining.take() {
@@ -392,7 +618,7 @@ impl Reconnect {
 						draining = Some(Draining::new(session, goaway.handover(msg.timeout)));
 
 						if healthy {
-							delay = backoff.initial;
+							delay = initial;
 							retry_start = tokio::time::Instant::now();
 							last_error = None;
 							// No backoff sleep: a handover off a healthy session is not a failure.
@@ -404,26 +630,23 @@ impl Reconnect {
 						// through backoff and eventually give up. The old session serves
 						// across the sleep, so the redirect loop costs time, not data.
 						last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
-						tracing::warn!(%url, ?delay, "peer redirected immediately; retrying after backoff");
+						let Some(wait) = retry_wait(delay, retry_start, timeout) else {
+							return Err(timeout_error(timeout, last_error.as_ref()));
+						};
+						tracing::warn!(%url, ?wait, "peer redirected immediately; retrying after backoff");
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
-						sleep_draining(delay, &mut draining).await;
-						delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+						sleep_draining(wait, &mut draining, shared).await;
+						delay = pacing.next(delay);
 						continue;
 					}
 
-					if let Ok(mut state) = state.write() {
-						state.status = Some(Status::Disconnected);
-						state.version = None;
-						state.session = None;
-					}
-					// The estimates belonged to the now-closed session; reset until the next connect.
-					let _ = send_bw.set(None);
-					let _ = recv_bw.set(None);
+					shared.disconnected();
 
-					// An auth rejection is terminal however long the session lived: the
-					// wire's UNAUTHORIZED is specified, so this is the peer telling us
-					// these credentials will never work, not a code we guessed at.
+					// An auth rejection is terminal however long the session lived, and
+					// whether or not we would otherwise redial: the wire's UNAUTHORIZED is
+					// specified, so this is the peer telling us these credentials will
+					// never work, not a code we guessed at.
 					if let Ended::Closed(Err(err)) = &ended {
 						let err = Error::from(err.clone());
 						if err.is_auth() {
@@ -431,10 +654,20 @@ impl Reconnect {
 						}
 					}
 
+					// One-shot mode: the session ending ends the connection. Its close
+					// reason is the terminal error, mirroring `moq_net::Session::closed`.
+					// A GOAWAY already returned above.
+					if !client.reconnect {
+						return match ended {
+							Ended::Closed(res) => res.map_err(Error::from),
+							Ended::Goaway(_) => unreachable!("handled before the migration branch"),
+						};
+					}
+
 					if healthy {
 						// Reset the backoff window so a one-off drop reconnects promptly.
 						tracing::warn!(%url, "session closed, reconnecting");
-						delay = backoff.initial;
+						delay = initial;
 						retry_start = tokio::time::Instant::now();
 						last_error = None;
 					} else {
@@ -450,6 +683,13 @@ impl Reconnect {
 							// Handled above: a GOAWAY never reaches here.
 							Ended::Goaway(_) => None,
 						};
+						// NOTE: only UNAUTHORIZED is specified, and it is handled above. Any
+						// other MoQ-layer rejection (Request::close after the transport is
+						// accepted) lands here as an untyped transport close, so it cannot be
+						// told apart from a network blip and is retried until the give-up
+						// timeout. Classifying the rest needs the transport to surface the
+						// close code; until then, one-shot mode (`reconnect = false`) is how
+						// a caller observes those rejections directly.
 						match err {
 							Some(err) => {
 								tracing::warn!(%url, %err, "session severed immediately, retrying");
@@ -460,17 +700,61 @@ impl Reconnect {
 					}
 				}
 				Err(err) => {
-					if err.is_auth() {
+					if err.is_auth()
+						|| err
+							.status()
+							.is_some_and(|status| !crate::error::status_retryable(status))
+						|| !client.reconnect
+					{
 						return Err(err);
 					}
 					last_error = Some(err);
 				}
 			}
 
-			tracing::warn!(%url, ?delay, "reconnecting after backoff");
-			tokio::time::sleep(delay).await;
-			delay = std::cmp::min(delay * backoff.multiplier, backoff.max);
+			let Some(wait) = retry_wait(delay, retry_start, timeout) else {
+				return Err(timeout_error(timeout, last_error.as_ref()));
+			};
+			tracing::warn!(%url, ?wait, "reconnecting after backoff");
+			// Drain-aware: a GOAWAY off a healthy session continues straight to the
+			// replacement dial, so a predecessor can still be draining when that dial
+			// fails and lands here. A plain sleep would stop enforcing its handover
+			// until some later dial succeeded, holding an upstream that asked to drain
+			// open for the whole retry window, or forever with `--backoff-timeout=0`.
+			sleep_draining(wait, &mut draining, shared).await;
+			delay = pacing.next(delay);
 		}
+	}
+
+	/// Poll until a session is established (the first connect, or the current one).
+	///
+	/// `Ready(Ok(session))` while a session is live (during a GOAWAY handover this is the
+	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
+	/// otherwise.
+	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
+		match ready!(self.state.poll(waiter, |state| match (state.status, &state.session) {
+			(Some(Status::Connected | Status::Migrating), Some(_)) => Poll::Ready(()),
+			_ => Poll::Pending,
+		})) {
+			Ok(()) => Poll::Ready(Ok(())),
+			Err(state) => Poll::Ready(Err(terminal(&state))),
+		}
+	}
+
+	/// Wait until a session is established, handing the connection back.
+	///
+	/// Returns as soon as a session is live, so the first call waits out the initial dial
+	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
+	/// mode). Useful when a caller wants dial errors up front rather than through
+	/// [`closed`](Self::closed).
+	///
+	/// It consumes and returns the connection so the reconnecting chain,
+	/// `client.connect(url).established().await?`, keeps it: the loop lives in this
+	/// handle, so a version that handed back the underlying session instead would leave
+	/// the caller holding a live transport that silently never redials.
+	pub async fn established(self) -> crate::Result<Self> {
+		kio::wait(|waiter| self.poll_established(waiter)).await?;
+		Ok(self)
 	}
 
 	/// Poll for the next connection status change since this handle last reported one.
@@ -518,6 +802,20 @@ impl Reconnect {
 		self.state.read().version
 	}
 
+	/// Observe a GOAWAY from the peer, or `None` while between sessions.
+	///
+	/// The reconnect loop reads the same GOAWAY to drive migration, reported as
+	/// [`Status::Migrating`], and a GOAWAY is a latch rather than a queue, so watching
+	/// it here doesn't take it from the loop. Reach for this when you need the message
+	/// itself: its redirect URI and deadline, or (in one-shot mode, where the loop
+	/// ignores GOAWAY entirely) the fact that one arrived at all.
+	///
+	/// Scoped to the current session, since that's what a GOAWAY is about; a redial
+	/// starts a fresh one.
+	pub fn draining(&self) -> Option<moq_net::goaway::Consumer> {
+		self.state.read().session.as_ref().map(moq_net::Session::draining)
+	}
+
 	/// A consumer for the live session's estimated send bitrate, mirroring
 	/// [`moq_net::Session::send_bandwidth`].
 	///
@@ -535,11 +833,11 @@ impl Reconnect {
 		self.recv_bandwidth.clone()
 	}
 
-	/// Poll whether the reconnect loop has stopped.
+	/// Poll whether the connection loop has stopped.
 	///
-	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, or an auth
-	/// rejection), `Ready(Ok(()))` if stopped by dropping the handle, `Pending` while
-	/// it's still running.
+	/// `Ready(Err)` if it permanently gave up (reconnect timeout exceeded, an auth
+	/// rejection, or the session ending in one-shot mode), `Ready(Ok(()))` if stopped
+	/// by dropping the handle, `Pending` while it's still running.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		ready!(self.state.poll_closed(waiter));
 		Poll::Ready(match &self.state.read().error {
@@ -548,7 +846,7 @@ impl Reconnect {
 		})
 	}
 
-	/// Wait until the reconnect loop stops.
+	/// Wait until the connection loop stops.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
@@ -563,6 +861,24 @@ impl Reconnect {
 	}
 }
 
+/// Build the terminal error for an exhausted retry window without discarding the last real cause.
+fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
+	let message = match last_error {
+		Some(err) => format!("reconnect timed out after {timeout:?}: {err}"),
+		None => format!("reconnect timed out after {timeout:?}"),
+	};
+	Error::Reconnect(message)
+}
+
+/// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
+fn retry_wait(delay: Duration, retry_start: tokio::time::Instant, timeout: Duration) -> Option<Duration> {
+	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+	if timeout.is_zero() {
+		return Some(wait);
+	}
+	Some(wait.min(timeout.checked_sub(retry_start.elapsed())?))
+}
+
 /// Why a session stopped being the live one.
 enum Ended {
 	/// The transport closed.
@@ -574,7 +890,7 @@ enum Ended {
 /// An old session kept alive after a GOAWAY so its in-flight groups finish.
 ///
 /// Held by the reconnect loop rather than a detached task, so dropping the
-/// [`Reconnect`] handle tears the old session down with everything else instead
+/// [`Connection`] handle tears the old session down with everything else instead
 /// of leaving an orphan holding the connection open.
 struct Draining {
 	session: moq_net::Session,
@@ -618,19 +934,37 @@ impl Draining {
 	}
 }
 
+/// Poll a draining predecessor, retiring it once it closes or overstays its
+/// handover window. `true` on the pass that retires it.
+///
+/// A `poll_*` step: on return the waiter is registered for the next change. The
+/// caller decides what the retirement means, because that depends on whether a
+/// replacement is already serving.
+fn poll_draining(draining: &mut Option<Draining>, waiter: &kio::Waiter) -> bool {
+	if let Some(old) = draining.as_mut()
+		&& old.poll(waiter)
+	{
+		*draining = None;
+		return true;
+	}
+	false
+}
+
 /// Sleep for `delay` while keeping a draining predecessor's deadline enforced.
 ///
 /// The drain is otherwise only polled from [`run_session`], which is reached only
 /// after a successful connect, so a replacement that takes several backoff rounds
 /// to reach would leave the old session holding its connection well past the
 /// handover window.
-async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
+async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
 	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
 	kio::wait(|waiter| {
-		if let Some(old) = draining.as_mut()
-			&& old.poll(waiter)
-		{
-			*draining = None;
+		// Nothing is serving once it retires: the predecessor closed or overstayed
+		// its handover, and the replacement is still a dial away. Leaving the state
+		// on `Migrating` would keep handing callers a session that is already closed,
+		// with its stats and version, until the next connect overwrote it.
+		if poll_draining(draining, waiter) {
+			shared.disconnected();
 		}
 		waiter.poll_future(sleep.as_mut())
 	})
@@ -638,18 +972,14 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>) {
 }
 
 /// Wait for `session` to close or receive a GOAWAY, forwarding its send/recv bandwidth estimates
-/// into the persistent producers meanwhile so [`Reconnect`] consumers track the live estimates
+/// into the persistent producers meanwhile so [`Connection`] consumers track the live estimates
 /// across the connection, and draining any predecessor left over from an earlier migration.
 ///
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
-/// polled through the waiter's own waker.
-async fn run_session(
-	send_bw: &BandwidthProducer,
-	recv_bw: &BandwidthProducer,
-	session: &moq_net::Session,
-	draining: &mut Option<Draining>,
-) -> Ended {
+/// polled through the waiter's own waker. `migrate` is whether a GOAWAY ends this session's
+/// tenure ([`Ended::Goaway`]); when false the arm isn't polled and only a close returns.
+async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = session.recv_bandwidth();
 	let goaway = session.draining();
@@ -657,18 +987,21 @@ async fn run_session(
 	tokio::pin!(closed);
 
 	kio::wait(|waiter| {
-		poll_forward(&mut send, send_bw, waiter);
-		poll_forward(&mut recv, recv_bw, waiter);
+		poll_forward(&mut send, &shared.send_bw, waiter);
+		poll_forward(&mut recv, &shared.recv_bw, waiter);
 
 		// Retire the predecessor once it closes or overstays its handover window.
-		if let Some(old) = draining.as_mut()
-			&& old.poll(waiter)
-		{
-			*draining = None;
-		}
+		// The replacement is already serving, so the state stays as it is.
+		poll_draining(draining, waiter);
 
 		// Checked before the close arm: a GOAWAY means the session is still up, and
 		// migrating from it is not the same as reconnecting after it died.
+		//
+		// Polled in one-shot mode too, even though there is no replacement to dial.
+		// A GOAWAY naming no deadline never force-closes, and the peer stops
+		// accepting requests and waits for us to leave, so ignoring it is how both
+		// sides end up waiting on each other forever. The caller ends the connection
+		// instead: asked to leave, with no way to migrate, leaving is the answer.
 		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
 			return Poll::Ready(Ended::Goaway(msg));
 		}
@@ -703,23 +1036,61 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 	}
 }
 
-impl Drop for Reconnect {
-	fn drop(&mut self) {
-		self.abort.abort();
-	}
-}
-
 /// The terminal error read from a closed channel's final state.
+///
+/// No recorded error means the loop was stopped locally rather than giving up, so
+/// this reports [`Error::Stopped`]: [`Connection::closed`] treats that as the `Ok`
+/// it is, and a watcher that only has an error to go on can still tell it apart
+/// from a connection that failed.
 fn terminal(state: &State) -> Error {
 	match &state.error {
 		Some(err) => err.clone(),
-		None => Error::Reconnect("reconnect stopped".to_string()),
+		None => Error::Stopped,
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The same clobber guard for [`Backoff`]. A bare field with a `default_value`
+	/// would be rewritten by the CLI re-parse that follows a TOML load, silently
+	/// resetting retry tuning that was only ever configured in the file.
+	#[test]
+	fn cli_does_not_clobber_toml_backoff() {
+		use clap::Parser;
+
+		#[derive(Parser)]
+		struct Wrapper {
+			#[command(flatten)]
+			backoff: Backoff,
+		}
+
+		// Stand in for the TOML layer, then re-apply the CLI with none of the flags set.
+		let mut parsed = Wrapper::parse_from(["test"]);
+		parsed.backoff.initial = Some(Duration::from_secs(7));
+		parsed.backoff.multiplier = Some(5);
+		parsed.backoff.max = Some(Duration::from_secs(11));
+		parsed.backoff.timeout = Some(Duration::ZERO);
+		parsed.update_from(["test"]);
+
+		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(7)));
+		assert_eq!(parsed.backoff.multiplier, Some(5));
+		assert_eq!(parsed.backoff.max, Some(Duration::from_secs(11)));
+		assert_eq!(parsed.backoff.timeout, Some(Duration::ZERO), "0 means retry forever");
+
+		// Unset stays unset, so the accessors supply the documented defaults.
+		let parsed = Wrapper::parse_from(["test"]);
+		assert_eq!(parsed.backoff.initial, None);
+		assert_eq!(parsed.backoff.initial(), DEFAULT_INITIAL);
+		assert_eq!(parsed.backoff.multiplier(), DEFAULT_MULTIPLIER);
+		assert_eq!(parsed.backoff.max(), DEFAULT_MAX);
+		assert_eq!(parsed.backoff.timeout(), DEFAULT_TIMEOUT);
+
+		// And a flag still lands where the merge can see it.
+		let parsed = Wrapper::parse_from(["test", "--backoff-initial", "3s"]);
+		assert_eq!(parsed.backoff.initial, Some(Duration::from_secs(3)));
+	}
 
 	/// The clap+TOML clobber guard: both `GoawayConfig` fields are `Option<T>` with
 	/// no `default_value`, so a TOML-configured value survives the CLI re-parse
@@ -886,13 +1257,72 @@ mod tests {
 		);
 	}
 
+	/// Every pacing knob can zero the retry delay on its own, and a zero delay is a
+	/// dial loop bounded by nothing. The floors are what keep a degenerate config
+	/// (or a binding that passes zeros) from turning unlimited retries into a spin.
+	#[test]
+	fn pacing_floors_every_degenerate_knob() {
+		// A zero initial would also make every session look healthy, resetting the
+		// give-up window forever.
+		let pacing = Pacing::new(&Backoff {
+			initial: Some(Duration::ZERO),
+			..Default::default()
+		});
+		assert_eq!(pacing.initial, MIN_BACKOFF);
+		assert!(pacing.next(pacing.initial) >= MIN_BACKOFF);
+
+		// A cap below the floor would clamp the delay straight back down.
+		let pacing = Pacing::new(&Backoff {
+			max: Some(Duration::ZERO),
+			..Default::default()
+		});
+		assert_eq!(pacing.max, pacing.initial);
+		assert_eq!(pacing.next(pacing.initial), pacing.initial);
+
+		// A zero multiplier would shrink it to nothing on the second attempt.
+		let pacing = Pacing::new(&Backoff {
+			multiplier: Some(0),
+			..Default::default()
+		});
+		assert_eq!(pacing.next(pacing.initial), pacing.initial);
+
+		// All at once: still paced.
+		let pacing = Pacing::new(&Backoff {
+			initial: Some(Duration::ZERO),
+			max: Some(Duration::ZERO),
+			multiplier: Some(0),
+			..Default::default()
+		});
+		let mut delay = pacing.initial;
+		for _ in 0..10 {
+			delay = pacing.next(delay);
+			assert!(delay >= MIN_BACKOFF, "the retry delay collapsed to {delay:?}");
+		}
+	}
+
+	/// A sane config is left alone: the delay doubles up to the cap and stays there.
+	#[test]
+	fn pacing_grows_to_the_cap() {
+		let pacing = Pacing::new(&Backoff {
+			initial: Some(Duration::from_millis(100)),
+			multiplier: Some(2),
+			max: Some(Duration::from_millis(400)),
+			..Default::default()
+		});
+
+		assert_eq!(pacing.initial, Duration::from_millis(100));
+		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
+		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
+		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
+	}
+
 	#[test]
 	fn test_backoff_default() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Duration::from_secs(1));
-		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Duration::from_secs(30));
-		assert_eq!(backoff.timeout, Duration::from_secs(300));
+		assert_eq!(backoff.initial(), Duration::from_secs(1));
+		assert_eq!(backoff.multiplier(), 2);
+		assert_eq!(backoff.max(), Duration::from_secs(5));
+		assert_eq!(backoff.timeout(), Duration::from_secs(10));
 	}
 
 	/// The linger outlives the give-up timeout (so the reconnect error surfaces
@@ -900,10 +1330,10 @@ mod tests {
 	#[test]
 	fn test_backoff_linger() {
 		let backoff = Backoff::default();
-		assert_eq!(backoff.linger(), backoff.timeout + Duration::from_secs(1));
+		assert_eq!(backoff.linger(), backoff.timeout() + Duration::from_secs(1));
 
 		let unlimited = Backoff {
-			timeout: Duration::ZERO,
+			timeout: Some(Duration::ZERO),
 			..Backoff::default()
 		};
 		assert_eq!(unlimited.linger(), Duration::MAX);

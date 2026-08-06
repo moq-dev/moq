@@ -168,6 +168,7 @@ pub struct Listener {
 	listener: tokio::net::UnixListener,
 	path: PathBuf,
 	protocols: Vec<String>,
+	health: crate::accept::Health,
 }
 
 impl Listener {
@@ -194,7 +195,24 @@ impl Listener {
 			listener,
 			path,
 			protocols: Vec::new(),
+			health: crate::accept::Health::new("unix"),
 		})
+	}
+
+	/// A live handle to this listener's accept-loop health, for an embedder that
+	/// publishes it (see [`crate::accept`]).
+	pub fn accept_health(&self) -> crate::accept::Health {
+		self.health.clone()
+	}
+
+	/// Report into `health` instead of the one this listener made for itself.
+	///
+	/// For an owner that has to hand the handle out *before* the listener exists:
+	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// registering them with a metrics endpoint does so at startup.
+	pub fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
+		self.health = health;
+		self
 	}
 
 	/// Advertise these application protocols (moq ALPNs) for in-band negotiation,
@@ -221,27 +239,44 @@ impl Listener {
 
 	/// Accept the next connection, returning the session and the peer's credentials.
 	///
-	/// Returns `None` only if the listener itself is gone; a per-connection
-	/// failure is yielded as `Some(Err(..))` so the accept loop keeps running.
+	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
+	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
+	/// retried, because the caller has no better answer than to ask again. A
+	/// per-connection failure is still yielded as `Some(Err(..))`.
+	///
+	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<(qmux::Session, PeerCred)>> {
-		match self.listener.accept().await {
-			Ok((stream, _addr)) => {
-				let cred = match stream.peer_cred() {
-					Ok(cred) => PeerCred {
-						uid: cred.uid(),
-						gid: cred.gid(),
-						pid: cred.pid(),
-					},
-					Err(err) => return Some(Err(err.into())),
-				};
-				let session = qmux::uds::Config::new(WIRE_VERSION)
-					.protocols(self.protocols.iter().map(String::as_str))
-					.accept(stream)
-					.await
-					.map_err(Error::Accept);
-				Some(session.map(|session| (session, cred)))
+		let stream = self.accept_socket().await;
+		let cred = match stream.peer_cred() {
+			Ok(cred) => PeerCred {
+				uid: cred.uid(),
+				gid: cred.gid(),
+				pid: cred.pid(),
+			},
+			Err(err) => return Some(Err(err.into())),
+		};
+		let session = qmux::uds::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.accept(stream)
+			.await
+			.map_err(Error::Accept);
+		Some(session.map(|session| (session, cred)))
+	}
+
+	/// The `accept(2)` half: keep asking until a connection comes back.
+	async fn accept_socket(&self) -> tokio::net::UnixStream {
+		loop {
+			match self.listener.accept().await {
+				Ok((stream, _addr)) => {
+					self.health.accepted();
+					return stream;
+				}
+				Err(err) => {
+					if let Some(delay) = self.health.failed(&err) {
+						tokio::time::sleep(delay).await;
+					}
+				}
 			}
-			Err(err) => Some(Err(err.into())),
 		}
 	}
 }

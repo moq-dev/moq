@@ -240,7 +240,7 @@ impl MoqRequest {
 					.ok()
 					.await
 					.map_err(|err| MoqError::Connect(format!("{err}")))?;
-				Ok(Arc::new(MoqSession::new(session, publish, subscribe)))
+				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 			})
 			.await
 	}

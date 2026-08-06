@@ -60,14 +60,14 @@ impl<E: CatalogExt> Producer<E> {
 	) -> Result<Self, Error> {
 		let codecs = match codec {
 			Codec::H264 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+				let track = broadcast.unique_track(".avc3", catalog.track_info())?;
 				Codecs::H264 {
 					split: moq_mux::codec::h264::Split::new(),
 					import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?,
 				}
 			}
 			Codec::H265 => {
-				let track = moq_mux::import::unique_track(&mut broadcast, ".hev1")?;
+				let track = broadcast.unique_track(".hev1", catalog.track_info())?;
 				Codecs::H265 {
 					split: moq_mux::codec::h265::Split::new(),
 					import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), Default::default())?,
@@ -170,7 +170,7 @@ pub struct Options {
 	pub kind: encoder::Kind,
 	/// The connection's send-bandwidth estimate, from
 	/// [`Session::send_bandwidth`](moq_net::Session::send_bandwidth) (or
-	/// `moq_native::Reconnect::send_bandwidth`, which survives reconnects).
+	/// `moq_native::Connection::send_bandwidth`, which survives reconnects).
 	///
 	/// Set it and the encoder tracks the estimate per the default
 	/// [`rate::Policy`](super::rate::Policy), so a closing uplink gets a softer

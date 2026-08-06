@@ -49,7 +49,7 @@ Top-level layout only. Per-crate and per-package detail lives in the nested guid
 - `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
 - `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
 - `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
-- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. See `doc/bin/obs.md`.
+- `/cpp/` - C/C++ consumers of `libmoq`. `cpp/obs/` is the OBS Studio plugin (CMake; links `libmoq` via `MOQ_LOCAL`), licensed GPL-2.0-or-later because it links `libobs`. PR CI never compiles it, so `just obs build` and `just obs test` (the latter runs `cpp/obs/test/` against stubbed libobs/libmoq under ThreadSanitizer) are manual gates, like `just rs macos`. See `doc/bin/obs.md`.
 - `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
 - `/test/` - cross-language interop smoke tests (`test/smoke/`), run via `just test smoke[-full]`.
 - `/doc/` - documentation site (VitePress, deployed via Cloudflare). The `/draft/` section is generated from `drafts/` by `doc/.vitepress/drafts.ts`.
@@ -96,6 +96,12 @@ Don't document deprecated flags, options, or APIs. User-facing docs (`/doc`), `-
 - Remove the example invocations and prose that mention it from `/doc`.
 
 The rename/removal rationale lives in the commit message and PR description, not in docs that users read. Warning someone who *uses* the deprecated path is not just fine but encouraged -- at compile time (Rust's `#[deprecated(note = "...")]`) or at runtime (a log line). Those fire on use, so they reach the one person who needs them and nobody else; they aren't documentation. A standing note in the docs that advertises the dead name is what's banned.
+
+## Retries
+
+Retry only operations that are safe to repeat and whose failure may clear without caller action. Use capped exponential backoff with jitter and normally stop after a short time or attempt budget, returning the last real error. Retry indefinitely only in process-lifetime supervisors waiting for external state; cap the delay and report failures.
+
+Use explicit protocol semantics to fail early when available, such as authentication rejection or a non-retryable HTTP status. Avoid broad `is_retryable()` classifications for opaque failures. Exactly one layer owns each retry sequence: callers must observe its terminal result rather than recreate it and reset its budget.
 
 ## Root Cause First
 

@@ -119,6 +119,10 @@ Each Subscription consists of a few properties:
 The publisher also keeps old groups around for a best-effort **Publisher Max Latency** cache window so relays and late subscribers can still fetch them. This defaults to 5 seconds.
 The subscriber's maximum latency is bounded by this window: a group can't be waited for longer than it's actually kept around.
 
+It is declared per track, so a publisher raises it on the tracks that are read as history rather than followed at the live edge.
+hang media tracks ask for 30 seconds on that basis: a segmented egress (HLS/DASH) may only advertise segments a fetch can still reach, and a standard player starts several segments behind the live edge.
+This is a retention budget rather than a delivery one, so a longer window never makes a subscriber play further behind live.
+
 By utilizing these properties, you can choose how your application behaves during congestion.
 For example, consider a conference room with Alice and Bob:
 
@@ -158,7 +162,7 @@ On the receiving side:
 
 A moq-transport client sends an empty URI: only a server can tell a peer where to reconnect. The URI is capped at 8,192 bytes on both wires, and a second GOAWAY on a session is a protocol violation that closes it.
 
-Native clients get step 3 for free from `moq_native::Client::reconnect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
+Native clients get step 3 for free from `moq_native::Client::connect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
 
 `moq-relay` uses this in both directions: on shutdown it drains its own downstream sessions (see [`--drain-timeout`](/bin/relay/config#drain-timeout)), and on a GOAWAY from a cluster peer the reconnect loop migrates transparently.
 

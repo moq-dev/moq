@@ -35,10 +35,14 @@ pub struct Config<S: web_transport_trait::Session> {
 	/// declares its own, which wins.
 	pub peer_origin: Option<Origin>,
 
-	/// What subscribing from us costs, declared in our SETUP (see
-	/// [`cluster::RELAY_COST`]) for the peer to charge. Directional, so what we charge
-	/// in the other direction is whatever the peer declared. `None` leaves it unpriced,
-	/// which the peer reads as the default of 1.
+	/// What crossing this link costs. Declared in our SETUP (see
+	/// [`cluster::RELAY_COST`]) for the peer to charge, and charged locally on what the
+	/// peer sends us. `None` declares nothing and charges whatever the peer declared,
+	/// falling back to 1; that is what a server accepting a connection passes, since it
+	/// has no per-peer configuration of its own.
+	///
+	/// Only `moqt-17`+ negotiates the MoQ Cluster extension. Earlier drafts carry no
+	/// cost at all, so nothing is charged and their routes rank on hop count alone.
 	pub cost: Option<u64>,
 
 	pub version: Version,

@@ -119,17 +119,19 @@ impl Announced {
 			}
 		}
 	}
+}
 
+/// Waits for one exact path, delegating to [`moq_net::origin::Consumer::announced_broadcast`].
+struct AnnouncedBroadcast {
+	origin: moq_net::origin::Consumer,
+	path: moq_net::PathOwned,
+}
+
+impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		loop {
-			match self.inner.next().await {
-				// Skip unannounce events; we're waiting for the broadcast to become available.
-				Some(moq_net::announce::Update { broadcast, .. }) => match broadcast {
-					Some(broadcast) => return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
-					None => continue,
-				},
-				None => return Err(MoqError::Closed),
-			}
+		match self.origin.announced_broadcast(&self.path).await {
+			Some(broadcast) => Ok(Arc::new(MoqBroadcastConsumer::new(broadcast))),
+			None => Err(MoqError::Closed),
 		}
 	}
 }
@@ -144,7 +146,7 @@ pub struct MoqAnnouncement {
 /// Waits for a specific broadcast to be announced.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
-	task: Task<Announced>,
+	task: Task<AnnouncedBroadcast>,
 }
 
 impl MoqOriginProducer {
@@ -263,10 +265,20 @@ impl MoqOriginConsumer {
 	/// Wait for a specific broadcast to be announced by path.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let origin = self.inner.with_root(path).ok_or(MoqError::Unauthorized)?;
+		let path = moq_net::Path::new(&path).to_owned();
+
+		// Probe the permission eagerly so an unreachable path fails here, rather than
+		// surfacing later as a `Closed` the caller can't tell from the origin ending.
+		self.inner.with_root(&path).ok_or(MoqError::Unauthorized)?;
+
 		Ok(Arc::new(MoqAnnouncedBroadcast {
-			task: Task::new(Announced {
-				inner: origin.announced(),
+			task: Task::new(AnnouncedBroadcast {
+				// The wait runs on the *unrooted* cursor. `announced_broadcast` narrows with
+				// `scope`, which leaves the root alone, so the broadcast is handed out named by
+				// its full path. Rooting the cursor at `path` would name it "" instead, making
+				// it its own root, and a catalog's `../sibling` reference would read as escaping.
+				origin: self.inner.clone(),
+				path,
 			}),
 		}))
 	}

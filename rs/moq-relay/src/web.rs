@@ -140,6 +140,7 @@ pub(crate) struct WebState {
 pub struct Web {
 	state: Arc<WebState>,
 	config: WebConfig,
+	health: moq_native::accept::Health,
 }
 
 impl Web {
@@ -154,7 +155,32 @@ impl Web {
 			conn_id: AtomicU64::new(0),
 			shutdown: crate::Shutdown::disabled(),
 		});
-		Self { state, config }
+		Self {
+			state,
+			config,
+			health: moq_native::accept::Health::new("web"),
+		}
+	}
+
+	/// A live handle to the accept-loop health of the HTTP/HTTPS listeners, for an
+	/// embedder that publishes it (see [`moq_native::accept`]).
+	///
+	/// This is the one signal that leaves the process when the public listener goes
+	/// dark: [`serve`](Self::serve) never gives up, so a node can be unable to accept
+	/// a WebSocket session, a WHIP offer, or an HLS request while every other metric
+	/// looks healthy. Take it before `serve` consumes the server.
+	///
+	/// `None` when neither listener is configured, so a QUIC-only relay publishes no
+	/// counters for a socket it never opens. A permanently-zero series for an absent
+	/// listener reads as a watch that is passing when there is nothing there to watch.
+	///
+	/// When both are configured they share one handle. The failures worth escalating
+	/// on are process- or host-wide (out of descriptors, out of kernel memory), so an
+	/// HTTP accept that succeeds is real evidence that the HTTPS one is not stalled
+	/// either.
+	pub fn accept_health(&self) -> Option<moq_native::accept::Health> {
+		let configured = self.config.http.listen.is_some() || self.config.https.listen.is_some();
+		configured.then(|| self.health.clone())
 	}
 
 	/// Attach the relay-wide shutdown broadcast so WebSocket sessions drain with
@@ -221,7 +247,7 @@ impl Web {
 			// Dual-stack so the cert endpoint + WebSocket fallback answer over IPv4
 			// too, even on Windows where `[::]` is IPv6-only by default.
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTP listener")?;
-			let server = axum_server::from_tcp(listener)?;
+			let server = crate::listener::server(listener, self.health.clone())?;
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -245,7 +271,7 @@ impl Web {
 				inner: RustlsAcceptor::new(rustls_config),
 			};
 			let listener = moq_native::bind::tcp(listen).context("failed to bind HTTPS listener")?;
-			let server = axum_server::from_tcp(listener)?.acceptor(acceptor);
+			let server = crate::listener::server(listener, self.health.clone())?.acceptor(acceptor);
 			Some(server.serve(app))
 		} else {
 			None

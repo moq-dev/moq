@@ -138,19 +138,23 @@ impl Relay {
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
 
-		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
-		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
-		// when unconfigured.
-		let internal = Internal::new(config.internal, cluster.stats.clone()).with_cluster(&cluster);
-
 		// Graceful shutdown: the first signal drains every accepted session with a
 		// GOAWAY; a second signal (or the drain window elapsing) exits.
 		let drain_timeout = config.drain_timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
 		let (shutdown_trigger, shutdown) = Shutdown::new(drain_timeout);
-
 		// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 		let web =
 			Web::new(auth.clone(), cluster.clone(), server.certificates(), config.web).with_shutdown(shutdown.clone());
+
+		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
+		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
+		// when unconfigured. Every listener that performs a real accept(2) reports here,
+		// web and stream alike: a stream-only relay has no web listener at all, and the
+		// point is that whichever socket goes quiet is the one a scrape can see.
+		let internal = Internal::new(config.internal, cluster.stats.clone())
+			.with_cluster(&cluster)
+			.with_listeners(web.accept_health())
+			.with_listeners(server.accept_health());
 
 		match addr {
 			Some(addr) => tracing::info!(%addr, "listening"),

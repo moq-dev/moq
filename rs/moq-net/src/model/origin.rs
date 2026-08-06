@@ -528,11 +528,26 @@ impl OriginConsumerState {
 struct AnnounceConsumerNotify {
 	root: PathOwned,
 	state: kio::Producer<OriginConsumerState>,
+	/// The peer this stream advertises to, when it is scoped to one (see
+	/// [`Consumer::excluding`]). Every broadcast handed out registers an
+	/// [`ExclusionGuard`] for it, which is what tells the front it is exposed to that
+	/// peer even before they subscribe.
+	exclude: Option<Origin>,
 }
 
 impl AnnounceConsumerNotify {
-	fn announce(&self, path: impl AsPath, broadcast: broadcast::Consumer) {
+	fn announce(&self, path: impl AsPath, broadcast: broadcast::Consumer, front: &kio::Producer<FrontState>) {
 		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
+
+		// Advertising a path to a peer exposes the front to them, so register the
+		// exclusion now rather than waiting for them to subscribe. A reflection can
+		// come back before any subscription does, and the front has to already know
+		// the route it arrives on leads to a peer we are feeding.
+		let broadcast = match self.exclude.and_then(|peer| ExclusionGuard::new(front, peer)) {
+			Some(guard) => broadcast.with_exclusion(guard),
+			None => broadcast,
+		};
+
 		self.state
 			.write()
 			.ok()
@@ -562,13 +577,16 @@ impl NotifyNode {
 		}
 	}
 
-	fn announce(&mut self, path: impl AsPath, broadcast: &broadcast::Consumer) {
+	/// `state` is the announced front's source table, so a consumer scoped to a peer
+	/// can register its [`ExclusionGuard`] against it (see
+	/// [`AnnounceConsumerNotify::announce`]).
+	fn announce(&mut self, path: impl AsPath, broadcast: &broadcast::Consumer, state: &kio::Producer<FrontState>) {
 		for consumer in self.consumers.values() {
-			consumer.announce(path.as_path(), broadcast.clone());
+			consumer.announce(path.as_path(), broadcast.clone(), state);
 		}
 
 		if let Some(parent) = &self.parent {
-			parent.lock().announce(path, broadcast);
+			parent.lock().announce(path, broadcast, state);
 		}
 	}
 
@@ -689,9 +707,10 @@ impl OriginNode {
 		existing.announced = announce;
 		let path = existing.path.clone();
 		let consumer = existing.broadcast.consume();
+		let state = existing.state.clone();
 		let mut notify = self.notify.lock();
 		if announce {
-			notify.announce(&path, &consumer);
+			notify.announce(&path, &consumer, &state);
 		} else {
 			notify.unannounce(&path);
 		}
@@ -708,7 +727,7 @@ impl OriginNode {
 		if let Some(broadcast) = &self.broadcast
 			&& broadcast.announced
 		{
-			notify.announce(&broadcast.path, broadcast.broadcast.consume());
+			notify.announce(&broadcast.path, broadcast.broadcast.consume(), &broadcast.state);
 		}
 
 		// Recursively subscribe to all nested nodes.
@@ -1252,12 +1271,18 @@ struct FrontState {
 	/// an exact tie toward the newest source.
 	next_route: u64,
 	routes: Vec<FrontRoute>,
-	/// Peers currently reading this front through the shared broadcast, refcounted
-	/// by live [`ExclusionGuard`]s. The resolve-time check only proves the table is
-	/// clean for a requester at that instant; the front picks per track and re-picks
-	/// on failover, so without this a route tainted for an attached peer could be
-	/// adopted underneath them and hand them back their own bytes. Routes through
-	/// these origins are avoided while any clean alternative exists.
+	/// Peers this front is exposed to, refcounted by live [`ExclusionGuard`]s: those
+	/// reading it through the shared broadcast, and those we merely advertise it to.
+	/// The resolve-time check only proves the table is clean for a requester at that
+	/// instant; the front picks per track and re-picks on failover, so without this a
+	/// route tainted for an attached peer could be adopted underneath them and hand
+	/// them back their own bytes. Routes through these origins are avoided while any
+	/// clean alternative exists.
+	///
+	/// Advertising registers a peer too, because a peer that cannot echo our identity
+	/// back (moq-transport carries no hop ids) may re-advertise the path to us before
+	/// it ever subscribes. That reflection is otherwise indistinguishable from a rival
+	/// publisher, and this is what tells [`attach_source`] apart.
 	excluded: HashMap<Origin, usize>,
 	/// The source tracks are dispatched to. Backups park until promoted.
 	active: Option<u64>,
@@ -1308,7 +1333,12 @@ impl FrontState {
 		self.pick(|r| exclude.is_none_or(|origin| !r.route.hops.contains(&origin)), false)
 	}
 
-	/// Whether serving from `route` would hand an attached peer its own bytes back.
+	/// Whether `route` flows back through a peer this front is exposed to, so serving
+	/// (or attaching) it would hand that peer its own bytes back.
+	///
+	/// Doubles as the reflection test in [`attach_source`]: a route arriving through a
+	/// peer we are already advertising this path to is our own broadcast coming home,
+	/// whatever its chain claims.
 	fn taints_a_reader(&self, route: &broadcast::Route) -> bool {
 		route.hops.iter().any(|hop| self.excluded.contains_key(hop))
 	}
@@ -1554,9 +1584,9 @@ async fn run_source(
 		let (state, broadcast, id) = match attach_source(&ctx, &leaf, &source, route.clone()) {
 			Attach::Ready(state, broadcast, id) => (state, broadcast, id),
 			Attach::Parked(incumbent) => {
-				tracing::warn!(
+				tracing::debug!(
 					broadcast = %full,
-					"path already live with a different publisher; parking an offline source until it ends",
+					"path already live with a different publisher; parking this source until it ends",
 				);
 				// Wait for the incumbent front to close, or for our own route to
 				// change: announcing ourselves is what earns the takeover, and our
@@ -1642,9 +1672,10 @@ enum Attach {
 	/// source table, the spliced broadcast, and the source's table id.
 	Ready(kio::Producer<FrontState>, broadcast::Producer, u64),
 	/// The path's live front belongs to a different original publisher and this
-	/// source is offline, so it would rank below every route the front holds and
-	/// must not take the path from it. The caller parks on the returned table
-	/// until the front closes.
+	/// source may not take it: either the source is offline (so it would rank below
+	/// every route the front holds) or its chain leads back through a peer the front
+	/// is already exposed to, making it a reflection rather than rival content. The
+	/// caller parks on the returned table until the front closes.
 	Parked(kio::Producer<FrontState>),
 }
 
@@ -1656,6 +1687,21 @@ struct AttachContext<'a> {
 	full: &'a PathOwned,
 	/// Path relative to `node`, for locating (and later pruning) the leaf.
 	rest: &'a PathOwned,
+}
+
+/// Whether two sources carry the same content and may therefore splice.
+///
+/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
+/// identity, or that does not speak the hops extension at all, contributes as a
+/// first hop. Two such sources are not interchangeable even though their first
+/// hops compare equal, so splicing them would cut one publisher's subscribers
+/// over to an unrelated publisher's content. Every other id compares normally,
+/// including `None` for a locally produced broadcast with no hops.
+fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
+	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
+		return false;
+	}
+	a == b
 }
 
 /// Attach a source to the broadcast at `leaf`, creating (and publishing) the
@@ -1673,22 +1719,11 @@ struct AttachContext<'a> {
 /// Taking over requires announcing, which keeps the rule consistent with
 /// [`route_order`]: an offline source ranks below every announced route, so it
 /// waits ([`Attach::Parked`]) rather than unannouncing a live broadcast and
-/// cutting its subscribers for content nobody has advertised.
-/// Whether two sources carry the same content and may therefore splice.
-///
-/// [`Origin::UNKNOWN`] identifies nothing: it is what a peer that declared no
-/// identity, or that does not speak the hops extension at all, contributes as a
-/// first hop. Two such sources are not interchangeable even though their first
-/// hops compare equal, so splicing them would cut one publisher's subscribers
-/// over to an unrelated publisher's content. Every other id compares normally,
-/// including `None` for a locally produced broadcast with no hops.
-fn same_publisher(a: Option<Origin>, b: Option<Origin>) -> bool {
-	if a == Some(Origin::UNKNOWN) || b == Some(Origin::UNKNOWN) {
-		return false;
-	}
-	a == b
-}
-
+/// cutting its subscribers for content nobody has advertised. It also requires a
+/// chain that does not lead back through a peer this front is already exposed to
+/// (see [`FrontState::taints_a_reader`]): such a source is our own broadcast
+/// reflected by a peer that cannot detect the loop itself, and letting it evict the
+/// front is how a publish direction ends up withdrawing its own announce.
 fn attach_source(
 	ctx: &AttachContext,
 	leaf: &Lock<OriginNode>,
@@ -1716,7 +1751,7 @@ fn attach_source(
 				});
 				s.reselect(carrying);
 				joined = Some(id);
-			} else if !route.announce {
+			} else if !route.announce || s.taints_a_reader(&route) {
 				return Attach::Parked(existing.state.clone());
 			} else {
 				// New content at a live path: the newest publisher wins it. Closing
@@ -1777,7 +1812,10 @@ fn attach_source(
 		announced: announce,
 	};
 	if entry.announced {
-		leaf_guard.notify.lock().announce(ctx.full, &broadcast.consume());
+		leaf_guard
+			.notify
+			.lock()
+			.announce(ctx.full, &broadcast.consume(), &state);
 	}
 	leaf_guard.broadcast = Some(entry);
 	drop(leaf_guard);
@@ -2398,6 +2436,10 @@ impl Drop for Request {
 /// handler drops before serving it.
 pub struct Requesting {
 	inner: RequestState,
+	// The path the requester asked for, relative to its cursor's root. Stamped on the
+	// resolved broadcast (see [`broadcast::Info::path`]) because a handler is free to
+	// serve a broadcast created somewhere else entirely, or at no path at all.
+	path: PathOwned,
 	// Egress scope applied to the resolved broadcast, so its reads are attributed.
 	// Empty (no-op) for an untagged consumer.
 	stats: stats::Scope,
@@ -2415,24 +2457,28 @@ enum RequestState {
 
 impl Requesting {
 	fn ready(broadcast: broadcast::Consumer) -> Self {
-		Self {
-			inner: RequestState::Ready(broadcast),
-			stats: stats::Scope::default(),
-		}
+		Self::new(RequestState::Ready(broadcast))
 	}
 
 	fn failed(error: Error) -> Self {
+		Self::new(RequestState::Failed(error))
+	}
+
+	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
+		Self::new(RequestState::Pending(consumer))
+	}
+
+	fn new(inner: RequestState) -> Self {
 		Self {
-			inner: RequestState::Failed(error),
+			inner,
+			path: PathOwned::default(),
 			stats: stats::Scope::default(),
 		}
 	}
 
-	fn pending(consumer: kio::Consumer<PendingBroadcast>) -> Self {
-		Self {
-			inner: RequestState::Pending(consumer),
-			stats: stats::Scope::default(),
-		}
+	fn with_path(mut self, path: PathOwned) -> Self {
+		self.path = path;
+		self
 	}
 
 	fn with_stats(mut self, scope: stats::Scope) -> Self {
@@ -2440,17 +2486,22 @@ impl Requesting {
 		self
 	}
 
+	/// Stamp a resolved broadcast with the path this cursor asked for and its egress scope.
+	fn hand_out(&self, broadcast: broadcast::Consumer) -> broadcast::Consumer {
+		broadcast.with_path(self.path.clone()).with_stats(self.stats.clone())
+	}
+
 	/// Poll for the requested broadcast without blocking.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		match &self.inner {
-			RequestState::Ready(broadcast) => Poll::Ready(Ok(broadcast.clone().with_stats(self.stats.clone()))),
+			RequestState::Ready(broadcast) => Poll::Ready(Ok(self.hand_out(broadcast.clone()))),
 			RequestState::Failed(error) => Poll::Ready(Err(error.clone())),
 			RequestState::Pending(consumer) => Poll::Ready(
 				match ready!(consumer.poll(waiter, |state| match &state.resolved {
 					Some(result) => Poll::Ready(result.clone()),
 					None => Poll::Pending,
 				})) {
-					Ok(result) => result.map(|broadcast| broadcast.with_stats(self.stats.clone())),
+					Ok(result) => result.map(|broadcast| self.hand_out(broadcast)),
 					// Every handler dropped without resolving: nobody could route it.
 					Err(_closed) => Err(Error::Unroutable),
 				},
@@ -2635,7 +2686,7 @@ impl Consumer {
 	/// set as initial announcements. Drop the returned [`AnnounceConsumer`]
 	/// to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), self.stats.clone(), self.exclude)
 	}
 
 	/// Returns a cheap duplicate of this read handle.
@@ -2755,6 +2806,10 @@ impl Consumer {
 		// counters resolve against the same broadcast the ingress side wrote.
 		let absolute = self.root.join(&path).to_owned();
 		let scope = self.stats.egress(&absolute);
+		// The resolved handle is named by what *this* cursor asked for, not by the absolute
+		// path: a rooted cursor cannot name anything above its own root, so that is what a
+		// catalog it reads may reference.
+		let requested = path.to_owned();
 
 		// Prefer a live announcement when one is present; the dynamic queue is only a
 		// fallback for a path we hold nothing for. A broadcast we do hold but cannot
@@ -2762,7 +2817,10 @@ impl Consumer {
 		// with no route chain to check, so falling through would let it route around
 		// the split horizon and rebuild the loop.
 		match self.resolve(&path) {
-			Resolved::Found(broadcast) => return kio::Pending::new(Requesting::ready(broadcast).with_stats(scope)),
+			Resolved::Found(broadcast) => {
+				let resolved = Requesting::ready(broadcast).with_path(requested).with_stats(scope);
+				return kio::Pending::new(resolved);
+			}
 			Resolved::Excluded => return kio::Pending::new(Requesting::failed(Error::Unroutable)),
 			Resolved::Missing => {}
 		}
@@ -2773,7 +2831,8 @@ impl Consumer {
 		// requests share one upstream subscription. A closed entry is stale; `get` drops it
 		// and returns `None`, so we fall through and re-serve below.
 		if let Some(weak) = state.served.get(&absolute) {
-			return kio::Pending::new(Requesting::ready(weak.consume()).with_stats(scope));
+			let resolved = Requesting::ready(weak.consume()).with_path(requested).with_stats(scope);
+			return kio::Pending::new(resolved);
 		}
 
 		// Coalesce onto a pending request for the same path; otherwise register a new
@@ -2789,7 +2848,7 @@ impl Consumer {
 			consumer
 		};
 
-		kio::Pending::new(Requesting::pending(consumer).with_stats(scope))
+		kio::Pending::new(Requesting::pending(consumer).with_path(requested).with_stats(scope))
 	}
 
 	/// Returns a new Consumer that automatically strips out the provided prefix.
@@ -2849,7 +2908,7 @@ impl AnnounceProducer {
 	pub fn consume(&self) -> AnnounceConsumer {
 		// Untagged: `AnnounceProducer` is used for internal announce plumbing, not
 		// egress attribution (which flows through `origin::Consumer::announced`).
-		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default())
+		AnnounceConsumer::new(self.root.clone(), self.nodes.clone(), stats::Session::default(), None)
 	}
 
 	/// Returns the prefix that is automatically stripped from announced paths.
@@ -2882,7 +2941,7 @@ pub struct AnnounceConsumer {
 }
 
 impl AnnounceConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session) -> Self {
+	fn new(root: PathOwned, nodes: OriginNodes, stats: stats::Session, exclude: Option<Origin>) -> Self {
 		let state = kio::Producer::<OriginConsumerState>::default();
 		let id = ConsumerId::new();
 
@@ -2890,6 +2949,7 @@ impl AnnounceConsumer {
 			let notify = AnnounceConsumerNotify {
 				root: root.clone(),
 				state: state.clone(),
+				exclude,
 			};
 			node.lock().consume(id, notify);
 		}
@@ -2904,21 +2964,24 @@ impl AnnounceConsumer {
 		}
 	}
 
-	/// Drive the egress announce guards and tag the broadcast for one update.
+	/// Stamp the broadcast for one update and drive the egress announce guards.
 	///
-	/// An announce opens a guard (keyed by absolute path) and tags the yielded
-	/// broadcast with the egress scope; an unannounce drops the guard. A no-op for
-	/// an untagged stream.
-	fn attribute(&mut self, update: OriginAnnounce) -> OriginAnnounce {
+	/// An announce stamps the yielded broadcast with the path it was announced at (see
+	/// [`broadcast::Info::path`]) plus the egress scope, and opens a guard keyed by the
+	/// absolute path; an unannounce drops the guard. The stamped path is the
+	/// cursor-relative one, so a catalog served by the broadcast resolves its relative
+	/// references against exactly the subtree this cursor may name.
+	fn hand_out(&mut self, update: OriginAnnounce) -> OriginAnnounce {
 		let OriginAnnounce { path, broadcast } = update;
 		let absolute = self.root.join(&path).to_owned();
 		match broadcast {
 			Some(broadcast) => {
 				let scope = self.stats.egress(&absolute);
 				self.guards.entry(absolute).or_insert_with(|| scope.announce());
+				let broadcast = broadcast.with_path(path.clone()).with_stats(scope);
 				OriginAnnounce {
 					path,
-					broadcast: Some(broadcast.with_stats(scope)),
+					broadcast: Some(broadcast),
 				}
 			}
 			None => {
@@ -2958,7 +3021,7 @@ impl AnnounceConsumer {
 			};
 			state.take().expect("predicate guaranteed an update")
 		};
-		Poll::Ready(Some(self.attribute(update)))
+		Poll::Ready(Some(self.hand_out(update)))
 	}
 
 	/// Returns the next (un)announced broadcast without blocking.
@@ -2967,7 +3030,7 @@ impl AnnounceConsumer {
 	/// Use [`Self::is_closed`] to check if the cursor is closed.
 	pub fn try_next(&mut self) -> Option<OriginAnnounce> {
 		let update = self.state.write().ok()?.take()?;
-		Some(self.attribute(update))
+		Some(self.hand_out(update))
 	}
 
 	/// Returns true if the cursor is closed (no more updates will arrive).
@@ -3232,6 +3295,83 @@ mod tests {
 			state.active,
 			Some(1),
 			"an unannounced incumbent must always be displaced"
+		);
+	}
+
+	/// A route arriving through a peer the front is already exposed to is our own
+	/// broadcast reflected back, whatever its chain claims, so it must not evict the
+	/// front. This is the shape a relay with no hop ids produces when both directions
+	/// of a sync target point at it.
+	#[test]
+	fn test_reflection_through_an_exposed_peer_cannot_take_over() {
+		let peer = Origin::new(42).unwrap();
+		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
+		let reflected = announce().with_hops(OriginList::try_from(vec![peer]).unwrap());
+
+		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+
+		// Nobody is exposed yet: a different publisher is free to take the path.
+		assert!(!state.taints_a_reader(&reflected));
+
+		// Advertising the path to `peer` registers them, and the same route is now
+		// recognizable as a reflection.
+		*state.excluded.entry(peer).or_default() += 1;
+		assert!(state.taints_a_reader(&reflected));
+	}
+
+	/// The exposure is what discriminates, not the shape of the chain: an unrelated
+	/// publisher reaching us through some *other* peer still takes the path over.
+	#[test]
+	fn test_rival_publisher_through_another_peer_still_takes_over() {
+		let peer = Origin::new(42).unwrap();
+		let elsewhere = Origin::new(43).unwrap();
+		let upstream = OriginList::try_from(vec![Origin::new(7).unwrap()]).unwrap();
+		let rival = announce().with_hops(OriginList::try_from(vec![Origin::UNKNOWN, elsewhere]).unwrap());
+
+		let mut state = front_state(Origin::new(1).unwrap(), vec![announce().with_hops(upstream)]);
+		*state.excluded.entry(peer).or_default() += 1;
+
+		assert!(!state.taints_a_reader(&rival), "only the peer we feed is a reflection");
+	}
+
+	/// A peer that carries no hop ids hides its depth: everything behind it collapses
+	/// into one entry, so its route understates its true length and wins the cost
+	/// comparison against a longer-looking but genuinely shorter path. Pricing the
+	/// opaque link (`Client::with_cost`) is what restores the intended order.
+	#[test]
+	fn test_opaque_peer_understates_its_depth() {
+		let us = Origin::new(1).unwrap();
+
+		// Our own upstream, honestly described: two hops, charged per link.
+		let direct = || {
+			announce()
+				.with_hops(OriginList::try_from(vec![Origin::new(7).unwrap(), Origin::new(8).unwrap()]).unwrap())
+				.with_cost(2)
+		};
+		// The same content reached through an opaque relay, which is actually further
+		// away but advertises no chain at all, so it lands as one unpriced hop.
+		let opaque = |cost| {
+			announce()
+				.with_hops(OriginList::try_from(vec![Origin::new(42).unwrap()]).unwrap())
+				.with_cost(cost)
+		};
+
+		// Unpriced, the opaque route wins on cost even though it is the longer path.
+		let mut state = front_state(us, vec![direct(), opaque(1)]);
+		state.reselect(false);
+		assert_eq!(
+			state.active,
+			Some(1),
+			"an unpriced opaque link out-ranks a shorter real path"
+		);
+
+		// Priced to reflect what it hides, the real path wins again.
+		let mut state = front_state(us, vec![direct(), opaque(16)]);
+		state.reselect(false);
+		assert_eq!(
+			state.active,
+			Some(0),
+			"pricing the opaque link restores the intended order"
 		);
 	}
 
@@ -5294,6 +5434,74 @@ mod tests {
 			dynamic.requested_broadcast().now_or_never().is_some(),
 			"a genuinely missing path must still fall back"
 		);
+	}
+
+	/// A dynamic handler may serve a broadcast that was never created at the requested
+	/// path, so the requester's handle is named by what it asked for rather than by
+	/// whatever the producer was stamped with. A standalone broadcast (path `""`) served
+	/// at `a/pub` would otherwise be its own root, and a legal `../source` reference in
+	/// its catalog would read as escaping.
+	#[tokio::test]
+	async fn test_dynamic_broadcast_named_by_the_requested_path() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let mut dynamic = origin.dynamic();
+
+		// A standalone broadcast, with no origin and no path of its own.
+		let mut standalone = broadcast::Info::new().produce();
+		let _track = standalone.create_track("catalog.json", None).unwrap();
+		assert_eq!(standalone.info().path.as_str(), "");
+
+		let requesting = origin.consume().request_broadcast("a/pub");
+		settle().await;
+		dynamic
+			.requested_broadcast()
+			.await
+			.expect("handler should be asked for the path")
+			.accept(&standalone);
+
+		let broadcast = requesting.await.expect("the handler served it");
+		assert_eq!(broadcast.info().path.as_str(), "a/pub");
+		// The stamp reaches the tracks, which is what a catalog reader resolves against.
+		let track = broadcast.track("catalog.json").unwrap();
+		assert_eq!(track.broadcast().path.as_str(), "a/pub");
+		assert_eq!(track.subscribe(None).await.unwrap().broadcast().path.as_str(), "a/pub");
+
+		// A repeat request shares the served broadcast and is named the same way.
+		let cached = origin.consume().request_broadcast("a/pub").await.unwrap();
+		assert_eq!(cached.info().path.as_str(), "a/pub");
+
+		// The handler's own handle keeps the broadcast's own (empty) name.
+		assert_eq!(standalone.consume().info().path.as_str(), "");
+	}
+
+	/// A rooted cursor names a broadcast relative to its own root, both when it requests
+	/// one by path and when it observes an announce. That is the only name it can
+	/// resolve against, so a catalog reference is bounds-checked against exactly the
+	/// subtree the cursor may reach rather than the origin's wider root.
+	#[tokio::test]
+	async fn test_rooted_cursor_names_broadcasts_relatively() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let _source = origin.create_broadcast("a/pub", announce()).unwrap();
+		settle().await;
+		settle().await;
+
+		// The origin stamps the absolute path at creation.
+		let absolute = origin.consume().request_broadcast("a/pub").await.unwrap();
+		assert_eq!(absolute.info().path.as_str(), "a/pub");
+
+		let rooted = origin.consume().with_root("a").unwrap();
+		assert_eq!(
+			rooted.request_broadcast("pub").await.unwrap().info().path.as_str(),
+			"pub"
+		);
+
+		let update = rooted.announced().next().await.unwrap();
+		assert_eq!(update.path.as_str(), "pub");
+		assert_eq!(update.broadcast.unwrap().info().path.as_str(), "pub");
 	}
 
 	/// When every route flows through the requester, the path is unroutable for
