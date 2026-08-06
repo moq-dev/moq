@@ -364,16 +364,28 @@ async fn play_audio(
 		channels,
 	})?;
 
-	while let Some(frame) = consumer.read().await? {
-		// Let the speaker catch up before handing it more than it can hold.
-		if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
-			tokio::time::sleep(excess).await;
-		}
+	// One sample across every channel, the unit a write has to stay aligned to.
+	let stride = channels as usize * size_of::<f32>();
+	// A second per write, so a frame longer than the sink can hold is paced in
+	// rather than handed over whole and truncated. An Opus packet caps at 120 ms,
+	// but a PCM one is only required to be sample-aligned, so it can be any length.
+	// Paired with the wait below this keeps the sink under two seconds, inside its
+	// own ceiling.
+	let chunk = (sample_rate as usize * stride).max(stride);
 
+	while let Some(frame) = consumer.read().await? {
 		let samples = frame.data.len() / size_of::<f32>() / channels as usize;
 		let end =
 			timestamp(frame.timestamp).saturating_add(Duration::from_secs_f64(samples as f64 / sample_rate as f64));
-		sink.write(&frame.data)?;
+
+		for part in frame.data.chunks(chunk) {
+			// Let the speaker catch up before handing it more than it can hold.
+			if let Some(excess) = sink.buffered().checked_sub(AUDIO_BUFFER_MAX) {
+				tokio::time::sleep(excess).await;
+			}
+			sink.write(part)?;
+		}
+
 		let previous = clock.lock().unwrap().replace(Clock {
 			media: end.saturating_sub(sink.buffered()),
 			wall: Instant::now(),
