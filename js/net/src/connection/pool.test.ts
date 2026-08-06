@@ -54,15 +54,15 @@ test("two handles on one URL share a connection and an origin", async () => {
 	const first = new Shared({ url, linger });
 	const second = new Shared({ url });
 
-	await waitUntil(() => first.established.peek() !== undefined);
-	await waitUntil(() => second.established.peek() !== undefined);
+	await waitUntil(() => first.status.peek() === "connected");
+	await waitUntil(() => second.status.peek() === "connected");
 	expect(dials.count()).toBe(1);
 	expect(second.origin.peek()).toBe(first.origin.peek());
 
 	// One handle leaving doesn't disturb the other.
 	first.close();
 	await expired();
-	expect(second.established.peek()).not.toBeUndefined();
+	expect(second.status.peek()).toBe("connected");
 
 	second.close();
 });
@@ -71,7 +71,7 @@ test("the connection closes after the last handle and the linger window", async 
 	const dials = stubTransports();
 
 	const handle = new Shared({ url, linger });
-	await waitUntil(() => handle.established.peek() !== undefined);
+	await waitUntil(() => handle.status.peek() === "connected");
 	const origin = handle.origin.peek();
 
 	handle.close();
@@ -83,7 +83,7 @@ test("the connection closes after the last handle and the linger window", async 
 
 	// The next handle dials fresh.
 	const next = new Shared({ url, linger });
-	await waitUntil(() => next.established.peek() !== undefined);
+	await waitUntil(() => next.status.peek() === "connected");
 	expect(dials.count()).toBe(2);
 	next.close();
 });
@@ -92,7 +92,7 @@ test("a handle taken within the linger window reuses the warm connection", async
 	const dials = stubTransports();
 
 	const first = new Shared({ url, linger: 10_000 });
-	await waitUntil(() => first.established.peek() !== undefined);
+	await waitUntil(() => first.status.peek() === "connected");
 	const origin = first.origin.peek();
 	first.close();
 
@@ -108,19 +108,19 @@ test("disabling a handle releases its share", async () => {
 
 	const toggled = new Shared({ url, linger });
 	const steady = new Shared({ url });
-	await waitUntil(() => toggled.established.peek() !== undefined);
+	await waitUntil(() => toggled.status.peek() === "connected");
 
 	toggled.enabled.set(false);
 	await waitUntil(() => toggled.origin.peek() === undefined);
-	expect(toggled.established.peek()).toBeUndefined();
+	expect(toggled.status.peek()).not.toBe("connected");
 
 	// The steady handle keeps the connection alive through the toggle.
 	await expired();
-	expect(steady.established.peek()).not.toBeUndefined();
+	expect(steady.status.peek()).toBe("connected");
 
 	// Re-enabling rejoins the shared connection.
 	toggled.enabled.set(true);
-	await waitUntil(() => toggled.established.peek() !== undefined);
+	await waitUntil(() => toggled.status.peek() === "connected");
 	expect(toggled.origin.peek()).toBe(steady.origin.peek());
 
 	toggled.close();
@@ -154,7 +154,7 @@ test("a publish through one handle resolves locally for another", async () => {
 	broadcast.createTrack("chat");
 
 	// Loopback: the shared origin serves the page's own publish with no round trip.
-	const handle = watcher.origin.peek()?.consume().consume(Path.from("mine"));
+	const handle = watcher.origin.peek()?.get(Path.from("mine"));
 	expect(handle).toBeDefined();
 	handle?.close();
 

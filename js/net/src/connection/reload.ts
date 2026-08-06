@@ -310,7 +310,7 @@ export class Reload {
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
 		// With a subscribe origin the table already spans reconnects (the forwarder retracts
 		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.subscribe) return this.subscribe.consume().announced(prefix);
+		if (this.subscribe) return this.subscribe.announced(prefix);
 
 		const producer = new Announce.Producer(prefix);
 		const consumer = producer.consume();
@@ -378,7 +378,7 @@ export class Reload {
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
 		// Same delegation as announced(): the origin's table is the reconnect-spanning view.
-		if (this.subscribe) return new Announce.Broadcast({ origin: this.subscribe.consume(), path });
+		if (this.subscribe) return new Announce.Broadcast({ origin: this.subscribe, path });
 		return new Announce.Broadcast({ connection: this.established, path });
 	}
 

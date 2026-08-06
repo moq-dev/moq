@@ -59,7 +59,7 @@ type Status = "offline" | "loading" | "live";
 export type BroadcastInput = {
 	// The origin to consume from. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
-	origin: Getter<Moq.Origin.Consumer | undefined>;
+	origin: Getter<Moq.Origin.Table | undefined>;
 
 	// Whether to start downloading the broadcast.
 	// Defaults to false so you can make sure everything is ready before starting.
@@ -169,20 +169,14 @@ export class Broadcast {
 		return active.has(path);
 	}
 
-	// Resolve `path` without waiting for an announcement: the routed broadcast when the
-	// origin already has it (a local publish resolves with no round trip), else a standing
-	// request answered by whichever session provides it, resolving on a later run.
-	#blindBroadcast(
+	// Resolve `path` without waiting for an announcement. The request is table-first, so a
+	// routed broadcast (a local publish, or anything announced) resolves synchronously and
+	// a blind session answer covers the rest, arriving on a later run.
+	#requestBroadcast(
 		effect: Effect,
-		origin: Moq.Origin.Consumer,
+		origin: Moq.Origin.Table,
 		path: Moq.Path.Valid,
 	): Moq.Broadcast.Consumer | undefined {
-		const routed = origin.consume(path);
-		if (routed) {
-			effect.cleanup(() => routed.close());
-			return routed;
-		}
-
 		const request = origin.request(path);
 		effect.cleanup(() => request.close());
 		return effect.get(request.active);
@@ -202,7 +196,7 @@ export class Broadcast {
 
 		// No announcement gate: subscribe immediately.
 		if (!effect.get(this.in.reload)) {
-			effect.set(this.#out.active, this.#blindBroadcast(effect, origin, name), undefined);
+			effect.set(this.#out.active, this.#requestBroadcast(effect, origin, name), undefined);
 			return;
 		}
 
@@ -321,16 +315,14 @@ export class Broadcast {
 		if (!origin) return undefined;
 
 		// Without an announcement gate (reload off, or no session supports discovery),
-		// resolve blind rather than waiting for an announcement that never comes.
-		if (!effect.get(this.in.reload) || effect.get(origin.discovery) === false) {
-			return this.#blindBroadcast(effect, origin, resolved);
+		// resolve blind rather than waiting for an announcement that never comes. With the
+		// gate, only stand the request once the path is announced: the request then
+		// resolves from the table, never blind.
+		if (effect.get(this.in.reload) && effect.get(origin.discovery) !== false) {
+			if (!this.#isPathAnnounced(effect, resolved)) return undefined;
 		}
 
-		if (!this.#isPathAnnounced(effect, resolved)) return undefined;
-
-		const broadcast = origin.consume(resolved);
-		if (broadcast) effect.cleanup(() => broadcast.close());
-		return broadcast;
+		return this.#requestBroadcast(effect, origin, resolved);
 	}
 
 	close() {

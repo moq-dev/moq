@@ -69,11 +69,20 @@ export interface Table {
 	/** Settles once the origin closes; see {@link Producer.closed}. */
 	readonly closed: GetPromise<Error | null>;
 
+	/** Whether an attached session supports discovery; see {@link Consumer.discovery}. */
+	readonly discovery: Getter<boolean | undefined>;
+
 	/** Publish a broadcast at `path`, returning its producer; see {@link Producer.publish}. */
 	publish(path: Path.Valid): broadcast.Producer;
 
-	/** A read handle for this origin; see {@link Producer.consume}. */
-	consume(): Consumer;
+	/** Resolve `path`, without waiting for an announcement; see {@link Consumer.request}. */
+	request(path: Path.Valid): Request;
+
+	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
+	announced(prefix?: Path.Valid): announce.Consumer;
+
+	/** A one-shot lookup; see {@link Consumer.get}. @internal */
+	get(path: Path.Valid): broadcast.Consumer | undefined;
 }
 
 /**
@@ -231,8 +240,34 @@ export class Producer implements Table {
 		};
 	}
 
-	/** A read handle for this origin. */
+	/** A read handle for this origin, the side a connection's `publish` option borrows. */
 	consume(): Consumer {
+		return makeConsumer(this.#state);
+	}
+
+	/** Whether an attached session supports discovery; see {@link Consumer.discovery}. */
+	get discovery(): Getter<boolean | undefined> {
+		return this.#reader.discovery;
+	}
+
+	/** Resolve `path`, without waiting for an announcement; see {@link Consumer.request}. */
+	request(path: Path.Valid): Request {
+		return this.#reader.request(path);
+	}
+
+	/** The available broadcasts under `prefix`, as a live stream; see {@link Consumer.announced}. */
+	announced(prefix?: Path.Valid): announce.Consumer {
+		return this.#reader.announced(prefix);
+	}
+
+	/** A one-shot lookup; see {@link Consumer.get}. @internal */
+	get(path: Path.Valid): broadcast.Consumer | undefined {
+		return this.#reader.get(path);
+	}
+
+	// The reader backing the passthroughs, so holding a Producer never requires the
+	// consume().x() stutter for everyday reads.
+	get #reader(): Consumer {
 		return makeConsumer(this.#state);
 	}
 
@@ -273,11 +308,15 @@ export class Request {
 	readonly path: Path.Valid;
 
 	/**
-	 * The broadcast a session provided, or undefined while nobody has.
+	 * The resolved broadcast, or undefined while nothing provides the path.
 	 *
-	 * Assumed present rather than known live: the session subscribed blind, so a missing
-	 * broadcast surfaces as a reset on the first track subscription, not here. Drops back
-	 * to undefined when the answering session dies and resolves again once another answers.
+	 * The table's route when it has one: a local publish (no round trip) or an announced
+	 * broadcast, swapping when a republish takes the path. Otherwise a session's blind
+	 * answer, which is assumed present rather than known live: a missing broadcast
+	 * surfaces as a reset on the first track subscription, not here. Drops back to
+	 * undefined when the providing route dies and resolves again when another appears.
+	 *
+	 * Borrowed, not yours to close: take a `clone()` for a lifetime of your own.
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
@@ -358,31 +397,33 @@ export class Consumer {
 	};
 
 	/**
-	 * A handle to the broadcast at `path`, or undefined when nothing routes it.
+	 * A one-shot handle to the broadcast at `path`, or undefined when nothing routes it.
 	 *
-	 * A local publish wins over a remote broadcast at the same path, so a publisher
-	 * consuming its own path reads its own copy with no round trip. The handle is yours:
-	 * close it when done. The broadcast stays routed for everyone else.
+	 * A snapshot: it neither waits for the path to appear nor follows a republish, which is
+	 * why it is not public. Use {@link request} for a resolution that cannot race. A local
+	 * publish wins over a remote broadcast. The handle is yours: close it when done.
+	 *
+	 * @internal
 	 */
-	consume(path: Path.Valid): broadcast.Consumer | undefined {
+	get(path: Path.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
 		if (local) return local.clone();
 		return this.#state.remote.peek()?.get(path)?.[0]?.clone();
 	}
 
 	/**
-	 * Ask the attached sessions to provide `path` without waiting for an announcement.
+	 * Resolve `path`, without waiting for an announcement.
 	 *
-	 * The escape hatch for a path nothing announces: a relay without discovery, or a
-	 * subscribe-immediately consumer that accepts a reset when the path turns out absent.
-	 * Whichever attached session answers first backs {@link Request.active}, blind; the
-	 * request outlives sessions, so a reconnect re-answers it. Close the request when done.
-	 * On a closed origin the request never resolves.
+	 * The one way to consume by path. {@link Request.active} follows whatever the table
+	 * routes (a local publish, or any feeding session's announcement, swapping on a
+	 * republish); when nothing does, the request stands and whichever attached session
+	 * answers first provides a blind subscription instead, re-answered across reconnects.
+	 * Close the request when done. On a closed origin it never resolves.
 	 */
 	request(path: Path.Valid): Request {
 		const requests = this.#state.requests.peek();
 		if (!requests) {
-			// Closed origin: a request that can never resolve, mirroring consume's undefined.
+			// Closed origin: a request that can never resolve.
 			return new Request(path, new Signal<broadcast.Consumer | undefined>(undefined), () => {});
 		}
 
@@ -397,7 +438,7 @@ export class Consumer {
 		slot.count += 1;
 
 		const taken = slot;
-		return new Request(path, taken.front, () => {
+		return new Request(path, this.#resolved(path, taken), () => {
 			taken.count -= 1;
 			if (taken.count > 0) return;
 
@@ -413,6 +454,47 @@ export class Consumer {
 				taken.front.set(undefined);
 			});
 		});
+	}
+
+	// The reactive view behind Request.active: the table's route for `path` when it has
+	// one (knowledge beats assumption), else the slot's blind answer. Derived per access
+	// over the backing signals, so a routed path resolves synchronously.
+	#resolved(path: Path.Valid, slot: RequestSlot): Getter<broadcast.Consumer | undefined> {
+		const resolve = () => {
+			const local = this.#state.local.peek()?.get(path);
+			if (local) return local;
+			return this.#state.remote.peek()?.get(path)?.[0] ?? slot.front.peek();
+		};
+		const sources = [this.#state.local, this.#state.remote, slot.front] as const;
+
+		return {
+			peek: resolve,
+			subscribe: (fn) => {
+				const notify = () => fn(resolve());
+				const disposes = sources.map((source) => source.subscribe(notify));
+				return () => {
+					for (const dispose of disposes) dispose();
+				};
+			},
+			changed: ((fn?: (value: broadcast.Consumer | undefined) => void) => {
+				if (fn) {
+					const notify = () => fn(resolve());
+					// Spelled out: mapping over the tuple trips overload resolution on the
+					// union of signal types.
+					const disposes = [
+						sources[0].changed(notify),
+						sources[1].changed(notify),
+						sources[2].changed(notify),
+					];
+					return () => {
+						for (const dispose of disposes) dispose();
+					};
+				}
+				// Spelled out: mapping `.changed()` over the tuple trips overload resolution
+				// on the union of signal types.
+				return Promise.race([sources[0].changed(), sources[1].changed(), sources[2].changed()]).then(resolve);
+			}) as Getter<broadcast.Consumer | undefined>["changed"],
+		};
 	}
 
 	/**
