@@ -1224,9 +1224,9 @@ mod tests {
 	}
 
 	/// The stream listeners must hand accepted sessions to the *configured*
-	/// [`moq_net::Server`]. A fresh one drops the publisher that
-	/// [`Server::serve_publish`] sets, so the session would accept and then serve
-	/// nothing.
+	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
+	/// rather than on the request, so a session that handshakes against any other
+	/// server accepts and then serves nothing.
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn unix_listener_serves_the_configured_publisher() {
@@ -1253,10 +1253,12 @@ mod tests {
 		// The publisher lives on the server, never on the accepted request.
 		let serve = tokio::spawn(server.serve_publish(origin.consume()));
 
-		// The listener binds on the first accept, so wait for the socket.
+		// The listener binds on the first accept, so wait for the socket. Keep the
+		// last error: a bind failure is logged and swallowed, so it's the only clue
+		// to why the socket never showed up.
 		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-		while tokio::net::UnixStream::connect(&path).await.is_err() {
-			assert!(std::time::Instant::now() < deadline, "unix listener never bound");
+		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
+			assert!(std::time::Instant::now() < deadline, "unix listener never bound: {err}");
 			tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 		}
 
