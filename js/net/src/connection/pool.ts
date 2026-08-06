@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Computed, Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
@@ -80,6 +80,14 @@ export class Shared {
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	#signals = new Effect();
 
+	/**
+	 * Take a handle on the shared connection for {@link SharedProps.url}.
+	 *
+	 * Dials immediately when a URL is given and `enabled` is not false; otherwise waits for
+	 * the signals to say go. The handle owns nothing but its own share: {@link close}
+	 * releases it, and the underlying connection and origin live for as long as any handle
+	 * (plus the linger window) wants them.
+	 */
 	constructor(props?: SharedProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
@@ -167,10 +175,12 @@ export class Shared {
 	 * Close the handle when done.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
-		return new Announce.Broadcast({
-			origin: this.#signals.computed((effect) => effect.get(this.#origin)?.consume()),
-			path,
-		});
+		// The mapping computed belongs to the handle, not this connection: parking it on
+		// #signals would retain one per call until the whole connection closes.
+		const origin = new Computed((effect) => effect.get(this.#origin)?.consume());
+		const watch = new Announce.Broadcast({ origin, path });
+		void watch.closed.then(() => origin.close());
+		return watch;
 	}
 
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */

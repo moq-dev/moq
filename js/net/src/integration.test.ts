@@ -1546,3 +1546,108 @@ test("origin: a reactive handle follows announcements, republishes, and reconnec
 	serverOrigin.close();
 	clientOrigin.close();
 });
+
+test("origin: overlapping sessions carrying one path fail over", async () => {
+	// Two live relays announce the same broadcast into one origin, the redundant-relay
+	// shape (and the GOAWAY drain shape, where old and new sessions briefly overlap).
+	const clientOrigin = new OriginProducer();
+
+	const setup = async () => {
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		const serverOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, subscribe: clientOrigin }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+		const broadcast = serverOrigin.publish(Path.from("redundant"));
+		const serving = (async () => {
+			for (;;) {
+				const req = await broadcast.requested();
+				if (!req) break;
+				req.accept().writeString("still here");
+			}
+		})();
+		return { client, server, serverOrigin, broadcast, serving };
+	};
+
+	const first = await setup();
+	const second = await setup();
+
+	const reader = clientOrigin.consume();
+	await until(() => reader.consume(Path.from("redundant")) !== undefined);
+
+	// The newer session dies; the older one still carries the path and must keep serving.
+	second.client.close();
+	second.server.close();
+	await sleep(50);
+
+	const remote = reader.consume(Path.from("redundant"));
+	if (!remote) throw new Error("route black-holed despite a live session");
+	const track = remote.track("chat").subscribe();
+	expect(await track.readString()).toBe("still here");
+
+	track.close();
+	remote.close();
+	first.broadcast.close();
+	await first.serving;
+	first.client.close();
+	first.server.close();
+	first.serverOrigin.close();
+	second.serverOrigin.close();
+	second.broadcast.close();
+	clientOrigin.close();
+});
+
+test("origin: a standby session re-answers a request when the answerer dies", async () => {
+	const clientOrigin = new OriginProducer();
+
+	const setup = async (payload: string) => {
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		const serverOrigin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			// No discovery: requests are the only way through.
+			connect(url, { transport: pair.client, subscribe: clientOrigin, discovery: false }),
+			accept(pair.server, url, { publish: serverOrigin.consume() }),
+		]);
+		const broadcast = serverOrigin.publish(Path.from("blind"));
+		const serving = (async () => {
+			for (;;) {
+				const req = await broadcast.requested();
+				if (!req) break;
+				req.accept().writeString(payload);
+			}
+		})();
+		return { client, server, serverOrigin, broadcast, serving };
+	};
+
+	// The first session answers the standing request; the second attaches as a standby.
+	const request = clientOrigin.consume().request(Path.from("blind"));
+	const answerer = await setup("from answerer");
+	await until(() => request.active.peek() !== undefined);
+	const standby = await setup("from standby");
+
+	// The answering session dies while the standby stays connected: the withdrawal must
+	// wake the standby's serving loop, not wait for a brand-new session. The handoff can
+	// complete within one scheduler tick, so assert the front changed rather than racing
+	// to observe the vacant slot.
+	const before = request.active.peek();
+	answerer.client.close();
+	answerer.server.close();
+	await until(() => request.active.peek() !== undefined && request.active.peek() !== before);
+
+	const front = request.active.peek();
+	const track = front?.track("chat").subscribe();
+	if (!track) throw new Error("expected a track from the standby");
+	expect(await track.readString()).toBe("from standby");
+
+	track.close();
+	request.close();
+	standby.broadcast.close();
+	await standby.serving;
+	standby.client.close();
+	standby.server.close();
+	standby.serverOrigin.close();
+	answerer.serverOrigin.close();
+	answerer.broadcast.close();
+	clientOrigin.close();
+});
