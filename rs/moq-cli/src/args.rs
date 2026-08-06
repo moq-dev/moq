@@ -1,6 +1,7 @@
 //! The unified moq-cli argument surface.
 //!
-//! Grammar: `moq <MoQ side> <import|export> <endpoint> [endpoint opts]`.
+//! Grammar: `moq <MoQ side> <import|export> <endpoint> [endpoint opts]`, plus
+//! `moq <MoQ side> play` for native playback.
 //!
 //! - The MoQ side (`--client-connect` / `--server-bind`, both optional, at least
 //!   one) attaches the shared Origin to the MoQ network, and comes before the
@@ -138,6 +139,9 @@ pub enum Command {
 	/// Route media OUT OF MoQ to one sink.
 	#[command(alias = "subscribe")]
 	Export(Export),
+	/// Play a broadcast in a native window and speaker.
+	#[cfg(feature = "play")]
+	Play(crate::play::Args),
 	/// Re-encode `--broadcast` into a lower ladder, published next to it and
 	/// only encoded while watched (just-in-time).
 	#[cfg(feature = "transcode")]
@@ -370,5 +374,27 @@ mod tests {
 			let err = cli.moq.reject("token").unwrap_err().to_string();
 			assert!(err.contains(flag[0]), "{err}");
 		}
+	}
+
+	#[cfg(feature = "play")]
+	#[test]
+	fn play_verb() {
+		let cli = Cli::try_parse_from([
+			"moq",
+			"--client-connect",
+			"https://relay.example.com/anon",
+			"--broadcast",
+			"room.hang",
+			"play",
+			"--video-name",
+			"hd",
+		])
+		.unwrap();
+		let Command::Play(play) = cli.command else {
+			panic!("expected play")
+		};
+		assert_eq!(play.latency_max, Duration::from_millis(500));
+		assert_eq!(play.select.video_name.as_deref(), Some("hd"));
+		assert!(cli.moq.validate().is_ok());
 	}
 }
