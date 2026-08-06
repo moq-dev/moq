@@ -659,27 +659,46 @@ pub(crate) fn apply_codec_durations(frames: &mut [Frame], opus: bool) {
 /// writes arrive already set and are left alone here.
 pub(crate) fn infer_missing_durations(frames: &mut [Frame], successor: Option<&Frame>, default_frame: Duration) {
 	let infer_from_pts = pts_monotonic(frames, successor);
-	// Express the fallback at the frames' own timescale so it matches the durations derived from
-	// their timestamps (a `Timestamp` carries its scale, and `try_from(Duration)` is nanosecond-scale).
-	let fallback = frames.first().map(|f| f.timestamp.scale()).and_then(|scale| {
-		Timestamp::try_from(default_frame)
-			.ok()
-			.and_then(|t| t.convert(scale).ok())
-	});
 
 	for i in 0..frames.len() {
-		if frames[i].duration.is_some_and(|duration| !duration.is_zero()) {
-			continue;
-		}
-
-		frames[i].duration = infer_from_pts
+		let successor = infer_from_pts
 			.then(|| duration_bound(frames, successor, i))
 			.flatten()
-			.and_then(|next| next.timestamp.convert(frames[i].timestamp.scale()).ok())
-			.and_then(|next| next.checked_sub(frames[i].timestamp).ok())
-			.filter(|duration| !duration.is_zero())
-			.or(fallback);
+			.cloned();
+		infer_missing_duration(&mut frames[i], successor.as_ref(), default_frame);
 	}
+}
+
+/// Infer one frame's duration from a known same-group successor, else the catalog cadence.
+pub(crate) fn infer_missing_duration(frame: &mut Frame, successor: Option<&Frame>, default_frame: Duration) {
+	if frame.duration.is_some_and(|duration| !duration.is_zero()) {
+		return;
+	}
+
+	frame.duration = successor
+		.and_then(|next| timestamp_gap(frame.timestamp, next.timestamp))
+		.or_else(|| Timestamp::try_from(default_frame).ok())
+		.filter(|duration| !duration.is_zero());
+}
+
+/// Subtract two instants at a common scale so neither is quantized before the gap is known.
+fn timestamp_gap(start: Timestamp, end: Timestamp) -> Option<Timestamp> {
+	let start_scale = start.scale().as_u64();
+	let end_scale = end.scale().as_u64();
+	let common_scale = start_scale
+		.checked_div(gcd(start_scale, end_scale))?
+		.checked_mul(end_scale)?;
+	let common_scale = moq_net::Timescale::new(common_scale).ok()?;
+	let ticks = end.as_scale(common_scale).checked_sub(start.as_scale(common_scale))?;
+	Timestamp::new(u64::try_from(ticks).ok()?, common_scale).ok()
+}
+
+/// Greatest common divisor for building an exact common timestamp scale.
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+	while b != 0 {
+		(a, b) = (b, a % b);
+	}
+	a
 }
 
 fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {
@@ -744,6 +763,10 @@ mod tests {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
+	fn duration_micros(frame: &Frame) -> u128 {
+		frame.duration.unwrap().as_micros()
+	}
+
 	fn frame(timestamp_us: u64, duration_us: Option<u64>) -> Frame {
 		Frame {
 			timestamp: ts(timestamp_us),
@@ -769,7 +792,7 @@ mod tests {
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(frames[1].duration, Some(ts(41_667)));
-		assert_eq!(frames[2].duration, Some(ts(33_000)));
+		assert_eq!(duration_micros(&frames[2]), 33_000);
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.116334);
 	}
 
@@ -778,7 +801,7 @@ mod tests {
 		let mut frames = vec![frame(83_333, Some(0))];
 		infer_missing_durations(&mut frames, None, Duration::from_millis(40));
 
-		assert_eq!(frames[0].duration, Some(ts(40_000)));
+		assert_eq!(duration_micros(&frames[0]), 40_000);
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(40)), 0.04);
 	}
 
@@ -802,7 +825,7 @@ mod tests {
 		let mut frames = vec![frame(63_244, None)];
 		infer_missing_durations(&mut frames, Some(&next_group), Duration::from_millis(33));
 
-		assert_eq!(frames[0].duration, Some(ts(33_000)));
+		assert_eq!(duration_micros(&frames[0]), 33_000);
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.033);
 	}
 
@@ -815,8 +838,8 @@ mod tests {
 		infer_missing_durations(&mut frames, None, Duration::from_millis(21));
 
 		assert_eq!(frames[0].duration, Some(ts(21_333)), "same group, real delta");
-		assert_eq!(frames[1].duration, Some(ts(21_000)), "bounded by the next group");
-		assert_eq!(frames[2].duration, Some(ts(21_000)), "nothing after it at all");
+		assert_eq!(duration_micros(&frames[1]), 21_000, "bounded by the next group");
+		assert_eq!(duration_micros(&frames[2]), 21_000, "nothing after it at all");
 	}
 
 	/// The duration cap splits a GOP across fragments, so the successor is a delta frame
@@ -870,7 +893,7 @@ mod tests {
 			Some(ts(33_000)),
 			"in-group delta survives the rewind"
 		);
-		assert_eq!(frames[1].duration, Some(ts(50_000)), "last in group falls back");
+		assert_eq!(duration_micros(&frames[1]), 50_000, "last in group falls back");
 	}
 
 	#[test]
@@ -879,9 +902,9 @@ mod tests {
 		let mut frames = vec![frame(0, None), frame(99_000, None), frame(33_000, None)];
 		infer_missing_durations(&mut frames, Some(&successor), Duration::from_millis(33));
 
-		assert_eq!(frames[0].duration, Some(ts(33_000)));
-		assert_eq!(frames[1].duration, Some(ts(33_000)));
-		assert_eq!(frames[2].duration, Some(ts(33_000)));
+		assert_eq!(duration_micros(&frames[0]), 33_000);
+		assert_eq!(duration_micros(&frames[1]), 33_000);
+		assert_eq!(duration_micros(&frames[2]), 33_000);
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.099);
 	}
 

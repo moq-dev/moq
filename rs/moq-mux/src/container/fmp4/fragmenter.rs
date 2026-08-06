@@ -5,7 +5,13 @@ use std::time::Duration;
 use crate::container::Frame;
 
 use super::Fragment;
-use super::export::{apply_codec_durations, fragment_seconds, infer_missing_durations};
+use super::export::{apply_codec_durations, infer_missing_duration};
+
+/// A frame waiting for its duration, with its decode-timeline boundary preserved.
+pub(super) struct Pending {
+	frame: Frame,
+	group_start: bool,
+}
 
 /// Cuts a live stream of frames into one moof+mdat fragment each, on one continuous
 /// decode timeline.
@@ -43,14 +49,19 @@ use super::export::{apply_codec_durations, fragment_seconds, infer_missing_durat
 /// # }
 /// ```
 ///
+/// Use [`push_group`](Self::push_group) for the first frame after an actual MoQ group
+/// boundary. A mid-group sync sample still uses [`push`](Self::push), even though its
+/// [`keyframe`](Frame::keyframe) flag is set.
+///
 /// A frame that states its own duration (CMAF input, an Opus TOC byte, or a publisher that
 /// sets [`Frame::duration`]) emits with no lookahead. If the preceding frame was waiting for
 /// this one to determine its duration, the same `push` returns both fragments in decode order.
-/// A successor that opens a new group (a keyframe) is never used as a duration bound, since
-/// the publisher may have paused across the boundary; the pending frame then takes the catalog
-/// cadence, exactly like the last frame of a [`Muxer::fragment`](super::Muxer::fragment) call.
+/// A successor passed to [`push_group`](Self::push_group) is never used as a duration bound,
+/// since the publisher may have paused across the boundary; the pending frame then takes the
+/// catalog cadence, exactly like the last frame of a
+/// [`Muxer::fragment`](super::Muxer::fragment) call.
 ///
-/// Each group re-anchors the decode timeline at its keyframe's presentation time. When the
+/// Each explicit group start re-anchors the decode timeline at its presentation time. When the
 /// durations tile the timeline this is a no-op, and when they don't (a publisher pause, a
 /// variable frame rate with no stated durations) it keeps `tfdt` truthful instead of letting
 /// the composition offsets grow without bound.
@@ -68,7 +79,7 @@ pub struct Fragmenter {
 	/// Whether a missing duration can be inferred from the successor's presentation time.
 	pub(super) infer_missing: bool,
 	/// A duration-less frame held until its successor arrives to time it.
-	pub(super) pending: Option<Frame>,
+	pub(super) pending: Option<Pending>,
 	/// The next fragment's decode time in ticks at `timescale`; `None` before the first frame.
 	pub(super) dts: Option<u64>,
 	/// The next moof sequence number.
@@ -81,7 +92,21 @@ impl Fragmenter {
 	/// Returns no fragments when the frame must wait for a successor, one in the normal case,
 	/// or two when the incoming frame both times a pending frame and states its own duration.
 	/// The final pending frame is retrieved with [`flush`](Self::flush).
-	pub fn push(&mut self, mut frame: Frame) -> crate::Result<Vec<Fragment>> {
+	pub fn push(&mut self, frame: Frame) -> crate::Result<Vec<Fragment>> {
+		self.push_inner(frame, false)
+	}
+
+	/// Feed the first frame after an actual MoQ group boundary.
+	///
+	/// The prior duration-less frame takes the catalog cadence, and this frame re-anchors the
+	/// decode timeline at its presentation time. Use [`push`](Self::push) for every other frame,
+	/// including a mid-group sync sample.
+	pub fn push_group(&mut self, frame: Frame) -> crate::Result<Vec<Fragment>> {
+		self.push_inner(frame, true)
+	}
+
+	/// Feed one frame with the caller's explicit group-boundary knowledge.
+	fn push_inner(&mut self, mut frame: Frame, group_start: bool) -> crate::Result<Vec<Fragment>> {
 		// Opus states its duration in the TOC byte; read it now so such a frame never waits.
 		apply_codec_durations(std::slice::from_mut(&mut frame), self.opus);
 		if !stated(&frame) && !self.infer_missing {
@@ -94,17 +119,18 @@ impl Fragmenter {
 		let mut fragments = Vec::new();
 
 		if let Some(mut pending) = next.pending.take() {
-			// The incoming frame is the successor that times the pending one. A keyframe may
-			// open a new group, and a group boundary is never a duration (the publisher may
-			// have paused across it), so the pending frame then takes the catalog cadence.
-			infer_missing_durations(std::slice::from_mut(&mut pending), Some(&frame), next.default_frame);
-			fragments.push(next.emit(pending)?);
+			// The incoming frame is the successor that times the pending one. A group boundary
+			// is never a duration (the publisher may have paused across it), so the pending frame
+			// then takes the catalog cadence.
+			let successor = (!group_start).then_some(&frame);
+			infer_missing_duration(&mut pending.frame, successor, next.default_frame);
+			fragments.push(next.emit(pending.frame, pending.group_start)?);
 		}
 
 		if stated(&frame) {
-			fragments.push(next.emit(frame)?);
+			fragments.push(next.emit(frame, group_start)?);
 		} else {
-			next.pending = Some(frame);
+			next.pending = Some(Pending { frame, group_start });
 		}
 
 		*self = next;
@@ -120,18 +146,18 @@ impl Fragmenter {
 		let Some(mut pending) = self.pending.take() else {
 			return Ok(None);
 		};
-		infer_missing_durations(std::slice::from_mut(&mut pending), None, self.default_frame);
-		Ok(Some(self.emit(pending)?))
+		infer_missing_duration(&mut pending.frame, None, self.default_frame);
+		Ok(Some(self.emit(pending.frame, pending.group_start)?))
 	}
 
 	/// Encode one frame as its own fragment and advance the timeline past it.
-	fn emit(&mut self, frame: Frame) -> crate::Result<Fragment> {
+	fn emit(&mut self, frame: Frame, group_start: bool) -> crate::Result<Fragment> {
 		let pts = super::base_ticks(&frame, self.timescale)?;
-		// A keyframe may open a new group after a gap the durations didn't cover, so each
-		// group re-anchors the decode timeline at its keyframe's presentation time. When
+		// A group may open after a gap the durations didn't cover, so each group re-anchors
+		// the decode timeline at its first frame's presentation time. When
 		// the durations tile, the accumulated time already equals it and this is a no-op.
 		let dts = match self.dts {
-			Some(dts) if !frame.keyframe => dts,
+			Some(dts) if !group_start => dts,
 			_ => pts,
 		};
 
@@ -158,7 +184,9 @@ impl Fragmenter {
 			// Audio has no keyframes, so every audio fragment is independent; video is
 			// independent only at a GOP boundary. Matches what the exporter advertises.
 			independent: !self.is_video || frame.keyframe,
-			duration: fragment_seconds(std::slice::from_ref(&frame), self.default_frame),
+			// Describe the exact duration written into trun, including its timescale
+			// quantization, so playlist metadata and media advance by the same amount.
+			duration: f64::from(ticks) / self.timescale.as_u64() as f64,
 		})
 	}
 
@@ -171,7 +199,10 @@ impl Fragmenter {
 			is_video: self.is_video,
 			opus: self.opus,
 			infer_missing: self.infer_missing,
-			pending: self.pending.clone(),
+			pending: self.pending.as_ref().map(|pending| Pending {
+				frame: pending.frame.clone(),
+				group_start: pending.group_start,
+			}),
 			dts: self.dts,
 			sequence: self.sequence,
 		}
@@ -337,6 +368,47 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
 	}
 
+	// Convert both instants to an exact common scale only after finding that scale. Converting
+	// the 1.5-second successor to the predecessor's 1 Hz scale first would erase this gap.
+	#[test]
+	fn a_coarse_predecessor_does_not_quantize_the_successor_gap() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
+		let first = Frame {
+			timestamp: Timestamp::from_secs(1).unwrap(),
+			duration: None,
+			..tick_frame(0, true)
+		};
+		let successor = Frame {
+			timestamp: Timestamp::from_scale(3, 2).unwrap(),
+			duration: None,
+			..tick_frame(0, false)
+		};
+
+		assert!(fragmenter.push(first).unwrap().is_empty());
+		let first = one(fragmenter.push(successor).unwrap());
+
+		assert_eq!(super::super::sample_durations(&first.data), vec![Some(15_000)]);
+	}
+
+	// Keep the catalog fallback in its native precision too. Converting 1/30 second to the
+	// frame's 1 Hz timestamp scale would turn a positive tail duration into zero.
+	#[test]
+	fn a_coarse_tail_timestamp_keeps_the_catalog_fallback() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(infer_video_durations());
+		let tail = Frame {
+			timestamp: Timestamp::from_secs(1).unwrap(),
+			duration: None,
+			..tick_frame(0, true)
+		};
+
+		assert!(fragmenter.push(tail).unwrap().is_empty());
+		let tail = fragmenter.flush().unwrap().expect("the pending tail");
+
+		assert_eq!(super::super::sample_durations(&tail.data), vec![Some(999)]);
+	}
+
 	// A stated frame that arrives behind a pending frame is already ready too. Returning both
 	// keeps the live edge available even when no later frame arrives and flush is not called.
 	#[test]
@@ -454,7 +526,7 @@ mod tests {
 
 		assert!(fragmenter.push(untimed_frame(0, true)).unwrap().is_empty());
 		let first = one(fragmenter.push(untimed_frame(1_500, false)).unwrap());
-		let second = one(fragmenter.push(untimed_frame(paused_until, true)).unwrap());
+		let second = one(fragmenter.push_group(untimed_frame(paused_until, true)).unwrap());
 		let third = fragmenter.flush().unwrap().expect("the keyframe itself");
 
 		assert_eq!(super::super::sample_durations(&first.data), vec![Some(1_500)]);
@@ -467,6 +539,28 @@ mod tests {
 			super::super::timeline(&third.data).0,
 			paused_until,
 			"the new group re-anchors at its keyframe's presentation time"
+		);
+	}
+
+	// A group may contain another sync sample. Its keyframe bit makes it independently
+	// decodable, but only push_group is allowed to reset the continuous decode timeline.
+	#[test]
+	fn a_mid_group_keyframe_does_not_reanchor_the_timeline() {
+		let muxer = video_muxer();
+		let mut fragmenter = muxer.fragmenter(Default::default());
+
+		let first = one(fragmenter.push(tick_frame(0, true)).unwrap());
+		let second = one(fragmenter.push(tick_frame(1_000, false)).unwrap());
+		let sync = one(fragmenter.push(tick_frame(5_000, true)).unwrap());
+		let next_group = one(fragmenter.push_group(tick_frame(10_000, true)).unwrap());
+
+		assert_eq!(super::super::timeline(&first.data).0, 0);
+		assert_eq!(super::super::timeline(&second.data).0, 1_000);
+		assert_eq!(super::super::timeline(&sync.data).0, 2_000);
+		assert_eq!(super::super::timeline(&next_group.data).0, 10_000);
+		assert!(
+			sync.independent,
+			"the mid-group sync sample stays independently decodable"
 		);
 	}
 
