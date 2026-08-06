@@ -186,9 +186,8 @@ export default class MoqPublish extends HTMLElement {
 		// transport has no event for it, so sample on our own schedule and skip a tick
 		// while the previous snapshot is outstanding.
 		this.signals.run((effect) => {
-			const connection = effect.get(this.connection.established);
 			effect.set(this.#bandwidth, undefined);
-			if (!connection) return;
+			if (effect.get(this.connection.status) !== "connected") return;
 
 			let pending = false;
 			const sample = async () => {
@@ -198,7 +197,7 @@ export default class MoqPublish extends HTMLElement {
 					// A snapshot that lands after this run was torn down describes a
 					// connection we no longer have, so drop it rather than capping the
 					// encoder at a dead peer's estimate.
-					const stats = await Promise.race([effect.cancel, connection.stats()]);
+					const stats = await Promise.race([effect.cancel, this.connection.stats()]);
 					if (stats) this.#bandwidth.set(stats.estimatedSendRate);
 				} finally {
 					pending = false;

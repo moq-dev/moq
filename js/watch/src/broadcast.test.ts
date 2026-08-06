@@ -17,7 +17,7 @@ function origin(paths: string[]): Origin.Producer {
 function broadcast(name: string, paths: string[] = [name]): { source: Broadcast; owner: Origin.Producer } {
 	const owner = origin(paths);
 	const source = new Broadcast({
-		origin: owner.consume(),
+		origin: owner,
 		name: Path.from(name),
 		enabled: true,
 		reload: false,
@@ -77,7 +77,7 @@ describe("relativeBroadcast", () => {
 	const manualCatalog = (catalog: Catalog.Root) => {
 		const owner = origin(["a/b"]);
 		const source = new Broadcast({
-			origin: owner.consume(),
+			origin: owner,
 			name: Path.from("a/b"),
 			enabled: true,
 			reload: false,
@@ -182,7 +182,7 @@ describe("blind resolution", () => {
 		// answer, not close the request and re-dial forever.
 		const owner = new Origin.Producer();
 		const source = new Broadcast({
-			origin: owner.consume(),
+			origin: owner,
 			name: Path.from("blind.hang"),
 			enabled: true,
 			reload: false,

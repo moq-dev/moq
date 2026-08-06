@@ -156,7 +156,7 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.cleanup(() => this.connection.close());
 
 		this.broadcast = new Broadcast({
-			origin: this.signals.computed((effect) => effect.get(this.connection.origin)?.consume()),
+			origin: this.connection.origin,
 			enabled: this.#enabled,
 			name: this.#name,
 			reload: this.#reload,
@@ -192,7 +192,7 @@ export default class MoqWatch extends HTMLElement {
 		const videoJitter = new Signal<Time.Milli | undefined>(undefined);
 		this.sync = new Sync({
 			latency: this.controls.latency,
-			connection: this.connection.established,
+			probe: this.connection.probe,
 			video: videoJitter,
 			audio: audioSource.out.jitter,
 		});

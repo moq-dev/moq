@@ -6,7 +6,7 @@
 import { Effect, type GetPromise, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type * as broadcast from "./broadcast.js";
 import type { Established } from "./connection/established.js";
-import type { Consumer as OriginConsumer } from "./origin.js";
+import type { Table as OriginTable } from "./origin.js";
 import * as Path from "./path.js";
 
 /**
@@ -163,7 +163,7 @@ export type BroadcastProps = {
 			 * attached session lacks discovery it falls back to a standing request, so
 			 * `active` means assumed present.
 			 */
-			origin: GetterInit<OriginConsumer | undefined>;
+			origin: GetterInit<OriginTable | undefined>;
 			connection?: undefined;
 	  }
 );
@@ -315,7 +315,7 @@ export class Broadcast {
 	// merges every source (local publishes, every feeding session), so this is simpler than
 	// the session path: no hop bookkeeping, and the table's identity-diffed announcements
 	// retract before a republish, which is what lets a plain re-consume suffice.
-	#runOrigin(effect: Effect, source: Getter<OriginConsumer | undefined>): void {
+	#runOrigin(effect: Effect, source: Getter<OriginTable | undefined>): void {
 		const origin = effect.get(source);
 		if (!origin) return;
 
@@ -351,7 +351,7 @@ export class Broadcast {
 
 				if (event.active) {
 					current?.close();
-					current = origin.consume(this.path);
+					current = origin.get(this.path);
 					table.set(current);
 				} else {
 					offline();
