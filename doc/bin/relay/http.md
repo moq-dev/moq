@@ -114,7 +114,7 @@ groups, subscriptions, viewers, sessions), split by `tier` and `role`.
 Alongside them are the TCP listeners' accept-loop counters, which are how a node
 that has stopped accepting connections says so:
 
-```
+```text
 moq_relay_accept_failures_total{listener="web",class="connection"} 41
 moq_relay_accept_failures_total{listener="web",class="exhausted"} 0
 moq_relay_accept_failures_total{listener="web",class="unknown"} 0

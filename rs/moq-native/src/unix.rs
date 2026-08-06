@@ -242,8 +242,9 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection failure is still yielded as `Some(Err(..))`, and `None` only
-	/// if the listener itself is gone.
+	/// per-connection failure is still yielded as `Some(Err(..))`.
+	///
+	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<(qmux::Session, PeerCred)>> {
 		let stream = self.accept_socket().await;
 		let cred = match stream.peer_cred() {

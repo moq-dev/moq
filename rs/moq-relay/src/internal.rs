@@ -107,7 +107,22 @@ impl Internal {
 	/// [`moq_native::accept`] for that argument, and for why no QUIC backend has
 	/// anything to register.
 	pub fn with_listeners(mut self, health: impl IntoIterator<Item = moq_native::accept::Health>) -> Self {
-		self.listeners.extend(health);
+		for health in health {
+			// Two handles under one name would emit the same `listener` label twice,
+			// which is a malformed exposition: a scraper is entitled to reject the whole
+			// payload, taking the node's traffic counters down with it. Drop the
+			// duplicate loudly instead, so one mis-registered listener cannot blind the
+			// rest of the endpoint.
+			if self.listeners.iter().any(|seen| seen.listener() == health.listener()) {
+				tracing::warn!(
+					listener = health.listener(),
+					"ignoring a second listener registered under a name already in use; \
+					 its accept failures will not be reported"
+				);
+				continue;
+			}
+			self.listeners.push(health);
+		}
 		self
 	}
 
@@ -327,7 +342,7 @@ fn render_accepts(out: &mut String, listeners: &[moq_native::accept::Health]) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_accept_failures_total counter");
 	for health in listeners {
-		for failure in Failure::ALL {
+		for &failure in Failure::ALL {
 			let _ = writeln!(
 				out,
 				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",

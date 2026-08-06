@@ -366,8 +366,10 @@ impl Server {
 	/// Call this first and the two are distinct: the error is yours to handle, and a
 	/// later `None` means the server stopped.
 	///
-	/// Idempotent, and optional: `accept` still binds them itself (logging the
-	/// failure) for a caller that doesn't.
+	/// Idempotent: a call that fails binds nothing at all (any listener it did bind
+	/// is torn down again), so a retry starts from the same place. Optional, too:
+	/// `accept` still binds them itself, logging the failure, for a caller that
+	/// doesn't call this.
 	pub async fn listen(&mut self) -> crate::Result<()> {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 		self.streams.ensure_started().await?;
@@ -641,6 +643,7 @@ fn stream_versions(base: &moq_net::Versions) -> moq_net::Versions {
 
 /// A configured stream listener (`--server-tcp-bind` / `--server-unix-bind`).
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+#[derive(Clone)]
 enum StreamBind {
 	#[cfg(feature = "tcp")]
 	Tcp(net::SocketAddr),
@@ -710,8 +713,29 @@ impl StreamListeners {
 		}
 
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
+		if let Err(err) = self.start(&tx).await {
+			// All or nothing. A half-bound set would leave the loops we did spawn
+			// feeding the channel this call is about to drop, so a retry would find
+			// listeners that can never deliver a request while `binds` looked done.
+			// Abort them instead and leave the binds untouched, so a retry starts over
+			// and a second `listen` cannot report success over a dead listener.
+			for task in self.tasks.drain(..) {
+				task.abort();
+			}
+			return Err(err);
+		}
+
+		self.rx = Some(rx);
+		Ok(())
+	}
+
+	/// Bind and spawn every configured listener, or return the first failure.
+	async fn start(&mut self, tx: &tokio::sync::mpsc::Sender<Request>) -> crate::Result<()> {
+		// Cloned so the loop can push into `self.tasks` while iterating; there are at
+		// most two entries, each an address or a path.
+		let binds = self.binds.clone();
 		let health = self.health.clone();
-		for (bind, health) in self.binds.drain(..).zip(health) {
+		for (bind, health) in binds.into_iter().zip(health) {
 			let versions = self.versions.clone();
 			match bind {
 				#[cfg(feature = "tcp")]
@@ -742,7 +766,6 @@ impl StreamListeners {
 			}
 		}
 
-		self.rx = Some(rx);
 		Ok(())
 	}
 
@@ -1122,6 +1145,31 @@ mod tests {
 
 		let names: Vec<_> = server.accept_health().iter().map(|h| h.listener()).collect();
 		assert_eq!(names, vec!["tcp"], "the tcp listener must report before it binds");
+	}
+
+	/// A failed `listen` must leave nothing bound, so a retry starts over.
+	///
+	/// The trap is `binds.drain(..)`: consume the list up front and a partial failure
+	/// leaves it empty, so the *second* `listen` sees nothing left to do and reports
+	/// success while no stream listener exists and `accept` parks forever.
+	#[cfg(all(feature = "tcp", feature = "uds", unix))]
+	#[tokio::test]
+	async fn a_failed_listen_binds_nothing_and_can_be_retried() {
+		// A path that cannot be a socket, so the unix bind fails after the tcp one
+		// has already succeeded.
+		let dir = tempfile::TempDir::new().unwrap();
+		let occupied = dir.path().join("not-a-socket");
+		std::fs::write(&occupied, b"in the way").unwrap();
+
+		let mut config = ServerConfig::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.unix.bind = Some(occupied);
+		let mut server = Server::new(config).expect("stream-only server");
+
+		assert!(server.listen().await.is_err(), "the unix bind must fail");
+		// Same error the second time, rather than a success over a listener that the
+		// first call already tore down.
+		assert!(server.listen().await.is_err(), "a retry must not report success");
 	}
 
 	/// A QUIC-only server reports nothing. It multiplexes over one UDP socket and

@@ -178,8 +178,11 @@ impl Listener {
 	/// A failed `accept(2)` is handled here rather than yielded: it is classified,
 	/// counted, logged, and paced by [`accept_health`](Self::accept_health), then
 	/// retried, because the caller has no better answer than to ask again. A
-	/// per-connection *handshake* failure is still yielded as `Some(Err(..))`, and
-	/// `None` only if the listener itself is gone.
+	/// per-connection *handshake* failure is still yielded as `Some(Err(..))`.
+	///
+	/// The `Option` no longer has a `None` case to report: nothing ends the accept
+	/// loop, so this always yields. It stays because dropping it is a breaking change
+	/// to a published signature.
 	pub async fn accept(&self) -> Option<Result<qmux::Session>> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");

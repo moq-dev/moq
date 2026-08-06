@@ -118,7 +118,7 @@ mod tests {
 		let client = connect.await.unwrap();
 
 		assert_eq!(peer.0, client.local_addr().unwrap());
-		for failure in Failure::ALL {
+		for &failure in Failure::ALL {
 			assert_eq!(health.failures(failure), 0, "{failure} on a healthy accept");
 		}
 		assert_eq!(health.stalled(), None);

@@ -76,7 +76,11 @@ pub enum Failure {
 impl Failure {
 	/// Every class, for a caller enumerating [`Health::failures`] into a metrics
 	/// endpoint.
-	pub const ALL: [Failure; 3] = [Failure::Connection, Failure::Exhausted, Failure::Unknown];
+	///
+	/// A slice rather than an array: the length of an array is part of the type, so
+	/// `[Failure; 3]` would make adding a class a breaking change for every caller
+	/// that named the type, defeating the `#[non_exhaustive]` above.
+	pub const ALL: &'static [Failure] = &[Failure::Connection, Failure::Exhausted, Failure::Unknown];
 
 	/// Classify a failed `accept(2)`.
 	///
