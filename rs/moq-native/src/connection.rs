@@ -25,6 +25,19 @@ fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
 }
 
+/// The retry window as a deadline for the address walk, or `None` to leave each
+/// attempt to the client's own connect timeout.
+///
+/// Only when reconnecting. `Backoff::timeout` is how long to keep *retrying*, so
+/// applying it to a one-shot dial would cut short the single attempt there will
+/// ever be: a handshake slower than the retry window but well inside
+/// [`ClientConfig::timeout`](crate::ClientConfig::timeout) would fail for a
+/// reason that does not apply. That deadline is the one governing a one-shot
+/// dial, and it already does.
+fn retry_budget(reconnect: bool, retry_start: tokio::time::Instant, timeout: Duration) -> Option<tokio::time::Instant> {
+	(reconnect && !timeout.is_zero()).then(|| retry_start + timeout)
+}
+
 /// When the attempt at candidate `index` of `total` must be given up, or `None`
 /// to let it run.
 ///
@@ -598,9 +611,7 @@ impl Connection {
 				return Err(timeout_error(timeout, last_error.as_ref()));
 			}
 
-			// The walk respects the same give-up window the loop does, so a list of
-			// black-holed addresses cannot outrun it several attempts at a time.
-			let budget = (!timeout.is_zero()).then(|| retry_start + timeout);
+			let budget = retry_budget(client.reconnect, retry_start, timeout);
 
 			match Self::dial_any(shared, &client, &addrs, &mut draining, budget).await {
 				Ok((url, session)) => {
@@ -1596,6 +1607,29 @@ mod tests {
 		assert!(logs_contain("connecting"), "the dial never logged at all");
 		assert!(!logs_contain(SECRET), "a log line leaked the credential");
 		assert!(!format!("{err}").contains(SECRET), "the error leaked it: {err}");
+	}
+
+	/// The retry window bounds the walk only when there are retries.
+	///
+	/// It is a budget for *retrying*, so spending it on the single attempt a
+	/// one-shot dial gets would fail a handshake that is merely slower than the
+	/// retry window while well inside the connect timeout that actually governs it.
+	#[test]
+	fn only_a_reconnecting_dial_spends_the_retry_window() {
+		let start = tokio::time::Instant::now();
+		let timeout = Duration::from_secs(10);
+
+		assert_eq!(retry_budget(true, start, timeout), Some(start + timeout));
+		assert_eq!(
+			retry_budget(false, start, timeout),
+			None,
+			"a one-shot dial is bounded by the connect timeout, not the retry window"
+		);
+		assert_eq!(
+			retry_budget(true, start, Duration::ZERO),
+			None,
+			"zero means retry forever, so nothing bounds the walk"
+		);
 	}
 
 	/// Whichever of the two bounds comes first wins, and the retry window applies
