@@ -105,6 +105,12 @@ check-changed $FILES:
     	*)     echo "rs: checking ${packages//--package /}"; just rs check $packages ;;
     esac
 
+    # moq-wasm is a non-default member, so `_select` never reaches it and the
+    # branch above would check nothing at all for a moq-wasm-only diff.
+    if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
+    	just rs wasm
+    fi
+
 # Same as `fix`, but scoped the same way as `check-changed`.
 fix-changed $FILES:
     #!/usr/bin/env bash
@@ -115,6 +121,12 @@ fix-changed $FILES:
     	ALL)   just rs fix ;;
     	*)     echo "rs: fixing ${packages//--package /}"; just rs fix $packages ;;
     esac
+
+    # Mirrors `check-changed`: without this a moq-wasm-only diff is never
+    # formatted, and `ci`'s `cargo fmt --all --check` fails on it later.
+    if grep -q '^rs/moq-wasm/' <<< "$FILES"; then
+    	just rs wasm-fix
+    fi
 
 # Runs the `#[cfg(target_os = "windows")]` code past the compiler: moq-video's
 # Media Foundation capture/encode/decode and its D3D11 frames, which the Linux
@@ -157,6 +169,29 @@ windows *args:
 macos *args:
     cargo check -p moq-video -p moq-audio --all-targets --all-features {{ args }}
 
+# Same idea as `windows`/`macos`, for the browser: moq-wasm's whole crate root is
+# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
+# compiles an empty crate and every error in it stays invisible. Only a wasm32
+# build sees the code.
+#
+# Unlike those two this needs no special host, so `ci` runs it on every Rust PR.
+# The wasm32 target and the `getrandom`/`web-sys` cfg flags come from the Nix dev
+# shell and `.cargo/config.toml`. Not to be confused with the root `just wasm`,
+# which builds the shippable `@moq/wasm` package (wasm-bindgen, release profile);
+# this is the compile gate.
+
+# Compile and lint the browser/WASM bindings, which the host-target check skips.
+wasm *args:
+    cargo clippy -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }} -- -D warnings
+
+# The `fix` counterpart to `wasm`. `cargo fmt` is scoped rather than `--all`
+# because this runs alongside `fix`, which already formats everything else.
+
+# Auto-fix the browser/WASM bindings.
+wasm-fix *args:
+    cargo clippy --fix --allow-staged --allow-dirty -p moq-wasm --target wasm32-unknown-unknown --all-targets {{ args }}
+    cargo fmt -p moq-wasm
+
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty
 # and none match the Rust scope. Run `just rs ci` (no FILES) to
@@ -191,6 +226,9 @@ ci $FILES="":
     cargo check --workspace --no-default-features
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+    # `--workspace` above still compiles moq-wasm for the host, where its crate
+    # root cfgs away to nothing, so this wasm32 pass is what actually checks it.
+    just rs wasm
     # nextest compiles + runs the test binaries with real parallelism (faster than
     # `cargo test`'s serial harness). It does not build or run
     # doctests, so the `/// ```` examples are no longer compile-checked in CI -- an

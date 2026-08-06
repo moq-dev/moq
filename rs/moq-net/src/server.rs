@@ -406,16 +406,16 @@ impl<S: web_transport_trait::Session> Request<S> {
 				return Ok(Session::new(session, version.into(), None, protocol));
 			}
 			Handshake::LiteBare { session, version } => {
-				let start = lite::start(
-					session.clone(),
-					None,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
 					publish,
 					subscribe,
-					None,
+					peer_origin: None,
 					version,
-					lite::Setup::default(),
-					None,
-				)?;
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 				return Ok(Session::new(
 					session,
 					version.into(),
@@ -438,16 +438,16 @@ impl<S: web_transport_trait::Session> Request<S> {
 					// Filled by `lite::start` from the attached origin handles.
 					origin: None,
 				};
-				let start = lite::start(
-					session.clone(),
-					None,
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: None,
 					publish,
 					subscribe,
-					None,
+					peer_origin: None,
 					version,
 					our_setup,
-					Some(client_setup),
-				)?;
+					peer_setup: Some(client_setup),
+				})?;
 				return Ok(Session::new(
 					session,
 					version.into(),
@@ -484,16 +484,16 @@ impl<S: web_transport_trait::Session> Request<S> {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
-				let start = lite::start(
-					session.clone(),
-					Some(stream),
+				let start = lite::start(lite::Config {
+					session: session.clone(),
+					setup_stream: Some(stream),
 					publish,
 					subscribe,
-					None,
-					v,
-					lite::Setup::default(),
-					None,
-				)?;
+					peer_origin: None,
+					version: v,
+					our_setup: lite::Setup::default(),
+					peer_setup: None,
+				})?;
 				(start.recv_bandwidth, start.driver)
 			}
 			Version::Ietf(v) => {

@@ -19,6 +19,7 @@ use m3u8_rs::{
 use moq_mux::catalog::Producer as CatalogProducer;
 use moq_mux::container::fmp4::Import as Fmp4;
 use moq_mux::select;
+use rand::RngExt;
 use reqwest::Client;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{debug, info, warn};
@@ -29,9 +30,15 @@ use crate::{Error, Result, SequenceKind};
 /// Per-request timeout for the default HTTP client (playlist + segment fetches).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Backoff before retrying after a failed import step, so a transient upstream
-/// error (a 5xx, a truncated segment) doesn't tear down the whole import.
-const ERROR_BACKOFF: Duration = Duration::from_secs(1);
+/// Backoff bounds for retrying a failed import step, so a transient upstream error (a 503, a
+/// dropped connection) doesn't tear down the whole import.
+///
+/// The budget is short on purpose: a failure that clears within it was transient, and one that
+/// doesn't is an outage the caller should hear about rather than one the import papers over while
+/// publishing nothing. No error is classified; the budget is the filter.
+const STEP_RETRY_MIN: Duration = Duration::from_secs(1);
+const STEP_RETRY_MAX: Duration = Duration::from_secs(5);
+const STEP_RETRY_BUDGET: Duration = Duration::from_secs(10);
 
 /// How far back from the live edge to start when (re-)anchoring to a playlist window.
 ///
@@ -86,6 +93,21 @@ struct StepOutcome {
 	wrote_segments: usize,
 	/// Target segment duration (in seconds) from the playlist, if known.
 	target_duration: Option<u64>,
+	/// Renditions that ingested without error, however many segments each wrote.
+	///
+	/// A live playlist with no new segments yet still counts: that's a healthy rendition with
+	/// nothing to add this pass, not a failure. Counting segments instead would read a quiet
+	/// playlist as a dead one.
+	ok: usize,
+	/// A rendition failure from this step, if any.
+	///
+	/// [`OnError::Warn`] keeps the other renditions going after one fails, so a step can report
+	/// `Ok` having imported nothing at all. The loop needs to tell that apart from a quiet playlist
+	/// with no new segments, or it treats a permanently broken source as steady progress.
+	///
+	/// When several renditions fail, this is the one whose failure another pass could still clear,
+	/// so a single permanently-dead variant doesn't end an import the others could still serve.
+	failed: Option<Error>,
 }
 
 /// What a step does when a rendition fails.
@@ -589,15 +611,58 @@ impl Import {
 
 	/// Run the import loop until cancelled.
 	///
-	/// A failed step (e.g. a transient playlist fetch error) is logged and
-	/// retried after a short backoff rather than ending the import.
+	/// A failed step is logged and retried with escalating backoff, and the import ends with the
+	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
+	/// instead of looping forever. The one shortcut is an HTTP status the origin actually sent: a
+	/// `404` playlist ends the import immediately, since no amount of waiting turns it into a `200`.
 	pub async fn run(&mut self) -> Result<()> {
+		let mut delay = STEP_RETRY_MIN;
+		let mut deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
+
 		loop {
-			let outcome = match self.step(OnError::Warn).await {
-				Ok(outcome) => outcome,
+			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
+			// an `Ok`: `step` swallows per-rendition errors so one bad variant doesn't drop the rest.
+			// Letting it through would reset the backoff every pass, so a source that returns 404
+			// forever would spin at the refresh cadence while publishing nothing.
+			//
+			// Keyed on renditions that ingested, not on segments written: a healthy live playlist
+			// with nothing new this pass writes no segments, and reading that as a failure would end
+			// a multi-rendition import over one dead variant the others were covering for.
+			let stepped = match self.step(OnError::Warn).await {
+				Ok(StepOutcome {
+					ok: 0,
+					failed: Some(err),
+					..
+				}) => Err(err),
+				stepped => stepped,
+			};
+
+			let outcome = match stepped {
+				Ok(outcome) => {
+					// The source is alive, so the earlier failures no longer describe it.
+					delay = STEP_RETRY_MIN;
+					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
+					outcome
+				}
+				// A status the origin actually sent is its answer: a 404 playlist is not going to
+				// become a 200 on the next pass. Everything else rides the backoff budget.
+				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
+					return Err(err);
+				}
 				Err(err) => {
+					let now = tokio::time::Instant::now();
+					if now >= deadline {
+						return Err(err);
+					}
+
 					warn!(%err, "HLS import step failed, retrying");
-					tokio::time::sleep(ERROR_BACKOFF).await;
+					// Jittered so a fleet of importers pointed at one origin doesn't retry in
+					// lockstep, and never past the deadline the budget promised.
+					let wait = delay
+						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.min(deadline - now);
+					delay = (delay * 2).min(STEP_RETRY_MAX);
+					tokio::time::sleep(wait).await;
 					continue;
 				}
 			};
@@ -644,15 +709,30 @@ impl Import {
 
 		let mut wrote_segments = 0;
 		let mut target_duration = None;
+		let mut failed = None;
+		let mut ok = 0;
 
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
 			match track.ingest(&self.fetcher, &mut target_duration).await {
-				Ok(count) => wrote_segments += count,
+				Ok(count) => {
+					wrote_segments += count;
+					ok += 1;
+				}
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
-					OnError::Warn => warn!(label = %track.label, %err, "rendition import step failed, will retry"),
+					OnError::Warn => {
+						warn!(label = %track.label, %err, "rendition import step failed, will retry");
+						// Prefer a failure another pass could still clear, so a single
+						// permanently-dead variant doesn't end an import the others could still
+						// serve. Keeping whichever error came last instead would make the outcome
+						// depend on rendition order.
+						let recoverable = err.status().is_none_or(crate::status_retryable);
+						if recoverable || failed.is_none() {
+							failed = Some(err);
+						}
+					}
 				},
 			}
 		}
@@ -660,6 +740,8 @@ impl Import {
 		Ok(StepOutcome {
 			wrote_segments,
 			target_duration,
+			failed,
+			ok,
 		})
 	}
 
