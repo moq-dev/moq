@@ -9,6 +9,7 @@ import { createMockTransportPair } from "./mock.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
+import { withTimeout } from "./util/timeout.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -153,30 +154,46 @@ test("integration: lite subscription options and updates reach the publisher", a
 });
 
 test("integration: lite applies initial and updated group bounds", async () => {
+	const GROUP_COUNT = 6;
+	const INITIAL_START_GROUP = 1;
+	const INITIAL_END_GROUP = 2;
+	const UPDATED_GROUP = 4;
+	const PENDING_ASSERT_MS = 20;
+	const UPDATE_TIMEOUT_MS = 1000;
+
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
 
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video");
-	for (let sequence = 0; sequence < 5; sequence++) producer.appendGroup().close();
+	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
 	server.publish(Path.from("test"), broadcast);
 
 	const remote = client.consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ startGroup: 1, endGroup: 2 });
-	expect((await subscriber.nextGroup())?.sequence).toBe(1);
-	expect((await subscriber.nextGroup())?.sequence).toBe(2);
+	const subscriber = remote
+		.track("video")
+		.subscribe({ startGroup: INITIAL_START_GROUP, endGroup: INITIAL_END_GROUP });
+	try {
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
+		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP);
 
-	const pending = subscriber.nextGroup();
-	expect(await Promise.race([pending, sleep(20).then(() => "pending")])).toBe("pending");
+		const pending = subscriber.nextGroup();
+		expect(await Promise.race([pending, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
 
-	subscriber.update({ startGroup: 4, endGroup: 4 });
-	expect((await pending)?.sequence).toBe(4);
+		subscriber.update({ startGroup: UPDATED_GROUP, endGroup: UPDATED_GROUP });
+		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
+			UPDATED_GROUP,
+		);
 
-	subscriber.close();
-	remote.close();
-	broadcast.close();
-	client.close();
-	server.close();
+		const capped = subscriber.nextGroup();
+		expect(await Promise.race([capped, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
+	} finally {
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		client.close();
+		server.close();
+	}
 });
 
 test("integration: lite draft-06", async () => {

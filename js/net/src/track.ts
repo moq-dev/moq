@@ -650,7 +650,11 @@ export class Subscriber {
 		this.#cursor.update((cursor) => ({ ...cursor, start: sequence }));
 	}
 
-	/** Cap this subscriber's sequence-ordered cursor at `sequence` inclusively, or omit it to remove the cap. */
+	/**
+	 * Cap {@link nextGroup} at `sequence` inclusively, or omit it to remove the cap.
+	 * Groups above the cap remain buffered and become readable if the cap is raised.
+	 * This local cursor does not change the subscription's wire request.
+	 */
 	endAt(sequence?: number): void {
 		this.#cursor.update((cursor) => ({ ...cursor, end: sequence }));
 	}
