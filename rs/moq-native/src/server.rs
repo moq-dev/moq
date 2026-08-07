@@ -59,10 +59,13 @@ pub struct ServerConfig {
 	/// By default, the server accepts all supported versions.
 	/// Use this to restrict to specific versions, e.g. `--server-version moq-lite-02`.
 	/// Can be specified multiple times to accept a subset of versions.
-	///
-	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
+	#[arg(
+		id = "server-version",
+		long = "server-version",
+		env = "MOQ_SERVER_VERSION",
+		value_parser = crate::version_parser(),
+	)]
 	pub version: Vec<moq_net::Version>,
 
 	/// The certificates to serve and the roots that authenticate mTLS clients
@@ -1142,6 +1145,16 @@ impl Request {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn version_help_lists_every_parseable_name() {
+		let help = <ServerConfig as clap::Args>::augment_args(clap::Command::new("test"))
+			.render_long_help()
+			.to_string();
+		for name in moq_net::Version::names() {
+			assert!(help.contains(name), "missing {name} from --server-version help");
+		}
+	}
 
 	/// The handles have to exist before anything binds, and cover the stream
 	/// listeners rather than just the ones an owner happens to construct itself.
