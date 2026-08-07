@@ -82,10 +82,13 @@ pub struct ClientConfig {
 	/// By default, the client offers all supported versions and lets the server choose.
 	/// Use this to force a specific version, e.g. `--client-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
-	///
-	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16, moq-transport-17
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
+	#[arg(
+		id = "client-version",
+		long = "client-version",
+		env = "MOQ_CLIENT_VERSION",
+		value_parser = crate::version_parser(),
+	)]
 	pub version: Vec<moq_net::Version>,
 
 	/// TLS trust and client-certificate settings (`--client-tls-*`).
@@ -708,7 +711,7 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use clap::Parser;
+	use clap::{CommandFactory, Parser};
 
 	#[cfg(any(
 		feature = "noq",
@@ -926,6 +929,14 @@ mod tests {
 	fn test_cli_version() {
 		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
+	}
+
+	#[test]
+	fn test_cli_version_help_lists_every_parseable_name() {
+		let help = ClientConfig::command().render_long_help().to_string();
+		for name in moq_net::Version::names() {
+			assert!(help.contains(name), "missing {name} from --client-version help");
+		}
 	}
 
 	#[test]
