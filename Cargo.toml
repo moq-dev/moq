@@ -123,10 +123,6 @@ web-transport-quiche = "0.5"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3.4"
 
-[patch.crates-io]
-# Include iOS simulator support until https://github.com/ralfbiedert/openh264-rs/pull/96 is released.
-openh264-sys2 = { git = "https://github.com/kixelated/openh264-rs", rev = "e2255eebd259c0e8c98e79110526354bc578aebc" }
-
 [profile.dev]
 panic = "abort"
 
