@@ -45,6 +45,7 @@ jobs:
         shell: bash
         run: |
           for target in aarch64-apple-ios-sim x86_64-apple-ios; do
+            rustup target add "$target"
             if cargo tree --locked --package moq-ffi --target "$target" | grep openh264; then
               echo "::error::openh264 must stay out of Apple simulator builds"
               exit 1
