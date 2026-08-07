@@ -208,4 +208,75 @@ mod tests {
 			samples
 		);
 	}
+
+	#[tokio::test]
+	async fn reads_cmaf_container_declared_by_catalog() {
+		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
+		let source_subscriber = source_broadcast.consume();
+		let source_catalog = moq_mux::catalog::Producer::new(&mut source_broadcast).unwrap();
+		let input = Input {
+			format: Format::F32,
+			sample_rate: 48_000,
+			channels: 1,
+		};
+		let options = Options {
+			track: Some("audio".to_string()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut source_broadcast, source_catalog, input, &options).unwrap();
+
+		let samples = vec![0.25f32; 960];
+		let mut data = Vec::with_capacity(samples.len() * size_of::<f32>());
+		for sample in samples {
+			data.extend_from_slice(&sample.to_le_bytes());
+		}
+		producer
+			.write(&Frame {
+				timestamp: Timestamp::ZERO,
+				data: data.into(),
+			})
+			.unwrap();
+
+		let origin = moq_net::Origin::random().produce();
+		let mut requests = origin.dynamic();
+		let served = source_subscriber.clone();
+		tokio::spawn(async move {
+			while let Ok(request) = requests.requested_broadcast().await {
+				request.accept(served.clone());
+			}
+		});
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&source_subscriber, moq_mux::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap();
+		let source = moq_mux::Source::new(origin.consume(), "test");
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog);
+		let init = export.next().await.unwrap().expect("CMAF init");
+		let fragment = export.next().await.unwrap().expect("CMAF fragment");
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let subscriber = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+		import.decode(&init).unwrap();
+		import.decode(&fragment).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, config) = snapshot.audio.renditions.iter().next().expect("audio rendition");
+		assert!(matches!(config.container, hang::catalog::Container::Cmaf { .. }));
+		let mut consumer = Consumer::new(
+			&subscriber,
+			config,
+			name,
+			Config {
+				format: Format::F32,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		assert_eq!(frame.timestamp.as_micros(), 0);
+		assert!(!frame.data.is_empty());
+	}
 }

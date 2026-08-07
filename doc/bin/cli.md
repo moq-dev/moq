@@ -130,7 +130,8 @@ libpipewire-0.3 at build time to give `import capture` a display source that
 playback never uses. That still leaves one build dependency a playback-only box
 would rather not have. `play` pulls in moq-video, whose V4L2 camera capture is
 not behind a feature, so a Linux build needs libclang and the V4L2 headers
-(`libclang-dev` and `libv4l-dev` on Debian) for bindgen either way. macOS and
+(`libclang-dev` and `libv4l-dev` on Debian) for bindgen either way. Audio
+playback also needs the ALSA headers (`libasound2-dev` on Debian). macOS and
 Windows need nothing extra, so plain `--features play` is enough there.
 
 Once built, play a broadcast with:

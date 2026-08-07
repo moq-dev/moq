@@ -82,3 +82,71 @@ impl Consumer {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::decode::Kind;
+	use crate::encode::{Codec, Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+
+	#[tokio::test]
+	async fn reads_cmaf_container_declared_by_catalog() {
+		let mut source_broadcast = moq_net::broadcast::Info::new().produce();
+		let source_subscriber = source_broadcast.consume();
+		let source_catalog = moq_mux::catalog::Producer::new(&mut source_broadcast).unwrap();
+		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, Codec::H264).unwrap();
+		let mut encoder = Encoder::new(&EncodeConfig {
+			kind: EncodeKind::Software,
+			..EncodeConfig::new(320, 240, 30)
+		})
+		.unwrap();
+		let rgba = vec![0x80u8; 320 * 240 * 4];
+		for index in 0..2 {
+			encoder.keyframe();
+			let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
+			let frame = crate::Frame::new(surface, moq_net::Timestamp::from_micros(index * 33_333).unwrap());
+			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
+		}
+
+		let origin = moq_net::Origin::random().produce();
+		let mut requests = origin.dynamic();
+		let served = source_subscriber.clone();
+		tokio::spawn(async move {
+			while let Ok(request) = requests.requested_broadcast().await {
+				request.accept(served.clone());
+			}
+		});
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&source_subscriber, moq_mux::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap();
+		let source = moq_mux::Source::new(origin.consume(), "test");
+		let mut export = moq_mux::container::fmp4::Export::new(source, catalog);
+		let init = export.next().await.unwrap().expect("CMAF init");
+		let fragment = export.next().await.unwrap().expect("CMAF fragment");
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let subscriber = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast).unwrap();
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+		import.decode(&init).unwrap();
+		import.decode(&fragment).unwrap();
+
+		let snapshot = catalog.snapshot();
+		let (name, config) = snapshot.video.renditions.iter().next().expect("video rendition");
+		assert!(matches!(config.container, hang::catalog::Container::Cmaf { .. }));
+		let mut consumer = Consumer::new(
+			&subscriber,
+			config,
+			name,
+			Config {
+				kind: Kind::Software,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		assert_eq!(frame.size(), crate::Size::new(320, 240));
+	}
+}
