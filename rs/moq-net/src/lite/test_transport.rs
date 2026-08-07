@@ -1,5 +1,6 @@
 //! Transport doubles shared by the lite tests: a session whose streams record
-//! everything written and every reset code, and peers that never speak.
+//! everything written and every reset code, peers that never speak, and peers
+//! whose incoming streams die before their first byte.
 
 use std::{
 	sync::{
@@ -127,6 +128,124 @@ impl web_transport_trait::RecvStream for PendingRecv {
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
 		std::future::pending().await
+	}
+}
+
+/// A stream that died before delivering a single byte: every read fails, the
+/// wire equivalent of RESET_STREAM arriving ahead of any payload. QUIC does not
+/// order a reset behind the data, so this reaches an accept loop in normal
+/// operation, not just from a misbehaving peer.
+pub struct DeadRecv;
+
+impl web_transport_trait::RecvStream for DeadRecv {
+	type Error = SinkError;
+
+	async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+		Err(SinkError)
+	}
+
+	fn stop(&mut self, _code: u32) {}
+
+	async fn closed(&mut self) -> Result<(), Self::Error> {
+		Err(SinkError)
+	}
+}
+
+/// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
+/// each yield the configured number of [`DeadRecv`] streams and then park like a
+/// peer with nothing more to say. Sends record to [`Log`] like [`SinkSession`].
+#[derive(Clone)]
+pub struct DeadStreamSession {
+	pub log: Log,
+	unis: Arc<Mutex<usize>>,
+	bis: Arc<Mutex<usize>>,
+}
+
+impl DeadStreamSession {
+	/// `count` uni streams that die before their first byte, then silence.
+	pub fn unis(count: usize) -> Self {
+		Self {
+			log: Log::default(),
+			unis: Arc::new(Mutex::new(count)),
+			bis: Arc::new(Mutex::new(0)),
+		}
+	}
+
+	/// `count` bidi streams that die before their first byte, then silence.
+	pub fn bis(count: usize) -> Self {
+		Self {
+			log: Log::default(),
+			unis: Arc::new(Mutex::new(0)),
+			bis: Arc::new(Mutex::new(count)),
+		}
+	}
+
+	fn take(counter: &Mutex<usize>) -> bool {
+		let mut remaining = counter.lock().unwrap();
+		match *remaining {
+			0 => false,
+			_ => {
+				*remaining -= 1;
+				true
+			}
+		}
+	}
+}
+
+impl web_transport_trait::Session for DeadStreamSession {
+	type SendStream = SinkSend;
+	type RecvStream = DeadRecv;
+	type Error = SinkError;
+
+	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+		match Self::take(&self.unis) {
+			true => Ok(DeadRecv),
+			false => std::future::pending().await,
+		}
+	}
+
+	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		match Self::take(&self.bis) {
+			true => Ok((SinkSend::new(self.log.clone()), DeadRecv)),
+			false => std::future::pending().await,
+		}
+	}
+
+	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
+		Ok((SinkSend::new(self.log.clone()), DeadRecv))
+	}
+
+	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+		Ok(SinkSend::new(self.log.clone()))
+	}
+
+	fn send_datagram(&self, _payload: bytes::Bytes) -> Result<(), Self::Error> {
+		Ok(())
+	}
+
+	async fn recv_datagram(&self) -> Result<bytes::Bytes, Self::Error> {
+		std::future::pending().await
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		0
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		None
+	}
+
+	fn close(&self, code: u32, reason: &str) {
+		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+	}
+
+	async fn closed(&self) -> Self::Error {
+		std::future::pending().await
+	}
+
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		SinkStats
 	}
 }
 
