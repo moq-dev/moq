@@ -700,20 +700,10 @@ pub(crate) fn infer_missing_duration(
 /// Snap floating-point catalog cadence to an output tick only when the mismatch is no more
 /// than the nanosecond precision used by `Duration`.
 fn fallback_duration(default_frame: Duration, timescale: moq_net::Timescale) -> Option<Timestamp> {
-	let duration = Timestamp::try_from(default_frame).ok()?;
-	let source_timescale = u128::from(duration.scale().as_u64());
-	let output_timescale = u128::from(timescale.as_u64());
-	let scaled = u128::from(duration.value()).checked_mul(output_timescale)?;
-	let rounded = scaled
-		.checked_add(source_timescale / 2)?
-		.checked_div(source_timescale)?;
-	let exact = rounded.checked_mul(source_timescale)?;
-	let error = scaled.abs_diff(exact);
-
-	if error <= output_timescale {
-		Timestamp::new(u64::try_from(rounded).ok()?, timescale).ok()
+	if let Some(ticks) = super::rounded_duration_ticks(default_frame, timescale.as_u64()) {
+		Timestamp::new(ticks, timescale).ok()
 	} else {
-		Some(duration)
+		Timestamp::try_from(default_frame).ok()
 	}
 }
 
@@ -731,12 +721,12 @@ fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale
 	}
 
 	let mut denominator = start_scale * end_scale;
-	let common = gcd(numerator, denominator);
+	let common = super::gcd(numerator, denominator);
 	numerator /= common;
 	denominator /= common;
 
 	let mut output_scale = u128::from(timescale.as_u64());
-	let common = gcd(output_scale, denominator);
+	let common = super::gcd(output_scale, denominator);
 	output_scale /= common;
 	denominator /= common;
 	if denominator != 1 {
@@ -746,14 +736,6 @@ fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale
 	let ticks = numerator.checked_mul(output_scale).ok_or(Error::PtsOverflow)?;
 	let ticks = u64::try_from(ticks).map_err(|_| Error::PtsOverflow)?;
 	Ok(Some(Timestamp::new(ticks, timescale)?))
-}
-
-/// Greatest common divisor for reducing exact timestamp ratios.
-fn gcd(mut a: u128, mut b: u128) -> u128 {
-	while b != 0 {
-		(a, b) = (b, a % b);
-	}
-	a
 }
 
 fn pts_monotonic(frames: &[Frame], successor: Option<&Frame>) -> bool {

@@ -22,7 +22,7 @@ mod export_test;
 #[cfg(test)]
 mod import_test;
 
-use std::task::Poll;
+use std::{task::Poll, time::Duration};
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
@@ -830,25 +830,53 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 
 /// Default video timescale when the catalog doesn't supply one.
 ///
-/// Used by the fMP4 exporter when synthesizing an init segment for a
-/// Legacy or LOC source: prefer `framerate * 1000` (so each frame has an
-/// integer duration), falling back to 90 kHz (the MPEG-TS convention).
+/// Used by the fMP4 exporter when synthesizing an init segment for a Legacy or LOC source.
+/// Prefer `framerate * 1000`, then the common NTSC denominator, and finally an exact scale
+/// for the nanosecond-rounded catalog cadence.
 ///
 /// A framerate that scales to less than one tick takes the fallback too: zero and negative land
 /// on 0 through `as u64`, which is not a timescale anything accepts, and a non-finite one is
 /// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
-/// range a `Timescale` holds. A fractional tick count truncates rather than falling back, so
-/// 30.0005 fps gives 30000; the common broadcast rates (29.97, 59.94, 23.976) all land on a whole
-/// tick already.
+/// range a `Timescale` holds.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	let ticks = config
-		.framerate
-		.filter(|fps| fps.is_finite())
-		.map(|fps| (fps * 1000.0) as u64);
-	match ticks {
-		Some(ticks) if ticks > 0 => ticks,
-		_ => 90000,
+	let Some(framerate) = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0) else {
+		return 90_000;
+	};
+	let preferred = (framerate * 1000.0) as u64;
+	if preferred == 0 {
+		return 90_000;
 	}
+
+	let frame = Duration::from_secs_f64(1.0 / framerate);
+	for timescale in [preferred, (framerate * 1001.0).round() as u64] {
+		if timescale > 0 && rounded_duration_ticks(frame, timescale).is_some() {
+			return timescale;
+		}
+	}
+
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let timescale = NANOS_PER_SECOND / gcd(frame.as_nanos(), NANOS_PER_SECOND);
+	u64::try_from(timescale).unwrap()
+}
+
+/// Convert a rounded duration to ticks when it is within one nanosecond of an exact tick.
+fn rounded_duration_ticks(duration: Duration, timescale: u64) -> Option<u64> {
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let scaled = duration.as_nanos().checked_mul(u128::from(timescale))?;
+	let rounded = scaled.checked_add(NANOS_PER_SECOND / 2)? / NANOS_PER_SECOND;
+	let exact = rounded.checked_mul(NANOS_PER_SECOND)?;
+	if scaled.abs_diff(exact) > u128::from(timescale) {
+		return None;
+	}
+	u64::try_from(rounded).ok()
+}
+
+/// Greatest common divisor for reducing exact timestamp ratios.
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+	while b != 0 {
+		(a, b) = (b, a % b);
+	}
+	a
 }
 
 /// The decode timeline a fragment actually carries: its `tfdt` and each sample's composition
@@ -962,6 +990,9 @@ mod tests {
 		}
 
 		config.framerate = Some(30.0);
+		assert_eq!(default_video_timescale(&config), 30_000);
+
+		config.framerate = Some(30_000.0 / 1001.0);
 		assert_eq!(default_video_timescale(&config), 30_000);
 	}
 

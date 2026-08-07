@@ -95,8 +95,8 @@ impl Muxer {
 
 	/// The media timescale this muxer's init segment and fragments are expressed in.
 	///
-	/// Derived from the catalog: a `Cmaf` rendition's own init scale, the framerate for video
-	/// (`framerate * 1000`, falling back to 90 kHz) and the sample rate for audio, unless
+	/// Derived from the catalog: a `Cmaf` rendition's own init scale, a cadence-compatible scale
+	/// for video (falling back to 90 kHz) and the sample rate for audio, unless
 	/// [`with_timescale`](Self::with_timescale) overrode it.
 	pub fn timescale(&self) -> moq_net::Timescale {
 		self.timescale
@@ -331,6 +331,30 @@ mod tests {
 	#[test]
 	fn fragment_with_no_frames_is_empty() {
 		assert!(video_muxer().fragment(0, &[]).unwrap().is_empty());
+	}
+
+	#[test]
+	fn ntsc_fallback_duration_uses_the_derived_timescale() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(30_000.0 / 1001.0);
+		let muxer = Muxer::video(&config).unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 30_000);
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let fragment = muxer.fragment(0, std::slice::from_ref(&frame)).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1001)]);
+
+		let mut fragmenter = muxer.fragmenter(fragment::Config {
+			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
+		});
+		assert!(fragmenter.push(frame).unwrap().is_empty());
+		let fragment = fragmenter.flush().unwrap().unwrap();
+		assert_eq!(super::super::sample_durations(&fragment.data), vec![Some(1001)]);
 	}
 
 	// A downstream timeline fixed at 90 kHz overrides the framerate-derived default, and the
