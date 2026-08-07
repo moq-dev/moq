@@ -502,6 +502,29 @@ async fn ntsc_tail_uses_a_representable_catalog_cadence() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn unusable_framerate_uses_the_standard_fallback_rate() {
+	use hang::catalog::{Container, VideoCodec, VideoConfig};
+
+	let mut live = Live::new(".vp8", |catalog, name| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(0.0005);
+		config.container = Container::Legacy;
+		catalog.lock().video.renditions.insert(name, config);
+	});
+	live.track.write(raw_frame(0, &[0x82, 0x00], true)).unwrap();
+	live.track.finish().unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source(), live.catalog_stream().await);
+	assert!(fragment_now(&mut exporter).await.init);
+
+	let fragment = fragment_now(&mut exporter).await;
+	assert!((fragment.duration - 1.0 / 30.0).abs() < 1e-9);
+	let timescale = moq_net::Timescale::new(90_000).unwrap();
+	let decoded = super::decode(fragment.data, timescale).unwrap();
+	assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+}
+
+#[tokio::test(start_paused = true)]
 async fn audio_only_default_mode_emits_without_successor() {
 	use hang::catalog::{AAC, AudioConfig};
 

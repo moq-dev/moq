@@ -76,6 +76,28 @@ impl Default for Backoff {
 }
 
 impl Backoff {
+	/// Reject a backoff that would retry without pacing.
+	///
+	/// The loop sleeps `delay`, then `delay = min(delay * multiplier, max)`. A zero in
+	/// any of the three collapses that to zero forever, so a relay that is simply down
+	/// becomes a hot loop of dials and DNS lookups, unbounded when
+	/// [`timeout`](Self::timeout) is also zero. A zero `timeout` on its own is fine and
+	/// documented: it means retry forever, which is only a problem unpaced.
+	///
+	/// A `multiplier` of 1 is allowed: the delay stays at `initial`, which is a
+	/// constant-delay retry rather than an unpaced one.
+	pub(crate) fn validate(&self) -> crate::Result<()> {
+		match self.initial.is_zero() || self.multiplier == 0 || self.max.is_zero() {
+			true => Err(crate::Error::BackoffUnpaced),
+			false => Ok(()),
+		}
+	}
+
+	/// Grow the retry delay without overflowing before applying the configured cap.
+	fn next_delay(&self, delay: Duration) -> Duration {
+		delay.saturating_mul(self.multiplier.max(1)).min(self.max)
+	}
+
 	/// How long broadcasts fed by a reconnecting session should outlive a session
 	/// drop (see [`moq_net::origin::Info::linger`]): slightly past the give-up
 	/// [`timeout`](Self::timeout), so when the loop does give up its error surfaces
@@ -290,7 +312,7 @@ impl Reconnect {
 			if let Some(deadline) = deadline {
 				wait = wait.min(deadline - now);
 			}
-			delay = (delay * backoff.multiplier.max(1)).min(backoff.max);
+			delay = backoff.next_delay(delay);
 
 			tracing::warn!(%url, ?wait, "reconnecting after backoff");
 			tokio::time::sleep(wait).await;
@@ -453,6 +475,52 @@ fn terminal(state: &State) -> Error {
 
 #[cfg(test)]
 mod tests {
+	/// The retry loop is `delay = min(delay * multiplier, max)`, so a zero anywhere
+	/// pins the delay at zero and turns an unreachable relay into a hot dial loop,
+	/// unbounded when the give-up timeout is also zero.
+	#[test]
+	fn backoff_rejects_an_unpaced_retry() {
+		assert!(Backoff::default().validate().is_ok());
+
+		for bad in [
+			Backoff {
+				initial: Duration::ZERO,
+				..Default::default()
+			},
+			Backoff {
+				multiplier: 0,
+				..Default::default()
+			},
+			Backoff {
+				max: Duration::ZERO,
+				..Default::default()
+			},
+		] {
+			assert!(
+				matches!(bad.validate(), Err(crate::Error::BackoffUnpaced)),
+				"{bad:?} should be rejected"
+			);
+		}
+
+		// A zero timeout is documented as retry-forever, which is only a hazard
+		// unpaced, and a multiplier of 1 is a constant delay rather than no delay.
+		let forever = Backoff {
+			timeout: Duration::ZERO,
+			multiplier: 1,
+			..Default::default()
+		};
+		assert!(forever.validate().is_ok());
+	}
+
+	#[test]
+	fn backoff_growth_saturates_before_applying_the_cap() {
+		let backoff = Backoff {
+			multiplier: u32::MAX,
+			..Default::default()
+		};
+		assert_eq!(backoff.next_delay(Duration::MAX), backoff.max);
+	}
+
 	use super::*;
 
 	#[test]

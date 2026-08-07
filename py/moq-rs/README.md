@@ -25,6 +25,7 @@ This pulls in the `moq-ffi` native bindings automatically. `moq-rs` is pure Pyth
 import asyncio
 import moq
 
+
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for announcement in client.announced():
@@ -36,6 +37,7 @@ async def main():
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
 
+
 asyncio.run(main())
 ```
 
@@ -44,6 +46,7 @@ asyncio.run(main())
 ```python
 import asyncio
 import moq
+
 
 async def main():
     async with moq.Client("https://cdn.moq.dev/anon") as client:
@@ -60,6 +63,7 @@ async def main():
         audio.finish()
         broadcast.finish()
 
+
 asyncio.run(main())
 ```
 
@@ -68,6 +72,7 @@ asyncio.run(main())
 ```python
 import asyncio
 import moq
+
 
 async def main():
     async with moq.Server("127.0.0.1:4443", tls_generate=["localhost"]) as server:
@@ -79,6 +84,7 @@ async def main():
         async for request in server:
             print(f"  + {request.transport} from {request.url}")
             sessions.append(await request.accept())
+
 
 asyncio.run(main())
 ```

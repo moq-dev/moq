@@ -154,6 +154,14 @@ pub enum Error {
 	/// Error from the moq-json snapshot/stream layer.
 	#[error("json track error: {0}")]
 	JsonTrack(Arc<moq_json::Error>),
+
+	/// Client configuration handle not found.
+	#[error("client not found")]
+	ClientNotFound,
+
+	/// A client configuration value could not be parsed or initialized.
+	#[error("invalid config: {0}")]
+	InvalidConfig(String),
 }
 
 impl From<moq_json::Error> for Error {
@@ -231,6 +239,8 @@ impl ffi::ReturnCode for Error {
 			Error::Video(_) => -36,
 			Error::Json(_) => -37,
 			Error::JsonTrack(_) => -38,
+			Error::ClientNotFound => -39,
+			Error::InvalidConfig(_) => -40,
 		}
 	}
 }

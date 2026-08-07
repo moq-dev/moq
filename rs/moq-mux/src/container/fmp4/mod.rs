@@ -143,20 +143,20 @@ pub enum Error {
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
 
-	/// A `Cmaf` rendition's init passes through from the catalog at its own scale, so
-	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
-	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
-	TimescaleOverride,
-
 	/// `mdhd.timescale` is a 32-bit field, so a larger scale would reach the init segment
 	/// truncated while the fragments kept the full value, putting them on different timelines.
 	#[error("timescale {0} does not fit the 32-bit mdhd field")]
 	TimescaleTooLarge(u64),
 
+	/// A `Cmaf` rendition's init passes through from the catalog at its own scale, so
+	/// [`Muxer::with_timescale`] can't move it without desynchronising it from the fragments.
+	#[error("a CMAF rendition's timescale comes from its init segment and can't be overridden")]
+	TimescaleOverride,
+
 	/// A sample duration is a 32-bit `trun` field. A larger value would wrap in the media
 	/// while the fragment metadata kept the full duration, putting them on different timelines.
 	#[error("sample duration {0} does not fit the 32-bit trun field")]
-	SampleDurationTooLarge(u128),
+	SampleDurationTooLarge(u64),
 
 	/// A positive sample duration must occupy at least one tick in the output timescale.
 	#[error("sample duration is shorter than one tick at timescale {0}")]
@@ -501,7 +501,7 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 	if scaled % u128::from(source_timescale) != 0 {
 		return Err(Error::SampleDurationInexact(output_timescale));
 	}
-	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(ticks))
+	u32::try_from(ticks).map_err(|_| Error::SampleDurationTooLarge(u64::try_from(ticks).unwrap_or(u64::MAX)))
 }
 
 /// Synthesize a CMAF `Trak` for a video rendition that has no init segment.
@@ -839,13 +839,10 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
 /// range a `Timescale` holds.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	let Some(framerate) = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0) else {
+	let Some(framerate) = usable_video_framerate(config) else {
 		return 90_000;
 	};
 	let preferred = (framerate * 1000.0) as u64;
-	if preferred == 0 {
-		return 90_000;
-	}
 
 	let frame = Duration::from_secs_f64(1.0 / framerate);
 	for timescale in [preferred, (framerate * 1001.0).round() as u64] {
@@ -857,6 +854,13 @@ pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
 	const NANOS_PER_SECOND: u128 = 1_000_000_000;
 	let timescale = NANOS_PER_SECOND / gcd(frame.as_nanos(), NANOS_PER_SECOND);
 	u64::try_from(timescale).unwrap()
+}
+
+/// A finite catalog framerate that produces at least one tick at the preferred scale.
+pub(crate) fn usable_video_framerate(config: &VideoConfig) -> Option<f64> {
+	config
+		.framerate
+		.filter(|fps| fps.is_finite() && *fps > 0.0 && (*fps * 1000.0) as u64 > 0)
 }
 
 /// Convert a rounded duration to ticks when it is within one nanosecond of an exact tick.
@@ -1126,7 +1130,7 @@ mod tests {
 		};
 
 		let err = encode_fragment(info(1, timescale, 0), std::slice::from_ref(&frame)).unwrap_err();
-		assert!(matches!(err, Error::SampleDurationTooLarge(ticks) if ticks == u128::from(over)));
+		assert!(matches!(err, Error::SampleDurationTooLarge(ticks) if ticks == over));
 
 		let largest = Frame {
 			duration: Some(Timestamp::from_scale(u64::from(u32::MAX), timescale.as_u64()).unwrap()),

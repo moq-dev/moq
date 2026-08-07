@@ -232,6 +232,45 @@ pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a 
 	Ok(string)
 }
 
+/// Parse an optional C string, where a NULL or empty value means "unset".
+///
+/// Config setters use this so one function both sets and clears a knob, rather than
+/// needing a paired `moq_client_clear_*` for every optional field.
+///
+/// # Safety
+/// The caller must ensure that cstr is valid for 'a.
+pub unsafe fn parse_str_optional<'a>(cstr: *const c_char, cstr_len: usize) -> Result<Option<&'a str>, Error> {
+	if cstr.is_null() {
+		return Ok(None);
+	}
+
+	let string = unsafe { parse_str(cstr, cstr_len)? };
+	Ok((!string.is_empty()).then_some(string))
+}
+
+/// Parse a C array of [`crate::moq_string`] into owned strings.
+///
+/// A NULL array is only valid when `count` is zero, which yields an empty list.
+///
+/// # Safety
+/// The caller must ensure that items is valid for count elements, and that each
+/// element points to its own length in bytes.
+pub unsafe fn parse_strings(items: *const crate::moq_string, count: usize) -> Result<Vec<String>, Error> {
+	if items.is_null() {
+		if count == 0 {
+			return Ok(Vec::new());
+		}
+
+		return Err(Error::InvalidPointer);
+	}
+
+	let items = unsafe { std::slice::from_raw_parts(items, count) };
+	items
+		.iter()
+		.map(|item| Ok(unsafe { parse_str(item.data, item.len)? }.to_string()))
+		.collect()
+}
+
 /// Parse a raw pointer and size into a byte slice.
 ///
 /// Returns an empty slice if both pointer and size are zero.

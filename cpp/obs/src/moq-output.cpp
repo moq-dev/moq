@@ -2,6 +2,7 @@
 #include <obs.hpp>
 
 #include "moq-output.h"
+#include "moq-settings.h"
 #include "util/util_uint64.h"
 
 extern "C" {
@@ -90,6 +91,19 @@ bool MoQOutput::Start()
 		return false;
 	}
 
+	// Advanced settings live on the service alongside the URL and path. A 0 handle
+	// means the group is switched off, which moq_client_connect reads as "defaults":
+	// the same dial moq_session_connect would have made.
+	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
+	int client = MoQSettings::CreateClient(service_settings);
+	if (client < 0) {
+		// CreateClient logged which setting was rejected and why. Refusing to start
+		// beats connecting with a setting the user asked for quietly dropped.
+		obs_output_set_last_error(output, "Invalid advanced MoQ settings; see the log for details.");
+		SignalStop(OBS_OUTPUT_CONNECT_FAILED);
+		return false;
+	}
+
 	LOG_INFO("Connecting to MoQ server: %s", server_url.c_str());
 
 	// Held from the connect through obs_output_begin_data_capture. The status
@@ -117,8 +131,13 @@ bool MoQOutput::Start()
 
 	// Start establishing a session with the MoQ server
 	// NOTE: You could publish the same broadcasts to multiple sessions if you want (redundant ingest).
-	int handle =
-		moq_session_connect(server_url.data(), server_url.size(), origin, 0, MoQOutput::SessionStatus, ref);
+	int handle = moq_client_connect(server_url.data(), server_url.size(), (uint32_t)client, origin, 0,
+					MoQOutput::SessionStatus, ref);
+
+	// The connect copied the config, so the handle has done its job either way.
+	if (client > 0)
+		moq_client_close(client);
+
 	if (handle < 0) {
 		const char *reason = moq_error();
 		LOG_ERROR("Failed to initialize MoQ server: %d: %s", handle, reason ? reason : "unknown error");

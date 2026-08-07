@@ -75,6 +75,12 @@ pub enum Error {
 	)]
 	FingerprintWithRoots,
 
+	/// Trust material was configured alongside the flag that ignores all of it.
+	#[error(
+		"--client-tls-disable-verify cannot be combined with --client-tls-fingerprint, --client-tls-root or --client-tls-system-roots: it accepts every certificate, so the trust material would be ignored"
+	)]
+	DisableVerifyWithTrust,
+
 	/// A root certificate parsed as PEM but rustls rejected it as a trust anchor.
 	#[error("failed to add root certificate")]
 	AddRoot(#[source] rustls::Error),
@@ -133,6 +139,12 @@ pub enum Error {
 
 /// Convenience alias for results produced by this module.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Parse a hex-encoded SHA-256 certificate fingerprint.
+pub fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
+	let bytes = hex::decode(value.trim()).map_err(Error::Fingerprint)?;
+	bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
+}
 
 /// Read a PEM file into its list of certificates.
 pub(crate) fn read_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
@@ -357,35 +369,46 @@ impl Client {
 	/// Resolve the verification policy from the configured flags.
 	///
 	/// Precedence and rules (shared by all backends):
-	/// - `--client-tls-disable-verify` wins and disables verification.
+	/// - `--client-tls-disable-verify` disables verification, and combining it with any
+	///   trust material is rejected rather than silently ignoring that material.
 	/// - `--client-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
 	///   it with `--client-tls-root` or `--client-tls-system-roots` is rejected rather than
 	///   silently ignoring one of them.
 	/// - Otherwise, verify against the system roots (default) plus any custom
 	///   roots. The system roots are dropped once a custom root is given unless
 	///   `--client-tls-system-roots` re-enables them.
+	///
+	/// Every combination that would quietly drop one setting is an error. Silently
+	/// weakening trust is the worst outcome here: someone moving off
+	/// `disable_verify` by adding a fingerprint would otherwise still accept every
+	/// certificate, with the UI showing the pin as configured.
 	pub(crate) fn verification(&self) -> Result<Verification> {
 		self.warn_deprecated();
 
+		let fingerprints = self.fingerprints()?;
+		let roots = self.effective_root();
+		let system_roots = self.effective_system_roots();
+
 		if self.effective_disable_verify().unwrap_or_default() {
+			if !fingerprints.is_empty() || !roots.is_empty() || system_roots == Some(true) {
+				return Err(Error::DisableVerifyWithTrust);
+			}
 			return Ok(Verification::Disabled);
 		}
 
-		let fingerprints = self.fingerprints()?;
 		if !fingerprints.is_empty() {
-			if !self.effective_root().is_empty() || self.effective_system_roots() == Some(true) {
+			if !roots.is_empty() || system_roots == Some(true) {
 				return Err(Error::FingerprintWithRoots);
 			}
 			return Ok(Verification::Fingerprints(fingerprints));
 		}
 
-		let root = self.effective_root();
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
-		let system = self.effective_system_roots().unwrap_or(root.is_empty());
+		let system = system_roots.unwrap_or(roots.is_empty());
 
 		let mut custom = Vec::new();
-		for root in &root {
+		for root in &roots {
 			let certs = read_certs(root)?;
 			if certs.is_empty() {
 				return Err(Error::EmptyRoots(root.clone()));
@@ -420,10 +443,7 @@ impl Client {
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
 		self.effective_fingerprint()
 			.iter()
-			.map(|fp| {
-				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;
-				bytes.try_into().map_err(|v: Vec<u8>| Error::FingerprintLength(v.len()))
-			})
+			.map(|fp| parse_fingerprint(fp))
 			.collect()
 	}
 
@@ -881,6 +901,54 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 #[cfg(test)]
 #[cfg(all(any(feature = "quinn", feature = "noq", feature = "quiche"), feature = "aws-lc-rs"))]
 mod tests {
+	/// Disabling verification cannot be combined with trust material that it would
+	/// otherwise ignore.
+	#[test]
+	fn disable_verify_rejects_trust_material() {
+		let insecure = Client {
+			disable_verify: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(insecure.verification(), Ok(Verification::Disabled)));
+
+		let with_fingerprint = Client {
+			disable_verify: Some(true),
+			fingerprint: vec!["ab".repeat(32)],
+			..Default::default()
+		};
+		assert!(matches!(
+			with_fingerprint.verification(),
+			Err(Error::DisableVerifyWithTrust)
+		));
+
+		let with_root = Client {
+			disable_verify: Some(true),
+			root: vec!["/tmp/root.pem".into()],
+			..Default::default()
+		};
+		assert!(matches!(with_root.verification(), Err(Error::DisableVerifyWithTrust)));
+
+		let with_system_roots = Client {
+			disable_verify: Some(true),
+			system_roots: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(
+			with_system_roots.verification(),
+			Err(Error::DisableVerifyWithTrust)
+		));
+
+		let without_system_roots = Client {
+			disable_verify: Some(true),
+			system_roots: Some(false),
+			..Default::default()
+		};
+		assert!(matches!(
+			without_system_roots.verification(),
+			Ok(Verification::Disabled)
+		));
+	}
+
 	use super::*;
 	use rustls::client::danger::ServerCertVerifier;
 	use rustls::pki_types::ServerName;

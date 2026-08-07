@@ -63,10 +63,7 @@ impl Muxer {
 	/// A muxer for a video rendition described by `config`.
 	pub fn video(config: &VideoConfig) -> crate::Result<Self> {
 		let container = (&config.container).try_into()?;
-		let framerate = config
-			.framerate
-			.filter(|fps| fps.is_finite() && *fps > 0.0)
-			.unwrap_or(30.0);
+		let framerate = super::usable_video_framerate(config).unwrap_or(30.0);
 		Ok(Self {
 			container,
 			transform: build_video_transform(config),
@@ -357,6 +354,24 @@ mod tests {
 		assert_eq!(super::super::sample_durations(&fragment.data), vec![Some(1001)]);
 	}
 
+	#[test]
+	fn unusable_framerate_uses_the_standard_fallback_rate() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(0.0005);
+		let muxer = Muxer::video(&config).unwrap();
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		assert_eq!(muxer.timescale(), timescale);
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
+	}
+
 	// A downstream timeline fixed at 90 kHz overrides the framerate-derived default, and the
 	// init and the fragments have to agree on it.
 	#[test]
@@ -380,6 +395,21 @@ mod tests {
 		};
 		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
 		assert_eq!(decoded[0].timestamp.as_micros(), 33_333);
+	}
+
+	#[test]
+	fn with_timescale_recomputes_the_fallback_frame_duration() {
+		let timescale = moq_net::Timescale::new(90_000).unwrap();
+		let muxer = video_muxer().with_timescale(timescale).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+
+		let decoded = super::super::decode(muxer.fragment(0, &[frame]).unwrap(), timescale).unwrap();
+		assert_eq!(decoded[0].duration.unwrap().as_scale(timescale), 3_000);
 	}
 
 	// mdhd.timescale is 32 bits, but moq_net::Timescale spans the whole QUIC varint range. A

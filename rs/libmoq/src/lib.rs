@@ -18,6 +18,7 @@
 
 mod api;
 mod audio;
+mod client;
 mod consume;
 mod error;
 mod ffi;
@@ -34,6 +35,7 @@ pub use error::*;
 pub use id::*;
 pub use video::*;
 
+pub(crate) use client::*;
 pub(crate) use consume::*;
 pub(crate) use origin::*;
 pub(crate) use publish::*;
