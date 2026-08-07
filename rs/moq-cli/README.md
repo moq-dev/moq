@@ -19,7 +19,7 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ## Usage
 
-`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`).
+`moq-cli` routes one endpoint onto a shared MoQ Origin: `moq <MoQ side> <import|export> <endpoint>`. The MoQ side (before the verb) is either `--client-connect <url>` (dial a relay) or `--server-bind <addr>` (self-host). `import` moves media into MoQ, `export` moves it out. The endpoint is a container format (`fmp4`, `ts`, `flv`, ... read from stdin / written to stdout), or a gateway (`hls`, `rtmp`, `srt`, `rtc`). A build with the `play` feature can also render a broadcast locally with `moq <MoQ side> play`.
 
 ### Publish to a remote relay
 
@@ -33,6 +33,12 @@ ffmpeg -i input.mp4 -f mp4 -movflags cmaf - | \
 ```bash
 moq --client-connect https://relay.example.com --broadcast my-stream.hang export fmp4 | \
     ffplay -
+```
+
+Play the broadcast in a native window and speaker (requires `--features play` when building):
+
+```bash
+moq --client-connect https://relay.example.com --broadcast my-stream.hang play
 ```
 
 ### Self-host: publish into a local relay

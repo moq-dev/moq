@@ -1,14 +1,16 @@
 //! moq-cli: a media router that wires one endpoint onto a shared MoQ Origin.
 //!
-//! The binary is `moq`. See [`args`] for the `import`/`export` command grammar;
-//! this module orchestrates the shared Origin and spawns the MoQ side plus the
-//! selected endpoint.
+//! The binary is `moq`. See [`args`] for the `import`/`export`/`play` command
+//! grammar; this module orchestrates the shared Origin and spawns the MoQ side
+//! plus the selected endpoint.
 
 mod args;
 #[cfg(feature = "capture")]
 mod devices;
 mod hls;
 mod moq;
+#[cfg(feature = "play")]
+mod play;
 mod publish;
 mod rtc;
 mod rtmp;
@@ -104,6 +106,8 @@ async fn main() -> anyhow::Result<()> {
 		match cli.command {
 			Command::Import(import) => run_import(cli.moq, import, net).await,
 			Command::Export(export) => run_export(cli.moq, export, net).await,
+			#[cfg(feature = "play")]
+			Command::Play(args) => run_play(cli.moq, args, net).await,
 			#[cfg(feature = "transcode")]
 			Command::Transcode(args) => transcode::run(cli.moq, args, net).await,
 			Command::Token(_) => unreachable!("handled above, before the transport is bound"),
@@ -116,6 +120,50 @@ async fn main() -> anyhow::Result<()> {
 		result = run => result,
 		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 	}
+}
+
+/// Attach the MoQ side so it fills the shared Origin: dial a relay, accept
+/// inbound sessions, or both. Shared by every verb that consumes.
+fn spawn_moq_consume(
+	moq: &MoqSide,
+	net: &Net,
+	origin: &moq_net::origin::Producer,
+	tasks: &mut JoinSet<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+	if moq.client.connect.is_some()
+		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
+	{
+		moq::notify_ready();
+		tasks.spawn(async move { Ok(reconnect.closed().await?) });
+	}
+	if let Some(web_bind) = moq.server.bind.clone() {
+		let server = net.server(moq.server.clone())?;
+		let certificates = server.certificates();
+		moq::notify_ready();
+		let origin = origin.clone();
+		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
+		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
+	}
+	Ok(())
+}
+
+/// Fill the shared Origin from MoQ, then play one broadcast locally.
+///
+/// The playback event loop runs on this task's thread rather than a spawned one:
+/// winit can only build an event loop on the process main thread, which is where
+/// `#[tokio::main]` polls this future.
+#[cfg(feature = "play")]
+async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
+	// Before anything dials: a codec we can't decode is a blank window otherwise.
+	args.validate()?;
+
+	let origin = moq.origin()?;
+	let name = moq.broadcast.clone().unwrap_or_default();
+	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+
+	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
+
+	play::run(origin.consume(), name, args, tasks)
 }
 
 /// Route one source INTO the shared Origin, exposing it to the MoQ network.
@@ -261,20 +309,7 @@ async fn run_export(moq: MoqSide, export: Export, net: Net) -> anyhow::Result<()
 	}
 
 	// MoQ side: fill the Origin.
-	if moq.client.connect.is_some()
-		&& let Some(reconnect) = net.client(moq.client.clone())?.consume(origin.clone())
-	{
-		moq::notify_ready();
-		tasks.spawn(async move { Ok(reconnect.closed().await?) });
-	}
-	if let Some(web_bind) = moq.server.bind.clone() {
-		let server = net.server(moq.server.clone())?;
-		let certificates = server.certificates();
-		moq::notify_ready();
-		let origin = origin.clone();
-		tasks.spawn(async move { Ok(server.serve_consume(origin).await?) });
-		tasks.spawn(async move { web::run_web(&web_bind, certificates).await });
-	}
+	spawn_moq_consume(&moq, &net, &origin, &mut tasks)?;
 
 	// Foreign side: the single sink.
 	if let Some((format, max_latency, fragment_duration)) = export.sink.stdout() {

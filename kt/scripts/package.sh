@@ -136,9 +136,7 @@ done
 JVM_LIBS=(
     "x86_64-unknown-linux-gnu:linux-x86-64:libmoq_ffi.so"
     "aarch64-unknown-linux-gnu:linux-aarch64:libmoq_ffi.so"
-    "universal-apple-darwin:darwin:libmoq_ffi.dylib"
     "aarch64-apple-darwin:darwin-aarch64:libmoq_ffi.dylib"
-    "x86_64-apple-darwin:darwin-x86-64:libmoq_ffi.dylib"
     "x86_64-pc-windows-msvc:win32-x86-64:moq_ffi.dll"
 )
 for entry in "${JVM_LIBS[@]}"; do

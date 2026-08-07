@@ -169,14 +169,14 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
 - **Local checks only compile the host's platform and target, and PR CI is Linux-only.** `#[cfg(target_os = "...")]` code for other platforms is invisible to them, and `cargo fmt` skips those modules too. Windows and Mac runners cost too much for a per-PR gate, so those platforms are manual:
 
-  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++.
+  - Windows (moq-video's Media Foundation and D3D11 backends): `just rs windows`, which must run ON Windows. You can't reproduce it elsewhere, since cross-compiling dies in openh264-sys2's vendored C++. It names `moq-cli/play` explicitly, since that feature is what pulls in moq-video's wgpu renderer and moq-audio's cpal output; a default-feature build compiles neither.
   - macOS (moq-video's VideoToolbox and ScreenCaptureKit, moq-audio's system audio): `just rs macos`, which must run ON macOS. Scoped to moq-video + moq-audio, and needs `--all-features` because moq-audio's capture backend is off by default.
   - Linux: covered. `just rs ci` already runs `--all-features` in a dev shell carrying PipeWire and ALSA. VAAPI loads libva dynamically, so nvenc/nvdec/vaapi/pipewire all compile without libva installed.
   - wasm32 (moq-wasm): `just rs wasm`. The crate root is `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace` compiles it down to nothing and sees no errors at all. This one needs no special host (the Nix shell carries the target), so `just rs ci` and `just check-all` both run it, and `just check` adds it when the diff touches `rs/moq-wasm/`. It's a compile gate, distinct from the root `just wasm`, which builds the shippable `@moq/wasm` package.
 
   What still compiles these automatically, and when:
 
-  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and both Apple targets. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
+  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and Apple Silicon. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
   - **moq-audio's macOS capture has no automated backstop at all.** ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). `just rs macos` is the only thing that compiles it, ever.
   - `.github/workflows/swift.yml` still runs on a Mac for `swift/**` and `rs/moq-ffi/**` PRs, so moq-ffi and the Swift wrapper keep a PR-time gate.
 

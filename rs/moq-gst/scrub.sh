@@ -36,13 +36,12 @@ scrub_macos() {
 
     # The shared Mach-O scrub does the LC_LOAD_DYLIB rewrite, /nix LC_RPATH
     # strip, and the no-/nix assertion. We just pass the rpaths a GStreamer
-    # plugin needs: /opt/homebrew + /usr/local cover homebrew on ARM and
-    # Intel, the Framework path covers the official .pkg installer, and
-    # /usr/lib lets dyld resolve system libs (libiconv, libc++) via the
-    # dyld_shared_cache at @rpath substitution time.
+    # plugin needs: /opt/homebrew covers Homebrew on Apple Silicon, the
+    # Framework path covers the official .pkg installer, and /usr/lib lets
+    # dyld resolve system libs (libiconv, libc++) via the dyld_shared_cache at
+    # @rpath substitution time.
     "$SCRIPT_DIR/../scripts/scrub-macho.sh" "$dylib" \
         /opt/homebrew/lib \
-        /usr/local/lib \
         /Library/Frameworks/GStreamer.framework/Libraries \
         /usr/lib
 }

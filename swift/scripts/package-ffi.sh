@@ -146,19 +146,14 @@ ensure_lib() {
 
 IOS_DEVICE_LIB=$(ensure_lib "aarch64-apple-ios")
 IOS_SIM_ARM64=$(ensure_lib "aarch64-apple-ios-sim")
-IOS_SIM_X86_64=$(ensure_lib "x86_64-apple-ios")
-MAC_UNIVERSAL=$(ensure_lib "universal-apple-darwin")
-
-# Fat lib for iOS simulator (arm64 + x86_64).
-IOS_SIM_FAT="$STAGING/libmoq_ffi-iossim.a"
-lipo -create "$IOS_SIM_ARM64" "$IOS_SIM_X86_64" -output "$IOS_SIM_FAT"
+MAC_ARM64=$(ensure_lib "aarch64-apple-darwin")
 
 # --- Build XCFramework ---
 XCF="$STAGING/MoqFFI.xcframework"
 env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} xcodebuild -create-xcframework \
     -library "$IOS_DEVICE_LIB" -headers "$HEADERS_DIR" \
-    -library "$IOS_SIM_FAT" -headers "$HEADERS_DIR" \
-    -library "$MAC_UNIVERSAL" -headers "$HEADERS_DIR" \
+    -library "$IOS_SIM_ARM64" -headers "$HEADERS_DIR" \
+    -library "$MAC_ARM64" -headers "$HEADERS_DIR" \
     -output "$XCF"
 
 # --- Zip and checksum the XCFramework ---

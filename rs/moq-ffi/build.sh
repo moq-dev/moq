@@ -103,10 +103,6 @@ is_ios() {
 # Check if target can run on the host (for binding generation)
 can_run_on_host() {
     local target="$1"
-    # Universal darwin can run on host if we're on macOS
-    if [[ "$target" == "universal-apple-darwin" && "$(uname)" == "Darwin" ]]; then
-        return 0
-    fi
     [[ "$target" == "$HOST_TARGET" ]]
 }
 
@@ -206,22 +202,7 @@ fi
 
 # --- Full build mode ---
 
-if [[ "$TARGET" == "universal-apple-darwin" ]]; then
-    if [[ "$(uname)" != "Darwin" ]]; then
-        echo "Error: Universal builds are only supported on macOS" >&2
-        exit 1
-    fi
-
-    build_target "x86_64-apple-darwin"
-    build_target "aarch64-apple-darwin"
-
-    LIB_X86_STATIC="$TARGET_BASE_DIR/x86_64-apple-darwin/release/libmoq_ffi.a"
-    LIB_ARM64_STATIC="$TARGET_BASE_DIR/aarch64-apple-darwin/release/libmoq_ffi.a"
-    LIB_X86_DYLIB="$TARGET_BASE_DIR/x86_64-apple-darwin/release/libmoq_ffi.dylib"
-    LIB_ARM64_DYLIB="$TARGET_BASE_DIR/aarch64-apple-darwin/release/libmoq_ffi.dylib"
-else
-    build_target "$TARGET"
-fi
+build_target "$TARGET"
 
 # Package native libraries
 NAME="moq-ffi-${VERSION}-${TARGET}"
@@ -232,12 +213,7 @@ echo "Packaging $NAME..."
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/lib"
 
-if [[ "$TARGET" == "universal-apple-darwin" ]]; then
-    echo "Creating universal binaries..."
-    lipo -create "$LIB_X86_STATIC" "$LIB_ARM64_STATIC" -output "$PACKAGE_DIR/lib/libmoq_ffi.a"
-    lipo -create "$LIB_X86_DYLIB" "$LIB_ARM64_DYLIB" -output "$PACKAGE_DIR/lib/libmoq_ffi.dylib"
-
-elif [[ "$TARGET" == *"-windows-"* ]]; then
+if [[ "$TARGET" == *"-windows-"* ]]; then
     TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
     cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/moq_ffi.dll.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
@@ -294,20 +270,7 @@ fi
 # Generate bindings if we can run the library on this host
 cd "$WORKSPACE_DIR"
 if can_run_on_host "$TARGET"; then
-    # For universal builds, use the dylib matching the host arch
-    if [[ "$TARGET" == "universal-apple-darwin" ]]; then
-        host_arch=$(uname -m)
-        case "$host_arch" in
-            arm64 | aarch64) cdylib=$(find_cdylib "aarch64-apple-darwin") ;;
-            x86_64) cdylib=$(find_cdylib "x86_64-apple-darwin") ;;
-            *)
-                echo "Warning: unknown host arch $host_arch, skipping bindings"
-                cdylib=""
-                ;;
-        esac
-    else
-        cdylib=$(find_cdylib "$TARGET")
-    fi
+    cdylib=$(find_cdylib "$TARGET")
 
     if [[ -f "$cdylib" ]]; then
         generate_bindings "$cdylib"
