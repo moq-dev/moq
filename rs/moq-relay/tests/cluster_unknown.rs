@@ -65,37 +65,102 @@ fn client(version: Option<moq_net::Version>) -> moq_native::Client {
 }
 
 struct Publisher {
-	_track: moq_net::track::Producer,
 	_broadcast: moq_net::broadcast::Producer,
 	_session: moq_net::Session,
+	streamer: tokio::task::AbortHandle,
 }
 
-async fn publish_unknown(port: u16) -> Publisher {
+impl Drop for Publisher {
+	fn drop(&mut self) {
+		// The streaming task owns the track producer; stop it with the
+		// publisher so the broadcast actually ends (a live track producer
+		// would keep it announced).
+		self.streamer.abort();
+	}
+}
+
+async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = Origin::random().produce();
 	let mut broadcast = origin
 		.create_broadcast(PATH, moq_net::broadcast::Route::new().with_announce(true))
 		.expect("create broadcast");
 	let mut track = broadcast.create_track("video", None).expect("create track");
-	let mut group = track.append_group().expect("append group");
-	group
-		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
-		.expect("write frame");
-	group.finish().expect("finish group");
 
-	// Draft-14 has no Cluster extension, so the accepting relay must represent
-	// this external publisher with the wire-defined UNKNOWN Hop ID.
-	let version = "moq-transport-14".parse().expect("parse version");
+	// Stream like a real publisher: a fresh group every 100ms, so a subscriber
+	// that attaches at any point receives one (and the test doesn't depend on
+	// cached-group replay, which differs per protocol). Aborted by the
+	// Publisher's Drop, which is what ends the broadcast.
+	let streamer = tokio::spawn(async move {
+		loop {
+			let Ok(mut group) = track.append_group() else { break };
+			if group.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref()).is_err() {
+				break;
+			}
+			if group.finish().is_err() {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.abort_handle();
+
+	let version = version.parse().expect("parse version");
 	let session = tokio::time::timeout(TIMEOUT, client(Some(version)).with_publisher(&origin).connect(url))
 		.await
 		.expect("publisher connect timeout")
 		.expect("publisher connect failed");
 
 	Publisher {
-		_track: track,
 		_broadcast: broadcast,
 		_session: session,
+		streamer,
 	}
+}
+
+async fn publish_unknown(port: u16) -> Publisher {
+	// Draft-14 has no Cluster extension, so the accepting relay must represent
+	// this external publisher with the wire-defined UNKNOWN Hop ID.
+	publish_version(port, "moq-transport-14").await
+}
+
+/// Subscribe to [`PATH`] through the relay on `port` and read its first frame.
+/// `Err` carries why it never arrived, so a failing assertion says which step
+/// broke rather than just "no frame".
+async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
+	let url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
+	let origin = Origin::random().produce();
+	let consumer = origin.consume();
+	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url))
+		.await
+		.map_err(|_| "subscriber connect timeout".to_string())?
+		.map_err(|err| format!("subscriber connect failed: {err}"))?;
+
+	let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(PATH))
+		.await
+		.map_err(|_| "request_broadcast timed out".to_string())?
+		.map_err(|err| format!("request_broadcast failed: {err}"))?;
+
+	let mut track = tokio::time::timeout(TIMEOUT, broadcast.track("video").expect("track handle").subscribe(None))
+		.await
+		.map_err(|_| "subscribe timed out".to_string())?
+		.map_err(|err| format!("subscribe failed: {err}"))?;
+
+	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+		.await
+		.map_err(|_| "recv_group timed out".to_string())?
+		.map_err(|err| format!("recv_group failed: {err}"))?
+		.ok_or_else(|| "track closed before a group arrived".to_string())?;
+
+	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		.await
+		.map_err(|_| "read_frame timed out".to_string())?
+		.map_err(|err| format!("read_frame failed: {err}"))?
+		.ok_or_else(|| "group closed before a frame arrived".to_string())?;
+
+	let payload = frame.payload.to_vec();
+	drop(session);
+	Ok(payload)
 }
 
 async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
@@ -115,7 +180,7 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	updates
 }
 
-async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>) {
+async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>, expect_frame: bool) {
 	let (a_port, a) = spawn_relay(11, vec![], cluster_version).await;
 	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], cluster_version).await;
 	let (c_port, c) = spawn_relay(
@@ -133,6 +198,13 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 	let publisher = publish_unknown(a_port).await;
 	let updates = watcher.await.expect("viewer task");
 
+	// The announce is only half the contract: the route it advertises must
+	// actually serve a frame at the far end of the mesh. Over IETF cluster
+	// sessions that data path is still broken for UNKNOWN publishers (see
+	// unknown_publisher_frames_over_an_ietf_cluster below), so only the lite
+	// variant asserts it for now.
+	let frame = read_first_frame(d_port).await;
+
 	drop(publisher);
 	a.abort();
 	b.abort();
@@ -146,15 +218,138 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 		unannounces, 0,
 		"the broadcast flapped while its publisher stayed up: {updates:?}"
 	);
+	if expect_frame {
+		assert_eq!(frame.expect("read through the mesh"), b"hello");
+	}
+}
+
+/// Every ingest version that can carry a broadcast must survive the same
+/// redundant mesh. The pre-fix failure set was exactly the versions that
+/// declare no origin identity (lite <= 03, moq-transport <= 16): their
+/// broadcasts enter with an UNKNOWN first hop, and the reflected copy replaced
+/// the live source instead of parking. The identity-carrying versions held
+/// even before the fix, so this pins both halves of the boundary.
+#[tokio::test]
+async fn every_ingest_version_crosses_a_redundant_mesh() {
+	let mut failures = Vec::new();
+
+	for version in [
+		"moq-lite-02",
+		"moq-lite-03",
+		"moq-lite-04",
+		"moq-lite-05",
+		"moq-transport-14",
+		"moq-transport-16",
+		"moq-transport-17",
+	] {
+		let (a_port, a) = spawn_relay(11, vec![], None).await;
+		let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
+		let (c_port, c) = spawn_relay(
+			13,
+			vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+			None,
+		)
+		.await;
+		let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
+		tokio::time::sleep(Duration::from_millis(500)).await;
+
+		let _publisher = publish_version(a_port, version).await;
+		tokio::time::sleep(Duration::from_millis(750)).await;
+
+		if let Err(err) = read_first_frame(d_port).await {
+			failures.push(format!("{version}: {err}"));
+		}
+
+		a.abort();
+		b.abort();
+		c.abort();
+		d.abort();
+	}
+
+	assert!(failures.is_empty(), "cross-mesh failures:\n{}", failures.join("\n"));
+}
+
+/// The same broadcast path republished after its previous session ended - what
+/// a reconnecting robot (or a re-run smoke test) does. Each round must become
+/// routable across the mesh again; a dead verdict left by the previous round
+/// must not suppress the republish.
+#[tokio::test]
+async fn unknown_publisher_republish_stays_routable() {
+	let (a_port, a) = spawn_relay(11, vec![], None).await;
+	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
+	let (c_port, c) = spawn_relay(
+		13,
+		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+		None,
+	)
+	.await;
+	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
+	tokio::time::sleep(Duration::from_millis(500)).await;
+
+	for round in 0..3 {
+		let publisher = publish_unknown(a_port).await;
+		tokio::time::sleep(Duration::from_millis(750)).await;
+
+		let frame = read_first_frame(d_port).await;
+		assert_eq!(
+			frame.unwrap_or_else(|err| panic!("round {round}: the republished broadcast never came back: {err}")),
+			b"hello",
+			"round {round}"
+		);
+
+		// The session ends; the broadcast unannounces everywhere before the
+		// next round republishes the same path.
+		drop(publisher);
+		tokio::time::sleep(Duration::from_millis(750)).await;
+	}
+
+	a.abort();
+	b.abort();
+	c.abort();
+	d.abort();
 }
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
-	assert_unknown_publisher_stays_announced(None).await;
+	assert_unknown_publisher_stays_announced(None, true).await;
 }
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
 	let version = "moq-transport-19".parse().expect("parse version");
-	assert_unknown_publisher_stays_announced(Some(version)).await;
+	assert_unknown_publisher_stays_announced(Some(version), false).await;
+}
+
+/// KNOWN GAP: over IETF inter-relay sessions an UNKNOWN publisher's broadcast
+/// now stays announced (the fix above), but its frames never arrive at the far
+/// relay - recv_group fails with `dropped` while a DECLARED publisher's frames
+/// flow fine over the same mesh. The fleet's inter-relay sessions negotiate
+/// lite, so this only bites IETF federation; pinned here so it isn't
+/// forgotten, ignored so it doesn't fail CI until the data path is fixed.
+#[tokio::test]
+#[ignore = "UNKNOWN publisher frames do not flow over IETF cluster sessions"]
+async fn unknown_publisher_frames_over_an_ietf_cluster() {
+	let version: moq_net::Version = "moq-transport-19".parse().expect("parse version");
+	let (a_port, a) = spawn_relay(11, vec![], Some(version)).await;
+	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], Some(version)).await;
+	let (c_port, c) = spawn_relay(
+		13,
+		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
+		Some(version),
+	)
+	.await;
+	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], Some(version)).await;
+	tokio::time::sleep(Duration::from_millis(500)).await;
+
+	let _publisher = publish_unknown(a_port).await;
+	tokio::time::sleep(Duration::from_millis(750)).await;
+
+	let frame = read_first_frame(d_port).await;
+
+	a.abort();
+	b.abort();
+	c.abort();
+	d.abort();
+
+	assert_eq!(frame.expect("read through the IETF mesh"), b"hello");
 }
