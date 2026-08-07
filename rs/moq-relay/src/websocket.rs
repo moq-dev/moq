@@ -1,5 +1,5 @@
 use futures::{Sink, Stream};
-use qmux::tungstenite;
+use qmux::ws::tungstenite;
 use std::{
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
@@ -101,7 +101,7 @@ where
 	// broadcast it published stays announced for that entire window and the
 	// announce propagates to the rest of the cluster. QUIC gets this from its
 	// idle timeout; WebSocket has no equivalent of its own.
-	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::KeepAlive::default());
+	let upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
 	let upgraded = match alpn.as_deref() {
 		Some(alpn) => upgraded.with_alpn(alpn),
 		None => upgraded,
@@ -377,7 +377,7 @@ mod tests {
 	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
-	/// of truth that `supported_subprotocols` and `qmux::Client::with_protocols`
+	/// of truth that `supported_subprotocols` and `qmux::ws::Client::with_protocols`
 	/// consume, so adding a new ALPN doesn't break these tests independently
 	/// of the production logic.
 	fn newest_moq_alpn() -> &'static str {
@@ -611,7 +611,7 @@ mod tests {
 	async fn axum_ws_negotiates_newest_moq_alpn() {
 		let (addr, mut rx) = spawn_test_server().await;
 
-		let session = qmux::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
 			.connect(&format!("ws://{addr}/"))
 			.await
@@ -650,7 +650,7 @@ mod tests {
 				continue;
 			};
 
-			let session = qmux::Client::new()
+			let session = qmux::ws::Client::new()
 				.with_protocol(app, &[version])
 				.connect(&url)
 				.await
@@ -672,7 +672,7 @@ mod tests {
 		// rather than failing: we always accept a bare web-transport connection, and
 		// there's no other qmux version worth negotiating for moqt-18. It just never
 		// lands on `moqt-18`.
-		let session = qmux::Client::new()
+		let session = qmux::ws::Client::new()
 			.with_protocol("moqt-18", &[qmux::Version::QMux00])
 			.connect(&url)
 			.await

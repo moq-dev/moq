@@ -12,7 +12,6 @@ use std::net;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use url::Url;
-use web_transport_quiche::proto::ConnectRequest;
 
 /// Re-exported because this module's public API exposes its types. A major
 /// `web-transport-quiche` bump is therefore a breaking change for this crate.
@@ -380,11 +379,7 @@ impl QuicheClient {
 			}
 			"moqt" | "moql" => {
 				// Raw QUIC mode
-				let alpn = conn.alpn().ok_or(Error::MissingAlpn)?;
-				let alpn = std::str::from_utf8(&alpn)?;
-
-				let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
-				Ok(web_transport_quiche::Connection::raw(conn, request, response))
+				Ok(web_transport_quiche::Connection::raw(conn))
 			}
 			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
 		}
@@ -738,10 +733,8 @@ pub(crate) async fn accept(
 		// not the global default set, so opt-in / work-in-progress versions (e.g.
 		// moq-lite-06-wip) that are deliberately absent from `moq_net::ALPNS` still work.
 		alpn if alpns.contains(&alpn) => {
-			let request = ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap());
-			let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
 			// Raw QUIC carries no request URL; the path rides the SETUP.
-			let session = web_transport_quiche::Connection::raw(conn, request, response);
+			let session = web_transport_quiche::Connection::raw(conn);
 			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn.to_string())),

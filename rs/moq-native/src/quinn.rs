@@ -381,19 +381,7 @@ impl QuinnClient {
 			"https" => web_transport_quinn::Session::connect(connection, request)
 				.await
 				.map_err(map_client_error)?,
-			"moqt" | "moql" => {
-				let handshake = connection
-					.handshake_data()
-					.ok_or(Error::MissingHandshake)?
-					.downcast::<quinn::crypto::rustls::HandshakeData>()
-					.unwrap();
-
-				let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
-				let alpn = String::from_utf8(alpn)?;
-
-				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
-				web_transport_quinn::Session::raw(connection, request, response)
-			}
+			"moqt" | "moql" => web_transport_quinn::Session::raw(connection),
 			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};
 
@@ -662,22 +650,9 @@ pub(crate) async fn accept(
 		// this covers opt-in / work-in-progress versions (e.g. moq-lite-06-wip) that are
 		// deliberately absent from `moq_net::ALPNS`.
 		alpn if alpns.contains(&alpn) => {
-			// Raw QUIC carries no in-band request URL like WebTransport's CONNECT, so the TLS
-			// SNI is the only authority the client can offer, and it's optional. A client dialing
-			// a bare IP sends no SNI (RFC 6066 forbids IP literals), leaving `host` empty; the
-			// resulting hostless `moqt://` routes to the root path, exactly like a URL-less stream
-			// transport. `url()` returns `None` for the raw variant either way.
-			let host_str = if host.contains(':') {
-				format!("[{}]", host)
-			} else {
-				host.clone()
-			};
-			let url = format!("moqt://{}", host_str).parse::<Url>().map_err(Error::BuildUrl)?;
-			let request = web_transport_quinn::proto::ConnectRequest::new(url);
-			let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
 			let identity = crate::tls::PeerIdentity::from_any(conn.peer_identity());
 			// Raw QUIC carries no request URL; the path rides the SETUP.
-			let session = web_transport_quinn::Session::raw(conn, request, response);
+			let session = web_transport_quinn::Session::raw(conn);
 			Ok((session, None, identity))
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),

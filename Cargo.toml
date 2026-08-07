@@ -114,22 +114,22 @@ moq-transcode = { version = "0.0.8", path = "rs/moq-transcode", default-features
 moq-vaapi = "0.0.3"
 moq-video = { version = "0.0.14", path = "rs/moq-video", default-features = false }
 percent-encoding = "2"
-qmux = { version = "0.4.0", default-features = false }
+qmux = { version = "0.5.0", default-features = false }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 subtle = "2.6"
 tempfile = "3"
 tokio = "1.48"
 web-async = { version = "0.1.5", features = ["tracing"] }
-web-transport-iroh = "0.6"
+web-transport-iroh = "0.7"
 # default-features off so the QUIC crypto provider is chosen by moq-native's
 # aws-lc-rs / ring features (mirroring how the quinn dependency is wired).
-# 0.2.1 for the `qlog` passthrough feature moq-native's `qlog` forwards to.
-web-transport-noq = { version = "0.2.1", default-features = false }
+# 0.3 for the `qlog` passthrough feature moq-native's `qlog` forwards to.
+web-transport-noq = { version = "0.3", default-features = false }
 web-transport-proto = "0.6"
-web-transport-quiche = "0.5"
-web-transport-quinn = "0.11"
-web-transport-trait = "0.3.4"
+web-transport-quiche = "0.6"
+web-transport-quinn = "0.12"
+web-transport-trait = "0.4"
 
 [profile.dev]
 panic = "abort"

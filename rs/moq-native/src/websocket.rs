@@ -5,8 +5,8 @@
 //! a small head start ([`Client::delay`]), so WebSocket only wins when QUIC can't get
 //! through. Servers accept it on a separate TCP port via [`Listener`].
 
-use qmux::tokio_tungstenite;
-use qmux::tokio_tungstenite::tungstenite::{self, http};
+use qmux::ws::tokio_tungstenite;
+use qmux::ws::tokio_tungstenite::tungstenite::{self, http};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
@@ -185,10 +185,10 @@ pub(crate) async fn connect(
 	// restricts. qmux also offers the bare ALPNs (`qmux-01`, `qmux-00`,
 	// `webtransport`) by default so we still interop with relays that only know a
 	// wire-format version.
-	let session = qmux::Client::new()
+	let session = qmux::ws::Client::new()
 		.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 		.with_connector(connector)
-		.with_keep_alive(qmux::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
+		.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
 		.connect(url.as_str())
 		.await
 		.map_err(Error::Connect)?;
@@ -243,7 +243,7 @@ impl Error {
 /// alongside QUIC connections on a separate port.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
-	server: qmux::Server,
+	server: qmux::ws::Server,
 	health: crate::accept::Health,
 }
 
@@ -259,7 +259,7 @@ impl Listener {
 		// `qmux_versions_for` returns `&[]` (every QMux draft) for ALPNs the spec
 		// doesn't restrict; qmux by default also accepts legacy clients that
 		// only offer a bare wire-format ALPN (today's moq-net clients still do).
-		let server = qmux::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
+		let server = qmux::ws::Server::new().with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))));
 		Ok(Self {
 			listener,
 			server,
