@@ -142,10 +142,14 @@ fix-changed $FILES:
 # backend don't build on MSVC, while moq-video's Linux-only nvenc/nvdec defaults
 # are already no-ops off Linux. moq-gst is excluded because it links
 # GStreamer via pkg-config, which the Windows runner doesn't have.
+#
+# `moq-cli/play` is named explicitly because it's off by default and is what
+# turns on moq-video's wgpu renderer and moq-audio's cpal output, neither of
+# which any default-feature build compiles.
 
 # Compile the whole workspace on a Windows host. Must run ON Windows.
 windows *args:
-    cargo check --workspace --exclude moq-gst --all-targets {{ args }}
+    cargo check --workspace --exclude moq-gst --all-targets --features moq-cli/play {{ args }}
 
 # Runs the `#[cfg(target_os = "macos")]` code past the compiler: moq-video's
 # VideoToolbox encode/decode and its ScreenCaptureKit / AVFoundation capture,

@@ -162,9 +162,9 @@ moq --client-connect https://relay.example.com/anon --broadcast conference.hang 
 ```
 
 Video decoding prefers the platform hardware backend and falls back to the
-built-in software H.264 decoder. Rendering uses Metal on macOS, D3D12 on
-Windows, and Vulkan or OpenGL on Linux. Audio uses the system default output
-device through CoreAudio, WASAPI, or ALSA.
+built-in software H.264 decoder. Rendering picks the best graphics API the
+machine offers: Metal on macOS, and Vulkan ahead of D3D12 or OpenGL elsewhere.
+Audio uses the system default output device through CoreAudio, WASAPI, or ALSA.
 
 ### Publish a Video File
 

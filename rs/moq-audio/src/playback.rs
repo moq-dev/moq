@@ -1,6 +1,9 @@
 //! Play decoded PCM out a speaker, via [`cpal`] (CoreAudio / WASAPI / ALSA).
 //!
-//! The playback counterpart to [`capture`](crate::capture), and where a
+//! The playback counterpart to `capture`, and where a
+// `capture` is deliberately not a doc link: the module is behind the
+// off-by-default `capture` feature, so a link to it fails the `-D warnings`
+// rustdoc build of a playback-only build (what `moq-cli`'s `play` enables).
 //! [`decode::Consumer`](crate::decode::Consumer) ends up:
 //!
 //! ```no_run
