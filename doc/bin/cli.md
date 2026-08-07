@@ -119,9 +119,9 @@ window, graphics, decoder, and speaker dependencies:
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or build from a checkout:
-cargo build --release -p moq-cli --features play
+cargo build --release -p moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or run straight from that checkout:
-cargo run -p moq-cli --features play -- \
+cargo run -p moq-cli --no-default-features --features "iroh,quinn,websocket,play" -- \
     --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
