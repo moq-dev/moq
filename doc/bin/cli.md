@@ -119,20 +119,27 @@ window, graphics, decoder, and speaker dependencies:
 ```bash
 cargo install moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or build from a checkout:
-cargo build --release -p moq-cli --features play
+cargo build --release -p moq-cli --no-default-features --features "iroh,quinn,websocket,play"
 # or run straight from that checkout:
-cargo run -p moq-cli --features play -- \
+cargo run -p moq-cli --no-default-features --features "iroh,quinn,websocket,play" -- \
     --client-connect https://relay.example.com/anon --broadcast my-stream.hang play
 ```
 
 Drop the defaults on Linux, as above: the default `pipewire` feature links
 libpipewire-0.3 at build time to give `import capture` a display source that
-playback never uses. That still leaves one build dependency a playback-only box
-would rather not have. `play` pulls in moq-video, whose V4L2 camera capture is
-not behind a feature, so a Linux build needs libclang and the V4L2 headers
-(`libclang-dev` and `libv4l-dev` on Debian) for bindgen either way. Audio
-playback also needs the ALSA headers (`libasound2-dev` on Debian). macOS and
-Windows need nothing extra, so plain `--features play` is enough there.
+playback never uses.
+
+A Linux build still needs three system packages, whichever features are picked.
+The speaker goes through cpal, which links ALSA, and `play` pulls in moq-video,
+whose V4L2 camera capture is not behind a feature and whose bindgen wants
+libclang. On Debian and Ubuntu:
+
+```bash
+sudo apt install libasound2-dev libclang-dev libv4l-dev
+```
+
+macOS and Windows need nothing extra, so plain `--features play` is enough
+there.
 
 Once built, play a broadcast with:
 
