@@ -719,9 +719,8 @@ fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale
 		return Ok(None);
 	}
 
-	let output_scale = u128::from(timescale.as_u64());
-	let start_ticks = (u128::from(start.value()) * output_scale + start_scale / 2) / start_scale;
-	let end_ticks = (u128::from(end.value()) * output_scale + end_scale / 2) / end_scale;
+	let start_ticks = super::timestamp_ticks(start, timescale)?;
+	let end_ticks = super::timestamp_ticks(end, timescale)?;
 	let Some(ticks) = end_ticks.checked_sub(start_ticks) else {
 		return Ok(None);
 	};
@@ -729,7 +728,6 @@ fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale
 		return Err(Error::SampleDurationTooSmall(timescale.as_u64()).into());
 	}
 
-	let ticks = u64::try_from(ticks).map_err(|_| Error::PtsOverflow)?;
 	Ok(Some(Timestamp::new(ticks, timescale)?))
 }
 

@@ -394,7 +394,15 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 /// otherwise it's a single rescale rather than the legacy `micros * scale / 1_000_000`
 /// round-trip.
 fn base_ticks(frame: &Frame, timescale: moq_net::Timescale) -> Result<u64> {
-	u64::try_from(frame.timestamp.as_scale(timescale)).map_err(|_| Error::PtsOverflow)
+	timestamp_ticks(frame.timestamp, timescale)
+}
+
+/// Round an absolute timestamp to its nearest tick at the output scale.
+fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Result<u64> {
+	let source_scale = u128::from(timestamp.scale().as_u64());
+	let scaled = u128::from(timestamp.value()) * u128::from(timescale.as_u64());
+	let ticks = (scaled + source_scale / 2) / source_scale;
+	u64::try_from(ticks).map_err(|_| Error::PtsOverflow)
 }
 
 /// Encode a single-traf moof+mdat fragment whose decode timeline starts at `base_dts` ticks.
@@ -435,7 +443,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 			// Write the sample-duration back at the track's scale when we know it, so
 			// fMP4 -> fMP4 round-trips it. Frames without one stay byte-identical.
 			let duration = f.duration.map(|d| trun_duration(d, timescale)).transpose()?;
-			let pts = f.timestamp.as_scale(timescale) as i128;
+			let pts = i128::from(timestamp_ticks(f.timestamp, timescale)?);
 			let cts = pts - i128::from(dts);
 			let cts = i32::try_from(cts).map_err(|_| Error::PtsOverflow)?;
 
@@ -869,6 +877,9 @@ fn select_video_timescale(framerate: f64) -> Option<u64> {
 	if duration_fits_trun(frame, exact) {
 		return Some(exact);
 	}
+	if let Some(timescale) = rational_timescale(frame) {
+		return Some(timescale);
+	}
 
 	let max_scale = u128::from(u32::MAX)
 		.checked_mul(NANOS_PER_SECOND)?
@@ -876,6 +887,35 @@ fn select_video_timescale(framerate: f64) -> Option<u64> {
 		.min(u128::from(u32::MAX));
 	let max_scale = u64::try_from(max_scale).ok()?;
 	duration_fits_trun(frame, max_scale).then_some(max_scale)
+}
+
+/// Find a small rational scale whose rounded cadence stays within one nanosecond.
+fn rational_timescale(duration: Duration) -> Option<u64> {
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let mut numerator = duration.as_nanos();
+	let mut denominator = NANOS_PER_SECOND;
+	let (mut previous_ticks, mut ticks) = (0_u128, 1_u128);
+	let (mut previous_scale, mut scale) = (1_u128, 0_u128);
+
+	while denominator != 0 {
+		let coefficient = numerator / denominator;
+		let next_ticks = coefficient.checked_mul(ticks)?.checked_add(previous_ticks)?;
+		let next_scale = coefficient.checked_mul(scale)?.checked_add(previous_scale)?;
+		if next_ticks > u128::from(u32::MAX) || next_scale > u128::from(u32::MAX) {
+			break;
+		}
+
+		let candidate = u64::try_from(next_scale).ok()?;
+		if duration_fits_trun(duration, candidate) {
+			return Some(candidate);
+		}
+
+		(previous_ticks, ticks) = (ticks, next_ticks);
+		(previous_scale, scale) = (scale, next_scale);
+		(numerator, denominator) = (denominator, numerator % denominator);
+	}
+
+	None
 }
 
 /// Whether the scale represents the rounded cadence and keeps its sample duration 32-bit.
@@ -1023,13 +1063,17 @@ mod tests {
 	#[test]
 	fn default_video_timescale_keeps_low_cadence_within_trun() {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.framerate = Some(0.2001);
-		let timescale = default_video_timescale(&config);
-		let duration = Duration::from_secs_f64(1.0 / 0.2001);
-		let ticks = rounded_duration_ticks(duration, timescale).unwrap();
+		for framerate in [0.2001, 0.0011] {
+			config.framerate = Some(framerate);
+			let timescale = default_video_timescale(&config);
+			let duration = Duration::from_secs_f64(1.0 / framerate);
+			let ticks = rounded_duration_ticks(duration, timescale).unwrap();
 
-		assert!(timescale <= u64::from(u32::MAX));
-		assert!(ticks <= u64::from(u32::MAX));
+			assert!(timescale <= u64::from(u32::MAX));
+			assert!(ticks <= u64::from(u32::MAX));
+		}
+
+		assert_eq!(default_video_timescale(&config), 11);
 	}
 
 	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a

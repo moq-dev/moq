@@ -366,6 +366,7 @@ mod tests {
 
 		let fragment = muxer.fragment(0, &input).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000); 3]);
+		assert_eq!(super::super::timeline(&fragment), (0, vec![0; 3]));
 
 		let mut fragmenter = muxer.fragmenter(fragment::Config {
 			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
@@ -380,13 +381,19 @@ mod tests {
 			.map(|fragment| super::super::sample_durations(&fragment.data)[0])
 			.collect();
 		assert_eq!(durations, vec![Some(1_000); 3]);
+		let timelines: Vec<_> = fragments
+			.iter()
+			.map(|fragment| super::super::timeline(&fragment.data))
+			.collect();
+		assert_eq!(timelines, vec![(0, vec![0]), (1_000, vec![0]), (2_000, vec![0])]);
 	}
 
 	#[test]
 	fn low_framerate_fallback_fits_mp4_timing_fields() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.framerate = Some(0.2001);
+		config.framerate = Some(0.0011);
 		let muxer = Muxer::video(&config).unwrap();
+		assert_eq!(muxer.timescale().as_u64(), 11);
 		assert!(muxer.init().unwrap().is_some());
 
 		let frame = Frame {
@@ -396,7 +403,7 @@ mod tests {
 			duration: None,
 		};
 		let fragment = muxer.fragment(0, &[frame]).unwrap();
-		assert!(super::super::sample_durations(&fragment)[0].is_some());
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(10_000)]);
 	}
 
 	#[test]
