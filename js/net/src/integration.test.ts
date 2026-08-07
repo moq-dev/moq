@@ -152,6 +152,33 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.close();
 });
 
+test("integration: lite applies initial and updated group bounds", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("video");
+	for (let sequence = 0; sequence < 5; sequence++) producer.appendGroup().close();
+	server.publish(Path.from("test"), broadcast);
+
+	const remote = client.consume(Path.from("test"));
+	const subscriber = remote.track("video").subscribe({ startGroup: 1, endGroup: 2 });
+	expect((await subscriber.nextGroup())?.sequence).toBe(1);
+	expect((await subscriber.nextGroup())?.sequence).toBe(2);
+
+	const pending = subscriber.nextGroup();
+	expect(await Promise.race([pending, sleep(20).then(() => "pending")])).toBe("pending");
+
+	subscriber.update({ startGroup: 4, endGroup: 4 });
+	expect((await pending)?.sequence).toBe(4);
+
+	subscriber.close();
+	remote.close();
+	broadcast.close();
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-06", async () => {
 	// Exercises announce ids: every active assigns an ordinal on the wire.
 	await runPublishSubscribeFlow(Lite.ALPN_06_WIP);

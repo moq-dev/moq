@@ -68,6 +68,19 @@ test("a request exposes the aggregate subscription options", async () => {
 	expect(request?.priority).toBe(7);
 });
 
+test("requested selects the highest current priority", async () => {
+	const consumer = new TestConsumer();
+
+	const first = consumer.subscribe("first", { priority: 1 });
+	consumer.subscribe("second", { priority: 5 });
+	const updated = first.subscription.changed();
+	first.update({ priority: 9 });
+	await updated;
+
+	expect((await consumer.requested())?.name).toBe("first");
+	expect((await consumer.requested())?.name).toBe("second");
+});
+
 test("a consumer clone shares the broadcast until every handle closes", () => {
 	const consumer = new TestConsumer();
 	const clone = consumer.clone();

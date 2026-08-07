@@ -198,6 +198,26 @@ test("nextGroup returns buffered groups in sequence", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(5);
 });
 
+test("local cursor bounds can skip, pause, and release buffered groups", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+
+	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+
+	expect(track.latest()).toBe(4);
+	track.startAt(1);
+	track.endAt(2);
+	expect((await track.nextGroup())?.sequence).toBe(1);
+	expect((await track.nextGroup())?.sequence).toBe(2);
+
+	const pending = track.nextGroup();
+	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+
+	track.startAt(4);
+	track.endAt(4);
+	expect((await pending)?.sequence).toBe(4);
+});
+
 test("recvGroup after nextGroup still returns late arrivals", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();

@@ -256,6 +256,9 @@ export class Publisher {
 			startGroup: msg.startGroup,
 			endGroup: msg.endGroup,
 		});
+		const startGroup = msg.startGroup ?? track.latest();
+		if (startGroup !== undefined) track.startAt(startGroup);
+		track.endAt(msg.endGroup);
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -314,6 +317,8 @@ export class Publisher {
 						startGroup: result.startGroup,
 						endGroup: result.endGroup,
 					});
+					if (result.startGroup !== undefined) track.startAt(result.startGroup);
+					track.endAt(result.endGroup);
 				}
 			}
 
@@ -390,7 +395,7 @@ export class Publisher {
 
 		try {
 			for (;;) {
-				const next = track.recvGroup();
+				const next = track.nextGroup();
 				const group = await Promise.race([next, stream.closed]);
 				if (!group) {
 					next.then((group) => group?.close()).catch(() => {});

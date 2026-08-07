@@ -236,6 +236,7 @@ class TrackState {
 	groups = new Signal<GroupConsumer[]>([]);
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
+	latest?: number;
 	closed = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
@@ -439,6 +440,7 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		entry.mirrors.set(sink, dst);
+		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.groups.mutate((groups) => {
 			groups.push(dst);
 			groups.sort((a, b) => a.sequence - b.sequence);
@@ -606,6 +608,7 @@ export class Subscriber {
 
 	#state: TrackState;
 	#nextSequence = 0;
+	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
@@ -637,6 +640,21 @@ export class Subscriber {
 		return this.#state.update;
 	}
 
+	/** Return the latest group sequence observed on this track, if any. */
+	latest(): number | undefined {
+		return this.#state.latest;
+	}
+
+	/** Start this subscriber's local read cursor at `sequence`, without changing its wire request. */
+	startAt(sequence: number): void {
+		this.#cursor.update((cursor) => ({ ...cursor, start: sequence }));
+	}
+
+	/** Cap this subscriber's sequence-ordered cursor at `sequence` inclusively, or omit it to remove the cap. */
+	endAt(sequence?: number): void {
+		this.#cursor.update((cursor) => ({ ...cursor, end: sequence }));
+	}
+
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		if (!closeTrackState(this.#state, abort)) return;
@@ -654,6 +672,8 @@ export class Subscriber {
 	async recvGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
 			const groups = this.#state.groups.peek();
+			const { start } = this.#cursor.peek();
+			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
 			if (groups.length > 0) {
 				return groups.shift();
 			}
@@ -662,7 +682,7 @@ export class Subscriber {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) return undefined;
 
-			await Signal.race(this.#state.groups, this.#state.closed);
+			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
 	}
 
@@ -708,14 +728,23 @@ export class Subscriber {
 	 */
 	async nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
-			const group = await this.recvGroup();
-			if (!group) return undefined;
-			if (group.sequence < this.#nextSequence) {
-				group.close();
-				continue;
+			const groups = this.#state.groups.peek();
+			const cursor = this.#cursor.peek();
+			const start = Math.max(cursor.start, this.#nextSequence);
+			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+
+			const group = groups[0];
+			if (group && (cursor.end === undefined || group.sequence <= cursor.end)) {
+				groups.shift();
+				this.#nextSequence = group.sequence + 1;
+				return group;
 			}
-			this.#nextSequence = group.sequence + 1;
-			return group;
+
+			const closed = this.#state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed !== undefined && !group) return undefined;
+
+			await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 		}
 	}
 
@@ -735,6 +764,8 @@ export class Subscriber {
 	async readFrameSequence(): Promise<({ group: number; frame: number } & Frame) | undefined> {
 		for (;;) {
 			const groups = this.#state.groups.peek();
+			const { start } = this.#cursor.peek();
+			while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
 
 			// Drain older groups first, dropping each once empty.
 			while (groups.length > 1) {
@@ -760,7 +791,7 @@ export class Subscriber {
 				const closed = this.#state.closed.peek();
 				if (closed instanceof Error) throw closed;
 				if (closed !== undefined) return undefined;
-				await Signal.race(this.#state.groups, this.#state.closed);
+				await Signal.race(this.#state.groups, this.#cursor, this.#state.closed);
 				continue;
 			}
 
@@ -794,7 +825,7 @@ export class Subscriber {
 
 			// Lone open group with nothing buffered yet: wait for a frame on it, a new group, or
 			// the track closing.
-			await Promise.race([Signal.race(this.#state.groups, this.#state.closed), group.readable()]);
+			await Promise.race([Signal.race(this.#state.groups, this.#cursor, this.#state.closed), group.readable()]);
 		}
 	}
 
