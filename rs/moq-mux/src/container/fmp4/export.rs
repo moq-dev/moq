@@ -702,33 +702,33 @@ fn fallback_duration(default_frame: Duration, timescale: moq_net::Timescale) -> 
 	}
 }
 
-/// Subtract two instants as a reduced rational and express the exact gap at the output scale.
+/// Quantize two absolute instants at the output scale, then subtract their tick positions.
+///
+/// Quantizing endpoints instead of each gap independently carries fractional ticks forward:
+/// a microsecond clock alternating 33,333 and 33,334 microsecond steps at 30 kHz produces
+/// consecutive 1,000-tick samples instead of either drifting or failing as inexact.
 fn timestamp_gap(start: Timestamp, end: Timestamp, timescale: moq_net::Timescale) -> Result<Option<Timestamp>> {
 	let start_scale = u128::from(start.scale().as_u64());
 	let end_scale = u128::from(end.scale().as_u64());
 	let end_numerator = u128::from(end.value()) * start_scale;
 	let start_numerator = u128::from(start.value()) * end_scale;
-	let Some(mut numerator) = end_numerator.checked_sub(start_numerator) else {
+	let Some(numerator) = end_numerator.checked_sub(start_numerator) else {
 		return Ok(None);
 	};
 	if numerator == 0 {
 		return Ok(None);
 	}
 
-	let mut denominator = start_scale * end_scale;
-	let common = super::gcd(numerator, denominator);
-	numerator /= common;
-	denominator /= common;
-
-	let mut output_scale = u128::from(timescale.as_u64());
-	let common = super::gcd(output_scale, denominator);
-	output_scale /= common;
-	denominator /= common;
-	if denominator != 1 {
-		return Err(Error::SampleDurationInexact(timescale.as_u64()).into());
+	let output_scale = u128::from(timescale.as_u64());
+	let start_ticks = (u128::from(start.value()) * output_scale + start_scale / 2) / start_scale;
+	let end_ticks = (u128::from(end.value()) * output_scale + end_scale / 2) / end_scale;
+	let Some(ticks) = end_ticks.checked_sub(start_ticks) else {
+		return Ok(None);
+	};
+	if ticks == 0 {
+		return Err(Error::SampleDurationTooSmall(timescale.as_u64()).into());
 	}
 
-	let ticks = numerator.checked_mul(output_scale).ok_or(Error::PtsOverflow)?;
 	let ticks = u64::try_from(ticks).map_err(|_| Error::PtsOverflow)?;
 	Ok(Some(Timestamp::new(ticks, timescale)?))
 }
@@ -851,6 +851,22 @@ mod tests {
 
 		assert_eq!(frames[0].duration, Some(ts(41_667)));
 		assert_eq!(fragment_seconds(&frames, Duration::from_millis(33)), 0.041667);
+	}
+
+	#[test]
+	fn inferred_microsecond_clock_carries_fractional_ticks_forward() {
+		let timescale = moq_net::Timescale::new(30_000).unwrap();
+		let mut frames = vec![frame(0, None), frame(33_333, None), frame(66_667, None)];
+		infer_missing_durations(&mut frames, None, Duration::from_nanos(33_333_333), timescale).unwrap();
+
+		let durations: Vec<_> = frames
+			.iter()
+			.map(|frame| {
+				let duration = frame.duration.unwrap();
+				(duration.value(), duration.scale())
+			})
+			.collect();
+		assert_eq!(durations, vec![(1_000, timescale); 3]);
 	}
 
 	/// The regression for moq-dev/moq.pro#814: a subscriber that got a stale cached group

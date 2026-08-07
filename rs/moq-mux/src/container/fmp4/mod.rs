@@ -831,36 +831,56 @@ fn build_mdia(timescale: u32, handler: &[u8; 4], is_video: bool, sample_entry: m
 /// Default video timescale when the catalog doesn't supply one.
 ///
 /// Used by the fMP4 exporter when synthesizing an init segment for a Legacy or LOC source.
-/// Prefer `framerate * 1000`, then the common NTSC denominator, and finally an exact scale
-/// for the nanosecond-rounded catalog cadence.
+/// Prefer `framerate * 1000`, then the common NTSC denominator, an exact scale for the
+/// nanosecond-rounded cadence, and finally the highest safe approximate scale.
 ///
 /// A framerate that scales to less than one tick takes the fallback too: zero and negative land
 /// on 0 through `as u64`, which is not a timescale anything accepts, and a non-finite one is
 /// filtered out before the cast, since infinity would saturate to `u64::MAX`, past the varint
 /// range a `Timescale` holds.
 pub(crate) fn default_video_timescale(config: &VideoConfig) -> u64 {
-	let Some(framerate) = usable_video_framerate(config) else {
-		return 90_000;
-	};
-	let preferred = (framerate * 1000.0) as u64;
-
-	let frame = Duration::from_secs_f64(1.0 / framerate);
-	for timescale in [preferred, (framerate * 1001.0).round() as u64] {
-		if timescale > 0 && rounded_duration_ticks(frame, timescale).is_some() {
-			return timescale;
-		}
-	}
-
-	const NANOS_PER_SECOND: u128 = 1_000_000_000;
-	let timescale = NANOS_PER_SECOND / gcd(frame.as_nanos(), NANOS_PER_SECOND);
-	u64::try_from(timescale).unwrap()
+	usable_video_framerate(config)
+		.and_then(select_video_timescale)
+		.unwrap_or(90_000)
 }
 
-/// A finite catalog framerate that produces at least one tick at the preferred scale.
+/// A finite catalog framerate with a synthesized scale and duration that fit their MP4 fields.
 pub(crate) fn usable_video_framerate(config: &VideoConfig) -> Option<f64> {
 	config
 		.framerate
 		.filter(|fps| fps.is_finite() && *fps > 0.0 && (*fps * 1000.0) as u64 > 0)
+		.filter(|fps| select_video_timescale(*fps).is_some())
+}
+
+/// Choose a scale that represents the rounded cadence without overflowing `trun` duration.
+fn select_video_timescale(framerate: f64) -> Option<u64> {
+	let preferred = (framerate * 1000.0) as u64;
+
+	let frame = Duration::from_secs_f64(1.0 / framerate);
+	for timescale in [preferred, (framerate * 1001.0).round() as u64] {
+		if duration_fits_trun(frame, timescale) {
+			return Some(timescale);
+		}
+	}
+
+	const NANOS_PER_SECOND: u128 = 1_000_000_000;
+	let exact = NANOS_PER_SECOND / gcd(frame.as_nanos(), NANOS_PER_SECOND);
+	let exact = u64::try_from(exact).ok()?;
+	if duration_fits_trun(frame, exact) {
+		return Some(exact);
+	}
+
+	let max_scale = u128::from(u32::MAX)
+		.checked_mul(NANOS_PER_SECOND)?
+		.checked_div(frame.as_nanos())?
+		.min(u128::from(u32::MAX));
+	let max_scale = u64::try_from(max_scale).ok()?;
+	duration_fits_trun(frame, max_scale).then_some(max_scale)
+}
+
+/// Whether the scale represents the rounded cadence and keeps its sample duration 32-bit.
+fn duration_fits_trun(duration: Duration, timescale: u64) -> bool {
+	timescale > 0 && rounded_duration_ticks(duration, timescale).is_some_and(|ticks| u32::try_from(ticks).is_ok())
 }
 
 /// Convert a rounded duration to ticks when it is within one nanosecond of an exact tick.
@@ -998,6 +1018,18 @@ mod tests {
 
 		config.framerate = Some(30_000.0 / 1001.0);
 		assert_eq!(default_video_timescale(&config), 30_000);
+	}
+
+	#[test]
+	fn default_video_timescale_keeps_low_cadence_within_trun() {
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.framerate = Some(0.2001);
+		let timescale = default_video_timescale(&config);
+		let duration = Duration::from_secs_f64(1.0 / 0.2001);
+		let ticks = rounded_duration_ticks(duration, timescale).unwrap();
+
+		assert!(timescale <= u64::from(u32::MAX));
+		assert!(ticks <= u64::from(u32::MAX));
 	}
 
 	// A live fragmented stream's duration isn't known up front. Zero reads as an empty file to a

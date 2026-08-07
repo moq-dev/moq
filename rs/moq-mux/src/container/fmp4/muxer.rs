@@ -355,6 +355,51 @@ mod tests {
 	}
 
 	#[test]
+	fn microsecond_pts_quantize_without_timeline_drift() {
+		let muxer = video_muxer();
+		let input = [0, 33_333, 66_667].map(|micros| Frame {
+			timestamp: Timestamp::from_micros(micros).unwrap(),
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: micros == 0,
+			duration: None,
+		});
+
+		let fragment = muxer.fragment(0, &input).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000); 3]);
+
+		let mut fragmenter = muxer.fragmenter(fragment::Config {
+			missing_duration: fragment::MissingDuration::InferFromPresentationTime,
+		});
+		let mut fragments = Vec::new();
+		for frame in input {
+			fragments.extend(fragmenter.push(frame).unwrap());
+		}
+		fragments.extend(fragmenter.flush().unwrap());
+		let durations: Vec<_> = fragments
+			.iter()
+			.map(|fragment| super::super::sample_durations(&fragment.data)[0])
+			.collect();
+		assert_eq!(durations, vec![Some(1_000); 3]);
+	}
+
+	#[test]
+	fn low_framerate_fallback_fits_mp4_timing_fields() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.framerate = Some(0.2001);
+		let muxer = Muxer::video(&config).unwrap();
+		assert!(muxer.init().unwrap().is_some());
+
+		let frame = Frame {
+			timestamp: Timestamp::ZERO,
+			payload: Bytes::from_static(&[0xDE, 0xAD]),
+			keyframe: true,
+			duration: None,
+		};
+		let fragment = muxer.fragment(0, &[frame]).unwrap();
+		assert!(super::super::sample_durations(&fragment)[0].is_some());
+	}
+
+	#[test]
 	fn unusable_framerate_uses_the_standard_fallback_rate() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.framerate = Some(0.0005);
