@@ -1064,15 +1064,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
+		// The extension changes what an advertisement carries, so nothing can be
+		// sent until the peer's SETUP says whether it speaks it.
+		let peer = self.peer().await;
+		// Register the split-horizon peer on the announce cursor too. The origin
+		// model uses this exposure to park a reflected copy before it can replace
+		// the source we are currently advertising to that peer.
+		let origin = match self.exclude(&peer) {
+			crate::Origin::UNKNOWN => origin,
+			exclude => origin.excluding(exclude),
+		};
 		let mut announced = origin.announced();
 		let mut watched: HashMap<crate::PathOwned, Watched> = HashMap::new();
 		// Draft-14/15: the open PUBLISH_NAMESPACE request carrying each advertised
 		// namespace. Empty on later drafts, whose entries ride `stream` inline.
 		let mut requests: HashMap<crate::PathOwned, NamespaceRequest<S>> = HashMap::new();
 
-		// The extension changes what an advertisement carries, so nothing can be
-		// sent until the peer's SETUP says whether it speaks it.
-		let peer = self.peer().await;
 		let mut linger = kio::time::Deadline::new();
 
 		// Stream updates (origin (un)announces plus watched route and demand

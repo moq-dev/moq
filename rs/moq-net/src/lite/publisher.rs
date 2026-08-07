@@ -258,6 +258,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.origin
 			.scope(&[prefix.as_path()])
 			.unwrap_or_else(|| self.origin.empty());
+		// Register the split-horizon peer on the announce cursor too. The origin
+		// model uses this exposure to park a reflected copy before it can replace
+		// the source we are currently advertising to that peer.
+		let origin = match Origin::new(exclude_hop) {
+			Ok(peer) => origin.excluding(peer),
+			Err(_) => origin,
+		};
 		let mut announced = origin.announced();
 
 		if let Err(err) = Self::run_announce(
