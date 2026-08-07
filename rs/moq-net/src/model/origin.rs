@@ -3371,6 +3371,22 @@ mod tests {
 		request.accept(None)
 	}
 
+	/// Serve `count` requested tracks, keyed by name. Dispatch order across
+	/// tracks is not guaranteed, which [`accept_track`]'s exact-name assert
+	/// cannot express.
+	async fn accept_tracks(dynamic: &mut broadcast::Dynamic, count: usize) -> HashMap<String, track::Producer> {
+		let mut accepted = HashMap::new();
+		for _ in 0..count {
+			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic.requested_track())
+				.await
+				.expect("timed out waiting for a track request")
+				.expect("source closed");
+			let name = request.name().to_string();
+			accepted.insert(name, request.accept(None));
+		}
+		accepted
+	}
+
 	/// Tagging both origin handles with one context attributes the full model path:
 	/// ingress writes on the subscriber side, egress reads on the publisher side,
 	/// each counter landing exactly once (the model-layer silent-zero guard).
@@ -3789,6 +3805,102 @@ mod tests {
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 2, "groups below the boundary are filtered");
 		sub.assert_not_closed();
+	}
+
+	/// Failover restores *every* subscribed track, not just one. A single-track
+	/// takeover leaves a partial recovery indistinguishable from a whole one:
+	/// the subscriber survives and keeps reading, but a track that is never
+	/// re-dispatched to the standby stalls silently. Real broadcasts are
+	/// multi-track (an MPEG-TS feed carries video, audio and data together), so
+	/// each track's boundary has to be computed and served independently.
+	#[tokio::test]
+	async fn test_route_failover_restores_every_track() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		// Both routes share the first hop: interchangeable content.
+		let hops_a = OriginList::try_from(vec![Origin::new(1).unwrap()]).unwrap();
+		let hops_b = OriginList::try_from(vec![Origin::new(1).unwrap(), Origin::new(3).unwrap()]).unwrap();
+
+		let source_a = origin.create_broadcast("test", announce().with_hops(hops_a)).unwrap();
+		let mut dynamic_a = source_a.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		// The standby joins silently.
+		let source_b = origin.create_broadcast("test", announce().with_hops(hops_b)).unwrap();
+		let mut dynamic_b = source_b.dynamic();
+		settle().await;
+		settle().await;
+
+		// Deliberately unequal group counts, so every track's resume boundary is a
+		// different number. Equal counts would let a boundary computed per
+		// broadcast rather than per track pass unnoticed.
+		const TRACKS: [(&str, u64); 3] = [("video", 3), ("audio", 1), ("data", 2)];
+
+		let subscribing: Vec<_> = TRACKS
+			.iter()
+			.map(|(name, _)| broadcast.track(name).unwrap().subscribe(None))
+			.collect();
+		let mut producers_a = accept_tracks(&mut dynamic_a, TRACKS.len()).await;
+		settle().await;
+
+		let mut subs = Vec::new();
+		for ((name, groups), subscribing) in TRACKS.iter().zip(subscribing) {
+			let mut sub = subscribing.await.unwrap();
+			let producer = producers_a
+				.get_mut(*name)
+				.unwrap_or_else(|| panic!("{name} was never dispatched"));
+			for expected in 0..*groups {
+				producer.append_group().unwrap();
+				assert_eq!(sub.assert_group().sequence, expected, "{name} did not start");
+			}
+			subs.push((*name, *groups, sub));
+		}
+
+		// Source A dies mid-stream.
+		for (_, producer) in producers_a.drain() {
+			producer.abort(Error::Dropped).unwrap();
+		}
+		source_a.abort(Error::Dropped).unwrap();
+		drop(dynamic_a);
+		settle().await;
+
+		// The standby must be asked for all of them, and each must resume at its
+		// own boundary.
+		let mut producers_b = accept_tracks(&mut dynamic_b, TRACKS.len()).await;
+		settle().await;
+
+		// Demand registers as each subscriber polls, so poll them all before
+		// reading the boundaries back.
+		for (_, _, sub) in subs.iter_mut() {
+			sub.assert_no_group();
+		}
+		settle().await;
+
+		for (name, groups, sub) in subs.iter_mut() {
+			let producer = producers_b
+				.get_mut(*name)
+				.unwrap_or_else(|| panic!("{name} was never re-dispatched to the standby"));
+			let boundary = producer
+				.subscription()
+				.unwrap_or_else(|| panic!("{name} resumed without a subscription"))
+				.group_start
+				.unwrap_or_else(|| panic!("{name} resumed without a boundary"));
+			assert_eq!(
+				boundary, *groups,
+				"{name} resumed at another track's boundary instead of its own"
+			);
+
+			// A group below the boundary is filtered out; one at it is delivered.
+			producer.create_group(group::Info { sequence: boundary - 1 }).unwrap();
+			producer.create_group(group::Info { sequence: boundary }).unwrap();
+			assert_eq!(sub.assert_group().sequence, boundary, "{name} did not resume");
+			sub.assert_not_closed();
+		}
 	}
 
 	/// `route_changed` yields the current route first, then each change; equal
@@ -5040,6 +5152,87 @@ mod tests {
 		producer_local.create_group(group::Info { sequence: 1 }).unwrap();
 		assert_eq!(sub.assert_group().sequence, 1);
 		sub.assert_not_closed();
+	}
+
+	/// Reselect is decided per track, so a standby carrying only some of the
+	/// broadcast's tracks splices the ones it has and leaves the rest on the
+	/// incumbent. This is the divergent-layout case for a 1+1 pair: two sources
+	/// that are meant to be interchangeable but do not agree on the track list
+	/// must degrade to a per-track split rather than taking the whole broadcast
+	/// with them.
+	#[tokio::test]
+	async fn test_standby_with_a_partial_track_list_splits_per_track() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let consumer = origin.consume();
+
+		let publisher = Origin::new(1).unwrap();
+		let peer = Origin::new(5).unwrap();
+		let via_peer = OriginList::try_from(vec![publisher, peer]).unwrap();
+		let local = OriginList::try_from(vec![publisher]).unwrap();
+
+		// The incumbent carries both tracks, with live subscribers mid-stream.
+		let source_remote = origin
+			.create_broadcast("test", announce().with_hops(via_peer).with_cost(2))
+			.unwrap();
+		let mut dynamic_remote = source_remote.dynamic();
+		settle().await;
+		settle().await;
+		let broadcast = consumer.request_broadcast("test").await.unwrap();
+
+		let subscribing_video = broadcast.track("video").unwrap().subscribe(None);
+		let subscribing_audio = broadcast.track("audio").unwrap().subscribe(None);
+		let mut producers_remote = accept_tracks(&mut dynamic_remote, 2).await;
+		settle().await;
+
+		let mut sub_video = subscribing_video.await.unwrap();
+		let mut sub_audio = subscribing_audio.await.unwrap();
+		for name in ["video", "audio"] {
+			producers_remote.get_mut(name).unwrap().append_group().unwrap();
+		}
+		assert_eq!(sub_video.assert_group().sequence, 0);
+		assert_eq!(sub_audio.assert_group().sequence, 0);
+
+		// The cheaper standby joins and wins dispatch, but only has "video".
+		let source_local = origin.create_broadcast("test", announce().with_hops(local)).unwrap();
+		let mut dynamic_local = source_local.dynamic();
+		settle().await;
+
+		let mut producer_local = None;
+		for _ in 0..2 {
+			let request = tokio::time::timeout(std::time::Duration::from_secs(1), dynamic_local.requested_track())
+				.await
+				.expect("timed out waiting for a track request")
+				.expect("source closed");
+			match request.name() {
+				"video" => producer_local = Some(request.accept(None)),
+				"audio" => request.reject(Error::NotFound),
+				other => panic!("unexpected track dispatched: {other}"),
+			}
+		}
+		settle().await;
+		let mut producer_local = producer_local.expect("the standby was never asked for video");
+
+		// Video re-splices onto the standby at the boundary.
+		sub_video.assert_no_group();
+		assert_eq!(producer_local.subscription().unwrap().group_start, Some(1));
+		producer_local.create_group(group::Info { sequence: 1 }).unwrap();
+		assert_eq!(
+			sub_video.assert_group().sequence,
+			1,
+			"video did not move to the standby"
+		);
+
+		// Audio is untouched: the refusal costs the incumbent nothing.
+		producers_remote.get_mut("audio").unwrap().append_group().unwrap();
+		assert_eq!(
+			sub_audio.assert_group().sequence,
+			1,
+			"audio did not stay on the incumbent"
+		);
+		sub_video.assert_not_closed();
+		sub_audio.assert_not_closed();
 	}
 
 	/// A standby that wins dispatch before creating a track must not kill a
