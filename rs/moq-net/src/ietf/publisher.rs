@@ -2,7 +2,6 @@ use crate::{group, origin, track};
 use std::{collections::HashMap, task::Poll};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
-use web_transport_trait::SendStream;
 
 use crate::{
 	AsPath, Error, Timescale,
@@ -598,10 +597,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		timescale: Timescale,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
-		stream.set_priority(priority);
+		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
+		// Set through the Writer so the IETF subscriber priority (lower = more urgent)
+		// is converted to the transport's send order (higher = sent first).
+		stream.set_priority(priority);
 
 		stream.encode(&msg).await?;
 

@@ -112,9 +112,14 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	/// Set the priority of the stream.
-	pub fn set_priority(&mut self, priority: u8) {
-		self.stream.as_mut().unwrap().set_priority(priority);
+	/// Set the transmission urgency of the stream: 0 is the most urgent, 255 the least.
+	///
+	/// This is the convention of the lite priority queue rank and the IETF subscriber
+	/// priority. The transport trait uses the opposite one (higher values are sent first,
+	/// matching W3C `sendOrder` and quinn), so the urgency is inverted here, at the one
+	/// point where every group stream's priority crosses into the transport.
+	pub fn set_priority(&mut self, urgency: u8) {
+		self.stream.as_mut().unwrap().set_priority(u8::MAX - urgency);
 	}
 
 	/// Cast the writer to a different version, used during version negotiation.
@@ -142,5 +147,35 @@ impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {
 			// Unlike the Quinn default, we abort the stream on drop.
 			stream.reset(Error::Cancel.to_code());
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::lite::test_transport::{Log, SinkSend};
+
+	/// The urgency-to-send-order conversion. Callers pass urgency (0 = most urgent,
+	/// the convention of the lite priority queue and IETF subscriber priority), but
+	/// the transport trait sends HIGHER values first (W3C sendOrder / quinn). The
+	/// most urgent stream must therefore receive the largest send order, strictly
+	/// decreasing as urgency drops. Without the conversion the transport drains the
+	/// stalest stream first.
+	#[test]
+	fn set_priority_inverts_urgency_to_send_order() {
+		let log = Log::default();
+		let mut writer = Writer::new(SinkSend::new(log.clone()), crate::lite::Version::Lite05);
+
+		for urgency in 0u8..=255 {
+			writer.set_priority(urgency);
+		}
+
+		let sent = log.priorities();
+		assert_eq!(sent.first(), Some(&255), "urgency 0 must map to the highest send order");
+		assert_eq!(sent.last(), Some(&0), "urgency 255 must map to the lowest send order");
+		assert!(
+			sent.windows(2).all(|w| w[0] > w[1]),
+			"send order must strictly decrease as urgency drops: {sent:?}",
+		);
 	}
 }
