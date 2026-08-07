@@ -97,6 +97,61 @@ test("integration: lite draft-05", async () => {
 	await runPublishSubscribeFlow(Lite.ALPN_05);
 });
 
+test("integration: lite subscription options and updates reach the publisher", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_05);
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+
+	let resolveProducer: ((producer: TrackProducer) => void) | undefined;
+	const accepted = new Promise<TrackProducer>((resolve) => {
+		resolveProducer = resolve;
+	});
+	const serving = (async () => {
+		for (;;) {
+			const request = await broadcast.requested();
+			if (!request) return;
+			const producer = request.accept();
+			if (request.subscription.startGroup === 0) resolveProducer?.(producer);
+		}
+	})();
+
+	const remote = client.consume(Path.from("test"));
+	const subscriber = remote.track("video").subscribe({
+		priority: 3,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 9,
+	});
+	const producer = await accepted;
+	expect(producer.subscription.peek()).toEqual({
+		priority: 3,
+		ordered: true,
+		latencyMax: 250,
+		startGroup: 0,
+		endGroup: 9,
+	});
+
+	const updated = producer.subscription.changed();
+	subscriber.update({ priority: 8, ordered: false, latencyMax: 500, startGroup: 2, endGroup: 12 });
+	expect(await updated).toEqual({
+		priority: 8,
+		ordered: false,
+		latencyMax: 500,
+		startGroup: 2,
+		endGroup: 12,
+	});
+
+	subscriber.close();
+	remote.close();
+	broadcast.close();
+	await serving;
+	client.close();
+	server.close();
+});
+
 test("integration: lite draft-06", async () => {
 	// Exercises announce ids: every active assigns an ordinal on the wire.
 	await runPublishSubscribeFlow(Lite.ALPN_06_WIP);

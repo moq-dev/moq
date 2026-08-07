@@ -52,12 +52,12 @@ function subscribe(
 
 	const existing = state.tracks.get(name);
 	if (existing) {
-		if (existing.closed.peek() === undefined) return existing.subscribe();
+		if (existing.closed.peek() === undefined) return existing.subscribe(options);
 		state.tracks.delete(name);
 	}
 
 	const producer = new track.Producer(name);
-	const subscriber = producer.subscribe();
+	const subscriber = producer.subscribe(options);
 
 	if (register) {
 		state.tracks.set(name, producer);
@@ -69,7 +69,7 @@ function subscribe(
 	}
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, options.priority ?? 0));
+		requested.push(hooks.makeRequest(name, producer));
 		requested.sort((a, b) => a.priority - b.priority);
 	});
 
@@ -88,7 +88,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string): Promise<tr
 
 	const producer = new track.Producer(name);
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest(name, producer, 0));
+		requested.push(hooks.makeRequest(name, producer));
 		requested.sort((a, b) => a.priority - b.priority);
 	});
 

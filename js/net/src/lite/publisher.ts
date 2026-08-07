@@ -249,7 +249,13 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, { priority: msg.priority });
+		const track = broadcast.subscribe(msg.track, {
+			priority: msg.priority,
+			ordered: msg.ordered,
+			latencyMax: msg.maxLatency,
+			startGroup: msg.startGroup,
+			endGroup: msg.endGroup,
+		});
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -273,7 +279,13 @@ export class Publisher {
 				timescale = info.timescale;
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
-				const ok = new SubscribeOk({ priority: msg.priority });
+				const ok = new SubscribeOk({
+					priority: msg.priority,
+					ordered: msg.ordered,
+					maxLatency: msg.maxLatency,
+					startGroup: msg.startGroup,
+					endGroup: msg.endGroup,
+				});
 				await encodeSubscribeResponse(stream.writer, { ok }, this.version);
 			}
 
@@ -294,10 +306,14 @@ export class Publisher {
 				if (!result) break;
 
 				if (result instanceof SubscribeUpdate) {
-					console.debug(
-						`subscribe update: broadcast=${msg.broadcast} track=${track.name} priority=${result.priority}`,
-					);
-					track.update({ priority: result.priority });
+					console.debug(`subscribe update: broadcast=${msg.broadcast} track=${track.name}`);
+					track.update({
+						priority: result.priority,
+						ordered: result.ordered,
+						latencyMax: result.maxLatency,
+						startGroup: result.startGroup,
+						endGroup: result.endGroup,
+					});
 				}
 			}
 

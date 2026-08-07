@@ -79,6 +79,57 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 export interface Subscription {
 	/** Delivery priority relative to this session's other subscriptions. Defaults to `0`. */
 	priority?: number;
+	/** Whether groups are prioritized in sequence order. Defaults to `false` (newest-first). */
+	ordered?: boolean;
+	/** Maximum age (milliseconds) of a non-latest group before it is skipped. Defaults to `0`. */
+	latencyMax?: number;
+	/** First group the publisher should deliver, or omit to start at the latest group. */
+	startGroup?: number;
+	/** Last group the publisher should deliver (inclusive), or omit for no end. */
+	endGroup?: number;
+}
+
+// Materialize the defaults at the model boundary so every layer observes a complete
+// subscription rather than interpreting an omitted field differently.
+function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+	return {
+		priority: subscription.priority ?? 0,
+		ordered: subscription.ordered ?? false,
+		latencyMax: subscription.latencyMax ?? 0,
+		startGroup: subscription.startGroup,
+		endGroup: subscription.endGroup,
+	};
+}
+
+// Aggregate the preferences of every live subscriber, matching Rust's Subscription::poll_combined.
+function combineSubscriptions(states: Iterable<TrackState>): Subscription | undefined {
+	let combined: Subscription | undefined;
+	for (const state of states) {
+		const subscription = state.update.peek();
+		if (!subscription) continue;
+		if (!combined) {
+			combined = { ...subscription };
+			continue;
+		}
+
+		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
+		combined.ordered = (combined.ordered ?? false) && (subscription.ordered ?? false);
+		combined.latencyMax = Math.max(combined.latencyMax ?? 0, subscription.latencyMax ?? 0);
+
+		if (subscription.startGroup !== undefined) {
+			combined.startGroup =
+				combined.startGroup === undefined
+					? subscription.startGroup
+					: Math.min(combined.startGroup, subscription.startGroup);
+		}
+
+		if (combined.endGroup === undefined || subscription.endGroup === undefined) {
+			combined.endGroup = undefined;
+		} else {
+			combined.endGroup = Math.max(combined.endGroup, subscription.endGroup);
+		}
+	}
+	return combined;
 }
 
 /**
@@ -92,19 +143,26 @@ export interface Subscription {
 export class Request {
 	/** The requested track name. */
 	readonly name: string;
-	/** The subscriber's priority for this track. */
-	readonly priority: number;
 
 	#producer: Producer;
 
-	private constructor(name: string, producer: Producer, priority: number) {
+	private constructor(name: string, producer: Producer) {
 		this.name = name;
 		this.#producer = producer;
-		this.priority = priority;
 	}
 
 	static {
-		hooks.makeRequest = (name, producer, priority) => new Request(name, producer, priority);
+		hooks.makeRequest = (name, producer) => new Request(name, producer);
+	}
+
+	/** The aggregate subscription requested for this track. */
+	get subscription(): Readonly<Subscription> {
+		return this.#producer.subscription.peek() ?? subscriptionDefaults();
+	}
+
+	/** The subscriber's priority for this track. */
+	get priority(): number {
+		return this.subscription.priority ?? 0;
 	}
 
 	/** Accept the request, committing the track's immutable {@link Info}. */
@@ -179,9 +237,13 @@ class TrackState {
 	/** Best-effort datagram channel, parallel to {@link groups}; an age-evicted send buffer per subscriber. */
 	datagrams = new Signal<BufferedDatagram[]>([]);
 	closed = new Once<Error | null>();
-	update = new Signal<Subscription | undefined>(undefined);
+	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+
+	constructor(subscription?: Subscription) {
+		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
+	}
 }
 
 // Settle a track state's closed Once. Idempotent: Once.set throws on a second settle, and a
@@ -275,8 +337,8 @@ export class Producer {
 	}
 
 	/**
-	 * The current subscription, or `undefined` until a subscriber first calls
-	 * {@link Subscriber.update}. The wire layer watches this to emit SUBSCRIBE_UPDATE.
+	 * The aggregate subscription across live subscribers, or `undefined` when there are none.
+	 * The wire layer watches this to emit SUBSCRIBE_UPDATE.
 	 */
 	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
@@ -292,8 +354,8 @@ export class Producer {
 	}
 
 	/** An independent {@link Subscriber} receiving a full copy of this track's groups. */
-	subscribe(): Subscriber {
-		const sink = new TrackState();
+	subscribe(options: Subscription = {}): Subscriber {
+		const sink = new TrackState(options);
 		this.#addSink(sink);
 		return makeSubscriber(this.name, sink);
 	}
@@ -330,9 +392,8 @@ export class Producer {
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
 			// state, which the wire layer (or the serving application) watches.
-			const forward = sink.update.subscribe((update) => {
-				if (update) this.#state.update.set(update, true);
-			});
+			const forward = sink.update.subscribe(() => this.#updateSubscription());
+			this.#updateSubscription();
 
 			// Drop the sink once its consumer goes away, closing its mirrors so source
 			// groups stop teeing into them, so a long-lived producer doesn't leak. This
@@ -343,6 +404,7 @@ export class Producer {
 				const abort = c instanceof Error ? c : undefined;
 				forward();
 				this.#sinks.delete(sink);
+				this.#updateSubscription();
 				for (const entry of this.#cache) {
 					const mirror = entry.mirrors.get(sink);
 					if (mirror) {
@@ -363,6 +425,12 @@ export class Producer {
 		for (const entry of this.#cache) this.#mirror(entry, sink);
 
 		if (closed !== undefined) closeTrackState(sink, closed instanceof Error ? closed : undefined);
+	}
+
+	// Recompute from every live sink because an update or close can narrow as well as widen
+	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
+	#updateSubscription(): void {
+		this.#state.update.set(combineSubscriptions(this.#sinks));
 	}
 
 	// Mirror a cached source group into a sink. The mirror fills synchronously as the
@@ -564,7 +632,7 @@ export class Subscriber {
 		return this.#state.closed;
 	}
 
-	/** The last {@link update} requested on this subscriber, or `undefined` if none yet. */
+	/** This subscriber's current options, including defaults and the last {@link update}. */
 	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
 	}
@@ -758,6 +826,6 @@ export class Subscriber {
 	 * publisher. Mirrors the Rust `Subscriber::update`.
 	 */
 	update(options: Subscription) {
-		this.#state.update.set(options, true);
+		this.#state.update.set(subscriptionDefaults(options));
 	}
 }

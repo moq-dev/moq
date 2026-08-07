@@ -357,6 +357,7 @@ export class Subscriber {
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
 		const id = this.#subscribeNext++;
+		const subscription = request.subscription;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -364,7 +365,16 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 
-		const msg = new Subscribe({ id, broadcast, track: request.name, priority: request.priority });
+		const msg = new Subscribe({
+			id,
+			broadcast,
+			track: request.name,
+			priority: subscription.priority ?? 0,
+			ordered: subscription.ordered,
+			maxLatency: subscription.latencyMax,
+			startGroup: subscription.startGroup,
+			endGroup: subscription.endGroup,
+		});
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
@@ -396,7 +406,7 @@ export class Subscriber {
 
 		const { stream, producer } = opened;
 		try {
-			// Watch for priority changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
+			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
 			// and just wait on the stream/track like before.
 			//
@@ -404,15 +414,15 @@ export class Subscriber {
 			// drain them (we don't drive delivery off the resolved range) so the FIN is
 			// observed. Older drafts just wait for the stream to close.
 			const closed = supportsTrackStream(this.version) ? this.#drainResponses(stream) : stream.reader.closed;
-			const priorityUpdates =
+			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
-					: this.#runPriorityUpdates(id, broadcast, producer, msg, stream);
+					: this.#runSubscriptionUpdates(id, broadcast, producer, msg, stream);
 
-			// Terminal conditions (stream end, track close, a failed priority update) settle at most
+			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
 			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
-			if (priorityUpdates !== undefined) terminal.push(priorityUpdates);
+			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates);
 			const done = Promise.race(terminal);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
@@ -645,17 +655,17 @@ export class Subscriber {
 	}
 
 	/**
-	 * Send SUBSCRIBE_UPDATE messages whenever the track's priority signal changes.
+	 * Send SUBSCRIBE_UPDATE messages whenever the track's aggregate subscription changes.
 	 *
 	 * Resolves cleanly when the stream or track closes, so the caller can include
 	 * this in Promise.race without leaving a dangling pending write that would
-	 * become an unhandled rejection if the user calls updatePriority after close.
+	 * become an unhandled rejection if the user calls update after close.
 	 *
 	 * Peeks the signal at the top of every iteration so that updates which landed
 	 * before SubscribeOk arrived (or between iterations, before .next() registered
 	 * its listener) aren't lost.
 	 */
-	async #runPriorityUpdates(
+	async #runSubscriptionUpdates(
 		id: bigint,
 		broadcast: Path.Valid,
 		track: track.Producer,
@@ -663,30 +673,44 @@ export class Subscriber {
 		stream: Stream,
 	): Promise<void> {
 		const stopped: Promise<null> = Promise.race([track.closed, stream.reader.closed]).then(() => null);
-		let lastSent: number | undefined;
+		let lastSent: track.Subscription = {
+			priority: msg.priority,
+			ordered: msg.ordered,
+			latencyMax: msg.maxLatency,
+			startGroup: msg.startGroup,
+			endGroup: msg.endGroup,
+		};
 
 		for (;;) {
-			const current = track.subscription.peek()?.priority;
-			if (current === undefined || current === lastSent) {
+			const current = track.subscription.peek();
+			if (current === undefined || this.#sameSubscription(current, lastSent)) {
 				// Nothing new to send; wait for a change or termination.
 				const next = await Promise.race([track.subscription.changed(), stopped]);
 				if (next === null) return;
 				continue;
 			}
 
-			// Round-trip the other Subscribe parameters so the publisher doesn't
-			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxLatency/etc.
 			const update = new SubscribeUpdate({
-				priority: current,
-				ordered: msg.ordered,
-				maxLatency: msg.maxLatency,
-				startGroup: msg.startGroup,
-				endGroup: msg.endGroup,
+				priority: current.priority ?? 0,
+				ordered: current.ordered,
+				maxLatency: current.latencyMax,
+				startGroup: current.startGroup,
+				endGroup: current.endGroup,
 			});
 			await update.encode(stream.writer, this.version);
-			lastSent = current;
-			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name} priority=${current}`);
+			lastSent = { ...current };
+			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
+	}
+
+	#sameSubscription(a: track.Subscription, b: track.Subscription): boolean {
+		return (
+			(a.priority ?? 0) === (b.priority ?? 0) &&
+			(a.ordered ?? false) === (b.ordered ?? false) &&
+			(a.latencyMax ?? 0) === (b.latencyMax ?? 0) &&
+			a.startGroup === b.startGroup &&
+			a.endGroup === b.endGroup
+		);
 	}
 
 	/**
