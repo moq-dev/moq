@@ -168,4 +168,44 @@ mod tests {
 			assert_eq!(pair[0], pair[1]);
 		}
 	}
+
+	#[tokio::test]
+	async fn reads_the_container_the_catalog_declares() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("audio", hang::container::track_info()).unwrap();
+		let subscriber = broadcast.consume();
+
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.container = hang::catalog::Container::Loc;
+
+		let mut producer = moq_mux::container::Producer::new(track, moq_mux::catalog::hang::Container::Loc);
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"audio",
+			Config {
+				format: Format::F32,
+				..Config::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		let samples = [0.25f32, -0.5, 0.75, -1.0];
+		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				duration: None,
+				payload: payload.into(),
+				keyframe: true,
+			})
+			.unwrap();
+
+		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		assert_eq!(
+			Format::F32.as_interleaved_f32(&frame.data, 1).unwrap().as_ref(),
+			samples
+		);
+	}
 }
