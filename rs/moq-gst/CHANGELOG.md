@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.4...moq-gst-v0.3.5) - 2026-08-07
+
+### Other
+
+- drop Intel macOS release targets ([#2715](https://github.com/moq-dev/moq/pull/2715))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/moq-gst-v0.3.3...moq-gst-v0.3.4) - 2026-08-06
 
 ### Added

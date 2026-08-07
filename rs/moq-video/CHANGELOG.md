@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/moq-dev/moq/compare/moq-video-v0.0.14...moq-video-v0.0.15) - 2026-08-07
+
+### Added
+
+- *(cli)* add moq play ([#2697](https://github.com/moq-dev/moq/pull/2697))
+
 ## [0.0.14](https://github.com/moq-dev/moq/compare/moq-video-v0.0.13...moq-video-v0.0.14) - 2026-08-06
 
 ### Added
