@@ -26,7 +26,6 @@ package moq
 /*
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib/linux_amd64 -lmoq_ffi -ldl -lm -lpthread -lstdc++
 #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/lib/linux_arm64 -lmoq_ffi -ldl -lm -lpthread -lstdc++
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/lib/darwin_amd64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework CoreGraphics -lc++
 #cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib/darwin_arm64 -lmoq_ffi -framework Security -framework SystemConfiguration -framework CoreFoundation -framework CoreServices -framework Foundation -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox -framework ScreenCaptureKit -framework CoreGraphics -lc++
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows_amd64 -lmoq_ffi -lws2_32 -luserenv -lbcrypt -lntdll
 */

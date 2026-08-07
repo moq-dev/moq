@@ -157,7 +157,7 @@ windows *args:
 #
 # Nothing in CI runs this either; Mac runners cost too much for a per-PR gate.
 # The moq-video half has a release-time backstop, since libmoq's `libmoq-v*` tag
-# build compiles it on both Apple targets. The moq-audio half has none: its
+# build compiles it on Apple Silicon. The moq-audio half has none: its
 # capture backend is behind an off-by-default feature no release build enables,
 # so this recipe is the only thing that ever compiles it.
 #

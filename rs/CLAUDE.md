@@ -176,7 +176,7 @@ Then `Config::load()?` (initializes tracing), build clients/servers via `.init()
 
   What still compiles these automatically, and when:
 
-  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and both Apple targets. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
+  - moq-video's platform backends are gated on `target_os` alone, and libmoq depends on moq-video, so a `libmoq-v*` tag builds them on `windows-latest` and Apple Silicon. That's a release-time backstop, not a PR one: a break lands on `main` and surfaces at the tag.
   - **moq-audio's macOS capture has no automated backstop at all.** ScreenCaptureKit system audio and the TCC pre-check sit behind the off-by-default `capture` feature, and every consumer leaves it off (libmoq and moq-ffi don't enable it; moq-cli's own `capture` feature is off in release builds). `just rs macos` is the only thing that compiles it, ever.
   - `.github/workflows/swift.yml` still runs on a Mac for `swift/**` and `rs/moq-ffi/**` PRs, so moq-ffi and the Swift wrapper keep a PR-time gate.
 

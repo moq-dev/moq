@@ -31,7 +31,7 @@ sudo dnf config-manager --add-repo https://rpm.moq.dev/moq.repo
 sudo dnf install gstreamer1-moq
 ```
 
-### Nix (any platform with Nix installed)
+### Nix (Linux or Apple Silicon macOS)
 
 The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq + the standard `gst-plugins-{base,good,bad}` set, so no `GST_PLUGIN_PATH` setup is needed.
 
@@ -80,7 +80,6 @@ Available targets:
 |---|---|
 | `x86_64-unknown-linux-gnu` | Linux (x86\_64) |
 | `aarch64-unknown-linux-gnu` | Linux (ARM64) |
-| `x86_64-apple-darwin` | macOS (Intel) |
 | `aarch64-apple-darwin` | macOS (Apple Silicon) |
 
 You need a matching GStreamer runtime installed:
@@ -89,7 +88,7 @@ You need a matching GStreamer runtime installed:
 - **macOS (Homebrew)**: `brew install gstreamer`
 - **macOS (official)**: the .pkg installer from [gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/)
 
-The macOS dylib has rpaths pre-baked for the three common install locations (`/opt/homebrew/lib`, `/usr/local/lib`, `/Library/Frameworks/GStreamer.framework/Libraries`). If your GStreamer is somewhere else, set `DYLD_FALLBACK_LIBRARY_PATH` accordingly.
+The macOS dylib has rpaths pre-baked for Homebrew (`/opt/homebrew/lib`) and the official installer (`/Library/Frameworks/GStreamer.framework/Libraries`). If your GStreamer is somewhere else, set `DYLD_FALLBACK_LIBRARY_PATH` accordingly.
 
 ## Building from source
 

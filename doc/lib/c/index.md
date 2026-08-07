@@ -33,7 +33,7 @@ Each [`libmoq-v*` release](https://github.com/moq-dev/moq/releases) ships a
 library, and the generated header. Supported targets:
 
 - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
-- `x86_64-apple-darwin`, `aarch64-apple-darwin`
+- `aarch64-apple-darwin`
 
 Download and extract a bundle (here `0.2.0` on Linux x86\_64):
 

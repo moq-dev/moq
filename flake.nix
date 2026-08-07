@@ -35,6 +35,13 @@
       rust-overlay,
       ...
     }:
+    let
+      eachSupportedSystem = flake-utils.lib.eachSystem [
+        "x86_64-linux"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+    in
     {
       nixosModules = {
         moq-relay = import ./nix/modules/moq-relay.nix;
@@ -42,7 +49,7 @@
 
       overlays.default = import ./nix/overlay.nix { inherit crane; };
     }
-    // flake-utils.lib.eachDefaultSystem (
+    // eachSupportedSystem (
       system:
       let
         pkgs = import nixpkgs {
@@ -64,7 +71,6 @@
             "wasm32-unknown-unknown"
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-            "x86_64-apple-darwin"
             "aarch64-apple-darwin"
           ];
         };
@@ -290,22 +296,7 @@
             name = "moq-packaging-tools";
             paths = packagingDeps ++ publishDeps;
           };
-        })
-        # x86_64-darwin release artifacts are cross-compiled from the
-        # aarch64-darwin runner (see nix/overlay.nix). The cross outputs only
-        # evaluate on an aarch64-darwin host, so gate them on the system to
-        # keep `nix flake check` working on Linux and Intel macs.
-        // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
-          inherit (overlayPkgs)
-            moq-relay-x86_64-apple-darwin
-            moq-cli-x86_64-apple-darwin
-            moq-bench-x86_64-apple-darwin
-            moq-token-x86_64-apple-darwin
-            moq-token-cli-x86_64-apple-darwin
-            libmoq-x86_64-apple-darwin
-            moq-gst-plugin-x86_64-apple-darwin
-            ;
-        };
+        });
 
         # Re-export gst_all_1 so users can pair the plugin with a matching
         # gstreamer in one nix invocation:

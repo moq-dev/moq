@@ -73,30 +73,20 @@ if [[ -z "$TARGET" ]]; then
     echo "Detected target: $TARGET"
 fi
 
-# Native builds use the bare flake output. The one supported cross is the
-# Intel mac release built on an Apple Silicon runner (the Determinate Nix
-# installer dropped Intel macOS): the flake exposes a per-target output for
-# it (nix/overlay.nix) and Apple's clang cross-compiles natively, so the only
-# emulation is the Rosetta smoke test below. Any other host/target mismatch
-# would silently mislabel the archive, so it's rejected.
+# Release builds must match the host. A mismatch would silently mislabel the
+# archive, so reject it before building.
 HOST_TARGET=$(rustc -vV | awk '/^host:/ {print $2}')
-NIX_ATTR="$CRATE"
 if [[ "$TARGET" != "$HOST_TARGET" ]]; then
-    if [[ "$HOST_TARGET" == "aarch64-apple-darwin" && "$TARGET" == "x86_64-apple-darwin" ]]; then
-        NIX_ATTR="$CRATE-$TARGET"
-    else
-        echo "Error: unsupported cross ($HOST_TARGET -> $TARGET)." >&2
-        echo "Only aarch64-apple-darwin -> x86_64-apple-darwin is wired up; refusing to mislabel the archive." >&2
-        exit 1
-    fi
+    echo "Error: unsupported cross ($HOST_TARGET -> $TARGET); refusing to mislabel the archive." >&2
+    exit 1
 fi
 
-echo "Building $CRATE for $TARGET via nix (output: $NIX_ATTR)..."
+echo "Building $CRATE for $TARGET via nix (output: $CRATE)..."
 
 BUILD_TMP="$(mktemp -d)"
 trap 'rm -rf "$BUILD_TMP"' EXIT
 RESULT_LINK="$BUILD_TMP/result"
-nix build "$WORKSPACE_DIR#$NIX_ATTR" --out-link "$RESULT_LINK"
+nix build "$WORKSPACE_DIR#$CRATE" --out-link "$RESULT_LINK"
 
 # Locate the built binary. Crane installs to result/bin/<binary>. The binary
 # name is usually the crate name; the `moq-cli` crate ships as `moq`.

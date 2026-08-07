@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Render a Homebrew formula template by substituting __VERSION__ and the
-# four __SHA256_<TARGET>__ placeholders.
+# three __SHA256_<TARGET>__ placeholders.
 #
 # Usage:
 #   render-formula.sh \
@@ -12,10 +12,9 @@ set -euo pipefail
 #     --crate <crate-name> \
 #     --output <path/to/crate.rb>
 #
-# The release dir must contain the four tarballs named like
+# The release dir must contain the three tarballs named like
 # <crate>-<version>-<target>.tar.gz for each of:
 #   aarch64-apple-darwin
-#   x86_64-apple-darwin
 #   aarch64-unknown-linux-gnu
 #   x86_64-unknown-linux-gnu
 
@@ -66,7 +65,6 @@ fi
 
 targets=(
     "aarch64-apple-darwin AARCH64_APPLE_DARWIN"
-    "x86_64-apple-darwin X86_64_APPLE_DARWIN"
     "aarch64-unknown-linux-gnu AARCH64_UNKNOWN_LINUX_GNU"
     "x86_64-unknown-linux-gnu X86_64_UNKNOWN_LINUX_GNU"
 )
