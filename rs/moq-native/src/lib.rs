@@ -99,6 +99,59 @@ pub enum QuicBackend {
 	Noq,
 }
 
+/// Parses the same spellings the CLI and TOML accept (`quinn`, `quiche`, `noq`),
+/// case-insensitively. A backend this build was compiled without is an error, since
+/// its variant doesn't exist.
+impl std::str::FromStr for QuicBackend {
+	type Err = String;
+
+	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+		<Self as clap::ValueEnum>::from_str(s, true)
+	}
+}
+
+impl QuicBackend {
+	/// Every backend this build was compiled with, spelled the way [`FromStr`] accepts.
+	///
+	/// The variants are feature-gated, so this is the only honest answer to "what can I
+	/// pass here". A caller building a menu should read it rather than listing the three
+	/// names, which would offer options that cannot parse.
+	///
+	/// [`FromStr`]: std::str::FromStr
+	pub fn compiled() -> &'static [Self] {
+		&[
+			#[cfg(feature = "quinn")]
+			Self::Quinn,
+			#[cfg(feature = "quiche")]
+			Self::Quiche,
+			#[cfg(feature = "noq")]
+			Self::Noq,
+		]
+	}
+
+	/// The name [`FromStr`] accepts for this backend.
+	///
+	/// [`FromStr`]: std::str::FromStr
+	pub fn as_str(&self) -> &'static str {
+		match *self {
+			#[cfg(feature = "quinn")]
+			Self::Quinn => "quinn",
+			#[cfg(feature = "quiche")]
+			Self::Quiche => "quiche",
+			#[cfg(feature = "noq")]
+			Self::Noq => "noq",
+		}
+	}
+}
+
+/// Whether this build can capture qlog traces, which the `qlog` feature gates.
+///
+/// Setting a qlog directory without it is an error at dial time, so a caller offering
+/// the knob should check here rather than surfacing an option that cannot work.
+pub fn qlog_supported() -> bool {
+	cfg!(feature = "qlog")
+}
+
 fn default_quic_backend() -> QuicBackend {
 	#[cfg(feature = "quinn")]
 	{

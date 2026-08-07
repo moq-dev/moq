@@ -370,9 +370,12 @@ impl Server {
 	/// is torn down again), so a retry starts from the same place. Optional, too:
 	/// `accept` still binds them itself, logging the failure, for a caller that
 	/// doesn't call this.
+	///
+	/// Call it after [`with_publisher`](Self::with_publisher) and friends: the stream
+	/// listeners serve what is configured at the moment they bind.
 	pub async fn listen(&mut self) -> crate::Result<()> {
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		self.streams.ensure_started().await?;
+		self.streams.ensure_started(self.moq.clone()).await?;
 		Ok(())
 	}
 
@@ -396,9 +399,10 @@ impl Server {
 	))]
 	pub async fn accept(&mut self) -> Option<Request> {
 		// Bind the stream (tcp/unix) listeners on first poll; a bind failure is
-		// fatal, mirroring how a QUIC bind failure aborts startup.
+		// fatal, mirroring how a QUIC bind failure aborts startup. They handshake
+		// with the same configured server as the QUIC arms below.
 		#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-		if let Err(err) = self.streams.ensure_started().await {
+		if let Err(err) = self.streams.ensure_started(self.moq.clone()).await {
 			tracing::error!(%err, "failed to bind stream listener");
 			return None;
 		}
@@ -707,13 +711,20 @@ impl StreamListeners {
 	}
 
 	/// Bind the configured listeners and spawn their accept loops, once.
-	async fn ensure_started(&mut self) -> crate::Result<()> {
+	///
+	/// `server` is the [`Server`]'s configured [`moq_net::Server`], so what
+	/// [`Server::with_publisher`] and friends set applies to stream sessions too.
+	async fn ensure_started(&mut self, server: moq_net::Server) -> crate::Result<()> {
 		if self.rx.is_some() || self.binds.is_empty() {
 			return Ok(());
 		}
 
+		// Stream listeners widen the version set (see `stream_versions`), so the
+		// handshake has to offer that set rather than the server's own.
+		let server = server.with_versions(self.versions.clone());
+
 		let (tx, rx) = tokio::sync::mpsc::channel(16);
-		if let Err(err) = self.start(&tx).await {
+		if let Err(err) = self.start(&server, &tx).await {
 			// All or nothing. A half-bound set would leave the loops we did spawn
 			// feeding the channel this call is about to drop, so a retry would find
 			// listeners that can never deliver a request while `binds` looked done.
@@ -730,13 +741,13 @@ impl StreamListeners {
 	}
 
 	/// Bind and spawn every configured listener, or return the first failure.
-	async fn start(&mut self, tx: &tokio::sync::mpsc::Sender<Request>) -> crate::Result<()> {
+	async fn start(&mut self, server: &moq_net::Server, tx: &tokio::sync::mpsc::Sender<Request>) -> crate::Result<()> {
 		// Cloned so the loop can push into `self.tasks` while iterating; there are at
 		// most two entries, each an address or a path.
 		let binds = self.binds.clone();
 		let health = self.health.clone();
 		for (bind, health) in binds.into_iter().zip(health) {
-			let versions = self.versions.clone();
+			let alpns = self.versions.alpns();
 			match bind {
 				#[cfg(feature = "tcp")]
 				StreamBind::Tcp(addr) => {
@@ -745,23 +756,27 @@ impl StreamListeners {
 					}
 					let listener = crate::tcp::Listener::bind(addr)
 						.await?
-						.with_protocols(versions.alpns())
+						.with_protocols(alpns)
 						.with_accept_health(health);
 					tracing::info!(%addr, "listening (tcp)");
-					self.tasks.push(spawn_tcp_loop(listener, versions, tx.clone()));
+					self.tasks.push(spawn_tcp_loop(listener, server.clone(), tx.clone()));
 				}
 				#[cfg(all(feature = "uds", unix))]
 				StreamBind::Unix(path) => {
 					let listener = crate::unix::Listener::bind(&path)
 						.await?
-						.with_protocols(versions.alpns())
+						.with_protocols(alpns)
 						.with_accept_health(health);
 					// Loose file perms: the uid/gid/pid allow list is the real gate,
 					// and the worker usually runs as a different user than the server.
 					listener.set_mode(0o666)?;
 					tracing::info!(path = %path.display(), allow = ?self.unix_allow, "listening (unix)");
-					self.tasks
-						.push(spawn_unix_loop(listener, versions, self.unix_allow.clone(), tx.clone()));
+					self.tasks.push(spawn_unix_loop(
+						listener,
+						server.clone(),
+						self.unix_allow.clone(),
+						tx.clone(),
+					));
 				}
 			}
 		}
@@ -791,13 +806,13 @@ impl Drop for StreamListeners {
 #[cfg(feature = "tcp")]
 fn spawn_tcp_loop(
 	listener: crate::tcp::Listener,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
 	tokio::spawn(async move {
 		loop {
 			match listener.accept().await {
-				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, versions.clone(), tx.clone()),
+				Some(Ok(session)) => spawn_stream_request(session, Transport::Tcp, server.clone(), tx.clone()),
 				// Per-connection: a failed `accept(2)` is the listener's own to
 				// classify and pace, and never surfaces here.
 				Some(Err(err)) => tracing::warn!(%err, "tcp qmux handshake failed"),
@@ -810,7 +825,7 @@ fn spawn_tcp_loop(
 #[cfg(all(feature = "uds", unix))]
 fn spawn_unix_loop(
 	listener: crate::unix::Listener,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	allow: Option<crate::unix::Allow>,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) -> tokio::task::JoinHandle<()> {
@@ -825,7 +840,7 @@ fn spawn_unix_loop(
 						tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
 						continue;
 					}
-					spawn_stream_request(session, Transport::Unix, versions.clone(), tx.clone());
+					spawn_stream_request(session, Transport::Unix, server.clone(), tx.clone());
 				}
 				// Per-connection, as in `spawn_tcp_loop`.
 				Some(Err(err)) => tracing::warn!(%err, "unix qmux handshake failed"),
@@ -841,11 +856,10 @@ fn spawn_unix_loop(
 fn spawn_stream_request(
 	session: qmux::Session,
 	transport: Transport,
-	versions: moq_net::Versions,
+	server: moq_net::Server,
 	tx: tokio::sync::mpsc::Sender<Request>,
 ) {
 	tokio::spawn(async move {
-		let server = moq_net::Server::new().with_versions(versions);
 		match server.accept_request(session).await {
 			Ok(request) => {
 				let request = Request {
@@ -1207,6 +1221,99 @@ mod tests {
 		// Hex-encoded SHA-256.
 		assert_eq!(fingerprints[0].len(), 64);
 		assert!(fingerprints[0].chars().all(|c| c.is_ascii_hexdigit()));
+	}
+
+	/// The stream listeners must hand accepted sessions to the *configured*
+	/// [`moq_net::Server`]. [`Server::serve_publish`] sets the publisher there
+	/// rather than on the request, so a session that handshakes against any other
+	/// server accepts and then serves nothing.
+	#[cfg(all(feature = "uds", unix))]
+	#[tokio::test]
+	async fn unix_listener_serves_the_configured_publisher() {
+		use rand::RngExt;
+
+		// macOS caps AF_UNIX paths near 104 bytes and the system temp dir is long,
+		// so bind under /tmp with a name unique to this process.
+		let path = PathBuf::from(format!("/tmp/moq-native-publish-{}.sock", std::process::id()));
+		let _ = std::fs::remove_file(&path);
+
+		let origin = moq_net::Origin::random().produce();
+		let mut broadcast = origin
+			.create_broadcast("test", moq_net::broadcast::Route::new().with_announce(true))
+			.expect("create broadcast");
+		let mut track = broadcast.create_track("video", None).expect("create track");
+		let mut group = track.append_group().expect("append group");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+			.expect("write frame");
+		group.finish().expect("finish group");
+
+		let mut config = ServerConfig::default();
+		config.unix.bind = Some(path.clone());
+		let server = config.init().expect("server init");
+
+		// The publisher lives on the server, never on the accepted request.
+		let serve = tokio::spawn(server.serve_publish(origin.consume()));
+
+		// The listener binds on the first accept, so wait for the socket. Keep the
+		// last error: a bind failure is logged and swallowed, so it's the only clue
+		// to why the socket never showed up.
+		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+		let mut delay = std::time::Duration::from_millis(1);
+		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"unix listener never bound: {err}"
+			);
+			tokio::time::sleep(delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)).await;
+			delay = (delay * 2).min(MAX_DELAY);
+		}
+
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+		let url: Url = format!("unix://{}", path.display()).parse().expect("parse url");
+		let subscriber = moq_net::Origin::random().produce();
+		let mut announced = subscriber.consume().announced();
+		let client = crate::ClientConfig::default()
+			.init()
+			.expect("client init")
+			.with_subscriber(subscriber);
+		let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+			.await
+			.expect("connect timeout")
+			.expect("connect");
+
+		// Without the server's publisher the session announces nothing, so this is
+		// where the regression shows up.
+		let update = tokio::time::timeout(TIMEOUT, announced.next())
+			.await
+			.expect("announce timeout")
+			.expect("origin closed");
+		assert_eq!(update.path.as_str(), "test");
+		let broadcast = update.broadcast.expect("expected an announce");
+
+		let mut track = broadcast
+			.track("video")
+			.expect("track name")
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("recv group timeout")
+			.expect("recv group")
+			.expect("track closed early");
+		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("read frame timeout")
+			.expect("read frame")
+			.expect("group closed early");
+		assert_eq!(&frame.payload[..], b"hello");
+
+		drop(session);
+		serve.abort();
+		let _ = std::fs::remove_file(&path);
 	}
 
 	/// A stream-only server has no TLS backend, so there's nothing to pin. This

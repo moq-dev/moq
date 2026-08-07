@@ -154,13 +154,20 @@ target_sources(
     src/moq-service.h
     src/moq-output.cpp
     src/moq-service.cpp
+    src/moq-settings.cpp
+    src/moq-settings.h
     src/moq-source.cpp
     src/moq-source.h
 )
 
 # The dock requires both the frontend API (to register it) and Qt (to build it).
+# The advanced settings dialog is Qt-only, so it ships with the dock that opens it;
+# without Qt the same settings are still reachable through the service properties.
 if(ENABLE_FRONTEND_API AND ENABLE_QT)
-  target_sources(obs-moq PRIVATE src/moq-dock.cpp src/moq-dock.h)
+  target_sources(
+    obs-moq
+    PRIVATE src/moq-dock.cpp src/moq-dock.h src/moq-advanced-dialog.cpp src/moq-advanced-dialog.h
+  )
   target_compile_definitions(obs-moq PRIVATE MOQ_FRONTEND_ENABLED MOQ_VERSION_STRING="${_moq_link_version}")
 endif()
 

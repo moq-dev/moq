@@ -80,7 +80,7 @@ Plain custom elements built directly on `@moq/signals`, no framework (except moq
 
 ## Conventions
 
-- **Retry loops inline their backoff** (root Retries has the policy). Escalate a local delay toward a `max`, jitter each wait (`delay * (0.5 + Math.random() / 2)`), and hand it to `effect.timer`; a short time or attempt budget stops the loop, never a classification of the thrown value.
+- **Retry loops use capped backoff with jitter** (root Retries has the policy). For a local loop, escalate a delay toward a `max`, jitter each wait (`delay * (0.5 + Math.random() / 2)`), and hand it to `effect.timer`. Reuse an existing operation-specific retry abstraction when one owns the sequence already.
 - **Avoid callback parameters.** A function taking a `fn`/`create`/`onXxx` to invoke later reads poorly and hides control flow. Prefer returning a value the caller acts on, exposing a method or getter, or splitting into a couple of small calls the caller sequences itself (e.g. a cache `get()` then `insert(value)`, not `getOrCreate(key, () => value)`). Reserve callbacks for genuine event/subscription sinks where there is no alternative (`effect.subscribe`, DOM listeners, `Signal` subscriptions).
 - ESM only (`"type": "module"`). Relative imports include the `.ts`/`.tsx` extension in the lower-level packages (`net`, `signals`, `hang`); `rewriteRelativeImportExtensions` in `tsconfig.json` rewrites them to `.js` on build. Some higher-level packages (watch/publish) still omit extensions, so match the file you are editing.
 - Document every exported symbol and add a top-of-file `@module` doc block to each entrypoint (root convention; the published JSR/`.d.ts` docs render these). Use `@public` on the load-bearing classes.
