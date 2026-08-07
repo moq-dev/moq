@@ -353,3 +353,14 @@ async fn unknown_publisher_frames_over_an_ietf_cluster() {
 
 	assert_eq!(frame.expect("read through the IETF mesh"), b"hello");
 }
+
+/// Same drill over Lite04 inter-relay sessions, which have no restart support.
+/// Pre-fix, `run_announce` only retained the broadcast consumer (whose
+/// ExclusionGuard is the exposure registration) when restarts were supported,
+/// so on Lite04 the guard released right after the Active was written and a
+/// reflected UNKNOWN route could still replace the incumbent.
+#[tokio::test]
+async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
+	let version = "moq-lite-04".parse().expect("parse version");
+	assert_unknown_publisher_stays_announced(Some(version), true).await;
+}
