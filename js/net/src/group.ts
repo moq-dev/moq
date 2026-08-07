@@ -93,6 +93,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
 	state.cacheBytes += frame.payload.byteLength;
+	const offset = state.offset;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 
@@ -103,6 +104,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 			state.offset++;
 		}
 	});
+	if (state.offset > offset) markGone(state, null);
 
 	state.total.update((total) => total + 1);
 }
@@ -135,6 +137,19 @@ export class Producer {
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
+	}
+
+	/**
+	 * Settles once this publisher can no longer serve the complete group from frame zero.
+	 * `null` when it aged out or lost leading frames, or the abort {@link Error}.
+	 */
+	get gone(): GetPromise<Error | null> {
+		return this.#state.gone;
+	}
+
+	/** True once this publisher can no longer serve the complete group from frame zero. */
+	get isGone(): boolean {
+		return this.#state.gone.peek() !== undefined;
 	}
 
 	/** A read handle for this group. */
@@ -300,24 +315,6 @@ export class Consumer {
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
-	}
-
-	/**
-	 * Settles once the group is gone: dropped from the publisher's cache, evicted, or aborted.
-	 * `null` when it simply aged out, or the abort {@link Error}.
-	 *
-	 * This is availability, not completion: a group that finished cleanly stays unsettled here
-	 * while it is still cached and fetchable, and settles once it is not. An index track (a
-	 * timeline, a playlist) watches this to learn which groups it can still point at. Holding a
-	 * {@link Consumer} does not keep the group's frames alive, so watching is free.
-	 */
-	get gone(): GetPromise<Error | null> {
-		return this.#state.gone;
-	}
-
-	/** True once the group is gone. Synchronous complement to the {@link gone} promise. */
-	get isGone(): boolean {
-		return this.#state.gone.peek() !== undefined;
 	}
 
 	static {

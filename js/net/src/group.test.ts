@@ -88,6 +88,14 @@ test("reading a group whose frames were evicted throws Lagged", async () => {
 	expect(consumer.readFrame()).rejects.toBeInstanceOf(Lagged);
 });
 
+test("publisher availability is lost when leading frames are evicted", async () => {
+	const { producer } = pair(0);
+	for (let i = 0; i <= MAX_GROUP_FRAMES; i++) producer.writeString("");
+
+	expect(producer.isGone).toBe(true);
+	expect(await producer.gone).toBeNull();
+});
+
 test("a group with no eviction reads every frame without error", async () => {
 	const { producer, consumer } = pair(0);
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });

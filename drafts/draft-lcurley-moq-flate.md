@@ -119,11 +119,3 @@ An application SHOULD NOT mix secrets and attacker-controlled content in the sam
 
 # IANA Considerations
 This document has no IANA actions.
-
-
---- back
-
-# Acknowledgments
-{:numbered="false"}
-
-This document was drafted with the assistance of Claude, an AI assistant by Anthropic.

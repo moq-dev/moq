@@ -574,6 +574,13 @@ export class Subscriber {
 		return this.#state.update;
 	}
 
+	/** Resolves once a group is buffered or the track closes. Does not consume the group. */
+	async readable(): Promise<void> {
+		while (this.#state.groups.peek().length === 0 && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#state.groups, this.#state.closed);
+		}
+	}
+
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
 		if (!closeTrackState(this.#state, abort)) return;

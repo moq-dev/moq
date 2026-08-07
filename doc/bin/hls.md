@@ -97,8 +97,8 @@ moq --client-connect https://relay.example.com/anon --broadcast my-stream.hang \
 
 - **Relay retention bounds the window.** A segment is only servable while its
   groups are still in the relay's cache (the `[cache]` capacity on
-  `moq-relay`). A request for an evicted segment returns 404; players skip
-  ahead.
+  `moq-relay`). The playlist retracts segments as their groups leave that
+  cache; a request racing the retraction can still return 404.
 - **Codecs.** Video renditions are served as CMAF; H.264/H.265 Annex-B sources
   are converted to length-prefixed (avc1/hvc1), with inline parameter sets
   resolved from the fetched keyframe. Audio renditions (AAC, Opus) get their

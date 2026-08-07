@@ -43,6 +43,9 @@ pub(crate) struct Producer {
 struct State {
 	/// Rows within the window, oldest first. Every row is a complete segment.
 	rows: VecDeque<Row>,
+	/// The first segment clients may request, retained when a retraction empties `rows` so
+	/// `EXT-X-MEDIA-SEQUENCE` never rewinds to zero.
+	sequence: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
 }
@@ -93,7 +96,7 @@ impl State {
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	fn window(&self) -> Window {
 		Window {
-			sequence: self.rows.front().map(|s| s.segment).unwrap_or(0),
+			sequence: self.sequence,
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
 		}
@@ -124,6 +127,7 @@ impl Producer {
 		Self {
 			state: kio::Producer::new(State {
 				rows: VecDeque::new(),
+				sequence: 0,
 				ended: false,
 			}),
 			broadcast: OnceLock::new(),
@@ -142,6 +146,7 @@ impl Producer {
 			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
 				state.rows.clear();
+				state.sequence = row.segment;
 			}
 		}
 
@@ -155,6 +160,7 @@ impl Producer {
 			}
 			state.rows.pop_front();
 		}
+		state.sequence = state.rows.front().map(|row| row.segment).unwrap_or(state.sequence);
 	}
 
 	/// Drop every listed segment numbered below `segment`: the publisher no longer holds their
@@ -171,6 +177,11 @@ impl Producer {
 		while state.rows.front().is_some_and(|row| row.segment < segment) {
 			state.rows.pop_front();
 		}
+		state.sequence = state
+			.rows
+			.front()
+			.map(|row| row.segment)
+			.unwrap_or_else(|| state.sequence.max(segment));
 	}
 
 	/// Mark the timeline ended (the broadcast finished cleanly): the playlist gets
@@ -544,7 +555,9 @@ mod tests {
 
 		let snapshot = live.window();
 		assert!(snapshot.segments.is_empty());
-		assert_eq!(snapshot.sequence, 0, "an empty window has no head to report");
+		assert_eq!(snapshot.sequence, 9, "the retracted head remains monotonic while empty");
+		live.end();
+		assert_eq!(live.window().sequence, 9, "ending an empty playlist keeps its head");
 	}
 
 	/// The duration window stays a preference on top: whichever of the two removes more wins.

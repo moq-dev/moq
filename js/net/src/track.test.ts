@@ -185,6 +185,16 @@ test("nextGroup returns undefined when track closes", async () => {
 	expect(await track.nextGroup()).toBeUndefined();
 });
 
+test("subscriber readable observes a group without consuming it", async () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe();
+	const readable = track.readable();
+
+	producer.writeGroup(new GroupProducer(4));
+	await readable;
+	expect(track.tryNextGroup()?.sequence).toBe(4);
+});
+
 test("readFrame does not livelock when a sole group finishes before the next arrives", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
@@ -213,32 +223,30 @@ test("eviction marks a group gone, a clean finish does not", async () => {
 	const producer = new TrackProducer("test").accept({ latencyMax: 0 });
 
 	const first = producer.appendGroup();
-	const watching = first.consume();
 	first.writeFrame({ payload: enc.encode("hello"), timestamp: Timestamp.now() });
 	first.close();
 
 	// Finished, but nothing has pruned the cache yet, so it is still fetchable.
-	expect(watching.isClosed).toBe(true);
-	expect(watching.isGone).toBe(false);
+	expect(first.isClosed).toBe(true);
+	expect(first.isGone).toBe(false);
 
 	// The cache is pruned as the next group is published. With a zero latency window the finished
 	// group is immediately past the cutoff.
 	producer.appendGroup();
-	expect(watching.isGone).toBe(true);
-	expect(await watching.gone).toBe(null);
+	expect(first.isGone).toBe(true);
+	expect(await first.gone).toBe(null);
 });
 
 test("an aborted group is gone as well as closed", async () => {
 	const producer = new TrackProducer("test").accept();
 
 	const group = producer.appendGroup();
-	const watching = group.consume();
 
 	const abort = new Error("boom");
 	group.close(abort);
 
-	expect(watching.isGone).toBe(true);
-	expect(await watching.gone).toBe(abort);
+	expect(group.isGone).toBe(true);
+	expect(await group.gone).toBe(abort);
 });
 
 test("eviction releases the frames a watching handle would otherwise pin", async () => {
@@ -247,16 +255,16 @@ test("eviction releases the frames a watching handle would otherwise pin", async
 	const producer = new TrackProducer("test").accept({ latencyMax: 0 });
 
 	const first = producer.appendGroup();
-	const watching = first.consume();
+	const reader = first.consume();
 	first.writeFrame({ payload: enc.encode("payload"), timestamp: Timestamp.now() });
 	first.close();
 
 	// Pruning runs when a late subscriber attaches, not only when the publisher writes.
 	producer.subscribe();
 
-	expect(watching.isGone).toBe(true);
+	expect(first.isGone).toBe(true);
 	// The buffer is empty, and the unread frame is reported as a gap rather than a clean finish.
-	expect(watching.skipped).toBe(true);
-	expect(watching.tryReadFrame()).toBeUndefined();
-	expect(watching.readFrame()).rejects.toThrow("lagged");
+	expect(reader.skipped).toBe(true);
+	expect(reader.tryReadFrame()).toBeUndefined();
+	expect(reader.readFrame()).rejects.toThrow("lagged");
 });

@@ -600,6 +600,17 @@ impl Producer {
 		}
 	}
 
+	/// Watch whether this publisher can still serve the complete group from frame zero.
+	///
+	/// The watch holds no producer and pins no frames. A finished group remains available while
+	/// it is cached; the watch resolves once the group is aborted, dropped, or loses any leading
+	/// frame to eviction.
+	pub fn watch(&self) -> Watch {
+		Watch {
+			state: self.state.consume(),
+		}
+	}
+
 	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
@@ -631,6 +642,44 @@ impl Clone for Producer {
 			stats: self.stats.clone(),
 			alive: self.alive.clone(),
 		}
+	}
+}
+
+/// A publisher-derived watch for complete-group cache availability.
+///
+/// Created by [`Producer::watch`]. Unlike a read [`Consumer`], this always refers to one
+/// publisher's cache entry, so route splicing cannot make its availability ambiguous.
+pub struct Watch {
+	state: kio::Consumer<GroupState>,
+}
+
+impl Watch {
+	/// Whether the publisher can no longer serve the complete group from frame zero.
+	pub fn is_gone(&self) -> bool {
+		let state = self.state.read();
+		state.offset > 0 || state.abort.is_some() || state.is_closed()
+	}
+
+	/// Poll until the complete group is gone, returning the cause.
+	pub fn poll_gone(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		match self.state.poll(waiter, |state| {
+			if state.offset > 0 {
+				Poll::Ready(Error::Lagged)
+			} else if let Some(err) = &state.abort {
+				Poll::Ready(err.clone())
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(err)) => Poll::Ready(err),
+			Poll::Ready(Err(state)) => Poll::Ready(state.abort.clone().unwrap_or(Error::Dropped)),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait until the complete group is gone, returning the cause.
+	pub async fn gone(&self) -> Error {
+		kio::wait(|waiter| self.poll_gone(waiter)).await
 	}
 }
 
@@ -919,40 +968,6 @@ impl Consumer {
 	/// Block until the group is finished, returning the number of frames in the group.
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
-	}
-
-	/// Whether the group can still deliver content.
-	///
-	/// This is availability, not completion: a group that [`finished`](Self::finished) cleanly
-	/// stays open while its frames are still retrievable, and closes once they aren't. An index
-	/// track (a timeline, a playlist) watches this to learn which groups it can still point at.
-	/// Holding a [`Consumer`] does not keep the group's frames alive, so watching is free.
-	///
-	/// What ends availability depends on where the group came from, but the question is the same
-	/// either way: a group served by one publisher closes when that publisher's cache drops it
-	/// (evicted, aged out, or aborted), and a group spliced across route changes closes when the
-	/// assembly does, i.e. when no route can serve it again.
-	pub fn is_closed(&self) -> bool {
-		match &self.inner {
-			ConsumerKind::Plain(plain) => plain.state.is_closed(),
-			ConsumerKind::Spliced(spliced) => spliced.is_closed(),
-		}
-	}
-
-	/// Poll until the group is gone; ready with the cause. See [`is_closed`](Self::is_closed).
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		match &self.inner {
-			ConsumerKind::Plain(plain) => plain
-				.state
-				.poll_closed(waiter)
-				.map(|()| plain.state.read().abort.clone().unwrap_or(Error::Dropped)),
-			ConsumerKind::Spliced(spliced) => spliced.poll_closed(waiter),
-		}
-	}
-
-	/// Block until the group is gone, returning the cause. See [`is_closed`](Self::is_closed).
-	pub async fn closed(&self) -> Error {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 }
 
@@ -1671,46 +1686,60 @@ mod test {
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
 	}
 
-	/// `Consumer::is_closed` reports availability, not completion: a finished group stays open
-	/// while it is still cached, and an abort (how the cache evicts) closes it. An index track
-	/// keying off this must not see a clean finish as "gone".
+	/// A watch reports publisher cache availability, not completion: a finished group remains
+	/// available while cached, and an abort makes it gone.
 	#[test]
-	fn consumer_closed_tracks_availability() {
+	fn watch_tracks_availability() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
 			.unwrap();
-		let consumer = producer.consume();
-		assert!(!consumer.is_closed());
+		let watch = producer.watch();
+		assert!(!watch.is_gone());
 
 		// Finishing completes the group but leaves it cached and fetchable.
 		producer.finish().unwrap();
-		assert!(!consumer.is_closed(), "a finished group is still available");
+		assert!(!watch.is_gone(), "a finished group is still available");
 
 		// Eviction aborts it, even though it finished cleanly.
 		producer.abort(Error::Evicted).unwrap();
-		assert!(consumer.is_closed());
+		assert!(watch.is_gone());
 		assert!(matches!(
-			consumer.poll_closed(&kio::Waiter::noop()),
+			watch.poll_gone(&kio::Waiter::noop()),
 			Poll::Ready(Error::Evicted)
 		));
 	}
 
-	/// Dropping the last producer (the track releasing a cached group without an explicit
-	/// abort) also closes the consumer, reported as `Dropped`.
+	/// Losing any leading frame makes the complete group unavailable even while its tail remains.
 	#[test]
-	fn consumer_closed_on_producer_drop() {
+	fn watch_reports_partial_eviction() {
+		let mut producer = Info { sequence: 0 }.produce();
+		let watch = producer.watch();
+		let half = usize::try_from(MAX_GROUP_CACHE / 2 + 1).unwrap();
+		producer.write_frame(Timestamp::ZERO, vec![0; half]).unwrap();
+		producer.write_frame(Timestamp::ZERO, vec![0; half]).unwrap();
+
+		assert!(watch.is_gone());
+		assert!(matches!(
+			watch.poll_gone(&kio::Waiter::noop()),
+			Poll::Ready(Error::Lagged)
+		));
+	}
+
+	/// Dropping the last producer also settles the watch as `Dropped`.
+	#[test]
+	fn watch_reports_producer_drop() {
 		let mut producer = Info { sequence: 0 }.produce();
 		producer
 			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
 			.unwrap();
 		producer.finish().unwrap();
 
-		let consumer = producer.consume();
+		let watch = producer.watch();
 		drop(producer);
-		assert!(consumer.is_closed());
+		assert!(watch.is_gone());
 		assert!(matches!(
-			consumer.poll_closed(&kio::Waiter::noop()),
+			watch.poll_gone(&kio::Waiter::noop()),
 			Poll::Ready(Error::Dropped)
 		));
 	}

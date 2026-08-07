@@ -338,7 +338,10 @@ impl Inner {
 			}
 			false => (Bytes::from(payload), None),
 		};
-		group.write_frame(moq_net::Timestamp::now(), slice)?;
+		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), slice) {
+			let _ = group.abort(err.clone());
+			return Err(err.into());
+		}
 
 		self.group = Some(group);
 		self.encoder = encoder;
@@ -569,6 +572,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 				snapshot.values.len()
 			)));
 		};
+		if tail < self.next {
+			return Err(Error::Window(format!(
+				"snapshot tail {tail} precedes the consumed position {}",
+				self.next
+			)));
+		}
 
 		self.head = snapshot.offset;
 		self.tail = tail;
@@ -766,6 +775,28 @@ mod test {
 		assert!(matches!(producer.trim(1), Err(Error::Net(_))));
 		assert_eq!(producer.len(), 2, "a rejected trim must not shrink the window");
 		assert_eq!(producer.offset(), 0, "a rejected trim must not move the head");
+	}
+
+	#[test]
+	fn a_failed_snapshot_aborts_the_published_group() {
+		let timescale = moq_net::Timescale::new((1 << 62) - 1).unwrap();
+		let info = moq_net::track::Info::default().with_timescale(timescale);
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", Some(info))
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default());
+		assert!(matches!(
+			producer.append(&json!({ "n": 0 })),
+			Err(Error::Net(moq_net::Error::TimestampMismatch))
+		));
+
+		let waiter = kio::Waiter::noop();
+		assert!(
+			matches!(subscriber.poll_next_group(&waiter), Poll::Pending),
+			"the aborted empty group must not be delivered or left open"
+		);
 	}
 
 	#[test]
@@ -1103,6 +1134,49 @@ mod test {
 		match consumer(subscriber, false).poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Err(Error::Window(msg))) => assert!(msg.contains("maximum position"), "{msg}"),
 			other => panic!("expected an out-of-range span to be rejected, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn a_snapshot_cannot_rewind_behind_consumed_positions() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", None)
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let mut consumer = consumer(subscriber, false);
+		let waiter = kio::Waiter::noop();
+
+		let mut first = track.append_group().unwrap();
+		first
+			.write_frame(
+				moq_net::Timestamp::ZERO,
+				Bytes::from_static(
+					br#"{"offset":0,"values":[{"n":0},{"n":1},{"n":2},{"n":3},{"n":4},{"n":5},{"n":6},{"n":7},{"n":8},{"n":9}]}"#,
+				),
+			)
+			.unwrap();
+		first.finish().unwrap();
+		for position in 0..10 {
+			match consumer.poll_next(&waiter) {
+				Poll::Ready(Ok(Some(Update::Append { position: got, .. }))) => assert_eq!(got, position),
+				other => panic!("expected position {position}, got {other:?}"),
+			}
+		}
+
+		let mut rewind = track.append_group().unwrap();
+		rewind
+			.write_frame(
+				moq_net::Timestamp::ZERO,
+				Bytes::from_static(br#"{"offset":0,"values":[{"n":0}]}"#),
+			)
+			.unwrap();
+		rewind.finish().unwrap();
+		track.finish().unwrap();
+
+		match consumer.poll_next(&waiter) {
+			Poll::Ready(Err(Error::Window(msg))) => assert!(msg.contains("precedes the consumed position"), "{msg}"),
+			other => panic!("expected a rewind error, got {other:?}"),
 		}
 	}
 

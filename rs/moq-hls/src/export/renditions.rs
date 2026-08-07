@@ -226,9 +226,6 @@ impl Fanout {
 		while feed.history.front().is_some_and(|entry| entry.segment < segment) {
 			feed.history.pop_front();
 		}
-		if feed.history.is_empty() {
-			feed.anchor = None;
-		}
 
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
@@ -423,4 +420,37 @@ fn next_event(current: &BTreeMap<Key, Arc<Rendition>>, seen: &BTreeMap<Key, Arc<
 		}
 	}
 	Poll::Pending
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn entry(segment: u64, pts_ms: u64) -> Entry {
+		Entry {
+			segment,
+			pts: moq_net::Timestamp::from_millis(pts_ms).unwrap(),
+			duration: Duration::from_secs(2),
+			tracks: BTreeMap::new(),
+			ext: (),
+		}
+	}
+
+	#[test]
+	fn trimming_history_to_empty_preserves_the_wall_anchor() {
+		let producer = Producer::new(Duration::from_secs(30));
+		let fanout = producer.fanout();
+		fanout.push(entry(0, 0));
+		let anchor = producer.anchor().expect("the first entry anchors pts zero");
+
+		fanout.trim(1);
+		assert_eq!(producer.anchor(), Some(anchor));
+
+		fanout.push(entry(1, 2_000));
+		assert_eq!(
+			producer.anchor(),
+			Some(anchor),
+			"a later entry must not shift the MPD clock"
+		);
+	}
 }

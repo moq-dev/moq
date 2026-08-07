@@ -187,6 +187,47 @@ describe("window", () => {
 		expect([...positions].sort((a, b) => a - b)).toEqual(positions);
 	});
 
+	test("a newer snapshot preempts an older open group", async () => {
+		const track = new Moq.Track.Producer("test");
+		const consumer = new Window.Consumer<Rec>(track.subscribe());
+
+		const old = track.appendGroup();
+		old.writeJson({ offset: 0, values: [{ n: 0 }] });
+		expect(await consumer.next()).toEqual({ type: "append", position: 0, value: { n: 0 } });
+
+		// Leave the old group open. Independent QUIC streams can deliver the replacement before
+		// its FIN, so waiting only on old.readFrame() would strand this update.
+		const pending = consumer.next();
+		const current = track.appendGroup();
+		current.writeJson({ offset: 1, values: [{ n: 1 }] });
+		expect(await pending).toEqual({ type: "trim", offset: 1 });
+		expect(await consumer.next()).toEqual({ type: "append", position: 1, value: { n: 1 } });
+
+		current.close();
+		track.close();
+	});
+
+	test("a snapshot cannot rewind behind consumed positions", async () => {
+		const track = new Moq.Track.Producer("test");
+		const consumer = new Window.Consumer<Rec>(track.subscribe());
+
+		const first = track.appendGroup();
+		first.writeJson({
+			offset: 0,
+			values: Array.from({ length: 10 }, (_, n) => ({ n })),
+		});
+		first.close();
+		for (let position = 0; position < 10; position++) {
+			expect(await consumer.next()).toEqual({ type: "append", position, value: { n: position } });
+		}
+
+		const rewind = track.appendGroup();
+		rewind.writeJson({ offset: 0, values: [{ n: 0 }] });
+		rewind.close();
+		track.close();
+		await expect(consumer.next()).rejects.toThrow("precedes the consumed position");
+	});
+
 	test("compressed roundtrip", async () => {
 		const [producer, consumer] = pair(true);
 		for (let n = 0; n < 20; n++) producer.append({ n });

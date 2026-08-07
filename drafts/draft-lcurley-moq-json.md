@@ -142,6 +142,8 @@ It MUST NOT exceed 2^53-1, so a receiver using IEEE 754 doubles (a JSON parser's
 **values**:
 Every record currently in the window, oldest first.
 Required, and may be empty.
+The sum of `offset` and the number of values MUST NOT exceed 2^53-1.
+A receiver that has already delivered records MUST reject a later snapshot whose end precedes the next position it expects, since accepting it would reuse positions and silently discard subsequent records.
 
 Each subsequent frame carries exactly one operation:
 
@@ -218,5 +220,3 @@ This document has no IANA actions.
 {:numbered="false"}
 
 The snapshot-per-group structure follows the catalog and media timeline design of {{msf}}, extended here with explicit head removal.
-
-This document was drafted with the assistance of Claude, an AI assistant by Anthropic.

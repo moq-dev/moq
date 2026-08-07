@@ -98,7 +98,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.3.4",
+      "version": "0.4.0",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.9.8",
@@ -120,7 +120,7 @@
     },
     "js/json": {
       "name": "@moq/json",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
@@ -181,7 +181,7 @@
     },
     "js/net": {
       "name": "@moq/net",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@moq/qmux": "^0.3.2",
         "@moq/signals": "workspace:*",

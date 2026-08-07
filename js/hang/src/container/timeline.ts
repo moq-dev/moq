@@ -118,7 +118,7 @@ export interface ProducerProps {
 /** One enrolled track's report state. */
 interface TrackState {
 	// Group opens reported and not yet flushed into a record.
-	pending: { sequence: number; pts: Time.Micro; keyframe: boolean; group: Moq.Group.Consumer }[];
+	pending: { sequence: number; pts: Time.Micro; keyframe: boolean; group: Moq.Group.Producer }[];
 	// The newest reported timestamp: everything earlier is known. Advanced by a group open (the
 	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
@@ -138,7 +138,7 @@ export class Producer {
 	#window: Json.Window.Producer<Record>;
 	// One span of group handles per record in the window, oldest first. A record stands for the
 	// media across its whole segment, so it survives exactly as long as every group it covers.
-	#indexed: Moq.Group.Consumer[][] = [];
+	#indexed: Moq.Group.Producer[][] = [];
 	#trackName: string;
 	#durationMinUs: number;
 	#durationMaxUs?: number;
@@ -288,7 +288,7 @@ export class Producer {
 	report(name: string, group: Moq.Group.Producer, pts: Time.Micro, keyframe: boolean): void {
 		const track = this.#tracks.get(name);
 		if (!track) return;
-		track.pending.push({ sequence: group.sequence, pts, keyframe, group: group.consume() });
+		track.pending.push({ sequence: group.sequence, pts, keyframe, group });
 		this.#advance(track, pts);
 	}
 
@@ -439,7 +439,7 @@ export class Producer {
 		let any = false;
 		// Every group this segment covers, across every track: the set whose availability the
 		// record's own availability is the AND of.
-		const covered: Moq.Group.Consumer[] = [];
+		const covered: Moq.Group.Producer[] = [];
 		for (const [name, track] of this.#tracks) {
 			const ranges: Range[] = [];
 			while (track.pending.length > 0) {

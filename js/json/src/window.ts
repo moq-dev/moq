@@ -303,21 +303,26 @@ export class Consumer<T> {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
 				this.#group = await this.#track.nextGroup();
 				if (!this.#group) return undefined;
-
-				// Then skip to the newest group already buffered. Each group is self-contained, so
-				// an older one carries nothing the newest lacks; without this a late joiner replays
-				// every cached group, emitting appends and trims for records already gone.
-				//
-				// Close each group skipped past. A subscriber's group is its own mirror of the
-				// source (`Group.Producer.mirror` builds a fresh state per sink), so closing one
-				// releases only this reader's copy and drops its share of the producer's demand.
-				for (let newer = this.#track.tryNextGroup(); newer; newer = this.#track.tryNextGroup()) {
-					this.#group.close();
-					this.#group = newer;
-				}
-
 				this.#frames = 0;
 				this.#decoder = undefined;
+			}
+
+			// Prefer the newest buffered snapshot before reading more operations from an older
+			// group. Groups use independent QUIC streams, so the replacement can arrive before the
+			// old stream's FIN. Closing here releases only this subscriber's mirrored copy.
+			for (let newer = this.#track.tryNextGroup(); newer; newer = this.#track.tryNextGroup()) {
+				this.#group.close();
+				this.#group = newer;
+				this.#frames = 0;
+				this.#decoder = undefined;
+			}
+
+			// Frame zero is the snapshot. If it was evicted, none of the surviving operations can
+			// be decoded in isolation, so skip the group and wait for the next snapshot.
+			if (this.#group.skipped) {
+				this.#group.close();
+				this.#group = undefined;
+				continue;
 			}
 
 			// Drain everything already buffered before blocking, so a late joiner catches up in one step.
@@ -328,17 +333,14 @@ export class Consumer<T> {
 			}
 			if (advanced) continue;
 
-			let frame: Moq.Group.Frame | undefined;
-			try {
-				frame = await this.#group.readFrame();
-			} catch {
-				// The group was reset or we fell behind its eviction window. Resync from the next
-				// group, which begins with a fresh snapshot, so no partial state is presented.
-				this.#group = undefined;
-				continue;
-			}
-
-			if (frame === undefined) {
+			if (this.#group.done) {
+				try {
+					await this.#group.readFrame();
+				} catch {
+					// An aborted group is a lost snapshot. Resync from the next self-contained group.
+					this.#group = undefined;
+					continue;
+				}
 				// Every group opens with a snapshot, so one that ends cleanly having delivered
 				// nothing is malformed. Accepting it would let it masquerade as a clean end of
 				// track and silently lose the window the publisher advertised. Rust rejects the
@@ -351,7 +353,11 @@ export class Consumer<T> {
 				continue;
 			}
 
-			this.#apply(frame.payload);
+			// Wake for either source. Re-checking the buffered group first on the next iteration
+			// prevents an old stream's delayed FIN from holding a newer snapshot hostage.
+			const wait = [this.#group.readable()];
+			if (this.#track.closed.peek() === undefined) wait.push(this.#track.readable());
+			await Promise.race(wait);
 		}
 	}
 
@@ -400,8 +406,12 @@ export class Consumer<T> {
 		if (snapshot.offset + values.length > MAX_POSITION) {
 			throw new Error(`snapshot spans past the maximum position ${MAX_POSITION}`);
 		}
+		const tail = snapshot.offset + values.length;
+		if (tail < this.#next) {
+			throw new Error(`snapshot tail ${tail} precedes the consumed position ${this.#next}`);
+		}
 		this.#head = snapshot.offset;
-		this.#tail = snapshot.offset + values.length;
+		this.#tail = tail;
 		this.#reportTrim();
 
 		values.forEach((value, index) => {

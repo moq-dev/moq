@@ -131,7 +131,7 @@ struct Report {
 	keyframe: bool,
 	/// A read handle on the group, held so the segment it lands in can watch it leave the
 	/// cache. Pins no frames, so this observes availability without extending it.
-	group: moq_net::group::Consumer,
+	group: moq_net::group::Watch,
 }
 
 /// One enrolled track's report state.
@@ -168,7 +168,7 @@ struct State {
 	/// One entry per record still in the window, oldest first, holding a handle for every group
 	/// the segment covers across every track. Kept in lockstep with the window, so its length is
 	/// what a trim count is measured against.
-	indexed: VecDeque<Vec<moq_net::group::Consumer>>,
+	indexed: VecDeque<Vec<moq_net::group::Watch>>,
 	/// Where the open (unflushed) segment starts; `None` until the first report.
 	start: Option<Timestamp>,
 	/// Explicit [`Producer::cut`] boundaries not yet reached, in order.
@@ -201,7 +201,7 @@ impl State {
 			sequence: group.sequence,
 			pts,
 			keyframe,
-			group: group.consume(),
+			group: group.watch(),
 		});
 		self.advance(name, pts);
 	}
@@ -393,7 +393,7 @@ impl State {
 
 		// Every group this segment covers, across every track: the set whose availability the
 		// record's own availability is the AND of.
-		let mut covered: Vec<moq_net::group::Consumer> = Vec::new();
+		let mut covered: Vec<moq_net::group::Watch> = Vec::new();
 
 		for (name, track) in &mut self.tracks {
 			let mut ranges: Vec<Range> = Vec::new();
@@ -432,7 +432,7 @@ impl State {
 	///
 	/// The timeline is an optional sidecar, so a transport failure logs and stops publishing
 	/// rather than tearing down the media path.
-	fn emit(&mut self, record: Record, covered: Vec<moq_net::group::Consumer>) {
+	fn emit(&mut self, record: Record, covered: Vec<moq_net::group::Watch>) {
 		let Some(sink) = self.sink.as_mut() else {
 			return;
 		};
@@ -456,7 +456,7 @@ impl State {
 	/// whole point of the timeline; the cost is a shorter window, and eviction reaches those
 	/// records shortly anyway.
 	fn sweep(&mut self) {
-		let gone = |covered: &Vec<moq_net::group::Consumer>| covered.iter().any(moq_net::group::Consumer::is_closed);
+		let gone = |covered: &Vec<moq_net::group::Watch>| covered.iter().any(moq_net::group::Watch::is_gone);
 		let Some(last) = self.indexed.iter().rposition(gone) else {
 			return;
 		};
