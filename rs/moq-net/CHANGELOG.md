@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11](https://github.com/moq-dev/moq/compare/moq-net-v0.2.10...moq-net-v0.2.11) - 2026-08-08
+
+### Other
+
+- *(net)* cover multi-track failover and a partial-list standby ([#2713](https://github.com/moq-dev/moq/pull/2713))
+
 ## [0.2.10](https://github.com/moq-dev/moq/compare/moq-net-v0.2.9...moq-net-v0.2.10) - 2026-08-07
 
 ### Fixed
