@@ -4,6 +4,7 @@ import { Producer as GroupProducer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
+import { Request as TrackRequest } from "../track.ts";
 import { randomOrigin } from "./origin.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
@@ -67,4 +68,49 @@ test("lite draft-05: subscribe end clears the max sequence when groups arrive ou
 // without colliding with a track whose sole group was sequence 0.
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
 	expect(await subscribeEnd([])).toBe(0);
+});
+
+// How long a served path gets to answer before the test calls it unpublished.
+const REQUEST_DEADLINE_MS = 100;
+
+// A shared session lets two components publish the same path, so the registration has to
+// belong to whoever holds it now. Without the identity check the stale producer's close
+// deletes the live one's entry, and the path stops answering subscribes.
+test("a stale producer closing does not unpublish a republished path", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomOrigin());
+	const path = Path.from("test");
+
+	const stale = new BroadcastProducer();
+	publisher.publish(path, stale);
+
+	const live = new BroadcastProducer();
+	publisher.publish(path, live);
+
+	stale.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+
+	const client = await Stream.open(pair.client);
+	const server = await Stream.accept(pair.server);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	const msg = new Subscribe({ id: 0n, broadcast: path, track: "video", priority: 0 });
+	const serving = publisher.runSubscribe(msg, server).catch(() => undefined);
+
+	try {
+		// An unpublished path is reset rather than served, so the request never arrives;
+		// race a deadline so the regression fails instead of hanging.
+		const deadline = new Promise((resolve) => setTimeout(() => resolve("not served"), REQUEST_DEADLINE_MS));
+		const request = await Promise.race([live.requested(), deadline]);
+		expect(request).toHaveProperty("name", "video");
+
+		// The handler parks on track.info() until the request is answered, so reject it rather
+		// than leaving the handler running past the test.
+		if (request instanceof TrackRequest) request.reject(new Error("done"));
+	} finally {
+		live.close();
+		publisher.close();
+		client.close();
+		await serving;
+	}
 });

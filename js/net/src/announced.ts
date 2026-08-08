@@ -129,9 +129,43 @@ export class Consumer {
 	}
 }
 
-// Connections already warned about missing broadcast discovery, so the fallback logs at most
-// once per connection instead of once per watched path.
-const warnedNoDiscovery = new WeakSet<Established>();
+// Relays already warned about missing broadcast discovery, so the fallback logs at most once
+// per relay instead of once per watched path. Keyed by relay rather than by session, since
+// several handles can share one connection.
+const warnedNoDiscovery = new Set<string>();
+
+/**
+ * How many relays the no-discovery warning remembers.
+ *
+ * Enough that a real deployment never evicts, small enough that the cache can't grow into a
+ * leak. Past it the oldest relay is forgotten and may warn a second time, which is the right
+ * thing to give up: this exists to keep the log readable, not to guarantee exactly-once.
+ *
+ * @internal
+ */
+export const WARNED_MAX = 64;
+
+/** Warn that `url`'s relay lacks discovery, at most once per relay. */
+function warnNoDiscovery(url: URL): void {
+	// Never the full href: the query carries the auth token, so keying on it would pin every
+	// token an app ever used and mint an entry per rotation. Origin plus path is the relay.
+	const key = `${url.origin}${url.pathname}`;
+	if (warnedNoDiscovery.has(key)) return;
+
+	// A Set iterates in insertion order, so the first entry is the oldest.
+	if (warnedNoDiscovery.size >= WARNED_MAX) {
+		const oldest = warnedNoDiscovery.values().next().value;
+		if (oldest !== undefined) warnedNoDiscovery.delete(oldest);
+	}
+
+	warnedNoDiscovery.add(key);
+	console.warn("relay does not support broadcast discovery; consuming without waiting.");
+}
+
+/** @internal Forget every warned relay, so a test starts from a clean cache. */
+export function resetNoDiscoveryWarnings(): void {
+	warnedNoDiscovery.clear();
+}
 
 /**
  * What to watch, for {@link Broadcast}.
@@ -218,10 +252,7 @@ export class Broadcast {
 
 			// Without discovery no announcement ever arrives, so waiting would hang forever.
 			if (!conn.discovery) {
-				if (!warnedNoDiscovery.has(conn)) {
-					warnedNoDiscovery.add(conn);
-					console.warn("relay does not support broadcast discovery; consuming without waiting.");
-				}
+				warnNoDiscovery(conn.url);
 
 				const blind = conn.consume(path);
 				effect.cleanup(() => blind.close());
@@ -284,6 +315,11 @@ export class Broadcast {
 				offline();
 			});
 		});
+	}
+
+	/** Resolves once the handle is closed, so an owner can drop its reference. */
+	get closed(): Promise<void> {
+		return this.#signals.closed;
 	}
 
 	/** Closes the handle and the broadcast it currently holds. Idempotent. */

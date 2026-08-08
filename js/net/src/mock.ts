@@ -238,6 +238,45 @@ export class MockTransport implements WebTransport {
 	}
 }
 
+/** A {@link WebTransport} stub that never connects, plus counters for what it was asked to do. */
+export interface PendingTransports {
+	/** Assign to `globalThis.WebTransport` for the duration of a test. */
+	transport: typeof WebTransport;
+	/** How many were constructed, i.e. how many dials were attempted. */
+	connects(): number;
+	/** How many were closed, i.e. how many attempts were abandoned. */
+	closes(): number;
+}
+
+/**
+ * A {@link WebTransport} whose `ready` and `closed` never settle, so a connection attempt stays
+ * in flight until something aborts it. Counts constructions and closes for tests asserting on
+ * how many dials happened and whether they were cleaned up.
+ */
+export function createPendingTransports(): PendingTransports {
+	let connects = 0;
+	let closes = 0;
+
+	class PendingWebTransport {
+		ready = new Promise<void>(() => {});
+		closed = new Promise<void>(() => {});
+
+		constructor() {
+			connects++;
+		}
+
+		close() {
+			closes++;
+		}
+	}
+
+	return {
+		transport: PendingWebTransport as unknown as typeof WebTransport,
+		connects: () => connects,
+		closes: () => closes,
+	};
+}
+
 type DatagramWritableApi = "writable" | "createWritable" | "none";
 
 /** Options for {@link createMockTransportPair}. */

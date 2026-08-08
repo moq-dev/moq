@@ -3,44 +3,22 @@ import * as Announce from "../announced.ts";
 import { error } from "../error.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
-import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
+import {
+	type ConnectProps,
+	connect,
+	type ReloadDelay,
+	type WebSocketOptions,
+	type WebTransportProps,
+} from "./connect.ts";
 import type { Established } from "./established.ts";
+import type { PoolProps } from "./pool.ts";
 import type { Probe, Stats } from "./stats.ts";
 
-/**
- * Exponential backoff settings for {@link Reload}'s reconnect loop.
- *
- * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the loop.
- */
-export type ReloadDelay = {
-	/** The delay in milliseconds before reconnecting (default: 1000). */
-	initial: DOMHighResTimeStamp;
+/** The {@link ConnectProps} a {@link Reload} accepts. */
+export type ReloadProps = ConnectProps;
 
-	/** The multiplier for the delay (default: 2). */
-	multiplier: number;
-
-	/** The maximum delay in milliseconds (default: 5000). */
-	max: DOMHighResTimeStamp;
-
-	/**
-	 * Maximum total time in milliseconds to spend retrying before giving up (default:
-	 * 10000). Resets after each successful connection. Set to 0 for unlimited retries.
-	 */
-	timeout?: DOMHighResTimeStamp;
-};
-
-/** Connection and retry options for {@link Reload}. */
-export type ReloadProps = Omit<ConnectProps, "signal"> & {
-	/** Whether to reload the connection when it disconnects (default: true). */
-	enabled?: boolean | Signal<boolean>;
-
-	/** The URL of the relay server. */
-	url?: URL | Signal<URL | undefined>;
-
-	/** Backoff settings for the reconnect loop. */
-	delay?: ReloadDelay;
-};
+/** The backoff used when nothing else is asked for. */
+const DEFAULT_DELAY: ReloadDelay = { initial: 1000, multiplier: 2, max: 5000 };
 
 /**
  * How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset.
@@ -53,12 +31,17 @@ const DEFAULT_TIMEOUT = 10000;
 /** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
 
-/** Maintains a MoQ connection, reconnecting with exponential backoff when it drops. */
+/**
+ * Maintains a MoQ connection, reconnecting with exponential backoff when it drops.
+ *
+ * Takes the same {@link ConnectProps} as {@link connect}, including the shared session pool, so
+ * several of these on one relay URL cost one connection.
+ */
 export class Reload {
 	/** Relay URL to connect to; updating it triggers a reconnect. */
 	url: Signal<URL | undefined>;
 
-	/** Whether reconnecting is active. */
+	/** Whether to connect at all; clearing it disconnects and setting it reconnects. */
 	enabled: Signal<boolean>;
 
 	/** Current connection status. */
@@ -90,6 +73,12 @@ export class Reload {
 	/** Backoff settings for the reconnect loop. */
 	delay: ReloadDelay;
 
+	/** Whether a dropped session is reconnected at all, applied to each drop (not reactive). */
+	reload: boolean;
+
+	/** Whether sessions are shared with other connections to the same URL (not reactive). */
+	pool: boolean | PoolProps;
+
 	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
 	#signals = new Effect();
 
@@ -119,11 +108,20 @@ export class Reload {
 	#url: Getter<string | undefined>;
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
-		this.enabled = Signal.from(props?.enabled ?? false);
-		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 5000 };
+		this.enabled = Signal.from(props?.enabled ?? true);
+		this.reload = props?.reload !== false;
+		this.delay = (typeof props?.reload === "object" ? props.reload : props?.delay) ?? DEFAULT_DELAY;
+		this.pool = props?.pool ?? true;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
+
+		// A supplied session is good for one connection, so a loop that reconnects has nothing
+		// to reuse after the first drop and dials its own instead. Say so out loud rather than
+		// silently handing back a session the caller didn't ask for.
+		if (props?.transport) {
+			console.warn("transport is ignored when reconnecting; use connect() for a supplied session");
+		}
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
@@ -152,6 +150,13 @@ export class Reload {
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
 		this.#signals.run(this.#connect.bind(this));
+
+		// The whole managed connection goes away with the caller's signal, since there is no
+		// single attempt for it to cancel.
+		if (props?.signal) {
+			if (props.signal.aborted) this.close();
+			else this.#signals.event(props.signal, "abort", () => this.close());
+		}
 	}
 
 	#connect(effect: Effect): void {
@@ -181,6 +186,7 @@ export class Reload {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					pool: this.pool,
 					signal,
 				});
 
@@ -221,6 +227,12 @@ export class Reload {
 		this.established.set(undefined);
 		this.status.set("disconnected");
 
+		// One attempt was all that was asked for, so this is the end of the line.
+		if (!this.reload) {
+			this.#finish(cause);
+			return;
+		}
+
 		// A session that outlived the initial delay was healthy, so clear the backoff and
 		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
 		// shorter is a peer that accepts and immediately severs, which has to keep
@@ -238,7 +250,7 @@ export class Reload {
 		if (now >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
-			this.#closedReject(cause === undefined ? new Error("reconnect timed out") : error(cause));
+			this.#finish(cause ?? new Error("reconnect timed out"));
 			return;
 		}
 
@@ -339,7 +351,22 @@ export class Reload {
 
 	/** Stop reconnecting, close the current connection, and resolve {@link Reload.closed}. */
 	close() {
+		this.#finish();
+	}
+
+	/**
+	 * Stop for good: tear down the effect scope, then settle {@link Reload.closed}.
+	 *
+	 * Both terminal paths run through here so neither leaves the page listeners, the `probe`
+	 * computed, and the `announced()` pumps behind. Settling twice is a no-op, so the public
+	 * {@link Reload.close} after a timeout keeps the original cause.
+	 */
+	#finish(cause?: unknown): void {
+		// Closing the scope also restores `established` and `status`, since the connect run set
+		// them through `effect.set`.
 		this.#signals.close();
-		this.#closedResolve();
+
+		if (cause === undefined) this.#closedResolve();
+		else this.#closedReject(error(cause));
 	}
 }

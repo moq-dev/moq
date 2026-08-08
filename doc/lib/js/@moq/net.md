@@ -64,6 +64,18 @@ See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/net/exa
 
 ## Advanced Usage
 
+### Shared sessions
+
+`connect()` shares one session with every other connection to the same URL and options, so a page showing a dozen broadcasts from one relay dials it once. What you get back is a reference-counted handle: `close()` releases yours, and the connection goes away once the last one does. It lingers for a couple of seconds after that, so tearing a component down and rebuilding it costs no handshake.
+
+```ts
+const a = await Moq.Connection.connect(url); // dials
+const b = await Moq.Connection.connect(url); // same session
+a.close(); // b keeps working
+```
+
+Pass `pool: false` when the session has to be yours alone. One case needs it: a session never sees its own announcements, so publishing and consuming the same broadcast over one shared session leaves the consumer waiting forever. Sharing is also skipped automatically when it can't be done safely, with a supplied `transport` or a pinned server certificate.
+
 ### Remote errors
 
 When a peer resets a stream it sends a numeric code, and a read or write in progress rejects with `Moq.RemoteError` carrying it:
