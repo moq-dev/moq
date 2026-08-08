@@ -15,11 +15,15 @@
 //!   content ends. A container import never decides where segments fall; it only states what
 //!   it published.
 //! - **The timeline sets policy.** A segment ends at the first group boundary that gives it at
-//!   least [`Config::duration_min`] on every enrolled track (see [`Config`] for the exact
+//!   least [`Config::duration_min`] on every enrolled pacing track (see [`Config`] for the exact
 //!   rule). An application that knows its own boundaries overrides that with [`Producer::cut`].
+//! - **Not every track can pace.** A track that publishes on its own schedule (a catalog, an
+//!   application's metadata) enrolls via [`Producer::passive`]: its groups are recorded into
+//!   whichever segment is open, but it never votes on a boundary and never holds a record back.
+//!   Pacing on such a track would stall the timeline the moment it went quiet.
 //! - **Records flush on completeness.** A segment's record is published only once every
-//!   enrolled track has reported a group at or past the segment's end (or closed), proving the
-//!   segment's group ranges are final on every track. The record is then self-contained and
+//!   enrolled pacing track has reported a group at or past the segment's end (or closed), proving
+//!   the segment's group ranges are final on every track that paces. The record is then self-contained and
 //!   immediately servable. [`Producer::reserve`] extends that across a batch of enrollments,
 //!   the way the catalog's own reservation does.
 //!
@@ -115,6 +119,9 @@ struct TrackState {
 	frontier: Option<Timestamp>,
 	/// The recorder was dropped; this track no longer paces boundaries or gates completeness.
 	closed: bool,
+	/// This track never paces boundaries or gates completeness, even while open: its groups are
+	/// recorded into whichever segment is open when they arrive. See [`Producer::passive`].
+	passive: bool,
 }
 
 impl TrackState {
@@ -183,9 +190,11 @@ impl State {
 			track.frontier = Some(pts);
 		}
 
-		// The first thing anybody reports anchors the first segment, so content produced before
-		// any boundary exists belongs to the oldest segment rather than to nowhere.
-		if self.start.is_none() {
+		// The first thing a pacing track reports anchors the first segment, so content produced
+		// before any boundary exists belongs to the oldest segment rather than to nowhere. A
+		// passive track must not anchor it: a catalog published while the encoder is still warming
+		// up would otherwise stretch segment 0 across the whole startup gap.
+		if self.start.is_none() && self.tracks.get(name).is_some_and(|t| !t.passive) {
 			self.start = Some(pts);
 		}
 
@@ -238,14 +247,15 @@ impl State {
 			return false;
 		};
 
-		// Every open track has to have reported at or past the boundary, proving its ranges for
-		// this segment are final. The track that voted for `end` has by construction; a track
-		// with shorter groups can still be behind it.
+		// Every open pacing track has to have reported at or past the boundary, proving its ranges
+		// for this segment are final. The track that voted for `end` has by construction; a track
+		// with shorter groups can still be behind it. A passive track is excluded: it may publish
+		// rarely or never again, so waiting on it would stall the timeline for good.
 		let complete = finished
 			|| self
 				.tracks
 				.values()
-				.all(|t| t.closed || t.frontier.is_some_and(|f| f.as_micros() >= end.as_micros()));
+				.all(|t| t.passive || t.closed || t.frontier.is_some_and(|f| f.as_micros() >= end.as_micros()));
 		if !complete {
 			return false;
 		}
@@ -277,7 +287,7 @@ impl State {
 		let threshold = start.as_micros() + self.config.duration_min.as_micros();
 
 		let mut end: Option<Timestamp> = None;
-		for track in self.tracks.values() {
+		for track in self.tracks.values().filter(|t| !t.passive) {
 			match track.candidate(threshold) {
 				// The latest vote wins: it is a group boundary on the coarsest track, and every
 				// finer track assigns its groups by start, so no group is split. A closed track
@@ -473,7 +483,8 @@ impl Producer {
 		}
 	}
 
-	/// Enroll the media track `name`, returning the [`Recorder`] it reports through.
+	/// Enroll the media track `name` as a pacing track, returning the [`Recorder`] it reports
+	/// through.
 	///
 	/// The segment records key ranges by this name, and the track paces boundaries and gates
 	/// completeness until its recorder drops. Enroll a track when it is about to produce: an
@@ -481,18 +492,58 @@ impl Producer {
 	/// complete until every track's content is known. One recorder per track: enrolling the
 	/// same name again resets its state.
 	///
+	/// This is for tracks whose groups arrive continuously, which is what makes them usable as
+	/// boundaries. A track that publishes on its own schedule belongs in
+	/// [`passive`](Self::passive) instead.
+	///
 	/// Creates the timeline track on first use, which errors if the broadcast can't (something
 	/// else already took the name).
 	pub fn track(&self, name: &str) -> crate::Result<Recorder> {
+		self.enroll(name, false)
+	}
+
+	/// Enroll the track `name` without letting it influence segmentation, returning its
+	/// [`Recorder`].
+	///
+	/// A passive track's groups are recorded into whichever segment is open when they arrive, but
+	/// it never votes on where a boundary falls and never holds a record back. That is what a
+	/// track publishing on its own schedule needs: a catalog that emits a group only when the
+	/// renditions change, or an application's metadata track. Enrolling such a track with
+	/// [`track`](Self::track) instead would stall the timeline for good, since a segment cannot
+	/// end until every pacing track has reported past its boundary.
+	///
+	/// The trade is that a passive track's groups are placed by arrival rather than by content
+	/// time: nothing waits for them, so a group that shows up after its segment already flushed is
+	/// recorded in the next one. The frames still carry their own timestamps.
+	///
+	/// Unlike [`track`](Self::track) this does not create the timeline track, so enrolling only
+	/// passive tracks publishes no timeline at all. Segmentation stays opt-in by pacing track.
+	///
+	/// A group that never closes (a `moq_json::stream` log) is recorded once, in the segment its
+	/// group opened in, and never again. Roll the group at segment boundaries if its content
+	/// needs to be addressable per segment.
+	pub fn passive(&self, name: &str) -> crate::Result<Recorder> {
+		self.enroll(name, true)
+	}
+
+	/// Enroll `name`, creating the timeline track if this is a pacing track and the first to need
+	/// it.
+	fn enroll(&self, name: &str, passive: bool) -> crate::Result<Recorder> {
 		let mut state = self.state.lock().unwrap();
 
-		if state.sink.is_none() && state.overrun.is_none() {
+		if !passive && state.sink.is_none() && state.overrun.is_none() {
 			let net = state.broadcast.create_track(DEFAULT_NAME, None)?;
 			let config = moq_json::stream::ProducerConfig::default().with_compression(true);
 			state.sink = Some(moq_json::stream::Producer::new(net, config));
 		}
 
-		state.tracks.insert(name.to_string(), TrackState::default());
+		state.tracks.insert(
+			name.to_string(),
+			TrackState {
+				passive,
+				..Default::default()
+			},
+		);
 
 		Ok(Recorder {
 			state: self.state.clone(),
@@ -1286,6 +1337,79 @@ mod test {
 			entries[0],
 			entry(0, 0, 3_000, &[("video0", &[(0, 2)])]),
 			"the source's 3s boundaries should be reproduced, not duration_min pacing"
+		);
+	}
+
+	// A catalog publishes a group only when the renditions change, so it can go quiet for the
+	// rest of the broadcast. Enrolled as a pacing track it would stall the timeline for good;
+	// passive, it rides along in whichever segment is open.
+	#[tokio::test]
+	async fn a_passive_track_neither_paces_nor_gates() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+		let mut catalog = timeline.passive("catalog.json").unwrap();
+
+		catalog.record(0, ms(0), true);
+		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
+			video.record(seq, ms(t), true);
+		}
+		video.end(ms(6_000));
+		timeline.finish().unwrap();
+
+		let entries = drain(&broadcast, &timeline).await;
+		assert_eq!(
+			entries,
+			vec![
+				entry(0, 0, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(0, 0)])]),
+				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
+				entry(2, 4_000, 2_000, &[("video0", &[(2, 2)])]),
+			],
+			"the silent catalog should neither hold records back nor move a boundary"
+		);
+	}
+
+	// Nothing waits for a passive track, so a group arriving after its segment already flushed
+	// is recorded in the next one. Placement is by arrival; the frames still carry their own
+	// timestamps.
+	#[tokio::test]
+	async fn a_late_passive_group_lands_in_the_next_segment() {
+		let (broadcast, mut timeline) = setup();
+		let mut video = timeline.track("video0").unwrap();
+		let mut catalog = timeline.passive("catalog.json").unwrap();
+
+		video.record(0, ms(0), true);
+		// Flushes segment 0, which the catalog has contributed nothing to.
+		video.record(1, ms(2_000), true);
+
+		// The update happened a second in, but only reaches the timeline now.
+		catalog.record(0, ms(1_000), true);
+
+		video.record(2, ms(4_000), true);
+		video.end(ms(6_000));
+		timeline.finish().unwrap();
+
+		let entries = drain(&broadcast, &timeline).await;
+		assert_eq!(entries[0], entry(0, 0, 2_000, &[("video0", &[(0, 0)])]));
+		assert_eq!(
+			entries[1],
+			entry(1, 2_000, 2_000, &[("catalog.json", &[(0, 0)]), ("video0", &[(1, 1)])]),
+			"the late group belongs to the segment that was open when it arrived"
+		);
+	}
+
+	// Segmentation stays opt-in by pacing track: passive tracks alone describe nothing, so the
+	// timeline track is never created and its name stays free.
+	#[tokio::test]
+	async fn passive_tracks_alone_publish_no_timeline() {
+		let (mut broadcast, mut timeline) = setup();
+		let mut catalog = timeline.passive("catalog.json").unwrap();
+
+		catalog.record(0, ms(0), true);
+		timeline.finish().unwrap();
+
+		assert!(
+			broadcast.create_track(DEFAULT_NAME, None).is_ok(),
+			"the timeline track should never have been created"
 		);
 	}
 }

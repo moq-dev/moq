@@ -458,3 +458,60 @@ test("a cut on the first group does not poison later cuts", async () => {
 	expect(out[0]).toEqual({ segment: 0, pts: 0, duration: 3000, tracks: { video0: [{ start: 0, end: 2 }] } });
 	expect(out[1]).toEqual({ segment: 1, pts: 3000, duration: 3000, tracks: { video0: [{ start: 3, end: 5 }] } });
 });
+
+// A catalog publishes a group only when the renditions change, so it can go quiet for the rest
+// of the broadcast. Enrolled as a pacing track it would stall the timeline for good; passive, it
+// rides along in whichever segment is open.
+test("a passive track neither paces nor gates", async () => {
+	const { timeline, records } = capture();
+	const video = timeline.track("video0");
+	const catalog = timeline.passive("catalog.json");
+
+	catalog.record(0, us(0));
+	video.record(0, us(0));
+	video.record(1, us(2000));
+	video.record(2, us(4000));
+	video.end(us(6000));
+	video.close();
+	timeline.finish();
+
+	expect(await records()).toEqual([
+		{
+			segment: 0,
+			pts: 0,
+			duration: 2000,
+			tracks: { "catalog.json": [{ start: 0, end: 0 }], video0: [{ start: 0, end: 0 }] },
+		},
+		{ segment: 1, pts: 2000, duration: 2000, tracks: { video0: [{ start: 1, end: 1 }] } },
+		{ segment: 2, pts: 4000, duration: 2000, tracks: { video0: [{ start: 2, end: 2 }] } },
+	]);
+});
+
+// Nothing waits for a passive track, so a group arriving after its segment already flushed is
+// recorded in the next one. Placement is by arrival; the frames still carry their own timestamps.
+test("a late passive group lands in the next segment", async () => {
+	const { timeline, records } = capture();
+	const video = timeline.track("video0");
+	const catalog = timeline.passive("catalog.json");
+
+	video.record(0, us(0));
+	// Flushes segment 0, which the catalog has contributed nothing to.
+	video.record(1, us(2000));
+
+	// The update happened a second in, but only reaches the timeline now.
+	catalog.record(0, us(1000));
+
+	video.record(2, us(4000));
+	video.end(us(6000));
+	video.close();
+	timeline.finish();
+
+	const out = await records();
+	expect(out[0]).toEqual({ segment: 0, pts: 0, duration: 2000, tracks: { video0: [{ start: 0, end: 0 }] } });
+	expect(out[1]).toEqual({
+		segment: 1,
+		pts: 2000,
+		duration: 2000,
+		tracks: { "catalog.json": [{ start: 0, end: 0 }], video0: [{ start: 1, end: 1 }] },
+	});
+});
