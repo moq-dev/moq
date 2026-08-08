@@ -38,9 +38,26 @@
 //!
 //! On the read side, [`Consumer::subscribe`] reads the timeline straight from the catalog's
 //! [`hang::catalog::Timeline`] section (so the track name and timescale can't be mismatched)
-//! and yields decoded [`Entry`]s. On the wire the track is a DEFLATE-compressed
-//! [`moq_json::stream`] (a single group, one record per frame; see [`hang::timeline`] for the
+//! and yields [`Update`]s: a decoded [`Entry`] per segment, and a retraction once a segment's
+//! media is gone. On the wire the track is a DEFLATE-compressed [`moq_json::window`]: a sliding
+//! log that appends at the tail and trims at the head, so the timeline describes what is
+//! actually available rather than everything ever published (see [`hang::timeline`] for the
 //! record schema).
+//!
+//! ## Retraction follows the cache
+//!
+//! Trimming is driven by the media cache itself, not a timer. A segment's record names the
+//! group ranges that carry it, and the timeline keeps a [`moq_net::group::Consumer`] for every
+//! one of those groups, on every track. The record is retracted once any of them reports the
+//! group gone (evicted under cache pressure, aged out of the publisher's latency window, or
+//! aborted), since a consumer fetches the whole segment and a hole anywhere in it breaks the
+//! segment just as thoroughly as a missing head.
+//!
+//! Holding those handles doesn't keep the media alive, so the timeline tracks the cache without
+//! extending it. The sweep runs as segments are recorded, which is also the only time the
+//! publisher's cache shrinks. The corollary is that the window is only accurate while media is
+//! flowing: a publisher that stalls keeps advertising segments that have since aged out, until
+//! it records again or calls [`Producer::finish`].
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -104,11 +121,24 @@ impl Default for Config {
 	}
 }
 
+/// One group open, as reported by a track and not yet flushed into a record.
+struct Report {
+	/// The group's sequence number, as used by FETCH/SUBSCRIBE on the media track.
+	sequence: u64,
+	/// Where the group starts.
+	pts: Timestamp,
+	/// Whether its first frame is a keyframe.
+	keyframe: bool,
+	/// A read handle on the group, held so the segment it lands in can watch it leave the
+	/// cache. Pins no frames, so this observes availability without extending it.
+	group: moq_net::group::Consumer,
+}
+
 /// One enrolled track's report state.
 #[derive(Default)]
 struct TrackState {
-	/// Group opens reported and not yet flushed into a record: (sequence, pts, keyframe).
-	pending: VecDeque<(u64, Timestamp, bool)>,
+	/// Group opens reported and not yet flushed into a record.
+	pending: VecDeque<Report>,
 	/// The newest reported timestamp: everything earlier is known, which is what lets a
 	/// segment ending at or before it flush. Advanced by a group open (the group starts there)
 	/// and by [`Recorder::end`] (the content stops there).
@@ -123,7 +153,7 @@ impl TrackState {
 	fn candidate(&self, threshold: u128) -> Option<Timestamp> {
 		self.pending
 			.iter()
-			.map(|&(_, pts, _)| pts)
+			.map(|report| report.pts)
 			.find(|pts| pts.as_micros() >= threshold)
 	}
 }
@@ -134,7 +164,11 @@ struct State {
 	/// Retained so the timeline track can be created when the first media track enrolls.
 	broadcast: moq_net::broadcast::Producer,
 	/// The timeline track, created by the first [`Producer::track`] call.
-	sink: Option<moq_json::stream::Producer<Record>>,
+	sink: Option<moq_json::window::Producer<Record>>,
+	/// One entry per record still in the window, oldest first, holding a handle for every group
+	/// the segment covers across every track. Kept in lockstep with the window, so its length is
+	/// what a trim count is measured against.
+	indexed: VecDeque<Vec<moq_net::group::Consumer>>,
 	/// Where the open (unflushed) segment starts; `None` until the first report.
 	start: Option<Timestamp>,
 	/// Explicit [`Producer::cut`] boundaries not yet reached, in order.
@@ -159,11 +193,16 @@ struct State {
 
 impl State {
 	/// A group open reported by `name`: record the fact and publish whatever became complete.
-	fn report(&mut self, name: &str, sequence: u64, pts: Timestamp, keyframe: bool) {
+	fn report(&mut self, name: &str, group: &moq_net::group::Producer, pts: Timestamp, keyframe: bool) {
 		let Some(track) = self.tracks.get_mut(name) else {
 			return;
 		};
-		track.pending.push_back((sequence, pts, keyframe));
+		track.pending.push_back(Report {
+			sequence: group.sequence,
+			pts,
+			keyframe,
+			group: group.consume(),
+		});
 		self.advance(name, pts);
 	}
 
@@ -205,6 +244,12 @@ impl State {
 	/// `finished` is the terminal pass: no track will report again, so a track that never
 	/// reached a boundary stops voting instead of holding the timeline open forever.
 	fn pump(&mut self, finished: bool) {
+		// Sweep first: a retraction and the record that triggers it ride the same window group,
+		// and sweeping before appending keeps the window from briefly listing content that is
+		// already gone. Unconditional, since media leaving the cache is worth reporting even
+		// while a reservation withholds new records.
+		self.sweep();
+
 		// With nothing enrolled there is nothing to describe. A record is immutable once
 		// published, so a caller that knows more tracks are still enrolling withholds it (see
 		// [`Producer::reserve`]), and an overrun has already broken the catalog's promise.
@@ -339,37 +384,42 @@ impl State {
 			if let Some(sink) = self.sink.as_mut() {
 				let _ = sink.finish();
 			}
-			self.sink = None;
+			self.drop_sink();
 			return;
 		}
 
 		let mut record = Record::new(self.next_segment, pts, duration);
 		self.next_segment += 1;
 
+		// Every group this segment covers, across every track: the set whose availability the
+		// record's own availability is the AND of.
+		let mut covered: Vec<moq_net::group::Consumer> = Vec::new();
+
 		for (name, track) in &mut self.tracks {
 			let mut ranges: Vec<Range> = Vec::new();
-			while let Some(&(sequence, group_pts, keyframe)) = track.pending.front() {
-				if end.is_some_and(|end| group_pts.as_micros() >= end.as_micros()) {
+			while let Some(report) = track.pending.front() {
+				if end.is_some_and(|end| report.pts.as_micros() >= end.as_micros()) {
 					break;
 				}
-				track.pending.pop_front();
+				let report = track.pending.pop_front().expect("peeked above");
 				match ranges.last_mut() {
 					// Contiguous sequences extend the run; a skip starts a new range (a gap:
 					// groups that never existed).
-					Some(last) if last.end + 1 == sequence => last.end = sequence,
+					Some(last) if last.end + 1 == report.sequence => last.end = report.sequence,
 					_ => {
-						let mut range = Range::new(sequence, sequence);
-						range.keyframe = keyframe;
+						let mut range = Range::new(report.sequence, report.sequence);
+						range.keyframe = report.keyframe;
 						ranges.push(range);
 					}
 				}
+				covered.push(report.group);
 			}
 			if !ranges.is_empty() {
 				record.tracks.insert(name.clone(), ranges);
 			}
 		}
 
-		self.emit(record);
+		self.emit(record, covered);
 	}
 
 	/// A duration in the wire timescale's units, rounded up so a bound never understates itself.
@@ -377,18 +427,57 @@ impl State {
 		(duration.as_micros() * self.timescale.as_u64() as u128).div_ceil(1_000_000) as u64
 	}
 
-	/// Publish a flushed record.
+	/// Publish a flushed record, remembering the groups it covers so it can be retracted once
+	/// they leave the cache.
 	///
 	/// The timeline is an optional sidecar, so a transport failure logs and stops publishing
 	/// rather than tearing down the media path.
-	fn emit(&mut self, record: Record) {
+	fn emit(&mut self, record: Record, covered: Vec<moq_net::group::Consumer>) {
 		let Some(sink) = self.sink.as_mut() else {
 			return;
 		};
 		if let Err(err) = sink.append(&record) {
 			tracing::warn!(%err, "timeline publish failed; dropping the timeline track");
-			self.sink = None;
+			self.drop_sink();
+			return;
 		}
+		self.indexed.push_back(covered);
+	}
+
+	/// Retract every record up to and including the newest one that has lost any of its groups.
+	///
+	/// A record goes when *any* group it covers is gone, on any track: a consumer fetches the
+	/// whole segment, so a hole in the middle breaks it just as thoroughly as a missing head.
+	///
+	/// Eviction is not strictly oldest-first: a group refreshed by a FETCH is protected while a
+	/// newer unread one is evicted in its place. That leaves a hole, and a window has only a
+	/// head, so the choice is to advertise the dead record or to drop the live ones in front of
+	/// it. Dropping them keeps the promise that everything listed is fetchable, which is the
+	/// whole point of the timeline; the cost is a shorter window, and eviction reaches those
+	/// records shortly anyway.
+	fn sweep(&mut self) {
+		let gone = |covered: &Vec<moq_net::group::Consumer>| covered.iter().any(moq_net::group::Consumer::is_closed);
+		let Some(last) = self.indexed.iter().rposition(gone) else {
+			return;
+		};
+		let count = last + 1;
+
+		let Some(sink) = self.sink.as_mut() else {
+			return;
+		};
+		if let Err(err) = sink.trim(count) {
+			tracing::warn!(%err, "timeline retraction failed; dropping the timeline track");
+			self.drop_sink();
+			return;
+		}
+		self.indexed.drain(..count);
+	}
+
+	/// Stop publishing. The handles go too: nothing can be retracted from a window nobody is
+	/// writing to, so keeping them would only pin memory for the life of the broadcast.
+	fn drop_sink(&mut self) {
+		self.sink = None;
+		self.indexed.clear();
 	}
 
 	/// The terminal flush: publish what the media finalized, then the open tail.
@@ -407,6 +496,11 @@ impl State {
 		{
 			self.flush_segment(start, None);
 		}
+
+		// Eviction is charged from the frame-write path too, so a group can die after the last
+		// record. Without this final sweep the window would close still listing it, and a reader
+		// would take the clean end as a complete playlist over media it cannot fetch.
+		self.sweep();
 	}
 
 	/// The error a segment overrunning [`Config::duration_max`] left behind, if any.
@@ -461,6 +555,7 @@ impl Producer {
 				config,
 				broadcast: broadcast.clone(),
 				sink: None,
+				indexed: VecDeque::new(),
 				start: None,
 				cuts: VecDeque::new(),
 				manual: false,
@@ -488,8 +583,8 @@ impl Producer {
 
 		if state.sink.is_none() && state.overrun.is_none() {
 			let net = state.broadcast.create_track(DEFAULT_NAME, None)?;
-			let config = moq_json::stream::ProducerConfig::default().with_compression(true);
-			state.sink = Some(moq_json::stream::Producer::new(net, config));
+			let config = moq_json::window::ProducerConfig::default().with_compression(true);
+			state.sink = Some(moq_json::window::Producer::new(net, config));
 		}
 
 		state.tracks.insert(name.to_string(), TrackState::default());
@@ -622,13 +717,18 @@ pub struct Recorder {
 }
 
 impl Recorder {
-	/// Report that group `sequence` opened at presentation time `pts`, `keyframe` stating
-	/// whether its first frame is one (i.e. whether a player could join here).
+	/// Report that `group` opened at presentation time `pts`, `keyframe` stating whether its
+	/// first frame is one (i.e. whether a player could join here).
 	///
 	/// Reports must be in group order with monotonic timestamps; this is the fact the timeline
 	/// builds ranges, boundaries and completeness from.
-	pub(crate) fn record(&mut self, sequence: u64, pts: Timestamp, keyframe: bool) {
-		self.state.lock().unwrap().report(&self.name, sequence, pts, keyframe);
+	///
+	/// The timeline keeps a read handle on `group` to watch when it leaves the cache, which is
+	/// what retracts the segment carrying it. That pins no frames, and the caller keeps
+	/// ownership. Taking the group rather than its sequence number is also what makes the two
+	/// impossible to mismatch.
+	pub(crate) fn record(&mut self, group: &moq_net::group::Producer, pts: Timestamp, keyframe: bool) {
+		self.state.lock().unwrap().report(&self.name, group, pts, keyframe);
 	}
 
 	/// Report that this track's content extends to `pts`, without a group opening there.
@@ -670,12 +770,52 @@ pub struct Entry<E: RecordExt = ()> {
 	pub ext: E,
 }
 
-/// Reads a broadcast's timeline, yielding decoded [`Entry`]s in segment order.
+/// One change to a broadcast's timeline.
 ///
-/// Generic over the record extension `E` (see [`RecordExt`]).
+/// Generic over the record extension `E` (see [`RecordExt`]). `#[non_exhaustive]` because the
+/// underlying window format is extensible, so a later revision can carry a change this one has
+/// no variant for; match with a wildcard arm and skip what you don't recognize.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Update<E: RecordExt = ()> {
+	/// A segment was indexed. Its number is [`Entry::segment`].
+	Append {
+		/// The segment.
+		entry: Entry<E>,
+	},
+
+	/// Every segment before `segment` is gone: its media has left the publisher's cache and can
+	/// no longer be fetched.
+	Trim {
+		/// A lower bound on the oldest segment still available: everything below it is gone.
+		///
+		/// Normally this is exactly the oldest surviving segment, which is what a playlist's
+		/// `EXT-X-MEDIA-SEQUENCE` wants. It can understate after the consumer resynchronizes past
+		/// a lost group, where the retraction is known before the replacement's contents are, so
+		/// read the live edge off the entries themselves rather than off this number.
+		segment: u64,
+	},
+}
+
+/// Reads a broadcast's timeline, yielding an [`Update`] per change.
+///
+/// A consumer sees an [`Update::Append`] per segment in the live window when it joins, then
+/// follows along: an `Append` as each segment is indexed and an [`Update::Trim`] as old ones
+/// stop being fetchable. Generic over the record extension `E` (see [`RecordExt`]).
+///
+/// A `Trim` only ever retracts segments this consumer was told about, so joining a window that
+/// has already trimmed does not report the segments it missed. Those show up instead as a jump
+/// in the first entry's [`segment`](Entry::segment).
 pub struct Consumer<E: RecordExt = ()> {
-	inner: moq_json::stream::Consumer<Record<E>>,
+	inner: moq_json::window::Consumer<Record<E>>,
 	timescale: Timescale,
+	/// The segment number of each yielded entry, oldest first, so a trim expressed in window
+	/// positions can be reported as the segment number a playlist actually keys on. Holding the
+	/// pair rather than assuming `position == segment` keeps the two independent: the record
+	/// carries its own number, and nothing on the wire ties it to the window's coordinates.
+	held: VecDeque<(u64, u64)>,
+	/// The segment after the newest one retracted, for a trim that empties `held`.
+	trimmed: u64,
 }
 
 impl<E: RecordExt> Consumer<E> {
@@ -687,12 +827,14 @@ impl<E: RecordExt> Consumer<E> {
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer, section: &Timeline) -> crate::Result<Self> {
 		let track = broadcast.track(&section.track)?.subscribe(None).await?;
 
-		let config = moq_json::stream::ConsumerConfig::default().with_compression(true);
+		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
 
 		Ok(Self {
-			inner: moq_json::stream::Consumer::new(track, config),
+			inner: moq_json::window::Consumer::new(track, config),
 			timescale: Timescale::new(section.timescale as u64)
 				.map_err(|_| crate::Error::InvalidTimescale(section.timescale))?,
+			held: VecDeque::new(),
+			trimmed: 0,
 		})
 	}
 
@@ -712,20 +854,57 @@ impl<E: RecordExt> Consumer<E> {
 		})
 	}
 
-	/// Get the next entry, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Entry<E>>> {
-		match self.inner.next().await? {
-			Some(record) => Ok(Some(self.decode(record)?)),
-			None => Ok(None),
+	/// Translate one window change into a timeline change.
+	///
+	/// `None` for a window change this revision has no timeline meaning for, which a caller skips
+	/// rather than failing on: the window format is extensible by design.
+	fn convert(&mut self, update: moq_json::window::Update<Record<E>>) -> crate::Result<Option<Update<E>>> {
+		Ok(match update {
+			moq_json::window::Update::Append { position, value } => {
+				let entry = self.decode(value)?;
+				self.held.push_back((position, entry.segment));
+				Some(Update::Append { entry })
+			}
+			moq_json::window::Update::Trim { offset } => {
+				while self.held.front().is_some_and(|&(position, _)| position < offset) {
+					let (_, segment) = self.held.pop_front().expect("peeked above");
+					self.trimmed = segment + 1;
+				}
+				// The oldest entry still held names the new head; with nothing left it is one
+				// past the newest thing retracted.
+				let segment = self.held.front().map_or(self.trimmed, |&(_, segment)| segment);
+				Some(Update::Trim { segment })
+			}
+			_ => None,
+		})
+	}
+
+	/// Get the next update, or `None` once the track ends.
+	pub async fn next(&mut self) -> crate::Result<Option<Update<E>>> {
+		loop {
+			let Some(update) = self.inner.next().await? else {
+				return Ok(None);
+			};
+			if let Some(update) = self.convert(update)? {
+				return Ok(Some(update));
+			}
 		}
 	}
 
-	/// Poll for the next entry, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Entry<E>>>> {
-		match self.inner.poll_next(waiter)? {
-			Poll::Ready(Some(record)) => Poll::Ready(self.decode(record).map(Some)),
-			Poll::Ready(None) => Poll::Ready(Ok(None)),
-			Poll::Pending => Poll::Pending,
+	/// Poll for the next update, without blocking.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Update<E>>>> {
+		loop {
+			match self.inner.poll_next(waiter)? {
+				// A change with no timeline meaning is skipped, so keep polling rather than
+				// reporting a spurious end of stream.
+				Poll::Ready(Some(update)) => match self.convert(update) {
+					Ok(Some(update)) => return Poll::Ready(Ok(Some(update))),
+					Ok(None) => continue,
+					Err(err) => return Poll::Ready(Err(err)),
+				},
+				Poll::Ready(None) => return Poll::Ready(Ok(None)),
+				Poll::Pending => return Poll::Pending,
+			}
 		}
 	}
 }
@@ -736,6 +915,66 @@ mod test {
 
 	fn ms(v: u64) -> Timestamp {
 		Timestamp::from_millis(v).unwrap()
+	}
+
+	/// A media track feeding one timeline enrollment.
+	///
+	/// The timeline watches the groups it is handed, so a test has to publish real ones: the
+	/// backing [`moq_net::track::Producer`] caches them, which is what keeps them available
+	/// until a test evicts one on purpose.
+	struct Media {
+		track: moq_net::track::Producer,
+		/// Dropped by [`Self::close`] to end the enrollment while the media stays cached, which
+		/// is what a real track finishing looks like to the timeline.
+		recorder: Option<Recorder>,
+		groups: BTreeMap<u64, moq_net::group::Producer>,
+	}
+
+	impl Media {
+		fn new(broadcast: &mut moq_net::broadcast::Producer, timeline: &Producer, name: &str) -> Self {
+			Self {
+				track: broadcast.create_track(name, None).unwrap(),
+				recorder: Some(timeline.track(name).unwrap()),
+				groups: BTreeMap::new(),
+			}
+		}
+
+		/// Open group `sequence` at `pts` and report it.
+		fn record(&mut self, sequence: u64, pts: Timestamp, keyframe: bool) {
+			let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			// An empty group is not cached, so it would read as gone the moment the timeline
+			// looked at it.
+			group.write_frame(pts, b"x".as_slice()).unwrap();
+			self.recorder
+				.as_mut()
+				.expect("still enrolled")
+				.record(&group, pts, keyframe);
+			self.groups.insert(sequence, group);
+		}
+
+		fn end(&mut self, pts: Timestamp) {
+			self.recorder.as_mut().expect("still enrolled").end(pts);
+		}
+
+		/// End the timeline enrollment, leaving the media track and its cached groups alive.
+		fn close(&mut self) {
+			self.recorder = None;
+		}
+
+		/// Evict group `sequence` the way the cache does, so the timeline sees it go.
+		fn evict(&mut self, sequence: u64) {
+			let group = self.groups.remove(&sequence).expect("group was recorded");
+			group.abort(moq_net::Error::Evicted).unwrap();
+		}
+
+		/// Finish group `sequence` cleanly, leaving it cached and fetchable.
+		fn finish_group(&mut self, sequence: u64) {
+			self.groups
+				.get_mut(&sequence)
+				.expect("group was recorded")
+				.finish()
+				.unwrap();
+		}
 	}
 
 	/// Build an Entry the tests compare against.
@@ -757,17 +996,73 @@ mod test {
 		}
 	}
 
-	/// Drain a finished timeline track by subscribing to the producer's advertised section.
-	async fn drain(broadcast: &moq_net::broadcast::Producer, producer: &Producer) -> Vec<Entry> {
+	/// Drain every update a subscriber sees on the producer's advertised section.
+	async fn drain(broadcast: &moq_net::broadcast::Producer, producer: &Producer) -> Vec<Update> {
 		let mut consumer = Consumer::subscribe(&broadcast.consume(), &producer.section())
 			.await
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(entry))) = consumer.poll_next(&waiter) {
-			out.push(entry);
+		while let Poll::Ready(Ok(Some(update))) = consumer.poll_next(&waiter) {
+			out.push(update);
 		}
 		out
+	}
+
+	/// Subscribe before the action under test, so the consumer sees every update.
+	///
+	/// A consumer that joins afterwards is a late joiner: it adopts the trimmed head silently and
+	/// reports no retraction for records it never held (see [`Consumer`]). Whether a trim is even
+	/// still on the wire then depends on whether the window rolled, so a test that asserts on
+	/// retractions has to be watching when they happen.
+	async fn watch(broadcast: &moq_net::broadcast::Producer, producer: &Producer) -> Consumer {
+		Consumer::subscribe(&broadcast.consume(), &producer.section())
+			.await
+			.unwrap()
+	}
+
+	/// Everything a live consumer has been told so far.
+	fn collect(consumer: &mut Consumer) -> Vec<Update> {
+		let waiter = kio::Waiter::noop();
+		let mut out = Vec::new();
+		while let Poll::Ready(Ok(Some(update))) = consumer.poll_next(&waiter) {
+			out.push(update);
+		}
+		out
+	}
+
+	/// The segment numbers a run of updates retracted to, in order.
+	fn trims(updates: &[Update]) -> Vec<u64> {
+		updates
+			.iter()
+			.filter_map(|update| match update {
+				Update::Trim { segment } => Some(*segment),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// The segment numbers a run of updates indexed, in order.
+	fn appended(updates: &[Update]) -> Vec<u64> {
+		updates
+			.iter()
+			.filter_map(|update| match update {
+				Update::Append { entry } => Some(entry.segment),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// The entries a subscriber is told about, ignoring retractions.
+	async fn entries(broadcast: &moq_net::broadcast::Producer, producer: &Producer) -> Vec<Entry> {
+		drain(broadcast, producer)
+			.await
+			.into_iter()
+			.filter_map(|update| match update {
+				Update::Append { entry } => Some(entry),
+				_ => None,
+			})
+			.collect()
 	}
 
 	fn setup() -> (moq_net::broadcast::Producer, Producer) {
@@ -783,9 +1078,9 @@ mod test {
 	// The coarsest track paces: video GOPs are longer than duration_min, so segments are GOPs.
 	#[tokio::test]
 	async fn the_coarsest_track_paces_the_segments() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		// Video keyframes every 2s, audio groups every 500ms, minimum 1s.
 		video.record(0, ms(0), true);
@@ -798,14 +1093,14 @@ mod test {
 		}
 		video.record(2, ms(4_000), true);
 		audio.record(8, ms(4_000), true);
-		drop(video);
-		drop(audio);
+		video.close();
+		audio.close();
 		timeline.finish().unwrap();
 
 		// Audio's own candidate (1s) loses to video's (2s), so no segment splits a GOP. Every
 		// record is self-contained: start AND end groups, explicit duration.
 		assert_eq!(
-			drain(&broadcast, &timeline).await,
+			entries(&broadcast, &timeline).await,
 			vec![
 				entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 3)])]),
 				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)]), ("audio0", &[(4, 7)])]),
@@ -818,17 +1113,17 @@ mod test {
 	// else a segment could start and stay decodable, so the segment is simply long.
 	#[tokio::test]
 	async fn a_gop_longer_than_the_minimum_is_one_segment() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		video.record(0, ms(0), true);
 		video.record(1, ms(30_000), true);
 		video.end(ms(60_000));
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
 		assert_eq!(
-			drain(&broadcast, &timeline).await,
+			entries(&broadcast, &timeline).await,
 			vec![
 				entry(0, 0, 30_000, &[("video0", &[(0, 0)])]),
 				entry(1, 30_000, 30_000, &[("video0", &[(1, 1)])]),
@@ -839,19 +1134,19 @@ mod test {
 	// Groups shorter than the minimum pack into one segment rather than each becoming one.
 	#[tokio::test]
 	async fn short_groups_pack_up_to_the_minimum() {
-		let (broadcast, mut timeline) = setup_with(Config {
+		let (mut broadcast, mut timeline) = setup_with(Config {
 			duration_min: Duration::from_millis(1_500),
 			..Default::default()
 		});
-		let mut audio = timeline.track("audio0").unwrap();
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		for seq in 0..8u64 {
 			audio.record(seq, ms(seq * 500), true);
 		}
-		drop(audio);
+		audio.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		// The first group at or past 1500ms ends segment 0, so it holds groups 0..=2.
 		assert_eq!(entries[0], entry(0, 0, 1_500, &[("audio0", &[(0, 2)])]));
 		assert_eq!(entries[1], entry(1, 1_500, 1_500, &[("audio0", &[(3, 5)])]));
@@ -861,32 +1156,32 @@ mod test {
 	// omits a rendition that was about to contribute to it.
 	#[tokio::test]
 	async fn a_segment_waits_for_every_track() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		video.record(0, ms(0), true);
 		audio.record(0, ms(0), true);
 		video.record(1, ms(2_000), true);
 		// Video alone would close segment 0 here, but audio hasn't crossed 2s.
-		assert!(drain(&broadcast, &timeline).await.is_empty());
+		assert!(entries(&broadcast, &timeline).await.is_empty());
 
 		audio.record(1, ms(2_000), true);
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries,
 			vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 0)])])]
 		);
-		drop(video);
-		drop(audio);
+		video.close();
+		audio.close();
 		timeline.finish().unwrap();
 	}
 
 	// An application that knows its own boundaries overrides the pacing.
 	#[tokio::test]
 	async fn explicit_cuts_override_the_pacing() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		// Keyframes every second, cut every three: the segments follow the cuts, not the GOPs.
 		timeline.cut(ms(3_000)).unwrap();
@@ -894,10 +1189,10 @@ mod test {
 		for seq in 0..7u64 {
 			video.record(seq, ms(seq * 1_000), true);
 		}
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(entries[0], entry(0, 0, 3_000, &[("video0", &[(0, 2)])]));
 		assert_eq!(entries[1], entry(1, 3_000, 3_000, &[("video0", &[(3, 5)])]));
 	}
@@ -906,8 +1201,8 @@ mod test {
 	// segment shorter than the minimum is dropped rather than producing a stray segment.
 	#[tokio::test]
 	async fn a_cut_below_the_minimum_is_ignored() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		video.record(0, ms(0), true);
 		timeline.cut(ms(2_000)).unwrap();
@@ -917,10 +1212,10 @@ mod test {
 		timeline.cut(ms(4_000)).unwrap();
 		video.record(1, ms(2_000), true);
 		video.record(2, ms(4_000), true);
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(entries.len(), 3, "the duplicate and the 500ms cut are both dropped");
 		assert_eq!(entries[0], entry(0, 0, 2_000, &[("video0", &[(0, 0)])]));
 		assert_eq!(entries[1], entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]));
@@ -931,12 +1226,12 @@ mod test {
 	// contradicts the catalog.
 	#[tokio::test]
 	async fn exceeding_the_declared_maximum_fails_the_timeline() {
-		let (broadcast, mut timeline) = setup_with(Config {
+		let (mut broadcast, mut timeline) = setup_with(Config {
 			duration_min: Duration::from_secs(1),
 			duration_max: Some(Duration::from_secs(3)),
 			..Default::default()
 		});
-		let mut video = timeline.track("video0").unwrap();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		let mut consumer = {
 			video.record(0, ms(0), true);
@@ -948,7 +1243,7 @@ mod test {
 
 		// A 4s GOP against a declared 3s maximum.
 		video.record(2, ms(6_000), true);
-		drop(video);
+		video.close();
 
 		let err = timeline.finish().unwrap_err();
 		assert!(
@@ -959,11 +1254,16 @@ mod test {
 		// The record that was still true published; the one that would have contradicted the
 		// catalog did not, and the track ended there.
 		let waiter = kio::Waiter::noop();
-		let mut entries = Vec::new();
-		while let Poll::Ready(Ok(Some(entry))) = consumer.poll_next(&waiter) {
-			entries.push(entry);
+		let mut updates = Vec::new();
+		while let Poll::Ready(Ok(Some(update))) = consumer.poll_next(&waiter) {
+			updates.push(update);
 		}
-		assert_eq!(entries, vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)])])]);
+		assert_eq!(
+			updates,
+			vec![Update::Append {
+				entry: entry(0, 0, 2_000, &[("video0", &[(0, 0)])])
+			}]
+		);
 	}
 
 	#[tokio::test]
@@ -982,18 +1282,18 @@ mod test {
 	// final segment's duration collapses to zero (an HLS EXTINF:0).
 	#[tokio::test]
 	async fn the_final_segment_runs_to_the_reported_end() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		video.record(0, ms(0), true);
 		video.record(1, ms(2_000), true);
 		// A finished `container::Producer` reports where its content stops.
 		video.end(ms(4_000));
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
 		assert_eq!(
-			drain(&broadcast, &timeline).await,
+			entries(&broadcast, &timeline).await,
 			vec![
 				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
 				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
@@ -1006,30 +1306,30 @@ mod test {
 	// renditions) holds flushing back until they are all in.
 	#[tokio::test]
 	async fn a_reservation_defers_flushing_until_every_track_enrolls() {
-		let (broadcast, mut timeline) = setup();
+		let (mut broadcast, mut timeline) = setup();
 		let reserved = timeline.reserve();
 
 		// The primary rendition runs a whole batch of segments through before its sibling has
 		// even loaded an init segment.
-		let mut first = timeline.track("video0").unwrap();
+		let mut first = Media::new(&mut broadcast, &timeline, "video0");
 		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
 			first.record(seq, ms(t), true);
 		}
 
-		let mut second = timeline.track("video1").unwrap();
+		let mut second = Media::new(&mut broadcast, &timeline, "video1");
 		for (seq, t) in [(0u64, 0u64), (1, 2_000), (2, 4_000)] {
 			second.record(seq, ms(t), true);
 		}
 
 		drop(reserved);
-		drop(first);
-		drop(second);
+		first.close();
+		second.close();
 		timeline.finish().unwrap();
 
 		// Both renditions are indexed from segment 0. Without the reservation, segments 0 and 1 would
 		// have flushed knowing only video0 (a permanent gap for video1), and video1's first two
 		// groups would have folded into segment 2.
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries[0],
 			entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("video1", &[(0, 0)])])
@@ -1043,9 +1343,9 @@ mod test {
 	// A track that races ahead of the others still lands in the segment its content falls in.
 	#[tokio::test]
 	async fn groups_before_the_first_boundary_join_the_first_segment() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		// Audio races ahead of video's first keyframe (the startup race): its early group
 		// belongs to segment 0, which starts where the earliest content does.
@@ -1056,11 +1356,11 @@ mod test {
 		}
 		video.record(1, ms(2_030), true);
 		audio.record(5, ms(2_500), true);
-		drop(video);
-		drop(audio);
+		video.close();
+		audio.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries[0],
 			entry(0, 0, 2_030, &[("video0", &[(0, 0)]), ("audio0", &[(0, 4)])]),
@@ -1069,9 +1369,9 @@ mod test {
 
 	#[tokio::test]
 	async fn sequence_gaps_split_ranges() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		// Elemental-style gap: audio groups 2..=4 never existed inside segment 0.
 		video.record(0, ms(0), true);
@@ -1080,11 +1380,11 @@ mod test {
 		audio.record(5, ms(1_500), true);
 		video.record(1, ms(2_000), true);
 		audio.record(6, ms(2_100), true);
-		drop(video);
-		drop(audio);
+		video.close();
+		audio.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries[0],
 			entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 1), (5, 5)])]),
@@ -1096,35 +1396,35 @@ mod test {
 	// track that has merely gone quiet still gets to say where the boundary is.
 	#[tokio::test]
 	async fn a_closed_track_leaves_a_whole_segment_gap() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		video.record(0, ms(0), true);
 		audio.record(0, ms(0), true);
-		drop(audio);
+		audio.close();
 		video.record(1, ms(2_000), true);
 		video.record(2, ms(4_000), true);
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(entries[1], entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]));
 	}
 
 	#[tokio::test]
 	async fn a_non_keyframe_range_start_is_flagged() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		video.record(0, ms(0), true);
 		// A mid-stream join: the group doesn't open on an IDR.
 		video.record(1, ms(2_000), false);
 		video.record(2, ms(4_000), true);
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		let range = entries[1].tracks["video0"][0];
 		assert!(!range.keyframe, "a range whose first group isn't an IDR says so");
 	}
@@ -1133,22 +1433,22 @@ mod test {
 	// says it will never report again.
 	#[tokio::test]
 	async fn a_closed_track_stops_gating() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
-		let mut audio = timeline.track("audio0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
 
 		video.record(0, ms(0), true);
 		audio.record(0, ms(0), true);
 		video.record(1, ms(2_000), true);
-		assert!(drain(&broadcast, &timeline).await.is_empty(), "audio still gates");
+		assert!(entries(&broadcast, &timeline).await.is_empty(), "audio still gates");
 
-		drop(audio);
-		let entries = drain(&broadcast, &timeline).await;
+		audio.close();
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries,
 			vec![entry(0, 0, 2_000, &[("video0", &[(0, 0)]), ("audio0", &[(0, 0)])])]
 		);
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 	}
 
@@ -1199,8 +1499,8 @@ mod test {
 	// others are still filling in.
 	#[tokio::test]
 	async fn reservations_nest() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		let outer = timeline.reserve();
 		let inner = outer.clone();
@@ -1211,36 +1511,36 @@ mod test {
 
 		drop(inner);
 		assert!(
-			drain(&broadcast, &timeline).await.is_empty(),
+			entries(&broadcast, &timeline).await.is_empty(),
 			"the other clone still gates"
 		);
 
 		drop(outer);
 		assert_eq!(
-			drain(&broadcast, &timeline).await.len(),
+			entries(&broadcast, &timeline).await.len(),
 			2,
 			"the last clone dropped flushes"
 		);
 
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 	}
 
 	// A reservation outstanding when the broadcast ends must not strand the terminal flush.
 	#[tokio::test]
 	async fn finish_overrides_an_outstanding_reservation() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 		let reserved = timeline.reserve();
 
 		video.record(0, ms(0), true);
 		video.record(1, ms(2_000), true);
 		video.end(ms(4_000));
-		drop(video);
+		video.close();
 
 		timeline.finish().unwrap();
 		assert_eq!(
-			drain(&broadcast, &timeline).await,
+			entries(&broadcast, &timeline).await,
 			vec![
 				entry(0, 0, 2_000, &[("video0", &[(0, 0)])]),
 				entry(1, 2_000, 2_000, &[("video0", &[(1, 1)])]),
@@ -1265,8 +1565,8 @@ mod test {
 	// fMP4 importer does: it cuts at the keyframe fragment's timestamp, then records that group).
 	#[tokio::test]
 	async fn a_cut_on_the_first_group_does_not_poison_later_cuts() {
-		let (broadcast, mut timeline) = setup();
-		let mut video = timeline.track("video0").unwrap();
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
 
 		// Source segments every 3s, keyframes every 1s: 3s segments, not the 1s the
 		// duration_min pacing would produce on its own.
@@ -1278,14 +1578,197 @@ mod test {
 			}
 			video.record(seq, ms(seq * 1_000), true);
 		}
-		drop(video);
+		video.close();
 		timeline.finish().unwrap();
 
-		let entries = drain(&broadcast, &timeline).await;
+		let entries = entries(&broadcast, &timeline).await;
 		assert_eq!(
 			entries[0],
 			entry(0, 0, 3_000, &[("video0", &[(0, 2)])]),
 			"the source's 3s boundaries should be reproduced, not duration_min pacing"
 		);
+	}
+
+	/// A segment's record is retracted once its media leaves the cache. The whole point of the
+	/// window: a timeline must never advertise a segment a consumer would fail to fetch.
+	#[tokio::test]
+	async fn eviction_retracts_the_segment() {
+		let (mut broadcast, timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		for seq in 0..4u64 {
+			video.record(seq, ms(seq * 2_000), true);
+		}
+		assert_eq!(appended(&collect(&mut watcher)), vec![0, 1, 2]);
+
+		// Segment 0 is carried by group 0. Losing it retracts the record naming it, which the
+		// next report sweeps.
+		video.evict(0);
+		video.record(4, ms(8_000), true);
+
+		let updates = collect(&mut watcher);
+		assert_eq!(trims(&updates), vec![1], "segment 0 is gone, so the head moves to 1");
+		assert_eq!(appended(&updates), vec![3], "the newly complete segment still lands");
+	}
+
+	/// A segment spans every enrolled track, so losing a group on ANY of them breaks it: a
+	/// consumer fetches the whole segment, and a hole in audio is as fatal as one in video.
+	#[tokio::test]
+	async fn a_segment_goes_when_any_track_loses_a_group() {
+		let (mut broadcast, timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut audio = Media::new(&mut broadcast, &timeline, "audio0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		for seq in 0..3u64 {
+			video.record(seq, ms(seq * 2_000), true);
+			audio.record(seq, ms(seq * 2_000), true);
+		}
+		assert_eq!(appended(&collect(&mut watcher)), vec![0, 1]);
+
+		// Video's group 0 is untouched; only audio's is lost.
+		audio.evict(0);
+		video.record(3, ms(6_000), true);
+		audio.record(3, ms(6_000), true);
+
+		assert_eq!(
+			trims(&collect(&mut watcher)),
+			vec![1],
+			"the segment goes even though video still has its group"
+		);
+	}
+
+	/// A cleanly finished group is still cached and fetchable, so its segment stays listed.
+	///
+	/// The trap this pins: watching completion rather than availability would retract every
+	/// segment the instant its groups finished, i.e. immediately and always.
+	#[tokio::test]
+	async fn a_finished_group_is_not_a_retraction() {
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		video.finish_group(0);
+		video.finish_group(1);
+		video.record(2, ms(4_000), true);
+		video.close();
+		timeline.finish().unwrap();
+
+		let updates = collect(&mut watcher);
+		assert!(
+			trims(&updates).is_empty(),
+			"a finished group is still available: {updates:?}"
+		);
+		assert!(!appended(&updates).is_empty(), "and its segment is still listed");
+	}
+
+	/// Eviction is not strictly oldest-first (a FETCH refreshes a group past a newer one), and a
+	/// window has only a head. Losing a middle segment therefore drops the live records in front
+	/// of it rather than advertising a dead one.
+	#[tokio::test]
+	async fn out_of_order_eviction_drops_the_records_in_front() {
+		let (mut broadcast, timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		for seq in 0..4u64 {
+			video.record(seq, ms(seq * 2_000), true);
+		}
+		assert_eq!(appended(&collect(&mut watcher)), vec![0, 1, 2]);
+
+		// Segment 1 goes while segment 0 is still fetchable.
+		video.evict(1);
+		video.record(4, ms(8_000), true);
+
+		assert_eq!(
+			trims(&collect(&mut watcher)),
+			vec![2],
+			"segment 0 goes with 1, so the head lands past both"
+		);
+	}
+
+	/// Eviction is charged from the frame-write path, so a group can die after the last record.
+	/// `finish` sweeps once more, or the track would close still listing unfetchable media and a
+	/// reader would take that clean end as a complete playlist.
+	#[tokio::test]
+	async fn finish_sweeps_media_lost_after_the_last_record() {
+		let (mut broadcast, mut timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		video.record(0, ms(0), true);
+		video.record(1, ms(2_000), true);
+		video.record(2, ms(4_000), true);
+		video.close();
+
+		// Nothing will report again; only `finish` can notice this.
+		video.evict(0);
+		timeline.finish().unwrap();
+
+		assert_eq!(
+			trims(&collect(&mut watcher)),
+			vec![1],
+			"the final sweep retracted the lost segment"
+		);
+	}
+
+	/// A retraction that empties the window still has to name a segment, and the only honest
+	/// answer is one past the newest thing retracted. The window counts in its own positions, so
+	/// this pins the translation at the point where there is no surviving record to read it off.
+	#[tokio::test]
+	async fn a_retraction_that_empties_the_window_names_the_next_segment() {
+		let (mut broadcast, timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		for seq in 0..4u64 {
+			video.record(seq, ms(seq * 2_000), true);
+		}
+		assert_eq!(appended(&collect(&mut watcher)), vec![0, 1, 2]);
+
+		// The whole cache goes at once, so every indexed segment is retracted together.
+		for seq in 0..4u64 {
+			video.evict(seq);
+		}
+		video.record(4, ms(8_000), true);
+
+		assert_eq!(
+			trims(&collect(&mut watcher)),
+			vec![3],
+			"nothing survives, so the head is one past the newest retracted segment"
+		);
+	}
+
+	/// Folding every update a live consumer receives leaves exactly the segments that are still
+	/// fetchable: an append adds one, a retraction drops everything before it.
+	#[tokio::test]
+	async fn the_updates_converge_on_the_available_segments() {
+		let (mut broadcast, timeline) = setup();
+		let mut video = Media::new(&mut broadcast, &timeline, "video0");
+		let mut watcher = watch(&broadcast, &timeline).await;
+
+		for seq in 0..6u64 {
+			video.record(seq, ms(seq * 2_000), true);
+		}
+		video.evict(0);
+		video.evict(1);
+		video.record(6, ms(12_000), true);
+
+		let mut held: Vec<u64> = Vec::new();
+		for update in collect(&mut watcher) {
+			match update {
+				// No wildcard: `#[non_exhaustive]` doesn't apply inside the defining crate, so
+				// this stays exhaustive and a new variant fails the build here on purpose.
+				Update::Append { entry } => held.push(entry.segment),
+				Update::Trim { segment } => held.retain(|&s| s >= segment),
+			}
+		}
+
+		// Groups 0 and 1 carried segments 0 and 1; everything from 2 on is still cached. Segment
+		// 5 is in there because recording group 6 is what bounded it, and the sweep runs first.
+		assert_eq!(held, vec![2, 3, 4, 5]);
 	}
 }

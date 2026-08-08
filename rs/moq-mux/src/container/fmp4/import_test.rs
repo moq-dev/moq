@@ -332,6 +332,19 @@ async fn test_msf_catalog_roundtrip() {
 /// directly. This guards that the import advertises the broadcast's timeline at the catalog root
 /// and actually records both renditions' group opens into it, the index the VOD/playlist export
 /// reads. Regression for the missing-timeline break that skipped VOD renditions.
+/// The next segment the timeline indexes, skipping retractions.
+///
+/// Nothing here evicts, so a retraction would be a bug; these tests are about what gets indexed,
+/// and the retraction path has its own coverage in `timeline`.
+async fn next_entry(timeline: &mut crate::timeline::Consumer) -> Option<crate::timeline::Entry> {
+	while let Some(update) = timeline.next().await.unwrap() {
+		if let crate::timeline::Update::Append { entry } = update {
+			return Some(entry);
+		}
+	}
+	None
+}
+
 #[tokio::test]
 async fn import_populates_the_broadcast_timeline() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -363,10 +376,8 @@ async fn import_populates_the_broadcast_timeline() {
 	catalog.finish().unwrap();
 
 	// The first record indexes both renditions from their first group (sequence 0).
-	let first = timeline
-		.next()
+	let first = next_entry(&mut timeline)
 		.await
-		.unwrap()
 		.expect("a segment should be recorded in the timeline");
 	assert_eq!(first.segment, 0);
 	let video_ranges = first.tracks.get(&video_name).expect("video is indexed");
@@ -654,7 +665,7 @@ async fn segmented_source_indexes_one_group_range_per_track() {
 	catalog.finish().unwrap();
 
 	let mut records = Vec::new();
-	while let Some(record) = timeline.next().await.unwrap() {
+	while let Some(record) = next_entry(&mut timeline).await {
 		records.push(record);
 	}
 	assert_eq!(records.len(), 3, "one record per declared segment");
@@ -740,7 +751,7 @@ async fn segment_ranges_with_skew(
 	catalog.finish().unwrap();
 
 	let mut out = Vec::new();
-	while let Some(record) = timeline.next().await.unwrap() {
+	while let Some(record) = next_entry(&mut timeline).await {
 		out.push((
 			record.tracks.get(&video_name).cloned().unwrap_or_default(),
 			record.tracks.get(&audio_name).cloned().unwrap_or_default(),

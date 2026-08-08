@@ -50,6 +50,10 @@ class GroupState {
 	readonly sequence: number;
 	frames = new Signal<Frame[]>([]);
 	closed = new Once<Error | null>();
+	// Availability, as opposed to `closed`'s completion: settled once the group has left the
+	// publisher's cache and can no longer be fetched. A cleanly finished group stays unsettled
+	// here while it is still cached.
+	gone = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Frames evicted from the front by the cache cap. A reader that had not consumed
@@ -60,6 +64,29 @@ class GroupState {
 	constructor(sequence: number) {
 		this.sequence = sequence;
 	}
+}
+
+/** Settle a group's availability once, ignoring later causes. */
+function markGone(state: GroupState, reason: Error | null) {
+	if (state.gone.peek() === undefined) state.gone.set(reason);
+}
+
+/**
+ * Drop a gone group's buffered frames, so watching its availability costs nothing.
+ *
+ * Counted into `offset` rather than silently discarded: a reader that had not drained them has a
+ * gap, and reporting {@link Lagged} on its next read beats handing it a short group that looks
+ * cleanly finished.
+ */
+function releaseFrames(state: GroupState) {
+	const buffered = state.frames.peek().length;
+	if (buffered === 0) return;
+
+	state.offset += buffered;
+	state.cacheBytes = 0;
+	state.frames.mutate((frames) => {
+		frames.length = 0;
+	});
 }
 
 function appendFrame(state: GroupState, frame: Frame) {
@@ -127,6 +154,9 @@ export class Producer {
 		const dst = new GroupState(this.sequence);
 		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
 		dst.offset = this.#state.offset;
+
+		const gone = this.#state.gone.peek();
+		if (gone !== undefined) markGone(dst, gone);
 
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
@@ -211,11 +241,34 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 
+		// An abort takes the group's content with it, so it is gone as well as closed. A clean
+		// finish is not: the group stays fetchable until the cache drops it (see {@link evict}).
+		if (abort) markGone(this.#state, abort);
+
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
+				if (abort) markGone(mirror, abort);
 				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? null);
 			}
 			this.#mirrors.clear();
+		}
+	}
+
+	/**
+	 * Mark the group gone: it has left the publisher's cache, so nothing can fetch it any more.
+	 *
+	 * Separate from {@link close}, which ends the frame stream but leaves the group replayable.
+	 * Releases the buffered frames as well as settling the signal, so a handle held purely to watch
+	 * availability (an index track) does not pin the media it is no longer allowed to point at.
+	 *
+	 * @internal Track cache eviction only.
+	 */
+	evict(): void {
+		markGone(this.#state, null);
+		releaseFrames(this.#state);
+
+		if (this.#mirrors) {
+			for (const mirror of this.#mirrors) markGone(mirror, null);
 		}
 	}
 }
@@ -247,6 +300,24 @@ export class Consumer {
 	 */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
+	}
+
+	/**
+	 * Settles once the group is gone: dropped from the publisher's cache, evicted, or aborted.
+	 * `null` when it simply aged out, or the abort {@link Error}.
+	 *
+	 * This is availability, not completion: a group that finished cleanly stays unsettled here
+	 * while it is still cached and fetchable, and settles once it is not. An index track (a
+	 * timeline, a playlist) watches this to learn which groups it can still point at. Holding a
+	 * {@link Consumer} does not keep the group's frames alive, so watching is free.
+	 */
+	get gone(): GetPromise<Error | null> {
+		return this.#state.gone;
+	}
+
+	/** True once the group is gone. Synchronous complement to the {@link gone} promise. */
+	get isGone(): boolean {
+		return this.#state.gone.peek() !== undefined;
 	}
 
 	static {

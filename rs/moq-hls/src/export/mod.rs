@@ -336,8 +336,15 @@ async fn watch(
 	renditions: &renditions::Fanout,
 ) -> crate::Result<()> {
 	let mut timeline = moq_mux::timeline::Consumer::<()>::subscribe(broadcast, section).await?;
-	while let Some(entry) = timeline.next().await? {
-		renditions.push(entry);
+	while let Some(update) = timeline.next().await? {
+		match update {
+			moq_mux::timeline::Update::Append { entry } => renditions.push(entry),
+			// The publisher dropped this media from its cache, so it can no longer be fetched:
+			// drop it from the playlists rather than advertising segments that would 404.
+			moq_mux::timeline::Update::Trim { segment } => renditions.trim(segment),
+			// A change a later revision added; the window it describes is unaffected.
+			_ => {}
+		}
 	}
 	Ok(())
 }

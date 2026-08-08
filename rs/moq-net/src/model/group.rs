@@ -920,6 +920,40 @@ impl Consumer {
 	pub async fn finished(&mut self) -> Result<u64> {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
+
+	/// Whether the group can still deliver content.
+	///
+	/// This is availability, not completion: a group that [`finished`](Self::finished) cleanly
+	/// stays open while its frames are still retrievable, and closes once they aren't. An index
+	/// track (a timeline, a playlist) watches this to learn which groups it can still point at.
+	/// Holding a [`Consumer`] does not keep the group's frames alive, so watching is free.
+	///
+	/// What ends availability depends on where the group came from, but the question is the same
+	/// either way: a group served by one publisher closes when that publisher's cache drops it
+	/// (evicted, aged out, or aborted), and a group spliced across route changes closes when the
+	/// assembly does, i.e. when no route can serve it again.
+	pub fn is_closed(&self) -> bool {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain.state.is_closed(),
+			ConsumerKind::Spliced(spliced) => spliced.is_closed(),
+		}
+	}
+
+	/// Poll until the group is gone; ready with the cause. See [`is_closed`](Self::is_closed).
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		match &self.inner {
+			ConsumerKind::Plain(plain) => plain
+				.state
+				.poll_closed(waiter)
+				.map(|()| plain.state.read().abort.clone().unwrap_or(Error::Dropped)),
+			ConsumerKind::Spliced(spliced) => spliced.poll_closed(waiter),
+		}
+	}
+
+	/// Block until the group is gone, returning the cause. See [`is_closed`](Self::is_closed).
+	pub async fn closed(&self) -> Error {
+		kio::wait(|waiter| self.poll_closed(waiter)).await
+	}
 }
 
 impl Plain {
@@ -1635,5 +1669,49 @@ mod test {
 			timestamp: Timestamp::ZERO,
 		});
 		assert!(matches!(result, Err(Error::FrameTooLarge)));
+	}
+
+	/// `Consumer::is_closed` reports availability, not completion: a finished group stays open
+	/// while it is still cached, and an abort (how the cache evicts) closes it. An index track
+	/// keying off this must not see a clean finish as "gone".
+	#[test]
+	fn consumer_closed_tracks_availability() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
+			.unwrap();
+		let consumer = producer.consume();
+		assert!(!consumer.is_closed());
+
+		// Finishing completes the group but leaves it cached and fetchable.
+		producer.finish().unwrap();
+		assert!(!consumer.is_closed(), "a finished group is still available");
+
+		// Eviction aborts it, even though it finished cleanly.
+		producer.abort(Error::Evicted).unwrap();
+		assert!(consumer.is_closed());
+		assert!(matches!(
+			consumer.poll_closed(&kio::Waiter::noop()),
+			Poll::Ready(Error::Evicted)
+		));
+	}
+
+	/// Dropping the last producer (the track releasing a cached group without an explicit
+	/// abort) also closes the consumer, reported as `Dropped`.
+	#[test]
+	fn consumer_closed_on_producer_drop() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hi"))
+			.unwrap();
+		producer.finish().unwrap();
+
+		let consumer = producer.consume();
+		drop(producer);
+		assert!(consumer.is_closed());
+		assert!(matches!(
+			consumer.poll_closed(&kio::Waiter::noop()),
+			Poll::Ready(Error::Dropped)
+		));
 	}
 }

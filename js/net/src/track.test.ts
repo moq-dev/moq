@@ -205,3 +205,58 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 
 	expect(await track.readString()).toBe("hello");
 }, 2000);
+
+test("eviction marks a group gone, a clean finish does not", async () => {
+	// `closed` is completion and `gone` is availability: a finished group stays fetchable from the
+	// cache until it ages out. An index track (a timeline, a playlist) watches `gone` to learn what
+	// it can still point at.
+	const producer = new TrackProducer("test").accept({ latencyMax: 0 });
+
+	const first = producer.appendGroup();
+	const watching = first.consume();
+	first.writeFrame({ payload: enc.encode("hello"), timestamp: Timestamp.now() });
+	first.close();
+
+	// Finished, but nothing has pruned the cache yet, so it is still fetchable.
+	expect(watching.isClosed).toBe(true);
+	expect(watching.isGone).toBe(false);
+
+	// The cache is pruned as the next group is published. With a zero latency window the finished
+	// group is immediately past the cutoff.
+	producer.appendGroup();
+	expect(watching.isGone).toBe(true);
+	expect(await watching.gone).toBe(null);
+});
+
+test("an aborted group is gone as well as closed", async () => {
+	const producer = new TrackProducer("test").accept();
+
+	const group = producer.appendGroup();
+	const watching = group.consume();
+
+	const abort = new Error("boom");
+	group.close(abort);
+
+	expect(watching.isGone).toBe(true);
+	expect(await watching.gone).toBe(abort);
+});
+
+test("eviction releases the frames a watching handle would otherwise pin", async () => {
+	// An index track holds a consumer purely to watch `gone`. Eviction has to drop the payloads
+	// too, or watching an idle publisher's timeline keeps every evicted group's media alive.
+	const producer = new TrackProducer("test").accept({ latencyMax: 0 });
+
+	const first = producer.appendGroup();
+	const watching = first.consume();
+	first.writeFrame({ payload: enc.encode("payload"), timestamp: Timestamp.now() });
+	first.close();
+
+	// Pruning runs when a late subscriber attaches, not only when the publisher writes.
+	producer.subscribe();
+
+	expect(watching.isGone).toBe(true);
+	// The buffer is empty, and the unread frame is reported as a gap rather than a clean finish.
+	expect(watching.skipped).toBe(true);
+	expect(watching.tryReadFrame()).toBeUndefined();
+	expect(watching.readFrame()).rejects.toThrow("lagged");
+});

@@ -390,6 +390,11 @@ export class Producer {
 				continue;
 			}
 
+			// Mark the source and its mirrors gone before dropping them, so an index track holding
+			// a consumer learns the group stopped being fetchable. Done first: closing a mirror
+			// detaches it from the source, which would leave it unmarked.
+			entry.group.evict();
+
 			for (const [sink, mirror] of entry.mirrors) {
 				sink.groups.mutate((groups) => {
 					const i = groups.indexOf(mirror);
@@ -641,6 +646,28 @@ export class Subscriber {
 	async nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
 			const group = await this.recvGroup();
+			if (!group) return undefined;
+			if (group.sequence < this.#nextSequence) {
+				group.close();
+				continue;
+			}
+			this.#nextSequence = group.sequence + 1;
+			return group;
+		}
+	}
+
+	/**
+	 * Take the next group only if one is already buffered, otherwise `undefined`.
+	 *
+	 * The non-blocking counterpart to {@link nextGroup}, mirroring {@link GroupConsumer.tryReadFrame}.
+	 * A reader whose groups are each self-contained (a snapshot or window track) drains with this to
+	 * reach the newest buffered group, so a late joiner starts from current state instead of
+	 * replaying every cached group.
+	 */
+	tryNextGroup(): GroupConsumer | undefined {
+		for (;;) {
+			const groups = this.#state.groups.peek();
+			const group = groups.shift();
 			if (!group) return undefined;
 			if (group.sequence < this.#nextSequence) {
 				group.close();

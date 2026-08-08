@@ -214,6 +214,31 @@ impl Fanout {
 		});
 	}
 
+	/// Drop every segment below `segment` from the replay history and from every living
+	/// rendition: the publisher's cache no longer has them.
+	///
+	/// Applied to the history as well as the live windows so a rendition that attaches later
+	/// replays the same window a live one holds, rather than being seeded with segments that are
+	/// already unfetchable.
+	pub fn trim(&self, segment: u64) {
+		let mut feed = self.feed.lock().unwrap();
+
+		while feed.history.front().is_some_and(|entry| entry.segment < segment) {
+			feed.history.pop_front();
+		}
+		if feed.history.is_empty() {
+			feed.anchor = None;
+		}
+
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.trim(segment);
+			true
+		});
+	}
+
 	/// Mark every living rendition's window ended (the timeline finished cleanly).
 	pub fn end_windows(&self) {
 		let mut feed = self.feed.lock().unwrap();

@@ -12,6 +12,15 @@
  * track has reported past its end (or closed), so records are self-contained and immediately
  * servable.
  *
+ * On the wire the track is a `@moq/json` {@link Json.Window}: a sliding log that appends as
+ * segments are indexed and trims as they stop being fetchable, so the timeline describes what is
+ * actually available rather than everything ever published.
+ *
+ * Trimming is driven by the media cache itself, not a timer. The timeline keeps a group handle for
+ * every group a segment covers, on every track, and retracts the record once any of them reports
+ * the group gone. Holding those handles does not keep the media alive, so the timeline tracks the
+ * cache without extending it.
+ *
  * @module
  */
 
@@ -109,7 +118,7 @@ export interface ProducerProps {
 /** One enrolled track's report state. */
 interface TrackState {
 	// Group opens reported and not yet flushed into a record.
-	pending: { sequence: number; pts: Time.Micro; keyframe: boolean }[];
+	pending: { sequence: number; pts: Time.Micro; keyframe: boolean; group: Moq.Group.Consumer }[];
 	// The newest reported timestamp: everything earlier is known. Advanced by a group open (the
 	// group starts there) and by Recorder.end (the content stops there).
 	frontier?: Time.Micro;
@@ -126,7 +135,10 @@ interface TrackState {
  * {@link cut}. Advertise it in the catalog's root `timeline` section via {@link section}.
  */
 export class Producer {
-	#stream: Json.Stream.Producer<Record>;
+	#window: Json.Window.Producer<Record>;
+	// One span of group handles per record in the window, oldest first. A record stands for the
+	// media across its whole segment, so it survives exactly as long as every group it covers.
+	#indexed: Moq.Group.Consumer[][] = [];
 	#trackName: string;
 	#durationMinUs: number;
 	#durationMaxUs?: number;
@@ -157,7 +169,7 @@ export class Producer {
 			const unixMillis = Math.max(props.wall.getTime(), MOQ_EPOCH_UNIX_MILLIS);
 			this.#wall = Math.floor(((unixMillis - MOQ_EPOCH_UNIX_MILLIS) * DEFAULT_TIMESCALE) / 1000);
 		}
-		this.#stream = new Json.Stream.Producer<Record>(track, { compression: true });
+		this.#window = new Json.Window.Producer<Record>(track, { compression: true });
 	}
 
 	/**
@@ -264,14 +276,19 @@ export class Producer {
 			}
 		}
 
-		this.#stream.finish();
+		// Eviction is charged from the frame-write path too, so a group can die after the last
+		// record. Without this final sweep the window would close still listing it, and a reader
+		// would take the clean end as a complete playlist over media it cannot fetch.
+		this.#sweep();
+
+		this.#window.finish();
 	}
 
 	/** @internal A group open reported by a {@link Recorder}. */
-	report(name: string, sequence: number, pts: Time.Micro, keyframe: boolean): void {
+	report(name: string, group: Moq.Group.Producer, pts: Time.Micro, keyframe: boolean): void {
 		const track = this.#tracks.get(name);
 		if (!track) return;
-		track.pending.push({ sequence, pts, keyframe });
+		track.pending.push({ sequence: group.sequence, pts, keyframe, group: group.consume() });
 		this.#advance(track, pts);
 	}
 
@@ -306,6 +323,12 @@ export class Producer {
 	// will report again, so one that never reached a boundary stops voting instead of holding
 	// the timeline open forever.
 	#pump(finished: boolean): void {
+		// Sweep first: a retraction and the record that triggers it ride the same window group, and
+		// sweeping before appending keeps the window from briefly listing content already gone.
+		// Unconditional, since media leaving the cache is worth reporting even while a reservation
+		// withholds new records.
+		this.#sweep();
+
 		if (this.#tracks.size === 0 || this.#reservers > 0 || this.#overrun) return;
 		while (this.#closeSegment(finished)) {
 			if (this.#overrun) break;
@@ -404,7 +427,7 @@ export class Producer {
 				);
 				// End the track rather than drop it: the records published before the promise
 				// broke are still true, and a consumer that has them should keep them.
-				this.#stream.finish();
+				this.#window.finish();
 				return;
 			}
 		}
@@ -414,6 +437,9 @@ export class Producer {
 
 		const tracks: { [track: string]: Range[] } = {};
 		let any = false;
+		// Every group this segment covers, across every track: the set whose availability the
+		// record's own availability is the AND of.
+		const covered: Moq.Group.Consumer[] = [];
 		for (const [name, track] of this.#tracks) {
 			const ranges: Range[] = [];
 			while (track.pending.length > 0) {
@@ -430,6 +456,7 @@ export class Producer {
 					if (!group.keyframe) range.keyframe = false;
 					ranges.push(range);
 				}
+				covered.push(group.group);
 			}
 			if (ranges.length > 0) {
 				tracks[name] = ranges;
@@ -438,7 +465,32 @@ export class Producer {
 		}
 		if (any) record.tracks = tracks;
 
-		this.#stream.append(record);
+		this.#window.append(record);
+		this.#indexed.push(covered);
+	}
+
+	/**
+	 * Retract every record up to and including the newest one that has lost any of its groups.
+	 *
+	 * A record goes when *any* group it covers is gone, on any track: a consumer fetches the whole
+	 * segment, so a hole in the middle breaks it just as thoroughly as a missing head.
+	 *
+	 * Eviction is not strictly oldest-first: a group refreshed by a fetch is protected while a
+	 * newer unread one is evicted in its place. That leaves a hole, and a window has only a head,
+	 * so the choice is to advertise the dead record or to drop the live ones in front of it.
+	 * Dropping them keeps the promise that everything listed is fetchable, which is the whole point
+	 * of the timeline; the cost is a shorter window, and eviction reaches those records shortly
+	 * anyway.
+	 */
+	#sweep(): void {
+		let gone = 0;
+		this.#indexed.forEach((covered, index) => {
+			if (covered.some((group) => group.isGone)) gone = index + 1;
+		});
+		if (gone === 0) return;
+
+		this.#indexed.splice(0, gone);
+		this.#window.trim(gone);
 	}
 }
 
@@ -459,12 +511,14 @@ export class Recorder {
 	}
 
 	/**
-	 * Report that group `sequence` opened at presentation time `pts` (microseconds),
-	 * `keyframe` stating whether its first frame is one. Reports must be in group order with
-	 * monotonic timestamps.
+	 * Report that `group` opened at presentation time `pts` (microseconds), `keyframe` stating
+	 * whether its first frame is one. Reports must be in group order with monotonic timestamps.
+	 *
+	 * The timeline keeps a read handle on `group` to watch when it leaves the cache, which is what
+	 * retracts the segment carrying it. That pins no frames, and the caller keeps ownership.
 	 */
-	record(sequence: number, pts: Time.Micro, keyframe = true): void {
-		this.#timeline.report(this.#name, sequence, pts, keyframe);
+	record(group: Moq.Group.Producer, pts: Time.Micro, keyframe = true): void {
+		this.#timeline.report(this.#name, group, pts, keyframe);
 	}
 
 	/**

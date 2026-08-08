@@ -167,7 +167,7 @@ impl<C: Container> Producer<C> {
 			// timeline absorbs publish failures itself (it is an optional sidecar),
 			// so reporting can't abort the media write.
 			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.record(group.sequence, frame.timestamp, frame.keyframe);
+				recorder.record(&group, frame.timestamp, frame.keyframe);
 			}
 
 			self.group = Some(group);
