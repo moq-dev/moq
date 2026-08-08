@@ -1,6 +1,7 @@
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { error, RemoteError, SessionCode } from "../error.ts";
+import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
@@ -15,13 +16,13 @@ import type { Probe, Stats } from "./stats.ts";
  */
 export type ReloadDelay = {
 	/** The delay in milliseconds before reconnecting (default: 1000). */
-	initial: DOMHighResTimeStamp;
+	initial?: DOMHighResTimeStamp;
 
 	/** The multiplier for the delay (default: 2). */
-	multiplier: number;
+	multiplier?: number;
 
 	/** The maximum delay in milliseconds (default: 5000). */
-	max: DOMHighResTimeStamp;
+	max?: DOMHighResTimeStamp;
 
 	/**
 	 * Maximum total time in milliseconds to spend retrying before giving up (default:
@@ -50,17 +51,23 @@ export type ReloadProps = Omit<ConnectProps, "signal" | "transport"> & {
 	/** The URL of the relay server. */
 	url?: URL | Signal<URL | undefined>;
 
-	/** Backoff settings for the reconnect loop. */
+	/** Backoff settings for the reconnect loop; every field falls back to its default. */
 	delay?: ReloadDelay;
 };
 
 /**
- * How long to keep retrying before giving up, when {@link ReloadDelay.timeout} is unset.
+ * The backoff applied to whichever {@link ReloadDelay} fields a caller leaves out.
  *
- * Short on purpose: a failure that clears within it was transient, and one that doesn't should
- * surface as an error rather than leave the page silently reconnecting for minutes.
+ * The timeout is short on purpose: a failure that clears within it was transient, and one that
+ * doesn't should surface as an error rather than leave the page silently reconnecting for
+ * minutes. A loop nobody watches wants `timeout: 0` instead, since there is no one to react.
  */
-const DEFAULT_TIMEOUT = 10000;
+const DEFAULT_DELAY: Required<ReloadDelay> = {
+	initial: 1000,
+	multiplier: 2,
+	max: 5000,
+	timeout: 10000,
+};
 
 /** Current state of a {@link Reload} connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -99,7 +106,26 @@ export class Reload {
 	 */
 	discovery?: boolean;
 
-	/** Backoff settings for the reconnect loop. */
+	/**
+	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
+	 *
+	 * Each session announces the origin's table when it attaches, so a broadcast published
+	 * while offline surfaces on the next connection and a reconnect re-announces everything
+	 * still published. See the `publish` connect option.
+	 */
+	publish?: OriginConsumer;
+
+	/**
+	 * The origin fed with the peer's announced broadcasts, spanning reconnects (not
+	 * reactive).
+	 *
+	 * The entries a session fed retract when it dies, and the next session re-populates the
+	 * table, so a consumer watching the origin sees offline/online transitions across a
+	 * reconnect. See the `subscribe` connect option.
+	 */
+	subscribe?: OriginProducer;
+
+	/** Backoff settings for the reconnect loop; an unset field uses its default. */
 	delay: ReloadDelay;
 
 	/** The reactive effect scope driving the connect loop; closed by {@link Reload.close}. */
@@ -132,10 +158,12 @@ export class Reload {
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 5000 };
+		this.delay = props?.delay ?? {};
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.discovery = props?.discovery;
+		this.publish = props?.publish;
+		this.subscribe = props?.subscribe;
 
 		this.closed = new Promise((resolve, reject) => {
 			this.#closedResolve = resolve;
@@ -193,6 +221,8 @@ export class Reload {
 					websocket: this.websocket,
 					webtransport: this.webtransport,
 					discovery: this.discovery,
+					publish: this.publish,
+					subscribe: this.subscribe,
 					signal,
 				});
 
@@ -229,6 +259,10 @@ export class Reload {
 	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
+		// Resolved per sequence rather than at construction, so an edit to `delay` (including
+		// one that drops a field back to its default) applies to the next retry.
+		const { initial, multiplier, max, timeout } = { ...DEFAULT_DELAY, ...this.delay };
+
 		// Any session is dead now: report disconnected during the backoff rather than
 		// when the retry reruns the effect.
 		this.established.set(undefined);
@@ -238,7 +272,7 @@ export class Reload {
 		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
 		// shorter is a peer that accepts and immediately severs, which has to keep
 		// escalating or we hammer it forever at the initial delay.
-		if (connected !== undefined && performance.now() - connected >= this.delay.initial) {
+		if (connected !== undefined && performance.now() - connected >= initial) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
 		}
@@ -254,8 +288,7 @@ export class Reload {
 		}
 
 		const now = performance.now();
-		const timeout = this.delay.timeout ?? DEFAULT_TIMEOUT;
-		this.#delay ??= this.delay.initial;
+		this.#delay ??= initial;
 		this.#deadline ??= timeout > 0 ? now + timeout : Number.POSITIVE_INFINITY;
 
 		if (now >= this.#deadline) {
@@ -268,7 +301,7 @@ export class Reload {
 		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
 		// tick, and never past the deadline the retry window promised.
 		const wait = Math.min(this.#delay * (0.5 + Math.random() / 2), this.#deadline - now);
-		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+		this.#delay = Math.min(this.#delay * multiplier, max);
 
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
@@ -284,6 +317,10 @@ export class Reload {
 	 * Stays empty while the relay lacks {@link Established.discovery}.
 	 */
 	announced(prefix: Path.Valid = emptyPath()): Announce.Consumer {
+		// With a subscribe origin the table already spans reconnects (the forwarder retracts
+		// a dead session's entries), so its stream is the same thing with less machinery.
+		if (this.subscribe) return this.subscribe.announced(prefix);
+
 		const producer = new Announce.Producer(prefix);
 		const consumer = producer.consume();
 
@@ -349,6 +386,8 @@ export class Reload {
 	 * Close the handle when done; {@link Reload.close} only drops it to `undefined`.
 	 */
 	announcedBroadcast(path: Path.Valid): Announce.Broadcast {
+		// Same delegation as announced(): the origin's table is the reconnect-spanning view.
+		if (this.subscribe) return new Announce.Broadcast({ origin: this.subscribe, path });
 		return new Announce.Broadcast({ connection: this.established, path });
 	}
 

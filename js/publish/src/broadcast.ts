@@ -8,7 +8,9 @@ import { type Kind, Rendition } from "./rendition";
 // Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
 // whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
 export type BroadcastInput = {
-	connection: Getter<Moq.Connection.Established | undefined>;
+	// The origin to publish into. Independent of any connection: whichever sessions serve the
+	// origin announce the broadcast, and it survives their reconnects.
+	origin: Getter<Moq.Origin.Table | undefined>;
 
 	// Whether to publish the broadcast. Defaults to false so nothing is announced until ready.
 	enabled: Getter<boolean>;
@@ -57,10 +59,11 @@ export class Broadcast {
 	// root sections (e.g. `scte35`) by locking it too.
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, (re)created on each (re)connection and `undefined` while
-	// offline. Exposed so an application can serve its own tracks alongside the built-in
+	// The underlying network broadcast, recreated when the name or enabled state changes and
+	// `undefined` in between. It lives in the origin rather than any session, so it spans
+	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
 	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
-	// Reacquire it via an effect, since reconnecting swaps in a fresh producer.
+	// Reacquire it via an effect, since a rename swaps in a fresh producer.
 	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
 	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
@@ -75,7 +78,7 @@ export class Broadcast {
 
 	constructor(props?: Inputs<BroadcastInput>) {
 		this.in = {
-			connection: getter(props?.connection),
+			origin: getter(props?.origin),
 			enabled: getter(props?.enabled ?? false),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
@@ -193,9 +196,9 @@ export class Broadcast {
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.in.enabled, this.in.connection]);
+		const values = effect.getAll([this.in.enabled, this.in.origin]);
 		if (!values) return;
-		const [_enabled, connection] = values;
+		const [_enabled, origin] = values;
 
 		const name = effect.get(this.in.name);
 		if (Catalog.detectFormat(name) === undefined) {
@@ -204,10 +207,12 @@ export class Broadcast {
 			);
 		}
 
-		const broadcast = new Moq.Broadcast.Producer();
+		// Publishing into the origin outlives any single session: a reconnect re-announces the
+		// broadcast and new subscriptions land on the same producer.
+		const broadcast = origin.publish(name);
 		effect.cleanup(() => broadcast.close());
 
-		// Close every active rendition track when the broadcast tears down (reconnect/offline), so an
+		// Close every active rendition track when the broadcast tears down (disable/rename), so an
 		// encoder stops encoding into a dead producer. The Rendition handles themselves stay registered.
 		effect.cleanup(() => {
 			for (const track of this.#tracks.values()) {
@@ -216,13 +221,11 @@ export class Broadcast {
 			}
 		});
 
-		// Publish it before serving so an application reacting to `net` can insert its own tracks.
+		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.net.set(broadcast);
 		effect.cleanup(() => {
 			if (this.net.peek() === broadcast) this.net.set(undefined);
 		});
-
-		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
 	}

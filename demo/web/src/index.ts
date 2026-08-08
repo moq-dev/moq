@@ -79,7 +79,7 @@ const metaSignal = new Signals.Signal<unknown>(undefined);
 const relayUrl = new Signals.Signal<URL | undefined>(new URL(RELAY_URL));
 
 // Discovery connection (the tiles each open their own connection internally).
-const connection = new Net.Connection.Reload({ url: relayUrl, enabled: true });
+const connection = new Net.Connection.Shared({ url: relayUrl });
 
 // ---------------------------------------------------------------------------
 // Per-broadcast tile (a <moq-watch-ui> in the left column)
@@ -382,8 +382,8 @@ ui.run((effect) => {
 	section.hidden = false;
 
 	// Report the transport negotiated by the live connection.
-	const conn = effect.get(connection.established);
-	$("network-transport").textContent = conn ? (conn.transport === "websocket" ? "WebSocket" : "WebTransport") : "";
+	const transport = effect.get(connection.transport);
+	$("network-transport").textContent = transport ? (transport === "websocket" ? "WebSocket" : "WebTransport") : "";
 
 	const video = effect.get(watch.video.out.stats);
 	const audio = effect.get(watch.audio.out.stats);

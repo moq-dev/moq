@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { Effect } from "@moq/signals";
-import { Producer as BroadcastProducer } from "../broadcast.ts";
+import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { RemoteError, SessionCode } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { accept } from "./index.ts";
 import { Reload, type ReloadProps } from "./reload.ts";
@@ -147,11 +148,10 @@ test("announcedBroadcast follows the reconnect loop", async () => {
 	const published: BroadcastProducer[] = [];
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_06_WIP);
-		void accept(pair.server, url).then((server) => {
+		const origin = new OriginProducer();
+		void accept(pair.server, url, { publish: origin.consume() }).then((server) => {
 			sessions.push(server);
-			const broadcast = new BroadcastProducer();
-			published.push(broadcast);
-			server.publish(Path.from("late"), broadcast);
+			published.push(origin.publish(Path.from("late")));
 		});
 		return pair.client;
 	};
@@ -233,6 +233,62 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 	} finally {
 		watch.close();
 		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("origins span reconnects: local re-announces, remote re-populates", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/origins");
+
+	// What the client publishes (persistent) and what it discovers (per session).
+	const publishOrigin = new OriginProducer();
+	const subscribeOrigin = new OriginProducer();
+	publishOrigin.publish(Path.from("mine"));
+
+	// Each connect attempt gets a fresh server session that publishes "remote" and records
+	// what the client announced to it.
+	const servers: { session: { close: () => void }; saw: OriginProducer }[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_05);
+		const saw = new OriginProducer();
+		const serverOrigin = new OriginProducer();
+		void accept(pair.server, url, { publish: serverOrigin.consume(), subscribe: saw }).then((session) => {
+			serverOrigin.publish(Path.from("remote"));
+			servers.push({ session, saw });
+		});
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: 10, multiplier: 1, max: 10 },
+		publish: publishOrigin.consume(),
+		subscribe: subscribeOrigin,
+	});
+	const reader = subscribeOrigin.consume();
+
+	try {
+		// First session: the server's broadcast lands in the client origin, and the client's
+		// publish lands in the server's.
+		await waitUntil(() => reader.routes(Path.from("remote")));
+		await waitUntil(() => servers[0]?.saw.routes(Path.from("mine")));
+
+		// Kill the session: the remote entry retracts, the local publish stays put.
+		servers[0]?.session.close();
+		await waitUntil(() => !reader.routes(Path.from("remote")));
+
+		// The reconnect re-announces the (untouched) publish and re-populates the table.
+		await waitUntil(() => servers.length > 1);
+		await waitUntil(() => reader.routes(Path.from("remote")));
+		await waitUntil(() => servers[1]?.saw.routes(Path.from("mine")));
+	} finally {
+		reload.close();
+		publishOrigin.close();
+		subscribeOrigin.close();
 		globalThis.WebTransport = original;
 	}
 });
