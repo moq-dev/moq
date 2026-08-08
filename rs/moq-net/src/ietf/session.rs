@@ -1,7 +1,7 @@
 use crate::origin;
 use crate::{
 	Error, Origin,
-	coding::{Decode, Encode, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
 	setup,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
@@ -458,6 +458,18 @@ async fn run_setup<S: web_transport_trait::Session>(
 	Ok(())
 }
 
+/// Whether reading a just-accepted stream failed because the stream died (a
+/// reset, or an end before the first message was complete) rather than
+/// delivering bytes that do not parse. Death is that stream's failure and the
+/// accept loops drop the one stream; garbage is the peer breaking the protocol
+/// and stays session-fatal, per [`is_protocol_violation`].
+fn stream_died(err: &Error) -> bool {
+	matches!(
+		err,
+		Error::Cancel | Error::Remote(_) | Error::Decode(DecodeError::Short)
+	)
+}
+
 /// Accept incoming uni streams and dispatch each to a handler.
 ///
 /// For v17, this also handles the SETUP stream (0x2F00) and GOAWAY.
@@ -481,7 +493,20 @@ async fn run_unis<S: web_transport_trait::Session>(
 	loop {
 		let recv = tasks.drive(session.accept_uni()).await.map_err(Error::from_transport)?;
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
-		let kind: u64 = tasks.drive(reader.decode_peek()).await?;
+		// A stream that dies before its type varint is that stream's failure, not the
+		// session's. RESET_STREAM is how a peer drops a group, and QUIC does not order
+		// the reset behind the data, so one can beat the first byte even of a stream
+		// the peer wrote to. Failing the loop here would tear down the whole session
+		// over a single stream the peer had already given up on. Only death is
+		// tolerated: bytes that arrive and do not parse stay session-fatal.
+		let kind: u64 = match tasks.drive(reader.decode_peek()).await {
+			Ok(kind) => kind,
+			Err(err) if stream_died(&err) => {
+				tracing::debug!(%err, "dropping uni stream that died before its type");
+				continue;
+			}
+			Err(err) => return Err(err),
+		};
 
 		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
 		// We accept it in the background without blocking; the one thing that does
@@ -589,7 +614,17 @@ async fn run_dispatch<S: web_transport_trait::Session>(
 				Ok::<_, Error>((id, data))
 			})
 			.await;
-		let (id, data) = header?;
+		// Same tolerance as `run_unis`: a request stream that dies before its header
+		// is the peer abandoning that request, not the session. Anything else, a
+		// header that does not parse included, still fails the session.
+		let (id, data) = match header {
+			Ok(header) => header,
+			Err(err) if stream_died(&err) => {
+				tracing::debug!(%err, "dropping bidi stream that died before its header");
+				continue;
+			}
+			Err(err) => return Err(err),
+		};
 
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
@@ -820,5 +855,58 @@ mod tests {
 		// Neither half: nothing to route, so any id will do as long as it is ours.
 		let publish = crate::origin::Info::new(ours).produce();
 		assert_eq!(self_origin(Some(&publish.consume()), Some(&subscribe)), ours);
+	}
+
+	/// Drive `start` against a peer whose incoming streams die before their first
+	/// byte, and assert the session shrugs them off: the driver keeps running and
+	/// nothing closes the transport.
+	///
+	/// The dead stream is not exotic. RESET_STREAM is how a peer drops a group, and
+	/// QUIC does not order the reset behind the data, so it can beat the first byte
+	/// even when the peer wrote one. Erroring an accept loop on it tears down the
+	/// whole session over a single stream the peer had already given up on.
+	async fn a_dead_incoming_stream_is_not_fatal(session: crate::lite::test_transport::DeadStreamSession) {
+		const VERSION: Version = Version::Draft19;
+
+		// A driver that survives parks forever, so bound it: paused time makes the
+		// deadline fire the moment nothing else can run.
+		tokio::time::pause();
+
+		let origin = crate::origin::Info::new(crate::Origin::new(1).unwrap()).produce();
+		let log = session.log.clone();
+
+		let driver = start(Config {
+			session,
+			setup: None,
+			request_id_max: None,
+			client: true,
+			publish: None,
+			subscribe: Some(origin),
+			peer_origin: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			peer_setup_stream: None,
+			// Pre-settled, so nothing waits on a SETUP the dead stream will never
+			// carry and the dispatch loop actually runs.
+			peer_cluster: Some(cluster::Peer::default()),
+		})
+		.expect("start the session");
+
+		tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+			.await
+			.expect_err("the session ended over one dead stream");
+
+		assert_eq!(log.closes(), vec![], "nothing may close the transport");
+	}
+
+	#[tokio::test]
+	async fn a_uni_stream_dead_before_its_type_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1)).await;
+	}
+
+	#[tokio::test]
+	async fn a_bidi_stream_dead_before_its_header_does_not_end_the_session() {
+		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
 }
