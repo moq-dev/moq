@@ -2011,8 +2011,10 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			return Err(err);
 		}
 
-		stream.finish()?;
-		stream.closed().await?;
+		// Consume the writer: close() waits for the peer to acknowledge everything,
+		// and taking ownership disarms the Drop fallback that would otherwise reset
+		// the finished stream with a spurious Cancel.
+		stream.close().await?;
 
 		tracing::debug!(sequence, "finished group");
 
@@ -2028,7 +2030,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		priority: &mut PriorityHandle,
 		group: &mut group::Consumer,
 	) -> Result<(), Error> {
-		stream.set_priority(priority.current());
+		stream.set_priority(priority.send_order());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(msg).await?;
 
@@ -2141,7 +2143,9 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 		enum Event<T> {
 			Closed,
 			Work(Result<T, Error>),
-			Priority(u8),
+			/// The handle's rank changed; the new value is re-read via
+			/// [`PriorityHandle::send_order`] when handled.
+			Priority,
 			TrackPriority(u8),
 		}
 
@@ -2156,8 +2160,8 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 					if let Poll::Ready(res) = work(waiter) {
 						return Poll::Ready(Event::Work(res));
 					}
-					if let Poll::Ready(new_pri) = priority.poll_next(waiter) {
-						return Poll::Ready(Event::Priority(new_pri));
+					if priority.poll_next(waiter).is_ready() {
+						return Poll::Ready(Event::Priority);
 					}
 					// A dropped producer just disables this arm, like the queue arm above.
 					match track_priority.poll(waiter, |value| {
@@ -2177,7 +2181,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 			match event {
 				Event::Closed => return Err(Error::Cancel),
 				Event::Work(res) => return res,
-				Event::Priority(new_pri) => stream.set_priority(new_pri),
+				Event::Priority => stream.set_priority(priority.send_order()),
 				Event::TrackPriority(new_track) => {
 					*track_priority_seen = new_track;
 					priority.set_track(new_track);
@@ -2209,7 +2213,7 @@ impl<S: web_transport_trait::Session> Subscription<S> {
 	fn apply_priority(&mut self, stream: &mut Writer<S::SendStream, Version>, priority: &mut PriorityHandle) {
 		let track_priority = self.track_priority_current();
 		priority.set_track(track_priority);
-		stream.set_priority(priority.current());
+		stream.set_priority(priority.send_order());
 	}
 }
 
@@ -2256,6 +2260,50 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![Error::Old.to_code()]);
+	}
+
+	/// A group that completes cleanly must not reset at all. The completion path
+	/// consumes the writer via `close()`; leaving the writer to drop after `finish()`
+	/// would fire the Drop fallback and tack a spurious Cancel reset onto a stream
+	/// the peer already acknowledged.
+	#[tokio::test]
+	async fn completed_group_does_not_reset() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+
+		let track_priority = kio::Producer::new(0u8);
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			track_priority: track_priority.consume(),
+			track_priority_seen: 0,
+			version: Version::Lite06Wip,
+			timescale: Some(crate::Timescale::default()),
+		};
+
+		let mut track = track::Producer::new(Arc::new(broadcast::Info::default()), "test", None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
+			.unwrap();
+		let consumer = group.consume();
+		group.finish().unwrap();
+
+		let handle = subscription.priority.insert(Priority::new(0, 0));
+		subscription.serve_group(0, handle, consumer).await.unwrap();
+
+		assert_eq!(log.resets(), Vec::<u32>::new(), "clean completion must not reset");
+
+		// The group held rank 0 (most urgent); the transport sends higher values
+		// first, so every send order set on the stream must be the maximum.
+		let priorities = log.priorities();
+		assert!(!priorities.is_empty(), "the group stream must set a priority");
+		assert!(
+			priorities.iter().all(|&p| p == 255),
+			"rank 0 must reach the transport as send order 255: {priorities:?}",
+		);
 	}
 }
 

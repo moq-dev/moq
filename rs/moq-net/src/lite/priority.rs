@@ -279,6 +279,14 @@ impl PriorityHandle {
 		self.seen
 	}
 
+	/// The current rank as a transport send order, where HIGHER values are
+	/// transmitted first (the W3C `sendOrder` / quinn convention, and the model's
+	/// `Subscription::priority` semantics). The queue rank is the opposite
+	/// (0 = most urgent), so this is where the two conventions meet.
+	pub fn send_order(&mut self) -> u8 {
+		u8::MAX - self.current()
+	}
+
 	/// Poll for a priority change since the last observed value.
 	///
 	/// The queue holds the producer while this handle is registered, so closure is
@@ -325,6 +333,21 @@ mod tests {
 		let queue = PriorityQueue::default();
 		let mut handle = queue.insert(Priority::new(100, 5));
 		assert_eq!(handle.current(), 0); // First item is always index 0
+	}
+
+	/// The transport sends HIGHER values first, so the most urgent rank (0) must map
+	/// to the highest send order and overflow (u8::MAX) to the lowest. Emitting the
+	/// raw rank would transmit the stalest stream first.
+	#[test]
+	fn test_send_order_inverts_rank() {
+		let queue = PriorityQueue::default();
+		let mut top = queue.insert(Priority::new(200, 0));
+		let mut low = queue.insert(Priority::new(100, 0));
+
+		assert_eq!(top.current(), 0);
+		assert_eq!(top.send_order(), 255, "most urgent rank gets the highest send order");
+		assert_eq!(low.current(), 1);
+		assert_eq!(low.send_order(), 254);
 	}
 
 	#[test]
