@@ -642,10 +642,9 @@ impl Connection {
 						addrs = Addrs::new(url.clone());
 
 						// Hand over gracefully however the backoff bookkeeping scores this
-						// session. The old one keeps serving until it closes or overstays,
-						// so its routes stay attached and live tracks splice onto the
-						// replacement at a group boundary. Tearing it down here instead
-						// would drop every group published until the replacement caught up.
+						// session. The old one keeps its existing subscriptions alive until
+						// it closes or overstays, while the replacement is announced for new
+						// subscriptions. Tearing it down here would shorten that overlap.
 						tracing::info!(peer = %Endpoint(&url), "upstream GOAWAY; migrating");
 						shared.migrating();
 						// Retire any predecessor first: overwriting would drop its deadline

@@ -660,7 +660,7 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 
 	// Replace the broadcast at "first": finish the original (retiring its announce
 	// id on the wire), then create a fresh broadcast at the same path (assigning a
-	// fresh id). Await the unannounce first so the re-create can't splice into the
+	// fresh id). Await the unannounce first so the replacement cannot overlap the
 	// original's teardown.
 	first.finish();
 	let moq_net::announce::Update { path, broadcast } = next_announce(&mut announcements).await;

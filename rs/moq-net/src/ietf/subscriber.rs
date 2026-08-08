@@ -120,10 +120,9 @@ struct Advertised {
 	/// The route it describes, with this link's price already charged.
 	route: broadcast::Route,
 
-	/// The original publisher: the first entry of HOP_PATH. Two advertisements that
-	/// share a non-zero one carry interchangeable content, so a new path splices in.
-	/// A different one, or `Some(Origin::UNKNOWN)` (which identifies nothing), is a
-	/// distinct publisher reusing the namespace and must not splice.
+	/// The original publisher: the first entry of HOP_PATH. A different one, or
+	/// `Some(Origin::UNKNOWN)` (which identifies nothing), means distinct content
+	/// has reused the namespace and the existing source must be replaced.
 	///
 	/// `None` when the advertisement carried no path, so there is no identity to
 	/// compare and nothing ever replaces the source on identity grounds. That covers
@@ -229,12 +228,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// attributed to this session (`Origin::UNKNOWN` unless the peer or the caller
 	/// supplied an identity).
 	///
-	/// That entry doubles as the content identity, which is what makes an assigned
-	/// identity worth having: every session dialing the same relay produces the same
-	/// first hop, so a reconnect splices into the front its predecessor was serving
-	/// instead of replacing it. The cost is that we cannot tell the peer's own content
-	/// apart from our own coming back through it, since neither carries a chain. Loop
-	/// detection for that case is `FrontState::excluded`, not the chain.
+	/// An assigned identity makes every session dialing the same relay produce the
+	/// same first hop, so a reconnect forms an exact route tie and replaces the stale
+	/// source immediately. The cost is that we cannot tell the peer's own content apart
+	/// from our own coming back through it, since neither carries a chain.
 	///
 	/// The link is charged all the same. Such an advertisement carries no ROUTE_COST,
 	/// which reads as 0, but the draft charges every advertisement for the direction it
@@ -888,9 +885,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// A different original publisher, or one that identifies nothing, means a
-		// distinct broadcast may have taken over this namespace. Its content is not
-		// interchangeable, so detach the old source and attach fresh instead of splicing
-		// the route in place; cached tracks and subscriptions must not carry over. The
+		// distinct broadcast may have taken over this namespace. Detach the old
+		// source and attach fresh so cached tracks and subscriptions do not carry over. The
 		// refcount rides along: the same advertisements still reference this path.
 		//
 		// Both sides must be known for the comparison to mean anything. A session
@@ -1525,8 +1521,7 @@ mod tests {
 	/// moq-transport carries no hop ids, so a peer's broadcasts are normally
 	/// attributed to a random per-connection origin. An identity assigned via
 	/// `Client::with_peer_origin` pins it, so sessions dialing the same relay
-	/// resolve to one recognizable route, and a reconnect splices rather than
-	/// replacing.
+	/// resolve to one recognizable route.
 	#[tokio::test]
 	async fn assigned_peer_origin_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
@@ -1628,13 +1623,10 @@ mod tests {
 		assert_eq!(routes[0].hops, upstream);
 	}
 
-	/// The assigned identity is a content identity too, so a second session dialing
-	/// the same relay produces the same first hop and splices into the front its
-	/// predecessor is serving. That is what makes a reconnect immediate instead of
-	/// waiting for the transport to retire the dead session, and the reflection guard
-	/// must not cost us it.
+	/// A second session dialing the same assigned peer wins an exact route tie and
+	/// replaces the source immediately instead of waiting for the stale session.
 	#[tokio::test]
-	async fn reconnecting_peer_joins_the_front_it_replaces() {
+	async fn reconnecting_peer_replaces_the_selected_source() {
 		let peer = crate::Origin::new(777).unwrap();
 		let self_origin = crate::Origin::new(1).unwrap();
 
@@ -1666,17 +1658,16 @@ mod tests {
 
 		let _first = connect();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		announced.assert_next_some("room/host");
+		let first = announced.assert_next_some("room/host");
 
 		// The peer reconnects before the old session is retired.
 		let _second = connect();
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
-		// It joined: no announce churn, and both routes are in the table so the front
-		// can fail over the moment the stale one dies.
-		announced.assert_next_wait();
-		let routes = consumer.get_broadcast("room/host").unwrap().routes();
-		assert_eq!(routes.len(), 2, "a reconnect must join, not park or replace");
+		announced.assert_next_none("room/host");
+		let second = announced.assert_next_some("room/host");
+		assert!(!second.is_clone(&first));
+		assert_eq!(consumer.get_broadcast("room/host").unwrap().routes().len(), 1);
 	}
 
 	fn cluster_subscriber(
@@ -2088,8 +2079,8 @@ mod tests {
 		assert!(consumer.get_broadcast("room/host").is_none());
 	}
 
-	/// A different original publisher is not interchangeable content, so the source is
-	/// replaced rather than spliced. The refcount rides along: the same advertisements
+	/// A different original publisher is distinct content, so the source is
+	/// replaced. The refcount rides along: the same advertisements
 	/// still reference the path.
 	#[tokio::test]
 	async fn cluster_publisher_change_replaces_the_source() {

@@ -14,7 +14,6 @@ mod origin_impl;
 mod bytes;
 mod datagram;
 mod requests;
-pub(crate) mod resume;
 mod subscription;
 mod time;
 mod weak_cache;

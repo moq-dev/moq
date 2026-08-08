@@ -95,7 +95,7 @@ Hop IDs SHOULD be unique among the endpoints an advertisement can traverse.
 An endpoint MAY generate one randomly, since collisions across a 64-bit space are unlikely, or use a stable configured identifier that survives restarts.
 
 Loop detection and origin identification compare Hop IDs for equality, so two endpoints sharing a Hop ID are indistinguishable.
-Redundant publishers producing interchangeable content MAY share one deliberately, so a receiver treats their paths as failover options for the same content ({{selection}}).
+Redundant publishers for the same content MAY share one deliberately, so their paths have a stable identity for selection ({{selection}}).
 
 ## The Reserved Hop ID 0 {#zero}
 **0 means "no identity"** and is reserved.
@@ -104,11 +104,11 @@ It is used for an endpoint that did not negotiate this extension, and an endpoin
 Because any number of endpoints can be 0, it identifies nothing, which constrains all three uses:
 
 - **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself, and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin. A receiver MUST NOT treat two such advertisements as interchangeable ({{selection}}).
+- **Origin identity**: an advertisement whose first entry is 0 has an unknown origin.
 - **Filtering**: a peer that declared 0 excludes nothing, so the sender applies no filter to that session.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
-Declaring 0 therefore trades loop detection, failover, and update continuity ({{updating}}) for anonymity.
+Declaring 0 therefore trades loop detection and stable route identity ({{updating}}) for anonymity.
 
 
 # Namespace Advertisements {#namespace}
@@ -192,7 +192,7 @@ In {{moqt}} an advertisement lives for the lifetime of its stream, so an update 
 An endpoint MUST NOT open a second stream for a namespace it already advertises on this session.
 
 Replacement is atomic, so a receiver MUST NOT tear down subscriptions or drop cached state merely because an update arrived.
-What it means for existing subscriptions follows the first HOP_PATH entry ({{selection}}): unchanged and non-zero, the content is continuous and subscriptions MAY resume on the new route at a group boundary; changed or 0 ({{zero}}), a different publisher may have taken over and they do not carry over.
+Existing subscriptions remain on the source where they were opened; an update never authorizes migration to another source.
 
 The expected case is a ROUTE_COST-only change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -201,8 +201,8 @@ The expected case is a ROUTE_COST-only change, which is how a relay signals that
 A receiver holding advertisements for the same namespace over several sessions SHOULD prefer the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
 This is advisory: a receiver MAY apply local policy such as measured RTT instead.
 
-Two advertisements whose HOP_PATH begins with the same non-zero Hop ID share a publisher and carry interchangeable content, so a receiver MAY hold them as redundant paths and fail an active subscription over to the survivor.
-If the first entries differ, or either is 0, they are distinct publishers reusing a namespace: a receiver MUST NOT treat them as interchangeable and SHOULD treat the later as replacing the earlier.
+A receiver MAY hold multiple advertisements as route candidates, including ones whose HOP_PATH begins with the same non-zero Hop ID, but it MUST NOT move an existing subscription between sources.
+When a new advertisement becomes the preferred source, including on a shorter path or a tie, the receiver treats it as a visible replacement and uses it only for subsequent subscriptions.
 
 A publisher MUST NOT advertise a path whose HOP_PATH contains the Hop ID that peer declared.
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.

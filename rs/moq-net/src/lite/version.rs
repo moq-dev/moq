@@ -115,8 +115,7 @@ impl Version {
 	/// alongside their group sequences, so a subscription or fetch can start and end
 	/// partway through a group. Added in lite-06.
 	///
-	/// Older versions only address whole groups, so a route change has to wait for the
-	/// next group before it can resume.
+	/// Older versions only address whole groups.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_frame_bounds(self) -> bool {
 		// Match form so future versions default forward (CLAUDE.md convention).

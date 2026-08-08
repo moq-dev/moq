@@ -115,8 +115,7 @@ export function hasRouteCost(version: Version): boolean {
 
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, and GROUP carry frame indices alongside
  * their group sequences, so a subscription or fetch can start and end partway through a
- * group. Added in lite-06. Older versions only address whole groups, so a route change
- * has to wait for the next group before it can resume.
+ * group. Added in lite-06. Older versions only address whole groups.
  *
  * SUBSCRIBE_OK is deliberately not in that list: the resolved start frame follows from
  * its group plus the subscriber's own request, so it needs no frame field. */

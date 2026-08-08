@@ -70,10 +70,10 @@ pub struct MoqSide {
 	///
 	/// The origin id is the first hop of every announcement this process
 	/// publishes, and relays treat it as the broadcast's content identity:
-	/// redundant publishers of the same broadcast share an id so relays fail
-	/// over between them at a group boundary. Leave unset outside a redundant
-	/// (1+1) chain; the default fresh id per run is what makes a restarted
-	/// publisher look like new content instead of silently splicing.
+	/// redundant publishers of the same broadcast may share an id to expose a
+	/// stable source identity. A relay still announces a replacement whenever
+	/// it selects another source; subscriptions never migrate between them.
+	/// Leave unset unless a deployment deliberately coordinates that identity.
 	#[arg(long, env = "MOQ_ORIGIN", help_heading = "MoQ")]
 	pub origin: Option<u64>,
 

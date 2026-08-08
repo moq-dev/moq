@@ -362,19 +362,22 @@ A publisher MUST NOT advertise a path whose entries contain the origin the subsc
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
 Of the paths that remain a publisher SHOULD advertise the best, and nothing when every known path contains that origin.
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
-The per-subscriber winner changing travels as an ANNOUNCE_UPDATE; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
+An update to the selected source's own route travels as an ANNOUNCE_UPDATE.
+A different source becoming selected travels as ANNOUNCE_END followed by ANNOUNCE_START, including when a newly received route is shorter or tied with the previous winner.
+This makes the replacement visible so the subscriber can decide whether and when to resubscribe.
+The last qualifying path disappearing travels as ANNOUNCE_END.
 
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
 
 A subscriber that sees the same broadcast advertised across multiple streams MUST prefer the highest `Epoch` (any non-zero value outranks 0): a lower Epoch never displaces a higher one, regardless of cost or arrival order.
-Among interchangeable advertisements, the subscriber SHOULD route subscriptions to the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among advertisements for the selected Epoch, the subscriber SHOULD route new subscriptions to the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the shortest path and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-Advertisements with the same non-zero `Epoch` carry interchangeable content: a relay MAY hold them as redundant routes for one broadcast and splice a live subscription across them at a [Position](#positions).
-If a route ends partway through a Group, the replacement continues from the next frame instead of abandoning the rest of the Group.
-Cooperating redundant publishers opt in by minting the same Epoch, e.g. derived from the event rather than from each process.
-Any other pair is two generations colliding on one path: a relay MUST NOT splice between them and MUST end the lower-Epoch advertisement rather than wait for it to end on its own, which would hold the path for however long the transport takes to notice a publisher is gone.
-Only when both Epochs are 0 does identity fall back to the first entry of the reconstructed path: a shared non-zero first entry is spliceable, while differing or zero first entries (0 proves nothing shared) are a replacement decided toward the most recently received.
+A relay MAY retain multiple advertisements as route candidates, but it MUST NOT move an existing subscription from one source to another or join their Groups and Frames.
+An existing subscription remains bound to the source on which it was opened until that subscription ends or fails.
+When selection changes, the relay exposes the replacement as described above and routes only subsequent subscriptions to the new winner.
+This rule applies even when advertisements have the same non-zero `Epoch` or the same first Hop ID.
+The Epoch identifies the content generation for selection and request validation; it does not authorize transparent subscription migration.
 
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
@@ -802,7 +805,7 @@ This is combined with the broadcast path prefix to form the full broadcast path.
 
 **Epoch**:
 The generation of content at this path, chosen by the original publisher and forwarded unchanged by relays.
-Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the path (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare interchangeable content.
+Each new generation MUST use a non-zero Epoch greater than every Epoch still observable at the path (the incumbent advertisement and any generation the publisher retains), and MUST NOT equal another publisher's Epoch except by deliberate agreement: equal Epochs declare the same content generation, but do not authorize subscription migration.
 RECOMMENDED construction: wall-clock milliseconds shifted left 16 bits with the low 16 bits random, clamped to at least one more than the highest observable Epoch; the timestamp preserves ordering across restarts without persisted state, the random bits make accidental collisions improbable, and the clamp covers same-millisecond generations, clock rollback, and skew.
 A violation is not fatal: receivers keep no high-water mark, so an erroneously high Epoch suppresses newer generations only while its advertisement remains available.
 A value of 0 means unspecified: identity falls back to the first entry of the path (see [Routing](#routing)), e.g. when bridging from an endpoint that does not assign Epochs.
@@ -877,7 +880,7 @@ The Hop ID list MAY differ from the original (e.g. after a relay failover or ups
 The `Epoch` determines what the update means (see [ANNOUNCE_START](#announce-start)):
 
 - Unchanged (non-zero): the same content over a different route, or a changed `Ended` flag or Route Cost.
-  Cached TRACK_INFO stays valid (see [Track](#track-stream)) and the subscriber MAY resume in-flight subscriptions at a group boundary.
+  Cached TRACK_INFO stays valid (see [Track](#track-stream)); existing subscriptions remain on the source where they were opened.
 - Changed: a different generation occupies the path.
   Cached TRACK_INFO MUST be discarded and existing subscriptions do not carry over.
   A publisher SHOULD only move to a lower Epoch when the higher generation is gone entirely, e.g. a live broadcast vanished and only an older recording remains.
@@ -1250,7 +1253,7 @@ An endpoint MUST close the session with a protocol violation if it receives more
 
 A peer that reconnects to a provided URI SHOULD keep using that URI for subsequent reconnects rather than reverting to the original.
 
-A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so a subscription it can serve from another session moves at the next Group boundary rather than when the draining session finally closes.
+A relay that receives a GOAWAY SHOULD treat the announcements that arrived on that session as the most expensive routes available, so another source is selected and advertised before the draining session finally closes.
 The routes stay usable: a broadcast reachable only over the draining session MUST keep being served until the session ends, which is what makes the sender's deadline a handover window rather than a cutoff.
 
 ## GROUP
@@ -1318,7 +1321,7 @@ The `Message Length` describes the payload size on the wire.
 - Added implicit Announce IDs: each ANNOUNCE_START assigns the next per-stream ordinal.
 - ANNOUNCE_END and ANNOUNCE_UPDATE reference the Announce ID instead of repeating the broadcast path.
 - Replaced the duplicate-`active` restart idiom with ANNOUNCE_UPDATE; a second ANNOUNCE_START for an already-available path is now a protocol violation.
-- Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0) and replacement is decided by value rather than arrival order; equal non-zero Epochs splice, and the first entry of the path remains the identity only when both are 0. That fallback identity requires a non-zero first entry: 0 identifies nothing, so it never proves continuity, and publishers SHOULD assign themselves a Hop ID (a random per-session value suffices).
+- Added an `Epoch` to ANNOUNCE_START and ANNOUNCE_UPDATE: a per-path content generation minted by the original publisher and forwarded unchanged, 0 meaning unspecified. The highest Epoch wins (non-zero outranks 0), with Route Cost and path ordering selecting among advertisements for that Epoch.
 - Added an `Ended` flag to ANNOUNCE_START and ANNOUNCE_UPDATE, and as an opt-in filter on ANNOUNCE_REQUEST: ended broadcasts reject SUBSCRIBE, are read via FETCH, and are only announced to subscribers that asked for them.
 - Added an `Epoch` to SUBSCRIBE, FETCH, and TRACK (0 = current, mismatch = reset) and the resolved `Epoch` to TRACK_INFO, so metadata and groups always come from the same generation and requests cannot race a replacement.
 - Added a `Route Cost` field to ANNOUNCE_START and ANNOUNCE_UPDATE: the accumulated cost of the transfers a subscription via this advertisement would newly cause. Route selection prefers the lowest cost, with path length as the tie-break, and the most recently received advertisement below that.
@@ -1327,7 +1330,7 @@ The `Message Length` describes the payload size on the wire.
 - Stated the receiver's loop check normatively in ANNOUNCE_START: an announcement whose reconstructed path contains the receiver's own Hop ID is neither forwarded nor selected as a route.
 - Added a SETUP `Origin` parameter (0x5): each endpoint declares its Hop ID at session setup, carrying session-wide the identity `Exclude Hop` carried per announce stream, and filtering subscriptions as well as announcements (including sessions that never open an Announce Stream).
 - Made advertisement selection per subscriber: a publisher MUST NOT advertise a path containing the subscriber's declared origin and otherwise advertises the best remaining one (a subscriber the serving path flows through receives the best standby instead of nothing), MUST serve subscriptions by the same exclusion, and the actively-carrying cost discount applies only to the serving path. This is how redundant publishers fail over across a mesh.
-- Defined same-path advertisements with the same non-zero Epoch as interchangeable content a relay may splice across at a Position. When both Epochs are 0, identity falls back to a shared non-zero first Hop ID; differing or unknown identities never splice.
+- Defined source changes as visible replacements: a relay retains route candidates but never migrates an existing subscription between them, even when their Epochs or first Hop IDs match.
 - Added `Frame Start` and `Frame End` to SUBSCRIBE and SUBSCRIBE_UPDATE, qualifying the start and end group with a frame index so a subscription can begin or end partway through a group. `Frame Start` is a plain index; `Frame End` is the index + 1, matching `Group End`. Both MUST be 0 when the group bound they qualify is absent.
 - Added `Frame Start` and `Frame End` to FETCH, bounding the returned frames within the group. A publisher that cannot serve the full range resets the stream.
 - Added `Frame Start` to GROUP, giving the index of the first FRAME on the stream so a partial group is self-describing.

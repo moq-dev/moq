@@ -158,11 +158,11 @@ On the receiving side:
 
 1. `session.draining()` returns a consumer: `peek()` is a cheap synchronous check, `recv()` waits for the URI and optional deadline.
 2. New requests (subscribes, fetches, announce interests) on the session are then rejected; existing subscriptions keep flowing until the session closes.
-3. Connect a replacement session sharing the same origin. Its announcements attach as additional routes to the broadcasts the old session serves, and when the old session closes, live subscriptions resume on the new route at a group boundary. Applications reading through `moq-net` never observe the swap.
+3. Connect a replacement session sharing the same origin. When its route becomes preferred, `moq-net` emits an unannounce followed by a new announce. Existing subscriptions remain on the old session, while applications can subscribe to the newly announced source before the old session closes.
 
 A moq-transport client sends an empty URI: only a server can tell a peer where to reconnect. The URI is capped at 8,192 bytes on both wires, and a second GOAWAY on a session is a protocol violation that closes it.
 
-Native clients get step 3 for free from `moq_native::Client::connect`, which dials the replacement while the old session keeps serving and hands over at a group boundary. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
+Native clients dial the replacement while the old session keeps serving. Applications still need to react to the replacement announcement and subscribe to the new source. `--goaway-redirect` chooses how far to trust the URI and `--goaway-handover` bounds how long the old session lingers.
 
 `moq-relay` uses this in both directions: on shutdown it drains its own downstream sessions (see [`--drain-timeout`](/bin/relay/config#drain-timeout)), and on a GOAWAY from a cluster peer the reconnect loop migrates transparently.
 
